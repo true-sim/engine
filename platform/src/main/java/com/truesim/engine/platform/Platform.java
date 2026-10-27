@@ -1,0 +1,503 @@
+package com.truesim.engine.platform;
+
+import static org.lwjgl.sdl.SDLError.SDL_GetError;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_DISPLAY_ADDED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_DISPLAY_REMOVED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_GAMEPAD_ADDED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_GAMEPAD_AXIS_MOTION;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_GAMEPAD_BUTTON_DOWN;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_GAMEPAD_BUTTON_UP;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_GAMEPAD_REMOVED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_JOYSTICK_ADDED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_JOYSTICK_AXIS_MOTION;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_JOYSTICK_BUTTON_DOWN;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_JOYSTICK_BUTTON_UP;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_JOYSTICK_REMOVED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_KEYBOARD_ADDED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_KEYBOARD_REMOVED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_KEY_DOWN;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_KEY_UP;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_MOUSE_ADDED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_MOUSE_BUTTON_DOWN;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_MOUSE_BUTTON_UP;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_MOUSE_MOTION;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_MOUSE_REMOVED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_MOUSE_WHEEL;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_QUIT;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_TEXT_INPUT;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_DISPLAY_CHANGED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_FOCUS_GAINED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_FOCUS_LOST;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_MINIMIZED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_MOVED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_RESIZED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_RESTORED;
+import static org.lwjgl.sdl.SDLEvents.SDL_PollEvent;
+import static org.lwjgl.sdl.SDLGamepad.SDL_CloseGamepad;
+import static org.lwjgl.sdl.SDLGamepad.SDL_GetGamepadNameForID;
+import static org.lwjgl.sdl.SDLGamepad.SDL_GetGamepads;
+import static org.lwjgl.sdl.SDLGamepad.SDL_IsGamepad;
+import static org.lwjgl.sdl.SDLGamepad.SDL_OpenGamepad;
+import static org.lwjgl.sdl.SDLInit.SDL_INIT_EVENTS;
+import static org.lwjgl.sdl.SDLInit.SDL_INIT_GAMEPAD;
+import static org.lwjgl.sdl.SDLInit.SDL_INIT_JOYSTICK;
+import static org.lwjgl.sdl.SDLInit.SDL_INIT_VIDEO;
+import static org.lwjgl.sdl.SDLInit.SDL_Init;
+import static org.lwjgl.sdl.SDLInit.SDL_Quit;
+import static org.lwjgl.sdl.SDLJoystick.SDL_CloseJoystick;
+import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoystickNameForID;
+import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoystickProductForID;
+import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoystickVendorForID;
+import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoysticks;
+import static org.lwjgl.sdl.SDLJoystick.SDL_OpenJoystick;
+import static org.lwjgl.sdl.SDLKeyboard.SDL_GetKeyboardNameForID;
+import static org.lwjgl.sdl.SDLKeyboard.SDL_GetKeyboards;
+import static org.lwjgl.sdl.SDLMouse.SDL_GetMice;
+import static org.lwjgl.sdl.SDLMouse.SDL_GetMouseNameForID;
+import static org.lwjgl.sdl.SDLStdinc.SDL_free;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetCurrentDisplayMode;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetCurrentVideoDriver;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetDesktopDisplayMode;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetDisplayBounds;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetDisplayContentScale;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetDisplayName;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetDisplayUsableBounds;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetDisplays;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetFullscreenDisplayModes;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetPrimaryDisplay;
+
+import com.truesim.annotations.AllowAllocation;
+import java.nio.IntBuffer;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.lwjgl.PointerBuffer;
+import org.lwjgl.sdl.SDL_CommonEvent;
+import org.lwjgl.sdl.SDL_DisplayMode;
+import org.lwjgl.sdl.SDL_Event;
+import org.lwjgl.sdl.SDL_GamepadAxisEvent;
+import org.lwjgl.sdl.SDL_GamepadButtonEvent;
+import org.lwjgl.sdl.SDL_JoyAxisEvent;
+import org.lwjgl.sdl.SDL_JoyButtonEvent;
+import org.lwjgl.sdl.SDL_KeyboardDeviceEvent;
+import org.lwjgl.sdl.SDL_KeyboardEvent;
+import org.lwjgl.sdl.SDL_MouseButtonEvent;
+import org.lwjgl.sdl.SDL_MouseMotionEvent;
+import org.lwjgl.sdl.SDL_MouseWheelEvent;
+import org.lwjgl.sdl.SDL_Rect;
+import org.lwjgl.sdl.SDL_TextInputEvent;
+import org.lwjgl.sdl.SDL_WindowEvent;
+import org.lwjgl.system.MemoryStack;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * The engine's platform layer on SDL3: windows, displays, events and input devices. One platform exists at a time, and
+ * it belongs to the thread that started it (on macOS that must be the main thread): create windows, list displays and
+ * poll events there. Rendering and simulation can run on other threads.
+ *
+ * <pre>{@code
+ * try (Platform platform = Platform.start()) {
+ *     Window window = platform.createWindow(WindowOptions.of("true-sim", 1280, 720));
+ *     while (running) {
+ *         platform.pollEvents(listener);
+ *         render(window);
+ *     }
+ * }
+ * }</pre>
+ *
+ * <p>Gamepads and joysticks are opened as they connect, so their events arrive without further calls. The video driver
+ * can be chosen with the {@code SDL_VIDEO_DRIVER} environment variable, e.g. {@code offscreen} for headless tests.
+ */
+public final class Platform implements AutoCloseable {
+
+    private static final Logger LOG = LoggerFactory.getLogger(Platform.class);
+    private static final AtomicBoolean RUNNING = new AtomicBoolean();
+
+    private final Thread owner = Thread.currentThread();
+    private final SDL_Event event = SDL_Event.calloc();
+    private final List<Window> windows = new ArrayList<>();
+    private final Map<Integer, Long> openGamepads = new HashMap<>();
+    private final Map<Integer, Long> openJoysticks = new HashMap<>();
+    private boolean closed;
+
+    @AllowAllocation("starting up")
+    private Platform() {
+        if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK)) {
+            event.free();
+            throw new PlatformException("SDL could not start: " + SDL_GetError());
+        }
+        for (InputDevice device : inputDevices()) {
+            open(device.kind(), device.id());
+        }
+        LOG.info("Platform started on video driver {}", SDL_GetCurrentVideoDriver());
+    }
+
+    /** Starts the platform on this thread. Only one platform runs at a time. */
+    @AllowAllocation("starting up")
+    public static Platform start() {
+        if (!RUNNING.compareAndSet(false, true)) {
+            throw new IllegalStateException("A platform is already running");
+        }
+        try {
+            return new Platform();
+        } catch (RuntimeException e) {
+            RUNNING.set(false);
+            throw e;
+        }
+    }
+
+    /** The video driver in use, e.g. {@code windows}, {@code wayland}, {@code x11}, {@code cocoa} or {@code offscreen}. */
+    public String videoDriver() {
+        checkThread();
+        return SDL_GetCurrentVideoDriver();
+    }
+
+    // ---------------------------------------------------------------- windows
+
+    /** Opens a window; several can be open at once. */
+    @AllowAllocation("opening a window")
+    public Window createWindow(WindowOptions options) {
+        checkThread();
+        Window window = new Window(this, options);
+        windows.add(window);
+        return window;
+    }
+
+    /** The open windows. */
+    @AllowAllocation("a snapshot")
+    public List<Window> windows() {
+        checkThread();
+        return List.copyOf(windows);
+    }
+
+    /** The open window with {@code id}, or {@code null}. */
+    public Window window(int id) {
+        checkThread();
+        for (int i = 0; i < windows.size(); i++) {
+            Window window = windows.get(i);
+            if (window.id() == id) {
+                return window;
+            }
+        }
+        return null;
+    }
+
+    void closed(Window window) {
+        windows.remove(window);
+    }
+
+    // ---------------------------------------------------------------- displays
+
+    /** The connected displays, primary first. */
+    @AllowAllocation("a snapshot")
+    public List<Display> displays() {
+        checkThread();
+        IntBuffer ids = SDL_GetDisplays();
+        if (ids == null) {
+            throw new PlatformException("Could not list displays: " + SDL_GetError());
+        }
+        int primary = SDL_GetPrimaryDisplay();
+        List<Display> displays = new ArrayList<>();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            SDL_Rect bounds = SDL_Rect.malloc(stack);
+            SDL_Rect usable = SDL_Rect.malloc(stack);
+            for (int i = 0; i < ids.remaining(); i++) {
+                int id = ids.get(i);
+                SDL_GetDisplayBounds(id, bounds);
+                SDL_GetDisplayUsableBounds(id, usable);
+                Display display = new Display(id, SDL_GetDisplayName(id), bounds(bounds), bounds(usable),
+                    SDL_GetDisplayContentScale(id), mode(SDL_GetCurrentDisplayMode(id)),
+                    mode(SDL_GetDesktopDisplayMode(id)), fullscreenModes(id), id == primary);
+                displays.add(id == primary ? 0 : displays.size(), display);
+            }
+        } finally {
+            SDL_free(ids);
+        }
+        return List.copyOf(displays);
+    }
+
+    @AllowAllocation("a snapshot")
+    private static List<DisplayMode> fullscreenModes(int display) {
+        PointerBuffer modes = SDL_GetFullscreenDisplayModes(display);
+        if (modes == null) {
+            return List.of();
+        }
+        try {
+            List<DisplayMode> list = new ArrayList<>();
+            for (int i = 0; i < modes.remaining(); i++) {
+                list.add(mode(SDL_DisplayMode.create(modes.get(i))));
+            }
+            return List.copyOf(list);
+        } finally {
+            SDL_free(modes);
+        }
+    }
+
+    @AllowAllocation("a snapshot")
+    static DisplayMode mode(SDL_DisplayMode mode) {
+        return mode == null ? null : new DisplayMode(mode.displayID(), mode.w(), mode.h(), mode.pixel_density(),
+            mode.refresh_rate(), mode.refresh_rate_numerator(), mode.refresh_rate_denominator(), mode.format());
+    }
+
+    @AllowAllocation("a snapshot")
+    private static Bounds bounds(SDL_Rect rect) {
+        return new Bounds(rect.x(), rect.y(), rect.w(), rect.h());
+    }
+
+    // ---------------------------------------------------------------- input devices
+
+    /** The connected keyboards, mice, gamepads and joysticks (joysticks that are gamepads are listed as gamepads). */
+    @AllowAllocation("a snapshot")
+    public List<InputDevice> inputDevices() {
+        checkThread();
+        List<InputDevice> devices = new ArrayList<>();
+        list(devices, SDL_GetKeyboards(), InputDevice.Kind.KEYBOARD);
+        list(devices, SDL_GetMice(), InputDevice.Kind.MOUSE);
+        list(devices, SDL_GetGamepads(), InputDevice.Kind.GAMEPAD);
+        IntBuffer joysticks = SDL_GetJoysticks();
+        IntBuffer plain = joysticks == null ? null : filterJoysticks(joysticks);
+        list(devices, plain, InputDevice.Kind.JOYSTICK);
+        return List.copyOf(devices);
+    }
+
+    @AllowAllocation("a snapshot")
+    private static IntBuffer filterJoysticks(IntBuffer joysticks) {
+        IntBuffer plain = IntBuffer.allocate(joysticks.remaining());
+        for (int i = 0; i < joysticks.remaining(); i++) {
+            if (!SDL_IsGamepad(joysticks.get(i))) {
+                plain.put(joysticks.get(i));
+            }
+        }
+        SDL_free(joysticks);
+        return plain.flip();
+    }
+
+    @AllowAllocation("a snapshot")
+    private static void list(List<InputDevice> devices, IntBuffer ids, InputDevice.Kind kind) {
+        if (ids == null) {
+            return;
+        }
+        for (int i = 0; i < ids.remaining(); i++) {
+            devices.add(device(kind, ids.get(i)));
+        }
+        if (ids.isDirect()) {
+            SDL_free(ids);
+        }
+    }
+
+    @AllowAllocation("devices change rarely")
+    static InputDevice device(InputDevice.Kind kind, int id) {
+        String name = switch (kind) {
+            case KEYBOARD -> SDL_GetKeyboardNameForID(id);
+            case MOUSE -> SDL_GetMouseNameForID(id);
+            case GAMEPAD -> SDL_GetGamepadNameForID(id);
+            case JOYSTICK -> SDL_GetJoystickNameForID(id);
+        };
+        boolean stick = kind == InputDevice.Kind.GAMEPAD || kind == InputDevice.Kind.JOYSTICK;
+        int vendor = stick ? SDL_GetJoystickVendorForID(id) & 0xffff : 0;
+        int product = stick ? SDL_GetJoystickProductForID(id) & 0xffff : 0;
+        return new InputDevice(id, kind, name == null ? "" : name, vendor, product);
+    }
+
+    /** Opens gamepads and joysticks, so their events arrive. */
+    @AllowAllocation("devices change rarely")
+    private void open(InputDevice.Kind kind, int id) {
+        if (kind == InputDevice.Kind.GAMEPAD) {
+            put(openGamepads, id, SDL_OpenGamepad(id));
+        } else if (kind == InputDevice.Kind.JOYSTICK) {
+            put(openJoysticks, id, SDL_OpenJoystick(id));
+        }
+    }
+
+    @AllowAllocation("devices change rarely")
+    private static void put(Map<Integer, Long> open, int id, long handle) {
+        if (handle != 0) {
+            open.put(id, handle);
+        }
+    }
+
+    @AllowAllocation("devices change rarely")
+    private void close(InputDevice.Kind kind, int id) {
+        Long handle = (kind == InputDevice.Kind.GAMEPAD ? openGamepads : openJoysticks).remove(id);
+        if (handle != null) {
+            if (kind == InputDevice.Kind.GAMEPAD) {
+                SDL_CloseGamepad(handle);
+            } else {
+                SDL_CloseJoystick(handle);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- events
+
+    /**
+     * Forwards every pending event to {@code listener} and returns how many there were. Call once per frame on the
+     * platform's thread. Allocates nothing, except for typed text and connected devices.
+     */
+    public int pollEvents(PlatformListener listener) {
+        checkThread();
+        int count = 0;
+        while (SDL_PollEvent(event)) {
+            count++;
+            dispatch(event.address(), listener);
+        }
+        return count;
+    }
+
+    private void dispatch(long e, PlatformListener listener) {
+        switch (SDL_CommonEvent.ntype(e)) {
+            case SDL_EVENT_QUIT -> listener.quitRequested();
+            case SDL_EVENT_WINDOW_CLOSE_REQUESTED -> listener.windowCloseRequested(SDL_WindowEvent.nwindowID(e));
+            case SDL_EVENT_WINDOW_RESIZED -> listener.windowResized(
+                SDL_WindowEvent.nwindowID(e), SDL_WindowEvent.ndata1(e), SDL_WindowEvent.ndata2(e));
+            case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED -> listener.windowPixelSizeChanged(
+                SDL_WindowEvent.nwindowID(e), SDL_WindowEvent.ndata1(e), SDL_WindowEvent.ndata2(e));
+            case SDL_EVENT_WINDOW_MOVED -> listener.windowMoved(
+                SDL_WindowEvent.nwindowID(e), SDL_WindowEvent.ndata1(e), SDL_WindowEvent.ndata2(e));
+            case SDL_EVENT_WINDOW_MINIMIZED -> listener.windowMinimized(SDL_WindowEvent.nwindowID(e), true);
+            case SDL_EVENT_WINDOW_RESTORED -> listener.windowMinimized(SDL_WindowEvent.nwindowID(e), false);
+            case SDL_EVENT_WINDOW_FOCUS_GAINED -> listener.windowFocusChanged(SDL_WindowEvent.nwindowID(e), true);
+            case SDL_EVENT_WINDOW_FOCUS_LOST -> listener.windowFocusChanged(SDL_WindowEvent.nwindowID(e), false);
+            case SDL_EVENT_WINDOW_DISPLAY_CHANGED -> listener.windowDisplayChanged(
+                SDL_WindowEvent.nwindowID(e), SDL_WindowEvent.ndata1(e));
+            case SDL_EVENT_DISPLAY_ADDED, SDL_EVENT_DISPLAY_REMOVED, SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED ->
+                listener.displaysChanged();
+            case SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP -> listener.key(SDL_KeyboardEvent.ntimestamp(e),
+                SDL_KeyboardEvent.nwindowID(e), SDL_KeyboardEvent.nwhich(e), SDL_KeyboardEvent.nscancode(e),
+                SDL_KeyboardEvent.nkey(e), SDL_KeyboardEvent.nmod(e) & 0xffff, SDL_KeyboardEvent.ndown(e),
+                SDL_KeyboardEvent.nrepeat(e));
+            case SDL_EVENT_TEXT_INPUT -> text(e, listener);
+            case SDL_EVENT_MOUSE_MOTION -> listener.mouseMoved(SDL_MouseMotionEvent.ntimestamp(e),
+                SDL_MouseMotionEvent.nwindowID(e), SDL_MouseMotionEvent.nwhich(e), SDL_MouseMotionEvent.nx(e),
+                SDL_MouseMotionEvent.ny(e), SDL_MouseMotionEvent.nxrel(e), SDL_MouseMotionEvent.nyrel(e),
+                SDL_MouseMotionEvent.nstate(e));
+            case SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_EVENT_MOUSE_BUTTON_UP -> listener.mouseButton(
+                SDL_MouseButtonEvent.ntimestamp(e), SDL_MouseButtonEvent.nwindowID(e), SDL_MouseButtonEvent.nwhich(e),
+                SDL_MouseButtonEvent.nbutton(e) & 0xff, SDL_MouseButtonEvent.ndown(e),
+                SDL_MouseButtonEvent.nclicks(e) & 0xff, SDL_MouseButtonEvent.nx(e), SDL_MouseButtonEvent.ny(e));
+            case SDL_EVENT_MOUSE_WHEEL -> listener.mouseWheel(SDL_MouseWheelEvent.ntimestamp(e),
+                SDL_MouseWheelEvent.nwindowID(e), SDL_MouseWheelEvent.nwhich(e), SDL_MouseWheelEvent.nx(e),
+                SDL_MouseWheelEvent.ny(e));
+            case SDL_EVENT_GAMEPAD_AXIS_MOTION -> listener.gamepadAxis(SDL_GamepadAxisEvent.ntimestamp(e),
+                SDL_GamepadAxisEvent.nwhich(e), SDL_GamepadAxisEvent.naxis(e) & 0xff,
+                axis(SDL_GamepadAxisEvent.nvalue(e)));
+            case SDL_EVENT_GAMEPAD_BUTTON_DOWN, SDL_EVENT_GAMEPAD_BUTTON_UP -> listener.gamepadButton(
+                SDL_GamepadButtonEvent.ntimestamp(e), SDL_GamepadButtonEvent.nwhich(e),
+                SDL_GamepadButtonEvent.nbutton(e) & 0xff, SDL_GamepadButtonEvent.ndown(e));
+            case SDL_EVENT_JOYSTICK_AXIS_MOTION -> joystickAxis(e, listener);
+            case SDL_EVENT_JOYSTICK_BUTTON_DOWN, SDL_EVENT_JOYSTICK_BUTTON_UP -> joystickButton(e, listener);
+            case SDL_EVENT_KEYBOARD_ADDED -> added(InputDevice.Kind.KEYBOARD, e, listener);
+            case SDL_EVENT_MOUSE_ADDED -> added(InputDevice.Kind.MOUSE, e, listener);
+            case SDL_EVENT_GAMEPAD_ADDED -> added(InputDevice.Kind.GAMEPAD, e, listener);
+            case SDL_EVENT_JOYSTICK_ADDED -> addedJoystick(e, listener);
+            case SDL_EVENT_KEYBOARD_REMOVED -> removed(InputDevice.Kind.KEYBOARD, e, listener);
+            case SDL_EVENT_MOUSE_REMOVED -> removed(InputDevice.Kind.MOUSE, e, listener);
+            case SDL_EVENT_GAMEPAD_REMOVED -> removed(InputDevice.Kind.GAMEPAD, e, listener);
+            case SDL_EVENT_JOYSTICK_REMOVED -> removedJoystick(e, listener);
+            default -> {
+                // not forwarded
+            }
+        }
+    }
+
+    /** A stick or trigger from SDL's signed 16-bit range to [-1, 1]. */
+    static float axis(short value) {
+        return Math.max(value / 32767f, -1f);
+    }
+
+    @AllowAllocation("typed text is a string")
+    private static void text(long e, PlatformListener listener) {
+        listener.text(SDL_TextInputEvent.nwindowID(e), SDL_TextInputEvent.ntextString(e));
+    }
+
+    /** Joysticks that are gamepads report through the gamepad events instead. */
+    private static void joystickAxis(long e, PlatformListener listener) {
+        int joystick = SDL_JoyAxisEvent.nwhich(e);
+        if (!SDL_IsGamepad(joystick)) {
+            listener.joystickAxis(SDL_JoyAxisEvent.ntimestamp(e), joystick, SDL_JoyAxisEvent.naxis(e) & 0xff,
+                axis(SDL_JoyAxisEvent.nvalue(e)));
+        }
+    }
+
+    private static void joystickButton(long e, PlatformListener listener) {
+        int joystick = SDL_JoyButtonEvent.nwhich(e);
+        if (!SDL_IsGamepad(joystick)) {
+            listener.joystickButton(SDL_JoyButtonEvent.ntimestamp(e), joystick, SDL_JoyButtonEvent.nbutton(e) & 0xff,
+                SDL_JoyButtonEvent.ndown(e));
+        }
+    }
+
+    @AllowAllocation("devices change rarely")
+    private void added(InputDevice.Kind kind, long e, PlatformListener listener) {
+        int id = SDL_KeyboardDeviceEvent.nwhich(e); // all device events keep the id at the same place
+        if (!openGamepads.containsKey(id) && !openJoysticks.containsKey(id)) {
+            open(kind, id);
+        }
+        listener.deviceAdded(device(kind, id));
+    }
+
+    @AllowAllocation("devices change rarely")
+    private void addedJoystick(long e, PlatformListener listener) {
+        int id = SDL_KeyboardDeviceEvent.nwhich(e);
+        if (!SDL_IsGamepad(id)) {
+            added(InputDevice.Kind.JOYSTICK, e, listener);
+        }
+    }
+
+    @AllowAllocation("devices change rarely")
+    private void removed(InputDevice.Kind kind, long e, PlatformListener listener) {
+        int id = SDL_KeyboardDeviceEvent.nwhich(e);
+        close(kind, id);
+        listener.deviceRemoved(kind, id);
+    }
+
+    @AllowAllocation("devices change rarely")
+    private void removedJoystick(long e, PlatformListener listener) {
+        int id = SDL_KeyboardDeviceEvent.nwhich(e);
+        if (openJoysticks.containsKey(id)) {
+            removed(InputDevice.Kind.JOYSTICK, e, listener);
+        }
+    }
+
+    // ---------------------------------------------------------------- lifecycle
+
+    void checkThread() {
+        if (Thread.currentThread() != owner) {
+            throw new IllegalStateException("The platform belongs to thread " + owner.getName());
+        }
+        if (closed) {
+            throw new IllegalStateException("The platform is closed");
+        }
+    }
+
+    /** Closes all windows and devices and shuts SDL down. */
+    @Override
+    @AllowAllocation("shutting down")
+    public void close() {
+        if (closed) {
+            return;
+        }
+        checkThread();
+        for (Window window : List.copyOf(windows)) {
+            window.close();
+        }
+        for (Long handle : openGamepads.values()) {
+            SDL_CloseGamepad(handle);
+        }
+        for (Long handle : openJoysticks.values()) {
+            SDL_CloseJoystick(handle);
+        }
+        openGamepads.clear();
+        openJoysticks.clear();
+        closed = true;
+        event.free();
+        SDL_Quit();
+        RUNNING.set(false);
+    }
+}

@@ -1,0 +1,28 @@
+version: 2
+registries:
+  # GitHub Packages needs a token even for public packages: a Dependabot secret with read:packages.
+  build-logic:
+    type: maven-repository
+    url: https://maven.pkg.github.com/true-sim/build-logic
+    username: x-access-token
+    password: ${{secrets.PACKAGES_READ_TOKEN}}
+  common-math:
+    type: maven-repository
+    url: https://maven.pkg.github.com/true-sim/common-math
+    username: x-access-token
+    password: ${{secrets.PACKAGES_READ_TOKEN}}
+  common-jobs:
+    type: maven-repository
+    url: https://maven.pkg.github.com/true-sim/common-jobs
+    username: x-access-token
+    password: ${{secrets.PACKAGES_READ_TOKEN}}
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    registries: [build-logic, common-math, common-jobs]
+    schedule:
+      interval: daily
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: read # build-logic plugins and libraries from GitHub Packages
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # No display or GPU on the runner: SDL renders offscreen and Mesa's lavapipe is the Vulkan device.
+      SDL_VIDEO_DRIVER: offscreen
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Vulkan (lavapipe and validation layers)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers vulkan-validationlayers vulkan-tools
+          vulkaninfo --summary
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 27
+      - uses: gradle/actions/setup-gradle@v6
+      - run: ./gradlew build
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reports
+          path: |
+            */build/reports
+            */build/test-results

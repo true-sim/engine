@@ -1,0 +1,342 @@
+package com.truesim.engine.vulkan;
+
+import static org.lwjgl.system.MemoryStack.stackPush;
+import static org.lwjgl.system.MemoryUtil.memGetInt;
+import static org.lwjgl.system.MemoryUtil.memPutAddress;
+import static org.lwjgl.system.MemoryUtil.memPutInt;
+import static org.lwjgl.system.MemoryUtil.memPutLong;
+import static org.lwjgl.vulkan.KHRSurface.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+import static org.lwjgl.vulkan.KHRSurface.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+import static org.lwjgl.vulkan.KHRSurface.vkGetPhysicalDeviceSurfaceCapabilitiesKHR;
+import static org.lwjgl.vulkan.KHRSurface.vkGetPhysicalDeviceSurfaceFormatsKHR;
+import static org.lwjgl.vulkan.KHRSurface.vkGetPhysicalDeviceSurfacePresentModesKHR;
+import static org.lwjgl.vulkan.KHRSwapchain.VK_ERROR_OUT_OF_DATE_KHR;
+import static org.lwjgl.vulkan.KHRSwapchain.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+import static org.lwjgl.vulkan.KHRSwapchain.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+import static org.lwjgl.vulkan.KHRSwapchain.VK_SUBOPTIMAL_KHR;
+import static org.lwjgl.vulkan.KHRSwapchain.nvkAcquireNextImageKHR;
+import static org.lwjgl.vulkan.KHRSwapchain.vkCreateSwapchainKHR;
+import static org.lwjgl.vulkan.KHRSwapchain.vkDestroySwapchainKHR;
+import static org.lwjgl.vulkan.KHRSwapchain.vkGetSwapchainImagesKHR;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_B8G8R8A8_SRGB;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_SRGB;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_EXCLUSIVE;
+import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+import static org.lwjgl.vulkan.VK10.VK_SUCCESS;
+import static org.lwjgl.vulkan.VK10.vkCreateSemaphore;
+import static org.lwjgl.vulkan.VK10.vkDestroyImageView;
+import static org.lwjgl.vulkan.VK10.vkDestroySemaphore;
+
+import com.truesim.annotations.AllowAllocation;
+import java.nio.IntBuffer;
+import java.nio.LongBuffer;
+import java.util.ArrayList;
+import java.util.List;
+import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkPresentInfoKHR;
+import org.lwjgl.vulkan.VkSemaphoreCreateInfo;
+import org.lwjgl.vulkan.VkSurfaceCapabilitiesKHR;
+import org.lwjgl.vulkan.VkSurfaceFormatKHR;
+import org.lwjgl.vulkan.VkSwapchainCreateInfoKHR;
+
+/**
+ * The images a window shows, rendered in turn: {@link #acquire} an image, render to it, signal
+ * {@link #presentReady(int)} and {@link #present} it. Recreate it at any time with a new size
+ * ({@link #recreate(int, int)}, e.g. from {@code windowPixelSizeChanged}) or {@linkplain #setPresentMode present mode};
+ * {@link #needsRecreate()} also turns true when the system reports it out of date. While the window has no area
+ * (minimized) the swapchain is not {@linkplain #isUsable() usable} and frames should be skipped.
+ *
+ * <p>Sizes are passed in, so the swapchain can live on a render thread. Acquiring and presenting allocate nothing.
+ */
+public final class Swapchain implements AutoCloseable {
+
+    private static final long TIMEOUT = 5_000_000_000L;
+
+    private final VulkanDevice device;
+    private final Surface surface;
+    private PresentMode requested;
+    private PresentMode presentMode;
+    private long handle;
+    private int format;
+    private int width;
+    private int height;
+    private long[] images = new long[0];
+    private long[] views = new long[0];
+    private long[] presentReady = new long[0];
+    private boolean outOfDate;
+
+    /** A swapchain for {@code surface} of {@code width} x {@code height} pixels (the window's pixel size). */
+    @AllowAllocation("set up once")
+    public Swapchain(VulkanDevice device, Surface surface, PresentMode mode, int width, int height) {
+        if (!device.canPresent()) {
+            throw new VulkanException("The device was created headless");
+        }
+        if (!device.gpu().canPresent(surface, device.graphics().family())) {
+            throw new VulkanException(device.gpu().name() + " cannot present to " + surface.window());
+        }
+        this.device = device;
+        this.surface = surface;
+        this.requested = mode;
+        create(width, height);
+    }
+
+    /** Builds the swapchain for the current surface; the previous one, if any, is replaced. */
+    @AllowAllocation("recreating")
+    private void create(int requestedWidth, int requestedHeight) {
+        try (MemoryStack stack = stackPush()) {
+            VkSurfaceCapabilitiesKHR capabilities = VkSurfaceCapabilitiesKHR.malloc(stack);
+            Vulkan.check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device.gpu().handle(), surface.handle(), capabilities),
+                "Could not read the surface capabilities");
+            int w = capabilities.currentExtent().width();
+            int h = capabilities.currentExtent().height();
+            if (w == -1) { // the surface takes the swapchain's size
+                w = Math.clamp(requestedWidth, capabilities.minImageExtent().width(), capabilities.maxImageExtent().width());
+                h = Math.clamp(requestedHeight, capabilities.minImageExtent().height(),
+                    capabilities.maxImageExtent().height());
+            }
+            long previous = handle;
+            destroyImages();
+            this.width = w;
+            this.height = h;
+            this.outOfDate = false;
+            if (w == 0 || h == 0) { // minimized
+                if (previous != 0) {
+                    vkDestroySwapchainKHR(device.handle(), previous, null);
+                }
+                handle = 0;
+                return;
+            }
+            VkSurfaceFormatKHR chosen = chooseFormat(stack);
+            this.format = chosen.format();
+            this.presentMode = supportedPresentModes().contains(requested) ? requested : PresentMode.FIFO;
+            int count = Math.max(capabilities.minImageCount() + 1, 3);
+            if (capabilities.maxImageCount() > 0) {
+                count = Math.min(count, capabilities.maxImageCount());
+            }
+            VkSwapchainCreateInfoKHR info = VkSwapchainCreateInfoKHR.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR)
+                .surface(surface.handle())
+                .minImageCount(count)
+                .imageFormat(chosen.format())
+                .imageColorSpace(chosen.colorSpace())
+                .imageArrayLayers(1)
+                .imageUsage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                    | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
+                .imageSharingMode(VK_SHARING_MODE_EXCLUSIVE)
+                .preTransform(capabilities.currentTransform())
+                .compositeAlpha(VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+                .presentMode(presentMode.value)
+                .clipped(true)
+                .oldSwapchain(previous);
+            info.imageExtent().set(w, h);
+            LongBuffer swapchain = stack.mallocLong(1);
+            Vulkan.check(vkCreateSwapchainKHR(device.handle(), info, null, swapchain), "Could not create the swapchain");
+            if (previous != 0) {
+                vkDestroySwapchainKHR(device.handle(), previous, null);
+            }
+            this.handle = swapchain.get(0);
+
+            IntBuffer imageCount = stack.mallocInt(1);
+            vkGetSwapchainImagesKHR(device.handle(), handle, imageCount, null);
+            LongBuffer imageHandles = stack.mallocLong(imageCount.get(0));
+            vkGetSwapchainImagesKHR(device.handle(), handle, imageCount, imageHandles);
+            images = new long[imageCount.get(0)];
+            views = new long[images.length];
+            presentReady = new long[images.length];
+            VkSemaphoreCreateInfo semaphoreInfo = VkSemaphoreCreateInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO);
+            LongBuffer semaphore = stack.mallocLong(1);
+            for (int i = 0; i < images.length; i++) {
+                images[i] = imageHandles.get(i);
+                views[i] = Images.createView(device, images[i], format, VK_IMAGE_ASPECT_COLOR_BIT);
+                Vulkan.check(vkCreateSemaphore(device.handle(), semaphoreInfo, null, semaphore),
+                    "Could not create a semaphore");
+                presentReady[i] = semaphore.get(0);
+            }
+        }
+    }
+
+    /** An sRGB format, so shaders write linear colors and the display shows them right; else the first offered. */
+    private VkSurfaceFormatKHR chooseFormat(MemoryStack stack) {
+        IntBuffer count = stack.mallocInt(1);
+        vkGetPhysicalDeviceSurfaceFormatsKHR(device.gpu().handle(), surface.handle(), count, null);
+        VkSurfaceFormatKHR.Buffer formats = VkSurfaceFormatKHR.malloc(count.get(0), stack);
+        vkGetPhysicalDeviceSurfaceFormatsKHR(device.gpu().handle(), surface.handle(), count, formats);
+        for (VkSurfaceFormatKHR candidate : formats) {
+            if ((candidate.format() == VK_FORMAT_B8G8R8A8_SRGB || candidate.format() == VK_FORMAT_R8G8B8A8_SRGB)
+                && candidate.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                return candidate;
+            }
+        }
+        return formats.get(0);
+    }
+
+    /** The present modes the surface supports. */
+    @AllowAllocation("a snapshot")
+    public List<PresentMode> supportedPresentModes() {
+        try (MemoryStack stack = stackPush()) {
+            IntBuffer count = stack.mallocInt(1);
+            vkGetPhysicalDeviceSurfacePresentModesKHR(device.gpu().handle(), surface.handle(), count, null);
+            IntBuffer modes = stack.mallocInt(count.get(0));
+            vkGetPhysicalDeviceSurfacePresentModesKHR(device.gpu().handle(), surface.handle(), count, modes);
+            List<PresentMode> supported = new ArrayList<>();
+            for (PresentMode mode : PresentMode.values()) {
+                for (int i = 0; i < modes.remaining(); i++) {
+                    if (modes.get(i) == mode.value) {
+                        supported.add(mode);
+                    }
+                }
+            }
+            return List.copyOf(supported);
+        }
+    }
+
+    // ---------------------------------------------------------------- runtime changes
+
+    /**
+     * Rebuilds the swapchain for a new pixel size, e.g. after the window was resized or changed mode. Waits until the
+     * device is idle first.
+     */
+    @AllowAllocation("recreating")
+    public void recreate(int width, int height) {
+        device.waitIdle();
+        create(width, height);
+    }
+
+    /** Switches the present mode (falling back to {@link PresentMode#FIFO} if unsupported) and rebuilds. */
+    @AllowAllocation("recreating")
+    public void setPresentMode(PresentMode mode) {
+        this.requested = mode;
+        recreate(width, height);
+    }
+
+    /** The present mode in use. */
+    public PresentMode presentMode() {
+        return presentMode;
+    }
+
+    /** The present mode last asked for. */
+    public PresentMode requestedPresentMode() {
+        return requested;
+    }
+
+    /** Whether there are images to render to; not while the window is minimized. */
+    public boolean isUsable() {
+        return handle != 0;
+    }
+
+    /** Whether the system reported the swapchain out of date or suboptimal: call {@link #recreate}. */
+    public boolean needsRecreate() {
+        return outOfDate;
+    }
+
+    // ---------------------------------------------------------------- frames
+
+    /**
+     * Acquires the next image to render to; {@code imageAvailable} is signaled when it may be written. Returns the
+     * image index, or -1 if the swapchain is out of date (then {@link #needsRecreate()} is true).
+     */
+    public int acquire(long imageAvailable) {
+        try (MemoryStack stack = stackPush()) {
+            long index = stack.nmalloc(Integer.BYTES, Integer.BYTES);
+            int result = nvkAcquireNextImageKHR(device.handle(), handle, TIMEOUT, imageAvailable, 0, index);
+            if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+                outOfDate = true;
+                return -1;
+            }
+            if (result == VK_SUBOPTIMAL_KHR) {
+                outOfDate = true; // still usable this time
+            } else {
+                Vulkan.check(result, "Could not acquire a swapchain image");
+            }
+            return memGetInt(index);
+        }
+    }
+
+    /** The semaphore rendering to {@code image} signals, which presenting it waits for. */
+    public long presentReady(int image) {
+        return presentReady[image];
+    }
+
+    /** Presents {@code image} once {@link #presentReady(int)} is signaled. */
+    public void present(Queue queue, int image) {
+        try (MemoryStack stack = stackPush()) {
+            // Written into stack memory by address: no struct wrappers, so presenting allocates nothing.
+            long semaphores = stack.nmalloc(Long.BYTES, Long.BYTES);
+            memPutLong(semaphores, presentReady[image]);
+            long swapchains = stack.nmalloc(Long.BYTES, Long.BYTES);
+            memPutLong(swapchains, handle);
+            long indices = stack.nmalloc(Integer.BYTES, Integer.BYTES);
+            memPutInt(indices, image);
+            long info = stack.ncalloc(VkPresentInfoKHR.ALIGNOF, 1, VkPresentInfoKHR.SIZEOF);
+            memPutInt(info + VkPresentInfoKHR.STYPE, VK_STRUCTURE_TYPE_PRESENT_INFO_KHR);
+            memPutInt(info + VkPresentInfoKHR.WAITSEMAPHORECOUNT, 1);
+            memPutAddress(info + VkPresentInfoKHR.PWAITSEMAPHORES, semaphores);
+            memPutInt(info + VkPresentInfoKHR.SWAPCHAINCOUNT, 1);
+            memPutAddress(info + VkPresentInfoKHR.PSWAPCHAINS, swapchains);
+            memPutAddress(info + VkPresentInfoKHR.PIMAGEINDICES, indices);
+            int result = queue.present(info);
+            if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+                outOfDate = true;
+            } else if (result != VK_SUCCESS) {
+                Vulkan.check(result, "Could not present");
+            }
+        }
+    }
+
+    public long handle() {
+        return handle;
+    }
+
+    /** Width in pixels. */
+    public int width() {
+        return width;
+    }
+
+    /** Height in pixels. */
+    public int height() {
+        return height;
+    }
+
+    /** The image format, e.g. {@code VK_FORMAT_B8G8R8A8_SRGB}. */
+    public int format() {
+        return format;
+    }
+
+    public int imageCount() {
+        return images.length;
+    }
+
+    public long image(int index) {
+        return images[index];
+    }
+
+    public long view(int index) {
+        return views[index];
+    }
+
+    private void destroyImages() {
+        for (int i = 0; i < views.length; i++) {
+            vkDestroyImageView(device.handle(), views[i], null);
+            vkDestroySemaphore(device.handle(), presentReady[i], null);
+        }
+        views = new long[0];
+        presentReady = new long[0];
+        images = new long[0];
+    }
+
+    @Override
+    @AllowAllocation("shutting down")
+    public void close() {
+        device.waitIdle();
+        destroyImages();
+        if (handle != 0) {
+            vkDestroySwapchainKHR(device.handle(), handle, null);
+            handle = 0;
+        }
+    }
+}
