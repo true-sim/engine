@@ -27,6 +27,7 @@ import static org.lwjgl.vulkan.VK10.vkEnumerateInstanceLayerProperties;
 import static org.lwjgl.vulkan.VK10.vkEnumeratePhysicalDevices;
 import static org.lwjgl.vulkan.VK11.vkEnumerateInstanceVersion;
 import static org.lwjgl.vulkan.VK13.VK_API_VERSION_1_3;
+import static org.lwjgl.vulkan.VK14.VK_API_VERSION_1_4;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.platform.Window;
@@ -54,9 +55,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * A Vulkan 1.3 instance: the entry point that lists {@link Gpu}s and creates {@link Surface}s for windows. With
+ * A Vulkan instance: the entry point that lists {@link Gpu}s and creates {@link Surface}s for windows. With
  * validation on, Khronos' validation layer checks every call (when installed, e.g. with the Vulkan SDK) and its
  * messages go to the log; {@link #validationErrors()} counts the errors, so tests can require none.
+ *
+ * <p>The engine needs Vulkan 1.3 ({@link #MIN_API_VERSION}) and uses 1.4 ({@link #MAX_API_VERSION}) where the loader
+ * and GPU offer it: see {@link VulkanDevice#apiVersion()} and {@link VulkanDevice#features14()}.
  *
  * <pre>{@code
  * try (VulkanInstance vulkan = VulkanInstance.builder().applicationName("true-sim").validation(true).build()) {
@@ -69,12 +73,15 @@ import org.slf4j.LoggerFactory;
 public final class VulkanInstance implements AutoCloseable {
 
     /** The Vulkan version the engine needs: dynamic rendering and synchronization2 are core. */
-    public static final int API_VERSION = VK_API_VERSION_1_3;
+    public static final int MIN_API_VERSION = VK_API_VERSION_1_3;
+    /** The newest Vulkan version the engine uses when available; its features are enabled where supported. */
+    public static final int MAX_API_VERSION = VK_API_VERSION_1_4;
 
     private static final Logger LOG = LoggerFactory.getLogger(VulkanInstance.class);
     private static final String VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation";
 
     private final VkInstance handle;
+    private final int apiVersion;
     private final boolean validation;
     private final boolean surfaces;
     private final AtomicInteger errors = new AtomicInteger();
@@ -87,9 +94,10 @@ public final class VulkanInstance implements AutoCloseable {
         try (MemoryStack stack = stackPush()) {
             IntBuffer version = stack.mallocInt(1);
             Vulkan.check(vkEnumerateInstanceVersion(version), "Could not query the Vulkan version");
-            if (Integer.compareUnsigned(version.get(0), API_VERSION) < 0) {
+            if (Integer.compareUnsigned(version.get(0), MIN_API_VERSION) < 0) {
                 throw new VulkanException("Vulkan 1.3 is needed; the loader offers " + Vulkan.version(version.get(0)));
             }
+            this.apiVersion = Vulkan.min(Vulkan.withoutPatch(version.get(0)), builder.maxApiVersion);
             Set<String> available = instanceExtensions();
             List<String> extensions = new ArrayList<>();
             if (builder.surfaces) {
@@ -123,7 +131,7 @@ public final class VulkanInstance implements AutoCloseable {
                 .sType(VK_STRUCTURE_TYPE_APPLICATION_INFO)
                 .pApplicationName(stack.UTF8(builder.applicationName))
                 .pEngineName(stack.UTF8("true-sim"))
-                .apiVersion(API_VERSION);
+                .apiVersion(apiVersion);
             PointerBuffer extensionNames = stack.mallocPointer(extensions.size());
             for (String extension : extensions) {
                 extensionNames.put(stack.UTF8(extension));
@@ -163,6 +171,7 @@ public final class VulkanInstance implements AutoCloseable {
         private String applicationName = "true-sim";
         private boolean validation;
         private boolean surfaces = true;
+        private int maxApiVersion = MAX_API_VERSION;
 
         private Builder() {
         }
@@ -184,6 +193,20 @@ public final class VulkanInstance implements AutoCloseable {
          */
         public Builder surfaces(boolean surfaces) {
             this.surfaces = surfaces;
+            return this;
+        }
+
+        /**
+         * The newest Vulkan version to use, from {@link #MIN_API_VERSION} to {@link #MAX_API_VERSION} (the default):
+         * e.g. {@code VK_API_VERSION_1_3} to run as on a GPU without 1.4.
+         */
+        public Builder maxApiVersion(int version) {
+            if (Integer.compareUnsigned(version, MIN_API_VERSION) < 0
+                || Integer.compareUnsigned(version, MAX_API_VERSION) > 0) {
+                throw new IllegalArgumentException("Vulkan " + Vulkan.version(version) + " is not between "
+                    + Vulkan.version(MIN_API_VERSION) + " and " + Vulkan.version(MAX_API_VERSION));
+            }
+            this.maxApiVersion = version;
             return this;
         }
 
@@ -244,6 +267,11 @@ public final class VulkanInstance implements AutoCloseable {
         return handle;
     }
 
+    /** The Vulkan version this instance was created for: the loader's, at most the builder's maximum. */
+    public int apiVersion() {
+        return apiVersion;
+    }
+
     /** Whether the validation layer is active. */
     public boolean validationEnabled() {
         return validation;
@@ -271,7 +299,7 @@ public final class VulkanInstance implements AutoCloseable {
             List<Gpu> gpus = new ArrayList<>();
             for (int i = 0; i < devices.remaining(); i++) {
                 Gpu gpu = new Gpu(this, new VkPhysicalDevice(devices.get(i), handle));
-                if (Integer.compareUnsigned(gpu.apiVersion(), API_VERSION) >= 0) {
+                if (Integer.compareUnsigned(gpu.apiVersion(), MIN_API_VERSION) >= 0) {
                     gpus.add(gpu);
                 }
             }

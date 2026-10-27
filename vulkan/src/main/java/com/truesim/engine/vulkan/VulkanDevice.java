@@ -32,6 +32,8 @@ import static org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+import static org.lwjgl.vulkan.VK14.VK_API_VERSION_1_4;
+import static org.lwjgl.vulkan.VK14.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES;
 
 import com.truesim.annotations.AllowAllocation;
 import java.nio.LongBuffer;
@@ -56,6 +58,7 @@ import org.lwjgl.vulkan.VkFenceCreateInfo;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan13Features;
+import org.lwjgl.vulkan.VkPhysicalDeviceVulkan14Features;
 import org.lwjgl.vulkan.VkSubmitInfo2;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -79,6 +82,8 @@ public final class VulkanDevice implements AutoCloseable {
     private final Queue compute;
     private final Queue transfer;
     private final long allocator;
+    private final int apiVersion;
+    private final Vulkan14Features features14;
     private final boolean swapchains;
     private boolean closed;
 
@@ -95,8 +100,18 @@ public final class VulkanDevice implements AutoCloseable {
         if (swapchains && !gpu.supports(VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
             throw new VulkanException(gpu.name() + " cannot present: " + VK_KHR_SWAPCHAIN_EXTENSION_NAME + " missing");
         }
+        this.apiVersion = Vulkan.min(Vulkan.withoutPatch(gpu.apiVersion()), gpu.instance().apiVersion());
         try (MemoryStack stack = stackPush()) {
             requireFeatures(stack);
+            // Every 1.4 feature the GPU supports is enabled: the queried struct goes into the create chain as it is.
+            VkPhysicalDeviceVulkan14Features supported14 = null;
+            if (Integer.compareUnsigned(apiVersion, VK_API_VERSION_1_4) >= 0) {
+                supported14 = VkPhysicalDeviceVulkan14Features.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES);
+                vkGetPhysicalDeviceFeatures2(gpu.handle(), VkPhysicalDeviceFeatures2.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2).pNext(supported14.address()));
+            }
+            this.features14 = supported14 == null ? Vulkan14Features.NONE : Vulkan14Features.of(supported14);
             Map<Integer, QueueFamily> distinct = new LinkedHashMap<>();
             for (QueueFamily family : List.of(graphicsFamily, computeFamily, transferFamily)) {
                 distinct.put(family.index(), family);
@@ -111,6 +126,9 @@ public final class VulkanDevice implements AutoCloseable {
                 .dynamicRendering(true)
                 .synchronization2(true)
                 .maintenance4(true);
+            if (supported14 != null) {
+                features13.pNext(supported14.address());
+            }
             VkPhysicalDeviceVulkan12Features features12 = VkPhysicalDeviceVulkan12Features.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
                 .pNext(features13.address())
@@ -130,7 +148,7 @@ public final class VulkanDevice implements AutoCloseable {
                 .ppEnabledExtensionNames(swapchains ? stack.pointers(stack.UTF8(VK_KHR_SWAPCHAIN_EXTENSION_NAME)) : null);
             PointerBuffer device = stack.mallocPointer(1);
             Vulkan.check(vkCreateDevice(gpu.handle(), info, null, device), "Could not create a device on " + gpu.name());
-            this.handle = new VkDevice(device.get(0), gpu.handle(), info, VulkanInstance.API_VERSION);
+            this.handle = new VkDevice(device.get(0), gpu.handle(), info, apiVersion);
             Map<Integer, Queue> byFamily = new LinkedHashMap<>();
             for (int family : distinct.keySet()) {
                 PointerBuffer queue = stack.mallocPointer(1);
@@ -146,14 +164,14 @@ public final class VulkanDevice implements AutoCloseable {
                 .physicalDevice(gpu.handle())
                 .device(handle)
                 .instance(gpu.instance().handle())
-                .vulkanApiVersion(VulkanInstance.API_VERSION)
+                .vulkanApiVersion(VulkanInstance.MIN_API_VERSION) // all VMA needs
                 .pVulkanFunctions(VmaVulkanFunctions.calloc(stack).set(gpu.instance().handle(), handle));
             PointerBuffer pointer = stack.mallocPointer(1);
             Vulkan.check(vmaCreateAllocator(allocatorInfo, pointer), "Could not create the memory allocator");
             this.allocator = pointer.get(0);
         }
-        LOG.info("Device on {}: queues graphics {}, compute {}, transfer {}", gpu, graphics.family(), compute.family(),
-            transfer.family());
+        LOG.info("Device on {}: Vulkan {}, queues graphics {}, compute {}, transfer {}", gpu, Vulkan.version(apiVersion),
+            graphics.family(), compute.family(), transfer.family());
     }
 
     /** A device that can present to windows. */
@@ -202,6 +220,16 @@ public final class VulkanDevice implements AutoCloseable {
 
     public VkDevice handle() {
         return handle;
+    }
+
+    /** The Vulkan version used on this device: 1.3, or 1.4 when both the GPU and the instance have it. */
+    public int apiVersion() {
+        return apiVersion;
+    }
+
+    /** The Vulkan 1.4 features enabled on this device; {@link Vulkan14Features#NONE} on a 1.3 device. */
+    public Vulkan14Features features14() {
+        return features14;
     }
 
     /** The VMA allocator, for buffers and images. */

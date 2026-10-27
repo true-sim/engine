@@ -9,7 +9,7 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 | Module            | Package                       | What                                                    |
 |-------------------|-------------------------------|---------------------------------------------------------|
 | `engine-platform` | `com.truesim.engine.platform` | SDL3: displays, windows, runtime mode changes, raw input |
-| `engine-vulkan`   | `com.truesim.engine.vulkan`   | Vulkan 1.3: instance, GPUs, devices, swapchains, frames |
+| `engine-vulkan`   | `com.truesim.engine.vulkan`   | Vulkan 1.3, 1.4 where available: instance, GPUs, devices, swapchains, frames |
 
 ## Platform
 
@@ -35,8 +35,11 @@ try (Platform platform = Platform.start()) {
 
 ## Vulkan
 
-Vulkan 1.3 with dynamic rendering, synchronization2, timeline semaphores, buffer device addresses and
-descriptor indexing; memory through VMA. With validation on, every validation message is logged and counted,
+Vulkan 1.3 is required: dynamic rendering, synchronization2, timeline semaphores, buffer device addresses and
+descriptor indexing; memory through VMA. Where the loader and GPU have Vulkan 1.4, devices use it and enable every
+1.4 feature the GPU supports; `device.features14()` tells renderer paths what they can use (push descriptors,
+dynamic rendering local read, maintenance5/6, host image copy, ...), and is `Vulkan14Features.NONE` on 1.3.
+`VulkanInstance.builder().maxApiVersion(VK_API_VERSION_1_3)` runs as on a 1.3 GPU, e.g. to test fallbacks. With validation on, every validation message is logged and counted,
 and the tests require zero errors.
 
 ```java
@@ -69,7 +72,7 @@ try (VulkanInstance instance = VulkanInstance.builder().applicationName("game").
 
 ## Building
 
-Needs Java 27 and a Vulkan 1.3 driver; the validation layers (Vulkan SDK) are optional. Tests open hidden
+Needs Java 27 and a Vulkan 1.3 driver (1.4 is used when present); the validation layers (Vulkan SDK) are optional. Tests open hidden
 windows. Without a display, set `SDL_VIDEO_DRIVER=offscreen`, as CI does with Mesa's lavapipe. Exclusive
 fullscreen is only tested when `TRUESIM_TEST_FULLSCREEN` is set, because it changes the monitor's mode.
 

@@ -52,6 +52,16 @@ public final class Vulkan {
         };
     }
 
+    /** {@code version} without its patch number, e.g. 1.4.0 for 1.4.309. */
+    public static int withoutPatch(int version) {
+        return version & ~0xfff;
+    }
+
+    /** The older of two Vulkan versions. */
+    public static int min(int a, int b) {
+        return Integer.compareUnsigned(a, b) <= 0 ? a : b;
+    }
+
     /** A Vulkan version as {@code major.minor.patch}. */
     @AllowAllocation("diagnostics")
     public static String version(int version) {

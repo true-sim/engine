@@ -20,15 +20,18 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+import static org.lwjgl.vulkan.VK10.VK_MAKE_API_VERSION;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_SUBMIT_INFO;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
+import static org.lwjgl.vulkan.VK12.VK_API_VERSION_1_2;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_NONE;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_READ_BIT;
+import static org.lwjgl.vulkan.VK13.VK_API_VERSION_1_3;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_RENDERING_INFO;
 import static org.lwjgl.vulkan.VK13.vkCmdBeginRendering;
@@ -100,7 +103,7 @@ class VulkanTest {
             for (Gpu gpu : gpus) {
                 assertThat(gpu.name()).isNotBlank();
                 assertThat(gpu.instance()).isSameAs(instance);
-                assertThat(Integer.compareUnsigned(gpu.apiVersion(), VulkanInstance.API_VERSION)).isNotNegative();
+                assertThat(Integer.compareUnsigned(gpu.apiVersion(), VulkanInstance.MIN_API_VERSION)).isNotNegative();
                 assertThat(gpu.queueFamilies()).anyMatch(QueueFamily::graphics);
                 assertThat(gpu.extensions()).isNotEmpty();
                 assertThat(gpu.toString()).contains(gpu.name(), gpu.type().toString(), "MiB");
@@ -133,6 +136,46 @@ class VulkanTest {
                 assertThat(device.canPresent()).isFalse();
             }
         }
+    }
+
+    @Test
+    void devicesUseVulkan14WhereAvailable() {
+        try (VulkanInstance instance = headless()) {
+            assertThat(Integer.compareUnsigned(instance.apiVersion(), VulkanInstance.MIN_API_VERSION)).isNotNegative();
+            for (Gpu gpu : instance.gpus()) {
+                try (VulkanDevice device = VulkanDevice.createHeadless(gpu)) {
+                    assertThat(device.apiVersion())
+                        .isEqualTo(Vulkan.min(Vulkan.withoutPatch(gpu.apiVersion()), instance.apiVersion()));
+                    if (device.apiVersion() == VulkanInstance.MAX_API_VERSION) {
+                        // Mandatory in 1.4, so every 1.4 device has them enabled.
+                        assertThat(device.features14().pushDescriptor()).isTrue();
+                        assertThat(device.features14().maintenance5()).isTrue();
+                        assertThat(device.features14().dynamicRenderingLocalRead()).isTrue();
+                    } else {
+                        assertThat(device.features14()).isEqualTo(Vulkan14Features.NONE);
+                    }
+                }
+            }
+            assertThat(instance.validationErrors()).isZero();
+        }
+    }
+
+    @Test
+    void instancesCanBeLimitedToVulkan13() {
+        try (VulkanInstance instance = VulkanInstance.builder().validation(true).surfaces(false)
+            .maxApiVersion(VK_API_VERSION_1_3).build()) {
+            assumeThat(instance.gpus()).isNotEmpty();
+            assertThat(instance.apiVersion()).isEqualTo(VK_API_VERSION_1_3);
+            try (VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
+                assertThat(device.apiVersion()).isEqualTo(VK_API_VERSION_1_3);
+                assertThat(device.features14()).isEqualTo(Vulkan14Features.NONE);
+            }
+            assertThat(instance.validationErrors()).isZero();
+        }
+        assertThatIllegalArgumentException().isThrownBy(() -> VulkanInstance.builder().maxApiVersion(VK_API_VERSION_1_2))
+            .withMessage("Vulkan 1.2.0 is not between 1.3.0 and 1.4.0");
+        assertThatIllegalArgumentException()
+            .isThrownBy(() -> VulkanInstance.builder().maxApiVersion(VK_MAKE_API_VERSION(0, 1, 5, 0)));
     }
 
     @Test
@@ -215,7 +258,7 @@ class VulkanTest {
             assertThatThrownBy(() -> Vulkan.check(-4, "Lost it")).isInstanceOf(VulkanException.class)
                 .hasMessage("Lost it: VK_ERROR_DEVICE_LOST").extracting(e -> ((VulkanException) e).result()).isEqualTo(-4);
             assertThat(new VulkanException("plain").result()).isZero();
-            assertThat(Vulkan.version(VulkanInstance.API_VERSION)).isEqualTo("1.3.0");
+            assertThat(Vulkan.version(VulkanInstance.MIN_API_VERSION)).isEqualTo("1.3.0");
             for (int result : new int[] {0, 1, 2, 1000001003, -1, -2, -3, -4, -6, -7, -8, -9, 1000000000 * -1, -1000001004, 12345}) {
                 assertThat(Vulkan.resultName(result)).isNotBlank();
             }
