@@ -58,11 +58,25 @@ import org.lwjgl.vulkan.VkSurfaceFormatKHR;
 
 class VulkanTest {
 
+    /**
+     * {@code instance}, after checking that validation really is on where it must be: CI sets
+     * {@code TRUESIM_REQUIRE_VALIDATION=true}, so a missing validation layer fails the tests instead of letting them
+     * pass unchecked.
+     */
+    private static VulkanInstance validated(VulkanInstance instance) {
+        if ("true".equals(System.getenv("TRUESIM_REQUIRE_VALIDATION")) && !instance.validationEnabled()) {
+            instance.close();
+            throw new AssertionError("Validation is required (TRUESIM_REQUIRE_VALIDATION) but the layer is not active");
+        }
+        return instance;
+    }
+
     /** A headless instance with validation, or the test is skipped where there is no Vulkan 1.3 GPU at all. */
     private static VulkanInstance headless() {
         VulkanInstance instance;
         try {
-            instance = VulkanInstance.builder().applicationName("tests").validation(true).surfaces(false).build();
+            instance = validated(
+                VulkanInstance.builder().applicationName("tests").validation(true).surfaces(false).build());
         } catch (VulkanException | UnsatisfiedLinkError e) {
             assumeThat(e).as("no Vulkan available").isNull();
             throw e;
@@ -167,8 +181,8 @@ class VulkanTest {
 
     @Test
     void instancesCanBeLimitedToVulkan13() {
-        try (VulkanInstance instance = VulkanInstance.builder().validation(true).surfaces(false)
-            .maxApiVersion(VK_API_VERSION_1_3).build()) {
+        try (VulkanInstance instance = validated(VulkanInstance.builder().validation(true).surfaces(false)
+            .maxApiVersion(VK_API_VERSION_1_3).build())) {
             assumeThat(instance.gpus()).isNotEmpty();
             assertThat(instance.apiVersion()).isEqualTo(VK_API_VERSION_1_3);
             try (VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
@@ -369,7 +383,7 @@ class VulkanTest {
     @Test
     void windowsRenderAndResizeAtRuntime() {
         try (Platform platform = Platform.start();
-             VulkanInstance instance = VulkanInstance.builder().validation(true).build()) {
+             VulkanInstance instance = validated(VulkanInstance.builder().validation(true).build())) {
             assumeThat(instance.gpus()).as("no Vulkan 1.3 GPU").isNotEmpty();
             Gpu gpu = instance.bestGpu();
             assumeThat(gpu.supports(VK_KHR_SWAPCHAIN_EXTENSION_NAME)).as("no presentation").isTrue();
@@ -441,7 +455,7 @@ class VulkanTest {
     @Test
     void headlessDevicesCannotPresent() {
         try (Platform platform = Platform.start();
-             VulkanInstance instance = VulkanInstance.builder().validation(true).build()) {
+             VulkanInstance instance = validated(VulkanInstance.builder().validation(true).build())) {
             assumeThat(instance.gpus()).isNotEmpty();
             Window window = platform.createWindow(WindowOptions.of("headless", 100, 100).withHidden(true));
             try (VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
