@@ -179,6 +179,19 @@ class VulkanTest {
     }
 
     @Test
+    void offscreenWindowsGetHeadlessSurfaces() {
+        String headless = "VK_EXT_headless_surface";
+        List<String> extensions = new java.util.ArrayList<>(List.of("VK_KHR_surface"));
+        VulkanInstance.addHeadlessSurface("windows", java.util.Set.of(headless), extensions);
+        assertThat(extensions).containsExactly("VK_KHR_surface");
+        VulkanInstance.addHeadlessSurface("offscreen", java.util.Set.of(), extensions);
+        assertThat(extensions).containsExactly("VK_KHR_surface");
+        VulkanInstance.addHeadlessSurface("offscreen", java.util.Set.of(headless), extensions);
+        VulkanInstance.addHeadlessSurface("offscreen", java.util.Set.of(headless), extensions);
+        assertThat(extensions).containsExactly("VK_KHR_surface", headless);
+    }
+
+    @Test
     void surfacesNeedARunningPlatform() {
         assertThatThrownBy(() -> VulkanInstance.builder().build()).isInstanceOf(VulkanException.class)
             .hasMessageContaining("Platform");
