@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # Pinned Mesa lavapipe and validation layer, offscreen SDL; tests must run validated.
-      - uses: true-sim/build-logic/.github/actions/setup-vulkan@0eef1f386b2407335e042caf7a5e8ebe892177c3 # main, 2026-10-27
+      - uses: true-sim/build-logic/.github/actions/setup-vulkan@61314fb2c79472f89f95c8ffd001ee53e904b02a # main, 2026-10-27
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
