@@ -11,17 +11,11 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    env:
-      # No display or GPU on the runner: SDL renders offscreen and Mesa's lavapipe is the Vulkan device.
-      SDL_VIDEO_DRIVER: offscreen
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
-      - name: Install Vulkan (lavapipe and validation layers)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers vulkan-validationlayers vulkan-tools
-          vulkaninfo --summary
+      # Pinned Mesa lavapipe and validation layer, offscreen SDL; tests must run validated.
+      - uses: true-sim/build-logic/.github/actions/setup-vulkan@61314fb2c79472f89f95c8ffd001ee53e904b02a # main, 2026-10-27
       - uses: actions/setup-java@v6
         with:
           distribution: temurin

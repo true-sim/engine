@@ -105,9 +105,13 @@ try (VulkanInstance instance = VulkanInstance.builder().applicationName("game").
 
 ## Building
 
-Needs Java 27 and a Vulkan 1.3 driver (1.4 is used when present); the validation layers (Vulkan SDK) are optional. Tests open hidden
-windows. Without a display, set `SDL_VIDEO_DRIVER=offscreen`, as CI does with Mesa's lavapipe. Exclusive
-fullscreen is only tested when `TRUESIM_TEST_FULLSCREEN` is set, because it changes the monitor's mode.
+Needs Java 27 and a Vulkan 1.3 driver (1.4 is used when present); the validation layers (Vulkan SDK) are
+optional locally. Tests open hidden windows. Without a display, set `SDL_VIDEO_DRIVER=offscreen`.
+
+CI does that on Mesa's lavapipe through build-logic's `setup-vulkan` action. The action pins and caches the Vulkan
+packages and sets `TRUESIM_REQUIRE_VALIDATION=true`, so the Vulkan tests fail when the validation layer is not active.
+
+Exclusive fullscreen is only tested when `TRUESIM_TEST_FULLSCREEN` is set, because it changes the monitor's mode.
 
 ```bash
 ./gradlew build
