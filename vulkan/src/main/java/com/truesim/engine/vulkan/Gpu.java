@@ -3,13 +3,6 @@ package com.truesim.engine.vulkan;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.KHRSurface.vkGetPhysicalDeviceSurfaceSupportKHR;
 import static org.lwjgl.vulkan.VK10.VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
-import static org.lwjgl.vulkan.VK10.VK_PHYSICAL_DEVICE_TYPE_CPU;
-import static org.lwjgl.vulkan.VK10.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
-import static org.lwjgl.vulkan.VK10.VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
-import static org.lwjgl.vulkan.VK10.VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU;
-import static org.lwjgl.vulkan.VK10.VK_QUEUE_COMPUTE_BIT;
-import static org.lwjgl.vulkan.VK10.VK_QUEUE_GRAPHICS_BIT;
-import static org.lwjgl.vulkan.VK10.VK_QUEUE_TRANSFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_TRUE;
 import static org.lwjgl.vulkan.VK10.vkEnumerateDeviceExtensionProperties;
 import static org.lwjgl.vulkan.VK10.vkGetPhysicalDeviceMemoryProperties;
@@ -55,13 +48,7 @@ public final class Gpu {
             VkPhysicalDeviceProperties properties = VkPhysicalDeviceProperties.malloc(stack);
             vkGetPhysicalDeviceProperties(handle, properties);
             this.name = properties.deviceNameString();
-            this.type = switch (properties.deviceType()) {
-                case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU -> GpuType.DISCRETE;
-                case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU -> GpuType.INTEGRATED;
-                case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU -> GpuType.VIRTUAL;
-                case VK_PHYSICAL_DEVICE_TYPE_CPU -> GpuType.CPU;
-                default -> GpuType.OTHER;
-            };
+            this.type = GpuType.of(properties.deviceType());
             this.vendorId = properties.vendorID();
             this.deviceId = properties.deviceID();
             this.apiVersion = properties.apiVersion();
@@ -83,9 +70,7 @@ public final class Gpu {
             vkGetPhysicalDeviceQueueFamilyProperties(handle, count, families);
             List<QueueFamily> list = new ArrayList<>();
             for (int i = 0; i < families.capacity(); i++) {
-                int flags = families.get(i).queueFlags();
-                list.add(new QueueFamily(i, families.get(i).queueCount(), (flags & VK_QUEUE_GRAPHICS_BIT) != 0,
-                    (flags & VK_QUEUE_COMPUTE_BIT) != 0, (flags & VK_QUEUE_TRANSFER_BIT) != 0));
+                list.add(QueueFamily.of(i, families.get(i).queueCount(), families.get(i).queueFlags()));
             }
             this.queueFamilies = List.copyOf(list);
 

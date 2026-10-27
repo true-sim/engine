@@ -90,13 +90,10 @@ public final class VulkanDevice implements AutoCloseable {
     private VulkanDevice(Gpu gpu, boolean swapchains) {
         this.gpu = gpu;
         this.swapchains = swapchains;
-        List<QueueFamily> families = gpu.queueFamilies();
-        QueueFamily graphicsFamily = families.stream().filter(f -> f.graphics() && f.compute()).findFirst()
-            .orElseThrow(() -> new VulkanException(gpu.name() + " has no graphics queue"));
-        QueueFamily computeFamily = families.stream().filter(f -> f.compute() && !f.graphics()).findFirst()
-            .orElse(graphicsFamily);
-        QueueFamily transferFamily = families.stream().filter(f -> f.transfer() && !f.graphics() && !f.compute())
-            .findFirst().orElse(computeFamily);
+        QueueFamily[] chosen = chooseQueueFamilies(gpu.name(), gpu.queueFamilies());
+        QueueFamily graphicsFamily = chosen[0];
+        QueueFamily computeFamily = chosen[1];
+        QueueFamily transferFamily = chosen[2];
         if (swapchains && !gpu.supports(VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
             throw new VulkanException(gpu.name() + " cannot present: " + VK_KHR_SWAPCHAIN_EXTENSION_NAME + " missing");
         }
@@ -172,6 +169,32 @@ public final class VulkanDevice implements AutoCloseable {
         }
         LOG.info("Device on {}: Vulkan {}, queues graphics {}, compute {}, transfer {}", gpu, Vulkan.version(apiVersion),
             graphics.family(), compute.family(), transfer.family());
+    }
+
+    /**
+     * The families for the graphics, compute and transfer queues, in that order: graphics can also compute; compute
+     * and transfer are dedicated families when the GPU has them, otherwise the graphics and compute ones.
+     */
+    static QueueFamily[] chooseQueueFamilies(String gpu, List<QueueFamily> families) {
+        QueueFamily graphics = null;
+        QueueFamily compute = null;
+        QueueFamily transfer = null;
+        for (QueueFamily family : families) {
+            if (graphics == null && family.graphics() && family.compute()) {
+                graphics = family;
+            }
+            if (compute == null && family.compute() && !family.graphics()) {
+                compute = family;
+            }
+            if (transfer == null && family.transfer() && !family.graphics() && !family.compute()) {
+                transfer = family;
+            }
+        }
+        if (graphics == null) {
+            throw new VulkanException(gpu + " has no graphics queue");
+        }
+        compute = compute == null ? graphics : compute;
+        return new QueueFamily[] {graphics, compute, transfer == null ? compute : transfer};
     }
 
     /** A device that can present to windows. */

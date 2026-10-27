@@ -261,7 +261,11 @@ public final class VulkanInstance implements AutoCloseable {
     }
 
     private int message(int severity, int types, long data, long user) {
-        String text = VkDebugUtilsMessengerCallbackDataEXT.create(data).pMessageString();
+        return message(severity, VkDebugUtilsMessengerCallbackDataEXT.create(data).pMessageString());
+    }
+
+    /** Logs and counts a validation message. */
+    int message(int severity, String text) {
         if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0) {
             errors.incrementAndGet();
             LOG.error("Vulkan: {}", text);

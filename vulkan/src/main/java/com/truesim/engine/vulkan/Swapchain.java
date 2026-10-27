@@ -166,13 +166,19 @@ public final class Swapchain implements AutoCloseable {
         vkGetPhysicalDeviceSurfaceFormatsKHR(device.gpu().handle(), surface.handle(), count, null);
         VkSurfaceFormatKHR.Buffer formats = VkSurfaceFormatKHR.malloc(count.get(0), stack);
         vkGetPhysicalDeviceSurfaceFormatsKHR(device.gpu().handle(), surface.handle(), count, formats);
-        for (VkSurfaceFormatKHR candidate : formats) {
+        return formats.get(chooseFormat(formats));
+    }
+
+    /** The index of the first sRGB format with the sRGB color space, or 0. */
+    static int chooseFormat(VkSurfaceFormatKHR.Buffer formats) {
+        for (int i = 0; i < formats.capacity(); i++) {
+            VkSurfaceFormatKHR candidate = formats.get(i);
             if ((candidate.format() == VK_FORMAT_B8G8R8A8_SRGB || candidate.format() == VK_FORMAT_R8G8B8A8_SRGB)
                 && candidate.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-                return candidate;
+                return i;
             }
         }
-        return formats.get(0);
+        return 0;
     }
 
     /** The present modes the surface supports. */
