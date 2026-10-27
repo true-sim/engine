@@ -357,7 +357,9 @@ class PlatformTest {
         assertThat(window.isResizable()).isTrue();
         assertThat(second.isResizable()).isFalse();
         window.setResizable(false);
-        assertThat(window.isResizable()).isFalse();
+        if (!platform.videoDriver().equals("offscreen")) { // the offscreen driver keeps windows resizable
+            assertThat(window.isResizable()).isFalse();
+        }
         assertThat(window.isVisible()).isFalse();
         window.show();
         assertThat(window.isVisible()).isTrue();

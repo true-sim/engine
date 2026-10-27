@@ -46,10 +46,15 @@ import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.system.MemoryUtil;
+import org.lwjgl.vulkan.EXTDebugUtils;
+import org.lwjgl.vulkan.KHRSurface;
+import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VkBufferImageCopy;
 import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkRenderingAttachmentInfo;
 import org.lwjgl.vulkan.VkRenderingInfo;
+import org.lwjgl.vulkan.VkSurfaceFormatKHR;
 
 class VulkanTest {
 
@@ -176,6 +181,76 @@ class VulkanTest {
             .withMessage("Vulkan 1.2.0 is not between 1.3.0 and 1.4.0");
         assertThatIllegalArgumentException()
             .isThrownBy(() -> VulkanInstance.builder().maxApiVersion(VK_MAKE_API_VERSION(0, 1, 5, 0)));
+    }
+
+    @Test
+    void offscreenWindowsGetHeadlessSurfaces() {
+        String headless = "VK_EXT_headless_surface";
+        List<String> extensions = new java.util.ArrayList<>(List.of("VK_KHR_surface"));
+        VulkanInstance.addHeadlessSurface("windows", java.util.Set.of(headless), extensions);
+        assertThat(extensions).containsExactly("VK_KHR_surface");
+        VulkanInstance.addHeadlessSurface("offscreen", java.util.Set.of(), extensions);
+        assertThat(extensions).containsExactly("VK_KHR_surface");
+        VulkanInstance.addHeadlessSurface("offscreen", java.util.Set.of(headless), extensions);
+        VulkanInstance.addHeadlessSurface("offscreen", java.util.Set.of(headless), extensions);
+        assertThat(extensions).containsExactly("VK_KHR_surface", headless);
+    }
+
+    @Test
+    void hardwareDecisionsWorkForAnyHardware() {
+        // GPU types and queue flags as drivers report them.
+        assertThat(GpuType.of(VK10.VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)).isEqualTo(GpuType.DISCRETE);
+        assertThat(GpuType.of(VK10.VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)).isEqualTo(GpuType.INTEGRATED);
+        assertThat(GpuType.of(VK10.VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU)).isEqualTo(GpuType.VIRTUAL);
+        assertThat(GpuType.of(VK10.VK_PHYSICAL_DEVICE_TYPE_CPU)).isEqualTo(GpuType.CPU);
+        assertThat(GpuType.of(VK10.VK_PHYSICAL_DEVICE_TYPE_OTHER)).isEqualTo(GpuType.OTHER);
+        assertThat(QueueFamily.of(2, 4, VK10.VK_QUEUE_GRAPHICS_BIT | VK10.VK_QUEUE_COMPUTE_BIT))
+            .isEqualTo(new QueueFamily(2, 4, true, true, false));
+        assertThat(QueueFamily.of(3, 1, VK10.VK_QUEUE_TRANSFER_BIT)).isEqualTo(new QueueFamily(3, 1, false, false, true));
+
+        // Queue families: one family for everything, as on lavapipe ...
+        QueueFamily all = new QueueFamily(0, 1, true, true, true);
+        assertThat(VulkanDevice.chooseQueueFamilies("cpu", List.of(all))).containsExactly(all, all, all);
+        // ... dedicated compute and transfer families, as on discrete GPUs ...
+        QueueFamily graphicsOnly = new QueueFamily(0, 1, true, false, true); // cannot compute: not the main family
+        QueueFamily compute = new QueueFamily(2, 4, false, true, true);
+        QueueFamily transfer = new QueueFamily(3, 2, false, false, true);
+        assertThat(VulkanDevice.chooseQueueFamilies("gpu", List.of(graphicsOnly, all, compute, transfer)))
+            .containsExactly(all, compute, transfer);
+        // ... dedicated compute without a transfer family ...
+        assertThat(VulkanDevice.chooseQueueFamilies("gpu", List.of(all, compute))).containsExactly(all, compute, compute);
+        // ... and none that can render.
+        assertThatThrownBy(() -> VulkanDevice.chooseQueueFamilies("compute card", List.of(compute, transfer)))
+            .isInstanceOf(VulkanException.class).hasMessage("compute card has no graphics queue");
+
+        // Surface formats: the first sRGB one, else the first.
+        try (MemoryStack stack = stackPush()) {
+            VkSurfaceFormatKHR.Buffer formats = VkSurfaceFormatKHR.calloc(4, stack);
+            int[][] offered = {
+                {VK10.VK_FORMAT_R8G8B8A8_UNORM, KHRSurface.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+                {VK10.VK_FORMAT_B8G8R8A8_SRGB, 1000104002}, // sRGB format, other color space
+                {VK10.VK_FORMAT_R8G8B8A8_SRGB, KHRSurface.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+                {VK10.VK_FORMAT_B8G8R8A8_SRGB, KHRSurface.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR}};
+            for (int i = 0; i < offered.length; i++) {
+                long address = formats.address(i);
+                MemoryUtil.memPutInt(address + VkSurfaceFormatKHR.FORMAT, offered[i][0]);
+                MemoryUtil.memPutInt(address + VkSurfaceFormatKHR.COLORSPACE, offered[i][1]);
+            }
+            assertThat(Swapchain.chooseFormat(formats)).isEqualTo(2);
+            assertThat(Swapchain.chooseFormat(formats.position(3).slice())).isZero();
+            assertThat(Swapchain.chooseFormat(VkSurfaceFormatKHR.calloc(1, stack))).isZero();
+        }
+
+        // Validation messages by severity.
+        try (VulkanInstance instance = headless()) {
+            int errors = instance.validationErrors();
+            int warnings = instance.validationWarnings();
+            instance.message(EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT, "info");
+            instance.message(EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT, "warning");
+            instance.message(EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT, "error");
+            assertThat(instance.validationWarnings()).isEqualTo(warnings + 1);
+            assertThat(instance.validationErrors()).isEqualTo(errors + 1);
+        }
     }
 
     @Test

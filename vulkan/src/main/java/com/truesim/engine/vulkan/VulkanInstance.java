@@ -2,6 +2,7 @@ package com.truesim.engine.vulkan;
 
 import static org.lwjgl.sdl.SDLInit.SDL_INIT_VIDEO;
 import static org.lwjgl.sdl.SDLInit.SDL_WasInit;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetCurrentVideoDriver;
 import static org.lwjgl.sdl.SDLVulkan.SDL_Vulkan_CreateSurface;
 import static org.lwjgl.sdl.SDLVulkan.SDL_Vulkan_GetInstanceExtensions;
 import static org.lwjgl.system.MemoryStack.stackPush;
@@ -15,6 +16,7 @@ import static org.lwjgl.vulkan.EXTDebugUtils.VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
 import static org.lwjgl.vulkan.EXTDebugUtils.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
 import static org.lwjgl.vulkan.EXTDebugUtils.vkCreateDebugUtilsMessengerEXT;
 import static org.lwjgl.vulkan.EXTDebugUtils.vkDestroyDebugUtilsMessengerEXT;
+import static org.lwjgl.vulkan.EXTHeadlessSurface.VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRPortabilityEnumeration.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 import static org.lwjgl.vulkan.KHRPortabilityEnumeration.VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
 import static org.lwjgl.vulkan.VK10.VK_FALSE;
@@ -109,6 +111,7 @@ public final class VulkanInstance implements AutoCloseable {
                 for (int i = 0; i < required.remaining(); i++) {
                     extensions.add(required.getStringUTF8(i));
                 }
+                addHeadlessSurface(SDL_GetCurrentVideoDriver(), available, extensions);
             }
             boolean layer = builder.validation && layers().contains(VALIDATION_LAYER);
             if (builder.validation && !layer) {
@@ -215,6 +218,14 @@ public final class VulkanInstance implements AutoCloseable {
         }
     }
 
+    /** SDL's offscreen driver makes headless surfaces but does not ask for their extension. */
+    static void addHeadlessSurface(String videoDriver, Set<String> available, List<String> extensions) {
+        if ("offscreen".equals(videoDriver) && available.contains(VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME)
+            && !extensions.contains(VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME)) {
+            extensions.add(VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME);
+        }
+    }
+
     private static Set<String> instanceExtensions() {
         try (MemoryStack stack = stackPush()) {
             IntBuffer count = stack.mallocInt(1);
@@ -250,7 +261,11 @@ public final class VulkanInstance implements AutoCloseable {
     }
 
     private int message(int severity, int types, long data, long user) {
-        String text = VkDebugUtilsMessengerCallbackDataEXT.create(data).pMessageString();
+        return message(severity, VkDebugUtilsMessengerCallbackDataEXT.create(data).pMessageString());
+    }
+
+    /** Logs and counts a validation message. */
+    int message(int severity, String text) {
         if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0) {
             errors.incrementAndGet();
             LOG.error("Vulkan: {}", text);
