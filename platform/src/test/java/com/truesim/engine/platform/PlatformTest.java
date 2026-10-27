@@ -34,17 +34,35 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.lwjgl.sdl.SDLEvents;
+import org.lwjgl.sdl.SDLJoystick;
+import org.lwjgl.sdl.SDLPen;
+import org.lwjgl.sdl.SDLPower;
+import org.lwjgl.sdl.SDLSensor;
 import org.lwjgl.sdl.SDL_CommonEvent;
 import org.lwjgl.sdl.SDL_Event;
 import org.lwjgl.sdl.SDL_GamepadAxisEvent;
+import org.lwjgl.sdl.SDL_GamepadDeviceEvent;
 import org.lwjgl.sdl.SDL_GamepadButtonEvent;
+import org.lwjgl.sdl.SDL_GamepadSensorEvent;
+import org.lwjgl.sdl.SDL_GamepadTouchpadEvent;
 import org.lwjgl.sdl.SDL_JoyAxisEvent;
+import org.lwjgl.sdl.SDL_JoyBallEvent;
+import org.lwjgl.sdl.SDL_JoyBatteryEvent;
 import org.lwjgl.sdl.SDL_JoyButtonEvent;
+import org.lwjgl.sdl.SDL_JoyHatEvent;
 import org.lwjgl.sdl.SDL_KeyboardDeviceEvent;
 import org.lwjgl.sdl.SDL_KeyboardEvent;
 import org.lwjgl.sdl.SDL_MouseButtonEvent;
 import org.lwjgl.sdl.SDL_MouseMotionEvent;
 import org.lwjgl.sdl.SDL_MouseWheelEvent;
+import org.lwjgl.sdl.SDL_PenAxisEvent;
+import org.lwjgl.sdl.SDL_PenButtonEvent;
+import org.lwjgl.sdl.SDL_PenMotionEvent;
+import org.lwjgl.sdl.SDL_PenProximityEvent;
+import org.lwjgl.sdl.SDL_PenTouchEvent;
+import org.lwjgl.sdl.SDL_SensorEvent;
+import org.lwjgl.sdl.SDL_TouchFingerEvent;
 import org.lwjgl.sdl.SDL_WindowEvent;
 
 class PlatformTest {
@@ -125,9 +143,9 @@ class PlatformTest {
         }
 
         @Override
-        public void key(long timestamp, int window, int keyboard, int scancode, int key, int modifiers, boolean down,
+        public void key(long timestamp, int window, int keyboard, Key key, int character, int modifiers, boolean down,
             boolean repeat) {
-            events.add("key " + timestamp + " " + window + " " + keyboard + " " + scancode + " " + key + " " + modifiers
+            events.add("key " + timestamp + " " + window + " " + keyboard + " " + key + " " + character + " " + modifiers
                 + " " + down + " " + repeat);
         }
 
@@ -137,8 +155,8 @@ class PlatformTest {
         }
 
         @Override
-        public void mouseButton(long timestamp, int window, int mouse, int button, boolean down, int clicks, float x,
-            float y) {
+        public void mouseButton(long timestamp, int window, int mouse, MouseButton button, boolean down, int clicks,
+            float x, float y) {
             events.add("button " + window + " " + mouse + " " + button + " " + down + " " + clicks + " " + x + "," + y);
         }
 
@@ -148,12 +166,12 @@ class PlatformTest {
         }
 
         @Override
-        public void gamepadAxis(long timestamp, int gamepad, int axis, float value) {
+        public void gamepadAxis(long timestamp, int gamepad, GamepadAxis axis, float value) {
             events.add("gamepad axis " + gamepad + " " + axis + " " + value);
         }
 
         @Override
-        public void gamepadButton(long timestamp, int gamepad, int button, boolean down) {
+        public void gamepadButton(long timestamp, int gamepad, GamepadButton button, boolean down) {
             events.add("gamepad button " + gamepad + " " + button + " " + down);
         }
 
@@ -165,6 +183,76 @@ class PlatformTest {
         @Override
         public void joystickButton(long timestamp, int joystick, int button, boolean down) {
             events.add("joystick button " + joystick + " " + button + " " + down);
+        }
+
+        @Override
+        public void joystickHat(long timestamp, int joystick, int hat, HatPosition position) {
+            events.add("joystick hat " + joystick + " " + hat + " " + position);
+        }
+
+        @Override
+        public void joystickBall(long timestamp, int joystick, int ball, int dx, int dy) {
+            events.add("joystick ball " + joystick + " " + ball + " " + dx + "," + dy);
+        }
+
+        @Override
+        public void batteryChanged(int controller, PowerState state, int percent) {
+            events.add("battery " + controller + " " + state + " " + percent);
+        }
+
+        @Override
+        public void gamepadTouchpad(long timestamp, int gamepad, int touchpad, int finger, TouchPhase phase, float x,
+            float y, float pressure) {
+            events.add("touchpad " + gamepad + " " + touchpad + " " + finger + " " + phase + " " + x + "," + y + " "
+                + pressure);
+        }
+
+        @Override
+        public void gamepadSensor(long timestamp, int gamepad, SensorType sensor, float x, float y, float z,
+            long sensorTimestamp) {
+            events.add("gamepad sensor " + gamepad + " " + sensor + " " + x + "," + y + "," + z + " " + sensorTimestamp);
+        }
+
+        @Override
+        public void gamepadRemapped(int gamepad) {
+            events.add("remapped " + gamepad);
+        }
+
+        @Override
+        public void sensor(long timestamp, int sensor, float x, float y, float z, long sensorTimestamp) {
+            events.add("sensor " + sensor + " " + x + "," + y + "," + z + " " + sensorTimestamp);
+        }
+
+        @Override
+        public void touch(long timestamp, int window, long device, long finger, TouchPhase phase, float x, float y,
+            float dx, float dy, float pressure) {
+            events.add("touch " + window + " " + device + " " + finger + " " + phase + " " + x + "," + y + " " + dx + ","
+                + dy + " " + pressure);
+        }
+
+        @Override
+        public void penProximity(long timestamp, int window, int pen, boolean near) {
+            events.add("pen proximity " + window + " " + pen + " " + near);
+        }
+
+        @Override
+        public void penTouch(long timestamp, int window, int pen, float x, float y, boolean eraser, boolean down) {
+            events.add("pen touch " + pen + " " + x + "," + y + " " + eraser + " " + down);
+        }
+
+        @Override
+        public void penButton(long timestamp, int window, int pen, float x, float y, int button, boolean down) {
+            events.add("pen button " + pen + " " + button + " " + down);
+        }
+
+        @Override
+        public void penMoved(long timestamp, int window, int pen, float x, float y, int state) {
+            events.add("pen moved " + pen + " " + x + "," + y + " " + state);
+        }
+
+        @Override
+        public void penAxis(long timestamp, int window, int pen, float x, float y, PenAxis axis, float value) {
+            events.add("pen axis " + pen + " " + axis + " " + value);
         }
     }
 
@@ -379,12 +467,12 @@ class PlatformTest {
         SDL_JoyButtonEvent.nbutton(e, (byte) 9);
         send();
         assertThat(poll(recorder)).containsExactly(
-            "key 123 7 2 4 97 32769 true true",
+            "key 123 7 2 A 97 4097 true true",
             "motion 7 1 10.5,20.0 1.0,-2.0 5",
-            "button 7 1 3 false 2 4.0,5.0",
+            "button 7 1 RIGHT false 2 4.0,5.0",
             "wheel 7 1 0.5,-1.0",
-            "gamepad axis 11 1 -1.0",
-            "gamepad button 11 2 true",
+            "gamepad axis 11 LEFT_Y -1.0",
+            "gamepad button 11 WEST true",
             "joystick axis 12 3 1.0",
             "joystick button 12 9 false");
     }
@@ -452,11 +540,11 @@ class PlatformTest {
         Recorder recorder = new Recorder();
         poll(recorder);
         long e = event.address();
-        push(org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_FOCUS_LOST);
+        push(SDLEvents.SDL_EVENT_WINDOW_FOCUS_LOST);
         SDL_WindowEvent.nwindowID(e, 5);
         send();
-        int[] devices = {org.lwjgl.sdl.SDLEvents.SDL_EVENT_GAMEPAD_ADDED, org.lwjgl.sdl.SDLEvents.SDL_EVENT_GAMEPAD_REMOVED,
-            org.lwjgl.sdl.SDLEvents.SDL_EVENT_MOUSE_ADDED, org.lwjgl.sdl.SDLEvents.SDL_EVENT_MOUSE_REMOVED};
+        int[] devices = {SDLEvents.SDL_EVENT_GAMEPAD_ADDED, SDLEvents.SDL_EVENT_GAMEPAD_REMOVED,
+            SDLEvents.SDL_EVENT_MOUSE_ADDED, SDLEvents.SDL_EVENT_MOUSE_REMOVED};
         for (int type : devices) {
             push(type);
             SDL_KeyboardDeviceEvent.nwhich(e, 4545); // unknown to SDL: cannot be opened, still reported
@@ -478,16 +566,170 @@ class PlatformTest {
         ignoring.displaysChanged();
         ignoring.deviceAdded(new InputDevice(1, InputDevice.Kind.MOUSE, "m", 0, 0));
         ignoring.deviceRemoved(InputDevice.Kind.MOUSE, 1);
-        ignoring.key(0, 1, 2, 3, 4, 5, true, false);
+        ignoring.key(0, 1, 2, Key.A, 4, 5, true, false);
         ignoring.text(1, "x");
         ignoring.mouseMoved(0, 1, 2, 3, 4, 5, 6, 7);
-        ignoring.mouseButton(0, 1, 2, 3, true, 1, 2, 3);
+        ignoring.mouseButton(0, 1, 2, MouseButton.LEFT, true, 1, 2, 3);
         ignoring.mouseWheel(0, 1, 2, 3, 4);
-        ignoring.gamepadAxis(0, 1, 2, 0.5f);
-        ignoring.gamepadButton(0, 1, 2, true);
+        ignoring.gamepadAxis(0, 1, GamepadAxis.LEFT_X, 0.5f);
+        ignoring.gamepadButton(0, 1, GamepadButton.SOUTH, true);
+        ignoring.gamepadTouchpad(0, 1, 0, 0, TouchPhase.DOWN, 0, 0, 0);
+        ignoring.gamepadSensor(0, 1, SensorType.GYROSCOPE, 0, 0, 0, 0);
+        ignoring.gamepadRemapped(1);
+        ignoring.batteryChanged(1, PowerState.CHARGING, 50);
+        ignoring.joystickHat(0, 1, 0, HatPosition.UP);
+        ignoring.joystickBall(0, 1, 0, 1, 1);
+        ignoring.sensor(0, 1, 0, 0, 0, 0);
+        ignoring.touch(0, 1, 2, 3, TouchPhase.UP, 0, 0, 0, 0, 0);
+        ignoring.penProximity(0, 1, 2, true);
+        ignoring.penTouch(0, 1, 2, 0, 0, false, true);
+        ignoring.penButton(0, 1, 2, 0, 0, 1, true);
+        ignoring.penMoved(0, 1, 2, 0, 0, 0);
+        ignoring.penAxis(0, 1, 2, 0, 0, PenAxis.PRESSURE, 1);
         ignoring.joystickAxis(0, 1, 2, 0.5f);
         ignoring.joystickButton(0, 1, 2, true);
         assertThat(platform.pollEvents(ignoring)).isNotNegative();
+    }
+
+    @Test
+    void controllerSensorTouchAndPenEventsAreForwarded() {
+        Recorder recorder = new Recorder();
+        poll(recorder);
+        long e = event.address();
+        push(SDLEvents.SDL_EVENT_JOYSTICK_HAT_MOTION);
+        SDL_JoyHatEvent.nwhich(e, 12);
+        SDL_JoyHatEvent.nhat(e, (byte) 1);
+        SDL_JoyHatEvent.nvalue(e, (byte) SDLJoystick.SDL_HAT_LEFTUP);
+        send();
+        push(SDLEvents.SDL_EVENT_JOYSTICK_BALL_MOTION);
+        SDL_JoyBallEvent.nwhich(e, 12);
+        SDL_JoyBallEvent.nball(e, (byte) 0);
+        SDL_JoyBallEvent.nxrel(e, (short) 3);
+        SDL_JoyBallEvent.nyrel(e, (short) -4);
+        send();
+        push(SDLEvents.SDL_EVENT_JOYSTICK_BATTERY_UPDATED);
+        SDL_JoyBatteryEvent.nwhich(e, 12);
+        SDL_JoyBatteryEvent.nstate(e, SDLPower.SDL_POWERSTATE_CHARGING);
+        SDL_JoyBatteryEvent.npercent(e, 40);
+        send();
+        int[] touchpad = {SDLEvents.SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN, SDLEvents.SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION,
+            SDLEvents.SDL_EVENT_GAMEPAD_TOUCHPAD_UP};
+        for (int type : touchpad) {
+            push(type);
+            SDL_GamepadTouchpadEvent.nwhich(e, 11);
+            SDL_GamepadTouchpadEvent.nfinger(e, 1);
+            SDL_GamepadTouchpadEvent.nx(e, 0.25f);
+            SDL_GamepadTouchpadEvent.ny(e, 0.5f);
+            SDL_GamepadTouchpadEvent.npressure(e, 1);
+            send();
+        }
+        push(SDLEvents.SDL_EVENT_GAMEPAD_SENSOR_UPDATE);
+        SDL_GamepadSensorEvent.nwhich(e, 11);
+        SDL_GamepadSensorEvent.nsensor(e, SDLSensor.SDL_SENSOR_GYRO);
+        SDL_GamepadSensorEvent.ndata(e, 0, 1);
+        SDL_GamepadSensorEvent.ndata(e, 1, 2);
+        SDL_GamepadSensorEvent.ndata(e, 2, 3);
+        SDL_GamepadSensorEvent.nsensor_timestamp(e, 99);
+        send();
+        push(SDLEvents.SDL_EVENT_GAMEPAD_REMAPPED);
+        SDL_GamepadDeviceEvent.nwhich(e, 11);
+        send();
+        push(SDLEvents.SDL_EVENT_SENSOR_UPDATE);
+        SDL_SensorEvent.nwhich(e, 21);
+        SDL_SensorEvent.ndata(e, 0, -1);
+        SDL_SensorEvent.ndata(e, 1, 0);
+        SDL_SensorEvent.ndata(e, 2, 9.5f);
+        SDL_SensorEvent.nsensor_timestamp(e, 7);
+        send();
+        int[] fingers = {SDLEvents.SDL_EVENT_FINGER_DOWN, SDLEvents.SDL_EVENT_FINGER_MOTION, SDLEvents.SDL_EVENT_FINGER_UP,
+            SDLEvents.SDL_EVENT_FINGER_CANCELED};
+        for (int type : fingers) {
+            push(type);
+            SDL_TouchFingerEvent.nwindowID(e, 7);
+            SDL_TouchFingerEvent.ntouchID(e, 31);
+            SDL_TouchFingerEvent.nfingerID(e, 2);
+            SDL_TouchFingerEvent.nx(e, 0.5f);
+            SDL_TouchFingerEvent.ny(e, 0.25f);
+            SDL_TouchFingerEvent.ndx(e, 0.125f);
+            SDL_TouchFingerEvent.npressure(e, 0.75f);
+            send();
+        }
+        push(SDLEvents.SDL_EVENT_PEN_PROXIMITY_IN);
+        SDL_PenProximityEvent.nwindowID(e, 7);
+        SDL_PenProximityEvent.nwhich(e, 41);
+        send();
+        push(SDLEvents.SDL_EVENT_PEN_PROXIMITY_OUT);
+        SDL_PenProximityEvent.nwindowID(e, 7);
+        SDL_PenProximityEvent.nwhich(e, 41);
+        send();
+        push(SDLEvents.SDL_EVENT_PEN_DOWN);
+        SDL_PenTouchEvent.nwhich(e, 41);
+        SDL_PenTouchEvent.nx(e, 1);
+        SDL_PenTouchEvent.ny(e, 2);
+        SDL_PenTouchEvent.neraser(e, true);
+        SDL_PenTouchEvent.ndown(e, true);
+        send();
+        push(SDLEvents.SDL_EVENT_PEN_BUTTON_UP);
+        SDL_PenButtonEvent.nwhich(e, 41);
+        SDL_PenButtonEvent.nbutton(e, (byte) 2);
+        send();
+        push(SDLEvents.SDL_EVENT_PEN_MOTION);
+        SDL_PenMotionEvent.nwhich(e, 41);
+        SDL_PenMotionEvent.nx(e, 3);
+        SDL_PenMotionEvent.ny(e, 4);
+        SDL_PenMotionEvent.npen_state(e, SDLPen.SDL_PEN_INPUT_DOWN | SDLPen.SDL_PEN_INPUT_BUTTON_2
+            | SDLPen.SDL_PEN_INPUT_ERASER_TIP | SDLPen.SDL_PEN_INPUT_IN_PROXIMITY);
+        send();
+        push(SDLEvents.SDL_EVENT_PEN_AXIS);
+        SDL_PenAxisEvent.nwhich(e, 41);
+        SDL_PenAxisEvent.naxis(e, SDLPen.SDL_PEN_AXIS_XTILT);
+        SDL_PenAxisEvent.nvalue(e, 30);
+        send();
+        assertThat(poll(recorder)).containsExactly(
+            "joystick hat 12 1 UP_LEFT",
+            "joystick ball 12 0 3,-4",
+            "battery 12 CHARGING 40",
+            "touchpad 11 0 1 DOWN 0.25,0.5 1.0",
+            "touchpad 11 0 1 MOVED 0.25,0.5 1.0",
+            "touchpad 11 0 1 UP 0.25,0.5 1.0",
+            "gamepad sensor 11 GYROSCOPE 1.0,2.0,3.0 99",
+            "remapped 11",
+            "sensor 21 -1.0,0.0,9.5 7",
+            "touch 7 31 2 DOWN 0.5,0.25 0.125,0.0 0.75",
+            "touch 7 31 2 MOVED 0.5,0.25 0.125,0.0 0.75",
+            "touch 7 31 2 UP 0.5,0.25 0.125,0.0 0.75",
+            "touch 7 31 2 CANCELED 0.5,0.25 0.125,0.0 0.75",
+            "pen proximity 7 41 true",
+            "pen proximity 7 41 false",
+            "pen touch 41 1.0,2.0 true true",
+            "pen button 41 2 false",
+            "pen moved 41 3.0,4.0 " + (PenState.DOWN | PenState.BUTTON2 | PenState.ERASER | PenState.IN_PROXIMITY),
+            "pen axis 41 TILT_X 30.0");
+    }
+
+    @Test
+    void devicesWithoutEventsAreListed() {
+        for (InputDevice sensor : platform.sensors()) {
+            assertThat(sensor.kind()).isEqualTo(InputDevice.Kind.SENSOR);
+        }
+        for (InputDevice haptic : platform.haptics()) {
+            assertThat(haptic.kind()).isEqualTo(InputDevice.Kind.HAPTIC);
+        }
+        for (TouchDevice device : platform.touchDevices()) {
+            assertThat(device.name()).isNotNull();
+        }
+        assertThat(platform.penType(12345)).isEqualTo(PenType.UNKNOWN);
+        assertThat(platform.joysticks()).isNotNull();
+        assertThat(platform.gamepad(-1)).isNull();
+        assertThat(platform.joystick(-1)).isNull();
+        Haptic mouse = platform.mouseHaptic(); // a plain mouse has none
+        if (mouse != null) {
+            mouse.close();
+        }
+        assertThatThrownBy(() -> platform.openSensor(-1)).isInstanceOf(PlatformException.class);
+        assertThatThrownBy(() -> platform.openHaptic(-1)).isInstanceOf(PlatformException.class);
+        assertThat(Platform.device(InputDevice.Kind.SENSOR, -1).name()).isEmpty();
+        assertThat(Platform.device(InputDevice.Kind.HAPTIC, -1).name()).isEmpty();
     }
 
     @Test
@@ -507,9 +749,9 @@ class PlatformTest {
     void pollingAllocatesNothing() {
         PlatformListener counter = new PlatformListener() {
             @Override
-            public void key(long timestamp, int window, int keyboard, int scancode, int key, int modifiers,
+            public void key(long timestamp, int window, int keyboard, Key key, int character, int modifiers,
                 boolean down, boolean repeat) {
-                sink += scancode;
+                sink += key.usage();
             }
         };
         platform.pollEvents(counter);

@@ -8,13 +8,46 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 
 | Module            | Package                       | What                                                    |
 |-------------------|-------------------------------|---------------------------------------------------------|
-| `engine-platform` | `com.truesim.engine.platform` | SDL3: displays, windows, runtime mode changes, raw input |
+| `engine-platform` | `com.truesim.engine.platform` | SDL3: displays, windows, runtime mode changes, all input devices |
 | `engine-vulkan`   | `com.truesim.engine.vulkan`   | Vulkan 1.3, 1.4 where available: instance, GPUs, devices, swapchains, frames |
 
 ## Platform
 
-One `Platform` per process, used from the thread that started it. Events go to a `PlatformListener`, which
-gets every one as primitives, with nothing allocated. The input module builds on this.
+One `Platform` per process, used from the thread that started it. Events go to a `PlatformListener` as engine
+types and plain values, with nothing allocated. Nothing in the public API is SDL's: keys are `Key` (physical, USB HID
+based) with a layout character and `KeyModifiers` bits, and there are `MouseButton`, `GamepadButton`, `GamepadAxis`,
+`HatPosition`, `SensorType`, `TouchPhase`, `PenAxis` and so on. The mapping lives in one package-private class, so
+another backend replaces only the implementation. The input module builds on this.
+
+Everything SDL3 supports for input is passed through:
+
+- **Keyboards, mice, text:** physical keys, layout characters, modifiers, buttons, wheel, text input.
+- **Gamepads** (`platform.gamepad(id)`):
+  - buttons, axes, the button labels and pad type;
+  - touchpads and motion sensors (gyro, accelerometer);
+  - rumble, trigger rumble, RGB LED, player LEDs, raw device effects such as DualSense triggers;
+  - battery and connection state, serial and firmware;
+  - SDL_GameControllerDB mappings.
+- **Joysticks** (`platform.joystick(id)`): wheels, flight sticks, throttles and the like, with axes, buttons, hats
+  and trackballs, plus the same outputs as gamepads.
+- **Force feedback** (`controller.haptic()`, `platform.openHaptic(id)`, `platform.mouseHaptic()`):
+  - `HapticEffect`s: constant, periodic waves, spring, damper, inertia, friction, ramp, left/right rumble, custom;
+  - uploaded, run, updated live and stopped;
+  - gain, autocenter, pause.
+- **Other devices:** a device's own motion sensors (`platform.openSensor(id)`), touchscreens and trackpads, and
+  pens (proximity, tip, eraser, barrel buttons, pressure, tilt, rotation).
+
+```java
+Gamepad pad = platform.gamepad(id);
+pad.rumble(0.3f, 0.8f, 200);
+pad.setLed(255, 0, 0);
+pad.setSensorEnabled(SensorType.GYROSCOPE, true);   // gamepadSensor events follow
+
+Haptic wheel = platform.joystick(wheelId).haptic();
+int spring = wheel.create(new HapticEffect.Condition(ConditionKind.SPRING, Timing.of(HapticEffect.INFINITE),
+    List.of(new ConditionAxis(1, 1, 0.6f, 0.6f, 0, 0))));
+wheel.run(spring, 1);
+```
 
 ```java
 try (Platform platform = Platform.start()) {
@@ -28,7 +61,7 @@ try (Platform platform = Platform.start()) {
     window.windowed();
 
     while (running) {
-        platform.pollEvents(listener);          // windowResized, key, mouseMoved, gamepadAxis, deviceAdded, ...
+        platform.pollEvents(listener);          // windowResized, key, gamepadAxis, touch, penAxis, deviceAdded, ...
     }
 }
 ```
