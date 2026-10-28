@@ -368,6 +368,14 @@ that declare how they use each image. The graph does the rest:
   (indirect, index, storage from compute or draws, transfer) and shaders reach by `ctx.address(buffer)`. Buffer
   barriers come from those accesses like image barriers do, across queues as well: a buffer used by both is shared
   concurrently.
+- **Keys name buffers too:** `g.provide(key, buffer)` and `g.requireBuffer(key)`, e.g. a light list.
+- **Modifiers:** a technique listing a key in `modifies()` takes it after its provider with `g.modify(key)` and
+  writes it in place (transparency over the scene, decals) or provides a new version (a post effect). Modifiers of a
+  key run in `stage()` order, so a chain such as exposure, bloom, tone mapping needs no rewiring when an effect is
+  added or removed; whoever requires the key gets its last version. A modifier nothing needs is never built.
+- **History:** `g.history(name, width, height, format)` keeps an image from frame to frame: this frame writes
+  `current()`, and `previous()` holds what the frame before wrote (`ctx.historyValid(history)` says whether there
+  was one). The graph swaps the two images' roles every frame and carries their state across the frame boundary.
 
 ```java
 graph.add(new MeshletScene(renderer, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT))

@@ -30,6 +30,23 @@ public interface Technique {
     List<Key> provides();
 
     /**
+     * The keys this technique changes after their provider: it takes each with {@link GraphBuilder#modify} and writes
+     * it in place or provides a new version, e.g. transparency over the scene's color, or a post effect. Every
+     * technique requiring the key gets the version after all its modifiers. None by default.
+     */
+    default List<Key> modifies() {
+        return List.of();
+    }
+
+    /**
+     * Where among the modifiers of a key this one runs: lower first, equal stages in the order the techniques were
+     * added. E.g. post effects: exposure before bloom before tone mapping.
+     */
+    default int stage() {
+        return 0;
+    }
+
+    /**
      * Adds the technique's passes; called when the graph is (re)built, not per frame, so it may allocate (annotate it
      * {@code @AllowAllocation} in allocation-free modules). The pass bodies it creates run every frame and must not.
      */

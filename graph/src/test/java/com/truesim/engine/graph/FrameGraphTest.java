@@ -713,6 +713,234 @@ class FrameGraphTest {
         assertThat(graph.builds()).isEqualTo(1);
     }
 
+    /** Modifies {@code key} at {@code stage}: its columns {@code x} to {@code x + width} cleared to {@code rgba}. */
+    record Paint(Key key, int stage, int x, int width, float... rgba) implements Technique {
+        @Override
+        public List<Key> provides() {
+            return List.of();
+        }
+
+        @Override
+        public List<Key> modifies() {
+            return List.of(key);
+        }
+
+        @Override
+        public int stage() {
+            return stage;
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image image = g.modify(key);
+            Image color = g.create("paint", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("paint " + stage).write(color, Access.TRANSFER_DST).record(ctx -> clear(ctx, color, rgba));
+            g.pass("paint over " + stage).read(color, Access.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                .record(ctx -> copy(ctx, color, image, x, width));
+        }
+    }
+
+    /** Modifies {@code key} at {@code stage} by providing a new image: a copy, its columns from x cleared. */
+    record Replace(Key key, int stage, int x, float... rgba) implements Technique {
+        @Override
+        public List<Key> provides() {
+            return List.of();
+        }
+
+        @Override
+        public List<Key> modifies() {
+            return List.of(key);
+        }
+
+        @Override
+        public int stage() {
+            return stage;
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image before = g.modify(key);
+            Image fill = g.create("replace fill", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image after = g.createLike("replaced", before, 1);
+            g.pass("replace fill " + stage).write(fill, Access.TRANSFER_DST).record(ctx -> clear(ctx, fill, rgba));
+            g.pass("replace " + stage).read(before, Access.TRANSFER_SRC).read(fill, Access.TRANSFER_SRC)
+                .write(after, Access.TRANSFER_DST).record(ctx -> {
+                    copy(ctx, before, after, 0, x);
+                    copy(ctx, fill, after, x, SIZE - x);
+                });
+            g.provide(key, after);
+        }
+    }
+
+    @Test
+    void modifiersChangeAResultInStageOrder() {
+        // Added out of order: stage 20 paints the right quarter green in place; stage 10 replaces the right half
+        // with blue. Red on the left from the provider.
+        graph.add(new Paint(A, 20, 3 * SIZE / 4, SIZE / 4, 0, 1, 0, 1))
+            .add(new Replace(A, 10, SIZE / 2, 0, 0, 1, 1))
+            .add(new Fill(A, SIZE, 1, 0, 0, 1))
+            .add(new UsesCopy(OUT, A, A))
+            .output(OUT, output);
+        int[] texels = frame();
+        assertThat(texels[0]).isEqualTo(RED);
+        assertThat(texels[SIZE / 2 + 2]).isEqualTo(BLUE);
+        assertThat(texels[SIZE - 1]).isEqualTo(GREEN);
+        assertThat(graph.passes()).containsSubsequence("fill a", "replace 10", "paint over 20", "copy replaced");
+        // A modifier nothing needs costs nothing: it runs only when the key is required.
+        graph.removeOutput(OUT).output(B, output).add(new Fill(B, SIZE, 0, 0, 1, 1));
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        assertThat(graph.passes()).containsExactly("fill b");
+    }
+
+    /** Provides {@code key}: a buffer of SIZE x SIZE texels of {@code rgba}. */
+    record FillBuffer(Key key, int rgba) implements Technique {
+        @Override
+        public List<Key> provides() {
+            return List.of(key);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Buffer buffer = g.createBuffer(key.name(), 4L * SIZE * SIZE);
+            g.pass("fill " + key).write(buffer, BufferAccess.TRANSFER_DST)
+                .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0, VK_WHOLE_SIZE, rgba));
+            g.provide(key, buffer);
+        }
+    }
+
+    /** Provides {@code out}: the texels of buffer {@code from}. */
+    record Unpack(Key out, Key from) implements Technique {
+        @Override
+        public List<Key> provides() {
+            return List.of(out);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Buffer buffer = g.requireBuffer(from);
+            Image image = g.create(out.name(), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("unpack " + out).read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                .record(ctx -> unpack(ctx, buffer, image));
+            g.provide(out, image);
+        }
+    }
+
+    @Test
+    void keysNameBuffersToo() {
+        Key texels = Key.of("texels");
+        graph.add(new FillBuffer(texels, RED)).add(new Unpack(OUT, texels)).output(OUT, output);
+        assertThat(frame()).containsOnly(RED);
+        // Modified in place, like images.
+        graph.add(new Mod(List.of(), List.of(texels), g -> {
+            Buffer buffer = g.modifyBuffer(texels);
+            g.pass("paint texels").write(buffer, BufferAccess.TRANSFER_DST)
+                .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0, VK_WHOLE_SIZE, GREEN));
+        }));
+        assertThat(frame()).containsOnly(GREEN);
+        rejects(List.of(OUT), g -> g.provide(OUT, g.requireBuffer(A)), "a is an image, not a buffer");
+        rejects(List.of(OUT, texels), g -> {
+            g.provide(texels, g.createBuffer("t", 4));
+            g.provide(OUT, g.require(texels));
+        }, "texels is a buffer, not an image");
+        rejects(List.of(OUT), g -> g.provide(OUT, g.optionalBuffer(Key.of("none"))), "Not a buffer of this build");
+        rejects(List.of(OUT), g -> g.requireBuffer(Key.of("none")), "No technique provides none");
+    }
+
+    /** A technique providing and modifying the keys given, built by {@code builder}. */
+    record Mod(List<Key> provides, List<Key> modifies, java.util.function.Consumer<GraphBuilder> builder)
+        implements Technique {
+        @Override
+        public void build(GraphBuilder g) {
+            builder.accept(g);
+        }
+    }
+
+    /** Building {@code techniques}, outputting {@code key}, fails so. */
+    private void fails(Key key, String message, Technique... techniques) {
+        graph.close();
+        graph = new FrameGraph(device, 2);
+        for (Technique technique : techniques) {
+            graph.add(technique);
+        }
+        graph.output(key, output);
+        assertThatIllegalStateException().isThrownBy(this::frame).withMessageContaining(message);
+    }
+
+    @Test
+    void modifiersAreChecked() {
+        rejects(List.of(OUT), g -> g.modify(A), "cannot modify a");
+        Fill red = new Fill(A, SIZE, 1, 0, 0, 1);
+        fails(OUT, "both provides and modifies out", red, new Mod(List.of(OUT), List.of(OUT), g -> { }));
+        fails(A, "another kind of result", red, new Mod(List.of(), List.of(A), g -> {
+            g.modify(A);
+            g.provide(A, g.createBuffer("x", 4));
+        }));
+        fails(A, "cycle", red, new Mod(List.of(), List.of(A), g -> g.require(A))); // the version after itself
+        fails(OUT, "No technique provides a", new Mod(List.of(), List.of(A), g -> g.modify(A)),
+            new UsesCopy(OUT, B, B), new Fill(B, SIZE, 1, 0, 0, 1), new Mod(List.of(), List.of(B), g -> g.require(A)));
+        fails(OUT, "No technique provides a", new UsesCopy(OUT, B, B), new Fill(B, SIZE, 1, 0, 0, 1),
+            new Mod(List.of(), List.of(A, B), g -> g.modify(A)));
+        // A modifier that takes nothing changes nothing.
+        graph.close();
+        graph = new FrameGraph(device, 2).add(red).add(new Mod(List.of(), List.of(A), g -> { })).output(A, output);
+        assertThat(frame()[0]).isEqualTo(RED);
+        rejects(List.of(OUT), g -> g.provide(Key.of("other"), g.createBuffer("x", 4)), "cannot provide other");
+    }
+
+    /** Keeps a color per frame in a history and outputs last frame's (white when there is none). */
+    final class Remember implements Technique {
+        int frames;
+
+        @Override
+        public List<Key> provides() {
+            return List.of(OUT);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            History history = g.history("colors", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            assertThat(history.name()).isEqualTo("colors");
+            assertThat(history).hasToString("history colors");
+            Image out = g.create("recalled", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("recall").read(history.previous(), Access.TRANSFER_SRC).write(out, Access.TRANSFER_DST)
+                .record(ctx -> {
+                    if (ctx.historyValid(history)) {
+                        copy(ctx, history.previous(), out, 0, SIZE);
+                    } else {
+                        clear(ctx, out, 1, 1, 1, 1);
+                    }
+                });
+            g.pass("remember").write(history.current(), Access.TRANSFER_DST)
+                .record(ctx -> clear(ctx, history.current(), frames % 2, 0, 1 - frames++ % 2, 1));
+            g.provide(OUT, out);
+        }
+    }
+
+    @Test
+    void historiesKeepLastFramesImage() {
+        Remember remember = new Remember();
+        graph.add(remember).output(OUT, output);
+        assertThat(frame()[0]).isEqualTo(0xffffffff); // no last frame yet
+        assertThat(frame()[0]).isEqualTo(BLUE); // frame 0 remembered blue
+        assertThat(frame()[0]).isEqualTo(RED);
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        // Submitted the graph's way, frames in flight, the roles still alternate.
+        int[] last = submitted(5);
+        assertThat(last[0]).isIn(RED, BLUE);
+        // Rebuilt: kept images, but the contents start over.
+        graph.invalidate();
+        assertThat(frame()[0]).isEqualTo(0xffffffff);
+        assertThat(frame()[0]).isIn(RED, BLUE);
+        rejects(List.of(OUT), g -> {
+            g.history("x", 4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+            g.history("x", 4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+        }, "Two histories are named x");
+        rejects(List.of(OUT), g -> {
+            History history = g.history("x", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("scribble").write(history.previous(), Access.TRANSFER_DST).record(ctx -> { });
+        }, "last frame's image is read only");
+    }
+
     @Test
     void misuseIsReportedWithTheTechniquesInvolved() {
         assertThatIllegalArgumentException().isThrownBy(() -> new FrameGraph(device, 0));
@@ -797,7 +1025,8 @@ class FrameGraphTest {
         }, "beyond the usage");
         assertThatIllegalArgumentException().isThrownBy(() -> output.resize(0, 1));
         graph.close();
-        graph = new FrameGraph(device, 2).add(new Lambda(List.of(OUT), g -> g.provide(OUT, null))).output(OUT, output);
+        graph = new FrameGraph(device, 2).add(new Lambda(List.of(OUT), g -> g.provide(OUT, (Image) null)))
+            .output(OUT, output);
         assertThatIllegalArgumentException().isThrownBy(this::frame).withMessageContaining("Not an image of this build");
     }
 
