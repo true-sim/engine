@@ -1,7 +1,8 @@
-// The indexed path's meshlet pass: one workgroup per chunk, a thread per meshlet. Each visible meshlet is appended to
-// the frame's visible list with an index range reserved for its triangles; the expansion pass then writes them, and
-// the whole frame draws with one indexed draw. Commands are built in place by atomics: the expansion dispatch's X and
-// Y (rows of 65,535 meshlets) and the draw's index count.
+// The meshlet pass of both paths: one workgroup per chunk, a thread per meshlet. Each visible meshlet is appended to
+// the frame's visible list; the mesh shader path launches a mesh workgroup per entry, the indexed path reserves an index
+// range for its triangles that the expansion pass writes, and the whole frame draws with one indexed draw. Commands
+// are built in place by atomics: the expansion (or mesh) dispatch's X and Y (rows of 65,535 meshlets) and the draw's
+// index count.
 import meshlets.common;
 
 struct CullPush

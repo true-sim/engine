@@ -28,6 +28,11 @@ import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
 import static org.lwjgl.vulkan.VK13.vkCmdWriteTimestamp2;
+import static org.lwjgl.vulkan.VK13.vkCmdPipelineBarrier2;
+import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
 
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Images;
@@ -41,6 +46,8 @@ import java.lang.foreign.ValueLayout;
 import java.nio.LongBuffer;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.VkCommandBuffer;
+import org.lwjgl.vulkan.VkDependencyInfo;
+import org.lwjgl.vulkan.VkMemoryBarrier2;
 import org.lwjgl.vulkan.VkRect2D;
 import org.lwjgl.vulkan.VkRenderingAttachmentInfo;
 import org.lwjgl.vulkan.VkRenderingInfo;
@@ -268,7 +275,7 @@ class MeshletBenchmark {
                     // Without meshlets: the whole mesh per instance, no culling.
                     var finest = rockMesh.levels().getLast();
                     int drawn = classic.draws(pool, rock, rockMesh, count, i -> finest);
-                    double brute = time(device, color, depth, queries, period,
+                    double brute = time(device, color, depth, queries, period, 1,
                         commands -> classic.record(commands, renderer, pool, color, depth, drawn));
                     System.out.printf(Locale.ROOT, "  %s, without meshlets, full detail: %.3f ms median, %,d "
                         + "triangles drawn%n", scene, brute, (long) drawn * triangles(rockMesh));
@@ -288,7 +295,7 @@ class MeshletBenchmark {
                         cpu = repeat == 0 ? Long.MAX_VALUE : Math.min(cpu, System.nanoTime() - t0);
                     }
                     int lodCount = lodDrawn;
-                    double lod = time(device, color, depth, queries, period,
+                    double lod = time(device, color, depth, queries, period, BATCH,
                         commands -> classic.record(commands, renderer, pool, color, depth, lodCount));
                     System.out.printf(Locale.ROOT, "  %s, without meshlets, discrete LODs and culling on the CPU: "
                         + "%.3f ms median (CPU %.3f ms), %,d instances, %,d triangles drawn%n", scene, lod, cpu / 1e6,
@@ -302,7 +309,7 @@ class MeshletBenchmark {
                 var terrainFinest = terrainMesh.levels().getLast();
                 int terrainDraws = classic.draws(pool, ground, terrainMesh, 1, i -> terrainFinest);
                 System.out.printf(Locale.ROOT, "  terrain at a grazing angle, without meshlets, full detail: %.3f ms median,"
-                    + " %,d triangles drawn%n", time(device, color, depth, queries, period,
+                    + " %,d triangles drawn%n", time(device, color, depth, queries, period, BATCH,
                         commands -> classic.record(commands, renderer, pool, color, depth, terrainDraws)),
                     triangles(terrainMesh));
             } finally {
@@ -344,22 +351,30 @@ class MeshletBenchmark {
         return chosen;
     }
 
-    /** GPU time of a frame {@code record} records, median of {@link #FRAMES}, in milliseconds. */
+    /**
+     * GPU time of a frame {@code record} records, median of {@link #FRAMES}, in milliseconds; {@code batch} frames
+     * back to back per timed submission (1 for long frames).
+     */
     private static double time(VulkanDevice device, GpuImage color, GpuImage depth, long queries, double period,
-        java.util.function.Consumer<VkCommandBuffer> record) {
+        int batch, java.util.function.Consumer<VkCommandBuffer> record) {
         double[] times = new double[FRAMES];
-        for (int frame = -10; frame < FRAMES; frame++) {
+        for (int frame = -5; frame < FRAMES; frame++) {
             device.submitAndWait(device.graphics(), commands -> {
                 vkCmdResetQueryPool(commands, queries, 0, 2);
-                Images.transition(commands, color.handle(), VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
-                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-                Images.transition(commands, depth.handle(), VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
-                    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
                 vkCmdWriteTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 0);
-                record.accept(commands);
+                for (int i = 0; i < batch; i++) {
+                    Images.transition(commands, color.handle(), VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                        VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+                    Images.transition(commands, depth.handle(), VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                        VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT
+                            | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+                    record.accept(commands);
+                    fullBarrier(commands);
+                }
                 vkCmdWriteTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 1);
             });
             if (frame >= 0) {
@@ -367,7 +382,7 @@ class MeshletBenchmark {
                     LongBuffer stamps = stack.mallocLong(2);
                     vkGetQueryPoolResults(device.handle(), queries, 0, 2, stamps, 8,
                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-                    times[frame] = (stamps.get(1) - stamps.get(0)) * period / 1e6;
+                    times[frame] = (stamps.get(1) - stamps.get(0)) * period / 1e6 / batch;
                 }
             }
         }
@@ -469,27 +484,38 @@ class MeshletBenchmark {
         return full;
     }
 
+    /** Frames recorded back to back per timed submission, so the GPU stays busy and its clocks steady. */
+    private static final int BATCH = 32;
+
+    /**
+     * GPU time per frame on each path, median of {@link #FRAMES} batches. The paths take turns batch by batch, so they
+     * see the same clocks.
+     */
     private static void measure(String scene, VulkanDevice device, MeshletRenderer renderer, GpuImage color,
         GpuImage depth, long queries, double period) {
-        for (MeshletRenderer.Path path : device.meshShaders()
+        MeshletRenderer.Path[] paths = device.meshShaders()
             ? new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED, MeshletRenderer.Path.MESH_SHADERS}
-            : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED}) {
-            renderer.setPath(path);
-            double[] times = new double[FRAMES];
-            for (int frame = -10; frame < FRAMES; frame++) {
+            : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED};
+        double[][] times = new double[paths.length][FRAMES];
+        for (int frame = -5; frame < FRAMES; frame++) {
+            for (int v = 0; v < paths.length; v++) {
+                renderer.setPath(paths[v]);
                 device.submitAndWait(device.graphics(), commands -> {
                     vkCmdResetQueryPool(commands, queries, 0, 2);
-                    Images.transition(commands, color.handle(), VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                        VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-                    Images.transition(commands, depth.handle(), VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                        VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT
-                            | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
                     vkCmdWriteTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 0);
-                    renderer.record(commands, color.view(), depth.view(), WIDTH, HEIGHT, 0.1f, 0.12f, 0.15f);
+                    for (int i = 0; i < BATCH; i++) {
+                        Images.transition(commands, color.handle(), VK_IMAGE_ASPECT_COLOR_BIT,
+                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
+                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+                        Images.transition(commands, depth.handle(), VK_IMAGE_ASPECT_DEPTH_BIT,
+                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
+                            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+                        renderer.record(commands, color.view(), depth.view(), WIDTH, HEIGHT, 0.1f, 0.12f, 0.15f);
+                        fullBarrier(commands); // the next frame resets what this one reads
+                    }
                     vkCmdWriteTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 1);
                 });
                 if (frame >= 0) {
@@ -497,14 +523,30 @@ class MeshletBenchmark {
                         LongBuffer stamps = stack.mallocLong(2);
                         vkGetQueryPoolResults(device.handle(), queries, 0, 2, stamps, 8,
                             VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-                        times[frame] = (stamps.get(1) - stamps.get(0)) * period / 1e6;
+                        times[v][frame] = (stamps.get(1) - stamps.get(0)) * period / 1e6 / BATCH;
                     }
                 }
             }
-            Arrays.sort(times);
-            System.out.printf(Locale.ROOT, "  %s, %s: %.3f ms median, %.3f ms best, %,d meshlets drawn%n", scene,
-                path == MeshletRenderer.Path.INDEXED ? "indexed" : "mesh shaders", times[FRAMES / 2], times[0],
-                renderer.visibleMeshlets());
+        }
+        for (int v = 0; v < paths.length; v++) {
+            renderer.setPath(paths[v]);
+            Arrays.sort(times[v]);
+            System.out.printf(Locale.ROOT, "  %s, %s: %.3f ms median, %.3f ms best%n", scene, paths[v] == MeshletRenderer.Path.INDEXED ? "indexed" : "mesh shaders",
+                times[v][FRAMES / 2], times[v][0]);
+        }
+        System.out.printf(Locale.ROOT, "  %s: %,d meshlets drawn%n", scene, renderer.visibleMeshlets());
+    }
+
+    private static void fullBarrier(VkCommandBuffer commands) {
+        try (MemoryStack stack = stackPush()) {
+            vkCmdPipelineBarrier2(commands, VkDependencyInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_DEPENDENCY_INFO)
+                .pMemoryBarriers(VkMemoryBarrier2.calloc(1, stack)
+                    .sType(VK_STRUCTURE_TYPE_MEMORY_BARRIER_2)
+                    .srcStageMask(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
+                    .srcAccessMask(VK_ACCESS_2_MEMORY_WRITE_BIT)
+                    .dstStageMask(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
+                    .dstAccessMask(VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT)));
         }
     }
 }
