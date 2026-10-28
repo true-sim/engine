@@ -335,6 +335,140 @@ class MeshletRendererTest {
         assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 1, 1, 5));
     }
 
+    /**
+     * A quad in the x-y plane facing +z, 2 units across, with normals, tangents and texture coordinates (4 repeats
+     * across): its left half one submesh, its right half another.
+     */
+    static MeshData texturedQuad() {
+        int n = 4;
+        int count = (n + 1) * (n + 1);
+        float[] positions = new float[3 * count];
+        float[] normals = new float[3 * count];
+        float[] tangents = new float[4 * count];
+        float[] uvs = new float[2 * count];
+        for (int y = 0; y <= n; y++) {
+            for (int x = 0; x <= n; x++) {
+                int v = y * (n + 1) + x;
+                positions[3 * v] = 2f * x / n - 1;
+                positions[3 * v + 1] = 2f * y / n - 1;
+                normals[3 * v + 2] = 1;
+                tangents[4 * v] = 1;
+                tangents[4 * v + 3] = 1;
+                uvs[2 * v] = 4f * x / n;
+                uvs[2 * v + 1] = 4f * y / n;
+            }
+        }
+        int[] left = new int[n * n * 3];
+        int[] right = new int[n * n * 3];
+        int l = 0;
+        int r = 0;
+        for (int y = 0; y < n; y++) {
+            for (int x = 0; x < n; x++) {
+                int a = y * (n + 1) + x;
+                int[] cell = {a, a + 1, a + n + 2, a, a + n + 2, a + n + 1}; // counter-clockwise, seen from +z
+                if (x < n / 2) {
+                    System.arraycopy(cell, 0, left, l, 6);
+                    l += 6;
+                } else {
+                    System.arraycopy(cell, 0, right, r, 6);
+                    r += 6;
+                }
+            }
+        }
+        return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL, VertexAttribute.TANGENT, VertexAttribute.UV0),
+            count).positions(positions).attribute(VertexAttribute.NORMAL, normals)
+            .attribute(VertexAttribute.TANGENT, tangents).attribute(VertexAttribute.UV0, uvs)
+            .submesh(java.util.Arrays.copyOf(left, l)).submesh(java.util.Arrays.copyOf(right, r)).buildFlat();
+    }
+
+    /** {@code size} x {@code size} texels of {@code rgba} each, in an arena that lives as long as the test. */
+    private static java.lang.foreign.MemorySegment texels(int size, java.util.function.IntBinaryOperator rgba) {
+        java.lang.foreign.MemorySegment data = java.lang.foreign.Arena.ofAuto().allocate(4L * size * size, 4);
+        for (int y = 0; y < size; y++) {
+            for (int x = 0; x < size; x++) {
+                data.setAtIndex(ValueLayout.JAVA_INT, (long) y * size + x, rgba.applyAsInt(x, y));
+            }
+        }
+        return data;
+    }
+
+    /** The average of channel {@code shift} (0 red, 8 green, 16 blue) over columns {@code from} to {@code to}. */
+    private double channel(int shift, int from, int to) {
+        double sum = 0;
+        for (int y = SIZE / 2 - 16; y < SIZE / 2 + 16; y++) {
+            for (int x = from; x < to; x++) {
+                sum += (pixel(x, y) >> shift) & 0xff;
+            }
+        }
+        return sum / (32.0 * (to - from));
+    }
+
+    @Test
+    void materialsShadeEachSubmeshWithItsTextures() {
+        int quadMesh = pool.add(texturedQuad());
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8)) {
+            // Red and blue squares of 2 x 2 texels; normals tilted up, towards the sun.
+            int checker = textures.color(8, 8, texels(8, (x, y) -> ((x / 2 + y / 2) % 2 == 0) ? 0xff0000ff
+                : 0xffff0000));
+            int tilted = textures.data(4, 4, texels(4, (x, y) -> 0xffd9d980)); // (0, 0.7, 0.7)
+            assertThat(textures.count()).isEqualTo(2);
+            assertThat(textures.bytes()).isGreaterThan(4 * 64);
+            int first = materials.add(new Material().baseColor(1, 1, 1).baseColorTexture(checker).roughness(1));
+            materials.add(new Material().baseColor(0.1f, 0.8f, 0.1f).roughness(1));
+            materials.add(new Material().baseColor(0.1f, 0.8f, 0.1f).roughness(1));
+            materials.add(new Material().baseColor(0.1f, 0.8f, 0.1f).roughness(1).normalTexture(tilted, 1));
+            assertThat(materials.count()).isEqualTo(5);
+            renderer.setMaterials(materials);
+            renderer.setInstance(0, quadMesh, first, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1);
+            renderer.setInstanceCount(1);
+            lookForward(1, MeshletRenderer.MODE_LIT);
+            render();
+            // The left half shows the checker: red and blue texels; the right half is green.
+            int[] colors = new int[2];
+            for (int x = SIZE / 2 - 18; x < SIZE / 2 - 2; x++) {
+                int p = pixel(x, SIZE / 2 + 3);
+                colors[(p & 0xff) > ((p >> 16) & 0xff) ? 0 : 1]++;
+            }
+            assertThat(colors[0]).as("red texels").isGreaterThan(3);
+            assertThat(colors[1]).as("blue texels").isGreaterThan(3);
+            assertThat(channel(8, SIZE / 2 + 3, SIZE / 2 + 18))
+                .isGreaterThan(3 * channel(0, SIZE / 2 + 3, SIZE / 2 + 18));
+            // From the next material on: green both sides, the right one with the normal map facing the sun more.
+            renderer.setInstance(0, quadMesh, first + 2, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1);
+            render();
+            double flat = channel(8, SIZE / 2 - 18, SIZE / 2 - 3);
+            double bent = channel(8, SIZE / 2 + 3, SIZE / 2 + 18);
+            assertThat(bent).isGreaterThan(flat * 1.3);
+            // Changed in place: the right half is plain again.
+            materials.set(first + 3, new Material().baseColor(0.1f, 0.8f, 0.1f).roughness(1));
+            render();
+            assertThat(channel(8, SIZE / 2 + 3, SIZE / 2 + 18))
+                .isCloseTo(flat, org.assertj.core.data.Offset.offset(2.0));
+            renderer.setMaterials(null);
+            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(5, new Material()));
+            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(-1, new Material()));
+            for (int i = materials.count(); i < 8; i++) {
+                materials.add(new Material().metallic(1).emissive(1, 0, 0).emissiveTexture(checker)
+                    .ormTexture(tilted, 1));
+            }
+            assertThatIllegalStateException().isThrownBy(() -> materials.add(new Material()));
+            assertThatIllegalArgumentException().isThrownBy(() -> textures.color(4, 4, texels(2, (x, y) -> 0)));
+            assertThatIllegalArgumentException().isThrownBy(() -> textures.data(0, 4, texels(2, (x, y) -> 0)));
+            assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstance(0, quadMesh, -1, 0, 0, 0, 0,
+                0, 0, 1, 1, 1, 1));
+        }
+        assertThatIllegalArgumentException().isThrownBy(() -> new Materials(device, 0));
+    }
+
+    @Test
+    void closedTexturesTakeNoMore() {
+        Textures textures = new Textures(device);
+        assertThat(textures.color(1, 1, texels(1, (x, y) -> -1))).isNotNegative(); // one level only
+        textures.close();
+        textures.close();
+        assertThatIllegalStateException().isThrownBy(() -> textures.color(1, 1, texels(1, (x, y) -> -1)));
+    }
+
     @Test
     void devicesWithoutMeshShadersDrawIndexed() {
         assumeThat(device.meshShaders()).as("the device has mesh shaders").isFalse();

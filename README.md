@@ -217,6 +217,32 @@ simplification errors, which stay close to the real deviation from full detail.
 triangles as a byte per local index. An 82k-triangle rock with its whole cluster LOD hierarchy takes 1.50 MiB. A
 classic renderer would add a 32-bit index buffer per mesh and per discrete LOD; the pool has none.
 
+### Materials and textures
+
+Surfaces are physically based, metallic-roughness as in glTF: a base color, metalness, roughness, a tangent-space
+normal map, occlusion and emission, each a factor times an optional texture.
+
+```java
+try (Textures textures = new Textures(device); Materials materials = new Materials(device, 1024)) {
+    int albedo = textures.color(512, 512, rgba);       // sRGB, full mip chain made on the GPU
+    int normals = textures.data(512, 512, xyz);         // linear
+    int rock = materials.add(new Material().baseColorTexture(albedo).normalTexture(normals, 1).roughness(0.9f));
+    renderer.setMaterials(materials);
+    renderer.setInstance(0, rockMesh, rock, x, y, z, qx, qy, qz, qw, 1, 1, 1); // submesh s takes material rock + s
+}
+```
+
+- **Textures** live in the bindless set and are sampled by slot, trilinear and anisotropic (`Bindless.MATERIAL`, up to
+  16x where the GPU allows).
+- **Materials** are a table of 64-byte records the shaders read by id. Material 0 is a light gray default, so meshes
+  draw before anything is set up. Instances name a first material and each submesh of the mesh takes the next, so one
+  mesh can be drawn with different materials.
+- **One shading module** (`shading.slang`): the material evaluation (with explicit texture gradients, so passes
+  without hardware derivatives can use it too) and the shading model: Lambert diffuse and a GGX specular lobe with
+  height-correlated Smith visibility and Schlick Fresnel. The vertex stage decodes normals, tangents, texture
+  coordinates and vertex colors from the pool's attributes.
+
+
 ## Ray tracing
 
 Where the GPU has it (`VK_KHR_acceleration_structure` and `VK_KHR_ray_query`), `VulkanDevice.rayTracing()` is true and

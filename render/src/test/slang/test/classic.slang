@@ -9,6 +9,7 @@ struct ClassicPush
     Instance* instances;
     uint2* positions;
     uint* attributes;
+    Material* materials;
 };
 
 [[vk::push_constant]]
@@ -19,11 +20,11 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint instanceIndex : SV_Vu
 {
     Instance instance = push.instances[instanceIndex];
     return transformVertex(push.view[0], instance, push.meshes[instance.mesh], vertex, push.positions,
-        push.attributes, 0);
+        push.attributes, 0, 0);
 }
 
 [shader("fragment")]
 float4 fragmentMain(VertexOut in) : SV_Target
 {
-    return shadeSurface(push.view[0], in);
+    return shadeSurface(push.view[0], in, push.materials, ddx(in.uv), ddy(in.uv));
 }

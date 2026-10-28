@@ -144,6 +144,8 @@ public final class MeshletRenderer implements AutoCloseable {
     private static final int INSTANCE_PUSH = 88;
     private static final int CULL_PUSH = 80;
     private static final int LISTS_BYTES = 32;
+    /** Both draw paths' push blocks: the materials at byte 80, where the shared fragment shader reads them. */
+    private static final int DRAW_PUSH = 88;
     private static final int PHASE_EARLY = 1;
     private static final int PHASE_LATE = 2;
     private static final int VIEW_BYTES = 192;
@@ -175,6 +177,8 @@ public final class MeshletRenderer implements AutoCloseable {
     private final GpuBuffer drawCount;
     private final GpuBuffer visibility;
     private final int[] phaseOf = new int[VIEWS]; // each view's last culling phase
+    private final Materials defaultMaterials;
+    private Materials materials;
     private Path path = Path.AUTO;
     private int instanceCount;
     private boolean closed;
@@ -196,12 +200,12 @@ public final class MeshletRenderer implements AutoCloseable {
                 .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "fragmentMain")
                 .color(colorFormat)
                 .depth(depthFormat)
-                .pushConstants(64)
+                .pushConstants(DRAW_PUSH)
                 .build();
             drawDepth = Pipeline.graphics(device) // depth only: shadow maps
                 .stage(VK_SHADER_STAGE_VERTEX_BIT, drawShader, "vertexMain")
                 .depth(depthFormat)
-                .pushConstants(64)
+                .pushConstants(DRAW_PUSH)
                 .build();
             if (device.meshShaders()) {
                 try (ShaderModule meshShader = ShaderModule.load(device, "shaders/meshlets/mesh.spv")) {
@@ -210,12 +214,12 @@ public final class MeshletRenderer implements AutoCloseable {
                         .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "fragmentMain") // the same shading
                         .color(colorFormat)
                         .depth(depthFormat)
-                        .pushConstants(80)
+                        .pushConstants(DRAW_PUSH)
                         .build();
                     meshDepth = Pipeline.graphics(device)
                         .stage(VK_SHADER_STAGE_MESH_BIT_EXT, meshShader, "meshMain")
                         .depth(depthFormat)
-                        .pushConstants(80)
+                        .pushConstants(DRAW_PUSH)
                         .build();
                 }
             } else {
@@ -251,6 +255,8 @@ public final class MeshletRenderer implements AutoCloseable {
             entry.set(ValueLayout.JAVA_LONG_UNALIGNED, 24, drawCount.deviceAddress() + 8L * v);
         }
         visibility = GpuBuffer.deviceLocal(device, 4L * limits.instances(), storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        defaultMaterials = new Materials(device, 1);
+        materials = defaultMaterials;
         device.submitAndWait(device.graphics(), commands -> vkCmdFillBuffer(commands, visibility.handle(), 0,
             visibility.size(), 0)); // nothing visible yet: the first late phase finds out
     }
@@ -272,13 +278,31 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /**
+     * Draws with {@code table}'s materials (null: the default one only). Read when the frame's commands run, as
+     * instances are.
+     */
+    public void setMaterials(Materials table) {
+        this.materials = table == null ? defaultMaterials : table;
+    }
+
+    /**
      * Sets instance {@code index}: mesh {@code mesh} of the pool at camera-relative position ({@code x}, {@code y},
      * {@code z}), rotated by quaternion ({@code qx}, {@code qy}, {@code qz}, {@code qw}) and scaled. Allocates nothing.
      */
     public void setInstance(int index, int mesh, float x, float y, float z, float qx, float qy, float qz, float qw,
         float sx, float sy, float sz) {
-        if (index < 0 || index >= limits.instances() || mesh < 0 || mesh >= pool.meshCount()) {
-            throw new IllegalArgumentException("No instance " + index + " or mesh " + mesh);
+        setInstance(index, mesh, 0, x, y, z, qx, qy, qz, qw, sx, sy, sz);
+    }
+
+    /**
+     * Like {@link #setInstance(int, int, float, float, float, float, float, float, float, float, float, float)}, with
+     * materials from {@code material} of the {@link #setMaterials table} on: the mesh's submesh s takes material
+     * {@code material + s}. Allocates nothing.
+     */
+    public void setInstance(int index, int mesh, int material, float x, float y, float z, float qx, float qy, float qz,
+        float qw, float sx, float sy, float sz) {
+        if (index < 0 || index >= limits.instances() || mesh < 0 || mesh >= pool.meshCount() || material < 0) {
+            throw new IllegalArgumentException("No instance " + index + ", mesh " + mesh + " or material " + material);
         }
         MemorySegment m = instances.memory();
         long o = (long) INSTANCE_BYTES * index;
@@ -293,6 +317,7 @@ public final class MeshletRenderer implements AutoCloseable {
         m.set(F32, o + 32, sx);
         m.set(F32, o + 36, sy);
         m.set(F32, o + 40, sz);
+        m.set(U32, o + 44, material);
     }
 
     /** How many instances, from 0, are drawn. */
@@ -414,7 +439,7 @@ public final class MeshletRenderer implements AutoCloseable {
         try (MemoryStack stack = stackPush()) {
             beginRendering(commands, stack, colorView, depthView, width, height, r, g, b, late);
             if (path() == Path.MESH_SHADERS) {
-                long push = stack.nmalloc(8, 80);
+                long push = stack.nmalloc(8, DRAW_PUSH);
                 memPutLong(push, viewAddress);
                 memPutLong(push + 8, pool.meshTable().deviceAddress());
                 memPutLong(push + 16, instances.deviceAddress());
@@ -425,13 +450,14 @@ public final class MeshletRenderer implements AutoCloseable {
                 memPutLong(push + 56, pool.meshletTriangles().deviceAddress());
                 memPutLong(push + 64, pool.positions().deviceAddress());
                 memPutLong(push + 72, pool.attributes().deviceAddress());
+                memPutLong(push + 80, materials.deviceAddress());
                 Pipeline mesh = depthOnly ? meshDepth : meshDraw;
                 mesh.bind(commands);
                 setViewport(commands, stack, width, height);
-                mesh.push(commands, push, 80);
+                mesh.push(commands, push, DRAW_PUSH);
                 vkCmdDrawMeshTasksIndirectEXT(commands, expandCommand[v].handle(), 0, 1, 12);
             } else {
-                long push = stack.nmalloc(8, 64);
+                long push = stack.ncalloc(8, 1, DRAW_PUSH);
                 memPutLong(push, viewAddress);
                 memPutLong(push + 8, pool.meshTable().deviceAddress());
                 memPutLong(push + 16, instances.deviceAddress());
@@ -440,10 +466,11 @@ public final class MeshletRenderer implements AutoCloseable {
                 memPutLong(push + 40, visible[v].deviceAddress());
                 memPutLong(push + 48, pool.meshlets().deviceAddress());
                 memPutLong(push + 56, pool.meshletVertices().deviceAddress());
+                memPutLong(push + 80, materials.deviceAddress());
                 Pipeline indexed = depthOnly ? drawDepth : draw;
                 indexed.bind(commands);
                 setViewport(commands, stack, width, height);
-                indexed.push(commands, push, 64);
+                indexed.push(commands, push, DRAW_PUSH);
                 vkCmdBindIndexBuffer(commands, frameIndices[v].handle(), 0, VK_INDEX_TYPE_UINT32);
                 vkCmdDrawIndexedIndirect(commands, drawCommand[v].handle(), 0, 1, 20);
             }
@@ -666,6 +693,11 @@ public final class MeshletRenderer implements AutoCloseable {
         return view;
     }
 
+    /** The material table's address, for other passes shading the same instances. */
+    long materialsAddress() {
+        return materials.deviceAddress();
+    }
+
     /** The instance buffer, for other passes drawing the same instances. */
     GpuBuffer instanceBuffer() {
         return instances;
@@ -691,6 +723,7 @@ public final class MeshletRenderer implements AutoCloseable {
             for (GpuBuffer buffer : new GpuBuffer[] {view, instances, chunks, chunkCommand, lists, drawCount, visibility}) {
                 buffer.close();
             }
+            defaultMaterials.close();
             for (int v = 0; v < limits.views(); v++) {
                 visible[v].close();
                 frameIndices[v].close();
