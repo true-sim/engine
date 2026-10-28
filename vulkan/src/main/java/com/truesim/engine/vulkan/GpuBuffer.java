@@ -8,6 +8,7 @@ import static org.lwjgl.util.vma.Vma.vmaCreateBuffer;
 import static org.lwjgl.util.vma.Vma.vmaDestroyBuffer;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_CONCURRENT;
 import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_EXCLUSIVE;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyBuffer;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
@@ -43,7 +44,7 @@ public final class GpuBuffer implements AutoCloseable {
     private boolean closed;
 
     @SuppressWarnings("restricted") // wraps the mapped memory VMA returned, of exactly this size
-    private GpuBuffer(VulkanDevice device, long size, int usage, boolean hostVisible) {
+    private GpuBuffer(VulkanDevice device, long size, int usage, boolean hostVisible, int... families) {
         if (size <= 0) {
             throw new IllegalArgumentException("Buffer size must be positive: " + size);
         }
@@ -55,6 +56,9 @@ public final class GpuBuffer implements AutoCloseable {
                 .size(size)
                 .usage(usage)
                 .sharingMode(VK_SHARING_MODE_EXCLUSIVE);
+            if (families.length > 1) {
+                info.sharingMode(VK_SHARING_MODE_CONCURRENT).pQueueFamilyIndices(stack.ints(families));
+            }
             VmaAllocationCreateInfo allocationInfo = VmaAllocationCreateInfo.calloc(stack)
                 .usage(VMA_MEMORY_USAGE_AUTO)
                 .flags(hostVisible ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT : 0);
@@ -81,6 +85,16 @@ public final class GpuBuffer implements AutoCloseable {
     /** A buffer in fast GPU memory, filled by transfers. */
     public static GpuBuffer deviceLocal(VulkanDevice device, long size, int usage) {
         return new GpuBuffer(device, size, usage, false);
+    }
+
+    /**
+     * A buffer in fast GPU memory used by the queues of {@code families} at once (concurrent sharing, so no ownership
+     * transfers), e.g. by graphics and async compute; one family is the same as {@link #deviceLocal(VulkanDevice, long,
+     * int)}.
+     */
+    public static GpuBuffer deviceLocal(VulkanDevice device, long size, int usage, int... families) {
+        int[] distinct = java.util.Arrays.stream(families).distinct().toArray();
+        return new GpuBuffer(device, size, usage, false, distinct);
     }
 
     /**

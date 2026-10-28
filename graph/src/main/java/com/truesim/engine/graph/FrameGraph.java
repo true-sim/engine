@@ -22,6 +22,8 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_SAMPLED_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_STORAGE_BIT;
 import static org.lwjgl.vulkan.VK10.VK_QUEUE_FAMILY_IGNORED;
 import static org.lwjgl.vulkan.VK10.VK_REMAINING_MIP_LEVELS;
+import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
+import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK10.nvkCmdBlitImage;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -48,14 +50,17 @@ import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
 import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.graph.GraphBuilder.BufferInfo;
 import com.truesim.engine.graph.GraphBuilder.ImageInfo;
 import com.truesim.engine.graph.GraphBuilder.PassInfo;
 import com.truesim.engine.vulkan.Bindless;
+import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.common.jobs.JobSystem;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -72,6 +77,7 @@ import java.util.Objects;
 import java.util.function.Function;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkBufferMemoryBarrier2;
 import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkCommandBufferAllocateInfo;
 import org.lwjgl.vulkan.VkCommandBufferBeginInfo;
@@ -105,8 +111,8 @@ import org.slf4j.LoggerFactory;
  *   <li><b>Culled:</b> passes whose images nothing the outputs need are left out.</li>
  *   <li><b>Synchronized:</b> barriers and layout transitions come from the accesses passes declare, batched one call
  *       per pass, read after read without any.</li>
- *   <li><b>Pooled:</b> transient images live in a pool kept across frames, and images whose lifetimes do not overlap
- *       share one; an output is written straight into its target when it fits.</li>
+ *   <li><b>Pooled:</b> transient images and buffers live in a pool kept across frames, and those whose lifetimes do
+ *       not overlap share one; an output is written straight into its target when it fits.</li>
  * </ul>
  *
  * <p>The graph is built (techniques' {@code build}, resolving, culling, barriers, images) when it changes: techniques
@@ -121,6 +127,8 @@ public final class FrameGraph implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(FrameGraph.class);
     static final int GRAPHICS = 0;
     static final int COMPUTE = 1;
+    static final int IMAGE = 0;
+    static final int BUFFER = 1;
 
     private final VulkanDevice device;
     private final Bindless bindless;
@@ -131,6 +139,8 @@ public final class FrameGraph implements AutoCloseable {
     private final Map<Object, AutoCloseable> cache = new LinkedHashMap<>();
     private final List<Physical> pool = new ArrayList<>();
     private final List<Physical> retired = new ArrayList<>();
+    private final List<PhysicalBuffer> bufferPool = new ArrayList<>();
+    private final List<PhysicalBuffer> retiredBuffers = new ArrayList<>();
     private final Queue graphicsQueue;
     private final Queue computeQueue;
     private boolean asyncCompute;
@@ -149,6 +159,7 @@ public final class FrameGraph implements AutoCloseable {
     private PassInfo[] order = new PassInfo[0];
     private int[] barrierStart = {0, 0};
     private int[] barrierTarget = new int[0];
+    private int[] barrierKind = new int[0]; // IMAGE or BUFFER
     private int[] barrierAspect = new int[0];
     private int[] barrierOldLayout = new int[0];
     private int[] barrierNewLayout = new int[0];
@@ -160,6 +171,8 @@ public final class FrameGraph implements AutoCloseable {
     private Physical[] physicals = new Physical[0];
     private ExternalImage[] externals = new ExternalImage[0];
     private int[] externalVersions = new int[0];
+    private int[] bufferTargetOf = new int[0];
+    private PhysicalBuffer[] physicalBuffers = new PhysicalBuffer[0];
 
     // How the built graph runs: batches of passes, each on one queue, waiting for the other queue's batch of ordinal
     // batchWait (0: none) and, with batchAcquire, for the external images; each cut into chunks recorded in parallel.
@@ -341,7 +354,7 @@ public final class FrameGraph implements AutoCloseable {
             build();
         }
         frame++;
-        if (!retired.isEmpty()) {
+        if (!retired.isEmpty() || !retiredBuffers.isEmpty()) {
             release(false);
         }
     }
@@ -614,9 +627,33 @@ public final class FrameGraph implements AutoCloseable {
             return;
         }
         try (MemoryStack stack = stackPush()) {
-            long array = stack.ncalloc(VkImageMemoryBarrier2.ALIGNOF, to - from, VkImageMemoryBarrier2.SIZEOF);
+            int bufferCount = 0;
             for (int b = from; b < to; b++) {
-                long barrier = array + (long) (b - from) * VkImageMemoryBarrier2.SIZEOF;
+                bufferCount += barrierKind[b];
+            }
+            int imageCount = to - from - bufferCount;
+            long images = stack.ncalloc(VkImageMemoryBarrier2.ALIGNOF, Math.max(1, imageCount),
+                VkImageMemoryBarrier2.SIZEOF);
+            long buffers = stack.ncalloc(VkBufferMemoryBarrier2.ALIGNOF, Math.max(1, bufferCount),
+                VkBufferMemoryBarrier2.SIZEOF);
+            int image = 0;
+            int buffer = 0;
+            for (int b = from; b < to; b++) {
+                if (barrierKind[b] == BUFFER) {
+                    long barrier = buffers + (long) buffer++ * VkBufferMemoryBarrier2.SIZEOF;
+                    memPutInt(barrier + VkBufferMemoryBarrier2.STYPE, VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2);
+                    memPutLong(barrier + VkBufferMemoryBarrier2.SRCSTAGEMASK, barrierSrcStage[b]);
+                    memPutLong(barrier + VkBufferMemoryBarrier2.SRCACCESSMASK, barrierSrcAccess[b]);
+                    memPutLong(barrier + VkBufferMemoryBarrier2.DSTSTAGEMASK, barrierDstStage[b]);
+                    memPutLong(barrier + VkBufferMemoryBarrier2.DSTACCESSMASK, barrierDstAccess[b]);
+                    memPutInt(barrier + VkBufferMemoryBarrier2.SRCQUEUEFAMILYINDEX, VK_QUEUE_FAMILY_IGNORED);
+                    memPutInt(barrier + VkBufferMemoryBarrier2.DSTQUEUEFAMILYINDEX, VK_QUEUE_FAMILY_IGNORED);
+                    memPutLong(barrier + VkBufferMemoryBarrier2.BUFFER,
+                        physicalBuffers[barrierTarget[b]].buffer.handle());
+                    memPutLong(barrier + VkBufferMemoryBarrier2.SIZE, VK_WHOLE_SIZE);
+                    continue;
+                }
+                long barrier = images + (long) image++ * VkImageMemoryBarrier2.SIZEOF;
                 memPutInt(barrier + VkImageMemoryBarrier2.STYPE, VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2);
                 memPutLong(barrier + VkImageMemoryBarrier2.SRCSTAGEMASK, barrierSrcStage[b]);
                 memPutLong(barrier + VkImageMemoryBarrier2.SRCACCESSMASK, barrierSrcAccess[b]);
@@ -636,10 +673,16 @@ public final class FrameGraph implements AutoCloseable {
             }
             long dependency = stack.ncalloc(VkDependencyInfo.ALIGNOF, 1, VkDependencyInfo.SIZEOF);
             memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
-            memPutInt(dependency + VkDependencyInfo.IMAGEMEMORYBARRIERCOUNT, to - from);
-            memPutAddress(dependency + VkDependencyInfo.PIMAGEMEMORYBARRIERS, array);
+            memPutInt(dependency + VkDependencyInfo.IMAGEMEMORYBARRIERCOUNT, imageCount);
+            memPutAddress(dependency + VkDependencyInfo.PIMAGEMEMORYBARRIERS, images);
+            memPutInt(dependency + VkDependencyInfo.BUFFERMEMORYBARRIERCOUNT, bufferCount);
+            memPutAddress(dependency + VkDependencyInfo.PBUFFERMEMORYBARRIERS, buffers);
             nvkCmdPipelineBarrier2(commands, dependency);
         }
+    }
+
+    GpuBuffer bufferOf(int buffer) {
+        return physicalBuffers[bufferTargetOf[buffer]].buffer;
     }
 
     long handleOf(int image) {
@@ -729,6 +772,11 @@ public final class FrameGraph implements AutoCloseable {
         return pool.size();
     }
 
+    /** The transient buffers in the pool, for inspection. */
+    public int pooledBuffers() {
+        return bufferPool.size();
+    }
+
     /** How many times the graph was built. */
     public int builds() {
         return builds;
@@ -772,8 +820,9 @@ public final class FrameGraph implements AutoCloseable {
         int imageCount = g.images.size();
         substitute = Arrays.copyOf(substitute, imageCount);
         needed = Arrays.copyOf(needed, imageCount);
-        // Culled: walking back from the outputs, a pass is needed if it writes an image needed after it.
+        // Culled: walking back from the outputs, a pass is needed if it writes an image or buffer needed after it.
         List<PassInfo> passes = g.passes;
+        boolean[] neededBuffer = new boolean[g.buffers.size()];
         boolean[] keep = new boolean[passes.size()];
         for (int p = passes.size() - 1; p >= 0; p--) {
             PassInfo pass = passes.get(p);
@@ -781,10 +830,16 @@ public final class FrameGraph implements AutoCloseable {
             for (int a = 0; a < pass.images.length; a++) {
                 writesNeeded |= pass.accesses[a].writes && needed[pass.images[a]];
             }
+            for (int a = 0; a < pass.buffers.length; a++) {
+                writesNeeded |= pass.bufferAccesses[a].writes && neededBuffer[pass.buffers[a]];
+            }
             if (writesNeeded) {
                 keep[p] = true;
                 for (int image : pass.images) {
                     needed[image] = true;
+                }
+                for (int buffer : pass.buffers) {
+                    neededBuffer[buffer] = true;
                 }
             }
         }
@@ -811,6 +866,13 @@ public final class FrameGraph implements AutoCloseable {
                     if (g.images.get(pass.images[a]).external != null) {
                         throw new IllegalStateException(pass.name + " is async but uses the external image "
                             + g.images.get(pass.images[a]).image.name);
+                    }
+                }
+                for (int a = 0; a < pass.buffers.length; a++) {
+                    if (pass.bufferAccesses[a].draws) {
+                        throw new IllegalStateException(pass.name + " is async but uses "
+                            + g.buffers.get(pass.buffers[a]).buffer.name + " as " + pass.bufferAccesses[a]
+                            + ": async passes compute, store and copy only");
                     }
                 }
                 queues[p] = asyncCompute ? COMPUTE : GRAPHICS;
@@ -892,14 +954,66 @@ public final class FrameGraph implements AutoCloseable {
             slot.shared = slot.queues == 3 && twoFamilies;
         }
         Physical[] newPhysicals = claim(slots);
+        // Where buffers live: in physical buffers, shared (sized for the largest) by buffers of one queue whose
+        // lifetimes do not overlap.
+        int bufferCount = g.buffers.size();
+        int[] bufferFirst = new int[bufferCount];
+        int[] bufferLast = new int[bufferCount];
+        int[] bufferQueues = new int[bufferCount];
+        Arrays.fill(bufferFirst, -1);
+        for (int i = 0; i < newOrder.length; i++) {
+            for (int buffer : newOrder[i].buffers) {
+                if (bufferFirst[buffer] < 0) {
+                    bufferFirst[buffer] = i;
+                }
+                bufferLast[buffer] = i;
+                bufferQueues[buffer] |= 1 << queues[i];
+            }
+        }
+        Integer[] buffersByFirstUse = new Integer[bufferCount];
+        for (int i = 0; i < bufferCount; i++) {
+            buffersByFirstUse[i] = i;
+        }
+        Arrays.sort(buffersByFirstUse, (a, b) -> Integer.compare(bufferFirst[a], bufferFirst[b]));
+        int[] newBufferTargetOf = new int[bufferCount];
+        Arrays.fill(newBufferTargetOf, -1);
+        List<BufferSlot> bufferSlots = new ArrayList<>();
+        for (int buffer : buffersByFirstUse) {
+            if (bufferFirst[buffer] < 0) {
+                continue; // culled
+            }
+            BufferInfo info = g.buffers.get(buffer);
+            BufferSlot slot = null;
+            for (BufferSlot candidate : bufferSlots) {
+                if (candidate.last < bufferFirst[buffer] && candidate.queues == bufferQueues[buffer]
+                    && bufferQueues[buffer] != 3) {
+                    slot = candidate;
+                    break;
+                }
+            }
+            if (slot == null) {
+                slot = new BufferSlot();
+                bufferSlots.add(slot);
+            }
+            slot.size = Math.max(slot.size, info.buffer.size);
+            slot.last = bufferLast[buffer];
+            slot.usage |= info.usage;
+            slot.queues |= bufferQueues[buffer];
+            slot.shared = slot.queues == 3 && twoFamilies;
+            newBufferTargetOf[buffer] = bufferSlots.indexOf(slot);
+        }
+        PhysicalBuffer[] newPhysicalBuffers = claimBuffers(bufferSlots);
         // Barriers, now that every image has a home.
-        Barriers barriers = new Barriers(newPhysicals.length, newExternals);
-        barriers.simulate(newOrder, queues, newTargetOf, g, false); // the state a frame ends in is the next one's start
-        barriers.simulate(newOrder, queues, newTargetOf, g, true);
+        // The first walk learns the state a frame ends in, which is the next one's start.
+        Barriers barriers = new Barriers(newPhysicals.length, newExternals, newPhysicalBuffers.length);
+        barriers.simulate(newOrder, queues, newTargetOf, newBufferTargetOf, g, false);
+        barriers.simulate(newOrder, queues, newTargetOf, newBufferTargetOf, g, true);
 
         order = newOrder;
         targetOf = newTargetOf;
         physicals = newPhysicals;
+        bufferTargetOf = newBufferTargetOf;
+        physicalBuffers = newPhysicalBuffers;
         externals = newExternals.toArray(new ExternalImage[0]);
         externalVersions = new int[externals.length];
         for (int i = 0; i < externals.length; i++) {
@@ -909,8 +1023,9 @@ public final class FrameGraph implements AutoCloseable {
         schedule(queues, barriers.waitPass, barriers.firstExternalPass);
         dirty = false;
         builds++;
-        LOG.debug("Frame graph built: {} of {} passes in {} batches, {} images in {} pooled, {} barriers",
-            order.length, passes.size(), batchQueue.length, imageCount, physicals.length, barrierTarget.length);
+        LOG.debug("Frame graph built: {} of {} passes in {} batches, {} images in {} pooled, {} buffers in {} pooled, "
+            + "{} barriers", order.length, passes.size(), batchQueue.length, imageCount, physicals.length, bufferCount,
+            physicalBuffers.length, barrierTarget.length);
     }
 
     /**
@@ -1021,8 +1136,47 @@ public final class FrameGraph implements AutoCloseable {
         return claimed;
     }
 
-    /** Destroys retired images whose frames have finished (or all, when closing). */
+    /**
+     * Takes pooled buffers for the slots, the smallest that fits and is at most twice the size, creating the missing
+     * ones; pooled buffers left over retire.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    private PhysicalBuffer[] claimBuffers(List<BufferSlot> slots) {
+        PhysicalBuffer[] claimed = new PhysicalBuffer[slots.size()];
+        List<PhysicalBuffer> free = new ArrayList<>(bufferPool);
+        for (int s = 0; s < slots.size(); s++) {
+            BufferSlot slot = slots.get(s);
+            for (PhysicalBuffer candidate : free) {
+                if (candidate.size >= slot.size && candidate.size / 2 <= slot.size && candidate.usage == slot.usage
+                    && candidate.shared == slot.shared
+                    && (claimed[s] == null || candidate.size < claimed[s].size)) {
+                    claimed[s] = candidate;
+                }
+            }
+            if (claimed[s] == null) {
+                claimed[s] = new PhysicalBuffer(slot);
+                bufferPool.add(claimed[s]);
+            } else {
+                free.remove(claimed[s]);
+            }
+        }
+        for (PhysicalBuffer unused : free) {
+            bufferPool.remove(unused);
+            unused.retireAt = frame + framesInFlight;
+            retiredBuffers.add(unused);
+        }
+        return claimed;
+    }
+
+    /** Destroys retired images and buffers whose frames have finished (or all, when closing). */
     private void release(boolean all) {
+        for (int i = retiredBuffers.size() - 1; i >= 0; i--) {
+            PhysicalBuffer physical = retiredBuffers.get(i);
+            if (all || physical.retireAt <= frame) {
+                physical.buffer.close();
+                retiredBuffers.remove(i);
+            }
+        }
         for (int i = retired.size() - 1; i >= 0; i--) {
             Physical physical = retired.get(i);
             if (all || physical.retireAt <= frame) {
@@ -1085,8 +1239,13 @@ public final class FrameGraph implements AutoCloseable {
             physical.close();
         }
         pool.clear();
+        for (PhysicalBuffer physical : bufferPool) {
+            physical.buffer.close();
+        }
+        bufferPool.clear();
         release(true);
         physicals = new Physical[0];
+        physicalBuffers = new PhysicalBuffer[0];
         order = new PassInfo[0];
         barrierStart = new int[] {0, 0};
         dirty = true;
@@ -1108,6 +1267,34 @@ public final class FrameGraph implements AutoCloseable {
             this.height = height;
             this.format = format;
             this.mips = mips;
+        }
+    }
+
+    /** A physical buffer the pool is to have: the largest size and every usage of the buffers sharing it. */
+    private static final class BufferSlot {
+        long size;
+        int usage;
+        int queues;
+        boolean shared;
+        int last;
+    }
+
+    /** A pooled buffer, reachable by device address. */
+    @AllowAllocation("building the graph, when it changes")
+    private final class PhysicalBuffer {
+        final GpuBuffer buffer;
+        final long size;
+        final int usage;
+        final boolean shared;
+        long retireAt;
+
+        PhysicalBuffer(BufferSlot slot) {
+            size = slot.size;
+            usage = slot.usage;
+            shared = slot.shared;
+            int all = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+            buffer = shared ? GpuBuffer.deviceLocal(device, size, all, graphicsQueue.family(), computeQueue.family())
+                : GpuBuffer.deviceLocal(device, size, all);
         }
     }
 
@@ -1154,7 +1341,8 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     /**
-     * Derives barriers by walking the passes in order and tracking, per physical or external image, its layout, the
+     * Derives barriers by walking the passes in order and tracking, per physical or external image and physical buffer
+     * (whose layout never changes), its layout, the
      * stages and accesses that last wrote it, the stages that read it since, what is already visible, and which queue
      * used it last. A pass's barriers are batched. Crossing to the other queue, a barrier after all commands follows
      * the batch's semaphore wait. Along the way it notes, per pass, the latest pass of the other queue it depends on
@@ -1177,13 +1365,14 @@ public final class FrameGraph implements AutoCloseable {
         final int[][] lastReadPass;
         int[] waitPass = new int[0];
         int firstExternalPass = -1;
-        final List<long[]> out = new ArrayList<>(); // target, aspect, old, new, srcStage, srcAccess, dstStage, dstAccess
+        // target, aspect, old layout, new layout, srcStage, srcAccess, dstStage, dstAccess, kind
+        final List<long[]> out = new ArrayList<>();
         final List<Integer> starts = new ArrayList<>();
 
-        Barriers(int physicalCount, List<ExternalImage> externalList) {
+        Barriers(int physicalCount, List<ExternalImage> externalList, int bufferCount) {
             this.physicalCount = physicalCount;
             this.externalList = externalList;
-            int n = physicalCount + externalList.size();
+            int n = physicalCount + externalList.size() + bufferCount;
             layout = new int[n];
             writeStages = new long[n];
             writeAccess = new long[n];
@@ -1203,7 +1392,8 @@ public final class FrameGraph implements AutoCloseable {
         }
 
         /** Walks the passes; with {@code emit} off, only to learn the state a frame leaves its images in. */
-        void simulate(PassInfo[] passes, int[] queues, int[] targets, GraphBuilder g, boolean emit) {
+        void simulate(PassInfo[] passes, int[] queues, int[] targets, int[] bufferTargets, GraphBuilder g,
+            boolean emit) {
             for (int e = 0; e < externalList.size(); e++) {
                 ExternalImage external = externalList.get(e);
                 int i = physicalCount + e;
@@ -1260,7 +1450,36 @@ public final class FrameGraph implements AutoCloseable {
                     if (targets[image] < 0 && firstExternalPass < 0) {
                         firstExternalPass = p;
                     }
-                    access(pass, p, queues[p], image, targets[image], g, stages, access, writes, wanted, emit);
+                    int target = targets[image];
+                    access(pass, p, queues[p], index(target), IMAGE, target, aspect(g.images.get(image).image.format),
+                        image, g.images.get(image).image.name, target >= 0, stages, access, writes, wanted, emit);
+                }
+                // And one per buffer.
+                int[] seenBuffers = new int[pass.buffers.length];
+                int distinctBuffers = 0;
+                for (int a = 0; a < pass.buffers.length; a++) {
+                    int buffer = pass.buffers[a];
+                    boolean repeat = false;
+                    for (int s = 0; s < distinctBuffers; s++) {
+                        repeat |= seenBuffers[s] == buffer;
+                    }
+                    if (repeat) {
+                        continue;
+                    }
+                    seenBuffers[distinctBuffers++] = buffer;
+                    long stages = 0;
+                    long access = 0;
+                    boolean writes = false;
+                    for (int b = a; b < pass.buffers.length; b++) {
+                        if (pass.buffers[b] == buffer) {
+                            stages |= pass.bufferAccesses[b].stages;
+                            access |= pass.bufferAccesses[b].access;
+                            writes |= pass.bufferAccesses[b].writes;
+                        }
+                    }
+                    int target = bufferTargets[buffer];
+                    access(pass, p, queues[p], physicalCount + externalList.size() + target, BUFFER, target, 0,
+                        buffer, g.buffers.get(buffer).buffer.name, true, stages, access, writes, 0, emit);
                 }
             }
             if (emit) {
@@ -1268,17 +1487,21 @@ public final class FrameGraph implements AutoCloseable {
                 for (int e = 0; e < externalList.size(); e++) {
                     int i = physicalCount + e;
                     ExternalImage external = externalList.get(e);
+                    // Towards whatever comes after the frame.
                     out.add(new long[] {~e, aspect(external.format), layout[i], external.finalLayout,
                         writeStages[i] | readStages[i], writeAccess[i], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                        VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT}); // whatever comes after the frame
+                        VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, IMAGE});
                 }
             }
         }
 
-        private void access(PassInfo pass, int p, int queue, int image, int target, GraphBuilder g, long stages,
-            long access, boolean writes, int wanted, boolean emit) {
-            int i = index(target);
-            int aspect = aspect(g.images.get(image).image.format);
+        /**
+         * Pass {@code p}'s merged access to the image or buffer {@code id} ({@code name}), living at state index
+         * {@code i} and barrier target {@code target} of {@code kind}; {@code pooled}: in a physical image or buffer,
+         * whose earlier tenants it waits for.
+         */
+        private void access(PassInfo pass, int p, int queue, int i, int kind, int target, int aspect, int id,
+            String name, boolean pooled, long stages, long access, boolean writes, int wanted, boolean emit) {
             if (lastQueue[i] >= 0 && lastQueue[i] != queue) {
                 // From the other queue: submitted, its batch's semaphore wait orders and makes visible what came before;
                 // recorded into one command buffer, nothing does. A barrier after all commands, making any write
@@ -1290,7 +1513,7 @@ public final class FrameGraph implements AutoCloseable {
                 visibleAccess[i] = 0;
             }
             lastQueue[i] = queue;
-            boolean newTenant = target >= 0 && tenant[i] != image;
+            boolean newTenant = pooled && tenant[i] != id;
             boolean transition = layout[i] != wanted;
             if (newTenant || writes || transition) {
                 depend(p, Math.max(otherQueue(lastWriteQueue[i], queue, lastWritePass[i]),
@@ -1306,21 +1529,21 @@ public final class FrameGraph implements AutoCloseable {
             if (newTenant) {
                 // A new image in this physical one: its contents start undefined, after whatever used it before.
                 if (!writes) {
-                    throw new IllegalStateException(pass.name + " reads " + g.images.get(image).image.name
-                        + " before any pass writes it");
+                    throw new IllegalStateException(pass.name + " reads " + name + " before any pass writes it");
                 }
-                if (emit) {
-                    out.add(new long[] {target, aspect, VK_IMAGE_LAYOUT_UNDEFINED, wanted,
-                        writeStages[i] | readStages[i], writeAccess[i], stages, access});
+                long src = writeStages[i] | readStages[i];
+                if (emit && (kind == IMAGE || src != 0)) { // a buffer has no layout to start
+                    out.add(new long[] {target, aspect, VK_IMAGE_LAYOUT_UNDEFINED, wanted, src, writeAccess[i], stages,
+                        access, kind});
                 }
-                tenant[i] = image;
+                tenant[i] = id;
                 set(i, wanted, stages, access, access);
                 return;
             }
             if (writes || transition) {
                 long src = writeStages[i] | readStages[i];
                 if (emit && (src != 0 || transition)) {
-                    out.add(new long[] {target, aspect, layout[i], wanted, src, writeAccess[i], stages, access});
+                    out.add(new long[] {target, aspect, layout[i], wanted, src, writeAccess[i], stages, access, kind});
                 }
                 if (writes) {
                     set(i, wanted, stages, access, access);
@@ -1335,7 +1558,7 @@ public final class FrameGraph implements AutoCloseable {
             if ((stages & ~visibleStages[i]) != 0 || (access & ~visibleAccess[i]) != 0) {
                 if (emit && writeStages[i] != 0) {
                     out.add(new long[] {target, aspect, wanted, wanted, writeStages[i], writeAccess[i], stages,
-                        access});
+                        access, kind});
                 }
                 visibleStages[i] |= stages;
                 visibleAccess[i] |= access;
@@ -1370,6 +1593,7 @@ public final class FrameGraph implements AutoCloseable {
             }
             barrierStart[starts.size()] = n;
             barrierTarget = new int[n];
+            barrierKind = new int[n];
             barrierAspect = new int[n];
             barrierOldLayout = new int[n];
             barrierNewLayout = new int[n];
@@ -1380,6 +1604,7 @@ public final class FrameGraph implements AutoCloseable {
             for (int b = 0; b < n; b++) {
                 long[] barrier = out.get(b);
                 barrierTarget[b] = (int) barrier[0];
+                barrierKind[b] = (int) barrier[8];
                 barrierAspect[b] = (int) barrier[1];
                 barrierOldLayout[b] = (int) barrier[2];
                 barrierNewLayout[b] = (int) barrier[3];

@@ -4,9 +4,9 @@ import com.truesim.engine.vulkan.Bindless;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
- * What a {@link PassBody} records with: the command buffer, and the Vulkan objects behind its {@link Image}s. Sampled
- * and storage slots are the image's slots in the device's {@link Bindless} set, for shaders to take in their push
- * constants. Nothing allocates.
+ * What a {@link PassBody} records with: the command buffer, and the Vulkan objects behind its {@link Image}s and
+ * {@link Buffer}s. Sampled and storage slots are the image's slots in the device's {@link Bindless} set, for shaders
+ * to take in their push constants. Nothing allocates.
  */
 public final class PassContext {
 
@@ -39,6 +39,16 @@ public final class PassContext {
     /** The image's storage slot, for images some pass uses as a storage image (level 0 of a mipmapped one). */
     public int storage(Image image) {
         return graph.storageSlotOf(image.id, 0);
+    }
+
+    /** The {@code VkBuffer} of a transient buffer. */
+    public long buffer(Buffer buffer) {
+        return graph.bufferOf(buffer.id).handle();
+    }
+
+    /** The device address of a transient buffer, for shaders to take in their push constants. */
+    public long address(Buffer buffer) {
+        return graph.bufferOf(buffer.id).deviceAddress();
     }
 
     /** The storage slot of mip level {@code mip} of the image. */

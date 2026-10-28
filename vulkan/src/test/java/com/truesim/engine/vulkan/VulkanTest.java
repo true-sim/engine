@@ -332,6 +332,25 @@ class VulkanTest {
                 assertThatIllegalStateException().isThrownBy(local::memory);
                 local.close(); // twice is fine
             }
+            // Writes: straight into host-visible memory, through staging into device-local memory.
+            try (java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofConfined();
+                 GpuBuffer host = GpuBuffer.hostVisible(device, 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                 GpuBuffer local = GpuBuffer.deviceLocal(device, 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+                java.lang.foreign.MemorySegment data = arena.allocateFrom(ValueLayout.JAVA_INT, 1, 2, 3);
+                host.write(4, data);
+                assertThat(host.memory().getAtIndex(ValueLayout.JAVA_INT, 3)).isEqualTo(3);
+                local.write(4, data);
+                local.write(16, data.asSlice(0, 0)); // nothing, at the end
+                assertThatIllegalArgumentException().isThrownBy(() -> local.write(8, data));
+                assertThatIllegalArgumentException().isThrownBy(() -> host.write(-1, data));
+            }
+            // Shared by the queues of the families given: concurrent where they differ, exclusive where they are one.
+            int graphics = device.graphics().family();
+            int compute = device.compute().family();
+            try (GpuBuffer shared = GpuBuffer.deviceLocal(device, 256, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, graphics,
+                compute, graphics)) {
+                assertThat(shared.handle()).isNotZero();
+            }
             assertThatIllegalArgumentException().isThrownBy(() -> GpuBuffer.hostVisible(device, 0, 0));
             assertThatIllegalArgumentException().isThrownBy(() -> new GpuImage(device, 0, 4, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT));

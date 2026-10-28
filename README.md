@@ -281,11 +281,16 @@ that declare how they use each image. The graph does the rest:
 - **Swappable:** `replace` swaps a technique for another providing the same keys (one lighting or translucency
   technique for another). `implement` changes how every request of a type is computed (a cheaper blur on low
   settings). Nothing else changes.
-- **Culled:** walking back from the outputs, passes whose images nothing needs are dropped.
+- **Culled:** walking back from the outputs, passes whose images and buffers nothing needs are dropped.
 - **Synchronized:** barriers and layout transitions come from the declared accesses, batched into one call per pass,
   with none between reads.
-- **Pooled:** transient images live in a pool kept across frames, and images whose lifetimes do not overlap share
-  one. An output that fits its target (the swapchain image, say) is drawn straight into it; others are blitted.
+- **Pooled:** transient images and buffers live in a pool kept across frames. Images whose lifetimes do not overlap
+  share one; so do buffers, the shared one sized for the largest. An output that fits its target (the swapchain image,
+  say) is drawn straight into it; others are blitted.
+- **Buffers too:** `g.createBuffer(name, bytes)` makes a transient buffer, which passes declare with a `BufferAccess`
+  (indirect, index, storage from compute or draws, transfer) and shaders reach by `ctx.address(buffer)`. Buffer
+  barriers come from those accesses like image barriers do, across queues as well: a buffer used by both is shared
+  concurrently.
 
 ```java
 graph.add(new MeshletScene(renderer, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT))
@@ -338,7 +343,7 @@ swapchain.present(device.graphics(), image);
 The graph's tests run with synchronization validation, which checks every barrier and cross-queue wait. Dropping the
 waits makes it report races between the queues.
 
-Not yet: transient buffers, and merging similar work across views (#8).
+Not yet: merging similar work across views (#8).
 
 ## Building
 

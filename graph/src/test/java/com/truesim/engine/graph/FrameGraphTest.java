@@ -20,6 +20,11 @@ import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.vulkan.VK10.nvkCmdClearColorImage;
 import static org.lwjgl.vulkan.VK10.nvkCmdCopyImage;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
+import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
+import static org.lwjgl.vulkan.VK10.nvkCmdCopyBuffer;
+import static org.lwjgl.vulkan.VK10.nvkCmdCopyBufferToImage;
+import static org.lwjgl.vulkan.VK10.vkCmdFillBuffer;
+import static org.lwjgl.system.MemoryUtil.memPutLong;
 
 import com.truesim.engine.vulkan.Frames;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -33,6 +38,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkBufferCopy;
 import org.lwjgl.vulkan.VkBufferImageCopy;
 import org.lwjgl.vulkan.VkImageCopy;
 import org.lwjgl.vulkan.VkImageSubresourceLayers;
@@ -233,6 +239,61 @@ class FrameGraphTest {
         }
     }
 
+    /** Provides {@code key}: an image copied from a buffer filled with {@code rgba}, maybe on the async queue. */
+    record Packed(Key key, int rgba, boolean async) implements Technique {
+        @Override
+        public List<Key> provides() {
+            return List.of(key);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Buffer buffer = g.createBuffer(key.name() + " texels", 4L * SIZE * SIZE);
+            GraphBuilder.PassBuilder fill = g.pass("fill " + key + " texels").write(buffer, BufferAccess.TRANSFER_DST);
+            (async ? fill.async() : fill).record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0,
+                VK_WHOLE_SIZE, rgba));
+            Image image = g.create(key.name(), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("unpack " + key).read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                .record(ctx -> unpack(ctx, buffer, image));
+            g.provide(key, image);
+        }
+    }
+
+    /** A filled buffer, by request. */
+    record Filled(int value) implements Request<Buffer> {
+        @Override
+        public Buffer build(GraphBuilder g) {
+            Buffer buffer = g.createBuffer("filled", 64);
+            g.pass("fill").write(buffer, BufferAccess.TRANSFER_DST)
+                .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0, VK_WHOLE_SIZE, value));
+            return buffer;
+        }
+    }
+
+    /** Copies the first {@code bytes} of {@code from} to the start of {@code to}; field by field, allocating nothing. */
+    static void copy(PassContext ctx, Buffer from, Buffer to, long bytes) {
+        try (MemoryStack stack = stackPush()) {
+            long region = stack.ncalloc(8, 1, VkBufferCopy.SIZEOF);
+            memPutLong(region + VkBufferCopy.SIZE, bytes);
+            nvkCmdCopyBuffer(ctx.commands(), ctx.buffer(from), ctx.buffer(to), 1, region);
+        }
+    }
+
+    /** Copies {@code buffer}'s first SIZE x SIZE texels into {@code image}. */
+    static void unpack(PassContext ctx, Buffer buffer, Image image) {
+        try (MemoryStack stack = stackPush()) {
+            long region = stack.ncalloc(8, 1, VkBufferImageCopy.SIZEOF);
+            memPutInt(region + VkBufferImageCopy.IMAGESUBRESOURCE + VkImageSubresourceLayers.ASPECTMASK,
+                VK_IMAGE_ASPECT_COLOR_BIT);
+            memPutInt(region + VkBufferImageCopy.IMAGESUBRESOURCE + VkImageSubresourceLayers.LAYERCOUNT, 1);
+            memPutInt(region + VkBufferImageCopy.IMAGEEXTENT, SIZE);
+            memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 4, SIZE);
+            memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 8, 1);
+            nvkCmdCopyBufferToImage(ctx.commands(), ctx.buffer(buffer), ctx.image(image),
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, region);
+        }
+    }
+
     /** A technique built from a lambda, for the misuse tests. */
     record Lambda(List<Key> provides, java.util.function.Consumer<GraphBuilder> builder) implements Technique {
         @Override
@@ -369,6 +430,70 @@ class FrameGraphTest {
         assertThat(texels[SIZE * SIZE - 1]).isEqualTo(GREEN);
         assertThat(graph.passes()).hasSize(4);
         assertThat(graph.pooledImages()).isEqualTo(2); // a and the second copy share; the third is the target
+    }
+
+    @Test
+    void buffersCarryDataBetweenPasses() {
+        graph.add(new Packed(OUT, RED, false)).output(OUT, output);
+        int[] texels = frame();
+        assertThat(texels).containsOnly(RED);
+        assertThat(graph.passes()).containsExactly("fill out texels", "unpack out");
+        assertThat(graph.pooledBuffers()).isEqualTo(1);
+        assertThat(frame()).containsOnly(RED); // again: the frame before's reads are waited for
+    }
+
+    @Test
+    void buffersWhoseLifetimesDoNotOverlapShareMemory() {
+        long half = 2L * SIZE * SIZE;
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Buffer a = g.createBuffer("a", 2 * half);
+            Buffer b = g.createBuffer("b", 2 * half);
+            Buffer c = g.createBuffer("c", 4 * half); // lives after a: shares it, grown to its size
+            Buffer unused = g.createBuffer("unused", 16);
+            g.pass("fill a").write(a, BufferAccess.TRANSFER_DST)
+                .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(a), 0, VK_WHOLE_SIZE, RED));
+            g.pass("fill unused").write(unused, BufferAccess.TRANSFER_DST).record(ctx -> { });
+            g.pass("a to b").read(a, BufferAccess.TRANSFER_SRC).write(b, BufferAccess.TRANSFER_DST)
+                .record(ctx -> copy(ctx, a, b, 2 * half));
+            g.pass("fill c").write(c, BufferAccess.TRANSFER_DST)
+                .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(c), 0, VK_WHOLE_SIZE, GREEN));
+            g.pass("b to c").read(b, BufferAccess.TRANSFER_SRC).write(c, BufferAccess.TRANSFER_DST)
+                .record(ctx -> copy(ctx, b, c, half));
+            Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("unpack").read(c, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                .record(ctx -> unpack(ctx, c, image));
+            g.provide(OUT, image);
+        })).output(OUT, output);
+        int[] texels = frame();
+        assertThat(texels[0]).isEqualTo(RED); // the first half from b
+        assertThat(texels[SIZE * SIZE - 1]).isEqualTo(GREEN);
+        assertThat(graph.passes()).doesNotContain("fill unused");
+        assertThat(graph.pooledBuffers()).isEqualTo(2);
+        assertThat(frame()[0]).isEqualTo(RED);
+        // Buffers left in the pool retire once their frames are over.
+        graph.removeOutput(OUT);
+        for (int i = 0; i < 3; i++) {
+            device.submitAndWait(device.graphics(), graph::record);
+        }
+        assertThat(graph.pooledBuffers()).isZero();
+    }
+
+    @Test
+    void buffersPassBetweenQueues() {
+        graph.add(new Packed(A, BLUE, true))
+            .add(new Fill(B, SIZE, 1, 0, 0, 1))
+            .add(new Halves(OUT, A, B))
+            .output(OUT, output)
+            .asyncCompute(true);
+        int[] texels = submitted(4);
+        assertThat(texels[0]).isEqualTo(BLUE);
+        assertThat(texels[SIZE - 1]).isEqualTo(RED);
+        assertThat(graph.batches()).containsExactly(
+            "compute 1: fill a texels",
+            "graphics 1 (after compute 1): unpack a, fill b",
+            "graphics 2 (after acquire): halves out");
+        graph.asyncCompute(false);
+        assertThat(submitted(2)[0]).isEqualTo(BLUE);
     }
 
     @Test
@@ -573,7 +698,7 @@ class FrameGraphTest {
     @Test
     void recordingAllocatesNothing() {
         graph.add(new Fill(A, SIZE, 1, 0, 0, 1))
-            .add(new Fill(B, SIZE, 0, 1, 0, 1))
+            .add(new Packed(B, GREEN, false))
             .add(new Halves(OUT, A, B))
             .output(OUT, output);
         try (Frames frames = new Frames(device, device.graphics(), 2, 1)) {
@@ -634,6 +759,36 @@ class FrameGraphTest {
         rejects(List.of(OUT), g -> g.createLike("x", g.require(A), 0), "must be positive");
         rejects(List.of(OUT), g -> g.pass("x").read(g.require(A), Access.TRANSFER_DST), "declare it with write()");
         rejects(List.of(OUT), g -> g.pass("x").write(g.require(A), Access.TRANSFER_SRC), "declare it with read()");
+        // Buffers.
+        rejects(List.of(OUT), g -> g.createBuffer("x", 0), "must be positive");
+        rejects(List.of(OUT), g -> {
+            Buffer buffer = g.createBuffer("x", 64);
+            Image image = g.create("y", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("read").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                .record(ctx -> { });
+            g.provide(OUT, image);
+        }, "reads x before any pass writes it");
+        rejects(List.of(OUT), g -> {
+            Buffer foreign = g.request(new Filled(7));
+            g.pass("scribble").write(foreign, BufferAccess.TRANSFER_DST).record(ctx -> { });
+        }, "results are written only by whoever makes them");
+        rejects(List.of(OUT), g -> {
+            Buffer buffer = g.createBuffer("x", 64);
+            g.pass("indices").write(buffer, BufferAccess.TRANSFER_DST).record(ctx -> { });
+            Image image = g.create("y", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("draw").read(buffer, BufferAccess.INDEX).write(image, Access.TRANSFER_DST).async()
+                .record(ctx -> { });
+            g.provide(OUT, image);
+        }, "async passes compute, store and copy only");
+        rejects(List.of(OUT), g -> g.pass("x").read(g.createBuffer("x", 4), BufferAccess.STORAGE_WRITE),
+            "declare it with write()");
+        rejects(List.of(OUT), g -> g.pass("x").write(g.createBuffer("x", 4), BufferAccess.STORAGE_READ),
+            "declare it with read()");
+        rejects(List.of(OUT), g -> g.pass("x").read(new Buffer(3, "stray", 4), BufferAccess.INDIRECT),
+            "Not a buffer of this build");
+        assertThat(new Buffer(0, "b", 8)).hasToString("b (8 bytes)");
+        assertThat(BufferAccess.DRAW_WRITE.writes()).isTrue();
+        assertThat(BufferAccess.DRAW_READ.writes()).isFalse();
         // An external image used beyond its usage, or sampled.
         rejects(List.of(OUT), g -> {
             Image image = g.external(output);
