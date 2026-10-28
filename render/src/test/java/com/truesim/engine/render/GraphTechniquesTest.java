@@ -255,6 +255,55 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void bothShadingsDrawTheSameImage() {
+        assumeThat(device.primitiveIds()).as("primitive IDs in fragment shaders").isTrue();
+        // The lit floor, and a quad standing on it hiding part of it.
+        renderer.setInstance(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+        renderer.setInstance(1, quad, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+        renderer.setInstanceCount(2);
+        renderer.setView(new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1), 1,
+            MeshletRenderer.MODE_LIT);
+        try (Lights lights = new Lights(device, 4, 1)) {
+            lights.point(0, -1, -0.5f, -1.5f, 3, 6, 0, 0).point(1, 1, -0.5f, -1.5f, 3, 0, 0, 6)
+                .directional(2, -0.4f, -0.8f, -0.3f, 1, 1, 1).setCount(3);
+            MeshletScene scene = new MeshletScene(renderer, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                .lights(lights).clearColor(0, 0, 0.5f);
+            graph.add(scene).output(Keys.SCENE_COLOR, output);
+            for (MeshletRenderer.Path path : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED,
+                MeshletRenderer.Path.AUTO}) {
+                renderer.setPath(path);
+                scene.shading(MeshletScene.Shading.CLUSTERED_FORWARD);
+                graph.invalidate();
+                frame();
+                frame(); // the late phase has drawn what the early one missed the first time
+                int[] forward = new int[SIZE * SIZE];
+                for (int i = 0; i < forward.length; i++) {
+                    forward[i] = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, i);
+                }
+                scene.shading(MeshletScene.Shading.VISIBILITY_BUFFER);
+                graph.invalidate();
+                frame();
+                frame();
+                assertThat(graph.passes()).contains("meshlet ids early", "meshlet ids late", "visibility shading");
+                double total = 0;
+                int far = 0;
+                for (int i = 0; i < forward.length; i++) {
+                    int p = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, i);
+                    int worst = 0;
+                    for (int shift = 0; shift < 24; shift += 8) {
+                        int d = Math.abs(((p >> shift) & 0xff) - ((forward[i] >> shift) & 0xff));
+                        total += d;
+                        worst = Math.max(worst, d);
+                    }
+                    far += worst > 8 ? 1 : 0;
+                }
+                assertThat(total / (3.0 * forward.length)).as("mean difference, %s", path).isLessThan(0.5);
+                assertThat(far).as("pixels differing by more than 8, %s", path).isLessThan(SIZE * SIZE / 100);
+            }
+        }
+    }
+
+    @Test
     void depthPyramidsKeepTheFarthestDepthOfEveryFootprint() {
         int w = 13;
         int h = 7; // odd sizes: footprints of 3 along the edges

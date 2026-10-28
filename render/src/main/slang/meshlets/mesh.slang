@@ -24,6 +24,12 @@ struct MeshPush
 [[vk::push_constant]]
 ConstantBuffer<MeshPush> push;
 
+// The triangle's number in its meshlet, for the visibility buffer's fragment shader.
+struct PrimitiveOut
+{
+    uint id : SV_PrimitiveID;
+};
+
 /** Byte i of the pool's meshlet triangles. */
 uint triangleByte(uint i)
 {
@@ -34,7 +40,7 @@ uint triangleByte(uint i)
 [outputtopology("triangle")]
 [numthreads(64, 1, 1)]
 void meshMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertices VertexOut vertices[64],
-    out indices uint3 triangles[124])
+    out indices uint3 triangles[124], out primitives PrimitiveOut primitives[124])
 {
     View view = push.view[0];
     uint slot = group.y * 65535 + group.x;
@@ -59,10 +65,12 @@ void meshMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertice
         uint vertex = mesh.vertexBase + push.meshletVertices[mesh.meshletVertexBase + vertexOffset + thread];
         vertices[thread] = transformVertex(view, instance, mesh, vertex, push.positions, push.attributes, m,
             counts >> 16);
+        vertices[thread].instance = v.instance;
     }
     for (uint t = thread; t < triangleCount; t += 64)
     {
         uint b = mesh.indexBase + triangleOffset + t * 3;
         triangles[t] = uint3(triangleByte(b), triangleByte(b + 1), triangleByte(b + 2));
+        primitives[t].id = t;
     }
 }

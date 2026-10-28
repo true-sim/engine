@@ -21,3 +21,9 @@ tasks.test {
         extensions.configure<JacocoTaskExtension> { isEnabled = false } // measure the code, not its coverage probes
     }
 }
+
+// The bindless storage images are declared twice on one binding, as float and as unsigned integer images: Slang's
+// overlap check (E39001) would reject that.
+tasks.withType<com.truesim.build.slang.CompileSlang>().configureEach {
+    arguments.addAll("-warnings-disable", "39001")
+}

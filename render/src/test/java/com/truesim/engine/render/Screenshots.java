@@ -206,6 +206,66 @@ class Screenshots {
         }
     }
 
+    /**
+     * Many lights: 3,000 rocks on the terrain lit by 1,024 colored point lights through light clusters, shaded as they
+     * are drawn (clustered forward) and through the visibility buffer, and where the two differ (amplified 8 x).
+     */
+    @Test
+    void renderLights() throws IOException {
+        Path out = Files.createDirectories(Path.of("build", "screenshots"));
+        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        try (VulkanInstance instance = VulkanInstance.builder().applicationName("screenshots").surfaces(false)
+                 .build();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 100_000, 4));
+             GpuImage target = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage,
+                 VK_IMAGE_ASPECT_COLOR_BIT);
+             GpuBuffer pixels = GpuBuffer.hostVisible(device, (long) WIDTH * HEIGHT * 4,
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+             MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
+                 1 << 20, 65_535, 20_000_000), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+             Lights lights = new Lights(device, 4096, 1)) {
+            int rock = pool.add(MeshletBenchmark.rock(6));
+            int ground = pool.add(MeshletBenchmark.terrain(1024));
+            double groundY = -12;
+            MeshletBenchmark.rocksOnTerrain(renderer, rock, ground, 3000, 150, groundY);
+            renderer.setView(new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1,
+                MeshletRenderer.MODE_LIT);
+            MeshletBenchmark.scatterLights(lights, 1024, groundY, 3);
+            com.truesim.engine.graph.ExternalImage external = new com.truesim.engine.graph.ExternalImage("target",
+                WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
+            MeshletScene scene = new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT).lights(lights).clearColor(0.02f, 0.02f, 0.05f);
+            int[] forward;
+            int[] visibility;
+            try (com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
+                graph.add(scene).output(Keys.SCENE_COLOR, external);
+                capture(device, graph, target, pixels); // the first frame's late phase draws everything
+                forward = capture(device, graph, target, pixels);
+                write(forward, out.resolve("lights-forward.png"));
+                scene.shading(MeshletScene.Shading.VISIBILITY_BUFFER);
+                graph.invalidate();
+                capture(device, graph, target, pixels);
+                visibility = capture(device, graph, target, pixels);
+                write(visibility, out.resolve("lights-visibility.png"));
+            }
+            int[] difference = new int[forward.length];
+            long total = 0;
+            for (int i = 0; i < forward.length; i++) {
+                int pixel = 0xff000000;
+                for (int shift = 0; shift < 24; shift += 8) {
+                    int d = Math.abs(((forward[i] >> shift) & 0xff) - ((visibility[i] >> shift) & 0xff));
+                    total += d;
+                    pixel |= Math.min(255, 8 * d) << shift;
+                }
+                difference[i] = pixel;
+            }
+            write(difference, out.resolve("lights-difference.png"));
+            System.out.printf("lights: mean difference %.3f of 255%n", total / (3.0 * forward.length));
+        }
+    }
+
     /** Records {@code graph}'s frame and reads {@code target} back, RGBA per texel. */
     private static int[] capture(VulkanDevice device, com.truesim.engine.graph.FrameGraph graph, GpuImage target,
         GpuBuffer pixels) {

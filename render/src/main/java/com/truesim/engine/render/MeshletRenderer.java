@@ -149,9 +149,11 @@ public final class MeshletRenderer implements AutoCloseable {
      * shader reads them.
      */
     private static final int DRAW_PUSH = 96;
+    /** The visibility buffer's IDs: instance + 1 (0: nothing), and meshlet << 7 | triangle. */
+    public static final int ID_FORMAT = org.lwjgl.vulkan.VK10.VK_FORMAT_R32G32_UINT;
     private static final int PHASE_EARLY = 1;
     private static final int PHASE_LATE = 2;
-    private static final int VIEW_BYTES = 192;
+    private static final int VIEW_BYTES = 256;
     /** Views a renderer holds: e.g. the camera and a shadow map's light. */
     public static final int VIEWS = 4;
     private static final ValueLayout.OfInt U32 = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -167,6 +169,8 @@ public final class MeshletRenderer implements AutoCloseable {
     private final Pipeline meshDraw;
     private final Pipeline drawDepth;
     private final Pipeline meshDepth;
+    private final Pipeline idsDraw; // the visibility buffer's: IDs, no shading (null without primitive IDs)
+    private final Pipeline idsMesh;
     private final GpuBuffer view;
     private final GpuBuffer instances;
     private final GpuBuffer chunks;
@@ -210,6 +214,15 @@ public final class MeshletRenderer implements AutoCloseable {
                 .depth(depthFormat)
                 .pushConstants(DRAW_PUSH)
                 .build();
+            ShaderModule idsShader = device.primitiveIds() ? ShaderModule.load(device, "shaders/visibility/ids.spv")
+                : null;
+            idsDraw = idsShader == null ? null : Pipeline.graphics(device)
+                .stage(VK_SHADER_STAGE_VERTEX_BIT, drawShader, "vertexMain")
+                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader, "idsMain")
+                .color(ID_FORMAT)
+                .depth(depthFormat)
+                .pushConstants(DRAW_PUSH)
+                .build();
             if (device.meshShaders()) {
                 try (ShaderModule meshShader = ShaderModule.load(device, "shaders/meshlets/mesh.spv")) {
                     meshDraw = Pipeline.graphics(device)
@@ -224,10 +237,21 @@ public final class MeshletRenderer implements AutoCloseable {
                         .depth(depthFormat)
                         .pushConstants(DRAW_PUSH)
                         .build();
+                    idsMesh = idsShader == null ? null : Pipeline.graphics(device)
+                        .stage(VK_SHADER_STAGE_MESH_BIT_EXT, meshShader, "meshMain")
+                        .stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader, "idsMain")
+                        .color(ID_FORMAT)
+                        .depth(depthFormat)
+                        .pushConstants(DRAW_PUSH)
+                        .build();
                 }
             } else {
                 meshDraw = null;
                 meshDepth = null;
+                idsMesh = null;
+            }
+            if (idsShader != null) {
+                idsShader.close();
             }
         }
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
@@ -360,6 +384,10 @@ public final class MeshletRenderer implements AutoCloseable {
         m.set(U32, o + 172, limits.draws());
         m.set(U32, o + 176, mode);
         m.set(U32, o + 180, camera.orthographic() ? 1 : 0);
+        float[] inverse = camera.inverseViewProjection();
+        for (int i = 0; i < 16; i++) {
+            m.set(F32, o + 192 + 4L * i, inverse[i]);
+        }
     }
 
     /**
@@ -449,9 +477,38 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void drawView(VkCommandBuffer commands, int index, long colorView, long depthView, int width, int height,
         float r, float g, float b, long clusters) {
+        boolean depthOnly = colorView == 0;
+        draw(commands, index, colorView, depthView, width, height, r, g, b, clusters, depthOnly ? drawDepth : draw,
+            depthOnly ? meshDepth : meshDraw);
+    }
+
+    /**
+     * Draws view {@code index}, as culled last, into a visibility buffer: {@code idView} ({@link #ID_FORMAT}) gets
+     * what each pixel shows, cleared to 0 (nothing), and {@code depthView} its depth; after the late phase, drawn over
+     * them. A shading pass then shades each pixel once (engine-render's {@code VisibilityScene}). Needs
+     * {@link VulkanDevice#primitiveIds()}. Allocates nothing.
+     */
+    public void drawIds(VkCommandBuffer commands, int index, long idView, long depthView, int width, int height) {
+        if (idsDraw == null) {
+            throw new IllegalStateException("The device has no primitive IDs in fragment shaders (geometryShader)");
+        }
+        draw(commands, index, idView, depthView, width, height, 0, 0, 0, 0, idsDraw, idsMesh);
+    }
+
+    /** The late phase ({@link #recordLate}) into a visibility buffer ({@link #drawIds}). */
+    public void recordLateIds(VkCommandBuffer commands, long idView, long depthView, int width, int height,
+        int pyramid, int mips) {
+        if (idsDraw == null) {
+            throw new IllegalStateException("The device has no primitive IDs in fragment shaders (geometryShader)");
+        }
+        cull(commands, 1, PHASE_LATE, pyramid, width, height, mips);
+        drawIds(commands, 0, idView, depthView, width, height);
+    }
+
+    private void draw(VkCommandBuffer commands, int index, long colorView, long depthView, int width, int height,
+        float r, float g, float b, long clusters, Pipeline indexed, Pipeline mesh) {
         int v = lists(index);
         boolean late = phaseOf[v] == PHASE_LATE;
-        boolean depthOnly = colorView == 0;
         long viewAddress = view.deviceAddress() + (long) VIEW_BYTES * v;
         long count = drawCount.deviceAddress() + 8L * v + (late ? 4 : 0);
         try (MemoryStack stack = stackPush()) {
@@ -470,7 +527,6 @@ public final class MeshletRenderer implements AutoCloseable {
                 memPutLong(push + 72, pool.attributes().deviceAddress());
                 memPutLong(push + 80, materials.deviceAddress());
                 memPutLong(push + 88, clusters);
-                Pipeline mesh = depthOnly ? meshDepth : meshDraw;
                 mesh.bind(commands);
                 setViewport(commands, stack, width, height);
                 mesh.push(commands, push, DRAW_PUSH);
@@ -487,7 +543,6 @@ public final class MeshletRenderer implements AutoCloseable {
                 memPutLong(push + 56, pool.meshletVertices().deviceAddress());
                 memPutLong(push + 80, materials.deviceAddress());
                 memPutLong(push + 88, clusters);
-                Pipeline indexed = depthOnly ? drawDepth : draw;
                 indexed.bind(commands);
                 setViewport(commands, stack, width, height);
                 indexed.push(commands, push, DRAW_PUSH);
@@ -713,6 +768,11 @@ public final class MeshletRenderer implements AutoCloseable {
         return view;
     }
 
+    /** The geometry pool, for other passes shading the same instances. */
+    GeometryPool pool() {
+        return pool;
+    }
+
     /** The material table's address, for other passes shading the same instances. */
     long materialsAddress() {
         return materials.deviceAddress();
@@ -739,6 +799,12 @@ public final class MeshletRenderer implements AutoCloseable {
             if (meshDraw != null) {
                 meshDraw.close();
                 meshDepth.close();
+            }
+            if (idsDraw != null) {
+                idsDraw.close();
+            }
+            if (idsMesh != null) {
+                idsMesh.close();
             }
             for (GpuBuffer buffer : new GpuBuffer[] {view, instances, chunks, chunkCommand, lists, drawCount, visibility}) {
                 buffer.close();
