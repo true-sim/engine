@@ -151,26 +151,28 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
   meshlets; the chunk count is written straight into an indirect command, so only visible work is launched. Each
   meshlet is tested by the cluster LOD rule (its group's error projected on screen at most the allowed pixels, its
   parent's more), the frustum and its normal cone (whole meshlets facing away).
-- **Two paths, one set of shaders:** with mesh shaders (`VK_EXT_mesh_shader`, enabled where the GPU has it), a task
-  workgroup per chunk culls and launches a mesh workgroup per visible meshlet, which emits its vertices and triangles
-  straight from the pool. Without, a compute pass per chunk lists visible meshlets, an expansion pass writes their
-  triangles into one index buffer, and one `vkCmdDrawIndexedIndirect` draws them. The meshlet test, vertex decoding
-  and shading are one Slang module (`meshlets/common.slang`) both paths import, and they draw the same image
-  (tested). `Path.AUTO` picks mesh shaders where available.
+- **Two paths, one set of shaders:** a compute pass culls each chunk and lists the visible meshlets. With mesh shaders
+  (`VK_EXT_mesh_shader`, enabled where the GPU has it), a mesh workgroup per listed meshlet emits its vertices and
+  triangles straight from the pool. Without, an expansion pass writes their triangles into one index buffer, and one
+  `vkCmdDrawIndexedIndirect` draws them. The meshlet test, vertex decoding and shading are one Slang module
+  (`meshlets/common.slang`) both paths import, and they draw the same image (tested). `Path.AUTO` picks mesh shaders
+  where available. Culling in task shaders instead, a workgroup per chunk, left most lanes idle when instances need
+  only a few meshlets: 0.95 ms against 0.59 ms for 30,000 rocks.
 - **Instance-level LOD range:** before culling meshlets, the instance pass skips every level finer than the first one
   whose error, seen from the instance's nearest point, is within the allowed pixels: the rule could not pick anything
   there. A far instance costs a chunk or two, however detailed its mesh.
 
 Measured with `MeshletBenchmark` (`TRUESIM_BENCHMARK=true`) on an AMD Radeon RX 9070 XT at 1920 x 1080 with 1 pixel
-of error allowed, GPU time of the whole frame (instance pass, culling, drawing):
+of error allowed, GPU time of the whole frame (instance pass, culling, drawing), median per frame of batches of 32
+frames recorded back to back (the paths take turns, so they see the same clocks):
 
 | Scene | Source triangles | Mesh shaders | Indexed | No meshlets: full detail | No meshlets: discrete LODs, CPU culling |
 |---|---|---|---|---|---|
-| 1,000 rocks (82k-triangle mesh) | 81.9 M | 0.10 ms | 0.14 ms | 3.47 ms | 0.15 ms (+0.22 ms CPU) |
-| 3,000 rocks | 246 M | 0.12 ms | 0.08 ms | 10.1 ms | 0.38 ms (+0.35 ms CPU) |
-| 10,000 rocks | 819 M | 0.33 ms | 0.20 ms | 34.0 ms | 1.23 ms (+0.15 ms CPU) |
-| 30,000 rocks | 2.46 billion | 0.95 ms | 0.61 ms | 102 ms | 2.80 ms (+0.47 ms CPU) |
-| terrain at a grazing angle | 2.1 M | 0.08 ms | 0.10 ms | 0.17 ms | (one mesh: full detail) |
+| 1,000 rocks (82k-triangle mesh) | 81.9 M | 0.065 ms | 0.071 ms | 3.49 ms | 0.11 ms (+0.20 ms CPU) |
+| 3,000 rocks | 246 M | 0.076 ms | 0.080 ms | 10.2 ms | 0.30 ms (+0.36 ms CPU) |
+| 10,000 rocks | 819 M | 0.19 ms | 0.19 ms | 33.8 ms | 0.94 ms (+0.15 ms CPU) |
+| 30,000 rocks | 2.46 billion | 0.59 ms | 0.61 ms | 102 ms | 2.80 ms (+0.47 ms CPU) |
+| terrain at a grazing angle | 2.1 M | 0.081 ms | 0.084 ms | 0.17 ms | (one mesh: full detail) |
 
 `TRUESIM_SCREENSHOTS=true ./gradlew :engine-render:test --tests '*Screenshots'` renders these scenes to PNGs under
 `render/build/screenshots`, shaded and colored per meshlet.

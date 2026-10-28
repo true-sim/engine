@@ -315,6 +315,7 @@ class MeshletRendererTest {
             1));
         assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstanceCount(-1));
         assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 0, 1, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, (1 << 22) + 1, 1, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 0, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 65_536, 1));
         // Each limit of the pool: meshes, meshlets, triangles, meshlet vertices, attributes.

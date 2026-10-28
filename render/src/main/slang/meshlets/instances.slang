@@ -1,6 +1,6 @@
 // The instance pass of both geometry paths: one thread per instance tests its bounds against the frustum, and each
-// visible instance appends a chunk per 64 of the meshlets its distance may need. Words 0-2 of the chunk command are an indirect dispatch
-// (or mesh task) command over the chunks; word 3 counts them all, and the command's X is capped at the capacity.
+// visible instance appends a chunk per 64 of the meshlets its distance may need. Words 0-2 of the chunk command are the
+// cull pass's indirect dispatch over the chunks; word 3 counts them all, and the command's X is capped at the capacity.
 import meshlets.common;
 
 struct InstancePush

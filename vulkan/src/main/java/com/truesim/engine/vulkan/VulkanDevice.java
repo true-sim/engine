@@ -115,17 +115,17 @@ public final class VulkanDevice implements AutoCloseable {
                     .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2).pNext(supported14.address()));
             }
             this.features14 = supported14 == null ? Vulkan14Features.NONE : Vulkan14Features.of(supported14);
-            // Mesh shaders where the GPU has them: task and mesh stages, for the meshlet renderer's faster path.
+            // Mesh shaders where the GPU has them, for the meshlet renderer's faster path; task shaders too, if there.
             VkPhysicalDeviceMeshShaderFeaturesEXT meshShading = null;
             if (gpu.supports(VK_EXT_MESH_SHADER_EXTENSION_NAME)) {
                 VkPhysicalDeviceMeshShaderFeaturesEXT query = VkPhysicalDeviceMeshShaderFeaturesEXT.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT);
                 vkGetPhysicalDeviceFeatures2(gpu.handle(), VkPhysicalDeviceFeatures2.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2).pNext(query.address()));
-                if (query.taskShader() && query.meshShader()) {
+                if (query.meshShader()) {
                     meshShading = VkPhysicalDeviceMeshShaderFeaturesEXT.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT)
-                        .taskShader(true)
+                        .taskShader(query.taskShader())
                         .meshShader(true);
                 }
             }
