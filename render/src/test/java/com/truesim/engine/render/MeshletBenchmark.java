@@ -36,6 +36,9 @@ import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
 
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
+import com.truesim.engine.render.shadows.RayTracedShadows;
+import com.truesim.engine.render.shadows.ShadowMapShadows;
+import com.truesim.engine.render.shadows.ShadowedScene;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Images;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -59,6 +62,7 @@ import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_LOAD_OP_CLEAR;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_STORE_OP_STORE;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_INDEX_TYPE_UINT32;
 import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -250,7 +254,8 @@ class MeshletBenchmark {
                 .queryCount(2), null, pool2);
             long queries = pool2.get(0);
             Camera camera = new Camera();
-            Classic classic = new Classic(device);
+            Classic classic = new Classic(device, new int[] {rock, rockLod, ground}, rockMesh, rockLods,
+                terrainMesh);
             float[] placed = new float[30_000 * 8]; // x, y, z, qx, qy, qz, qw, scale
             try {
                 for (int count : new int[] {1000, 3000, 10_000, 30_000}) {
@@ -304,6 +309,7 @@ class MeshletBenchmark {
                         lodCount, lodTriangles[0]);
                 }
                 occlusion(device, renderer, color, depth, queries, period, rock, ground, placed, camera);
+                shadows(device, pool, renderer, color, depth, queries, period, rock, rockMesh, ground, terrainMesh);
                 renderer.setInstance(0, ground, 0, -6, 0, 0, 0, 0, 1, 1, 1, 1);
                 renderer.setInstanceCount(1);
                 renderer.setView(camera.set(0, -0.08, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1,
@@ -397,8 +403,24 @@ class MeshletBenchmark {
     private static final class Classic {
         private final Pipeline pipeline;
         private final GpuBuffer commands;
+        private final GpuBuffer indices;
+        private final java.util.Map<Integer, Integer> indexBases = new java.util.HashMap<>();
 
-        Classic(VulkanDevice device) {
+        /** Draws pool meshes {@code meshes}, as {@code data}: their 32-bit indices, in a buffer of its own. */
+        Classic(VulkanDevice device, int[] meshes, MeshData... data) {
+            long total = 0;
+            for (MeshData mesh : data) {
+                total += 3L * mesh.triangleCount();
+            }
+            java.lang.foreign.MemorySegment all = java.lang.foreign.Arena.ofAuto().allocate(4 * total, 4);
+            long at = 0;
+            for (int i = 0; i < meshes.length; i++) {
+                indexBases.put(meshes[i], (int) at);
+                java.lang.foreign.MemorySegment indexes = data[i].expandIndices();
+                java.lang.foreign.MemorySegment.copy(indexes, 0, all, 4 * at, indexes.byteSize());
+                at += indexes.byteSize() / 4;
+            }
+            indices = GpuBuffer.upload(device, all, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
             try (ShaderModule shaders = ShaderModule.load(device, "shaders/test/classic.spv")) {
                 pipeline = Pipeline.graphics(device)
                     .stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, "vertexMain")
@@ -416,7 +438,7 @@ class MeshletBenchmark {
             java.util.function.IntFunction<com.truesim.scene.assets.mesh.MeshLevel> levelOf) {
             var table = pool.meshTable().memory();
             int vertexBase = table.get(ValueLayout.JAVA_INT, (long) GeometryPool.MESH_ENTRY_BYTES * mesh + 12);
-            int indexBase = table.get(ValueLayout.JAVA_INT, (long) GeometryPool.MESH_ENTRY_BYTES * mesh + 56);
+            int indexBase = indexBases.get(mesh);
             int drawn = 0;
             for (int i = 0; i < count; i++) {
                 var level = levelOf.apply(i);
@@ -469,11 +491,116 @@ class MeshletBenchmark {
                 MemoryUtil.memPutLong(push + 24, pool.positions().deviceAddress());
                 MemoryUtil.memPutLong(push + 32, pool.attributes().deviceAddress());
                 pipeline.push(buffer, push, 40);
-                vkCmdBindIndexBuffer(buffer, pool.indices().handle(), 0, VK_INDEX_TYPE_UINT32);
+                vkCmdBindIndexBuffer(buffer, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
                 if (draws > 0) {
                     vkCmdDrawIndexedIndirect(buffer, commands.handle(), 0, draws, 20);
                 }
                 vkCmdEndRendering(buffer);
+            }
+        }
+    }
+
+    /** The height of {@link #terrain}(1024), placed at the origin, at x, z. */
+    static double terrainHeight(double x, double z) {
+        double gx = x + 512;
+        double gz = z + 512;
+        return 3 * Math.sin(gx / 9.0) * Math.cos(gz / 13.0) + Math.sin(gx * gz / 4000.0);
+    }
+
+    /**
+     * The terrain at {@code groundY} as instance 0, and {@code count} rocks resting on it (half sunk, scaled 0.5 to 3,
+     * turned at random) in a square {@code extent} wide ahead of the camera, from 5 units in front of it.
+     */
+    static void rocksOnTerrain(MeshletRenderer renderer, int rock, int ground, int count, double extent,
+        double groundY) {
+        renderer.setInstance(0, ground, 0, (float) groundY, 0, 0, 0, 0, 1, 1, 1, 1);
+        SplittableRandom random = new SplittableRandom(11);
+        for (int i = 1; i <= count; i++) {
+            double x = random.nextDouble(-extent / 2, extent / 2);
+            double z = random.nextDouble(-extent - 5, -5);
+            float scale = (float) random.nextDouble(0.5, 3);
+            double qx = random.nextDouble(-1, 1);
+            double qy = random.nextDouble(-1, 1);
+            double qz = random.nextDouble(-1, 1);
+            double qw = random.nextDouble(-1, 1);
+            double length = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+            renderer.setInstance(i, rock, (float) x, (float) (groundY + terrainHeight(x, z) + 0.4 * scale), (float) z,
+                (float) (qx / length), (float) (qy / length), (float) (qz / length), (float) (qw / length), scale,
+                scale, scale);
+        }
+        renderer.setInstanceCount(count + 1);
+    }
+
+    /**
+     * The sun's orthographic view of a square {@code extent} wide around the middle of {@link #rocksOnTerrain}'s
+     * rocks, for a {@code size} x {@code size} shadow map.
+     */
+    static Camera sun(double extent, double groundY, int size) {
+        double cz = -extent / 2 - 5;
+        double back = extent;
+        return new Camera().setOrthographic(back * Keys.SUN_X, groundY + back * Keys.SUN_Y, cz + back * Keys.SUN_Z,
+            -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 1, 0, 0, extent * 0.75, extent * 0.75, 2 * back, size, size);
+    }
+
+    /** A shadow map bias of about two texels' depth, for {@link #sun}. */
+    static float sunBias(double extent, int size) {
+        return (float) (2 * (1.5 * extent / size) / (2 * extent));
+    }
+
+    /**
+     * Sun shadows, through the frame graph: 30,000 rocks resting on the terrain, the camera looking down at them, drawn
+     * with occlusion culling; the frame without shadows, with ray-traced shadows (where the device has ray tracing) and
+     * with shadow maps of two sizes, each with the composite.
+     */
+    private static void shadows(VulkanDevice device, GeometryPool pool, MeshletRenderer renderer, GpuImage color,
+        GpuImage depth, long queries, double period, int rock, MeshData rockMesh, int ground, MeshData terrainMesh) {
+        double extent = 600;
+        double groundY = -12;
+        rocksOnTerrain(renderer, rock, ground, 30_000, extent, groundY);
+        Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
+        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+        ExternalImage sceneTarget = new ExternalImage("target", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+            .set(color.handle(), color.view());
+        try (GpuImage shadowed = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+            org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+             RayTracing rayTracing = device.rayTracing() ? new RayTracing(device, pool, 100_000) : null) {
+            ExternalImage shadowedTarget = new ExternalImage("shadowed", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shadowed.handle(), 0);
+            String scene = "30,000 rocks on the terrain, from above";
+            try (FrameGraph graph = new FrameGraph(device, 2)) {
+                graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
+                    .output(Keys.SCENE_COLOR, sceneTarget);
+                System.out.printf(Locale.ROOT, "  %s, no shadows: %.3f ms median%n", scene,
+                    time(device, color, depth, queries, period, BATCH, graph::record));
+            }
+            if (rayTracing != null) {
+                long t0 = System.nanoTime();
+                rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
+                rayTracing.add(ground, terrainMesh, terrainMesh.levels().size() - 1);
+                System.out.printf(Locale.ROOT, "  bottom levels (rock and terrain at full detail, %s vertices): %,d "
+                    + "bytes compacted, built in %.0f ms%n", rayTracing.quantizedVertices() ? "quantized" : "decoded",
+                    rayTracing.bottomLevelBytes(), (System.nanoTime() - t0) / 1e6);
+                try (FrameGraph graph = new FrameGraph(device, 2)) {
+                    graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
+                        .add(new RayTracedShadows(rayTracing, renderer, camera))
+                        .add(new ShadowedScene(0.3f))
+                        .output(Keys.SHADOWED_COLOR, shadowedTarget);
+                    System.out.printf(Locale.ROOT, "  %s, ray-traced shadows: %.3f ms median%n", scene,
+                        time(device, color, depth, queries, period, BATCH, graph::record));
+                }
+            }
+            for (int size : new int[] {2048, 4096}) {
+                try (FrameGraph graph = new FrameGraph(device, 2)) {
+                    graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
+                        .add(new ShadowMapShadows(renderer, camera, sun(extent, groundY, size), size, 1,
+                            sunBias(extent, size)))
+                        .add(new ShadowedScene(0.3f))
+                        .output(Keys.SHADOWED_COLOR, shadowedTarget);
+                    System.out.printf(Locale.ROOT, "  %s, shadow map %d x %d: %.3f ms median%n", scene, size, size,
+                        time(device, color, depth, queries, period, BATCH, graph::record));
+                }
             }
         }
     }

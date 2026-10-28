@@ -109,6 +109,134 @@ class Screenshots {
         }
     }
 
+    /**
+     * Sun shadows on rocks resting on the terrain, ray-traced (where the device can) and shadow-mapped (2048 x 2048
+     * over a 150 unit square): the shadowed images, both masks, close-ups of the masks near the camera, and where they
+     * differ (red: shadowed only by ray tracing, e.g. contact shadows the map misses; blue: only by the map).
+     */
+    @Test
+    void renderShadows() throws IOException {
+        Path out = Files.createDirectories(Path.of("build", "screenshots"));
+        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        try (VulkanInstance instance = VulkanInstance.builder().applicationName("screenshots").surfaces(false)
+                 .build();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 100_000, 4));
+             GpuImage target = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage,
+                 VK_IMAGE_ASPECT_COLOR_BIT);
+             GpuBuffer pixels = GpuBuffer.hostVisible(device, (long) WIDTH * HEIGHT * 4,
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+             MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
+                 1 << 20, 65_535, 80_000_000), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+             RayTracing rayTracing = device.rayTracing() ? new RayTracing(device, pool, 100_000) : null) {
+            com.truesim.scene.assets.mesh.MeshData rockMesh = MeshletBenchmark.rock(6);
+            com.truesim.scene.assets.mesh.MeshData terrainMesh = MeshletBenchmark.terrain(1024);
+            int rock = pool.add(rockMesh);
+            int ground = pool.add(terrainMesh);
+            double extent = 150;
+            double groundY = -12;
+            MeshletBenchmark.rocksOnTerrain(renderer, rock, ground, 3000, extent, groundY);
+            Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
+            renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+            com.truesim.engine.graph.ExternalImage external = new com.truesim.engine.graph.ExternalImage("target",
+                WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
+            int size = 2048;
+            com.truesim.engine.graph.Technique mapped = new com.truesim.engine.render.shadows.ShadowMapShadows(
+                renderer, camera, MeshletBenchmark.sun(extent, groundY, size), size, 1,
+                MeshletBenchmark.sunBias(extent, size));
+            int[] mappedMask;
+            int[] tracedMask = null;
+            try (com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
+                graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
+                    .add(mapped)
+                    .add(new com.truesim.engine.render.shadows.ShadowedScene(0.3f))
+                    .output(Keys.SHADOWED_COLOR, external);
+                write(capture(device, graph, target, pixels), out.resolve("shadows-mapped.png"));
+                graph.removeOutput(Keys.SHADOWED_COLOR).output(Keys.SHADOW_MASK, external);
+                mappedMask = capture(device, graph, target, pixels);
+                write(mappedMask, out.resolve("mask-mapped.png"));
+                if (rayTracing != null) {
+                    rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
+                    rayTracing.add(ground, terrainMesh, terrainMesh.levels().size() - 1);
+                    graph.replace(new com.truesim.engine.render.shadows.RayTracedShadows(rayTracing, renderer,
+                        camera));
+                    tracedMask = capture(device, graph, target, pixels);
+                    write(tracedMask, out.resolve("mask-traced.png"));
+                    graph.removeOutput(Keys.SHADOW_MASK).output(Keys.SHADOWED_COLOR, external);
+                    write(capture(device, graph, target, pixels), out.resolve("shadows-traced.png"));
+                }
+            }
+            if (tracedMask != null) {
+                int[] difference = new int[tracedMask.length];
+                int differ = 0;
+                for (int i = 0; i < difference.length; i++) {
+                    int traced = tracedMask[i] & 0xff;
+                    int map = mappedMask[i] & 0xff;
+                    if (traced + 64 < map) {
+                        difference[i] = 0xff0000ff; // red: shadowed by ray tracing only
+                        differ++;
+                    } else if (map + 64 < traced) {
+                        difference[i] = 0xffff0000; // blue: shadowed by the map only
+                        differ++;
+                    } else {
+                        int gray = traced / 3;
+                        difference[i] = 0xff000000 | gray << 16 | gray << 8 | gray;
+                    }
+                }
+                write(difference, out.resolve("shadows-difference.png"));
+                // Close-ups, 4 x, of the bottom middle: the nearest rocks and their contact shadows.
+                int w = WIDTH / 8;
+                int h = HEIGHT / 8;
+                BufferedImage closeUp = new BufferedImage(8 * w + 8, 4 * h, BufferedImage.TYPE_INT_RGB);
+                for (int y = 0; y < 4 * h; y++) {
+                    for (int x = 0; x < 4 * w; x++) {
+                        int source = (HEIGHT - h - 40 + y / 4) * WIDTH + WIDTH / 2 - w / 2 + x / 4;
+                        int traced = tracedMask[source] & 0xff;
+                        int map = mappedMask[source] & 0xff;
+                        closeUp.setRGB(x, y, traced << 16 | traced << 8 | traced);
+                        closeUp.setRGB(4 * w + 8 + x, y, map << 16 | map << 8 | map);
+                    }
+                }
+                ImageIO.write(closeUp, "png", out.resolve("masks-closeup.png").toFile());
+                System.out.printf("shadows: %,d of %,d pixels differ (ray-traced left, shadow map right in "
+                    + "masks-closeup.png); bottom levels %,d bytes%n", differ, difference.length,
+                    rayTracing.bottomLevelBytes());
+            }
+        }
+    }
+
+    /** Records {@code graph}'s frame and reads {@code target} back, RGBA per texel. */
+    private static int[] capture(VulkanDevice device, com.truesim.engine.graph.FrameGraph graph, GpuImage target,
+        GpuBuffer pixels) {
+        device.submitAndWait(device.graphics(), commands -> {
+            graph.record(commands);
+            try (MemoryStack stack = stackPush()) {
+                VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
+                region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
+                region.imageExtent().set(WIDTH, HEIGHT, 1);
+                vkCmdCopyImageToBuffer(commands, target.handle(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    pixels.handle(), region);
+            }
+        });
+        int[] rgba = new int[WIDTH * HEIGHT];
+        for (int i = 0; i < rgba.length; i++) {
+            rgba[i] = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, i);
+        }
+        return rgba;
+    }
+
+    private static void write(int[] rgba, Path file) throws IOException {
+        BufferedImage image = new BufferedImage(WIDTH, HEIGHT, BufferedImage.TYPE_INT_RGB);
+        for (int y = 0; y < HEIGHT; y++) {
+            for (int x = 0; x < WIDTH; x++) {
+                int p = rgba[y * WIDTH + x];
+                image.setRGB(x, y, (p & 0xff) << 16 | ((p >> 8) & 0xff) << 8 | ((p >> 16) & 0xff));
+            }
+        }
+        ImageIO.write(image, "png", file.toFile());
+    }
+
     private static void save(VulkanDevice device, MeshletRenderer renderer, GpuImage color, GpuImage depth,
         GpuBuffer pixels, Path file) throws IOException {
         device.submitAndWait(device.graphics(), commands -> {

@@ -58,7 +58,9 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     // instance's nearest point, is fine enough (meshlets are stored coarsest first).
     uint end = mesh.meshletCount;
     float scale = maxScale(instance);
-    float distance = length(toWorld(instance, mesh.lodSphere.xyz)) - mesh.lodSphere.w * scale;
+    // Orthographic views: errors do not shrink with distance (as if at distance 1).
+    float distance = view.orthographic != 0 ? 1.0
+        : length(toWorld(instance, mesh.lodSphere.xyz)) - mesh.lodSphere.w * scale;
     if (distance > 0)
     {
         for (uint l = 0; l < mesh.levelCount; l++)

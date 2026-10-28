@@ -1,6 +1,8 @@
 package com.truesim.engine.vulkan;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
 import static org.lwjgl.vulkan.VK10.VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
 import static org.lwjgl.vulkan.VK10.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 import static org.lwjgl.vulkan.VK10.VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -57,6 +59,7 @@ import org.lwjgl.vulkan.VkPipelineLayoutCreateInfo;
 import org.lwjgl.vulkan.VkPushConstantRange;
 import org.lwjgl.vulkan.VkSamplerCreateInfo;
 import org.lwjgl.vulkan.VkWriteDescriptorSet;
+import org.lwjgl.vulkan.VkWriteDescriptorSetAccelerationStructureKHR;
 
 /**
  * The device's one descriptor set, bindless: every sampled and storage image a shader may use sits in a slot of a large
@@ -67,7 +70,8 @@ import org.lwjgl.vulkan.VkWriteDescriptorSet;
  * <ul>
  *   <li>binding 0: sampled images, {@link #SAMPLED_SLOTS} of them, in the shader-read-only layout;</li>
  *   <li>binding 1: samplers, see {@link #LINEAR_CLAMP} and its neighbors;</li>
- *   <li>binding 2: storage images, {@link #STORAGE_SLOTS} of them, in the general layout.</li>
+ *   <li>binding 2: storage images, {@link #STORAGE_SLOTS} of them, in the general layout;</li>
+ *   <li>binding 3, on devices with ray tracing: acceleration structures, {@link #STRUCTURE_SLOTS} of them.</li>
  * </ul>
  *
  * <p>Slots may be written while command buffers using the set are pending (update after bind), as long as those
@@ -80,6 +84,8 @@ public final class Bindless implements AutoCloseable {
     public static final int PUSH_BYTES = 128;
     public static final int SAMPLED_SLOTS = 16_384;
     public static final int STORAGE_SLOTS = 4096;
+    /** Acceleration structure slots (binding 3), on devices with {@link VulkanDevice#rayTracing()}. */
+    public static final int STRUCTURE_SLOTS = 64;
     /** Sampler slots: linear filtering, clamped to the edge. */
     public static final int LINEAR_CLAMP = 0;
     /** Nearest texel, clamped to the edge. */
@@ -95,6 +101,7 @@ public final class Bindless implements AutoCloseable {
     private final long set;
     private final Slots sampled = new Slots(SAMPLED_SLOTS);
     private final Slots storage = new Slots(STORAGE_SLOTS);
+    private final Slots structures = new Slots(STRUCTURE_SLOTS);
     private boolean closed;
 
     Bindless(VulkanDevice device) {
@@ -103,19 +110,26 @@ public final class Bindless implements AutoCloseable {
             samplers[LINEAR_CLAMP] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
             samplers[NEAREST_CLAMP] = sampler(stack, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
             samplers[LINEAR_REPEAT] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
-            VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(3, stack);
+            boolean traced = device.rayTracing();
+            int count = traced ? 4 : 3;
+            VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(count, stack);
             bindings.get(0).binding(0).descriptorType(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).descriptorCount(SAMPLED_SLOTS)
                 .stageFlags(VK_SHADER_STAGE_ALL);
             bindings.get(1).binding(1).descriptorType(VK_DESCRIPTOR_TYPE_SAMPLER).descriptorCount(samplers.length)
                 .stageFlags(VK_SHADER_STAGE_ALL).pImmutableSamplers(stack.longs(samplers));
             bindings.get(2).binding(2).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(STORAGE_SLOTS)
                 .stageFlags(VK_SHADER_STAGE_ALL);
+            if (traced) {
+                bindings.get(3).binding(3).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
+                    .descriptorCount(STRUCTURE_SLOTS).stageFlags(VK_SHADER_STAGE_ALL);
+            }
             int slotFlags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
                 | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
             VkDescriptorSetLayoutBindingFlagsCreateInfo flags = VkDescriptorSetLayoutBindingFlagsCreateInfo
                 .calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO)
-                .pBindingFlags(stack.ints(slotFlags, 0, slotFlags));
+                .pBindingFlags(traced ? stack.ints(slotFlags, 0, slotFlags, slotFlags)
+                    : stack.ints(slotFlags, 0, slotFlags));
             LongBuffer handle = stack.mallocLong(1);
             Vulkan.check(vkCreateDescriptorSetLayout(device.handle(), VkDescriptorSetLayoutCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO)
@@ -129,10 +143,13 @@ public final class Bindless implements AutoCloseable {
                 .pPushConstantRanges(VkPushConstantRange.calloc(1, stack).stageFlags(VK_SHADER_STAGE_ALL)
                     .size(PUSH_BYTES)), null, handle), "Could not create the pipeline layout");
             pipelineLayout = handle.get(0);
-            VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(3, stack);
+            VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(count, stack);
             sizes.get(0).type(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE).descriptorCount(SAMPLED_SLOTS);
             sizes.get(1).type(VK_DESCRIPTOR_TYPE_SAMPLER).descriptorCount(samplers.length);
             sizes.get(2).type(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(STORAGE_SLOTS);
+            if (traced) {
+                sizes.get(3).type(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR).descriptorCount(STRUCTURE_SLOTS);
+            }
             Vulkan.check(vkCreateDescriptorPool(device.handle(), VkDescriptorPoolCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO)
                 .flags(VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT)
@@ -185,6 +202,37 @@ public final class Bindless implements AutoCloseable {
         return slot;
     }
 
+    /**
+     * Puts acceleration structure {@code structure} (a top-level one, to trace rays into) in a free slot of binding 3
+     * and returns the slot; on devices with {@link VulkanDevice#rayTracing()} only.
+     */
+    public int addAccelerationStructure(long structure) {
+        if (!device.rayTracing()) {
+            throw new IllegalStateException("The device has no ray tracing");
+        }
+        int slot = structures.take("acceleration structure");
+        try (MemoryStack stack = stackPush()) {
+            VkWriteDescriptorSetAccelerationStructureKHR info = VkWriteDescriptorSetAccelerationStructureKHR.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR)
+                .pAccelerationStructures(stack.longs(structure));
+            VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(1, stack)
+                .sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
+                .pNext(info.address())
+                .dstSet(set)
+                .dstBinding(3)
+                .dstArrayElement(slot)
+                .descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
+                .descriptorCount(1);
+            vkUpdateDescriptorSets(device.handle(), write, null);
+        }
+        return slot;
+    }
+
+    /** Frees an acceleration structure slot; no pending command buffer may still use it. */
+    public void removeAccelerationStructure(int slot) {
+        structures.free(slot);
+    }
+
     /** Frees a sampled slot; no pending command buffer may still use it. */
     public void removeSampled(int slot) {
         sampled.free(slot);
@@ -197,7 +245,7 @@ public final class Bindless implements AutoCloseable {
 
     /** How many sampled and storage slots are taken. */
     public int slotsInUse() {
-        return sampled.used + storage.used;
+        return sampled.used + storage.used + structures.used;
     }
 
     private void write(int binding, int slot, long view, int layout, int type) {
