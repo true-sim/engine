@@ -2,6 +2,7 @@ package com.truesim.engine.render;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
+import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
@@ -71,9 +72,9 @@ public final class MeshletGeometry implements GeometryProvider {
         if (color != null) {
             pass.write(color, Access.COLOR_ATTACHMENT);
         }
-        LightClusters.Grid clusters = targets.clusters();
-        if (clusters != null) {
-            clusters.readBy(pass, BufferAccess.DRAW_READ);
+        Buffer lights = targets.lights();
+        if (lights != null) {
+            pass.read(lights, BufferAccess.DRAW_READ);
         }
         int view = draw.view();
         int width = draw.width();
@@ -91,10 +92,10 @@ public final class MeshletGeometry implements GeometryProvider {
             case SHADED -> pass.record(ctx -> {
                 if (late) {
                     renderer.recordLate(ctx.commands(), ctx.view(color), ctx.view(depth), width, height,
-                        ctx.sampled(pyramid), pyramid.mips(), address(ctx, clusters));
+                        ctx.sampled(pyramid), pyramid.mips(), address(ctx, lights));
                 } else {
                     renderer.drawView(ctx.commands(), view, ctx.view(color), ctx.view(depth), width, height, clear[0],
-                        clear[1], clear[2], address(ctx, clusters));
+                        clear[1], clear[2], address(ctx, lights));
                 }
             });
             case IDS -> pass.record(ctx -> {
@@ -108,7 +109,7 @@ public final class MeshletGeometry implements GeometryProvider {
         }
     }
 
-    private static long address(PassContext ctx, LightClusters.Grid clusters) {
-        return clusters == null ? 0 : ctx.address(clusters.header());
+    private static long address(PassContext ctx, Buffer lights) {
+        return lights == null ? 0 : ctx.address(lights);
     }
 }

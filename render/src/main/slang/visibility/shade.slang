@@ -16,7 +16,7 @@ struct ShadePush
     uint* meshletVertices;
     uint* meshletTriangles;
     Material* materials;
-    ClusterHeader* clusters;   // null: the sun
+    LightListHeader* lights;   // the frame's light list; null: the sun
     uint ids;                  // storage slot of the IDs (uint2)
     uint color;                // storage slot of the color
     uint width;
@@ -101,5 +101,5 @@ void shadeMain(uint3 id : SV_DispatchThreadID)
     s.color = bary.x * v[0].color + bary.y * v[1].color + bary.z * v[2].color;
     float2 uvX = baryX.x * v[0].uv + baryX.y * v[1].uv + baryX.z * v[2].uv;
     float2 uvY = baryY.x * v[0].uv + baryY.y * v[1].uv + baryY.z * v[2].uv;
-    images[push.color][id.xy] = shadeSurface(view, s, push.materials, uvX - s.uv, uvY - s.uv, push.clusters, id.xy);
+    images[push.color][id.xy] = shadeSurface(view, s, push.materials, uvX - s.uv, uvY - s.uv, push.lights, id.xy);
 }

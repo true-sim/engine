@@ -13,6 +13,11 @@ public final class Keys {
     public static final Key SHADOW_MASK = Key.of("shadow mask");
     /** The scene's color with the sun's shadows. */
     public static final Key SHADOWED_COLOR = Key.of("shadowed scene color");
+    /**
+     * The frame's light list, a buffer: the lights binned for shading (e.g. by {@link ClusteredLights}), read through
+     * {@code lights.slang}'s {@code ILightList}. Without one, shading lights by the sun.
+     */
+    public static final Key LIGHT_LIST = Key.of("light list");
 
     /** Towards the sun, the scene's one light, unit length; the shaders' SUN. */
     public static final float SUN_X = 0.42399915f;

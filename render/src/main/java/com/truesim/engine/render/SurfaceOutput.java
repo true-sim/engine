@@ -9,10 +9,9 @@ import java.util.Objects;
  *
  * @param kind what is written
  * @param colorFormat the color format, for {@link Kind#SHADED}
- * @param lights the lights shading them, through light clusters (null: the sun alone), for {@link Kind#SHADED}
  * @param clear the color behind everything, read when the frame runs, for {@link Kind#SHADED}
  */
-public record SurfaceOutput(Kind kind, int colorFormat, Lights lights, float[] clear) {
+public record SurfaceOutput(Kind kind, int colorFormat, float[] clear) {
 
     /** What a draw writes besides depth. */
     public enum Kind {
@@ -27,16 +26,19 @@ public record SurfaceOutput(Kind kind, int colorFormat, Lights lights, float[] c
 
     /** Depth only. */
     public static SurfaceOutput depth() {
-        return new SurfaceOutput(Kind.DEPTH, 0, null, null);
+        return new SurfaceOutput(Kind.DEPTH, 0, null);
     }
 
-    /** Shaded color in {@code colorFormat}, lit by {@code lights} (null: the sun), cleared to {@code clear} (r, g, b). */
-    public static SurfaceOutput shaded(int colorFormat, Lights lights, float[] clear) {
-        return new SurfaceOutput(Kind.SHADED, colorFormat, lights, Objects.requireNonNull(clear, "clear"));
+    /**
+     * Shaded color in {@code colorFormat}, cleared to {@code clear} (r, g, b), lit by the frame's
+     * {@link Keys#LIGHT_LIST} if there is one, else by the sun.
+     */
+    public static SurfaceOutput shaded(int colorFormat, float[] clear) {
+        return new SurfaceOutput(Kind.SHADED, colorFormat, Objects.requireNonNull(clear, "clear"));
     }
 
     /** IDs ({@link MeshletRenderer#ID_FORMAT}): what each pixel shows, for shading afterwards. */
     public static SurfaceOutput ids() {
-        return new SurfaceOutput(Kind.IDS, MeshletRenderer.ID_FORMAT, null, null);
+        return new SurfaceOutput(Kind.IDS, MeshletRenderer.ID_FORMAT, null);
     }
 }

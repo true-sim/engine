@@ -8,6 +8,7 @@ import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
+import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
@@ -24,7 +25,7 @@ import org.lwjgl.system.MemoryStack;
  * The scene shaded through a visibility buffer: provides {@link Keys#SCENE_COLOR} and {@link Keys#SCENE_DEPTH} from a
  * {@link SceneDraw} of IDs (instance, meshlet, triangle), then shades every pixel once in a compute pass that rebuilds
  * its triangle through the same vertex stage, intersects the pixel's ray with it, and lights it as
- * {@link ClusteredForwardShading} does. Shading no longer grows with overdraw; triangles are read twice.
+ * {@link ClusteredForwardShading} does, by the frame's {@link Keys#LIGHT_LIST} (the sun without one). Shading no longer grows with overdraw; triangles are read twice.
  * {@code graph.replace} swaps the two.
  *
  * <p>The color format must allow storage images (not sRGB). Needs
@@ -43,7 +44,6 @@ public final class VisibilityBufferShading implements Technique {
     private final int depthFormat;
     private final float[] clear = new float[3];
     private boolean occlusion = true;
-    private Lights lights;
 
     public VisibilityBufferShading(SceneGeometry geometry, int width, int height, int colorFormat, int depthFormat) {
         this.geometry = Objects.requireNonNull(geometry, "geometry");
@@ -72,12 +72,6 @@ public final class VisibilityBufferShading implements Technique {
         return this;
     }
 
-    /** Shades with {@code lights} (null, the default: the sun alone); the graph rebuilds when it changes. */
-    public VisibilityBufferShading lights(Lights lights) {
-        this.lights = lights;
-        return this;
-    }
-
     @Override
     public List<Key> provides() {
         return List.of(Keys.SCENE_COLOR, Keys.SCENE_DEPTH);
@@ -93,22 +87,21 @@ public final class VisibilityBufferShading implements Technique {
         });
         SceneDraw.Targets targets = g.request(new SceneDraw(geometry, 0, null, SurfaceOutput.ids(), depthFormat,
             width, height, occlusion));
-        LightClusters.Grid clusters = lights == null ? null
-            : g.request(new LightClusters(lights, renderer, width, height));
+        Buffer lights = g.optionalBuffer(Keys.LIGHT_LIST);
         Image ids = targets.color();
         Image color = g.create("scene color", width, height, colorFormat);
         GraphBuilder.PassBuilder pass = g.pass("visibility shading")
             .read(ids, Access.STORAGE_READ)
             .write(color, Access.STORAGE_WRITE);
-        if (clusters != null) {
-            clusters.readBy(pass, BufferAccess.STORAGE_READ);
+        if (lights != null) {
+            pass.read(lights, BufferAccess.STORAGE_READ);
         }
-        pass.record(ctx -> shade(ctx, shade, ids, color, clusters));
+        pass.record(ctx -> shade(ctx, shade, ids, color, lights));
         g.provide(Keys.SCENE_COLOR, color);
         g.provide(Keys.SCENE_DEPTH, targets.depth());
     }
 
-    private void shade(PassContext ctx, Pipeline pipeline, Image ids, Image color, LightClusters.Grid clusters) {
+    private void shade(PassContext ctx, Pipeline pipeline, Image ids, Image color, Buffer lights) {
         GeometryPool pool = renderer.pool();
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(16, PUSH_BYTES);
@@ -121,7 +114,7 @@ public final class VisibilityBufferShading implements Technique {
             memPutLong(push + 48, pool.meshletVertices().deviceAddress());
             memPutLong(push + 56, pool.meshletTriangles().deviceAddress());
             memPutLong(push + 64, renderer.materialsAddress());
-            memPutLong(push + 72, clusters == null ? 0 : ctx.address(clusters.header()));
+            memPutLong(push + 72, lights == null ? 0 : ctx.address(lights));
             memPutInt(push + 80, ctx.storage(ids));
             memPutInt(push + 84, ctx.storage(color));
             memPutInt(push + 88, width);

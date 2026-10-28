@@ -1,6 +1,7 @@
 package com.truesim.engine.render;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Request;
@@ -37,10 +38,10 @@ public record SceneDraw(SceneGeometry geometry, int view, Camera camera, Surface
     }
 
     /**
-     * What the draw wrote: {@code depth}, {@code color} (shaded color or IDs; null for depth only), and the light
-     * {@code clusters} shading used (null without lights).
+     * What the draw wrote: {@code depth}, {@code color} (shaded color or IDs; null for depth only), and the light list
+     * shading used ({@link Keys#LIGHT_LIST}; null without one, or without shading).
      */
-    public record Targets(Image depth, Image color, LightClusters.Grid clusters) {
+    public record Targets(Image depth, Image color, Buffer lights) {
     }
 
     @Override
@@ -53,10 +54,8 @@ public record SceneDraw(SceneGeometry geometry, int view, Camera camera, Surface
             case SHADED -> g.create(name + " color", width, height, output.colorFormat());
             case IDS -> g.create(name + " ids", width, height, output.colorFormat());
         };
-        LightClusters.Grid clusters = output.lights() == null ? null
-            : g.request(new LightClusters(output.lights(), geometry.provider(MeshletGeometry.class).renderer(),
-                width, height));
-        Targets targets = new Targets(depth, color, clusters);
+        Buffer lights = output.kind() == SurfaceOutput.Kind.SHADED ? g.optionalBuffer(Keys.LIGHT_LIST) : null;
+        Targets targets = new Targets(depth, color, lights);
         boolean load = false;
         for (GeometryProvider provider : geometry.providers()) {
             provider.drawFirst(g, this, targets, load);

@@ -9,13 +9,13 @@ import java.util.Objects;
 
 /**
  * The scene shaded as it is drawn: provides {@link Keys#SCENE_COLOR} and {@link Keys#SCENE_DEPTH} from one
- * {@link SceneDraw} of the camera's view with {@link SurfaceOutput#shaded shaded} output, each fragment lit by its
- * cluster's lights. Simple, and each draw shades its own fragments, covered later or not. {@code graph.replace} swaps
+ * {@link SceneDraw} of the camera's view with {@link SurfaceOutput#shaded shaded} output, each fragment lit by the
+ * lights the frame's {@link Keys#LIGHT_LIST} gives it (the sun without one). Simple, and each draw shades its own fragments, covered later or not. {@code graph.replace} swaps
  * it for another shading technique ({@link VisibilityBufferShading}).
  *
  * <pre>{@code
- * graph.add(new ClusteredForwardShading(geometry, 1920, 1080, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT)
- *     .lights(lights));
+ * graph.add(new ClusteredForwardShading(geometry, 1920, 1080, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT))
+ *     .add(new ClusteredLights(lights, camera, 1920, 1080));
  * }</pre>
  */
 public final class ClusteredForwardShading implements Technique {
@@ -27,7 +27,6 @@ public final class ClusteredForwardShading implements Technique {
     private final int depthFormat;
     private final float[] clear = new float[3];
     private boolean occlusion = true;
-    private Lights lights;
 
     /** The providers' pipelines must have been made for {@code colorFormat} and {@code depthFormat}. */
     public ClusteredForwardShading(SceneGeometry geometry, int width, int height, int colorFormat, int depthFormat) {
@@ -52,12 +51,6 @@ public final class ClusteredForwardShading implements Technique {
         return this;
     }
 
-    /** Shades with {@code lights} (null, the default: the sun alone); the graph rebuilds when it changes. */
-    public ClusteredForwardShading lights(Lights lights) {
-        this.lights = lights;
-        return this;
-    }
-
     @Override
     public List<Key> provides() {
         return List.of(Keys.SCENE_COLOR, Keys.SCENE_DEPTH);
@@ -67,7 +60,7 @@ public final class ClusteredForwardShading implements Technique {
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
         SceneDraw.Targets targets = g.request(new SceneDraw(geometry, 0, null,
-            SurfaceOutput.shaded(colorFormat, lights, clear), depthFormat, width, height, occlusion));
+            SurfaceOutput.shaded(colorFormat, clear), depthFormat, width, height, occlusion));
         g.provide(Keys.SCENE_COLOR, targets.color());
         g.provide(Keys.SCENE_DEPTH, targets.depth());
     }

@@ -243,21 +243,28 @@ try (Textures textures = new Textures(device); Materials materials = new Materia
   coordinates and vertex colors from the pool's attributes.
 
 
-### Lights and clusters
+### Lights and light lists
 
-`Lights` holds point, spot and directional lights, camera-relative like instances, and a shadow table.
-`LightClusters` bins them for shading many lights: the camera's frustum is cut into tiles of 64 pixels and 24
-exponential depth slices, and a compute pass on the async queue gives each cluster the lights whose sphere reaches its
-box (lights read in batches of 64 into shared memory; directional lights reach every cluster). It is a shared request,
-so every technique shading the view gets the same clusters, built once per frame into transient buffers.
+`Lights` holds point, spot and directional lights, camera-relative like instances, and a shadow table. A **light
+binning** technique turns them into the frame's light list, `Keys.LIGHT_LIST` (a buffer). Shading techniques use it
+if the graph has one, and otherwise light by the sun; `graph.replace` swaps one binning for another.
+
+`ClusteredLights` is the first binning: the camera's frustum is cut into tiles of 64 pixels and 24 exponential depth
+slices, and a compute pass on the async queue gives each cluster the lights whose sphere reaches its box (lights read
+in batches of 64 into shared memory; directional lights reach every cluster).
 
 ```java
 lights.directional(0, -0.4f, -0.8f, -0.3f, 3, 3, 3).shadows(0, 0, 4); // the sun, four cascades: entries 0 to 3
 lights.point(1, x, y, z, 10, 20, 15, 10);                              // range 10
 lights.setCount(2);
-LightClusters.Grid clusters = g.request(new LightClusters(lights, renderer, width, height));
+graph.add(new ClusteredLights(lights, camera, width, height));       // provides Keys.LIGHT_LIST
 ```
 
+- **One interface for every layout:** a light list is one buffer, a common header (layout, lights, shadows, the
+  layout's lists and numbers) then the layout's data. Shading reads it through `lights.slang`'s `ILightList` (the
+  lights reaching one surface: `count()`, `light(i)`), with a generic light loop over any implementation.
+  `ClusterLightList` implements it; a new layout (tiles, depth bins) is a struct implementing it and a case in
+  `lightList()`'s dispatch on the header's layout.
 - **Shadows, single or many per light:** a light names consecutive shadow table entries (matrix, depth map slot, bias,
   size). A spot light uses one; a directional light one per cascade, chosen by view depth; a point light six cube
   faces, chosen by direction. `lights.slang` picks the entry and filters it (3 x 3 PCF), so any technique drawing
@@ -281,8 +288,9 @@ Drawing and shading are separate, and each is swappable:
 ```java
 SceneGeometry geometry = SceneGeometry.meshlets(renderer);
 geometry.setView(0, camera, 1, MeshletRenderer.MODE_LIT);
-graph.add(new ClusteredForwardShading(geometry, width, height, colorFormat, depthFormat).lights(lights));
-graph.replace(new VisibilityBufferShading(geometry, width, height, colorFormat, depthFormat).lights(lights));
+graph.add(new ClusteredForwardShading(geometry, width, height, colorFormat, depthFormat))
+    .add(new ClusteredLights(lights, camera, width, height));
+graph.replace(new VisibilityBufferShading(geometry, width, height, colorFormat, depthFormat));
 ```
 
 - `ClusteredForwardShading` shades as the meshlets are drawn, so pixels covered later are shaded too.
@@ -290,7 +298,7 @@ graph.replace(new VisibilityBufferShading(geometry, width, height, colorFormat, 
   once in a compute pass. That pass rebuilds the triangle through the same vertex stage, intersects the pixel's ray
   with it for barycentrics and texture gradients, and uses the same shading. Needs `VulkanDevice.primitiveIds()`.
 
-Both light each pixel with its cluster's lights (and the sky), or with the sun without lights, and draw the same image
+Both light each pixel with the light list's lights for it (and the sky), or with the sun without a light list, and draw the same image
 (tested; the screenshots differ by 0.014 of 255 on average). GPU time of the whole frame, 1920 x 1080:
 
 | Scene | Clustered forward | Visibility buffer |

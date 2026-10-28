@@ -42,7 +42,7 @@ import org.lwjgl.vulkan.VkBufferCopy;
  * Light clustering on the GPU against the same boxes computed on the CPU: every light reaching a cluster's box is in
  * it, none that stays clearly away is, directional lights are everywhere, and full clusters keep their first lights.
  */
-class LightClustersTest {
+class ClusteredLightsTest {
 
     private static final int WIDTH = 256;
     private static final int HEIGHT = 128;
@@ -103,7 +103,7 @@ class LightClustersTest {
             lights.point(i, 0.5f, 0.5f, -50, 0.2f, 1, 1, 1);
         }
         lights.setCount(16);
-        LightClusters request = new LightClusters(lights, renderer, WIDTH, HEIGHT, 64, 8, 0.5f, 100, 8);
+        ClusteredLights request = new ClusteredLights(lights, camera, WIDTH, HEIGHT, 64, 8, 0.5f, 100, 8);
         assertThat(request.clusters()).isEqualTo(4 * 2 * 8);
         int[][] gpu = run(request);
         float[] m = camera.viewProjection();
@@ -158,16 +158,17 @@ class LightClustersTest {
 
     @Test
     void misuseIsReported() {
-        assertThatIllegalArgumentException().isThrownBy(() -> new LightClusters(lights, renderer, 0, 1));
-        assertThatIllegalArgumentException().isThrownBy(() -> new LightClusters(lights, renderer, 1, 1, 64, 8, 1, 1,
+        Camera any = new Camera();
+        assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, any, 0, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, any, 1, 1, 64, 8, 1, 1,
             8));
-        assertThatIllegalArgumentException().isThrownBy(() -> new LightClusters(lights, renderer, 1, 1, 64, 8, 0, 1,
+        assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, any, 1, 1, 64, 8, 0, 1,
             8));
-        assertThatIllegalArgumentException().isThrownBy(() -> new LightClusters(lights, renderer, 1, 1, 0, 8, 0.1f, 1,
+        assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, any, 1, 1, 0, 8, 0.1f, 1,
             8));
-        assertThatIllegalArgumentException().isThrownBy(() -> new LightClusters(lights, renderer, 1, 1, 64, 0, 0.1f,
+        assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, any, 1, 1, 64, 0, 0.1f,
             1, 8));
-        assertThatIllegalArgumentException().isThrownBy(() -> new LightClusters(lights, renderer, 1, 1, 64, 8, 0.1f,
+        assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, any, 1, 1, 64, 8, 0.1f,
             1, 0));
         assertThatIllegalArgumentException().isThrownBy(() -> new Lights(device, 0, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> new Lights(device, 1, 0));
@@ -216,19 +217,17 @@ class LightClustersTest {
         return Math.sqrt(dot(a, a));
     }
 
-    /** Clusters the lights through a graph and reads them back: counts per cluster, slots, and {overflow}. */
-    private int[][] run(LightClusters request) {
-        int clusters = request.clusters();
-        long headerBytes = LightClusters.HEADER_BYTES + 4L * clusters;
-        long indexBytes = 4L * clusters * request.maxPerCluster();
+    /** Clusters the lights through a graph and reads the light list back: counts per cluster, slots, and {overflow}. */
+    private int[][] run(ClusteredLights clustered) {
+        int clusters = clustered.clusters();
+        long bytes = ClusteredLights.HEADER_BYTES + 4L * clusters * (1 + clustered.maxPerCluster());
         int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        try (GpuBuffer header = GpuBuffer.hostVisible(device, headerBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-             GpuBuffer indices = GpuBuffer.hostVisible(device, indexBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        try (GpuBuffer list = GpuBuffer.hostVisible(device, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
              GpuImage target = new GpuImage(device, 4, 4, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
              FrameGraph graph = new FrameGraph(device, 2)) {
             ExternalImage output = new ExternalImage("target", 4, 4, VK_FORMAT_R8G8B8A8_UNORM, usage,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
-            graph.add(new Technique() {
+            graph.add(clustered).add(new Technique() {
                 @Override
                 public List<Key> provides() {
                     return List.of(OUT);
@@ -236,13 +235,9 @@ class LightClustersTest {
 
                 @Override
                 public void build(GraphBuilder g) {
-                    LightClusters.Grid grid = g.request(request);
-                    g.request(request); // shared: one clustering pass
-                    grid.readBy(g.pass("read back"), BufferAccess.TRANSFER_SRC).sideEffects()
-                        .record(ctx -> {
-                            copy(ctx.commands(), ctx.buffer(grid.header()), header.handle(), headerBytes);
-                            copy(ctx.commands(), ctx.buffer(grid.indices()), indices.handle(), indexBytes);
-                        });
+                    com.truesim.engine.graph.Buffer lights = g.requireBuffer(Keys.LIGHT_LIST);
+                    g.pass("read back").read(lights, BufferAccess.TRANSFER_SRC).sideEffects()
+                        .record(ctx -> copy(ctx.commands(), ctx.buffer(lights), list.handle(), bytes));
                     Image image = g.create("out", 4, 4, VK_FORMAT_R8G8B8A8_UNORM);
                     g.pass("fill").write(image, Access.TRANSFER_DST).record(ctx -> { });
                     g.provide(OUT, image);
@@ -253,13 +248,14 @@ class LightClustersTest {
             int[][] out = new int[3][];
             out[0] = new int[clusters];
             for (int c = 0; c < clusters; c++) {
-                out[0][c] = header.memory().get(ValueLayout.JAVA_INT, LightClusters.HEADER_BYTES + 4L * c);
+                out[0][c] = list.memory().get(ValueLayout.JAVA_INT, ClusteredLights.HEADER_BYTES + 4L * c);
             }
-            out[1] = new int[clusters * request.maxPerCluster()];
+            out[1] = new int[clusters * clustered.maxPerCluster()];
+            long slots = ClusteredLights.HEADER_BYTES + 4L * clusters;
             for (int i = 0; i < out[1].length; i++) {
-                out[1][i] = indices.memory().getAtIndex(ValueLayout.JAVA_INT, i);
+                out[1][i] = list.memory().get(ValueLayout.JAVA_INT, slots + 4L * i);
             }
-            out[2] = new int[] {header.memory().get(ValueLayout.JAVA_INT, 28)};
+            out[2] = new int[] {list.memory().get(ValueLayout.JAVA_INT, 8)};
             return out;
         }
     }

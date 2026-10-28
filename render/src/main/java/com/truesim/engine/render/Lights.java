@@ -14,7 +14,7 @@ import java.util.Objects;
 
 /**
  * The scene's lights, as shaders read them (engine-render's {@code lights.slang}): point, spot and directional lights,
- * camera-relative like instances, and the shadow maps they cast through. {@link LightClusters} bins them per cluster
+ * camera-relative like instances, and the shadow maps they cast through. {@link ClusteredLights} bins them per cluster
  * of the view for shading.
  *
  * <p>Shadows: a light names a range of consecutive entries of the shadow table, each a shadow map with its transform.
