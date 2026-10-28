@@ -15,7 +15,8 @@ dependencies {
 
 // The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.
 tasks.test {
-    if (providers.environmentVariable("TRUESIM_BENCHMARK").orNull == "true") {
+    if (providers.environmentVariable("TRUESIM_BENCHMARK").orNull == "true"
+        || providers.environmentVariable("TRUESIM_SCREENSHOTS").orNull == "true") {
         maxHeapSize = "4g"
         extensions.configure<JacocoTaskExtension> { isEnabled = false } // measure the code, not its coverage probes
     }
