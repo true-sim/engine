@@ -38,6 +38,7 @@ import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.render.shadows.RayTracedShadows;
 import com.truesim.engine.render.shadows.ShadowMapShadows;
+import com.truesim.engine.render.shadows.CascadedShadowMaps;
 import com.truesim.engine.render.shadows.InlineRayShadows;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.vulkan.GpuImage;
@@ -231,7 +232,7 @@ class MeshletBenchmark {
              GpuImage depth = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_D32_SFLOAT,
                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
              MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
-                 1 << 20, 65_535, 80_000_000, 3), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+                 1 << 20, 65_535, 80_000_000, 4), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
              MemoryStack stack = stackPush()) {
             MeshData rockMesh = rock(6);
             MeshData terrainMesh = terrain(1024);
@@ -636,12 +637,15 @@ class MeshletBenchmark {
         try (GpuImage shaded = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
             org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
              Lights lights = new Lights(device, 1, 1);
+             Lights cascadeLights = new Lights(device, 1, 3);
              RayTracing rayTracing = device.rayTracing() ? new RayTracing(device, pool, 100_000) : null) {
             ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shaded.handle(), 0);
             lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
             ClusteredLights sun = new ClusteredLights(lights, camera, WIDTH, HEIGHT);
+            cascadeLights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
+            ClusteredLights cascadeSun = new ClusteredLights(cascadeLights, camera, WIDTH, HEIGHT);
             if (rayTracing != null) {
                 long t0 = System.nanoTime();
                 rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
@@ -665,6 +669,11 @@ class MeshletBenchmark {
                         shading, sun, new ShadowMapShadows(geometry, lights, 0, 0, sun(extent, groundY, size), size, 1,
                             sunBias(extent, size)));
                 }
+                CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, cascadeLights, 0, 0, camera, 3, 2048, 1,
+                    300);
+                cascades.update(0, 0, 0);
+                time(device, color, depth, queries, period, scene + ", 3 cascades of 2048 x 2048 to 300 units", target,
+                    shading, cascadeSun, cascades);
                 if (rayTracing != null) {
                     time(device, color, depth, queries, period, scene + ", ray-traced mask", target, shading, sun,
                         new RayTracedShadows(rayTracing, renderer, lights, 0, 0, forward ? depthOnly : ids, camera));

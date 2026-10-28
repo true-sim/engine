@@ -131,7 +131,18 @@ public final class Lights implements AutoCloseable {
      * {@code bias}; a cascade covers view depths up to {@code split} (others: any). Allocates nothing.
      */
     public Lights shadowMap(int entry, float[] toShadow, int map, int size, float bias, float split) {
+        return shadowMap(entry, toShadow, map, size, bias, split, 0);
+    }
+
+    /**
+     * Like {@link #shadowMap(int, float[], int, int, float, float)}, looked up from the surface moved {@code normalOffset}
+     * units along its normal (about a texel's size in the world): against acne where the light grazes, beyond what
+     * the depth bias does. Allocates nothing.
+     */
+    public Lights shadowMap(int entry, float[] toShadow, int map, int size, float bias, float split,
+        float normalOffset) {
         MemorySegment m = shadow(entry, SHADOW_MAP, PCF, map);
+        m.set(F32, 88, normalOffset);
         for (int i = 0; i < 16; i++) {
             m.set(F32, 4L * i, toShadow[i]);
         }
@@ -177,6 +188,14 @@ public final class Lights implements AutoCloseable {
     private MemorySegment light(int index) {
         Objects.checkIndex(index, capacity);
         return lights.memory().asSlice((long) LIGHT_BYTES * index, LIGHT_BYTES);
+    }
+
+    /** Light {@code index}'s direction (where it shines; unit length) into {@code out}. Allocates nothing. */
+    public void direction(int index, double[] out) {
+        MemorySegment m = light(index);
+        out[0] = m.get(F32, 32);
+        out[1] = m.get(F32, 36);
+        out[2] = m.get(F32, 40);
     }
 
     /** How many lights, from 0, shine. */
