@@ -23,7 +23,8 @@ tasks.test {
 }
 
 // The bindless storage images are declared twice on one binding, as float and as unsigned integer images: Slang's
-// overlap check (E39001) would reject that.
+// overlap check (E39001) would reject that. Indexing them per pixel (NonUniformResourceIndex) adds SPIR-V capabilities
+// beyond the base profile, which Slang adds itself but reports (E41012).
 tasks.withType<com.truesim.build.slang.CompileSlang>().configureEach {
-    arguments.addAll("-warnings-disable", "39001")
+    arguments.addAll("-warnings-disable", "39001,41012")
 }
