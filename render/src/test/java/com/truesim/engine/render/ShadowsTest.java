@@ -1,6 +1,7 @@
 package com.truesim.engine.render;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
@@ -18,6 +19,7 @@ import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.render.shadows.RayTracedShadows;
 import com.truesim.engine.render.shadows.ShadowMapShadows;
+import com.truesim.engine.render.shadows.CascadedShadowMaps;
 import com.truesim.engine.render.shadows.InlineRayShadows;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
@@ -68,7 +70,7 @@ class ShadowsTest {
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 12, 64, 4));
         quadMesh = MeshletRendererTest.grid(1, 2, false, VertexFormat.POSITIONS_ONLY);
         quad = pool.add(quadMesh);
-        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12, 3),
+        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12, 4),
             VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
         // The camera at the origin looks down at the floor (y = -5, around z = -5); the quad floats at y = -3.
         renderer.setInstance(0, quad, 0, -5, -5, 0, 0, 0, 1, 10, 1, 10);
@@ -229,6 +231,48 @@ class ShadowsTest {
             frame(colorTarget, 4);
             byte[] color = frame(colorTarget, 4);
             assertThat(floor(color, this, shadow[0], shadow[1])).isGreaterThan(floor(color, this, 3, -2) / 2);
+        }
+    }
+
+    @Test
+    void cascadesShadowNearAndFar() {
+        // A second quad, farther out on a longer floor: its shadow falls in a farther cascade.
+        renderer.setInstance(0, quad, 0, -5, -10, 0, 0, 0, 1, 10, 1, 15);
+        renderer.setInstance(2, quad, 0, -3, -14, 0, 0, 0, 1, 1, 1, 1);
+        renderer.setInstanceCount(3);
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
+        try (Lights lights = new Lights(device, 1, 4)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, 1024, 1, 40);
+            cascades.update(0, 0, 0);
+            assertThat(cascades.split(0)).isLessThan(cascades.split(1)).isLessThan(cascades.split(2));
+            assertThat(cascades.split(2)).isCloseTo(40, org.assertj.core.data.Offset.offset(1e-3f));
+            double[] near = shadowOf(sun[0], sun[1], sun[2]);
+            double[] run = shadowOf(sun[0], sun[1], sun[2]);
+            double[] far = {run[0], run[1] - 9}; // the far quad is 9 farther along z
+            for (com.truesim.engine.graph.Technique shading : new com.truesim.engine.graph.Technique[] {
+                new ClusteredForwardShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT),
+                new VisibilityBufferShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)}) {
+                byte[] color = expectShadow(shading, "cascades, near", near,
+                    new ClusteredLights(lights, camera, SIZE, SIZE), cascades);
+                int lit = floor(color, this, 3, -2);
+                assertThat(floor(color, this, far[0], far[1])).as("cascades, far").isLessThan(lit / 2);
+                assertThat(graph.passes()).contains("meshlet depth, view 1", "meshlet depth, view 2",
+                    "meshlet depth, view 3").containsOnlyOnce("meshlet culling");
+            }
+            // The cameras of the cascades grow with their slices.
+            float[] first = cascades.camera(0).viewProjection();
+            float[] last = cascades.camera(2).viewProjection();
+            assertThat(Math.abs(first[0]) + Math.abs(first[4]) + Math.abs(first[8]))
+                .isGreaterThan(Math.abs(last[0]) + Math.abs(last[4]) + Math.abs(last[8]));
+            cascades.lambda(0).bias(2).casters(50).update(10.3, 0, 4.7);
+            assertThat(cascades.split(0)).isCloseTo((float) (0.1 + 39.9 / 3),
+                org.assertj.core.data.Offset.offset(1e-3f));
+            assertThatIllegalArgumentException().isThrownBy(() -> new CascadedShadowMaps(geometry, lights, 0, 0, camera,
+                4, 1024, 1, 40));
+            assertThatIllegalArgumentException().isThrownBy(() -> new CascadedShadowMaps(geometry, lights, 0, 0, camera,
+                1, 1024, 0, 40));
         }
     }
 

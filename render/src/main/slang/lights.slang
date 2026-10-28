@@ -41,7 +41,7 @@ public struct Shadow
     public uint size;              // maps: texels across
     public float bias;             // maps: in the map's depth units
     public float split;            // cascades: the view depth this cascade reaches
-    public float2 params;          // masks: (channel, 0); rays: (offset per unit of distance, 0)
+    public float2 params;          // maps: (normal offset, 0); masks: (channel, 0); rays: (offset per unit of distance, 0)
 };
 
 /** Shadow kinds. */
@@ -150,12 +150,16 @@ public interface IShadow
     float visibility(Shadow s, ShadowQuery q);
 }
 
-/** A depth map, 3 x 3 percentage-closer filtering; outside the map, lit. */
+/**
+ * A depth map, 3 x 3 percentage-closer filtering; outside the map, lit. Looked up from the surface moved along its
+ * normal by the entry's normal offset (about a texel), against acne where the light grazes.
+ */
 public struct PcfShadow : IShadow
 {
     public float visibility(Shadow s, ShadowQuery q)
     {
-        float4 clip = mul(s.toShadow, float4(q.world, 1));
+        float3 normal = dot(q.normal, q.toLight) < 0 ? -q.normal : q.normal;
+        float4 clip = mul(s.toShadow, float4(q.world + normal * s.params.x, 1));
         float3 p = clip.xyz / clip.w;
         float2 uv = p.xy * 0.5 + 0.5;
         if (any(uv < 0) || any(uv > 1) || p.z < 0 || p.z > 1)

@@ -128,7 +128,7 @@ class Screenshots {
              GpuBuffer pixels = GpuBuffer.hostVisible(device, (long) WIDTH * HEIGHT * 4,
                  VK_BUFFER_USAGE_TRANSFER_DST_BIT);
              MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
-                 1 << 20, 65_535, 20_000_000, 2), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+                 1 << 20, 65_535, 20_000_000, 4), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
              RayTracing rayTracing = device.rayTracing() ? new RayTracing(device, pool, 100_000) : null) {
             com.truesim.scene.assets.mesh.MeshData rockMesh = MeshletBenchmark.rock(6);
             com.truesim.scene.assets.mesh.MeshData terrainMesh = MeshletBenchmark.terrain(1024);
@@ -146,7 +146,8 @@ class Screenshots {
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
             int[] mapped;
             int[] traced = null;
-            try (Lights lights = new Lights(device, 1, 1);
+            int[] cascaded;
+            try (Lights lights = new Lights(device, 1, 3);
                  com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
                 lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
                 com.truesim.engine.graph.Technique map = new com.truesim.engine.render.shadows.ShadowMapShadows(
@@ -158,6 +159,16 @@ class Screenshots {
                 capture(device, graph, target, pixels); // the first frame's late phase draws everything
                 mapped = capture(device, graph, target, pixels);
                 write(mapped, out.resolve("shadows-mapped.png"));
+                // Three cascades of 2048 x 2048 over the 150 units ahead instead of one map over all of it.
+                com.truesim.engine.render.shadows.CascadedShadowMaps cascades =
+                    new com.truesim.engine.render.shadows.CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, size, 1,
+                        150);
+                cascades.update(0, 0, 0);
+                graph.remove(map).add(cascades);
+                capture(device, graph, target, pixels);
+                cascaded = capture(device, graph, target, pixels);
+                write(cascaded, out.resolve("shadows-cascaded.png"));
+                graph.remove(cascades).add(map);
                 if (rayTracing != null) {
                     rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
                     rayTracing.add(ground, terrainMesh, terrainMesh.levels().size() - 1);
@@ -189,16 +200,17 @@ class Screenshots {
                 // Close-ups, 4 x, of the bottom middle: the nearest rocks and their contact shadows.
                 int w = WIDTH / 8;
                 int h = HEIGHT / 8;
-                BufferedImage closeUp = new BufferedImage(8 * w + 8, 4 * h, BufferedImage.TYPE_INT_RGB);
+                BufferedImage closeUp = new BufferedImage(12 * w + 16, 4 * h, BufferedImage.TYPE_INT_RGB);
                 for (int y = 0; y < 4 * h; y++) {
                     for (int x = 0; x < 4 * w; x++) {
                         int source = (HEIGHT - h - 40 + y / 4) * WIDTH + WIDTH / 2 - w / 2 + x / 4;
                         closeUp.setRGB(x, y, rgb(traced[source]));
-                        closeUp.setRGB(4 * w + 8 + x, y, rgb(mapped[source]));
+                        closeUp.setRGB(4 * w + 8 + x, y, rgb(cascaded[source]));
+                        closeUp.setRGB(8 * w + 16 + x, y, rgb(mapped[source]));
                     }
                 }
                 ImageIO.write(closeUp, "png", out.resolve("shadows-closeup.png").toFile());
-                System.out.printf("shadows: %,d of %,d pixels differ (inline rays left, shadow map right in "
+                System.out.printf("shadows: %,d of %,d pixels differ (inline rays left, cascades middle, one map right in "
                     + "shadows-closeup.png); bottom levels %,d bytes%n", differ, difference.length,
                     rayTracing.bottomLevelBytes());
             }

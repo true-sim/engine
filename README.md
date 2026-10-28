@@ -341,6 +341,7 @@ interface:
 | Kind | Technique | Evaluated by |
 |---|---|---|
 | shadow map (filter: PCF; PCSS, VSM, ESM fit the same slot) | `ShadowMapShadows`: the scene's depth from the light's camera, a `SceneDraw` of its own view, culled with the camera | `PcfShadow`: 3 x 3 percentage-closer filtering |
+| shadow maps, cascaded (directional lights) | `CascadedShadowMaps`: practical splits, each cascade fitted to its slice's sphere and snapped to world texels (stable), a `SceneDraw` per cascade | `PcfShadow`, the cascade chosen by view depth, looked up from a normal offset of about a texel |
 | screen-space mask | `RayTracedShadows`: a ray query per pixel of the camera's depth, on the async queue | `MaskShadow`: the mask's texel |
 | inline ray | `InlineRayShadows`: nothing but the frame's top level | `RayShadow`: a ray query while shading |
 
@@ -361,6 +362,7 @@ interface:
 | the sun, unshadowed | 1.32 ms | 0.89 ms |
 | shadow map 2048 x 2048 | 1.76 ms | 1.32 ms |
 | shadow map 4096 x 4096 | 2.23 ms | 1.81 ms |
+| 3 cascades of 2048 x 2048 to 300 units | 2.14 ms | 1.70 ms |
 | ray-traced mask | 2.26 ms (with its own depth draw) | 1.34 ms |
 | inline rays | (not traced) | 1.31 ms |
 
@@ -370,8 +372,10 @@ over a 150-unit square, the shadow map shows texel steps along shadow edges and 
 map needs no ray tracing and no memory beyond itself; ray tracing needs bottom levels (103 MiB here, mostly the
 terrain's 2.1 M triangles at full detail).
 
-`Screenshots.renderShadows` renders the sun's shadows both ways through the visibility buffer
-(`shadows-mapped.png`, `shadows-traced.png`), a close-up of the nearest rocks side by side, and where they differ.
+`Screenshots.renderShadows` renders the sun's shadows through the visibility buffer by one map, by three cascades and
+by inline rays (`shadows-mapped.png`, `shadows-cascaded.png`, `shadows-traced.png`), a close-up of the nearest rocks
+side by side, and where rays and the single map differ. Cascades put the detail near the camera: there they come close
+to the traced shadows, where one map over the whole area shows texel steps.
 
 ## Frame graph
 
