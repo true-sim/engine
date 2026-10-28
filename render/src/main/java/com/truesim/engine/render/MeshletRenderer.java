@@ -151,7 +151,7 @@ public final class MeshletRenderer implements AutoCloseable {
         try (ShaderModule instanceShader = ShaderModule.load(device, "shaders/meshlets/instances.spv");
              ShaderModule cullShader = ShaderModule.load(device, "shaders/meshlets/cull.spv");
              ShaderModule drawShader = ShaderModule.load(device, "shaders/meshlets/draw.spv")) {
-            instancesPass = Pipeline.compute(device, instanceShader, "instancesMain", 48);
+            instancesPass = Pipeline.compute(device, instanceShader, "instancesMain", 56);
             cull = Pipeline.compute(device, cullShader, "cullMain", 72);
             draw = Pipeline.graphics(device)
                 .stage(VK_SHADER_STAGE_VERTEX_BIT, drawShader, "vertexMain")
@@ -278,15 +278,16 @@ public final class MeshletRenderer implements AutoCloseable {
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT
                 | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         try (MemoryStack stack = stackPush()) {
-            long push = stack.nmalloc(8, 48);
+            long push = stack.nmalloc(8, 56);
             memPutLong(push, view.deviceAddress());
             memPutLong(push + 8, pool.meshTable().deviceAddress());
             memPutLong(push + 16, instances.deviceAddress());
             memPutLong(push + 24, chunks.deviceAddress());
             memPutLong(push + 32, chunkCommand.deviceAddress());
-            memPutInt(push + 40, limits.chunks());
+            memPutLong(push + 40, pool.levels().deviceAddress());
+            memPutInt(push + 48, limits.chunks());
             instancesPass.bind(commands);
-            instancesPass.push(commands, push, 44);
+            instancesPass.push(commands, push, 52);
             vkCmdDispatch(commands, (instanceCount + 63) / 64, 1, 1);
         }
         // The chunks feed an indirect command and the next shaders: the cull pass or the task shaders.

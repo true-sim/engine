@@ -31,7 +31,10 @@ import java.nio.ByteOrder;
 public final class GeometryPool implements AutoCloseable {
 
     /** Bytes per mesh table entry. */
-    static final int MESH_ENTRY_BYTES = 80;
+    static final int MESH_ENTRY_BYTES = 96;
+
+    /** The most detail levels a mesh may have here. */
+    public static final int MAX_LEVELS = 32;
 
     /** The most vertices and triangles a meshlet may hold for the mesh shader path: the builder's defaults. */
     public static final int MESH_SHADER_VERTICES = 64;
@@ -68,6 +71,7 @@ public final class GeometryPool implements AutoCloseable {
     private final GpuBuffer clusterLod;
     private final GpuBuffer indices;
     private final GpuBuffer meshTable;
+    private final GpuBuffer levels;
     private int vertexCount;
     private long attributeBytes;
     private int meshletVertexCount;
@@ -95,6 +99,7 @@ public final class GeometryPool implements AutoCloseable {
         indices = GpuBuffer.deviceLocal(device, 4L * triangleIndices,
             usage | transferDst | VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
         meshTable = GpuBuffer.hostVisible(device, (long) MESH_ENTRY_BYTES * capacity.meshes(), usage);
+        levels = GpuBuffer.hostVisible(device, 8L * MAX_LEVELS * capacity.meshes(), usage);
     }
 
     /**
@@ -112,7 +117,8 @@ public final class GeometryPool implements AutoCloseable {
             || meshletCount + mesh.meshletCount() > capacity.meshlets()
             || triangleCount + mesh.triangleCount() > capacity.triangles()
             || meshletVertexCount + meshletVertexTotal > meshletVertices.size() / 4
-            || attributeBytes + mesh.attributes().byteSize() > attributes.size()) {
+            || attributeBytes + mesh.attributes().byteSize() > attributes.size()
+            || mesh.levels().size() > MAX_LEVELS) {
             throw new IllegalStateException("The geometry pool has no room for a mesh of " + mesh.vertexCount()
                 + " vertices and " + mesh.meshletCount() + " meshlets");
         }
@@ -145,6 +151,9 @@ public final class GeometryPool implements AutoCloseable {
         entry.set(U32, 60, (int) attributeBytes);
         entry.set(U32, 64, mesh.format().mask());
         entry.set(U32, 68, mesh.format().stride());
+        entry.set(U32, 72, MAX_LEVELS * meshCount);
+        entry.set(U32, 76, mesh.levels().size());
+        writeLevels(mesh, entry);
         vertexCount += mesh.vertexCount();
         attributeBytes += mesh.attributes().byteSize();
         meshletVertexCount += meshletVertexTotal;
@@ -172,6 +181,52 @@ public final class GeometryPool implements AutoCloseable {
     }
 
     private final MemorySegment lastWord = Arena.ofAuto().allocate(4, 4);
+
+    /**
+     * The mesh's level table and the sphere around all its detail groups, for the instance pass: an instance whose
+     * nearest point sees level L's error within the allowed pixels needs no meshlet past level L's end, as no finer
+     * meshlet's parent error can exceed it there. Roots and other meshlets past a level whose parent error does exceed
+     * it extend that level's end, so the range stays right for any mesh.
+     */
+    private void writeLevels(MeshData mesh, MemorySegment entry) {
+        double[] lod = new double[10];
+        double cx = mesh.bounds().x();
+        double cy = mesh.bounds().y();
+        double cz = mesh.bounds().z();
+        double radius = mesh.bounds().radius();
+        double[] parentErrors = new double[mesh.meshletCount()];
+        for (int m = 0; m < mesh.meshletCount(); m++) {
+            mesh.meshletLod(m, lod);
+            radius = Math.max(radius, Math.sqrt(square(lod[0] - cx) + square(lod[1] - cy) + square(lod[2] - cz))
+                + lod[3]);
+            if (lod[9] != Double.POSITIVE_INFINITY) {
+                radius = Math.max(radius, Math.sqrt(square(lod[5] - cx) + square(lod[6] - cy) + square(lod[7] - cz))
+                    + lod[8]);
+            }
+            parentErrors[m] = lod[9];
+        }
+        entry.set(F32, 80, (float) cx);
+        entry.set(F32, 84, (float) cy);
+        entry.set(F32, 88, (float) cz);
+        entry.set(F32, 92, (float) radius);
+        MemorySegment table = levels.memory();
+        long base = 8L * MAX_LEVELS * meshCount;
+        for (int l = 0; l < mesh.levels().size(); l++) {
+            var level = mesh.levels().get(l);
+            int end = level.firstMeshlet() + level.meshletCount();
+            for (int m = end; m < mesh.meshletCount(); m++) {
+                if (parentErrors[m] > level.error()) {
+                    end = m + 1;
+                }
+            }
+            table.set(U32, base + 8L * l, end);
+            table.set(F32, base + 8L * l + 4, (float) level.error());
+        }
+    }
+
+    private static double square(double value) {
+        return value * value;
+    }
 
     /** How many meshes the pool holds. */
     public int meshCount() {
@@ -230,12 +285,16 @@ public final class GeometryPool implements AutoCloseable {
         return meshTable;
     }
 
+    GpuBuffer levels() {
+        return levels;
+    }
+
     @Override
     public void close() {
         if (!closed) {
             closed = true;
             for (GpuBuffer buffer : new GpuBuffer[] {positions, attributes, meshletVertices, meshletTriangles,
-                meshlets, clusterLod, indices, meshTable}) {
+                meshlets, clusterLod, indices, meshTable, levels}) {
                 buffer.close();
             }
         }
