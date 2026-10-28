@@ -172,6 +172,9 @@ of error allowed, GPU time of the whole frame (instance pass, culling, drawing):
 | 30,000 rocks | 1.97 billion | 2.12 ms | 20.6 ms | 576,127 |
 | terrain at a grazing angle | 2.1 M | 0.07 ms | 0.10 ms | 723 |
 
+`TRUESIM_SCREENSHOTS=true ./gradlew :engine-render:test --tests '*Screenshots'` renders these scenes to PNGs under
+`render/build/screenshots`, shaded and colored per meshlet.
+
 The indexed path issues one draw per visible meshlet, which dominates at these counts; compacting visible meshlets
 into one draw is #12.
 

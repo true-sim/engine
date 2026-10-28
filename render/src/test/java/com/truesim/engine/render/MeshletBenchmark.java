@@ -61,7 +61,7 @@ class MeshletBenchmark {
     private static final int FRAMES = 60;
 
     /** A bumpy sphere: a latitude-longitude grid of {@code rings} x {@code 2 rings}, with noise on the radius. */
-    private static MeshData rock(int rings) {
+    static MeshData rock(int rings) {
         int columns = rings * 2;
         int count = (rings + 1) * (columns + 1);
         float[] positions = new float[count * 3];
@@ -99,7 +99,7 @@ class MeshletBenchmark {
     }
 
     /** A bumpy {@code n} x {@code n} grid, 1 unit per quad, centered, facing +y. */
-    private static MeshData terrain(int n) {
+    static MeshData terrain(int n) {
         int count = (n + 1) * (n + 1);
         float[] positions = new float[count * 3];
         float[] normals = new float[count * 3];
