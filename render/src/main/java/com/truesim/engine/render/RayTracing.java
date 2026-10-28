@@ -123,6 +123,7 @@ public final class RayTracing implements AutoCloseable {
     private final Structure[] bottom;
     private final int maxInstances;
     private final GpuBuffer instances;
+    private final long instancesAddress; // 16-byte aligned, as instance data must be
     private final Structure top;
     private final GpuBuffer topScratch;
     private final int topSlot;
@@ -158,10 +159,11 @@ public final class RayTracing implements AutoCloseable {
         bottom = new Structure[meshes];
         bottomTable = GpuBuffer.hostVisible(device, 8L * meshes, storage);
         bottomTable.memory().fill((byte) 0);
-        instances = GpuBuffer.deviceLocal(device, (long) AS_INSTANCE_BYTES * maxInstances,
+        instances = GpuBuffer.deviceLocal(device, (long) AS_INSTANCE_BYTES * maxInstances + 16,
             storage | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+        instancesAddress = (instances.deviceAddress() + 15) & ~15L;
         try (MemoryStack stack = stackPush()) {
-            VkAccelerationStructureGeometryKHR.Buffer geometry = instancesGeometry(stack, instances.deviceAddress());
+            VkAccelerationStructureGeometryKHR.Buffer geometry = instancesGeometry(stack, instancesAddress);
             VkAccelerationStructureBuildGeometryInfoKHR info = buildInfo(stack, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
                 VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR, geometry);
             VkAccelerationStructureBuildSizesInfoKHR sizes = sizes(stack, info, maxInstances);
@@ -329,7 +331,7 @@ public final class RayTracing implements AutoCloseable {
             long push = stack.nmalloc(8, PUSH_BYTES);
             memPutLong(push, renderer.instanceBuffer().deviceAddress());
             memPutLong(push + 8, bottomTable.deviceAddress());
-            memPutLong(push + 16, instances.deviceAddress());
+            memPutLong(push + 16, instancesAddress);
             memPutInt(push + 24, count);
             instancePass.bind(commands);
             instancePass.push(commands, push, PUSH_BYTES);
@@ -349,7 +351,7 @@ public final class RayTracing implements AutoCloseable {
             long data = geometry + VkAccelerationStructureGeometryKHR.GEOMETRY;
             memPutInt(data + VkAccelerationStructureGeometryInstancesDataKHR.STYPE,
                 VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR);
-            memPutLong(data + VkAccelerationStructureGeometryInstancesDataKHR.DATA, instances.deviceAddress());
+            memPutLong(data + VkAccelerationStructureGeometryInstancesDataKHR.DATA, instancesAddress);
             long info = stack.ncalloc(VkAccelerationStructureBuildGeometryInfoKHR.ALIGNOF, 1,
                 VkAccelerationStructureBuildGeometryInfoKHR.SIZEOF);
             memPutInt(info + VkAccelerationStructureBuildGeometryInfoKHR.STYPE,

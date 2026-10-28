@@ -39,6 +39,6 @@ VertexOut vertexMain(uint index : SV_VulkanVertexID)
 [shader("fragment")]
 float4 fragmentMain(VertexOut in) : SV_Target
 {
-    return shadeSurface(push.view[0], in, push.materials, ddx(in.uv), ddy(in.uv), push.lights,
+    return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(in.uv), ddy(in.uv), push.lights,
         uint2(in.position.xy));
 }

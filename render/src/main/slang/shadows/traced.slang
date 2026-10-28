@@ -1,10 +1,12 @@
-// Ray-traced sun shadows: per pixel, the position from the scene's depth, then one ray query towards the sun. Exact:
+// Ray-traced shadows of one light, as a screen-space mask: per pixel, the position from the scene's depth, then one ray
+// query towards the light. Exact:
 // no resolution, no bias beyond a small offset off the surface, as far as the scene goes. The offset goes along the
 // surface's normal, rebuilt from the depth of the neighbours: the rays test full-detail geometry, while the pixel
 // may show a coarser level a little inside it.
 import bindless;
 import raytracing;
 import meshlets.common;
+import lights;
 
 struct TracedPush
 {
@@ -15,6 +17,8 @@ struct TracedPush
     uint width;
     uint height;
     float offset;                    // off the surface, per unit of distance from the camera
+    Light* lights;
+    uint light;                      // which of them
 };
 
 [[vk::push_constant]]
@@ -58,14 +62,23 @@ void tracedMain(uint3 id : SV_DispatchThreadID)
         float3 normal = normalize(cross(neighbour(pixel, int2(1, 0), depth, position),
             neighbour(pixel, int2(0, 1), depth, position)));
         normal = dot(normal, position) > 0 ? -normal : normal; // towards the camera
-        if (dot(normal, SUN) <= 0)
+        Light light = push.lights[push.light];
+        float3 toLight = -light.direction;
+        float distance = 1.0e30;
+        if (light.type != DIRECTIONAL)
         {
-            lit = 0; // turned away from the sun: its own shadow, no ray needed
+            float3 d = light.position - position;
+            distance = length(d);
+            toLight = d / max(distance, 1.0e-6);
+        }
+        if (dot(normal, toLight) <= 0)
+        {
+            lit = 0; // turned away from the light: its own shadow, no ray needed
         }
         else
         {
             float offset = push.offset * length(position) + 1.0e-3;
-            lit = occluded(push.scene, position + normal * offset, SUN, 0, 1.0e30) ? 0 : 1;
+            lit = occluded(push.scene, position + normal * offset, toLight, 0, distance) ? 0 : 1;
         }
     }
     images[push.mask][id.xy] = float4(lit, 0, 0, 0);

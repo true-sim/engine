@@ -96,7 +96,9 @@ class ClusteredLightsTest {
             .point(2, 30, 0, -10, 1, 10, 10, 10)           // off to the right: in no cluster
             .spot(3, -3, 1, -30, 5, 10, 10, 10, 0, 0, -1, 0.3, 0.5)
             .shadows(3, 0, 1)
-            .shadow(0, camera.viewProjection(), 0, 1024, 1e-3f, 0)
+            .shadowMap(0, camera.viewProjection(), 0, 1024, 1e-3f, 0)
+            .shadowMask(1, 0, 0)
+            .shadowRay(2, 0, 2e-3f)
             .point(4, 0.2f, 0.1f, -3, 0.5f, 1, 1, 1);
         // Many small lights in one spot: more than a cluster holds.
         for (int i = 5; i < 16; i++) {

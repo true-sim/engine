@@ -76,6 +76,10 @@ public final class MeshletGeometry implements GeometryProvider {
         if (lights != null) {
             pass.read(lights, BufferAccess.DRAW_READ);
         }
+        ShadowInputs.Set shadows = targets.shadows();
+        if (shadows != null) {
+            shadows.readBy(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
+        }
         int view = draw.view();
         int width = draw.width();
         int height = draw.height();
@@ -90,6 +94,9 @@ public final class MeshletGeometry implements GeometryProvider {
                 }
             });
             case SHADED -> pass.record(ctx -> {
+                if (shadows != null) {
+                    shadows.prepare(ctx);
+                }
                 if (late) {
                     renderer.recordLate(ctx.commands(), ctx.view(color), ctx.view(depth), width, height,
                         ctx.sampled(pyramid), pyramid.mips(), address(ctx, lights));

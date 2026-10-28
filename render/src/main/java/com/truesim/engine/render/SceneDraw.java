@@ -39,9 +39,10 @@ public record SceneDraw(SceneGeometry geometry, int view, Camera camera, Surface
 
     /**
      * What the draw wrote: {@code depth}, {@code color} (shaded color or IDs; null for depth only), and the light list
-     * shading used ({@link Keys#LIGHT_LIST}; null without one, or without shading).
+     * and shadow inputs shading used ({@link Keys#LIGHT_LIST}, {@link ShadowInputs}; null without a light list, or
+     * without shading).
      */
-    public record Targets(Image depth, Image color, Buffer lights) {
+    public record Targets(Image depth, Image color, Buffer lights, ShadowInputs.Set shadows) {
     }
 
     @Override
@@ -55,7 +56,8 @@ public record SceneDraw(SceneGeometry geometry, int view, Camera camera, Surface
             case IDS -> g.create(name + " ids", width, height, output.colorFormat());
         };
         Buffer lights = output.kind() == SurfaceOutput.Kind.SHADED ? g.optionalBuffer(Keys.LIGHT_LIST) : null;
-        Targets targets = new Targets(depth, color, lights);
+        ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs());
+        Targets targets = new Targets(depth, color, lights, shadows);
         boolean load = false;
         for (GeometryProvider provider : geometry.providers()) {
             provider.drawFirst(g, this, targets, load);

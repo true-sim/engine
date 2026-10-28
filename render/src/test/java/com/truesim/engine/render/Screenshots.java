@@ -110,9 +110,10 @@ class Screenshots {
     }
 
     /**
-     * Sun shadows on rocks resting on the terrain, ray-traced (where the device can) and shadow-mapped (2048 x 2048
-     * over a 150 unit square): the shadowed images, both masks, close-ups of the masks near the camera, and where they
-     * differ (red: shadowed only by ray tracing, e.g. contact shadows the map misses; blue: only by the map).
+     * The sun's shadows on rocks resting on the terrain, through the visibility buffer: by a shadow map (2048 x 2048
+     * over a 150 unit square) and by inline ray queries (where the device traces rays); close-ups near the camera, and
+     * where they differ (red: shadowed only by ray tracing, e.g. contact shadows the map misses; blue: only by the
+     * map).
      */
     @Test
     void renderShadows() throws IOException {
@@ -142,45 +143,45 @@ class Screenshots {
                 WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
             int size = 2048;
-            com.truesim.engine.graph.Technique mapped = new com.truesim.engine.render.shadows.ShadowMapShadows(
-                SceneGeometry.meshlets(renderer), camera, MeshletBenchmark.sun(extent, groundY, size), size, 1,
-                MeshletBenchmark.sunBias(extent, size));
-            int[] mappedMask;
-            int[] tracedMask = null;
-            try (com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
-                graph.add(MeshletBenchmark.forward(renderer, WIDTH, HEIGHT))
-                    .add(mapped)
-                    .add(new com.truesim.engine.render.shadows.ShadowedScene(0.3f))
-                    .output(Keys.SHADOWED_COLOR, external);
-                write(capture(device, graph, target, pixels), out.resolve("shadows-mapped.png"));
-                graph.removeOutput(Keys.SHADOWED_COLOR).output(Keys.SHADOW_MASK, external);
-                mappedMask = capture(device, graph, target, pixels);
-                write(mappedMask, out.resolve("mask-mapped.png"));
+            SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+            int[] mapped;
+            int[] traced = null;
+            try (Lights lights = new Lights(device, 1, 1);
+                 com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
+                lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
+                com.truesim.engine.graph.Technique map = new com.truesim.engine.render.shadows.ShadowMapShadows(
+                    geometry, lights, 0, 0, MeshletBenchmark.sun(extent, groundY, size), size, 1,
+                    MeshletBenchmark.sunBias(extent, size));
+                graph.add(new VisibilityBufferShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT)).add(new ClusteredLights(lights, camera, WIDTH, HEIGHT)).add(map)
+                    .output(Keys.SCENE_COLOR, external);
+                capture(device, graph, target, pixels); // the first frame's late phase draws everything
+                mapped = capture(device, graph, target, pixels);
+                write(mapped, out.resolve("shadows-mapped.png"));
                 if (rayTracing != null) {
                     rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
                     rayTracing.add(ground, terrainMesh, terrainMesh.levels().size() - 1);
-                    graph.replace(new com.truesim.engine.render.shadows.RayTracedShadows(rayTracing, renderer,
-                        camera));
-                    tracedMask = capture(device, graph, target, pixels);
-                    write(tracedMask, out.resolve("mask-traced.png"));
-                    graph.removeOutput(Keys.SHADOW_MASK).output(Keys.SHADOWED_COLOR, external);
-                    write(capture(device, graph, target, pixels), out.resolve("shadows-traced.png"));
+                    graph.remove(map).add(new com.truesim.engine.render.shadows.InlineRayShadows(
+                        rayTracing, renderer, lights, 0, 0));
+                    capture(device, graph, target, pixels);
+                    traced = capture(device, graph, target, pixels);
+                    write(traced, out.resolve("shadows-traced.png"));
                 }
             }
-            if (tracedMask != null) {
-                int[] difference = new int[tracedMask.length];
+            if (traced != null) {
+                int[] difference = new int[traced.length];
                 int differ = 0;
                 for (int i = 0; i < difference.length; i++) {
-                    int traced = tracedMask[i] & 0xff;
-                    int map = mappedMask[i] & 0xff;
-                    if (traced + 64 < map) {
+                    int t = traced[i] & 0xff;
+                    int m = mapped[i] & 0xff;
+                    if (t + 48 < m) {
                         difference[i] = 0xff0000ff; // red: shadowed by ray tracing only
                         differ++;
-                    } else if (map + 64 < traced) {
+                    } else if (m + 48 < t) {
                         difference[i] = 0xffff0000; // blue: shadowed by the map only
                         differ++;
                     } else {
-                        int gray = traced / 3;
+                        int gray = t / 3;
                         difference[i] = 0xff000000 | gray << 16 | gray << 8 | gray;
                     }
                 }
@@ -192,18 +193,21 @@ class Screenshots {
                 for (int y = 0; y < 4 * h; y++) {
                     for (int x = 0; x < 4 * w; x++) {
                         int source = (HEIGHT - h - 40 + y / 4) * WIDTH + WIDTH / 2 - w / 2 + x / 4;
-                        int traced = tracedMask[source] & 0xff;
-                        int map = mappedMask[source] & 0xff;
-                        closeUp.setRGB(x, y, traced << 16 | traced << 8 | traced);
-                        closeUp.setRGB(4 * w + 8 + x, y, map << 16 | map << 8 | map);
+                        closeUp.setRGB(x, y, rgb(traced[source]));
+                        closeUp.setRGB(4 * w + 8 + x, y, rgb(mapped[source]));
                     }
                 }
-                ImageIO.write(closeUp, "png", out.resolve("masks-closeup.png").toFile());
-                System.out.printf("shadows: %,d of %,d pixels differ (ray-traced left, shadow map right in "
-                    + "masks-closeup.png); bottom levels %,d bytes%n", differ, difference.length,
+                ImageIO.write(closeUp, "png", out.resolve("shadows-closeup.png").toFile());
+                System.out.printf("shadows: %,d of %,d pixels differ (inline rays left, shadow map right in "
+                    + "shadows-closeup.png); bottom levels %,d bytes%n", differ, difference.length,
                     rayTracing.bottomLevelBytes());
             }
         }
+    }
+
+    /** An RGBA texel (red lowest) as Java's RGB. */
+    private static int rgb(int rgba) {
+        return (rgba & 0xff) << 16 | ((rgba >> 8) & 0xff) << 8 | ((rgba >> 16) & 0xff);
     }
 
     /**
