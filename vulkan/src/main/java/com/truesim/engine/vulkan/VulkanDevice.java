@@ -28,6 +28,7 @@ import static org.lwjgl.vulkan.VK10.vkGetDeviceQueue;
 import static org.lwjgl.vulkan.VK10.vkWaitForFences;
 import static org.lwjgl.vulkan.VK11.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 import static org.lwjgl.vulkan.VK11.vkGetPhysicalDeviceFeatures2;
+import static org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
 import static org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
@@ -56,6 +57,7 @@ import org.lwjgl.vulkan.VkDeviceCreateInfo;
 import org.lwjgl.vulkan.VkDeviceQueueCreateInfo;
 import org.lwjgl.vulkan.VkFenceCreateInfo;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
+import org.lwjgl.vulkan.VkPhysicalDeviceVulkan11Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan13Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan14Features;
@@ -134,10 +136,18 @@ public final class VulkanDevice implements AutoCloseable {
                 .descriptorIndexing(true)
                 .runtimeDescriptorArray(true)
                 .descriptorBindingPartiallyBound(true)
-                .scalarBlockLayout(true);
+                .scalarBlockLayout(true)
+                .shaderInt8(true)
+                .storageBuffer8BitAccess(true);
+            VkPhysicalDeviceVulkan11Features features11 = VkPhysicalDeviceVulkan11Features.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES)
+                .pNext(features12.address())
+                .storageBuffer16BitAccess(true)
+                .shaderDrawParameters(true);
             VkPhysicalDeviceFeatures2 features = VkPhysicalDeviceFeatures2.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
-                .pNext(features12.address());
+                .pNext(features11.address());
+            features.features().shaderInt64(true).shaderInt16(true);
             VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
                 .pNext(features.address())
@@ -213,10 +223,19 @@ public final class VulkanDevice implements AutoCloseable {
             .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES);
         VkPhysicalDeviceVulkan12Features features12 = VkPhysicalDeviceVulkan12Features.calloc(stack)
             .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES).pNext(features13.address());
+        VkPhysicalDeviceVulkan11Features features11 = VkPhysicalDeviceVulkan11Features.calloc(stack)
+            .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES).pNext(features12.address());
         VkPhysicalDeviceFeatures2 features = VkPhysicalDeviceFeatures2.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2).pNext(features12.address());
+            .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2).pNext(features11.address());
         vkGetPhysicalDeviceFeatures2(gpu.handle(), features);
         List<String> missing = new ArrayList<>();
+        // Shaders read data through 64-bit pointers, as 8, 16 and 32-bit values (meshlet indices, quantized vertices).
+        check(missing, features.features().shaderInt64(), "shaderInt64");
+        check(missing, features.features().shaderInt16(), "shaderInt16");
+        check(missing, features11.storageBuffer16BitAccess(), "storageBuffer16BitAccess");
+        check(missing, features11.shaderDrawParameters(), "shaderDrawParameters"); // vertex and draw indices
+        check(missing, features12.shaderInt8(), "shaderInt8");
+        check(missing, features12.storageBuffer8BitAccess(), "storageBuffer8BitAccess");
         check(missing, features13.dynamicRendering(), "dynamicRendering");
         check(missing, features13.synchronization2(), "synchronization2");
         check(missing, features13.maintenance4(), "maintenance4");

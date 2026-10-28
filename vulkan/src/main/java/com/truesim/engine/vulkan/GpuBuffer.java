@@ -6,7 +6,13 @@ import static org.lwjgl.util.vma.Vma.VMA_ALLOCATION_CREATE_MAPPED_BIT;
 import static org.lwjgl.util.vma.Vma.VMA_MEMORY_USAGE_AUTO;
 import static org.lwjgl.util.vma.Vma.vmaCreateBuffer;
 import static org.lwjgl.util.vma.Vma.vmaDestroyBuffer;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_EXCLUSIVE;
+import static org.lwjgl.vulkan.VK10.vkCmdCopyBuffer;
+import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+import static org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+import static org.lwjgl.vulkan.VK12.vkGetBufferDeviceAddress;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 
 import com.truesim.annotations.AllowAllocation;
@@ -16,7 +22,9 @@ import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.util.vma.VmaAllocationCreateInfo;
 import org.lwjgl.util.vma.VmaAllocationInfo;
+import org.lwjgl.vulkan.VkBufferCopy;
 import org.lwjgl.vulkan.VkBufferCreateInfo;
+import org.lwjgl.vulkan.VkBufferDeviceAddressInfo;
 
 /**
  * A buffer in GPU memory, allocated by VMA. A host-visible buffer stays mapped: {@link #memory()} is a
@@ -31,6 +39,7 @@ public final class GpuBuffer implements AutoCloseable {
     private final long allocation;
     private final long size;
     private final MemorySegment memory;
+    private final long deviceAddress;
     private boolean closed;
 
     @SuppressWarnings("restricted") // wraps the mapped memory VMA returned, of exactly this size
@@ -57,6 +66,10 @@ public final class GpuBuffer implements AutoCloseable {
             this.handle = buffer.get(0);
             this.allocation = allocated.get(0);
             this.memory = hostVisible ? MemorySegment.ofAddress(result.pMappedData()).reinterpret(size) : null;
+            this.deviceAddress = (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) == 0 ? 0
+                : vkGetBufferDeviceAddress(device.handle(), VkBufferDeviceAddressInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO)
+                    .buffer(handle));
         }
     }
 
@@ -70,8 +83,40 @@ public final class GpuBuffer implements AutoCloseable {
         return new GpuBuffer(device, size, usage, false);
     }
 
+    /**
+     * A device-local buffer holding {@code data}, copied through a staging buffer on the graphics queue, so the
+     * graphics and compute work that uses it needs no queue ownership transfer: for data uploaded once, such as meshes. {@code usage} gets {@code TRANSFER_DST} added.
+     */
+    public static GpuBuffer upload(VulkanDevice device, MemorySegment data, int usage) {
+        long bytes = data.byteSize();
+        GpuBuffer target = deviceLocal(device, bytes, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        try (GpuBuffer staging = hostVisible(device, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+            MemorySegment.copy(data, 0, staging.memory, 0, bytes);
+            device.submitAndWait(device.graphics(), commands -> {
+                try (MemoryStack stack = stackPush()) {
+                    vkCmdCopyBuffer(commands, staging.handle, target.handle, VkBufferCopy.calloc(1, stack).size(bytes));
+                }
+            });
+        } catch (RuntimeException e) {
+            target.close();
+            throw e;
+        }
+        return target;
+    }
+
     public long handle() {
         return handle;
+    }
+
+    /**
+     * The buffer's address for shaders, e.g. passed in push constants; the buffer needs
+     * {@code VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT}.
+     */
+    public long deviceAddress() {
+        if (deviceAddress == 0) {
+            throw new IllegalStateException("The buffer was made without SHADER_DEVICE_ADDRESS usage");
+        }
+        return deviceAddress;
     }
 
     public long size() {

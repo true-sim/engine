@@ -103,6 +103,30 @@ try (VulkanInstance instance = VulkanInstance.builder().applicationName("game").
   their Vulkan structs straight into stack memory. LWJGL wraps native pointers in `MemorySegment`s, which the
   JIT removes once the code is compiled by C2.
 
+### Shaders and pipelines
+
+Shaders are Slang under `src/main/slang`, compiled to SPIR-V resources by build-logic's `truesim.slang` plugin with
+a pinned compiler. Data reaches shaders through buffer device addresses passed in push constants: no descriptor
+sets, no vertex input; shaders pull what they need.
+
+```java
+try (ShaderModule shaders = ShaderModule.load(device, "shaders/meshlets.spv");
+     Pipeline cull = Pipeline.compute(device, shaders, "cullMain", 32);
+     Pipeline draw = Pipeline.graphics(device)
+         .stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, "vertexMain")
+         .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, "fragmentMain")
+         .color(VK_FORMAT_R8G8B8A8_UNORM).depth(VK_FORMAT_D32_SFLOAT)   // reverse depth: clear to 0
+         .pushConstants(32)
+         .build();
+     GpuBuffer meshlets = GpuBuffer.upload(device, mesh.meshlets(), STORAGE | SHADER_DEVICE_ADDRESS)) {
+    draw.bind(commands);
+    draw.push(commands, pushData, 32);    // e.g. meshlets.deviceAddress(), the frame's buffers
+}
+```
+
+Devices require what such shaders use: 64-bit integers for pointers, 8 and 16-bit storage for packed data (meshlet
+indices, quantized vertices) and draw parameters, on top of the Vulkan 1.3 baseline.
+
 ## Building
 
 Needs Java 27 and a Vulkan 1.3 driver (1.4 is used when present); the validation layers (Vulkan SDK) are
