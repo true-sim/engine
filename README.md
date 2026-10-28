@@ -153,11 +153,10 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
   parent's more), the frustum and its normal cone (whole meshlets facing away).
 - **Two paths, one set of shaders:** with mesh shaders (`VK_EXT_mesh_shader`, enabled where the GPU has it), a task
   workgroup per chunk culls and launches a mesh workgroup per visible meshlet, which emits its vertices and triangles
-  straight from the pool. Without, a compute pass per chunk lists visible meshlets, an expansion pass writes their triangles into one index
-  buffer, drawn with one
-  `vkCmdDrawIndexedIndirect`. The meshlet test, vertex decoding and shading are one Slang module
-  (`meshlets/common.slang`) both paths import, and they draw the same image (tested). `Path.AUTO` picks mesh shaders
-  where available.
+  straight from the pool. Without, a compute pass per chunk lists visible meshlets, an expansion pass writes their
+  triangles into one index buffer, and one `vkCmdDrawIndexedIndirect` draws them. The meshlet test, vertex decoding
+  and shading are one Slang module (`meshlets/common.slang`) both paths import, and they draw the same image
+  (tested). `Path.AUTO` picks mesh shaders where available.
 - **Instance-level LOD range:** before culling meshlets, the instance pass skips every level finer than the first one
   whose error, seen from the instance's nearest point, is within the allowed pixels: the rule could not pick anything
   there. A far instance costs a chunk or two, however detailed its mesh.
