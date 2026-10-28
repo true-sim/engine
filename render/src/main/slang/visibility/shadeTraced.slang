@@ -4,7 +4,6 @@ import raytracing;
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
-[require(spvRayQueryKHR)]
 void shadeTracedMain(uint3 id : SV_DispatchThreadID)
 {
     shadePixel(QueryRays(), id);

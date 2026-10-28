@@ -1,5 +1,6 @@
 // The device's bindless set (engine-vulkan's Bindless): every sampled and storage image in one array each, indexed by
-// slot numbers shaders take in their push constants.
+// slot numbers shaders take in their push constants. A slot that may differ between neighbouring invocations (per pixel
+// or per light: materials, shadow maps) must go through NonUniformResourceIndex, or a wave reads one lane's image.
 module bindless;
 
 [[vk::binding(0, 0)]]

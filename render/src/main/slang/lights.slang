@@ -168,12 +168,13 @@ public struct PcfShadow : IShadow
         }
         int2 texel = int2(floor(uv * s.size));
         int last = int(s.size) - 1;
+        uint map = NonUniformResourceIndex(s.map); // neighbours may read other cascades and lights
         float lit = 0;
         for (int y = -1; y <= 1; y++)
         {
             for (int x = -1; x <= 1; x++)
             {
-                float nearest = textures[s.map].Load(int3(clamp(texel + int2(x, y), 0, last), 0)).r;
+                float nearest = textures[map].Load(int3(clamp(texel + int2(x, y), 0, last), 0)).r;
                 lit += p.z + s.bias >= nearest ? 1 : 0;
             }
         }
@@ -186,7 +187,7 @@ public struct MaskShadow : IShadow
 {
     public float visibility(Shadow s, ShadowQuery q)
     {
-        return textures[s.map].Load(int3(q.pixel, 0))[uint(s.params.x)];
+        return textures[NonUniformResourceIndex(s.map)].Load(int3(q.pixel, 0))[uint(s.params.x)];
     }
 }
 

@@ -212,6 +212,7 @@ public final class VulkanDevice implements AutoCloseable {
                 .bufferDeviceAddress(true)
                 .descriptorIndexing(true)
                 .runtimeDescriptorArray(true)
+                .shaderSampledImageArrayNonUniformIndexing(true)
                 .descriptorBindingPartiallyBound(true)
                 .descriptorBindingSampledImageUpdateAfterBind(true)
                 .descriptorBindingStorageImageUpdateAfterBind(true)
@@ -349,6 +350,9 @@ public final class VulkanDevice implements AutoCloseable {
         check(missing, features12.bufferDeviceAddress(), "bufferDeviceAddress");
         check(missing, features12.descriptorIndexing(), "descriptorIndexing");
         check(missing, features12.runtimeDescriptorArray(), "runtimeDescriptorArray");
+        // Slots that differ within a wave (per pixel materials, per light shadow maps).
+        check(missing, features12.shaderSampledImageArrayNonUniformIndexing(),
+            "shaderSampledImageArrayNonUniformIndexing");
         check(missing, features12.descriptorBindingPartiallyBound(), "descriptorBindingPartiallyBound");
         check(missing, features12.scalarBlockLayout(), "scalarBlockLayout");
         // The bindless set: image slots written while frames using other slots are in flight; storage images of any

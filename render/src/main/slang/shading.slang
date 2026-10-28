@@ -35,7 +35,7 @@ public struct Surface
 
 float4 sampleTexture(int slot, float2 uv, float2 dx, float2 dy)
 {
-    return textures[slot].SampleGrad(samplers[MATERIAL], uv, dx, dy);
+    return textures[NonUniformResourceIndex(slot)].SampleGrad(samplers[MATERIAL], uv, dx, dy);
 }
 
 /**
