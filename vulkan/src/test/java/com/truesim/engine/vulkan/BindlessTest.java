@@ -48,6 +48,10 @@ class BindlessTest {
                 assertThat(image.view(0)).isEqualTo(image.view());
                 assertThatIllegalArgumentException().isThrownBy(() -> GpuImage.mipmapped(device, 13, 7,
                     VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, 5));
+                if (!device.rayTracing()) {
+                    assertThatIllegalStateException().isThrownBy(() -> bindless.addAccelerationStructure(1))
+                        .withMessageContaining("no ray tracing");
+                }
                 // Bound on a compute-only queue: no graphics bind point there.
                 device.submitAndWait(device.compute(), commands -> bindless.bind(commands, false));
                 if (device.compute().family() != device.graphics().family()) {
