@@ -1,6 +1,7 @@
 plugins {
     id("truesim.java-library-conventions")
     id("truesim.allocation-free")
+    id("truesim.slang")
 }
 
 description = "Engine Vulkan layer for true-sim: instances, GPUs, devices, memory, surfaces and swapchains."
