@@ -543,20 +543,30 @@ class MeshletBenchmark {
                 org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shaded.handle(), 0);
             for (int count : new int[] {0, 256, 4096}) {
                 scatterLights(lights, count, groundY, 20);
-                for (MeshletScene.Shading shading : MeshletScene.Shading.values()) {
+                SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+                Lights lit = count == 0 ? null : lights;
+                for (boolean forward : new boolean[] {true, false}) {
                     try (FrameGraph graph = new FrameGraph(device, 2)) {
-                        graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
-                            VK_FORMAT_D32_SFLOAT).lights(count == 0 ? null : lights).shading(shading))
+                        graph.add(forward ? new ClusteredForwardShading(geometry, WIDTH, HEIGHT,
+                            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).lights(lit)
+                            : new VisibilityBufferShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                                VK_FORMAT_D32_SFLOAT).lights(lit))
                             .output(Keys.SCENE_COLOR, target);
                         System.out.printf(Locale.ROOT, "  30,000 rocks on the terrain, %s, %s: %.3f ms median%n",
                             count == 0 ? "the sun" : String.format(Locale.ROOT, "%,d point lights", count),
-                            shading == MeshletScene.Shading.CLUSTERED_FORWARD ? "clustered forward"
+                            forward ? "clustered forward"
                                 : "visibility buffer",
                             time(device, color, depth, queries, period, BATCH, graph::record));
                     }
                 }
             }
         }
+    }
+
+    /** Clustered forward shading of {@code renderer}'s meshlets into RGBA8 and D32 images. */
+    static ClusteredForwardShading forward(MeshletRenderer renderer, int width, int height) {
+        return new ClusteredForwardShading(SceneGeometry.meshlets(renderer), width, height, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_FORMAT_D32_SFLOAT);
     }
 
     /** The height of {@link #terrain}(1024), placed at the origin, at x, z. */
@@ -629,7 +639,7 @@ class MeshletBenchmark {
                 org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shadowed.handle(), 0);
             String scene = "30,000 rocks on the terrain, from above";
             try (FrameGraph graph = new FrameGraph(device, 2)) {
-                graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
+                graph.add(forward(renderer, WIDTH, HEIGHT))
                     .output(Keys.SCENE_COLOR, sceneTarget);
                 System.out.printf(Locale.ROOT, "  %s, no shadows: %.3f ms median%n", scene,
                     time(device, color, depth, queries, period, BATCH, graph::record));
@@ -642,7 +652,7 @@ class MeshletBenchmark {
                     + "bytes compacted, built in %.0f ms%n", rayTracing.quantizedVertices() ? "quantized" : "decoded",
                     rayTracing.bottomLevelBytes(), (System.nanoTime() - t0) / 1e6);
                 try (FrameGraph graph = new FrameGraph(device, 2)) {
-                    graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
+                    graph.add(forward(renderer, WIDTH, HEIGHT))
                         .add(new RayTracedShadows(rayTracing, renderer, camera))
                         .add(new ShadowedScene(0.3f))
                         .output(Keys.SHADOWED_COLOR, shadowedTarget);
@@ -652,8 +662,9 @@ class MeshletBenchmark {
             }
             for (int size : new int[] {2048, 4096}) {
                 try (FrameGraph graph = new FrameGraph(device, 2)) {
-                    graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
-                        .add(new ShadowMapShadows(renderer, camera, sun(extent, groundY, size), size, 1,
+                    graph.add(forward(renderer, WIDTH, HEIGHT))
+                        .add(new ShadowMapShadows(SceneGeometry.meshlets(renderer), camera, sun(extent, groundY, size),
+                            size, 1,
                             sunBias(extent, size)))
                         .add(new ShadowedScene(0.3f))
                         .output(Keys.SHADOWED_COLOR, shadowedTarget);
@@ -665,8 +676,8 @@ class MeshletBenchmark {
     }
 
     /**
-     * Occlusion culling, through the frame graph: the 30,000 rocks drawn by a {@link MeshletScene} without and with
-     * two-phase occlusion culling, in the open and behind a wall (the terrain, upright, 80 units ahead).
+     * Occlusion culling, through the frame graph: the 30,000 rocks drawn by {@link ClusteredForwardShading} without
+     * and with two-phase occlusion culling, in the open and behind a wall (the terrain, upright, 80 units ahead).
      */
     private static void occlusion(VulkanDevice device, MeshletRenderer renderer, GpuImage color, GpuImage depth,
         long queries, double period, int rock, int ground, float[] placed, Camera camera) {
@@ -686,7 +697,7 @@ class MeshletBenchmark {
             renderer.setInstanceCount(wall ? count + 1 : count);
             for (boolean occlusion : new boolean[] {false, true}) {
                 try (FrameGraph graph = new FrameGraph(device, 2)) {
-                    graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                    graph.add(forward(renderer, WIDTH, HEIGHT)
                         .occlusion(occlusion)).output(Keys.SCENE_COLOR, target);
                     double time = time(device, color, depth, queries, period, BATCH, graph::record);
                     System.out.printf(Locale.ROOT, "  %,d rocks%s, through the graph, occlusion culling %s: %.3f ms "

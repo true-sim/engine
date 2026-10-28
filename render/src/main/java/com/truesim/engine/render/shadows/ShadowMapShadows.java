@@ -9,7 +9,6 @@ import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
-import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
@@ -17,8 +16,10 @@ import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.Keys;
-import com.truesim.engine.render.MeshletCulling;
 import com.truesim.engine.render.MeshletRenderer;
+import com.truesim.engine.render.SceneDraw;
+import com.truesim.engine.render.SceneGeometry;
+import com.truesim.engine.render.SurfaceOutput;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import java.util.List;
@@ -27,16 +28,17 @@ import org.lwjgl.system.MemoryStack;
 
 /**
  * Sun shadows the classic way, by a shadow map: provides {@link Keys#SHADOW_MASK}, as {@link RayTracedShadows} does
- * ({@code graph.replace} swaps them). The renderer draws the scene's depth from the sun's orthographic view ({@code light},
- * into one of its views), then every pixel of {@link Keys#SCENE_DEPTH} is compared with it over 3 x 3 texels. Cheap,
- * with the classic trade-offs: the map's resolution over its area, a bias between acne and shadows that come loose from
- * their casters, and nothing outside the map.
+ * ({@code graph.replace} swaps them). The scene's depth is drawn from the sun's orthographic view ({@code light}, a
+ * {@link SceneDraw} of the geometry's view {@code lightView}, culled with the camera's), then every pixel of
+ * {@link Keys#SCENE_DEPTH} is compared with it over 3 x 3 texels. Cheap, with the classic trade-offs: the map's
+ * resolution over its area, a bias between acne and shadows that come loose from their casters, and nothing outside
+ * the map.
  */
 public final class ShadowMapShadows implements Technique {
 
     private static final int PUSH_BYTES = 96;
 
-    private final MeshletRenderer renderer;
+    private final SceneGeometry geometry;
     private final Camera camera;
     private final Camera light;
     private final int size;
@@ -45,14 +47,14 @@ public final class ShadowMapShadows implements Technique {
     private final float[] clipToLight = new float[16];
 
     /**
-     * Shadows of {@code renderer}'s instances, for the scene {@code camera} sees: a {@code size} x {@code size} map from
+     * Shadows of {@code geometry}, for the scene {@code camera} sees: a {@code size} x {@code size} map from
      * {@code light} (an orthographic {@link Camera#setOrthographic} along the sun, read when recording), drawn as the
-     * renderer's view {@code lightView}, compared with {@code bias} (the sun's depth units: a texel's worth of depth
+     * geometry's view {@code lightView}, compared with {@code bias} (the sun's depth units: a texel's worth of depth
      * slope is a good start).
      */
-    public ShadowMapShadows(MeshletRenderer renderer, Camera camera, Camera light, int size, int lightView,
+    public ShadowMapShadows(SceneGeometry geometry, Camera camera, Camera light, int size, int lightView,
         float bias) {
-        this.renderer = Objects.requireNonNull(renderer, "renderer");
+        this.geometry = Objects.requireNonNull(geometry, "geometry");
         this.camera = Objects.requireNonNull(camera, "camera");
         this.light = Objects.requireNonNull(light, "light");
         this.size = size;
@@ -73,14 +75,8 @@ public final class ShadowMapShadows implements Technique {
                 return Pipeline.compute(device, shader, "mappedMain", PUSH_BYTES);
             }
         });
-        Image map = g.create("shadow map", size, size, VK_FORMAT_D32_SFLOAT);
-        // The sun's view is culled with the camera's, in one pass.
-        MeshletCulling.Views culling = g.request(new MeshletCulling(renderer))
-            .add(lightView, false, () -> renderer.setView(lightView, light, 1, MeshletRenderer.MODE_WHITE));
-        g.pass("shadow map")
-            .read(culling.culled(), BufferAccess.INDIRECT)
-            .write(map, Access.DEPTH_ATTACHMENT)
-            .record(ctx -> renderer.drawView(ctx.commands(), lightView, 0, ctx.view(map), size, size, 0, 0, 0));
+        Image map = g.request(new SceneDraw(geometry, lightView, light, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT,
+            size, size, false)).depth();
         Image depth = g.require(Keys.SCENE_DEPTH);
         Image mask = g.createLike("shadow mask", depth, 1, VK_FORMAT_R8_UNORM);
         g.pass("shadow-mapped shadows")

@@ -143,12 +143,12 @@ class Screenshots {
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
             int size = 2048;
             com.truesim.engine.graph.Technique mapped = new com.truesim.engine.render.shadows.ShadowMapShadows(
-                renderer, camera, MeshletBenchmark.sun(extent, groundY, size), size, 1,
+                SceneGeometry.meshlets(renderer), camera, MeshletBenchmark.sun(extent, groundY, size), size, 1,
                 MeshletBenchmark.sunBias(extent, size));
             int[] mappedMask;
             int[] tracedMask = null;
             try (com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
-                graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
+                graph.add(MeshletBenchmark.forward(renderer, WIDTH, HEIGHT))
                     .add(mapped)
                     .add(new com.truesim.engine.render.shadows.ShadowedScene(0.3f))
                     .output(Keys.SHADOWED_COLOR, external);
@@ -235,8 +235,9 @@ class Screenshots {
             com.truesim.engine.graph.ExternalImage external = new com.truesim.engine.graph.ExternalImage("target",
                 WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
-            MeshletScene scene = new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
-                VK_FORMAT_D32_SFLOAT).lights(lights).clearColor(0.02f, 0.02f, 0.05f);
+            SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+            ClusteredForwardShading scene = new ClusteredForwardShading(geometry, WIDTH, HEIGHT,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).lights(lights).clearColor(0.02f, 0.02f, 0.05f);
             int[] forward;
             int[] visibility;
             try (com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
@@ -244,8 +245,8 @@ class Screenshots {
                 capture(device, graph, target, pixels); // the first frame's late phase draws everything
                 forward = capture(device, graph, target, pixels);
                 write(forward, out.resolve("lights-forward.png"));
-                scene.shading(MeshletScene.Shading.VISIBILITY_BUFFER);
-                graph.invalidate();
+                graph.replace(new VisibilityBufferShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).lights(lights).clearColor(0.02f, 0.02f, 0.05f));
                 capture(device, graph, target, pixels);
                 visibility = capture(device, graph, target, pixels);
                 write(visibility, out.resolve("lights-visibility.png"));

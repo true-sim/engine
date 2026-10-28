@@ -160,12 +160,12 @@ class ShadowsTest {
 
     @Test
     void bothTechniquesCastTheSameShadowBehindOneKey() {
-        graph.add(new MeshletScene(renderer, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
-            .add(new ShadowMapShadows(renderer, camera, light, 1024, 1, 1.5e-3f))
+        graph.add(MeshletBenchmark.forward(renderer, SIZE, SIZE))
+            .add(new ShadowMapShadows(SceneGeometry.meshlets(renderer), camera, light, 1024, 1, 1.5e-3f))
             .output(Keys.SHADOW_MASK, external(maskTarget, VK_FORMAT_R8_UNORM));
         byte[] mapped = frame(maskTarget, 1);
         expectShadow(mapped, "shadow map");
-        assertThat(graph.passes()).contains("shadow map", "shadow-mapped shadows")
+        assertThat(graph.passes()).contains("meshlet depth, view 1", "shadow-mapped shadows")
             .containsOnlyOnce("meshlet culling"); // the camera and the sun culled together
         assertThat(renderer.visibleMeshlets(1)).isEqualTo(2); // the sun's view drew both quads
 
@@ -177,7 +177,7 @@ class ShadowsTest {
             graph.replace(new RayTracedShadows(rayTracing, renderer, camera));
             byte[] traced = frame(maskTarget, 1);
             expectShadow(traced, "ray tracing");
-            assertThat(graph.passes()).contains("ray-traced shadows").doesNotContain("shadow map");
+            assertThat(graph.passes()).contains("ray-traced shadows").doesNotContain("meshlet depth, view 1");
             int differ = 0;
             for (int i = 0; i < traced.length; i++) {
                 differ += Math.abs((traced[i] & 0xff) - (mapped[i] & 0xff)) > 64 ? 1 : 0;

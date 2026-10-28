@@ -53,7 +53,8 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
 
         /**
          * Culls view {@code index} too, in the early phase of occlusion culling with {@code early} (the camera of a
-         * {@link MeshletScene}), after running {@code before} (null: nothing), e.g. to set the view when recording.
+         * {@link MeshletGeometry}'s camera), after running {@code before} (null: nothing), e.g. to set the view when
+         * recording.
          */
         public Views add(int index, boolean early, Runnable before) {
             if ((viewMask & 1 << index) != 0) {

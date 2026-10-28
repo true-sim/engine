@@ -184,7 +184,7 @@ frames recorded back to back (the paths take turns, so they see the same clocks)
 Small scenes depend on how the GPU clocks for short frames: from one session to the next, the 3,000 rocks and the
 terrain measured 0.08 to 0.14 ms on the same code. Comparisons are made within a session.
 
-**Occlusion culling.** Through the frame graph, `MeshletScene` draws in two phases around a `DepthPyramid`. The early
+**Occlusion culling.** Through the frame graph, `SceneDraw` draws the camera in two phases around a `DepthPyramid`. The early
 phase draws the instances visible last frame (a bit per instance, kept on the GPU). The late phase tests every
 instance in view against the pyramid of that depth, and the meshlets of those newly visible too. It draws what came
 into view in the same frame, so nothing pops in. Hidden objects cost only their instance test. The pyramid test is
@@ -266,16 +266,32 @@ LightClusters.Grid clusters = g.request(new LightClusters(lights, renderer, widt
   lights any cluster wanted is in the header).
 - Tested against the same cluster boxes computed on the CPU.
 
-**Shading: clustered forward or visibility buffer.** `new MeshletScene(...).lights(lights)` shades the scene with the
-lights of each pixel's cluster (and the sky); without lights, with the sun. `.shading(...)` picks when:
+### Geometry and shading
 
-- `CLUSTERED_FORWARD` shades as the meshlets are drawn, so pixels covered later are shaded too.
-- `VISIBILITY_BUFFER` draws only IDs (instance, meshlet, triangle: 8 bytes per pixel) and then shades each pixel once
-  in a compute pass. That pass rebuilds the triangle through the same vertex stage, intersects the pixel's ray with it
-  for barycentrics and texture gradients, and uses the same shading. Needs `VulkanDevice.primitiveIds()`.
+Drawing and shading are separate, and each is swappable:
 
-Both draw the same image (tested; the screenshots differ by 0.014 of 255 on average). GPU time of the whole frame,
-1920 x 1080:
+- **Geometry providers** draw one kind of geometry: `MeshletGeometry` (a renderer's meshlets) today; classic LOD,
+  skinned meshes and particles later. A `SceneGeometry` holds the providers of a frame and sets their views.
+- **`SceneDraw`**, a shared request, draws every provider from one view into the targets a `SurfaceOutput` asks for:
+  depth only, shaded color, or visibility buffer IDs. It does two-phase occlusion culling for the camera. Shading
+  techniques ask for the camera's draw and shadow techniques for the light's; equal requests are drawn once, and the
+  renderer culls all its views in one pass.
+- **Shading techniques** provide `Keys.SCENE_COLOR` and `Keys.SCENE_DEPTH`; `graph.replace` swaps them:
+
+```java
+SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+geometry.setView(0, camera, 1, MeshletRenderer.MODE_LIT);
+graph.add(new ClusteredForwardShading(geometry, width, height, colorFormat, depthFormat).lights(lights));
+graph.replace(new VisibilityBufferShading(geometry, width, height, colorFormat, depthFormat).lights(lights));
+```
+
+- `ClusteredForwardShading` shades as the meshlets are drawn, so pixels covered later are shaded too.
+- `VisibilityBufferShading` draws only IDs (instance, meshlet, triangle: 8 bytes per pixel) and then shades each pixel
+  once in a compute pass. That pass rebuilds the triangle through the same vertex stage, intersects the pixel's ray
+  with it for barycentrics and texture gradients, and uses the same shading. Needs `VulkanDevice.primitiveIds()`.
+
+Both light each pixel with its cluster's lights (and the sky), or with the sun without lights, and draw the same image
+(tested; the screenshots differ by 0.014 of 255 on average). GPU time of the whole frame, 1920 x 1080:
 
 | Scene | Clustered forward | Visibility buffer |
 |---|---|---|
@@ -284,8 +300,7 @@ Both draw the same image (tested; the screenshots differ by 0.014 of 255 on aver
 | the same, 4,096 point lights | 5.56 ms | 1.71 ms |
 | 3,000 rocks, 1,024 point lights (`Screenshots.renderLights`) | 1.86 ms | 0.74 ms |
 
-The enum is a first step: #46 makes shading, light binning, shadows, transparency and post effects swappable
-techniques.
+Next (#46): light binning, shadows per light, buckets, transparency and post effects as swappable techniques.
 
 
 ## Ray tracing
@@ -378,7 +393,7 @@ that declare how they use each image. The graph does the rest:
   was one). The graph swaps the two images' roles every frame and carries their state across the frame boundary.
 
 ```java
-graph.add(new MeshletScene(renderer, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT))
+graph.add(new ClusteredForwardShading(geometry, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT))
     .add(new Bloom())                       // requires Keys.SCENE_COLOR, provides BLOOM
     .add(new ToneMap())                     // requires BLOOM, provides TONEMAPPED
     .output(TONEMAPPED, swapchainImage);    // an ExternalImage, set to the acquired image each frame
