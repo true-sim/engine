@@ -17,13 +17,14 @@ import java.util.Objects;
  * camera-relative like instances, and the shadow maps they cast through. {@link ClusteredLights} bins them per cluster
  * of the view for shading.
  *
- * <p>Shadows: a light names a range of consecutive entries of the shadow table, each a shadow map with its transform.
- * A spot light uses one; a directional light one per cascade (nearest first, each covering view depths up to its
- * split); a point light six, the cube faces +x, -x, +y, -y, +z, -z. Shadow maps are depth images in the bindless set,
- * drawn by whatever technique (e.g. the renderer's {@link MeshletRenderer#drawView} from the light's view).
+ * <p>Shadows: a light names a range of consecutive entries of the shadow table, each of a kind evaluated its own way
+ * ({@code lights.slang}'s {@code IShadow}), so lights may each use another technique: a {@link #shadowMap shadow map}
+ * with its filter, a screen-space {@link #shadowMask mask}, or an inline {@link #shadowRay ray query}. A spot light
+ * uses one entry; a directional light one per cascade (nearest first, each covering view depths up to its split); a
+ * point light six, the cube faces +x, -x, +y, -y, +z, -z. Shadow techniques fill the entries of their lights.
  *
  * <pre>{@code
- * lights.directional(0, -0.4f, -0.8f, -0.3f, 3, 3, 3).shadows(0, 0, 4); // the sun, four cascades from entry 0
+ * lights.directional(0, -0.4f, -0.8f, -0.3f, 3, 3, 3);                  // the sun; its shadow technique sets entries
  * lights.point(1, x, y, z, 10, 20, 15, 10);                              // range 10, warm
  * lights.setCount(2);
  * }</pre>
@@ -35,7 +36,12 @@ import java.util.Objects;
 public final class Lights implements AutoCloseable {
 
     static final int LIGHT_BYTES = 64;
-    static final int SHADOW_BYTES = 80;
+    static final int SHADOW_BYTES = 96;
+    /** Shadow kinds and map filters, as lights.slang numbers them. */
+    private static final int SHADOW_MAP = 0;
+    private static final int SHADOW_MASK = 1;
+    private static final int SHADOW_RAY = 2;
+    private static final int PCF = 0;
     private static final int POINT = 0;
     private static final int SPOT = 1;
     private static final int DIRECTIONAL = 2;
@@ -119,22 +125,53 @@ public final class Lights implements AutoCloseable {
     }
 
     /**
-     * Shadow table entry {@code entry}: the depth map in sampled slot {@code map}, {@code size} texels across, drawn
-     * with {@code toShadow} (camera-relative positions to its clip space, column-major, reverse depth, e.g. the
-     * light camera's {@link Camera#viewProjection()}), compared with {@code bias}; a cascade covers view depths up to
-     * {@code split} (others: any).
+     * Shadow table entry {@code entry}, a shadow map filtered by 3 x 3 PCF: the depth map in sampled slot {@code map},
+     * {@code size} texels across, drawn with {@code toShadow} (camera-relative positions to its clip space,
+     * column-major, reverse depth, e.g. the light camera's {@link Camera#viewProjection()}), compared with
+     * {@code bias}; a cascade covers view depths up to {@code split} (others: any). Allocates nothing.
      */
-    public Lights shadow(int entry, float[] toShadow, int map, int size, float bias, float split) {
-        Objects.checkIndex(entry, shadowCapacity);
-        MemorySegment m = shadows.memory().asSlice((long) SHADOW_BYTES * entry, SHADOW_BYTES);
+    public Lights shadowMap(int entry, float[] toShadow, int map, int size, float bias, float split) {
+        MemorySegment m = shadow(entry, SHADOW_MAP, PCF, map);
         for (int i = 0; i < 16; i++) {
             m.set(F32, 4L * i, toShadow[i]);
         }
-        m.set(U32, 64, map);
-        m.set(F32, 68, bias);
-        m.set(F32, 72, split);
         m.set(U32, 76, size);
+        m.set(F32, 80, bias);
+        m.set(F32, 84, split);
         return this;
+    }
+
+    /**
+     * Shadow table entry {@code entry}, a screen-space mask: channel {@code channel} of the image in sampled slot
+     * {@code mask}, the size of the shaded image, 1 lit and 0 in shadow per pixel. Allocates nothing.
+     */
+    public Lights shadowMask(int entry, int mask, int channel) {
+        MemorySegment m = shadow(entry, SHADOW_MASK, 0, mask);
+        m.set(F32, 88, channel);
+        return this;
+    }
+
+    /**
+     * Shadow table entry {@code entry}, an inline ray query into the top level in acceleration structure slot
+     * {@code scene}, from {@code offset} per unit of distance off the surface (the drawn surface may be a detail level
+     * within a pixel of the traced one). Shading that cannot trace counts it as lit. Allocates nothing.
+     */
+    public Lights shadowRay(int entry, int scene, float offset) {
+        MemorySegment m = shadow(entry, SHADOW_RAY, 0, scene);
+        m.set(F32, 88, offset);
+        return this;
+    }
+
+    private MemorySegment shadow(int entry, int kind, int filter, int map) {
+        Objects.checkIndex(entry, shadowCapacity);
+        MemorySegment m = shadows.memory().asSlice((long) SHADOW_BYTES * entry, SHADOW_BYTES);
+        m.set(U32, 64, kind);
+        m.set(U32, 68, filter);
+        m.set(U32, 72, map);
+        m.set(F32, 84, Float.MAX_VALUE); // covers every depth, unless a cascade's split says otherwise
+        m.set(F32, 88, 0);
+        m.set(F32, 92, 0);
+        return m;
     }
 
     private MemorySegment light(int index) {
@@ -154,7 +191,8 @@ public final class Lights implements AutoCloseable {
         return count;
     }
 
-    long lightsAddress() {
+    /** The lights' device address, for passes reading them (e.g. a light's shadow technique). */
+    public long lightsAddress() {
         return lights.deviceAddress();
     }
 

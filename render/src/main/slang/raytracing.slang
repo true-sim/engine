@@ -2,6 +2,8 @@
 // into with ray queries, by slot.
 module raytracing;
 
+import lights;
+
 [[vk::binding(3, 0)]]
 public RaytracingAccelerationStructure scenes[];
 
@@ -18,4 +20,14 @@ public bool occluded(uint scene, float3 origin, float3 direction, float tMin, fl
     query.TraceRayInline(scenes[scene], RAY_FLAG_NONE, 0xff, ray);
     query.Proceed();
     return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+}
+
+/** Shadow rays by ray queries into the frame's scenes: for lights.slang's inline ray shadows. */
+public struct QueryRays : IShadowRays
+{
+    [require(spvRayQueryKHR)]
+    public float clear(uint scene, float3 origin, float3 direction, float tMax)
+    {
+        return occluded(scene, origin, direction, 0, tMax) ? 0 : 1;
+    }
 }

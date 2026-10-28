@@ -25,7 +25,8 @@ import org.lwjgl.system.MemoryStack;
  * The scene shaded through a visibility buffer: provides {@link Keys#SCENE_COLOR} and {@link Keys#SCENE_DEPTH} from a
  * {@link SceneDraw} of IDs (instance, meshlet, triangle), then shades every pixel once in a compute pass that rebuilds
  * its triangle through the same vertex stage, intersects the pixel's ray with it, and lights it as
- * {@link ClusteredForwardShading} does, by the frame's {@link Keys#LIGHT_LIST} (the sun without one). Shading no longer grows with overdraw; triangles are read twice.
+ * {@link ClusteredForwardShading} does, by the frame's {@link Keys#LIGHT_LIST} (the sun without one). Shading no
+ * longer grows with overdraw; triangles are read twice.
  * {@code graph.replace} swaps the two.
  *
  * <p>The color format must allow storage images (not sRGB). Needs
@@ -80,14 +81,18 @@ public final class VisibilityBufferShading implements Technique {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
-        Pipeline shade = g.cached(VisibilityBufferShading.class, device -> {
-            try (ShaderModule shader = ShaderModule.load(device, "shaders/visibility/shade.spv")) {
-                return Pipeline.compute(device, shader, "shadeMain", PUSH_BYTES);
-            }
-        });
         SceneDraw.Targets targets = g.request(new SceneDraw(geometry, 0, null, SurfaceOutput.ids(), depthFormat,
             width, height, occlusion));
         Buffer lights = g.optionalBuffer(Keys.LIGHT_LIST);
+        ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs());
+        // With inline ray shadows, the variant tracing them, where the device can.
+        boolean traced = shadows != null && shadows.traced() && g.device().rayTracing();
+        Pipeline shade = g.cached(traced ? "visibility shading, traced" : "visibility shading", device -> {
+            try (ShaderModule shader = ShaderModule.load(device, traced ? "shaders/visibility/shadeTraced.spv"
+                : "shaders/visibility/shade.spv")) {
+                return Pipeline.compute(device, shader, traced ? "shadeTracedMain" : "shadeMain", PUSH_BYTES);
+            }
+        });
         Image ids = targets.color();
         Image color = g.create("scene color", width, height, colorFormat);
         GraphBuilder.PassBuilder pass = g.pass("visibility shading")
@@ -96,7 +101,15 @@ public final class VisibilityBufferShading implements Technique {
         if (lights != null) {
             pass.read(lights, BufferAccess.STORAGE_READ);
         }
-        pass.record(ctx -> shade(ctx, shade, ids, color, lights));
+        if (shadows != null) {
+            shadows.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
+        }
+        pass.record(ctx -> {
+            if (shadows != null) {
+                shadows.prepare(ctx);
+            }
+            shade(ctx, shade, ids, color, lights);
+        });
         g.provide(Keys.SCENE_COLOR, color);
         g.provide(Keys.SCENE_DEPTH, targets.depth());
     }

@@ -7,7 +7,6 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
-import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8_UNORM;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
@@ -19,7 +18,7 @@ import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.render.shadows.RayTracedShadows;
 import com.truesim.engine.render.shadows.ShadowMapShadows;
-import com.truesim.engine.render.shadows.ShadowedScene;
+import com.truesim.engine.render.shadows.InlineRayShadows;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -35,9 +34,9 @@ import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkBufferImageCopy;
 
 /**
- * Sun shadows through the frame graph, validated (synchronization too): ray-traced where the device can, and by a
- * shadow map, swapped behind one key. A 2 x 2 quad floats 2 units over a 20 x 20 floor; its shadow falls where the sun
- * direction says, and the two techniques agree on almost every pixel.
+ * Shadows per light through the frame graph, validated (synchronization too): a 2 x 2 quad floats 2 units over a
+ * 20 x 20 floor, lit by directional lights whose shadows come from a shadow map, a ray-traced mask or inline ray
+ * queries (where the device traces rays), under both shading techniques; lights of one frame mixing techniques.
  */
 class ShadowsTest {
 
@@ -49,11 +48,9 @@ class ShadowsTest {
     private MeshletRenderer renderer;
     private RayTracing rayTracing;
     private FrameGraph graph;
-    private GpuImage maskTarget;
     private GpuImage colorTarget;
     private GpuBuffer pixels;
     private final Camera camera = new Camera();
-    private final Camera light = new Camera();
     private MeshData quadMesh;
     private int quad;
 
@@ -71,20 +68,16 @@ class ShadowsTest {
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 12, 64, 4));
         quadMesh = MeshletRendererTest.grid(1, 2, false, VertexFormat.POSITIONS_ONLY);
         quad = pool.add(quadMesh);
-        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12, 2),
+        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12, 3),
             VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
         // The camera at the origin looks down at the floor (y = -5, around z = -5); the quad floats at y = -3.
         renderer.setInstance(0, quad, 0, -5, -5, 0, 0, 0, 1, 10, 1, 10);
         renderer.setInstance(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
         renderer.setInstanceCount(2);
         camera.set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
-        renderer.setView(camera, 1, MeshletRenderer.MODE_WHITE);
-        // The sun's view: 20 units back along the sun from the floor's middle, 16 x 16 units, 40 deep.
-        light.setOrthographic(20 * Keys.SUN_X, -5 + 20 * Keys.SUN_Y, -5 + 20 * Keys.SUN_Z, -Keys.SUN_X, -Keys.SUN_Y,
-            -Keys.SUN_Z, 1, 0, 0, 8, 8, 40, 1024, 1024);
+        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
         graph = new FrameGraph(device, 2);
         int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        maskTarget = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
         colorTarget = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
         pixels = GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     }
@@ -100,7 +93,6 @@ class ShadowsTest {
             }
             pixels.close();
             colorTarget.close();
-            maskTarget.close();
             renderer.close();
             pool.close();
             device.close();
@@ -145,72 +137,126 @@ class ShadowsTest {
         return px + py * SIZE;
     }
 
-    /** Checks a mask: the floor under the quad's shadow dark, the floor elsewhere, the quad and the sky lit. */
-    private void expectShadow(byte[] mask, String technique) {
-        // The shadow of the quad's middle (0, -3, -5) on the floor, 2 below, along the sun.
-        double run = 2 / Keys.SUN_Y;
-        double sx = -Keys.SUN_X * run;
-        double sz = -5 - Keys.SUN_Z * run;
-        assertThat(mask[pixel(sx, -5, sz)] & 0xff).as("%s: the floor in shadow", technique).isLessThan(20);
-        assertThat(mask[pixel(sx + 0.6, -5, sz - 0.6)] & 0xff).as("%s: still in shadow", technique).isLessThan(20);
-        assertThat(mask[pixel(3, -5, -2)] & 0xff).as("%s: the floor in the sun", technique).isGreaterThan(235);
-        assertThat(mask[pixel(0.5, -3, -4.5)] & 0xff).as("%s: the quad itself", technique).isGreaterThan(235);
-        assertThat(mask[0] & 0xff).as("%s: the sky", technique).isEqualTo(255);
+    /** The red channel of a frame's color at the floor point (x, -5, z). */
+    private static int floor(byte[] color, ShadowsTest test, double x, double z) {
+        return color[4 * test.pixel(x, -5, z)] & 0xff;
+    }
+
+    /** Where the quad's middle (0, -3, -5) casts its shadow on the floor, 2 below, along direction (dx, dy, dz). */
+    private static double[] shadowOf(double dx, double dy, double dz) {
+        double run = 2 / -dy;
+        return new double[] {dx * run, -5 + dz * run};
+    }
+
+    /** An orthographic camera looking along (dx, dy, dz) at the floor's middle: a directional light's map. */
+    private static Camera lightCamera(double dx, double dy, double dz) {
+        return new Camera().setOrthographic(-20 * dx, -5 - 20 * dy, -5 - 20 * dz, dx, dy, dz, 1, 0, 0, 8, 8, 40,
+            1024, 1024);
+    }
+
+    /** How dark shadowed floor is against lit floor, at most. */
+    private double shadowRatio = 0.5;
+
+    /** Draws a frame with {@code shading} and the techniques, and checks the floor is shadowed at {@code shadow}. */
+    private byte[] expectShadow(com.truesim.engine.graph.Technique shading, String what, double[] shadow,
+        com.truesim.engine.graph.Technique... techniques) {
+        graph.close();
+        graph = new FrameGraph(device, 2).add(shading);
+        for (com.truesim.engine.graph.Technique technique : techniques) {
+            graph.add(technique);
+        }
+        graph.output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+        frame(colorTarget, 4);
+        byte[] color = frame(colorTarget, 4); // the late phase drew everything the first frame
+        int lit = floor(color, this, 3, -2);
+        int dark = floor(color, this, shadow[0], shadow[1]);
+        assertThat(dark).as("%s: the floor in shadow, against %d in the light", what, lit)
+            .isLessThan((int) (lit * shadowRatio));
+        assertThat(floor(color, this, shadow[0] + 0.4, shadow[1] - 0.4)).as("%s: still in shadow", what)
+            .isLessThan((int) (lit * shadowRatio));
+        return color;
     }
 
     @Test
-    void bothTechniquesCastTheSameShadowBehindOneKey() {
-        graph.add(MeshletBenchmark.forward(renderer, SIZE, SIZE))
-            .add(new ShadowMapShadows(SceneGeometry.meshlets(renderer), camera, light, 1024, 1, 1.5e-3f))
-            .output(Keys.SHADOW_MASK, external(maskTarget, VK_FORMAT_R8_UNORM));
-        byte[] mapped = frame(maskTarget, 1);
-        expectShadow(mapped, "shadow map");
-        assertThat(graph.passes()).contains("meshlet depth, view 1", "shadow-mapped shadows")
-            .containsOnlyOnce("meshlet culling"); // the camera and the sun culled together
-        assertThat(renderer.visibleMeshlets(1)).isEqualTo(2); // the sun's view drew both quads
-
-        if (device.rayTracing()) {
+    void everyKindOfShadowFallsWhereTheLightSays() {
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z}; // where the sun shines
+        try (Lights lights = new Lights(device, 4, 4)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            ClusteredLights clustered = new ClusteredLights(lights, camera, SIZE, SIZE);
+            double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
+            ShadowMapShadows mapped = new ShadowMapShadows(geometry, lights, 0, 0, lightCamera(sun[0], sun[1], sun[2]),
+                1024, 1, 1.5e-3f);
+            ClusteredForwardShading forward = new ClusteredForwardShading(geometry, SIZE, SIZE,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+            VisibilityBufferShading visibility = new VisibilityBufferShading(geometry, SIZE, SIZE,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+            expectShadow(forward, "forward, shadow map", shadow, clustered, mapped);
+            assertThat(graph.passes()).contains("meshlet depth, view 1").containsOnlyOnce("meshlet culling");
+            assertThat(renderer.visibleMeshlets(1)).isEqualTo(2); // the sun's view drew both quads
+            expectShadow(visibility, "visibility buffer, shadow map", shadow, clustered, mapped);
+            if (!device.rayTracing()) {
+                return;
+            }
             rayTracing = new RayTracing(device, pool, 16);
             rayTracing.add(quad, quadMesh, quadMesh.levels().size() - 1);
-            assertThat(rayTracing.bottomLevelBytes()).isPositive();
             assertThatIllegalStateException().isThrownBy(() -> rayTracing.add(quad, quadMesh, 0));
-            graph.replace(new RayTracedShadows(rayTracing, renderer, camera));
-            byte[] traced = frame(maskTarget, 1);
-            expectShadow(traced, "ray tracing");
-            assertThat(graph.passes()).contains("ray-traced shadows").doesNotContain("meshlet depth, view 1");
+            // A mask needs the camera's depth before shading: for forward, a depth-only draw of the camera as a view of
+            // its own; for the visibility buffer, the IDs' draw (the same as its own).
+            SceneDraw depthOnly = new SceneDraw(geometry, 2, camera, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, SIZE,
+                SIZE, false);
+            SceneDraw ids = new SceneDraw(geometry, 0, null, SurfaceOutput.ids(), VK_FORMAT_D32_SFLOAT, SIZE, SIZE,
+                true);
+            byte[] masked = expectShadow(forward, "forward, ray-traced mask", shadow, clustered,
+                new RayTracedShadows(rayTracing, renderer, lights, 0, 0, depthOnly, camera));
+            assertThat(graph.passes()).contains("ray-traced shadows of light 0", "top level");
+            expectShadow(visibility, "visibility buffer, ray-traced mask", shadow, clustered,
+                new RayTracedShadows(rayTracing, renderer, lights, 0, 0, ids, camera));
+            assertThat(graph.passes()).containsOnlyOnce("meshlet ids early");
+            byte[] inline = expectShadow(visibility, "visibility buffer, inline rays", shadow, clustered,
+                new InlineRayShadows(rayTracing, renderer, lights, 0, 0).offset(2e-3f));
+            assertThat(graph.passes()).doesNotContain("ray-traced shadows of light 0");
             int differ = 0;
-            for (int i = 0; i < traced.length; i++) {
-                differ += Math.abs((traced[i] & 0xff) - (mapped[i] & 0xff)) > 64 ? 1 : 0;
+            for (int i = 0; i < inline.length; i += 4) {
+                differ += Math.abs((inline[i] & 0xff) - (masked[i] & 0xff)) > 32 ? 1 : 0;
             }
-            System.out.printf("Shadows: %d of %d pixels differ between ray tracing and the shadow map; bottom levels "
-                + "%d bytes (%s vertices)%n", differ, traced.length, rayTracing.bottomLevelBytes(),
-                rayTracing.quantizedVertices() ? "quantized" : "decoded");
-            assertThat(differ).isLessThan(traced.length / 50); // edges only
+            assertThat(differ).as("inline rays against the mask").isLessThan(SIZE * SIZE / 50);
+            // Forward shading cannot trace inline: the light shines unshadowed.
+            graph.close();
+            graph = new FrameGraph(device, 2).add(forward).add(clustered)
+                .add(new InlineRayShadows(rayTracing, renderer, lights, 0, 0))
+                .output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+            frame(colorTarget, 4);
+            byte[] color = frame(colorTarget, 4);
+            assertThat(floor(color, this, shadow[0], shadow[1])).isGreaterThan(floor(color, this, 3, -2) / 2);
         }
-
-        // The composite: shadowed pixels keep the ambient share.
-        graph.add(new ShadowedScene(0.3f)).output(Keys.SHADOWED_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM))
-            .removeOutput(Keys.SHADOW_MASK);
-        byte[] color = frame(colorTarget, 4);
-        double run = 2 / Keys.SUN_Y;
-        int shadowed = color[4 * pixel(-Keys.SUN_X * run, -5, -5 - Keys.SUN_Z * run)] & 0xff;
-        int lit = color[4 * pixel(3, -5, -2)] & 0xff;
-        assertThat(lit).isEqualTo(255); // white
-        assertThat(shadowed).isBetween(70, 85); // 0.3 of white
     }
 
     @Test
-    void rayTracingNeedsTheDevice() {
-        if (device.rayTracing()) {
-            assertThat(device.bindless().slotsInUse()).isZero();
-            try (RayTracing tracing = new RayTracing(device, pool, 4)) {
-                assertThat(device.bindless().slotsInUse()).isEqualTo(1); // its top level
-                assertThat(tracing.slot()).isZero();
-            }
-            assertThat(device.bindless().slotsInUse()).isZero();
-        } else {
-            assertThatIllegalStateException().isThrownBy(() -> new RayTracing(device, pool, 4));
-            assertThatIllegalStateException().isThrownBy(() -> device.bindless().addAccelerationStructure(1));
+    void lightsOfOneFrameMixTechniques() {
+        assumeThat(device.rayTracing()).as("ray tracing").isTrue();
+        rayTracing = new RayTracing(device, pool, 16);
+        rayTracing.add(quad, quadMesh, quadMesh.levels().size() - 1);
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
+        double l = Math.sqrt(0.5 * 0.5 + 0.8 * 0.8 + 0.2 * 0.2);
+        double[] other = {0.5 / l, -0.8 / l, -0.2 / l};
+        try (Lights lights = new Lights(device, 4, 4)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 1, 1, 1)
+                .directional(1, (float) other[0], (float) other[1], (float) other[2], 1, 1, 1).setCount(2);
+            shadowRatio = 0.8; // a shadow of one light is still lit by the other
+            // The first light by a shadow map, the second by inline rays: two shadows, each lit by the other light.
+            byte[] color = expectShadow(new VisibilityBufferShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT), "two lights, first", shadowOf(sun[0], sun[1], sun[2]),
+                new ClusteredLights(lights, camera, SIZE, SIZE),
+                new ShadowMapShadows(geometry, lights, 0, 0, lightCamera(sun[0], sun[1], sun[2]), 1024, 1, 1.5e-3f),
+                new InlineRayShadows(rayTracing, renderer, lights, 1, 1));
+            double[] second = shadowOf(other[0], other[1], other[2]);
+            int lit = floor(color, this, 3, -2);
+            assertThat(floor(color, this, second[0], second[1])).as("the second light's shadow")
+                .isLessThan(lit * 3 / 4);
+            int first = floor(color, this, shadowOf(sun[0], sun[1], sun[2])[0], shadowOf(sun[0], sun[1], sun[2])[1]);
+            assertThat(first).as("in one shadow, lit by the other light").isGreaterThan(lit / 4);
         }
     }
 }

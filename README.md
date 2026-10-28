@@ -265,10 +265,9 @@ graph.add(new ClusteredLights(lights, camera, width, height));       // provides
   lights reaching one surface: `count()`, `light(i)`), with a generic light loop over any implementation.
   `ClusterLightList` implements it; a new layout (tiles, depth bins) is a struct implementing it and a case in
   `lightList()`'s dispatch on the header's layout.
-- **Shadows, single or many per light:** a light names consecutive shadow table entries (matrix, depth map slot, bias,
-  size). A spot light uses one; a directional light one per cascade, chosen by view depth; a point light six cube
-  faces, chosen by direction. `lights.slang` picks the entry and filters it (3 x 3 PCF), so any technique drawing
-  shadow maps only fills the table.
+- **Shadows, single or many per light:** a light names consecutive shadow table entries, each of a kind (a shadow
+  map with its filter, a mask, an inline ray). A spot light uses one; a directional light one per cascade, chosen by
+  view depth; a point light six cube faces, chosen by direction. See "Shadows per light" below.
 - **Fixed slots per cluster** (128 by default): no atomics, a deterministic order, and overflow reported (the most
   lights any cluster wanted is in the header).
 - Tested against the same cluster boxes computed on the CPU.
@@ -333,36 +332,46 @@ try (RayTracing rayTracing = new RayTracing(device, pool, 100_000)) { // at most
 - **Shaders** import `raytracing.slang` for `occluded(scene, origin, direction, tMin, tMax)`, a ray query that stops at
   the first hit.
 
-### Shadows: ray-traced and shadow-mapped
+### Shadows per light
 
-Two techniques provide `Keys.SHADOW_MASK` (1 lit, 0 in shadow), so either one, or `graph.replace` at run time, gives
-`ShadowedScene` what it darkens the scene's color with:
+Every light chooses its own shadow technique, and lights of one frame may mix them. A light names consecutive entries
+of the shadow table; each entry has a **kind**, evaluated in shading by an implementation of `lights.slang`'s `IShadow`
+interface:
 
-- `RayTracedShadows`: a ray per pixel towards the sun, from the position in the scene's depth, lifted along the normal
-  rebuilt from depth. Surfaces facing away from the sun need no ray.
-- `ShadowMapShadows`, the classic way: the scene's meshlets rendered depth-only from the sun (an orthographic view of
-  the same renderer, through the same culling and LOD), then each pixel compared with the map over 3 x 3 texels, with
-  a depth bias.
-  The sun's view is culled in the same pass as the camera's.
+| Kind | Technique | Evaluated by |
+|---|---|---|
+| shadow map (filter: PCF; PCSS, VSM, ESM fit the same slot) | `ShadowMapShadows`: the scene's depth from the light's camera, a `SceneDraw` of its own view, culled with the camera | `PcfShadow`: 3 x 3 percentage-closer filtering |
+| screen-space mask | `RayTracedShadows`: a ray query per pixel of the camera's depth, on the async queue | `MaskShadow`: the mask's texel |
+| inline ray | `InlineRayShadows`: nothing but the frame's top level | `RayShadow`: a ray query while shading |
 
-Both read depth and write the mask on the async compute queue. 30,000 rocks on the terrain, 1920 x 1080, sun shadows
-over a 600-unit square, GPU time of the whole frame:
+- **Shadow techniques modify `Keys.LIGHT_LIST`**, so they run whenever shading requires the light list. They put what
+  shading must read into the shared `ShadowInputs` (images to sample, buffers to wait for) with a setup that fills
+  their lights' entries when the frame records. A new technique is one class; shading needs no change.
+- **Ray tracing is a generic parameter** (`IShadowRays`): shading pipelines that cannot trace use `NoRays`, so only the
+  visibility buffer's traced variant (`shadeTraced.slang`) needs ray queries. Forward shading counts inline ray
+  shadows as lit; a ray-traced mask works with any shading.
+- **One top level per frame** (`TopLevel`, a shared request) serves every ray-traced technique.
+- A mask needs the camera's depth before shading: for the visibility buffer that is its own IDs' draw (shared); for
+  forward shading, a depth-only draw of the camera as a view of its own, for now.
 
-| | Frame | Shadows cost | Memory |
-|---|---|---|---|
-| no shadows | 0.64 ms | | |
-| ray-traced | 1.09 ms | 0.45 ms | 103 MiB of bottom levels (the rock and the 2.1 M-triangle terrain, full detail) |
-| shadow map 2048 x 2048 | 1.11 ms | 0.47 ms | 16 MiB |
-| shadow map 4096 x 4096 | 1.61 ms | 0.96 ms | 64 MiB |
+30,000 rocks on the terrain, 1920 x 1080, the sun's shadows over a 600-unit square, GPU time of the whole frame:
 
-For the same cost, ray tracing is exact: crisp contact shadows, thin details, no acne and no peter-panning, at any
-distance. Even at 2048 x 2048 over a 150-unit square, the shadow map shows texel steps along shadow edges and acne
-where the sun grazes. Its bias and resolution trade those off, and both get worse as the area grows. The shadow map
-costs no memory beyond itself and needs no ray tracing. Ray tracing needs bottom levels, which here are mostly the
-terrain's 2.1 M triangles at full detail; a coarser level would cost less.
+| | Forward | Visibility buffer |
+|---|---|---|
+| the sun, unshadowed | 1.32 ms | 0.89 ms |
+| shadow map 2048 x 2048 | 1.76 ms | 1.32 ms |
+| shadow map 4096 x 4096 | 2.23 ms | 1.81 ms |
+| ray-traced mask | 2.26 ms (with its own depth draw) | 1.34 ms |
+| inline rays | (not traced) | 1.31 ms |
 
-`Screenshots.renderShadows` renders both (`shadows-traced.png`, `shadows-mapped.png`), their masks, a close-up of the
-nearest rocks side by side, and where the masks differ (red: shadowed only when traced, blue: only by the map).
+With the visibility buffer, exact ray-traced shadows cost what a 2048 x 2048 shadow map does: about 0.42 ms. Ray
+tracing gives crisp contact shadows, thin details, and no acne or peter-panning at any distance. Even at 2048 x 2048
+over a 150-unit square, the shadow map shows texel steps along shadow edges and acne where the sun grazes. The shadow
+map needs no ray tracing and no memory beyond itself; ray tracing needs bottom levels (103 MiB here, mostly the
+terrain's 2.1 M triangles at full detail).
+
+`Screenshots.renderShadows` renders the sun's shadows both ways through the visibility buffer
+(`shadows-mapped.png`, `shadows-traced.png`), a close-up of the nearest rocks side by side, and where they differ.
 
 ## Frame graph
 

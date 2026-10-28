@@ -38,7 +38,8 @@ import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.render.shadows.RayTracedShadows;
 import com.truesim.engine.render.shadows.ShadowMapShadows;
-import com.truesim.engine.render.shadows.ShadowedScene;
+import com.truesim.engine.render.shadows.InlineRayShadows;
+import com.truesim.engine.graph.Technique;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Images;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -230,7 +231,7 @@ class MeshletBenchmark {
              GpuImage depth = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_D32_SFLOAT,
                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
              MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
-                 1 << 20, 65_535, 80_000_000, 2), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+                 1 << 20, 65_535, 80_000_000, 3), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
              MemoryStack stack = stackPush()) {
             MeshData rockMesh = rock(6);
             MeshData terrainMesh = terrain(1024);
@@ -631,22 +632,16 @@ class MeshletBenchmark {
         rocksOnTerrain(renderer, rock, ground, 30_000, extent, groundY);
         Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
         renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
-        ExternalImage sceneTarget = new ExternalImage("target", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-            .set(color.handle(), color.view());
-        try (GpuImage shadowed = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        try (GpuImage shaded = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
             org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+             Lights lights = new Lights(device, 1, 1);
              RayTracing rayTracing = device.rayTracing() ? new RayTracing(device, pool, 100_000) : null) {
-            ExternalImage shadowedTarget = new ExternalImage("shadowed", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+            ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shadowed.handle(), 0);
-            String scene = "30,000 rocks on the terrain, from above";
-            try (FrameGraph graph = new FrameGraph(device, 2)) {
-                graph.add(forward(renderer, WIDTH, HEIGHT))
-                    .output(Keys.SCENE_COLOR, sceneTarget);
-                System.out.printf(Locale.ROOT, "  %s, no shadows: %.3f ms median%n", scene,
-                    time(device, color, depth, queries, period, BATCH, graph::record));
-            }
+                org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shaded.handle(), 0);
+            lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
+            ClusteredLights sun = new ClusteredLights(lights, camera, WIDTH, HEIGHT);
             if (rayTracing != null) {
                 long t0 = System.nanoTime();
                 rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
@@ -654,27 +649,44 @@ class MeshletBenchmark {
                 System.out.printf(Locale.ROOT, "  bottom levels (rock and terrain at full detail, %s vertices): %,d "
                     + "bytes compacted, built in %.0f ms%n", rayTracing.quantizedVertices() ? "quantized" : "decoded",
                     rayTracing.bottomLevelBytes(), (System.nanoTime() - t0) / 1e6);
-                try (FrameGraph graph = new FrameGraph(device, 2)) {
-                    graph.add(forward(renderer, WIDTH, HEIGHT))
-                        .add(new RayTracedShadows(rayTracing, renderer, camera))
-                        .add(new ShadowedScene(0.3f))
-                        .output(Keys.SHADOWED_COLOR, shadowedTarget);
-                    System.out.printf(Locale.ROOT, "  %s, ray-traced shadows: %.3f ms median%n", scene,
-                        time(device, color, depth, queries, period, BATCH, graph::record));
+            }
+            SceneDraw depthOnly = new SceneDraw(geometry, 2, camera, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, WIDTH,
+                HEIGHT, false); // forward's depth for the mask: the camera as a view of its own
+            SceneDraw ids = new SceneDraw(geometry, 0, null, SurfaceOutput.ids(), VK_FORMAT_D32_SFLOAT, WIDTH, HEIGHT,
+                true);
+            for (boolean forward : new boolean[] {true, false}) {
+                Technique shading = forward ? forward(renderer, WIDTH, HEIGHT) : new VisibilityBufferShading(geometry,
+                    WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+                String scene = "30,000 rocks on the terrain, from above, "
+                    + (forward ? "forward" : "visibility buffer");
+                time(device, color, depth, queries, period, scene + ", the sun unshadowed", target, shading, sun);
+                for (int size : new int[] {2048, 4096}) {
+                    time(device, color, depth, queries, period, scene + ", shadow map " + size + " x " + size, target,
+                        shading, sun, new ShadowMapShadows(geometry, lights, 0, 0, sun(extent, groundY, size), size, 1,
+                            sunBias(extent, size)));
+                }
+                if (rayTracing != null) {
+                    time(device, color, depth, queries, period, scene + ", ray-traced mask", target, shading, sun,
+                        new RayTracedShadows(rayTracing, renderer, lights, 0, 0, forward ? depthOnly : ids, camera));
+                    if (!forward) {
+                        time(device, color, depth, queries, period, scene + ", inline rays", target, shading, sun,
+                            new InlineRayShadows(rayTracing, renderer, lights, 0, 0));
+                    }
                 }
             }
-            for (int size : new int[] {2048, 4096}) {
-                try (FrameGraph graph = new FrameGraph(device, 2)) {
-                    graph.add(forward(renderer, WIDTH, HEIGHT))
-                        .add(new ShadowMapShadows(SceneGeometry.meshlets(renderer), camera, sun(extent, groundY, size),
-                            size, 1,
-                            sunBias(extent, size)))
-                        .add(new ShadowedScene(0.3f))
-                        .output(Keys.SHADOWED_COLOR, shadowedTarget);
-                    System.out.printf(Locale.ROOT, "  %s, shadow map %d x %d: %.3f ms median%n", scene, size, size,
-                        time(device, color, depth, queries, period, BATCH, graph::record));
-                }
+        }
+    }
+
+    /** Times a graph of {@code techniques} outputting the scene's color into {@code target}, and prints it. */
+    private static void time(VulkanDevice device, GpuImage color, GpuImage depth, long queries, double period,
+        String what, ExternalImage target, Technique... techniques) {
+        try (FrameGraph graph = new FrameGraph(device, 2)) {
+            for (Technique technique : techniques) {
+                graph.add(technique);
             }
+            graph.output(Keys.SCENE_COLOR, target);
+            System.out.printf(Locale.ROOT, "  %s: %.3f ms median%n", what,
+                time(device, color, depth, queries, period, BATCH, graph::record));
         }
     }
 

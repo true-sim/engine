@@ -9,10 +9,6 @@ public final class Keys {
     public static final Key SCENE_COLOR = Key.of("scene color");
     /** The scene's depth: reverse, 1 near, 0 at infinity. */
     public static final Key SCENE_DEPTH = Key.of("scene depth");
-    /** Where the sun shines: 1 lit, 0 in shadow, per pixel of the scene. */
-    public static final Key SHADOW_MASK = Key.of("shadow mask");
-    /** The scene's color with the sun's shadows. */
-    public static final Key SHADOWED_COLOR = Key.of("shadowed scene color");
     /**
      * The frame's light list, a buffer: the lights binned for shading (e.g. by {@link ClusteredLights}), read through
      * {@code lights.slang}'s {@code ILightList}. Without one, shading lights by the sun.
