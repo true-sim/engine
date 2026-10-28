@@ -311,6 +311,7 @@ class MeshletBenchmark {
                         lodCount, lodTriangles[0]);
                 }
                 occlusion(device, renderer, color, depth, queries, period, rock, ground, placed, camera);
+                classicLod(device, renderer, color, depth, queries, period, rock, rockLod, rockLods, placed, camera);
                 shadows(device, pool, renderer, color, depth, queries, period, rock, rockMesh, ground, terrainMesh);
                 lighting(device, renderer, color, depth, queries, period, rock, ground);
                 renderer.setInstance(0, ground, 0, -6, 0, 0, 0, 0, 1, 1, 1, 1);
@@ -728,6 +729,39 @@ class MeshletBenchmark {
                         + "median, %,d meshlets drawn%n", count, wall ? " behind a wall" : "", occlusion ? "on" : "off",
                         time, renderer.visibleMeshlets());
                 }
+            }
+        }
+    }
+
+    /**
+     * Classic LOD against meshlets, through the frame graph, occlusion culling off: the 30,000 scattered rocks as
+     * meshlets (the cluster hierarchy, and the discrete LODs), and the discrete LODs drawn the classic way
+     * ({@link ClassicLodGeometry}: a level per instance chosen on the GPU, indexed indirect draws).
+     */
+    private static void classicLod(VulkanDevice device, MeshletRenderer renderer, GpuImage color, GpuImage depth,
+        long queries, double period, int rock, int rockLod, MeshData rockLods, float[] placed, Camera camera) {
+        int count = 30_000;
+        renderer.setView(camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1, MeshletRenderer.MODE_LIT);
+        ExternalImage target = new ExternalImage("target", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+            .set(color.handle(), color.view());
+        try (ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_FORMAT_D32_SFLOAT, count)) {
+            classic.add(rockLod, rockLods);
+            for (int mesh : new int[] {rock, rockLod, -1}) {
+                for (int i = 0; i < count; i++) {
+                    int o = 8 * i;
+                    renderer.setInstance(i, mesh < 0 ? rockLod : mesh, placed[o], placed[o + 1], placed[o + 2],
+                        placed[o + 3], placed[o + 4], placed[o + 5], placed[o + 6], placed[o + 7], placed[o + 7],
+                        placed[o + 7]);
+                }
+                renderer.setInstanceCount(count);
+                SceneGeometry geometry = mesh < 0 ? new SceneGeometry(classic) : SceneGeometry.meshlets(renderer);
+                time(device, color, depth, queries, period, String.format(Locale.ROOT, "%,d rocks, through the graph, "
+                    + "%s", count, mesh == rock ? "meshlets, cluster hierarchy" : mesh == rockLod
+                    ? "meshlets, discrete LODs" : "classic LOD (discrete LODs, a level per instance)"), target,
+                    new ClusteredForwardShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_FORMAT_D32_SFLOAT).occlusion(false));
             }
         }
     }

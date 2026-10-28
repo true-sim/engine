@@ -30,15 +30,16 @@ import org.lwjgl.system.MemoryStack;
  * {@code graph.replace} swaps the two.
  *
  * <p>The color format must allow storage images (not sRGB). Needs
- * {@link com.truesim.engine.vulkan.VulkanDevice#primitiveIds()}, and meshlet geometry (for now the only provider whose
- * triangles the shading pass can rebuild).
+ * {@link com.truesim.engine.vulkan.VulkanDevice#primitiveIds()}, and one provider whose triangles the shading pass can
+ * rebuild: {@link MeshletGeometry} or {@link ClassicLodGeometry}.
  */
 public final class VisibilityBufferShading implements Technique {
 
-    private static final int PUSH_BYTES = 108;
+    private static final int PUSH_BYTES = 120;
 
     private final SceneGeometry geometry;
     private final MeshletRenderer renderer;
+    private final ClassicLodGeometry classic; // null: meshlets
     private final int width;
     private final int height;
     private final int colorFormat;
@@ -49,10 +50,12 @@ public final class VisibilityBufferShading implements Technique {
     public VisibilityBufferShading(SceneGeometry geometry, int width, int height, int colorFormat, int depthFormat) {
         this.geometry = Objects.requireNonNull(geometry, "geometry");
         MeshletGeometry meshlets = geometry.provider(MeshletGeometry.class);
-        if (meshlets == null || geometry.providers().size() != 1) {
-            throw new IllegalArgumentException("The visibility buffer shades meshlet geometry alone, for now");
+        this.classic = geometry.provider(ClassicLodGeometry.class);
+        if (geometry.providers().size() != 1 || meshlets == null && classic == null) {
+            throw new IllegalArgumentException(
+                "The visibility buffer shades one provider's geometry, meshlets or classic LOD, for now");
         }
-        this.renderer = meshlets.renderer();
+        this.renderer = meshlets != null ? meshlets.renderer() : classic.renderer();
         this.width = width;
         this.height = height;
         this.colorFormat = colorFormat;
@@ -135,6 +138,7 @@ public final class VisibilityBufferShading implements Technique {
             memPutFloat(push + 96, clear[0]);
             memPutFloat(push + 100, clear[1]);
             memPutFloat(push + 104, clear[2]);
+            memPutLong(push + 112, classic == null ? 0 : classic.indicesAddress());
             pipeline.bind(ctx.commands());
             pipeline.push(ctx.commands(), push, PUSH_BYTES);
             vkCmdDispatch(ctx.commands(), (width + 7) / 8, (height + 7) / 8, 1);

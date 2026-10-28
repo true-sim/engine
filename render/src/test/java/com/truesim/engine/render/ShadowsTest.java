@@ -277,6 +277,37 @@ class ShadowsTest {
     }
 
     @Test
+    void classicGeometryCastsAndCatchesShadows() {
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
+        try (Lights lights = new Lights(device, 1, 4);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            classic.add(quad, quadMesh);
+            SceneGeometry geometry = new SceneGeometry(classic);
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
+            com.truesim.engine.graph.Technique[] shadings = device.primitiveIds()
+                ? new com.truesim.engine.graph.Technique[] {
+                    new ClusteredForwardShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT),
+                    new VisibilityBufferShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)}
+                : new com.truesim.engine.graph.Technique[] {
+                    new ClusteredForwardShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)};
+            for (com.truesim.engine.graph.Technique shading : shadings) {
+                expectShadow(shading, "classic, one map", shadow, new ClusteredLights(lights, camera, SIZE, SIZE),
+                    new ShadowMapShadows(geometry, lights, 0, 0, lightCamera(sun[0], sun[1], sun[2]), 1024, 1,
+                        1.5e-3f));
+                assertThat(graph.passes()).contains("classic depth, view 1");
+                CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, 1024, 1, 40);
+                cascades.update(0, 0, 0);
+                expectShadow(shading, "classic, cascades", shadow, new ClusteredLights(lights, camera, SIZE, SIZE),
+                    cascades);
+                assertThat(graph.passes()).contains("classic depth, view 1", "classic depth, view 2",
+                    "classic depth, view 3");
+            }
+        }
+    }
+
+    @Test
     void lightsOfOneFrameMixTechniques() {
         assumeThat(device.rayTracing()).as("ray tracing").isTrue();
         rayTracing = new RayTracing(device, pool, 16);

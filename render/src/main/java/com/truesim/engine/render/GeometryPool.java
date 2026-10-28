@@ -264,7 +264,26 @@ public final class GeometryPool implements AutoCloseable {
 
     /** Mesh {@code mesh}'s first vertex in {@link #positions()}. */
     int vertexBase(int mesh) {
-        return meshTable.memory().get(U32, (long) MESH_ENTRY_BYTES * Objects.checkIndex(mesh, meshCount) + 12);
+        return entryWord(mesh, 12);
+    }
+
+    /** Mesh {@code mesh}'s first meshlet in {@link #meshlets()}. */
+    int meshletBase(int mesh) {
+        return entryWord(mesh, 28);
+    }
+
+    /** How many meshlets mesh {@code mesh} has. */
+    int meshletCount(int mesh) {
+        return entryWord(mesh, 48);
+    }
+
+    /** Mesh {@code mesh}'s first index (byte) in {@link #meshletTriangles()}: its triangle t's indices are 3t on. */
+    int indexBase(int mesh) {
+        return entryWord(mesh, 56);
+    }
+
+    private int entryWord(int mesh, long offset) {
+        return meshTable.memory().get(U32, (long) MESH_ENTRY_BYTES * Objects.checkIndex(mesh, meshCount) + offset);
     }
 
     GpuBuffer positions() {

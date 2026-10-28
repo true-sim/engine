@@ -242,6 +242,12 @@ public struct ViewLists
     public uint* visibleCount;   // the early (or only) phase, then the late one
 };
 
+/**
+ * The top bit of a visibility buffer triangle: a classic LOD draw's (ClassicLodGeometry), then the submesh << 24 and the
+ * triangle in the mesh; without it, a meshlet's: the pool meshlet << 7 and the triangle in it.
+ */
+public static const uint CLASSIC_TRIANGLE = 0x80000000u;
+
 /** What the vertex or mesh shader hands the fragment shader: the same for both paths. */
 public struct VertexOut
 {
