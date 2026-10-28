@@ -276,8 +276,27 @@ graph.add(new ClusteredLights(lights, camera, width, height));       // provides
 
 Drawing and shading are separate, and each is swappable:
 
-- **Geometry providers** draw one kind of geometry: `MeshletGeometry` (a renderer's meshlets) today; classic LOD,
-  skinned meshes and particles later. A `SceneGeometry` holds the providers of a frame and sets their views.
+- **Geometry providers** draw one kind of geometry; skinned meshes and particles come later. A `SceneGeometry` holds
+  the providers of a frame and sets their views.
+  - `MeshletGeometry`: a renderer's meshlets, with cluster LOD.
+  - `ClassicLodGeometry`: the same instances drawn the classic way.
+    - It takes discrete LODs (`MeshBuilder.buildDiscrete`) or flat meshes, added with `add(mesh, data)`.
+    - A compute pass per view culls every instance against the frustum and picks one whole level by the same error
+      rule. It writes an indexed indirect draw per submesh run of that level, and one `vkCmdDrawIndexedIndirectCount`
+      draws them all.
+    - It draws depth, shaded color and visibility buffer IDs. Classic IDs carry a top-bit tag, and the resolve rebuilds
+      them from the provider's index buffer, so `VisibilityBufferShading` works with it unchanged.
+    - It has no occlusion culling yet, and it doesn't mix with meshlets over one renderer's instances.
+    - For 30,000 rocks through the graph (forward, occlusion off):
+
+      | Provider | Time |
+      |---|---|
+      | meshlets, cluster hierarchy | 1.28 ms |
+      | meshlets, discrete LODs | 2.07 ms |
+      | classic LOD | 2.84 ms |
+
+      Classic LOD matches the CPU-culled classic baseline (2.82 ms), since both draw the same 17.6 M triangles. It
+      also frees the CPU.
 - **`SceneDraw`**, a shared request, draws every provider from one view into the targets a `SurfaceOutput` asks for:
   depth only, shaded color, or visibility buffer IDs. It does two-phase occlusion culling for the camera. Shading
   techniques ask for the camera's draw and shadow techniques for the light's; equal requests are drawn once, and the

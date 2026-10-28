@@ -38,7 +38,10 @@ import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanException;
 import com.truesim.engine.vulkan.VulkanInstance;
+import com.truesim.scene.assets.mesh.MeshData;
+import com.truesim.scene.assets.mesh.VertexAttribute;
 import com.truesim.scene.assets.mesh.VertexFormat;
+import com.truesim.scene.meshbuild.MeshBuilder;
 import java.lang.foreign.ValueLayout;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -68,6 +71,9 @@ class GraphTechniquesTest {
     private GpuBuffer pixels;
     private GpuBuffer pattern;
     private int quad;
+    private MeshData quadMesh;
+    private int hill;
+    private MeshData hillMesh;
 
     @BeforeEach
     void start() {
@@ -81,7 +87,11 @@ class GraphTechniquesTest {
         assumeThat(instance.gpus()).as("no Vulkan 1.3 GPU").isNotEmpty();
         device = VulkanDevice.createHeadless(instance.bestGpu());
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 12, 64, 4));
-        quad = pool.add(MeshletRendererTest.grid(1, 2, false, VertexFormat.POSITIONS_ONLY));
+        quadMesh = MeshletRendererTest.grid(1, 2, false, VertexFormat.POSITIONS_ONLY);
+        quad = pool.add(quadMesh);
+        hillMesh = MeshletRendererTest.grid(16, 0.1f, true, VertexFormat.POSITIONS_ONLY); // a cluster hierarchy
+        hill = pool.add(hillMesh);
+        assertThat(hillMesh.levels()).as("the hill's levels").hasSizeGreaterThan(1);
         renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12),
             VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
         graph = new FrameGraph(device, 2);
@@ -613,5 +623,146 @@ class GraphTechniquesTest {
         assertThat(red(2, 2)).isEqualTo(1);
         assertThat(red(SIZE - 3, 2)).isZero();
         org.assertj.core.api.Assertions.assertThatNullPointerException().isThrownBy(() -> new Blur(null, 1, 1));
+    }
+
+    /** The target's pixels as last read back. */
+    private int[] image() {
+        int[] image = new int[SIZE * SIZE];
+        for (int i = 0; i < image.length; i++) {
+            image[i] = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, i);
+        }
+        return image;
+    }
+
+    /** How many pixels of the target differ from {@code expected} by more than 8 in a channel. */
+    private int differing(int[] expected) {
+        int far = 0;
+        for (int i = 0; i < expected.length; i++) {
+            int p = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, i);
+            int worst = 0;
+            for (int shift = 0; shift < 24; shift += 8) {
+                worst = Math.max(worst, Math.abs(((p >> shift) & 0xff) - ((expected[i] >> shift) & 0xff)));
+            }
+            far += worst > 8 ? 1 : 0;
+        }
+        return far;
+    }
+
+    /** A bumpy 7 x 7 grid, 0.3 a cell, as discrete LODs: each level one meshlet. */
+    static MeshData bumpyLods() {
+        int n = 7;
+        int count = (n + 1) * (n + 1);
+        float[] positions = new float[count * 3];
+        for (int z = 0; z <= n; z++) {
+            for (int x = 0; x <= n; x++) {
+                int v = z * (n + 1) + x;
+                positions[3 * v] = (x - n / 2f) * 0.3f;
+                positions[3 * v + 1] = (float) (0.25 * Math.sin(x * 1.3) * Math.cos(z * 0.9));
+                positions[3 * v + 2] = (z - n / 2f) * 0.3f;
+            }
+        }
+        int[] indices = new int[n * n * 6];
+        int at = 0;
+        for (int z = 0; z < n; z++) {
+            for (int x = 0; x < n; x++) {
+                int a = z * (n + 1) + x;
+                int[] cell = {a, a + n + 1, a + 1, a + 1, a + n + 1, a + n + 2};
+                System.arraycopy(cell, 0, indices, at, 6);
+                at += 6;
+            }
+        }
+        return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL), count).positions(positions)
+            .attribute(VertexAttribute.NORMAL, MeshletBenchmark.normals(positions, indices)).submesh(indices)
+            .buildDiscrete(6, 0.5);
+    }
+
+    @Test
+    void classicLodDrawsWhatMeshletsDraw() {
+        // The lit floor, and a quad standing on it hiding part of it.
+        renderer.setInstance(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+        renderer.setInstance(1, quad, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+        renderer.setInstanceCount(2);
+        Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+        try (ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_FORMAT_D32_SFLOAT, 64)) {
+            assertThat(classic.add(quad, quadMesh).renderer()).isSameAs(renderer);
+            SceneGeometry geometry = new SceneGeometry(classic);
+            ClusteredForwardShading meshlets = MeshletBenchmark.forward(renderer, SIZE, SIZE).clearColor(0, 0, 0.5f);
+            graph.add(meshlets).output(Keys.SCENE_COLOR, output);
+            frame();
+            frame();
+            int[] expected = image();
+            ClusteredForwardShading forward = new ClusteredForwardShading(geometry, SIZE, SIZE,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f);
+            graph.replace(forward);
+            frame();
+            assertThat(graph.passes()).contains("classic LOD reset", "classic LOD selection", "classic LOD")
+                .doesNotContain("meshlet culling");
+            assertThat(differing(expected)).as("classic forward against meshlets").isZero();
+            if (device.primitiveIds()) {
+                graph.replace(new VisibilityBufferShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f));
+                frame();
+                assertThat(graph.passes()).contains("classic LOD ids", "visibility shading");
+                assertThat(differing(expected)).as("classic visibility buffer against meshlets")
+                    .isLessThan(SIZE * SIZE / 100);
+                graph.replace(forward);
+            }
+            // Instances of meshes not added are not drawn: the floor is all that is left.
+            renderer.setInstance(1, hill, 0, -0.5f, -2.5f, 0, 0, 0, 1, 1, 1, 1);
+            frame();
+            renderer.setInstance(1, quad, 0, -0.5f, -2.5f, 0, 0, 0, 1, 1, 1, 1);
+            renderer.setInstanceCount(1);
+            int[] floorOnly = image();
+            frame();
+            assertThat(differing(floorOnly)).as("the hill is not drawn").isZero();
+            assertThatIllegalStateException().as("added twice").isThrownBy(() -> classic.add(quad, quadMesh));
+            assertThatIllegalArgumentException().as("a cluster hierarchy")
+                .isThrownBy(() -> classic.add(hill, hillMesh));
+            assertThatIllegalArgumentException().as("another mesh's data")
+                .isThrownBy(() -> classic.add(hill, quadMesh));
+            classic.close();
+            assertThatIllegalStateException().isThrownBy(() -> classic.add(hill, hillMesh));
+        }
+        GeometryProvider meshlets = SceneGeometry.meshlets(renderer).providers().getFirst();
+        assertThatIllegalArgumentException().isThrownBy(() -> new VisibilityBufferShading(
+            new SceneGeometry(meshlets, meshlets), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT));
+        assertThatIllegalArgumentException().isThrownBy(() -> new ClassicLodGeometry(device, renderer,
+            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, 0));
+    }
+
+    @Test
+    void classicLodPicksTheLevelsMeshletsPick() {
+        MeshData lods = bumpyLods();
+        assertThat(lods.levels()).as("levels").hasSizeGreaterThan(2);
+        int mesh = pool.add(lods);
+        Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        renderer.setView(camera, 1, MeshletRenderer.MODE_MESHLETS); // a color per meshlet: per level here
+        try (ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_FORMAT_D32_SFLOAT, 64)) {
+            classic.add(mesh, lods);
+            ClusteredForwardShading meshlets = MeshletBenchmark.forward(renderer, SIZE, SIZE);
+            ClusteredForwardShading classicForward = new ClusteredForwardShading(new SceneGeometry(classic), SIZE,
+                SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+            graph.add(meshlets).output(Keys.SCENE_COLOR, output);
+            java.util.Set<Integer> colors = new java.util.HashSet<>();
+            for (float distance : new float[] {1.2f, 3, 7, 16, 36}) {
+                // Facing the camera, a little off the middle so the middle pixel is not on an edge.
+                renderer.setInstance(0, mesh, 0.05f, 0.03f, -distance, HALF, 0, 0, HALF, 1, 1, 1);
+                renderer.setInstanceCount(1);
+                graph.replace(meshlets);
+                frame();
+                frame();
+                int expected = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, SIZE / 2 * SIZE + SIZE / 2);
+                graph.replace(classicForward);
+                frame();
+                int drawn = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, SIZE / 2 * SIZE + SIZE / 2);
+                assertThat(Integer.toHexString(drawn)).as("at %s", distance)
+                    .isEqualTo(Integer.toHexString(expected));
+                colors.add(drawn);
+            }
+            assertThat(colors).as("levels drawn").hasSizeGreaterThan(2);
+        }
     }
 }

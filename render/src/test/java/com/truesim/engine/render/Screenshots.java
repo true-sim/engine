@@ -284,6 +284,54 @@ class Screenshots {
         }
     }
 
+    /**
+     * Detail, two ways: 3,000 rocks as meshlets of a cluster hierarchy (a color per meshlet: detail varies across a
+     * rock) and as discrete LODs drawn the classic way (a color per level: a whole rock switches), and the classic
+     * rocks lit.
+     */
+    @Test
+    void renderLods() throws IOException {
+        Path out = Files.createDirectories(Path.of("build", "screenshots"));
+        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        try (VulkanInstance instance = VulkanInstance.builder().applicationName("screenshots").surfaces(false)
+                 .build();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 100_000, 4));
+             GpuImage target = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage,
+                 VK_IMAGE_ASPECT_COLOR_BIT);
+             GpuBuffer pixels = GpuBuffer.hostVisible(device, (long) WIDTH * HEIGHT * 4,
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+             MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
+                 1 << 20, 65_535, 20_000_000), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 100_000)) {
+            int rock = pool.add(MeshletBenchmark.rock(6));
+            com.truesim.scene.assets.mesh.MeshData rockLods = MeshletBenchmark.rockBuilder(6).buildDiscrete(8, 0.5);
+            int rockLod = pool.add(rockLods);
+            int ground = pool.add(MeshletBenchmark.terrain(1024));
+            classic.add(rockLod, rockLods);
+            Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
+            com.truesim.engine.graph.ExternalImage external = new com.truesim.engine.graph.ExternalImage("target",
+                WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
+            String[] names = {"lod-meshlets.png", "lod-classic.png", "lod-classic-lit.png"};
+            for (int image = 0; image < names.length; image++) {
+                boolean meshlets = image == 0;
+                // The terrain's place takes a rock too: the terrain is a cluster hierarchy, which classic LOD skips.
+                MeshletBenchmark.rocksOnTerrain(renderer, meshlets ? rock : rockLod, ground, 3000, 150, -12);
+                renderer.setInstance(0, meshlets ? rock : rockLod, 0, -12, -12, 0, 0, 0, 1, 2, 2, 2);
+                renderer.setView(camera, 1, image == 2 ? MeshletRenderer.MODE_LIT : MeshletRenderer.MODE_MESHLETS);
+                SceneGeometry geometry = meshlets ? SceneGeometry.meshlets(renderer) : new SceneGeometry(classic);
+                try (com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
+                    graph.add(new ClusteredForwardShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.02f, 0.05f)).output(Keys.SCENE_COLOR, external);
+                    capture(device, graph, target, pixels); // the first frame's late phase draws everything
+                    write(capture(device, graph, target, pixels), out.resolve(names[image]));
+                }
+            }
+        }
+    }
+
     /** Records {@code graph}'s frame and reads {@code target} back, RGBA per texel. */
     private static int[] capture(VulkanDevice device, com.truesim.engine.graph.FrameGraph graph, GpuImage target,
         GpuBuffer pixels) {

@@ -675,7 +675,7 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /** Begins rendering into the attachments, cleared or, with {@code load}, as they are. */
-    private static void beginRendering(VkCommandBuffer commands, MemoryStack stack, long colorView, long depthView,
+    static void beginRendering(VkCommandBuffer commands, MemoryStack stack, long colorView, long depthView,
         int width, int height, float r, float g, float b, boolean load) {
         long color = stack.ncalloc(VkRenderingAttachmentInfo.ALIGNOF, 1, VkRenderingAttachmentInfo.SIZEOF);
         attachment(color, colorView, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, load);
@@ -697,7 +697,7 @@ public final class MeshletRenderer implements AutoCloseable {
         nvkCmdBeginRendering(commands, rendering);
     }
 
-    private static void setViewport(VkCommandBuffer commands, MemoryStack stack, int width, int height) {
+    static void setViewport(VkCommandBuffer commands, MemoryStack stack, int width, int height) {
         long viewport = stack.ncalloc(VkViewport.ALIGNOF, 1, VkViewport.SIZEOF);
         memPutFloat(viewport + VkViewport.WIDTH, width);
         memPutFloat(viewport + VkViewport.HEIGHT, height);
@@ -766,6 +766,11 @@ public final class MeshletRenderer implements AutoCloseable {
     /** The view buffer, for other passes drawing the same frame. */
     GpuBuffer viewBuffer() {
         return view;
+    }
+
+    /** View {@code index}'s address in the view buffer. */
+    long viewAddress(int index) {
+        return view.deviceAddress() + (long) VIEW_BYTES * Objects.checkIndex(index, VIEWS);
     }
 
     /** The geometry pool, for other passes shading the same instances. */

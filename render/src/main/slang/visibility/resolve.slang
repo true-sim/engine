@@ -25,6 +25,7 @@ public struct ShadePush
     uint width;
     uint height;
     float3 clear;              // the color behind everything
+    uint* classicIndices;      // the classic LOD path's indices, as the pool's triangles lie (null: no such path)
 };
 
 [[vk::push_constant]]
@@ -69,17 +70,32 @@ public void shadePixel<R : IShadowRays>(R rays, uint3 id)
     View view = push.view[0];
     Instance instance = push.instances[ids.x - 1];
     MeshEntry mesh = push.meshes[instance.mesh];
-    uint m = ids.y >> 7;
-    uint t = ids.y & 0x7f;
-    uint w = m * 8;
-    uint first = mesh.indexBase + push.meshlets[w + 1] + t * 3;
-    uint vertexBase = mesh.meshletVertexBase + push.meshlets[w];
-    uint submesh = meshletSubmesh(push.meshlets, m);
     VertexOut v[3];
-    for (uint k = 0; k < 3; k++)
+    if ((ids.y & CLASSIC_TRIANGLE) != 0)
     {
-        uint vertex = mesh.vertexBase + push.meshletVertices[vertexBase + triangleByte(first + k)];
-        v[k] = transformVertex(view, instance, mesh, vertex, push.positions, push.attributes, m, submesh);
+        // A classic draw's: the submesh and the triangle in the mesh, whose indices lie where its meshlet bytes do.
+        uint t = ids.y & 0xffffff;
+        uint submesh = (ids.y >> 24) & 0x7f;
+        uint first = mesh.indexBase + t * 3;
+        for (uint k = 0; k < 3; k++)
+        {
+            uint vertex = mesh.vertexBase + push.classicIndices[first + k];
+            v[k] = transformVertex(view, instance, mesh, vertex, push.positions, push.attributes, t >> 7, submesh);
+        }
+    }
+    else
+    {
+        uint m = ids.y >> 7;
+        uint t = ids.y & 0x7f;
+        uint w = m * 8;
+        uint first = mesh.indexBase + push.meshlets[w + 1] + t * 3;
+        uint vertexBase = mesh.meshletVertexBase + push.meshlets[w];
+        uint submesh = meshletSubmesh(push.meshlets, m);
+        for (uint k = 0; k < 3; k++)
+        {
+            uint vertex = mesh.vertexBase + push.meshletVertices[vertexBase + triangleByte(first + k)];
+            v[k] = transformVertex(view, instance, mesh, vertex, push.positions, push.attributes, m, submesh);
+        }
     }
     float4x4 toWorld = view.inverseViewProjection;
     float3 a = v[0].world;
