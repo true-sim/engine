@@ -141,6 +141,8 @@ public final class FrameGraph implements AutoCloseable {
     private final List<Physical> retired = new ArrayList<>();
     private final List<PhysicalBuffer> bufferPool = new ArrayList<>();
     private final List<PhysicalBuffer> retiredBuffers = new ArrayList<>();
+    private final Map<String, HistoryPair> histories = new HashMap<>();
+    private HistoryPair[] activeHistories = new HistoryPair[0];
     private final Queue graphicsQueue;
     private final Queue computeQueue;
     private boolean asyncCompute;
@@ -352,6 +354,11 @@ public final class FrameGraph implements AutoCloseable {
     private void prepare() {
         if (dirty || externalsResized()) {
             build();
+        } else {
+            // A new frame: last frame's current images are this frame's previous ones.
+            for (HistoryPair pair : activeHistories) {
+                pair.current.swap(pair.previous);
+            }
         }
         frame++;
         if (!retired.isEmpty() || !retiredBuffers.isEmpty()) {
@@ -823,6 +830,9 @@ public final class FrameGraph implements AutoCloseable {
         // Culled: walking back from the outputs, a pass is needed if it writes an image or buffer needed after it.
         List<PassInfo> passes = g.passes;
         boolean[] neededBuffer = new boolean[g.buffers.size()];
+        for (History history : g.histories) {
+            needed[history.current.id] = true; // the next frame reads it
+        }
         boolean[] keep = new boolean[passes.size()];
         for (int p = passes.size() - 1; p >= 0; p--) {
             PassInfo pass = passes.get(p);
@@ -910,6 +920,9 @@ public final class FrameGraph implements AutoCloseable {
                 continue; // culled
             }
             ImageInfo info = g.images.get(image);
+            if (info.history != null) {
+                continue; // kept across frames: below
+            }
             ExternalImage external = info.external != null ? info.external
                 : substitute[image] >= 0 ? g.images.get(substitute[image]).external : null;
             if (external != null) {
@@ -953,7 +966,48 @@ public final class FrameGraph implements AutoCloseable {
         for (Slot slot : slots) {
             slot.shared = slot.queues == 3 && twoFamilies;
         }
-        Physical[] newPhysicals = claim(slots);
+        Physical[] claimed = claim(slots);
+        // Histories: a pair of images each, kept across builds while the name, size and format stay.
+        int historyCount = g.histories.size();
+        int[] historyCurrent = new int[historyCount];
+        int[] historyPrevious = new int[historyCount];
+        int[] previousImages = new int[historyCount];
+        HistoryPair[] pairs = new HistoryPair[historyCount];
+        List<Physical> all = new ArrayList<>(Arrays.asList(claimed));
+        Map<String, HistoryPair> old = new HashMap<>(histories);
+        histories.clear();
+        if (!old.isEmpty() || historyCount > 0) {
+            device.waitIdle(); // their contents start over, and replaced ones are closed
+        }
+        for (int h = 0; h < historyCount; h++) {
+            History history = g.histories.get(h);
+            ImageInfo current = g.images.get(history.current.id);
+            ImageInfo previous = g.images.get(history.previous.id);
+            Slot slot = new Slot(current.image.width, current.image.height, current.image.format, 1);
+            slot.usage = current.usage | previous.usage;
+            slot.shared = (queueMask[current.image.id] | queueMask[previous.image.id]) == 3 && twoFamilies;
+            HistoryPair pair = old.remove(history.name);
+            if (pair == null || !pair.fits(slot)) {
+                if (pair != null) {
+                    pair.close();
+                }
+                pair = new HistoryPair(slot);
+            }
+            histories.put(history.name, pair);
+            pairs[h] = pair;
+            history.index = h;
+            historyCurrent[h] = all.size();
+            all.add(pair.current);
+            historyPrevious[h] = all.size();
+            all.add(pair.previous);
+            newTargetOf[current.image.id] = historyCurrent[h];
+            newTargetOf[previous.image.id] = historyPrevious[h];
+            previousImages[h] = previous.image.id;
+        }
+        for (HistoryPair unused : old.values()) {
+            unused.close();
+        }
+        Physical[] newPhysicals = all.toArray(new Physical[0]);
         // Where buffers live: in physical buffers, shared (sized for the largest) by buffers of one queue whose
         // lifetimes do not overlap.
         int bufferCount = g.buffers.size();
@@ -1006,6 +1060,7 @@ public final class FrameGraph implements AutoCloseable {
         // Barriers, now that every image has a home.
         // The first walk learns the state a frame ends in, which is the next one's start.
         Barriers barriers = new Barriers(newPhysicals.length, newExternals, newPhysicalBuffers.length);
+        barriers.histories(historyCurrent, historyPrevious, previousImages);
         barriers.simulate(newOrder, queues, newTargetOf, newBufferTargetOf, g, false);
         barriers.simulate(newOrder, queues, newTargetOf, newBufferTargetOf, g, true);
 
@@ -1020,6 +1075,7 @@ public final class FrameGraph implements AutoCloseable {
             externalVersions[i] = externals[i].version;
         }
         barriers.store();
+        startHistories(pairs, barriers);
         schedule(queues, barriers.waitPass, barriers.firstExternalPass);
         dirty = false;
         builds++;
@@ -1104,6 +1160,61 @@ public final class FrameGraph implements AutoCloseable {
             } else {
                 computeChunks++;
             }
+        }
+    }
+
+    /**
+     * Puts each history's images in the layouts a frame starts with (their contents undefined: the first frame has no
+     * last frame), and notes that frame.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    private void startHistories(HistoryPair[] pairs, Barriers barriers) {
+        activeHistories = pairs;
+        if (pairs.length == 0) {
+            return;
+        }
+        device.submitAndWait(graphicsQueue, commands -> {
+            for (int h = 0; h < pairs.length; h++) {
+                start(commands, pairs[h].current, barriers.startCurrent[h]);
+                start(commands, pairs[h].previous, barriers.startPrevious[h]);
+                pairs[h].firstFrame = frame + 1;
+            }
+        });
+    }
+
+    private static void start(VkCommandBuffer commands, Physical physical, int layout) {
+        if (layout != VK_IMAGE_LAYOUT_UNDEFINED) {
+            com.truesim.engine.vulkan.Images.transition(commands, physical.image.handle(), aspect(physical.format),
+                VK_IMAGE_LAYOUT_UNDEFINED, layout, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0,
+                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        }
+    }
+
+    /** Whether history {@code index}'s last frame image holds what that frame wrote. */
+    boolean historyValid(int index) {
+        return frame > activeHistories[index].firstFrame;
+    }
+
+    /** The two images of a history, whose roles swap every frame. */
+    @AllowAllocation("building the graph, when it changes")
+    private final class HistoryPair {
+        final Physical current;
+        final Physical previous;
+        long firstFrame;
+
+        HistoryPair(Slot slot) {
+            current = new Physical(slot);
+            previous = new Physical(slot);
+        }
+
+        boolean fits(Slot slot) {
+            return current.width == slot.width && current.height == slot.height && current.format == slot.format
+                && current.usage == slot.usage && current.shared == slot.shared;
+        }
+
+        void close() {
+            current.close();
+            previous.close();
         }
     }
 
@@ -1243,6 +1354,11 @@ public final class FrameGraph implements AutoCloseable {
             physical.buffer.close();
         }
         bufferPool.clear();
+        for (HistoryPair pair : histories.values()) {
+            pair.close();
+        }
+        histories.clear();
+        activeHistories = new HistoryPair[0];
         release(true);
         physicals = new Physical[0];
         physicalBuffers = new PhysicalBuffer[0];
@@ -1301,15 +1417,15 @@ public final class FrameGraph implements AutoCloseable {
     /** A pooled image with its bindless slots. */
     @AllowAllocation("building the graph, when it changes")
     private final class Physical {
-        final GpuImage image;
+        GpuImage image; // these three swap between a history's two images
         final int width;
         final int height;
         final int format;
         final int usage;
         final boolean shared;
         final int mips;
-        final int sampled;
-        final int[] storage; // a slot per mip level
+        int sampled;
+        int[] storage; // a slot per mip level
         long retireAt;
 
         Physical(Slot slot) {
@@ -1327,6 +1443,19 @@ public final class FrameGraph implements AutoCloseable {
             for (int mip = 0; mip < storage.length; mip++) {
                 storage[mip] = bindless.addStorage(image.view(mip));
             }
+        }
+
+        /** Exchanges images (and their slots) with {@code other}: a history's roles, frame to frame. */
+        void swap(Physical other) {
+            GpuImage i = image;
+            image = other.image;
+            other.image = i;
+            int s = sampled;
+            sampled = other.sampled;
+            other.sampled = s;
+            int[] st = storage;
+            storage = other.storage;
+            other.storage = st;
         }
 
         void close() {
@@ -1367,6 +1496,11 @@ public final class FrameGraph implements AutoCloseable {
         int firstExternalPass = -1;
         // target, aspect, old layout, new layout, srcStage, srcAccess, dstStage, dstAccess, kind
         final List<long[]> out = new ArrayList<>();
+        int[] historyCurrent = new int[0];
+        int[] historyPrevious = new int[0];
+        int[] previousImages = new int[0];
+        int[] startCurrent = new int[0];
+        int[] startPrevious = new int[0];
         final List<Integer> starts = new ArrayList<>();
 
         Barriers(int physicalCount, List<ExternalImage> externalList, int bufferCount) {
@@ -1385,6 +1519,38 @@ public final class FrameGraph implements AutoCloseable {
             lastWriteQueue = new int[n];
             lastReadPass = new int[n][2];
             Arrays.fill(lastQueue, -1);
+        }
+
+        /** The histories' physical images, by role, and the images of the previous role. */
+        void histories(int[] current, int[] previous, int[] images) {
+            historyCurrent = current;
+            historyPrevious = previous;
+            previousImages = images;
+            startCurrent = new int[current.length];
+            startPrevious = new int[current.length];
+        }
+
+        /** Exchanges what is known of physical images {@code a} and {@code b}. */
+        private void swapState(int a, int b) {
+            swap(layout, a, b);
+            swap(writeStages, a, b);
+            swap(writeAccess, a, b);
+            swap(readStages, a, b);
+            swap(visibleStages, a, b);
+            swap(visibleAccess, a, b);
+            swap(lastQueue, a, b);
+        }
+
+        private static void swap(int[] array, int a, int b) {
+            int t = array[a];
+            array[a] = array[b];
+            array[b] = t;
+        }
+
+        private static void swap(long[] array, int a, int b) {
+            long t = array[a];
+            array[a] = array[b];
+            array[b] = t;
         }
 
         private int index(int target) {
@@ -1406,6 +1572,15 @@ public final class FrameGraph implements AutoCloseable {
                 lastQueue[i] = GRAPHICS;
             }
             Arrays.fill(tenant, -1); // transient contents never outlive their frame
+            for (int h = 0; h < historyCurrent.length; h++) {
+                if (emit) {
+                    // The frame boundary: last frame's current image is this frame's previous one.
+                    swapState(historyCurrent[h], historyPrevious[h]);
+                    startCurrent[h] = layout[historyCurrent[h]];
+                    startPrevious[h] = layout[historyPrevious[h]];
+                }
+                tenant[historyPrevious[h]] = previousImages[h]; // its contents carry over
+            }
             Arrays.fill(lastWritePass, -1);
             for (int[] reads : lastReadPass) {
                 Arrays.fill(reads, -1);

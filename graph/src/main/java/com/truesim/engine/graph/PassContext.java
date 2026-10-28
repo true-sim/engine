@@ -51,6 +51,11 @@ public final class PassContext {
         return graph.bufferOf(buffer.id).deviceAddress();
     }
 
+    /** Whether {@code history}'s last frame image holds what that frame wrote: not on its first frame. */
+    public boolean historyValid(History history) {
+        return graph.historyValid(history.index);
+    }
+
     /** The storage slot of mip level {@code mip} of the image. */
     public int storage(Image image, int mip) {
         return graph.storageSlotOf(image.id, mip);

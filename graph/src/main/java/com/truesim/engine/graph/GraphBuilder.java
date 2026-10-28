@@ -30,9 +30,11 @@ public final class GraphBuilder {
     /** One image of the build. */
     static final class ImageInfo {
         final Image image;
-        final Object owner;
+        Object owner;
         final ExternalImage external;
         int usage;
+        History history; // one of a history's images
+        boolean previous; // its last frame's: read only
 
         ImageInfo(Image image, Object owner, ExternalImage external) {
             this.image = image;
@@ -44,7 +46,7 @@ public final class GraphBuilder {
     /** One transient buffer of the build. */
     static final class BufferInfo {
         final Buffer buffer;
-        final Object owner;
+        Object owner;
         int usage;
 
         BufferInfo(Buffer buffer, Object owner) {
@@ -81,9 +83,13 @@ public final class GraphBuilder {
 
     final List<ImageInfo> images = new ArrayList<>();
     final List<BufferInfo> buffers = new ArrayList<>();
+    final List<History> histories = new ArrayList<>();
     final List<PassInfo> passes = new ArrayList<>();
     private final Map<Key, Technique> providers = new IdentityHashMap<>();
-    private final Map<Key, Image> provided = new IdentityHashMap<>();
+    private final Map<Key, Object> provided = new IdentityHashMap<>(); // the current version: an Image or a Buffer
+    private final Map<Key, List<Technique>> modifiers = new IdentityHashMap<>(); // by stage
+    private final Map<Key, Integer> applied = new IdentityHashMap<>(); // modifiers done, from the first
+    private final Map<Technique, Set<Key>> touched = new IdentityHashMap<>(); // what each modifier took
     private final Set<Technique> built = new HashSet<>();
     private final Deque<Technique> building = new ArrayDeque<>();
     private final Map<Request<?>, Object> requests = new HashMap<>();
@@ -105,6 +111,15 @@ public final class GraphBuilder {
                         + name(technique));
                 }
             }
+            for (Key key : technique.modifies()) {
+                if (technique.provides().contains(key)) {
+                    throw new IllegalStateException(name(technique) + " both provides and modifies " + key);
+                }
+                modifiers.computeIfAbsent(key, k -> new ArrayList<>()).add(technique);
+            }
+        }
+        for (List<Technique> chain : modifiers.values()) {
+            chain.sort(java.util.Comparator.comparingInt(Technique::stage)); // stable: equal stages as added
         }
     }
 
@@ -125,26 +140,98 @@ public final class GraphBuilder {
 
     // ---------------------------------------------------------------- results of other techniques
 
-    /** The result {@code key}, building the technique that provides it if it has not been built yet. */
+    /**
+     * The result {@code key}, an image: built by the technique that provides it, then by every technique that
+     * {@link Technique#modifies() modifies} it, in stage order, the first time it is required.
+     */
     public Image require(Key key) {
-        Image image = optional(key);
-        if (image == null) {
-            throw new IllegalStateException("No technique provides " + key + (scope == null ? "" : ", which "
-                + name(scope) + " requires"));
+        return image(key, required(key));
+    }
+
+    /** The image result {@code key}, or null if no technique of the graph provides it. */
+    public Image optional(Key key) {
+        Object result = resolve(key, Integer.MAX_VALUE);
+        return result == null ? null : image(key, result);
+    }
+
+    /** The result {@code key}, a buffer (e.g. a light list), as {@link #require} gives images. */
+    public Buffer requireBuffer(Key key) {
+        return buffer(key, required(key));
+    }
+
+    /** The buffer result {@code key}, or null if no technique of the graph provides it. */
+    public Buffer optionalBuffer(Key key) {
+        Object result = resolve(key, Integer.MAX_VALUE);
+        return result == null ? null : buffer(key, result);
+    }
+
+    /**
+     * For a technique that {@link Technique#modifies() modifies} {@code key}: the image as the techniques before it
+     * left it, now the building technique's to write (in place: e.g. transparency drawn over the scene). It may also
+     * {@link #provide(Key, Image) provide} another image for the key (e.g. a post effect writing a new one). Those
+     * requiring the key get the last version.
+     */
+    public Image modify(Key key) {
+        return image(key, take(key));
+    }
+
+    /** {@link #modify} for a buffer result. */
+    public Buffer modifyBuffer(Key key) {
+        return buffer(key, take(key));
+    }
+
+    private Object required(Key key) {
+        Object result = resolve(key, Integer.MAX_VALUE);
+        if (result == null) {
+            throw new IllegalStateException(missing(key));
+        }
+        return result;
+    }
+
+    private String missing(Key key) {
+        return "No technique provides " + key + (scope == null ? "" : ", which " + name(scope) + " requires");
+    }
+
+    private Image image(Key key, Object result) {
+        if (!(result instanceof Image image)) {
+            throw new IllegalStateException(key + " is a buffer, not an image");
         }
         return image;
     }
 
-    /** The result {@code key}, or null if no technique of the graph provides it. */
-    public Image optional(Key key) {
-        Image image = provided.get(key);
-        if (image != null) {
-            return image;
+    private Buffer buffer(Key key, Object result) {
+        if (!(result instanceof Buffer buffer)) {
+            throw new IllegalStateException(key + " is an image, not a buffer");
         }
-        Technique technique = providers.get(key);
-        if (technique == null) {
+        return buffer;
+    }
+
+    /** {@code key} after its first {@code upTo} modifiers (all: its last version), or null without a provider. */
+    private Object resolve(Key key, int upTo) {
+        Technique producer = providers.get(key);
+        if (producer == null) {
             return null;
         }
+        if (!provided.containsKey(key)) {
+            enter(producer, key);
+        }
+        List<Technique> chain = modifiers.getOrDefault(key, List.of());
+        int end = Math.min(upTo, chain.size());
+        while (applied.getOrDefault(key, 0) < end) {
+            int i = applied.getOrDefault(key, 0);
+            Technique modifier = chain.get(i);
+            if (!built.contains(modifier) || building.contains(modifier)) {
+                enter(modifier, key); // one being built needs the version after itself: a cycle
+            }
+            if (applied.getOrDefault(key, 0) == i) {
+                applied.put(key, i + 1); // built without taking the key: nothing to do for it
+            }
+        }
+        return provided.get(key);
+    }
+
+    /** Builds {@code technique} for {@code key}, unless that closes a cycle. */
+    private void enter(Technique technique, Key key) {
         if (building.contains(technique)) {
             List<String> chain = new ArrayList<>();
             building.descendingIterator().forEachRemaining(t -> chain.add(name(t)));
@@ -153,7 +240,24 @@ public final class GraphBuilder {
                 + String.join(" -> ", chain) + " (for " + key + ")");
         }
         build(technique);
-        return provided.get(key);
+    }
+
+    private Object take(Key key) {
+        if (!(scope instanceof Technique technique) || !technique.modifies().contains(key)) {
+            throw new IllegalStateException((scope == null ? "Nothing" : name(scope)) + " cannot modify " + key
+                + ": only a technique listing it in modifies() can");
+        }
+        Object result = resolve(key, modifiers.get(key).indexOf(technique));
+        if (result == null) {
+            throw new IllegalStateException(missing(key));
+        }
+        touched.computeIfAbsent(technique, t -> new HashSet<>()).add(key);
+        if (result instanceof Image image) {
+            images.get(image.id).owner = technique;
+        } else {
+            buffers.get(((Buffer) result).id).owner = technique;
+        }
+        return result;
     }
 
     void build(Technique technique) {
@@ -170,15 +274,37 @@ public final class GraphBuilder {
         if (!missing.isEmpty()) {
             throw new IllegalStateException(name(technique) + " did not provide " + missing);
         }
+        for (Key key : touched.getOrDefault(technique, Set.of())) {
+            applied.put(key, modifiers.get(key).indexOf(technique) + 1);
+        }
     }
 
-    /** Provides {@code key}: one of the keys the building technique {@link Technique#provides()}. */
+    /**
+     * Provides {@code key}: one of the keys the building technique {@link Technique#provides()}, or a new version of
+     * one it {@link #modify modifies}.
+     */
     public void provide(Key key, Image image) {
+        put(key, image(image));
+    }
+
+    /** Provides {@code key} as a buffer, as {@link #provide(Key, Image)} does an image. */
+    public void provide(Key key, Buffer buffer) {
+        put(key, buffer(buffer));
+    }
+
+    private void put(Key key, Object result) {
+        if (scope instanceof Technique technique && touched.getOrDefault(technique, Set.of()).contains(key)) {
+            if (result.getClass() != provided.get(key).getClass()) {
+                throw new IllegalStateException(name(scope) + " provides " + key + " as another kind of result");
+            }
+            provided.put(key, result); // a new version
+            return;
+        }
         if (!(scope instanceof Technique technique) || !technique.provides().contains(key)) {
             throw new IllegalStateException((scope == null ? "Nothing" : name(scope)) + " cannot provide " + key
                 + ": only the technique listing it in provides() can");
         }
-        if (provided.putIfAbsent(key, image(image)) != null) {
+        if (provided.putIfAbsent(key, result) != null) {
             throw new IllegalStateException(name(scope) + " provides " + key + " twice");
         }
     }
@@ -244,6 +370,27 @@ public final class GraphBuilder {
         }
         return create(name, Math.max(1, (int) Math.round(like.width * scale)),
             Math.max(1, (int) Math.round(like.height * scale)), format);
+    }
+
+    /**
+     * An image kept from frame to frame, {@code width} by {@code height} {@code format} texels, owned by the building
+     * technique: this frame's to write, and last frame's to read. Names are unique within the graph; a history of the
+     * same name, size and format keeps its images when the graph rebuilds (its contents start over).
+     */
+    public History history(String name, int width, int height, int format) {
+        for (History other : histories) {
+            if (other.name.equals(name)) {
+                throw new IllegalStateException("Two histories are named " + name);
+            }
+        }
+        Image current = create(name, width, height, format);
+        Image previous = create(name + " (last frame)", width, height, format);
+        History history = new History(name, current, previous);
+        images.get(current.id).history = history;
+        images.get(previous.id).history = history;
+        images.get(previous.id).previous = true;
+        histories.add(history);
+        return history;
     }
 
     /** {@code external} as an image of this build, the same one each time. */
@@ -320,6 +467,9 @@ public final class GraphBuilder {
                 throw new IllegalArgumentException(name + ": " + access + " only reads; declare it with read()");
             }
             ImageInfo info = images.get(image(image).id);
+            if (info.previous) {
+                throw new IllegalStateException(name + " writes " + image.name + ": last frame's image is read only");
+            }
             if (info.external == null && info.owner != scope) {
                 throw new IllegalStateException(name + " writes " + image.name + ", a result of " + name(info.owner)
                     + ": results are written only by whoever makes them");
