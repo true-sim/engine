@@ -21,6 +21,7 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_SAMPLED_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_STORAGE_BIT;
 import static org.lwjgl.vulkan.VK10.VK_QUEUE_FAMILY_IGNORED;
+import static org.lwjgl.vulkan.VK10.VK_REMAINING_MIP_LEVELS;
 import static org.lwjgl.vulkan.VK10.nvkCmdBlitImage;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -630,7 +631,7 @@ public final class FrameGraph implements AutoCloseable {
                     : externals[~target].handle);
                 long range = barrier + VkImageMemoryBarrier2.SUBRESOURCERANGE;
                 memPutInt(range + VkImageSubresourceRange.ASPECTMASK, barrierAspect[b]);
-                memPutInt(range + VkImageSubresourceRange.LEVELCOUNT, 1);
+                memPutInt(range + VkImageSubresourceRange.LEVELCOUNT, VK_REMAINING_MIP_LEVELS);
                 memPutInt(range + VkImageSubresourceRange.LAYERCOUNT, 1);
             }
             long dependency = stack.ncalloc(VkDependencyInfo.ALIGNOF, 1, VkDependencyInfo.SIZEOF);
@@ -655,8 +656,9 @@ public final class FrameGraph implements AutoCloseable {
         return physicals[targetOf[image]].sampled;
     }
 
-    int storageSlotOf(int image) {
-        return physicals[targetOf[image]].storage;
+    int storageSlotOf(int image, int mip) {
+        int[] slots = physicals[targetOf[image]].storage;
+        return mip < slots.length ? slots[mip] : -1;
     }
 
     VulkanDevice device() {
@@ -871,13 +873,14 @@ public final class FrameGraph implements AutoCloseable {
                 // for the other, and async compute would no longer run beside graphics.
                 if (candidate.last < first[image] && candidate.width == info.image.width
                     && candidate.height == info.image.height && candidate.format == info.image.format
+                    && candidate.mips == info.image.mips
                     && candidate.queues == queueMask[image] && queueMask[image] != 3) {
                     slot = candidate;
                     break;
                 }
             }
             if (slot == null) {
-                slot = new Slot(info.image.width, info.image.height, info.image.format);
+                slot = new Slot(info.image.width, info.image.height, info.image.format, info.image.mips);
                 slots.add(slot);
             }
             slot.last = last[image];
@@ -998,7 +1001,7 @@ public final class FrameGraph implements AutoCloseable {
             Slot slot = slots.get(s);
             for (Physical candidate : free) {
                 if (candidate.width == slot.width && candidate.height == slot.height
-                    && candidate.format == slot.format && candidate.usage == slot.usage
+                    && candidate.format == slot.format && candidate.mips == slot.mips && candidate.usage == slot.usage
                     && candidate.shared == slot.shared) {
                     claimed[s] = candidate;
                     free.remove(candidate);
@@ -1094,15 +1097,17 @@ public final class FrameGraph implements AutoCloseable {
         final int width;
         final int height;
         final int format;
+        final int mips;
         int usage;
         int queues;
         boolean shared; // used by both queues, of different families: concurrent sharing
         int last;
 
-        Slot(int width, int height, int format) {
+        Slot(int width, int height, int format, int mips) {
             this.width = width;
             this.height = height;
             this.format = format;
+            this.mips = mips;
         }
     }
 
@@ -1115,8 +1120,9 @@ public final class FrameGraph implements AutoCloseable {
         final int format;
         final int usage;
         final boolean shared;
+        final int mips;
         final int sampled;
-        final int storage;
+        final int[] storage; // a slot per mip level
         long retireAt;
 
         Physical(Slot slot) {
@@ -1125,18 +1131,23 @@ public final class FrameGraph implements AutoCloseable {
             format = slot.format;
             usage = slot.usage;
             shared = slot.shared;
-            image = shared ? new GpuImage(device, width, height, format, usage, aspect(format), graphicsQueue.family(),
-                computeQueue.family()) : new GpuImage(device, width, height, format, usage, aspect(format));
+            mips = slot.mips;
+            image = shared ? GpuImage.mipmapped(device, width, height, format, usage, aspect(format), mips,
+                graphicsQueue.family(), computeQueue.family())
+                : GpuImage.mipmapped(device, width, height, format, usage, aspect(format), mips);
             sampled = (usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0 ? bindless.addSampled(image.view()) : -1;
-            storage = (usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 ? bindless.addStorage(image.view()) : -1;
+            storage = new int[(usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 ? mips : 0];
+            for (int mip = 0; mip < storage.length; mip++) {
+                storage[mip] = bindless.addStorage(image.view(mip));
+            }
         }
 
         void close() {
             if (sampled >= 0) {
                 bindless.removeSampled(sampled);
             }
-            if (storage >= 0) {
-                bindless.removeStorage(storage);
+            for (int slot : storage) {
+                bindless.removeStorage(slot);
             }
             image.close();
         }

@@ -37,13 +37,15 @@ public final class GpuImage implements AutoCloseable {
     private final long handle;
     private final long allocation;
     private final long view;
+    private final long[] mipViews;
+    private final int mips;
     private final int width;
     private final int height;
     private final int format;
     private boolean closed;
 
     public GpuImage(VulkanDevice device, int width, int height, int format, int usage, int aspect) {
-        this(device, width, height, format, usage, aspect, new int[0]);
+        this(device, width, height, format, usage, aspect, 1, new int[0]);
     }
 
     /**
@@ -52,9 +54,34 @@ public final class GpuImage implements AutoCloseable {
      */
     public GpuImage(VulkanDevice device, int width, int height, int format, int usage, int aspect,
         int... queueFamilies) {
+        this(device, width, height, format, usage, aspect, 1, queueFamilies);
+    }
+
+    /**
+     * An image of {@code mips} mip levels (each half the one before, down to 1 x 1 at most), shared by
+     * {@code queueFamilies} as above. Storage images get a view of each level ({@link #view(int)}), as storage
+     * descriptors take one level at a time.
+     */
+    public static GpuImage mipmapped(VulkanDevice device, int width, int height, int format, int usage, int aspect,
+        int mips, int... queueFamilies) {
+        return new GpuImage(device, width, height, format, usage, aspect, mips, queueFamilies);
+    }
+
+    /** How many mip levels a {@code width} by {@code height} image has, down to 1 x 1. */
+    public static int fullMipCount(int width, int height) {
+        return 32 - Integer.numberOfLeadingZeros(Math.max(width, height));
+    }
+
+    private GpuImage(VulkanDevice device, int width, int height, int format, int usage, int aspect, int mips,
+        int[] queueFamilies) {
         if (width < 1 || height < 1) {
             throw new IllegalArgumentException("Image size must be positive: " + width + " x " + height);
         }
+        if (mips < 1 || mips > fullMipCount(width, height)) {
+            throw new IllegalArgumentException("A " + width + " x " + height + " image has 1 to "
+                + fullMipCount(width, height) + " mip levels: " + mips);
+        }
+        this.mips = mips;
         this.device = device;
         this.width = width;
         this.height = height;
@@ -64,7 +91,7 @@ public final class GpuImage implements AutoCloseable {
                 .sType(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO)
                 .imageType(VK_IMAGE_TYPE_2D)
                 .format(format)
-                .mipLevels(1)
+                .mipLevels(mips)
                 .arrayLayers(1)
                 .samples(VK_SAMPLE_COUNT_1_BIT)
                 .tiling(VK_IMAGE_TILING_OPTIMAL)
@@ -83,7 +110,11 @@ public final class GpuImage implements AutoCloseable {
             this.handle = image.get(0);
             this.allocation = allocated.get(0);
             // Views are for shaders and attachments; an image only copied to and from has none.
-            this.view = (usage & VIEW_USAGES) != 0 ? Images.createView(device, handle, format, aspect) : 0;
+            this.view = (usage & VIEW_USAGES) != 0 ? Images.createView(device, handle, format, aspect, 0, mips) : 0;
+            this.mipViews = new long[mips > 1 && (usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 ? mips : 0];
+            for (int mip = 0; mip < mipViews.length; mip++) {
+                mipViews[mip] = Images.createView(device, handle, format, aspect, mip, 1);
+            }
         }
     }
 
@@ -94,6 +125,15 @@ public final class GpuImage implements AutoCloseable {
     /** A view of the whole image; 0 for images used only for copies. */
     public long view() {
         return view;
+    }
+
+    /** A view of mip level {@code mip} alone (of a mipmapped storage image), or the view of a one-level image. */
+    public long view(int mip) {
+        return mips == 1 ? view : mipViews[mip];
+    }
+
+    public int mips() {
+        return mips;
     }
 
     public int width() {
@@ -114,6 +154,9 @@ public final class GpuImage implements AutoCloseable {
             closed = true;
             if (view != 0) {
                 vkDestroyImageView(device.handle(), view, null);
+            }
+            for (long mipView : mipViews) {
+                vkDestroyImageView(device.handle(), mipView, null);
             }
             vmaDestroyImage(device.allocator(), handle, allocation);
         }

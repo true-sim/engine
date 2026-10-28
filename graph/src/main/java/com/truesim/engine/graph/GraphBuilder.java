@@ -1,6 +1,7 @@
 package com.truesim.engine.graph;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -194,10 +195,22 @@ public final class GraphBuilder {
 
     /** A new image, {@code width} by {@code height} {@code format} texels, owned by the building technique. */
     public Image create(String name, int width, int height, int format) {
+        return create(name, width, height, format, 1);
+    }
+
+    /**
+     * A new image of {@code mips} mip levels (up to {@code GpuImage.fullMipCount}), owned by the building technique.
+     * Passes write a level as a storage image through {@link PassContext#storage(Image, int)}.
+     */
+    public Image create(String name, int width, int height, int format, int mips) {
         if (width < 1 || height < 1) {
             throw new IllegalArgumentException("Image size must be positive: " + name + ", " + width + " x " + height);
         }
-        Image image = new Image(images.size(), name, width, height, format);
+        if (mips < 1 || mips > GpuImage.fullMipCount(width, height)) {
+            throw new IllegalArgumentException(name + " has 1 to " + GpuImage.fullMipCount(width, height)
+                + " mip levels: " + mips);
+        }
+        Image image = new Image(images.size(), name, width, height, format, mips);
         images.add(new ImageInfo(image, scope, null));
         return image;
     }
@@ -219,7 +232,7 @@ public final class GraphBuilder {
     /** {@code external} as an image of this build, the same one each time. */
     public Image external(ExternalImage external) {
         return externals.computeIfAbsent(external, e -> {
-            Image image = new Image(images.size(), e.name, e.width, e.height, e.format);
+            Image image = new Image(images.size(), e.name, e.width, e.height, e.format, 1);
             images.add(new ImageInfo(image, null, e));
             return image;
         });

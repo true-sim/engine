@@ -36,6 +36,18 @@ class BindlessTest {
                 assertThat(bindless.pipelineLayout()).isNotZero();
                 assertThat(bindless.set()).isNotZero();
                 assertThat(copyOnly.view()).as("no view for an image only copied to").isZero();
+                // Mip levels: a view of each for storage, the whole chain for sampling.
+                assertThat(GpuImage.fullMipCount(13, 7)).isEqualTo(4);
+                try (GpuImage pyramid = GpuImage.mipmapped(device, 13, 7, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_ASPECT_COLOR_BIT, 4)) {
+                    assertThat(pyramid.mips()).isEqualTo(4);
+                    assertThat(pyramid.view(3)).isNotZero().isNotEqualTo(pyramid.view(0)).isNotEqualTo(pyramid.view());
+                    int slot = bindless.addStorage(pyramid.view(3));
+                    bindless.removeStorage(slot);
+                }
+                assertThat(image.view(0)).isEqualTo(image.view());
+                assertThatIllegalArgumentException().isThrownBy(() -> GpuImage.mipmapped(device, 13, 7,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, 5));
                 // Bound on a compute-only queue: no graphics bind point there.
                 device.submitAndWait(device.compute(), commands -> bindless.bind(commands, false));
                 if (device.compute().family() != device.graphics().family()) {

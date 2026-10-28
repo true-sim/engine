@@ -36,8 +36,13 @@ public final class PassContext {
         return graph.sampledSlotOf(image.id);
     }
 
-    /** The image's storage slot, for images some pass uses as a storage image. */
+    /** The image's storage slot, for images some pass uses as a storage image (level 0 of a mipmapped one). */
     public int storage(Image image) {
-        return graph.storageSlotOf(image.id);
+        return graph.storageSlotOf(image.id, 0);
+    }
+
+    /** The storage slot of mip level {@code mip} of the image. */
+    public int storage(Image image, int mip) {
+        return graph.storageSlotOf(image.id, mip);
     }
 }
