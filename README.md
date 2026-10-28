@@ -135,7 +135,8 @@ CPU writes instances and a view, the GPU decides what to draw.
 
 ```java
 try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 22, 65_536, 1024));
-     MeshletRenderer renderer = new MeshletRenderer(device, pool, 100_000, 1 << 20, colorFormat, depthFormat)) {
+     MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000, 1 << 20, 65_535),
+         colorFormat, depthFormat)) {
     int car = pool.add(carMesh);                                   // uploaded once
     renderer.setInstance(0, car, x, y, z, qx, qy, qz, qw, 1, 1, 1); // camera-relative
     renderer.setInstanceCount(1);
@@ -146,18 +147,22 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
 
 - **Geometry pool:** every mesh's streams in shared device-local buffers, reached by buffer device address, with a
   table entry per mesh; any number of meshes and instances draw in one pass.
-- **Culling on the GPU:** a compute pass, one workgroup per instance, tests each meshlet: the cluster LOD rule (its
-  group's error projected on screen at most the allowed pixels, its parent's more), the frustum, and its normal cone
-  (whole meshlets facing away). Visible meshlets become indexed indirect draws.
-- **One draw call:** `vkCmdDrawIndexedIndirectCount`; the vertex shader pulls and decodes vertices (unorm16
-  positions, octahedral normals) by device address.
+- **Culling on the GPU:** an instance pass tests instance bounds and splits each visible instance into chunks of 64
+  meshlets; the chunk count is written straight into an indirect command, so only visible work is launched. Each
+  meshlet is tested by the cluster LOD rule (its group's error projected on screen at most the allowed pixels, its
+  parent's more), the frustum and its normal cone (whole meshlets facing away).
+- **Two paths, one set of shaders:** with mesh shaders (`VK_EXT_mesh_shader`, enabled where the GPU has it), a task
+  workgroup per chunk culls and launches a mesh workgroup per visible meshlet, which emits its vertices and triangles
+  straight from the pool. Without, a compute pass per chunk writes indexed indirect draws, drawn with one
+  `vkCmdDrawIndexedIndirectCount`. The meshlet test, vertex decoding and shading are one Slang module
+  (`meshlets/common.slang`) both paths import, and they draw the same image (tested). `Path.AUTO` picks mesh shaders
+  where available.
 - **Reverse depth with an infinite far plane,** camera-relative instances: precise near and far, anywhere in a large
   world.
-- Tested on the GPU: coverage of a quad, culling (behind, outside, facing away), and LOD cuts from full detail to a
-  few meshlets that keep the covered area within 2 % (no holes).
+- Tested on the GPU: coverage of a quad, culling (behind, outside, facing away), LOD cuts from full detail to a few
+  meshlets that keep the covered area within 2 % (no holes), and both paths drawing the same image.
 
-The mesh shader path (task and mesh shaders on the same data and shading modules) and the frame graph (#8) build on
-this.
+The frame graph (#8) builds on this.
 
 ## Building
 

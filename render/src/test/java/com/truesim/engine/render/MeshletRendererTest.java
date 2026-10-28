@@ -79,7 +79,8 @@ class MeshletRendererTest {
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 16, 1024, 8));
         quad = pool.add(grid(1, 2, false, VertexFormat.POSITIONS_ONLY));
         terrain = pool.add(grid(64, 1, true, VertexFormat.of(VertexAttribute.NORMAL)));
-        renderer = new MeshletRenderer(device, pool, 256, 8192, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(256, 8192, 1024),
+            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
         color = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
         depth = new GpuImage(device, SIZE, SIZE, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
@@ -253,7 +254,47 @@ class MeshletRendererTest {
         renderer.setInstanceCount(n);
         lookForward(1, MeshletRenderer.MODE_WHITE);
         assertThat(render()).isEqualTo(n); // all 225 in view at 60 units
-        assertThat(renderer.maxDraws()).isEqualTo(8192);
+        assertThat(renderer.limits().draws()).isEqualTo(8192);
+    }
+
+    @Test
+    void bothPathsDrawTheSameImage() {
+        assumeThat(device.meshShaders()).as("no mesh shaders").isTrue();
+        assertThat(renderer.path()).isEqualTo(MeshletRenderer.Path.MESH_SHADERS); // chosen where available
+        renderer.setInstance(0, terrain, 0, -40, -40, 0, 0, 0, 1, 1, 1, 1);
+        int n = 1;
+        for (int i = 0; i < 20; i++) {
+            renderer.setInstance(n++, quad, (i % 5 - 2) * 4, (i / 5 - 2) * 3, -15 - i, HALF, 0, 0, HALF, 1, 1, 1);
+        }
+        renderer.setInstanceCount(n);
+        renderer.setView(camera.set(0, -0.3, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
+            MeshletRenderer.MODE_MESHLETS);
+        renderer.setPath(MeshletRenderer.Path.INDEXED);
+        assertThat(renderer.path()).isEqualTo(MeshletRenderer.Path.INDEXED);
+        int indexed = render();
+        int[] image = new int[SIZE * SIZE];
+        for (int i = 0; i < image.length; i++) {
+            image[i] = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, i);
+        }
+        renderer.setPath(MeshletRenderer.Path.MESH_SHADERS);
+        assertThat(render()).as("visible meshlets").isEqualTo(indexed).isPositive();
+        int different = 0;
+        for (int i = 0; i < image.length; i++) {
+            if (pixels.memory().getAtIndex(ValueLayout.JAVA_INT, i) != image[i]) {
+                different++;
+            }
+        }
+        assertThat(different).as("pixels that differ").isLessThanOrEqualTo(image.length / 1000);
+        assertThat(covered()).isGreaterThan(image.length / 4);
+        renderer.setPath(MeshletRenderer.Path.AUTO);
+        assertThat(renderer.path()).isEqualTo(MeshletRenderer.Path.MESH_SHADERS);
+    }
+
+    @Test
+    void devicesWithoutMeshShadersDrawIndexed() {
+        assumeThat(device.meshShaders()).as("the device has mesh shaders").isFalse();
+        assertThat(renderer.path()).isEqualTo(MeshletRenderer.Path.INDEXED);
+        assertThatIllegalStateException().isThrownBy(() -> renderer.setPath(MeshletRenderer.Path.MESH_SHADERS));
     }
 
     @Test
@@ -263,8 +304,7 @@ class MeshletRendererTest {
         assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstance(0, 5, 0, 0, 0, 0, 0, 0, 1, 1, 1,
             1));
         assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstanceCount(257));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer(device, pool, 0, 1,
-            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(0, 1, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> GeometryPool.Capacity.of(0, 1, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> GeometryPool.Capacity.of(1, 0, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> new GeometryPool.Capacity(1, 1, 0, 1));
@@ -274,8 +314,9 @@ class MeshletRendererTest {
         assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstance(0, -1, 0, 0, 0, 0, 0, 0, 1, 1, 1,
             1));
         assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstanceCount(-1));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer(device, pool, 1, 0,
-            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 0, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 0));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 65_536));
         // Each limit of the pool: meshes, meshlets, triangles, meshlet vertices, attributes.
         MeshData small = grid(2, 1, false, VertexFormat.of(VertexAttribute.NORMAL));
         for (GeometryPool.Capacity limit : new GeometryPool.Capacity[] {
