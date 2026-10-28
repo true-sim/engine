@@ -465,4 +465,5 @@ Exclusive fullscreen is only tested when `TRUESIM_TEST_FULLSCREEN` is set, becau
 ./gradlew build
 ```
 
-To develop against a local build-logic checkout, add `-Ptruesim.build-logic=../build-logic`.
+Sibling checkouts (`../build-logic`, `../common-math`, `../common-jobs`, `../scene`) are used automatically when
+present (override with `-Ptruesim.<repo>=<path>`); otherwise they come from GitHub Packages.
