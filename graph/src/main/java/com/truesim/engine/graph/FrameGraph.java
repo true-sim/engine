@@ -22,6 +22,28 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_SAMPLED_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_STORAGE_BIT;
 import static org.lwjgl.vulkan.VK10.VK_QUEUE_FAMILY_IGNORED;
 import static org.lwjgl.vulkan.VK10.nvkCmdBlitImage;
+import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+import static org.lwjgl.vulkan.VK10.VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+import static org.lwjgl.vulkan.VK10.nvkBeginCommandBuffer;
+import static org.lwjgl.vulkan.VK10.vkAllocateCommandBuffers;
+import static org.lwjgl.vulkan.VK10.vkCreateCommandPool;
+import static org.lwjgl.vulkan.VK10.vkCreateSemaphore;
+import static org.lwjgl.vulkan.VK10.vkDestroyCommandPool;
+import static org.lwjgl.vulkan.VK10.vkDestroySemaphore;
+import static org.lwjgl.vulkan.VK10.vkEndCommandBuffer;
+import static org.lwjgl.vulkan.VK10.vkResetCommandPool;
+import static org.lwjgl.vulkan.VK12.VK_SEMAPHORE_TYPE_TIMELINE;
+import static org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+import static org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+import static org.lwjgl.vulkan.VK12.nvkWaitSemaphores;
+import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -34,7 +56,11 @@ import com.truesim.engine.graph.GraphBuilder.ImageInfo;
 import com.truesim.engine.graph.GraphBuilder.PassInfo;
 import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.GpuImage;
+import com.truesim.common.jobs.JobSystem;
 import com.truesim.engine.vulkan.VulkanDevice;
+import com.truesim.engine.vulkan.Queue;
+import com.truesim.engine.vulkan.Vulkan;
+import java.nio.LongBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -43,13 +69,23 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Function;
+import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkCommandBuffer;
+import org.lwjgl.vulkan.VkCommandBufferAllocateInfo;
+import org.lwjgl.vulkan.VkCommandBufferBeginInfo;
+import org.lwjgl.vulkan.VkCommandBufferSubmitInfo;
+import org.lwjgl.vulkan.VkCommandPoolCreateInfo;
 import org.lwjgl.vulkan.VkDependencyInfo;
 import org.lwjgl.vulkan.VkImageBlit;
 import org.lwjgl.vulkan.VkImageMemoryBarrier2;
 import org.lwjgl.vulkan.VkImageSubresourceLayers;
 import org.lwjgl.vulkan.VkImageSubresourceRange;
+import org.lwjgl.vulkan.VkSemaphoreCreateInfo;
+import org.lwjgl.vulkan.VkSemaphoreSubmitInfo;
+import org.lwjgl.vulkan.VkSemaphoreTypeCreateInfo;
+import org.lwjgl.vulkan.VkSemaphoreWaitInfo;
+import org.lwjgl.vulkan.VkSubmitInfo2;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -75,12 +111,15 @@ import org.slf4j.LoggerFactory;
  * <p>The graph is built (techniques' {@code build}, resolving, culling, barriers, images) when it changes: techniques
  * or outputs added or removed, an external image resized, or {@link #invalidate()}. Recording a built graph allocates
  * nothing. Per-frame data (cameras, parameters) belongs to the techniques, which their pass bodies read when recording.
- * One thread records; close the graph once the device is idle.
+ * Frames are recorded on one thread (its passes possibly on {@link #parallel} workers); closing waits for the frames
+ * submitted.
  */
 @AllowAllocation("set up once")
 public final class FrameGraph implements AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(FrameGraph.class);
+    static final int GRAPHICS = 0;
+    static final int COMPUTE = 1;
 
     private final VulkanDevice device;
     private final Bindless bindless;
@@ -91,7 +130,14 @@ public final class FrameGraph implements AutoCloseable {
     private final Map<Object, AutoCloseable> cache = new LinkedHashMap<>();
     private final List<Physical> pool = new ArrayList<>();
     private final List<Physical> retired = new ArrayList<>();
-    private final PassContext context = new PassContext(this);
+    private final Queue graphicsQueue;
+    private final Queue computeQueue;
+    private boolean asyncCompute;
+    private JobSystem jobs;
+    private int grain = 4;
+    private PassContext[] contexts = {new PassContext(this)};
+    private final JobSystem.RangeTask recordChunks = this::recordChunks;
+    private Execution execution;
     private boolean dirty = true;
     private long frame;
     private int builds;
@@ -114,6 +160,23 @@ public final class FrameGraph implements AutoCloseable {
     private ExternalImage[] externals = new ExternalImage[0];
     private int[] externalVersions = new int[0];
 
+    // How the built graph runs: batches of passes, each on one queue, waiting for the other queue's batch of ordinal
+    // batchWait (0: none) and, with batchAcquire, for the external images; each cut into chunks recorded in parallel.
+    private int[] batchQueue = {GRAPHICS};
+    private int[] batchOrdinal = {1};
+    private int[] batchWait = {0};
+    private boolean[] batchAcquire = {false};
+    private int[] batchFirstChunk = {0, 1};
+    private int lastGraphicsBatch;
+    private int graphicsBatches = 1;
+    private int computeBatches;
+    private int graphicsChunks = 1;
+    private int computeChunks;
+    private int[] chunkBatch = {0};
+    private int[] chunkFirstPass = {0};
+    private int[] chunkEndPass = {0};
+    private VkCommandBuffer[] chunkCommands = new VkCommandBuffer[1];
+
     /** A graph on {@code device} whose frames may be {@code framesInFlight} deep (images retire after that). */
     public FrameGraph(VulkanDevice device, int framesInFlight) {
         if (framesInFlight < 1) {
@@ -122,6 +185,9 @@ public final class FrameGraph implements AutoCloseable {
         this.device = Objects.requireNonNull(device, "device");
         this.bindless = device.bindless();
         this.framesInFlight = framesInFlight;
+        this.graphicsQueue = device.graphics();
+        this.computeQueue = device.compute();
+        this.asyncCompute = graphicsQueue != computeQueue;
     }
 
     /** Adds a technique; the graph rebuilds on its next frame. */
@@ -182,13 +248,94 @@ public final class FrameGraph implements AutoCloseable {
         dirty = true;
     }
 
-    // ---------------------------------------------------------------- recording
+    // ---------------------------------------------------------------- how frames run
 
     /**
-     * Records the frame into {@code commands}: the bindless set, then each needed pass with its barriers, then the
-     * outputs' final layouts. Builds the graph first if it changed; otherwise allocates nothing.
+     * Runs {@link GraphBuilder.PassBuilder#async() async} passes on the compute queue (on by default where the device has a separate
+     * one), beside the graphics work that does not depend on them. Off, they run on the graphics queue in their place.
+     * On a device whose compute queue is the graphics queue, on still splits the frame into batches the same way, which
+     * runs the same code paths on one queue. The graph rebuilds on its next frame.
+     */
+    public FrameGraph asyncCompute(boolean on) {
+        if (on != asyncCompute) {
+            waitIdle();
+            asyncCompute = on;
+            dirty = true;
+        }
+        return this;
+    }
+
+    /**
+     * Records with {@code jobs}' threads, in chunks of {@code passes} passes each (null: on the calling thread). The
+     * chunks are submitted in order, so the GPU sees the same commands however the recording was scheduled. Pass bodies
+     * then run on worker threads, in parallel with each other: they must not share what they change.
+     */
+    @AllowAllocation("set up once")
+    public FrameGraph parallel(JobSystem jobs, int passes) {
+        if (passes < 1) {
+            throw new IllegalArgumentException("Chunks hold at least one pass: " + passes);
+        }
+        waitIdle();
+        this.jobs = jobs;
+        this.grain = passes;
+        int threads = jobs == null ? 1 : jobs.threads();
+        contexts = new PassContext[threads];
+        for (int w = 0; w < threads; w++) {
+            contexts[w] = new PassContext(this);
+        }
+        if (execution != null) {
+            execution.close();
+            execution = null;
+        }
+        dirty = true;
+        return this;
+    }
+
+    /**
+     * Starts a frame for {@link #submit}: waits until the GPU finished the frame that last used this one's command
+     * buffers ({@code framesInFlight} frames ago) and returns its index, 0 to {@code framesInFlight - 1}, e.g. to pick
+     * the semaphore to acquire a swapchain image with. Allocates nothing once warm.
+     */
+    public int beginFrame() {
+        if (execution == null) {
+            execution = new Execution();
+        }
+        return execution.begin();
+    }
+
+    /**
+     * Records the frame begun by {@link #beginFrame} (in parallel, with {@link #parallel}) and submits it: batches to
+     * the graphics and compute queues in order, ordered across queues by timeline semaphores. The first batch using an
+     * external image waits for binary semaphore {@code acquired} (0: none); the last graphics batch signals
+     * {@code renderFinished} (0: none), e.g. for presenting. Builds the graph first if it changed; otherwise allocates
+     * nothing.
+     */
+    public void submit(long acquired, long renderFinished) {
+        if (execution == null || !execution.begun) {
+            throw new IllegalStateException("Begin the frame first: beginFrame()");
+        }
+        prepare();
+        execution.ensureCommandBuffers();
+        if (jobs != null && chunkBatch.length > 1) {
+            jobs.parallelFor(chunkBatch.length, 1, recordChunks);
+        } else {
+            recordChunks(0, chunkBatch.length, 0);
+        }
+        execution.submit(acquired, renderFinished);
+    }
+
+    /**
+     * Records the whole frame into {@code commands}, on the calling thread: the bindless set, then each needed pass
+     * with its barriers, then the outputs' final layouts. Async passes run in their place. Builds the graph first if it
+     * changed; otherwise allocates nothing.
      */
     public void record(VkCommandBuffer commands) {
+        prepare();
+        bindless.bind(commands);
+        recordPasses(commands, 0, order.length, true, contexts[0]);
+    }
+
+    private void prepare() {
         if (dirty || externalsResized()) {
             build();
         }
@@ -196,15 +343,261 @@ public final class FrameGraph implements AutoCloseable {
         if (!retired.isEmpty()) {
             release(false);
         }
-        bindless.bind(commands);
+    }
+
+    /** Records chunks {@code from} to {@code to}, on worker {@code worker}: its own command buffers. */
+    private void recordChunks(int from, int to, int worker) {
+        for (int c = from; c < to; c++) {
+            int batch = chunkBatch[c];
+            boolean graphics = batchQueue[batch] == GRAPHICS;
+            VkCommandBuffer commands = execution.commandBuffer(worker, batchQueue[batch]);
+            bindless.bind(commands, graphics);
+            boolean last = batch == lastGraphicsBatch && c == batchFirstChunk[batch + 1] - 1;
+            recordPasses(commands, chunkFirstPass[c], chunkEndPass[c], last, contexts[worker]);
+            Vulkan.check(vkEndCommandBuffer(commands), "Could not finish recording");
+            chunkCommands[c] = commands;
+        }
+    }
+
+    /** Passes {@code from} to {@code to} with their barriers, and with {@code last} the outputs' final layouts. */
+    private void recordPasses(VkCommandBuffer commands, int from, int to, boolean last, PassContext context) {
         context.commands = commands;
-        for (int i = 0; i < order.length; i++) {
+        for (int i = from; i < to; i++) {
             barriers(commands, barrierStart[i], barrierStart[i + 1]);
             order[i].body.record(context);
         }
-        barriers(commands, barrierStart[order.length], barrierStart[order.length + 1]);
+        if (last) {
+            barriers(commands, barrierStart[order.length], barrierStart[order.length + 1]);
+        }
         context.commands = null;
     }
+
+    /** Waits until the GPU finished everything submitted, e.g. before changing how frames run. */
+    private void waitIdle() {
+        if (execution != null) {
+            execution.waitIdle();
+        }
+    }
+
+    /**
+     * Each frame in flight's command pools (one per worker and queue, so workers record without locks) and the two
+     * timeline semaphores that order batches across queues and tell when a frame is done.
+     */
+    @AllowAllocation("set up once")
+    private final class Execution implements AutoCloseable {
+        private final long graphicsTimeline;
+        private final long computeTimeline;
+        private long graphicsValue;
+        private long computeValue;
+        private final long[][] pools; // [slot][worker * 2 + queue]
+        private final VkCommandBuffer[][][] buffers; // [slot][worker * 2 + queue][i]
+        private final int[] used;
+        private final long[] slotGraphicsValue;
+        private final long[] slotComputeValue;
+        private int slot = -1;
+        boolean begun;
+
+        Execution() {
+            graphicsTimeline = timeline();
+            computeTimeline = timeline();
+            int workers = contexts.length;
+            pools = new long[framesInFlight][workers * 2];
+            buffers = new VkCommandBuffer[framesInFlight][workers * 2][0];
+            used = new int[workers * 2];
+            slotGraphicsValue = new long[framesInFlight];
+            slotComputeValue = new long[framesInFlight];
+            try (MemoryStack stack = stackPush()) {
+                LongBuffer handle = stack.mallocLong(1);
+                for (int s = 0; s < framesInFlight; s++) {
+                    for (int i = 0; i < workers * 2; i++) {
+                        Queue queue = i % 2 == GRAPHICS ? graphicsQueue : computeQueue;
+                        Vulkan.check(vkCreateCommandPool(device.handle(), VkCommandPoolCreateInfo.calloc(stack)
+                            .sType(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO)
+                            .flags(VK_COMMAND_POOL_CREATE_TRANSIENT_BIT)
+                            .queueFamilyIndex(queue.family()), null, handle), "Could not create a command pool");
+                        pools[s][i] = handle.get(0);
+                    }
+                }
+            }
+        }
+
+        private long timeline() {
+            try (MemoryStack stack = stackPush()) {
+                VkSemaphoreTypeCreateInfo type = VkSemaphoreTypeCreateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO)
+                    .semaphoreType(VK_SEMAPHORE_TYPE_TIMELINE);
+                LongBuffer handle = stack.mallocLong(1);
+                Vulkan.check(vkCreateSemaphore(device.handle(), VkSemaphoreCreateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO)
+                    .pNext(type.address()), null, handle), "Could not create a timeline semaphore");
+                return handle.get(0);
+            }
+        }
+
+        int begin() {
+            if (begun) {
+                throw new IllegalStateException("The frame was begun already: submit() it first");
+            }
+            slot = (slot + 1) % framesInFlight;
+            waitFor(slotGraphicsValue[slot], slotComputeValue[slot]);
+            for (int i = 0; i < used.length; i++) {
+                Vulkan.check(vkResetCommandPool(device.handle(), pools[slot][i], 0), "Could not reset a command pool");
+                used[i] = 0;
+            }
+            begun = true;
+            return slot;
+        }
+
+        private void waitFor(long graphics, long compute) {
+            try (MemoryStack stack = stackPush()) {
+                long semaphores = stack.nmalloc(8, 16);
+                memPutLong(semaphores, graphicsTimeline);
+                memPutLong(semaphores + 8, computeTimeline);
+                long values = stack.nmalloc(8, 16);
+                memPutLong(values, graphics);
+                memPutLong(values + 8, compute);
+                long info = stack.ncalloc(VkSemaphoreWaitInfo.ALIGNOF, 1, VkSemaphoreWaitInfo.SIZEOF);
+                memPutInt(info + VkSemaphoreWaitInfo.STYPE, VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO);
+                memPutInt(info + VkSemaphoreWaitInfo.SEMAPHORECOUNT, 2);
+                memPutAddress(info + VkSemaphoreWaitInfo.PSEMAPHORES, semaphores);
+                memPutAddress(info + VkSemaphoreWaitInfo.PVALUES, values);
+                Vulkan.check(nvkWaitSemaphores(device.handle(), info, Long.MAX_VALUE), "Could not wait for a frame");
+            }
+        }
+
+        void waitIdle() {
+            waitFor(graphicsValue, computeValue);
+        }
+
+        /** Makes sure each worker could record every chunk of each queue: workers take chunks as they come free. */
+        void ensureCommandBuffers() {
+            for (int i = 0; i < used.length; i++) {
+                int needed = i % 2 == GRAPHICS ? graphicsChunks : computeChunks;
+                if (buffers[slot][i].length < needed) {
+                    grow(i, needed);
+                }
+            }
+        }
+
+        @AllowAllocation("building the graph, when it changes")
+        private void grow(int i, int needed) {
+            VkCommandBuffer[] have = buffers[slot][i];
+            VkCommandBuffer[] more = Arrays.copyOf(have, needed);
+            try (MemoryStack stack = stackPush()) {
+                PointerBuffer handles = stack.mallocPointer(more.length - have.length);
+                Vulkan.check(vkAllocateCommandBuffers(device.handle(), VkCommandBufferAllocateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
+                    .commandPool(pools[slot][i])
+                    .level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+                    .commandBufferCount(more.length - have.length), handles), "Could not allocate command buffers");
+                for (int b = have.length; b < more.length; b++) {
+                    more[b] = new VkCommandBuffer(handles.get(b - have.length), device.handle());
+                }
+            }
+            buffers[slot][i] = more;
+        }
+
+        /** The worker's next command buffer for {@code queue}, begun. Allocates nothing. */
+        VkCommandBuffer commandBuffer(int worker, int queue) {
+            int i = worker * 2 + queue;
+            VkCommandBuffer commands = buffers[slot][i][used[i]++];
+            try (MemoryStack stack = stackPush()) {
+                long info = stack.ncalloc(VkCommandBufferBeginInfo.ALIGNOF, 1, VkCommandBufferBeginInfo.SIZEOF);
+                memPutInt(info + VkCommandBufferBeginInfo.STYPE, VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
+                memPutInt(info + VkCommandBufferBeginInfo.FLAGS, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+                Vulkan.check(nvkBeginCommandBuffer(commands, info), "Could not begin recording");
+            }
+            return commands;
+        }
+
+        /** Submits the batches in order, each to its queue. Allocates nothing. */
+        void submit(long acquired, long renderFinished) {
+            long graphicsBase = graphicsValue;
+            long computeBase = computeValue;
+            boolean acquireWaited = acquired == 0;
+            boolean bothQueues = computeBatches > 0;
+            boolean firstGraphics = true;
+            boolean firstCompute = true;
+            for (int b = 0; b < batchQueue.length; b++) {
+                int queue = batchQueue[b];
+                try (MemoryStack stack = stackPush()) {
+                    int from = batchFirstChunk[b];
+                    int count = batchFirstChunk[b + 1] - from;
+                    long infos = stack.ncalloc(VkCommandBufferSubmitInfo.ALIGNOF, Math.max(1, count),
+                        VkCommandBufferSubmitInfo.SIZEOF);
+                    for (int c = 0; c < count; c++) {
+                        long info = infos + (long) c * VkCommandBufferSubmitInfo.SIZEOF;
+                        memPutInt(info + VkCommandBufferSubmitInfo.STYPE, VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO);
+                        memPutAddress(info + VkCommandBufferSubmitInfo.COMMANDBUFFER, chunkCommands[from + c].address());
+                    }
+                    // Waits: the other queue's batch this one depends on (or, first on its queue, all the other queue
+                    // did in the frame before, as images pass between queues), and the acquired image.
+                    long waits = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 2, VkSemaphoreSubmitInfo.SIZEOF);
+                    int waitCount = 0;
+                    long otherBase = queue == GRAPHICS ? computeBase : graphicsBase;
+                    long otherValue = batchWait[b] > 0 ? otherBase + batchWait[b] : 0;
+                    if ((queue == GRAPHICS ? firstGraphics : firstCompute) && bothQueues) {
+                        otherValue = Math.max(otherValue, otherBase);
+                    }
+                    firstGraphics &= queue != GRAPHICS;
+                    firstCompute &= queue != COMPUTE;
+                    if (otherValue > 0) {
+                        semaphore(waits, queue == GRAPHICS ? computeTimeline : graphicsTimeline, otherValue);
+                        waitCount++;
+                    }
+                    boolean acquire = !acquireWaited && (batchAcquire[b] || b == lastGraphicsBatch);
+                    if (acquire) {
+                        semaphore(waits + (long) waitCount * VkSemaphoreSubmitInfo.SIZEOF, acquired, 0);
+                        waitCount++;
+                        acquireWaited = true;
+                    }
+                    long signals = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 2, VkSemaphoreSubmitInfo.SIZEOF);
+                    int signalCount = 1;
+                    semaphore(signals, queue == GRAPHICS ? graphicsTimeline : computeTimeline,
+                        (queue == GRAPHICS ? graphicsBase : computeBase) + batchOrdinal[b]);
+                    if (b == lastGraphicsBatch && renderFinished != 0) {
+                        semaphore(signals + VkSemaphoreSubmitInfo.SIZEOF, renderFinished, 0);
+                        signalCount++;
+                    }
+                    long submit = stack.ncalloc(VkSubmitInfo2.ALIGNOF, 1, VkSubmitInfo2.SIZEOF);
+                    memPutInt(submit + VkSubmitInfo2.STYPE, VK_STRUCTURE_TYPE_SUBMIT_INFO_2);
+                    memPutInt(submit + VkSubmitInfo2.WAITSEMAPHOREINFOCOUNT, waitCount);
+                    memPutAddress(submit + VkSubmitInfo2.PWAITSEMAPHOREINFOS, waits);
+                    memPutInt(submit + VkSubmitInfo2.COMMANDBUFFERINFOCOUNT, count);
+                    memPutAddress(submit + VkSubmitInfo2.PCOMMANDBUFFERINFOS, infos);
+                    memPutInt(submit + VkSubmitInfo2.SIGNALSEMAPHOREINFOCOUNT, signalCount);
+                    memPutAddress(submit + VkSubmitInfo2.PSIGNALSEMAPHOREINFOS, signals);
+                    (queue == GRAPHICS ? graphicsQueue : computeQueue).submit(1, submit, 0);
+                }
+            }
+            graphicsValue += graphicsBatches;
+            computeValue += computeBatches;
+            slotGraphicsValue[slot] = graphicsValue;
+            slotComputeValue[slot] = computeValue;
+            begun = false;
+        }
+
+        private static void semaphore(long info, long semaphore, long value) {
+            memPutInt(info + VkSemaphoreSubmitInfo.STYPE, VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO);
+            memPutLong(info + VkSemaphoreSubmitInfo.SEMAPHORE, semaphore);
+            memPutLong(info + VkSemaphoreSubmitInfo.VALUE, value);
+            memPutLong(info + VkSemaphoreSubmitInfo.STAGEMASK, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+        }
+
+        @Override
+        public void close() {
+            waitIdle();
+            for (long[] slotPools : pools) {
+                for (long pool : slotPools) {
+                    vkDestroyCommandPool(device.handle(), pool, null);
+                }
+            }
+            vkDestroySemaphore(device.handle(), graphicsTimeline, null);
+            vkDestroySemaphore(device.handle(), computeTimeline, null);
+        }
+    }
+
+    // ---------------------------------------------------------------- recording
 
     private boolean externalsResized() {
         for (int i = 0; i < externals.length; i++) {
@@ -293,6 +686,42 @@ public final class FrameGraph implements AutoCloseable {
         return names;
     }
 
+    /**
+     * The batches {@link #submit} submits, in order: their queue, what they wait for and their passes, e.g.
+     * {@code "compute 1 (after graphics 1): ssao"}.
+     */
+    @AllowAllocation("inspection")
+    public List<String> batches() {
+        List<String> out = new ArrayList<>();
+        for (int b = 0; b < batchQueue.length; b++) {
+            StringBuilder line = new StringBuilder(batchQueue[b] == GRAPHICS ? "graphics " : "compute ")
+                .append(batchOrdinal[b]);
+            List<String> after = new ArrayList<>();
+            if (batchWait[b] > 0) {
+                after.add((batchQueue[b] == GRAPHICS ? "compute " : "graphics ") + batchWait[b]);
+            }
+            if (batchAcquire[b]) {
+                after.add("acquire");
+            }
+            if (!after.isEmpty()) {
+                line.append(" (after ").append(String.join(", ", after)).append(')');
+            }
+            List<String> names = new ArrayList<>();
+            for (int c = batchFirstChunk[b]; c < batchFirstChunk[b + 1]; c++) {
+                for (int p = chunkFirstPass[c]; p < chunkEndPass[c]; p++) {
+                    names.add(order[p].name);
+                }
+            }
+            out.add(line.append(": ").append(String.join(", ", names)).toString());
+        }
+        return out;
+    }
+
+    /** How many command buffers {@link #submit} records each frame: the chunks of all batches. */
+    public int chunks() {
+        return chunkBatch.length;
+    }
+
     /** The transient images in the pool, for inspection. */
     public int pooledImages() {
         return pool.size();
@@ -364,12 +793,34 @@ public final class FrameGraph implements AutoCloseable {
             }
         }
         PassInfo[] newOrder = kept.toArray(new PassInfo[0]);
+        // The queue of each pass: async ones on the compute queue, when async compute is on.
+        int[] queues = new int[newOrder.length];
+        for (int p = 0; p < newOrder.length; p++) {
+            PassInfo pass = newOrder[p];
+            if (pass.async) {
+                for (int a = 0; a < pass.images.length; a++) {
+                    Access access = pass.accesses[a];
+                    if (access == Access.COLOR_ATTACHMENT || access == Access.DEPTH_ATTACHMENT
+                        || access == Access.DEPTH_TEST || access == Access.SAMPLED_FRAGMENT) {
+                        throw new IllegalStateException(pass.name + " is async but uses "
+                            + g.images.get(pass.images[a]).image.name + " as " + access
+                            + ": async passes compute, sample, store and copy only");
+                    }
+                    if (g.images.get(pass.images[a]).external != null) {
+                        throw new IllegalStateException(pass.name + " is async but uses the external image "
+                            + g.images.get(pass.images[a]).image.name);
+                    }
+                }
+                queues[p] = asyncCompute ? COMPUTE : GRAPHICS;
+            }
+        }
         // Where images live: external ones (and outputs drawn into their target) in their external image, transient
         // ones in physical images, shared by images of one size and format whose lifetimes do not overlap.
         List<ExternalImage> newExternals = new ArrayList<>();
         int[] newTargetOf = new int[imageCount];
         int[] first = new int[imageCount];
         int[] last = new int[imageCount];
+        int[] queueMask = new int[imageCount];
         Arrays.fill(first, -1);
         for (int i = 0; i < newOrder.length; i++) {
             for (int image : newOrder[i].images) {
@@ -377,6 +828,7 @@ public final class FrameGraph implements AutoCloseable {
                     first[image] = i;
                 }
                 last[image] = i;
+                queueMask[image] |= 1 << queues[i];
             }
         }
         List<Slot> slots = new ArrayList<>();
@@ -388,6 +840,7 @@ public final class FrameGraph implements AutoCloseable {
             byFirstUse[i] = i;
         }
         Arrays.sort(byFirstUse, (a, b) -> Integer.compare(first[a], first[b]));
+        boolean twoFamilies = graphicsQueue.family() != computeQueue.family();
         for (int image : byFirstUse) {
             if (first[image] < 0) {
                 continue; // culled
@@ -414,8 +867,11 @@ public final class FrameGraph implements AutoCloseable {
             }
             Slot slot = null;
             for (Slot candidate : slots) {
+                // Only between images of one queue: sharing memory with work on the other queue would make each wait
+                // for the other, and async compute would no longer run beside graphics.
                 if (candidate.last < first[image] && candidate.width == info.image.width
-                    && candidate.height == info.image.height && candidate.format == info.image.format) {
+                    && candidate.height == info.image.height && candidate.format == info.image.format
+                    && candidate.queues == queueMask[image] && queueMask[image] != 3) {
                     slot = candidate;
                     break;
                 }
@@ -426,13 +882,17 @@ public final class FrameGraph implements AutoCloseable {
             }
             slot.last = last[image];
             slot.usage |= info.usage;
+            slot.queues |= queueMask[image];
             newTargetOf[image] = slots.indexOf(slot);
+        }
+        for (Slot slot : slots) {
+            slot.shared = slot.queues == 3 && twoFamilies;
         }
         Physical[] newPhysicals = claim(slots);
         // Barriers, now that every image has a home.
         Barriers barriers = new Barriers(newPhysicals.length, newExternals);
-        barriers.simulate(newOrder, newTargetOf, g, false); // the state a frame ends in is the next one's start
-        barriers.simulate(newOrder, newTargetOf, g, true);
+        barriers.simulate(newOrder, queues, newTargetOf, g, false); // the state a frame ends in is the next one's start
+        barriers.simulate(newOrder, queues, newTargetOf, g, true);
 
         order = newOrder;
         targetOf = newTargetOf;
@@ -443,10 +903,90 @@ public final class FrameGraph implements AutoCloseable {
             externalVersions[i] = externals[i].version;
         }
         barriers.store();
+        schedule(queues, barriers.waitPass, barriers.firstExternalPass);
         dirty = false;
         builds++;
-        LOG.debug("Frame graph built: {} of {} passes, {} images in {} pooled, {} barriers", order.length,
-            passes.size(), imageCount, physicals.length, barrierTarget.length);
+        LOG.debug("Frame graph built: {} of {} passes in {} batches, {} images in {} pooled, {} barriers",
+            order.length, passes.size(), batchQueue.length, imageCount, physicals.length, barrierTarget.length);
+    }
+
+    /**
+     * Splits the passes into batches: a new one where the queue changes, where a pass waits for more of the other queue
+     * than its batch does, and at the first pass using an external image (which waits for it to be acquired), so work
+     * before it runs without waiting. Each batch is cut into chunks of {@link #grain} passes, recorded in parallel.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    private void schedule(int[] queues, int[] waitPass, int firstExternalPass) {
+        List<int[]> batches = new ArrayList<>(); // queue, first pass, end pass, wait (other queue's ordinal), acquire
+        int[] passBatch = new int[order.length];
+        int[] ordinals = new int[2];
+        List<Integer> batchOrdinals = new ArrayList<>();
+        for (int p = 0; p < order.length; p++) {
+            int queue = queues[p];
+            int wait = waitPass[p] < 0 ? 0 : batchOrdinals.get(passBatch[waitPass[p]]);
+            boolean acquire = p == firstExternalPass;
+            int[] current = batches.isEmpty() ? null : batches.getLast();
+            if (current == null || current[0] != queue || wait > current[3] || acquire) {
+                batches.add(new int[] {queue, p, p, wait, acquire ? 1 : 0});
+                batchOrdinals.add(++ordinals[queue]);
+                current = batches.getLast();
+            }
+            current[2] = p + 1;
+            passBatch[p] = batches.size() - 1;
+        }
+        int lastGraphics = -1;
+        for (int b = 0; b < batches.size(); b++) {
+            lastGraphics = batches.get(b)[0] == GRAPHICS ? b : lastGraphics;
+        }
+        if (lastGraphics < 0) {
+            // Nothing on the graphics queue: an empty batch there still signals and waits as asked.
+            batches.add(new int[] {GRAPHICS, order.length, order.length, 0, 0});
+            batchOrdinals.add(++ordinals[GRAPHICS]);
+            lastGraphics = batches.size() - 1;
+        }
+        int n = batches.size();
+        batchQueue = new int[n];
+        batchOrdinal = new int[n];
+        batchWait = new int[n];
+        batchAcquire = new boolean[n];
+        batchFirstChunk = new int[n + 1];
+        List<int[]> chunks = new ArrayList<>(); // batch, first pass, end pass
+        for (int b = 0; b < n; b++) {
+            int[] batch = batches.get(b);
+            batchQueue[b] = batch[0];
+            batchOrdinal[b] = batchOrdinals.get(b);
+            batchWait[b] = batch[3];
+            batchAcquire[b] = batch[4] != 0;
+            batchFirstChunk[b] = chunks.size();
+            for (int from = batch[1]; from < batch[2]; from += grain) {
+                chunks.add(new int[] {b, from, Math.min(batch[2], from + grain)});
+            }
+            if (b == lastGraphics && (chunks.isEmpty() || chunks.getLast()[0] != b)) {
+                chunks.add(new int[] {b, batch[2], batch[2]}); // only the outputs' final barriers
+            }
+        }
+        batchFirstChunk[n] = chunks.size();
+        lastGraphicsBatch = lastGraphics;
+        graphicsBatches = ordinals[GRAPHICS];
+        computeBatches = ordinals[COMPUTE];
+        chunkBatch = new int[chunks.size()];
+        chunkFirstPass = new int[chunks.size()];
+        chunkEndPass = new int[chunks.size()];
+        for (int c = 0; c < chunks.size(); c++) {
+            chunkBatch[c] = chunks.get(c)[0];
+            chunkFirstPass[c] = chunks.get(c)[1];
+            chunkEndPass[c] = chunks.get(c)[2];
+        }
+        chunkCommands = new VkCommandBuffer[chunks.size()];
+        graphicsChunks = 0;
+        computeChunks = 0;
+        for (int batch : chunkBatch) {
+            if (batchQueue[batch] == GRAPHICS) {
+                graphicsChunks++;
+            } else {
+                computeChunks++;
+            }
+        }
     }
 
     /** Takes pooled images for the slots, creating the missing ones; pooled images left over retire. */
@@ -458,7 +998,8 @@ public final class FrameGraph implements AutoCloseable {
             Slot slot = slots.get(s);
             for (Physical candidate : free) {
                 if (candidate.width == slot.width && candidate.height == slot.height
-                    && candidate.format == slot.format && candidate.usage == slot.usage) {
+                    && candidate.format == slot.format && candidate.usage == slot.usage
+                    && candidate.shared == slot.shared) {
                     claimed[s] = candidate;
                     free.remove(candidate);
                     break;
@@ -525,6 +1066,10 @@ public final class FrameGraph implements AutoCloseable {
 
     @Override
     public void close() {
+        if (execution != null) {
+            execution.close(); // waits for the frames submitted
+            execution = null;
+        }
         for (AutoCloseable object : cache.values()) {
             try {
                 object.close();
@@ -550,6 +1095,8 @@ public final class FrameGraph implements AutoCloseable {
         final int height;
         final int format;
         int usage;
+        int queues;
+        boolean shared; // used by both queues, of different families: concurrent sharing
         int last;
 
         Slot(int width, int height, int format) {
@@ -567,6 +1114,7 @@ public final class FrameGraph implements AutoCloseable {
         final int height;
         final int format;
         final int usage;
+        final boolean shared;
         final int sampled;
         final int storage;
         long retireAt;
@@ -576,7 +1124,9 @@ public final class FrameGraph implements AutoCloseable {
             height = slot.height;
             format = slot.format;
             usage = slot.usage;
-            image = new GpuImage(device, width, height, format, usage, aspect(format));
+            shared = slot.shared;
+            image = shared ? new GpuImage(device, width, height, format, usage, aspect(format), graphicsQueue.family(),
+                computeQueue.family()) : new GpuImage(device, width, height, format, usage, aspect(format));
             sampled = (usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0 ? bindless.addSampled(image.view()) : -1;
             storage = (usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 ? bindless.addStorage(image.view()) : -1;
         }
@@ -594,7 +1144,10 @@ public final class FrameGraph implements AutoCloseable {
 
     /**
      * Derives barriers by walking the passes in order and tracking, per physical or external image, its layout, the
-     * stages and accesses that last wrote it, and the stages that read it since. A pass's barriers are batched.
+     * stages and accesses that last wrote it, the stages that read it since, what is already visible, and which queue
+     * used it last. A pass's barriers are batched. Crossing to the other queue, a barrier after all commands follows
+     * the batch's semaphore wait. Along the way it notes, per pass, the latest pass of the other queue it depends on
+     * (for the batch's wait), and the first pass using an external image (which waits for it to be acquired).
      */
     @AllowAllocation("building the graph, when it changes")
     private final class Barriers {
@@ -604,8 +1157,15 @@ public final class FrameGraph implements AutoCloseable {
         final long[] writeStages;
         final long[] writeAccess;
         final long[] readStages;
-        final long[] readAccess;
+        final long[] visibleStages;
+        final long[] visibleAccess;
         final int[] tenant;
+        final int[] lastQueue;
+        final int[] lastWritePass;
+        final int[] lastWriteQueue;
+        final int[][] lastReadPass;
+        int[] waitPass = new int[0];
+        int firstExternalPass = -1;
         final List<long[]> out = new ArrayList<>(); // target, aspect, old, new, srcStage, srcAccess, dstStage, dstAccess
         final List<Integer> starts = new ArrayList<>();
 
@@ -617,9 +1177,14 @@ public final class FrameGraph implements AutoCloseable {
             writeStages = new long[n];
             writeAccess = new long[n];
             readStages = new long[n];
-            readAccess = new long[n];
+            visibleStages = new long[n];
+            visibleAccess = new long[n];
             tenant = new int[n];
-            Arrays.fill(tenant, -1);
+            lastQueue = new int[n];
+            lastWritePass = new int[n];
+            lastWriteQueue = new int[n];
+            lastReadPass = new int[n][2];
+            Arrays.fill(lastQueue, -1);
         }
 
         private int index(int target) {
@@ -627,7 +1192,7 @@ public final class FrameGraph implements AutoCloseable {
         }
 
         /** Walks the passes; with {@code emit} off, only to learn the state a frame leaves its images in. */
-        void simulate(PassInfo[] passes, int[] targets, GraphBuilder g, boolean emit) {
+        void simulate(PassInfo[] passes, int[] queues, int[] targets, GraphBuilder g, boolean emit) {
             for (int e = 0; e < externalList.size(); e++) {
                 ExternalImage external = externalList.get(e);
                 int i = physicalCount + e;
@@ -635,11 +1200,20 @@ public final class FrameGraph implements AutoCloseable {
                 writeStages[i] = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT; // whatever came before the frame
                 writeAccess[i] = external.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_2_MEMORY_WRITE_BIT;
                 readStages[i] = 0;
-                readAccess[i] = 0;
-                tenant[i] = -1;
+                visibleStages[i] = 0;
+                visibleAccess[i] = 0;
+                lastQueue[i] = GRAPHICS;
             }
-            Arrays.fill(tenant, 0, physicalCount, -1); // transient contents never outlive their frame
-            for (PassInfo pass : passes) {
+            Arrays.fill(tenant, -1); // transient contents never outlive their frame
+            Arrays.fill(lastWritePass, -1);
+            for (int[] reads : lastReadPass) {
+                Arrays.fill(reads, -1);
+            }
+            waitPass = new int[passes.length];
+            Arrays.fill(waitPass, -1);
+            firstExternalPass = -1;
+            for (int p = 0; p < passes.length; p++) {
+                PassInfo pass = passes[p];
                 if (emit) {
                     starts.add(out.size());
                 }
@@ -672,7 +1246,10 @@ public final class FrameGraph implements AutoCloseable {
                             writes |= other.writes;
                         }
                     }
-                    access(pass, image, targets[image], g, stages, access, writes, wanted, emit);
+                    if (targets[image] < 0 && firstExternalPass < 0) {
+                        firstExternalPass = p;
+                    }
+                    access(pass, p, queues[p], image, targets[image], g, stages, access, writes, wanted, emit);
                 }
             }
             if (emit) {
@@ -687,12 +1264,35 @@ public final class FrameGraph implements AutoCloseable {
             }
         }
 
-        private void access(PassInfo pass, int image, int target, GraphBuilder g, long stages, long access,
-            boolean writes, int wanted, boolean emit) {
+        private void access(PassInfo pass, int p, int queue, int image, int target, GraphBuilder g, long stages,
+            long access, boolean writes, int wanted, boolean emit) {
             int i = index(target);
             int aspect = aspect(g.images.get(image).image.format);
-            boolean transient_ = target >= 0;
-            if (transient_ && tenant[i] != image) {
+            if (lastQueue[i] >= 0 && lastQueue[i] != queue) {
+                // From the other queue: submitted, its batch's semaphore wait orders and makes visible what came before;
+                // recorded into one command buffer, nothing does. A barrier after all commands, making any write
+                // visible, is right either way: this queue's stages cannot be named for the other's work.
+                writeStages[i] = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+                writeAccess[i] = writeAccess[i] != 0 ? VK_ACCESS_2_MEMORY_WRITE_BIT : 0;
+                readStages[i] = 0;
+                visibleStages[i] = 0;
+                visibleAccess[i] = 0;
+            }
+            lastQueue[i] = queue;
+            boolean newTenant = target >= 0 && tenant[i] != image;
+            boolean transition = layout[i] != wanted;
+            if (newTenant || writes || transition) {
+                depend(p, Math.max(otherQueue(lastWriteQueue[i], queue, lastWritePass[i]),
+                    lastReadPass[i][1 - queue]));
+                lastWritePass[i] = p;
+                lastWriteQueue[i] = queue;
+                lastReadPass[i][0] = -1;
+                lastReadPass[i][1] = -1;
+            } else {
+                depend(p, otherQueue(lastWriteQueue[i], queue, lastWritePass[i]));
+                lastReadPass[i][queue] = p;
+            }
+            if (newTenant) {
                 // A new image in this physical one: its contents start undefined, after whatever used it before.
                 if (!writes) {
                     throw new IllegalStateException(pass.name + " reads " + g.images.get(image).image.name
@@ -703,42 +1303,52 @@ public final class FrameGraph implements AutoCloseable {
                         writeStages[i] | readStages[i], writeAccess[i], stages, access});
                 }
                 tenant[i] = image;
-                set(i, wanted, stages, access);
+                set(i, wanted, stages, access, access);
                 return;
             }
-            boolean transition = layout[i] != wanted;
             if (writes || transition) {
                 long src = writeStages[i] | readStages[i];
                 if (emit && (src != 0 || transition)) {
                     out.add(new long[] {target, aspect, layout[i], wanted, src, writeAccess[i], stages, access});
                 }
                 if (writes) {
-                    set(i, wanted, stages, access);
+                    set(i, wanted, stages, access, access);
                 } else {
                     // A transition orders like a write: later readers wait for it, later writers for this pass.
-                    set(i, wanted, stages, VK_ACCESS_2_MEMORY_WRITE_BIT);
+                    set(i, wanted, stages, VK_ACCESS_2_MEMORY_WRITE_BIT, access);
                     readStages[i] = stages;
-                    readAccess[i] = access;
                 }
                 return;
             }
-            // Read after write, in the same layout: one barrier per new reading stage, none after that.
-            if ((stages & ~readStages[i]) != 0 || (access & ~readAccess[i]) != 0) {
+            // Read after write, in the same layout: one barrier per new reading stage or access, none after that.
+            if ((stages & ~visibleStages[i]) != 0 || (access & ~visibleAccess[i]) != 0) {
                 if (emit && writeStages[i] != 0) {
                     out.add(new long[] {target, aspect, wanted, wanted, writeStages[i], writeAccess[i], stages,
                         access});
                 }
-                readStages[i] |= stages;
-                readAccess[i] |= access;
+                visibleStages[i] |= stages;
+                visibleAccess[i] |= access;
             }
+            readStages[i] |= stages;
         }
 
-        private void set(int i, int newLayout, long stages, long access) {
+        /** {@code pass}, if it ran on another queue than {@code queue}; else -1. */
+        private int otherQueue(int passQueue, int queue, int pass) {
+            return pass >= 0 && passQueue != queue ? pass : -1;
+        }
+
+        private void depend(int p, int on) {
+            waitPass[p] = Math.max(waitPass[p], on);
+        }
+
+        /** After a write (or transition) by {@code stages}: visible to those stages and {@code visible} accesses. */
+        private void set(int i, int newLayout, long stages, long access, long visible) {
             layout[i] = newLayout;
             writeStages[i] = stages;
             writeAccess[i] = access;
             readStages[i] = 0;
-            readAccess[i] = 0;
+            visibleStages[i] = stages;
+            visibleAccess[i] = visible;
         }
 
         void store() {

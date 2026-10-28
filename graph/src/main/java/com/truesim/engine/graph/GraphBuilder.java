@@ -47,14 +47,17 @@ public final class GraphBuilder {
         final int[] images;
         final Access[] accesses;
         final boolean sideEffects;
+        final boolean async;
         final PassBody body;
 
-        PassInfo(String name, String owner, int[] images, Access[] accesses, boolean sideEffects, PassBody body) {
+        PassInfo(String name, String owner, int[] images, Access[] accesses, boolean sideEffects, boolean async,
+            PassBody body) {
             this.name = name;
             this.owner = owner;
             this.images = images;
             this.accesses = accesses;
             this.sideEffects = sideEffects;
+            this.async = async;
             this.body = body;
         }
     }
@@ -243,6 +246,7 @@ public final class GraphBuilder {
         private final List<Image> used = new ArrayList<>();
         private final List<Access> accesses = new ArrayList<>();
         private boolean sideEffects;
+        private boolean async;
 
         private PassBuilder(String name) {
             this.name = name;
@@ -282,6 +286,16 @@ public final class GraphBuilder {
             return this;
         }
 
+        /**
+         * The pass may run on the async compute queue, beside graphics work it does not depend on: compute, sampling,
+         * storage and transfer accesses only (no attachments, no external images). Where the device has no separate
+         * compute queue, or async compute is off, it runs on the graphics queue in its place.
+         */
+        public PassBuilder async() {
+            async = true;
+            return this;
+        }
+
         /** Adds the pass, recording with {@code body}. */
         public void record(PassBody body) {
             int[] ids = new int[used.size()];
@@ -289,7 +303,7 @@ public final class GraphBuilder {
                 ids[i] = used.get(i).id;
             }
             passes.add(new PassInfo(name, scope == null ? "the graph" : name(scope), ids,
-                accesses.toArray(new Access[0]), sideEffects, Objects.requireNonNull(body, "body")));
+                accesses.toArray(new Access[0]), sideEffects, async, Objects.requireNonNull(body, "body")));
         }
     }
 

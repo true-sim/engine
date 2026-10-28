@@ -13,6 +13,7 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_SAMPLED_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_STORAGE_BIT;
 import static org.lwjgl.vulkan.VK10.VK_SAMPLE_COUNT_1_BIT;
+import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_CONCURRENT;
 import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_EXCLUSIVE;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 import static org.lwjgl.vulkan.VK10.vkDestroyImageView;
@@ -42,6 +43,15 @@ public final class GpuImage implements AutoCloseable {
     private boolean closed;
 
     public GpuImage(VulkanDevice device, int width, int height, int format, int usage, int aspect) {
+        this(device, width, height, format, usage, aspect, new int[0]);
+    }
+
+    /**
+     * An image used by several queue families at once without ownership transfers ({@code VK_SHARING_MODE_CONCURRENT}),
+     * e.g. by the graphics and the async compute queue; one family or none is exclusive, as usual.
+     */
+    public GpuImage(VulkanDevice device, int width, int height, int format, int usage, int aspect,
+        int... queueFamilies) {
         if (width < 1 || height < 1) {
             throw new IllegalArgumentException("Image size must be positive: " + width + " x " + height);
         }
@@ -59,8 +69,11 @@ public final class GpuImage implements AutoCloseable {
                 .samples(VK_SAMPLE_COUNT_1_BIT)
                 .tiling(VK_IMAGE_TILING_OPTIMAL)
                 .usage(usage)
-                .sharingMode(VK_SHARING_MODE_EXCLUSIVE)
+                .sharingMode(queueFamilies.length > 1 ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE)
                 .initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
+            if (queueFamilies.length > 1) {
+                info.pQueueFamilyIndices(stack.ints(queueFamilies));
+            }
             info.extent().set(width, height, 1);
             LongBuffer image = stack.mallocLong(1);
             PointerBuffer allocated = stack.mallocPointer(1);

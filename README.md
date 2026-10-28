@@ -220,7 +220,7 @@ graph.add(new MeshletScene(renderer, width, height, VK_FORMAT_R16G16B16A16_SFLOA
     .add(new Bloom())                       // requires Keys.SCENE_COLOR, provides BLOOM
     .add(new ToneMap())                     // requires BLOOM, provides TONEMAPPED
     .output(TONEMAPPED, swapchainImage);    // an ExternalImage, set to the acquired image each frame
-graph.record(commands);                     // per frame: nothing allocated
+graph.beginFrame(); graph.submit(acquired, renderFinished);   // per frame: nothing allocated
 
 final class Bloom implements Technique {
     public List<Key> provides() { return List.of(BLOOM); }
@@ -241,8 +241,32 @@ final class Bloom implements Technique {
 The graph is rebuilt only when it changes: techniques, outputs or implementations, an external image resized, or
 `invalidate()`. Per-frame data lives in the techniques, and pass bodies read it when recording.
 
-Not yet: transient buffers, recording passes in parallel on the JobSystem, async compute, and merging similar work
-across views (#8).
+**Running frames.** The graph runs its frames itself, on the graphics and compute queues:
+
+```java
+graph.parallel(jobs, 4);                    // record on the JobSystem's threads, 4 passes per command buffer
+int slot = graph.beginFrame();              // waits until this frame slot's GPU work is done
+int image = swapchain.acquire(acquired[slot]);
+target.set(swapchain.image(image), swapchain.view(image));
+graph.submit(acquired[slot], swapchain.presentReady(image));
+swapchain.present(device.graphics(), image);
+```
+
+- **Async compute:** passes marked `async()` (compute, sampling, storage and copies), such as the blur, run on the
+  compute queue where the GPU has one. The frame is split into batches, a new one where the queue changes or where a
+  pass needs work from the other queue. Timeline semaphores order the batches, so graphics work that does not need an
+  async pass runs beside it. Images both queues use are shared concurrently, without ownership transfers; memory is
+  aliased only between images of one queue, so that sharing never adds a wait. The first pass that touches the
+  swapchain image waits for its acquisition, so everything before it can start earlier.
+- **Parallel recording:** each batch is cut into chunks of a few passes, and workers record them in parallel, each
+  into its own command pools. Chunks are submitted in order, so the GPU sees the same commands on any number of
+  threads. Pass bodies then run on worker threads and must not share what they change.
+- `record(commands)` still records everything into one command buffer, for simple uses.
+
+The graph's tests run with synchronization validation, which checks every barrier and cross-queue wait. Dropping the
+waits makes it report races between the queues.
+
+Not yet: transient buffers, and merging similar work across views (#8).
 
 ## Building
 

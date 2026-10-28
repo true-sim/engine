@@ -61,7 +61,8 @@ class FrameGraphTest {
     @BeforeEach
     void start() {
         try {
-            instance = VulkanInstance.builder().applicationName("tests").validation(true).surfaces(false).build();
+            instance = VulkanInstance.builder().applicationName("tests").validation(true)
+                .synchronizationValidation(true).surfaces(false).build();
         } catch (VulkanException | UnsatisfiedLinkError e) {
             assumeThat(e).as("no Vulkan available").isNull();
             throw e;
@@ -146,6 +147,65 @@ class FrameGraphTest {
                 .write(copy, Access.TRANSFER_DST)
                 .record(ctx -> copy(ctx, source, copy, 0, SIZE));
             return copy;
+        }
+    }
+
+    /** A copy on the async compute queue. */
+    record AsyncCopy(Image source) implements Request<Image> {
+        @Override
+        public Image build(GraphBuilder g) {
+            Image copy = g.createLike("async copy of " + source.name(), source, 1);
+            g.pass("async copy " + source.name())
+                .read(source, Access.TRANSFER_SRC)
+                .write(copy, Access.TRANSFER_DST)
+                .async()
+                .record(ctx -> copy(ctx, source, copy, 0, SIZE));
+            return copy;
+        }
+    }
+
+    /**
+     * Provides {@code out}: the async copy of {@code a}, left, beside {@code b}, right. Built as a, the copy, b, so
+     * filling b on the graphics queue does not wait for the copy.
+     */
+    record Overlapping(Key out, Key a, Key b) implements Technique {
+        @Override
+        public List<Key> provides() {
+            return List.of(out);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image copied = g.request(new AsyncCopy(g.require(a)));
+            Image right = g.require(b);
+            Image image = g.createLike(out.name(), copied, 1);
+            g.pass("halves " + out).read(copied, Access.TRANSFER_SRC).read(right, Access.TRANSFER_SRC)
+                .write(image, Access.TRANSFER_DST).record(ctx -> {
+                    copy(ctx, copied, image, 0, SIZE / 2);
+                    copy(ctx, right, image, SIZE / 2, SIZE / 2);
+                });
+            g.provide(out, image);
+        }
+    }
+
+    /** Provides {@code out}: {@code from} copied {@code times} times over, each copy its own pass. */
+    record Chain(Key out, Key from, int times) implements Technique {
+        @Override
+        public List<Key> provides() {
+            return List.of(out);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image image = g.require(from);
+            for (int i = 0; i < times; i++) {
+                Image next = g.create(out.name() + " " + i, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                Image source = image;
+                g.pass("chain " + i).read(source, Access.TRANSFER_SRC).write(next, Access.TRANSFER_DST)
+                    .record(ctx -> copy(ctx, source, next, 0, SIZE));
+                image = next;
+            }
+            g.provide(out, image);
         }
     }
 
@@ -367,6 +427,147 @@ class FrameGraphTest {
         graph.implement(Copy.class, null);
         assertThat(frame()[0]).isEqualTo(GREEN);
         assertThat(graph.builds()).isEqualTo(4);
+    }
+
+    /** Submits {@code frames} frames the graph's way, then reads the target back. */
+    private int[] submitted(int frames) {
+        for (int i = 0; i < frames; i++) {
+            graph.beginFrame();
+            graph.submit(0, 0);
+        }
+        device.waitIdle();
+        device.submitAndWait(device.graphics(), commands -> {
+            try (MemoryStack stack = stackPush()) {
+                VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
+                region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
+                region.imageExtent().set(SIZE, SIZE, 1);
+                vkCmdCopyImageToBuffer(commands, target.handle(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    pixels.handle(), region);
+            }
+        });
+        int[] texels = new int[SIZE * SIZE];
+        for (int i = 0; i < texels.length; i++) {
+            texels[i] = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, i);
+        }
+        return texels;
+    }
+
+    @Test
+    void passesRecordInParallelChunksSubmittedInOrder() {
+        Key copied = Key.of("copied");
+        graph.add(new Fill(A, SIZE, 1, 0, 0, 1))
+            .add(new Fill(B, SIZE, 0, 1, 0, 1))
+            .add(new Chain(copied, A, 9))
+            .add(new Halves(OUT, copied, B))
+            .output(OUT, output);
+        try (com.truesim.common.jobs.JobSystem jobs = new com.truesim.common.jobs.JobSystem(4)) {
+            graph.parallel(jobs, 1);
+            int[] texels = submitted(5); // more frames than in flight: every slot reused
+            assertThat(texels[0]).isEqualTo(RED);
+            assertThat(texels[SIZE - 1]).isEqualTo(GREEN);
+            assertThat(graph.chunks()).isEqualTo(12); // a pass each: fill a, 9 copies, fill b, halves
+            graph.parallel(jobs, 5);
+            texels = submitted(3);
+            assertThat(texels[0]).isEqualTo(RED);
+            assertThat(graph.chunks()).isEqualTo(4); // 11 passes in 3 chunks, then the output pass
+            graph.parallel(null, 4); // back on the calling thread
+            assertThat(submitted(2)[SIZE - 1]).isEqualTo(GREEN);
+            assertThat(graph.batches()).containsExactly("graphics 1: fill a, chain 0, chain 1, chain 2, chain 3, "
+                + "chain 4, chain 5, chain 6, chain 7, chain 8, fill b", "graphics 2 (after acquire): halves out");
+        }
+        assertThatIllegalArgumentException().isThrownBy(() -> graph.parallel(null, 0));
+    }
+
+    @Test
+    void asyncPassesRunBesideGraphicsWorkThatDoesNotNeedThem() {
+        graph.add(new Fill(A, SIZE, 1, 0, 0, 1))
+            .add(new Fill(B, SIZE, 0, 0, 1, 1))
+            .add(new Overlapping(OUT, A, B))
+            .output(OUT, output)
+            .asyncCompute(true); // on devices without a compute queue too: the same batches, on one queue
+        int[] texels = submitted(4);
+        assertThat(texels[0]).isEqualTo(RED);
+        assertThat(texels[SIZE - 1]).isEqualTo(BLUE);
+        // Filling b does not wait for the copy; only the pass using both does.
+        assertThat(graph.batches()).containsExactly(
+            "graphics 1: fill a",
+            "compute 1 (after graphics 1): async copy a",
+            "graphics 2: fill b",
+            "graphics 3 (after compute 1, acquire): halves out");
+        // Binary semaphores: the first frame signals one, the next waits for it as if it were an acquired image.
+        try (MemoryStack stack = stackPush()) {
+            java.nio.LongBuffer semaphore = stack.mallocLong(1);
+            org.lwjgl.vulkan.VK10.vkCreateSemaphore(device.handle(), org.lwjgl.vulkan.VkSemaphoreCreateInfo
+                .calloc(stack).sType(org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO), null, semaphore);
+            graph.beginFrame();
+            graph.submit(0, semaphore.get(0));
+            graph.beginFrame();
+            graph.submit(semaphore.get(0), 0);
+            device.waitIdle();
+            org.lwjgl.vulkan.VK10.vkDestroySemaphore(device.handle(), semaphore.get(0), null);
+        }
+        // Off, async passes run on the graphics queue in their place.
+        graph.asyncCompute(false);
+        assertThat(submitted(1)[0]).isEqualTo(RED);
+        assertThat(graph.batches()).containsExactly("graphics 1: fill a, async copy a, fill b",
+            "graphics 2 (after acquire): halves out");
+        // Async passes compute, sample, store and copy only, and never touch external images.
+        rejects(List.of(OUT), g -> {
+            Image image = g.create("x", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("draw").write(image, Access.COLOR_ATTACHMENT).async().record(ctx -> { });
+            g.provide(OUT, image);
+        }, "async passes compute, sample, store and copy only");
+        rejects(List.of(OUT), g -> {
+            g.pass("write target").write(g.external(output), Access.TRANSFER_DST).async().sideEffects()
+                .record(ctx -> { });
+            g.provide(OUT, g.require(A));
+        }, "uses the external image");
+    }
+
+    @Test
+    void framesAreBegunThenSubmitted() {
+        graph.add(new Fill(A, SIZE, 1, 0, 0, 1)).output(A, output);
+        assertThatIllegalStateException().isThrownBy(() -> graph.submit(0, 0)).withMessageContaining("beginFrame");
+        assertThat(graph.beginFrame()).isZero();
+        assertThatIllegalStateException().isThrownBy(graph::beginFrame).withMessageContaining("submit()");
+        graph.submit(0, 0);
+        assertThat(graph.beginFrame()).isEqualTo(1);
+        graph.submit(0, 0);
+        assertThat(graph.beginFrame()).isZero(); // two in flight
+        graph.submit(0, 0);
+        // Nothing to do: an empty graphics batch still signals the frame.
+        graph.removeOutput(A);
+        graph.beginFrame();
+        graph.submit(0, 0);
+        assertThat(graph.batches()).containsExactly("graphics 1: ");
+        // Only async work: compute, then the output's blit on the graphics queue.
+        graph.close();
+        graph = new FrameGraph(device, 2).asyncCompute(true).add(new Lambda(List.of(OUT), g -> {
+            Image image = g.create("small", SIZE / 2, SIZE / 2, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("only compute").write(image, Access.TRANSFER_DST).async()
+                .record(ctx -> clear(ctx, image, 1, 1, 1, 1));
+            g.provide(OUT, image);
+        })).output(OUT, output);
+        assertThat(submitted(3)[0]).isEqualTo(0xffffffff);
+        assertThat(graph.batches()).containsExactly("compute 1: only compute",
+            "graphics 1 (after compute 1, acquire): output target");
+    }
+
+    @Test
+    void submittingAllocatesNothing() {
+        graph.add(new Fill(A, SIZE, 1, 0, 0, 1))
+            .add(new Fill(B, SIZE, 0, 1, 0, 1))
+            .add(new Overlapping(OUT, A, B))
+            .output(OUT, output)
+            .asyncCompute(true);
+        try (com.truesim.common.jobs.JobSystem jobs = new com.truesim.common.jobs.JobSystem(2)) {
+            graph.parallel(jobs, 1);
+            assertAllocationFree(() -> {
+                graph.beginFrame();
+                graph.submit(0, 0);
+            }, 20_000, 1_000, 10);
+        }
+        assertThat(graph.builds()).isEqualTo(1);
     }
 
     @Test

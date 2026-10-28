@@ -216,11 +216,21 @@ public final class Bindless implements AutoCloseable {
 
     /** Binds the set for compute and graphics pipelines. Allocates nothing. */
     public void bind(VkCommandBuffer commands) {
+        bind(commands, true);
+    }
+
+    /**
+     * Binds the set for compute pipelines and, with {@code graphics}, graphics ones (not on compute-only queues).
+     * Allocates nothing.
+     */
+    public void bind(VkCommandBuffer commands, boolean graphics) {
         try (MemoryStack stack = stackPush()) {
             long sets = stack.nmalloc(8, 8);
             memPutLong(sets, set);
             nvkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, sets, 0, 0);
-            nvkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, sets, 0, 0);
+            if (graphics) {
+                nvkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, sets, 0, 0);
+            }
         }
     }
 
