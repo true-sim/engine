@@ -79,7 +79,7 @@ class MeshletRendererTest {
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 16, 1024, 8));
         quad = pool.add(grid(1, 2, false, VertexFormat.POSITIONS_ONLY));
         terrain = pool.add(grid(64, 1, true, VertexFormat.of(VertexAttribute.NORMAL)));
-        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(256, 8192, 1024),
+        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(256, 8192, 1024, 1 << 20),
             VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
         color = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -304,7 +304,7 @@ class MeshletRendererTest {
         assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstance(0, 5, 0, 0, 0, 0, 0, 0, 1, 1, 1,
             1));
         assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstanceCount(257));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(0, 1, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(0, 1, 1, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> GeometryPool.Capacity.of(0, 1, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> GeometryPool.Capacity.of(1, 0, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> new GeometryPool.Capacity(1, 1, 0, 1));
@@ -314,9 +314,9 @@ class MeshletRendererTest {
         assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstance(0, -1, 0, 0, 0, 0, 0, 0, 1, 1, 1,
             1));
         assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstanceCount(-1));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 0, 1));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 0));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 65_536));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 0, 1, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 0, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 65_536, 1));
         // Each limit of the pool: meshes, meshlets, triangles, meshlet vertices, attributes.
         MeshData small = grid(2, 1, false, VertexFormat.of(VertexAttribute.NORMAL));
         for (GeometryPool.Capacity limit : new GeometryPool.Capacity[] {
