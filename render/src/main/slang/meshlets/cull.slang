@@ -18,6 +18,7 @@ struct CullPush
     uint* drawCommand;     // VkDrawIndexedIndirectCommand: its index count grows here
     uint* visibleCount;
     uint maxIndices;
+    Occlusion occlusion;
 };
 
 [[vk::push_constant]]
@@ -40,6 +41,17 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     if (!meshletVisible(view, instance, m, push.meshlets, push.clusterLod))
     {
         return;
+    }
+    if (push.occlusion.phase == PHASE_LATE)
+    {
+        // A newly visible instance: only its meshlets the pyramid does not hide.
+        uint w = m * 8;
+        float3 center = toWorld(instance, asfloat(uint3(push.meshlets[w + 3], push.meshlets[w + 4],
+            push.meshlets[w + 5])));
+        if (!unoccluded(view, push.occlusion, center, asfloat(push.meshlets[w + 6]) * maxScale(instance)))
+        {
+            return;
+        }
     }
     uint slot;
     InterlockedAdd(push.visibleCount[0], 1, slot);

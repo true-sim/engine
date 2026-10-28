@@ -34,6 +34,8 @@ import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
 
+import com.truesim.engine.graph.ExternalImage;
+import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Images;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -301,6 +303,7 @@ class MeshletBenchmark {
                         + "%.3f ms median (CPU %.3f ms), %,d instances, %,d triangles drawn%n", scene, lod, cpu / 1e6,
                         lodCount, lodTriangles[0]);
                 }
+                occlusion(device, renderer, color, depth, queries, period, rock, ground, placed, camera);
                 renderer.setInstance(0, ground, 0, -6, 0, 0, 0, 0, 1, 1, 1, 1);
                 renderer.setInstanceCount(1);
                 renderer.setView(camera.set(0, -0.08, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1,
@@ -471,6 +474,39 @@ class MeshletBenchmark {
                     vkCmdDrawIndexedIndirect(buffer, commands.handle(), 0, draws, 20);
                 }
                 vkCmdEndRendering(buffer);
+            }
+        }
+    }
+
+    /**
+     * Occlusion culling, through the frame graph: the 30,000 rocks drawn by a {@link MeshletScene} without and with
+     * two-phase occlusion culling, in the open and behind a wall (the terrain, upright, 80 units ahead).
+     */
+    private static void occlusion(VulkanDevice device, MeshletRenderer renderer, GpuImage color, GpuImage depth,
+        long queries, double period, int rock, int ground, float[] placed, Camera camera) {
+        int count = 30_000;
+        for (int i = 0; i < count; i++) {
+            int o = 8 * i;
+            renderer.setInstance(i, rock, placed[o], placed[o + 1], placed[o + 2], placed[o + 3], placed[o + 4],
+                placed[o + 5], placed[o + 6], placed[o + 7], placed[o + 7], placed[o + 7]);
+        }
+        renderer.setView(camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1, MeshletRenderer.MODE_LIT);
+        ExternalImage target = new ExternalImage("target", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+            .set(color.handle(), color.view());
+        float half = (float) Math.sqrt(0.5);
+        for (boolean wall : new boolean[] {false, true}) {
+            renderer.setInstance(count, ground, 0, 0, -80, half, 0, 0, half, 1, 1, 1);
+            renderer.setInstanceCount(wall ? count + 1 : count);
+            for (boolean occlusion : new boolean[] {false, true}) {
+                try (FrameGraph graph = new FrameGraph(device, 2)) {
+                    graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                        .occlusion(occlusion)).output(Keys.SCENE_COLOR, target);
+                    double time = time(device, color, depth, queries, period, BATCH, graph::record);
+                    System.out.printf(Locale.ROOT, "  %,d rocks%s, through the graph, occlusion culling %s: %.3f ms "
+                        + "median, %,d meshlets drawn%n", count, wall ? " behind a wall" : "", occlusion ? "on" : "off",
+                        time, renderer.visibleMeshlets());
+                }
             }
         }
     }
