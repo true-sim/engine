@@ -104,6 +104,33 @@ public final class GpuBuffer implements AutoCloseable {
         return target;
     }
 
+    /**
+     * Writes {@code data} at {@code offset}: straight into a host-visible buffer, or through a staging buffer on the
+     * graphics queue into a device-local one, waiting until it is there. For setup work such as adding meshes.
+     */
+    public void write(long offset, MemorySegment data) {
+        long bytes = data.byteSize();
+        if (offset < 0 || offset + bytes > size) {
+            throw new IllegalArgumentException("Writing " + bytes + " bytes at " + offset + " overruns " + size);
+        }
+        if (bytes == 0) {
+            return;
+        }
+        if (memory != null) {
+            MemorySegment.copy(data, 0, memory, offset, bytes);
+            return;
+        }
+        try (GpuBuffer staging = hostVisible(device, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+            MemorySegment.copy(data, 0, staging.memory, 0, bytes);
+            device.submitAndWait(device.graphics(), commands -> {
+                try (MemoryStack stack = stackPush()) {
+                    vkCmdCopyBuffer(commands, staging.handle, handle, VkBufferCopy.calloc(1, stack)
+                        .dstOffset(offset).size(bytes));
+                }
+            });
+        }
+    }
+
     public long handle() {
         return handle;
     }

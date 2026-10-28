@@ -10,6 +10,7 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 |-------------------|-------------------------------|---------------------------------------------------------|
 | `engine-platform` | `com.truesim.engine.platform` | SDL3: displays, windows, runtime mode changes, all input devices |
 | `engine-vulkan`   | `com.truesim.engine.vulkan`   | Vulkan 1.3, 1.4 where available: instance, GPUs, devices, swapchains, frames |
+| `engine-render`   | `com.truesim.engine.render`   | GPU-driven meshlet rendering of scene's meshes: geometry pool, GPU culling and LOD |
 
 ## Platform
 
@@ -126,6 +127,37 @@ try (ShaderModule shaders = ShaderModule.load(device, "shaders/meshlets.spv");
 
 Devices require what such shaders use: 64-bit integers for pointers, 8 and 16-bit storage for packed data (meshlet
 indices, quantized vertices) and draw parameters, on top of the Vulkan 1.3 baseline.
+
+## GPU-driven rendering
+
+`engine-render` draws scene's meshes (`MeshData`: meshlets over quantized vertices with cluster LOD) GPU-driven: the
+CPU writes instances and a view, the GPU decides what to draw.
+
+```java
+try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 22, 65_536, 1024));
+     MeshletRenderer renderer = new MeshletRenderer(device, pool, 100_000, 1 << 20, colorFormat, depthFormat)) {
+    int car = pool.add(carMesh);                                   // uploaded once
+    renderer.setInstance(0, car, x, y, z, qx, qy, qz, qw, 1, 1, 1); // camera-relative
+    renderer.setInstanceCount(1);
+    renderer.setView(camera.set(forward, up, fovY, width, height, near), 1.0f, MeshletRenderer.MODE_LIT);
+    renderer.record(commands, colorView, depthView, width, height, 0, 0, 0);
+}
+```
+
+- **Geometry pool:** every mesh's streams in shared device-local buffers, reached by buffer device address, with a
+  table entry per mesh; any number of meshes and instances draw in one pass.
+- **Culling on the GPU:** a compute pass, one workgroup per instance, tests each meshlet: the cluster LOD rule (its
+  group's error projected on screen at most the allowed pixels, its parent's more), the frustum, and its normal cone
+  (whole meshlets facing away). Visible meshlets become indexed indirect draws.
+- **One draw call:** `vkCmdDrawIndexedIndirectCount`; the vertex shader pulls and decodes vertices (unorm16
+  positions, octahedral normals) by device address.
+- **Reverse depth with an infinite far plane,** camera-relative instances: precise near and far, anywhere in a large
+  world.
+- Tested on the GPU: coverage of a quad, culling (behind, outside, facing away), and LOD cuts from full detail to a
+  few meshlets that keep the covered area within 2 % (no holes).
+
+The mesh shader path (task and mesh shaders on the same data and shading modules) and the frame graph (#8) build on
+this.
 
 ## Building
 
