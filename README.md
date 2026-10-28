@@ -243,6 +243,30 @@ try (Textures textures = new Textures(device); Materials materials = new Materia
   coordinates and vertex colors from the pool's attributes.
 
 
+### Lights and clusters
+
+`Lights` holds point, spot and directional lights, camera-relative like instances, and a shadow table.
+`LightClusters` bins them for shading many lights: the camera's frustum is cut into tiles of 64 pixels and 24
+exponential depth slices, and a compute pass on the async queue gives each cluster the lights whose sphere reaches its
+box (lights read in batches of 64 into shared memory; directional lights reach every cluster). It is a shared request,
+so every technique shading the view gets the same clusters, built once per frame into transient buffers.
+
+```java
+lights.directional(0, -0.4f, -0.8f, -0.3f, 3, 3, 3).shadows(0, 0, 4); // the sun, four cascades: entries 0 to 3
+lights.point(1, x, y, z, 10, 20, 15, 10);                              // range 10
+lights.setCount(2);
+LightClusters.Grid clusters = g.request(new LightClusters(lights, renderer, width, height));
+```
+
+- **Shadows, single or many per light:** a light names consecutive shadow table entries (matrix, depth map slot, bias,
+  size). A spot light uses one; a directional light one per cascade, chosen by view depth; a point light six cube
+  faces, chosen by direction. `lights.slang` picks the entry and filters it (3 x 3 PCF), so any technique drawing
+  shadow maps only fills the table.
+- **Fixed slots per cluster** (128 by default): no atomics, a deterministic order, and overflow reported (the most
+  lights any cluster wanted is in the header).
+- Tested against the same cluster boxes computed on the CPU.
+
+
 ## Ray tracing
 
 Where the GPU has it (`VK_KHR_acceleration_structure` and `VK_KHR_ray_query`), `VulkanDevice.rayTracing()` is true and
