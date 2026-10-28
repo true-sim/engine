@@ -24,7 +24,15 @@ public final class Materials implements AutoCloseable {
 
     private final FrameBuffer table;
     private final int capacity;
-    private int count;
+    private int count; // ids handed out so far, from 0
+    private int live;
+    private final boolean[] removed;
+    private final int[] freeIds;
+    private int freeCount;
+    // Removed ids waiting for the frames that may read them.
+    private final int[] retiring;
+    private final long[] retireAt;
+    private int retiringCount;
 
     /**
      * A table of up to {@code capacity} materials, the default one included, in one copy: for frames the caller waits
@@ -43,26 +51,77 @@ public final class Materials implements AutoCloseable {
             throw new IllegalArgumentException("At least the default material: " + capacity);
         }
         this.capacity = capacity;
+        removed = new boolean[capacity];
+        freeIds = new int[capacity];
+        retiring = new int[capacity];
+        retireAt = new long[capacity];
         table = FrameBuffer.create(device, (long) BYTES * capacity,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, slots);
         add(new Material());
     }
 
-    /** Adds {@code material} (copied) and returns its id. */
+    /** Adds {@code material} (copied) and returns its id: a removed one no frame in flight reads, lowest first. */
     public int add(Material material) {
-        if (count == capacity) {
+        releaseRetired();
+        int id;
+        if (freeCount > 0) {
+            int lowest = 0;
+            for (int i = 1; i < freeCount; i++) {
+                if (freeIds[i] < freeIds[lowest]) {
+                    lowest = i;
+                }
+            }
+            id = freeIds[lowest];
+            freeIds[lowest] = freeIds[--freeCount];
+            removed[id] = false;
+        } else if (count < capacity) {
+            id = count++;
+        } else {
             throw new IllegalStateException("The material table holds " + capacity + " materials");
         }
-        write(count, material);
-        return count++;
+        write(id, material);
+        live++;
+        return id;
     }
 
     /** Replaces material {@code id} with {@code material} (copied). */
     public void set(int id, Material material) {
-        if (id < 0 || id >= count) {
+        if (!contains(id)) {
             throw new IllegalArgumentException("No material " + id);
         }
         write(id, material);
+    }
+
+    /**
+     * Removes material {@code id} (not the default, 0): instances must no longer use it from the next frame on. Its id
+     * is reused once no frame in flight can read it. Allocates nothing.
+     */
+    public void remove(int id) {
+        if (id == 0 || !contains(id)) {
+            throw new IllegalArgumentException("No material " + id + " to remove");
+        }
+        removed[id] = true;
+        live--;
+        retiring[retiringCount] = id;
+        retireAt[retiringCount++] = table.slots().retireAt();
+    }
+
+    /** Whether {@code id} is a material of the table, added and not removed. */
+    public boolean contains(int id) {
+        return id >= 0 && id < count && !removed[id];
+    }
+
+    private void releaseRetired() {
+        int kept = 0;
+        for (int i = 0; i < retiringCount; i++) {
+            if (table.slots().isFinished(retireAt[i])) {
+                freeIds[freeCount++] = retiring[i];
+            } else {
+                retiring[kept] = retiring[i];
+                retireAt[kept++] = retireAt[i];
+            }
+        }
+        retiringCount = kept;
     }
 
     private void write(int id, Material material) {
@@ -87,7 +146,7 @@ public final class Materials implements AutoCloseable {
 
     /** How many materials the table holds, the default one included. */
     public int count() {
-        return count;
+        return live;
     }
 
     long deviceAddress() {

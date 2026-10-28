@@ -5,6 +5,7 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.assets.mesh.MeshData;
@@ -26,7 +27,9 @@ import java.util.Objects;
  * }
  * }</pre>
  *
- * <p>Meshes are added for good: the pool only grows within its capacity. Use it from one thread.
+ * <p>Meshes are removed with {@link #remove}: their ranges are reused once no frame in flight can draw them (the
+ * pool's {@link FrameSlots}). Ranges are handed out first fit, so the same adds and removes give the same layout.
+ * Use it from one thread.
  */
 @AllowAllocation("created rarely; adding meshes uploads them")
 public final class GeometryPool implements AutoCloseable {
@@ -72,18 +75,54 @@ public final class GeometryPool implements AutoCloseable {
     private final GpuBuffer clusterLod;
     private final GpuBuffer meshTable;
     private final GpuBuffer levels;
+    private final FrameSlots slots;
+    // Where meshes live: ranges of each kind of data, and mesh numbers.
+    private final RangeAllocator vertexRanges;
+    private final RangeAllocator attributeRanges;
+    private final RangeAllocator meshletVertexRanges;
+    private final RangeAllocator meshletRanges;
+    private final RangeAllocator triangleRanges;
+    private final int[] freeIds;
+    private int freeIdCount;
+    private int idCount; // ids handed out so far, from 0; freed ones are reused first
+    // Per mesh number: its ranges (starts and lengths), and whether it is live.
+    private final int[] vertexStart;
+    private final int[] vertexLength;
+    private final long[] attributeStart;
+    private final long[] attributeLength;
+    private final int[] meshletVertexStart;
+    private final int[] meshletVertexLength;
+    private final int[] meshletStart;
+    private final int[] meshletLength;
+    private final long[] triangleStart;
+    private final long[] triangleLength;
+    private final boolean[] live;
+    private final boolean[] fits;
+    // Removed meshes waiting for the frames that may draw them: their numbers and when they are free.
+    private final int[] retiring;
+    private final long[] retireAt;
+    private int retiringCount;
     private int vertexCount;
-    private long attributeBytes;
-    private int meshletVertexCount;
     private int meshletCount;
-    private int indexCount;
     private int meshCount;
-    private long triangleCount;
-    private boolean fitsMeshShaders = true;
+    private int unfit; // live meshes too large for the mesh shader path
     private boolean closed;
 
+    /**
+     * A pool of {@code capacity}, for frames the caller waits for between {@link #remove removing} a mesh and adding
+     * another.
+     */
     public GeometryPool(VulkanDevice device, Capacity capacity) {
+        this(device, capacity, FrameSlots.single());
+    }
+
+    /**
+     * A pool of {@code capacity} whose removed meshes keep their data until no frame of {@code slots} (a frame graph's)
+     * can still draw them.
+     */
+    public GeometryPool(VulkanDevice device, Capacity capacity, FrameSlots slots) {
         this.capacity = capacity;
+        this.slots = Objects.requireNonNull(slots, "slots");
         int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         int transferDst = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         long triangleIndices = 3L * capacity.triangles();
@@ -102,10 +141,33 @@ public final class GeometryPool implements AutoCloseable {
             usage | transferDst);
         meshTable = GpuBuffer.hostVisible(device, (long) MESH_ENTRY_BYTES * capacity.meshes(), usage);
         levels = GpuBuffer.hostVisible(device, 8L * MAX_LEVELS * capacity.meshes(), usage);
+        int meshes = capacity.meshes();
+        vertexRanges = new RangeAllocator(capacity.vertices());
+        attributeRanges = new RangeAllocator(attributes.size());
+        meshletVertexRanges = new RangeAllocator(meshletVertices.size() / 4);
+        meshletRanges = new RangeAllocator(capacity.meshlets());
+        // Whole words within 3 indices per triangle of capacity, which other tables laid out alike can rely on.
+        triangleRanges = new RangeAllocator(3L * capacity.triangles() & ~3L);
+        freeIds = new int[meshes];
+        vertexStart = new int[meshes];
+        vertexLength = new int[meshes];
+        attributeStart = new long[meshes];
+        attributeLength = new long[meshes];
+        meshletVertexStart = new int[meshes];
+        meshletVertexLength = new int[meshes];
+        meshletStart = new int[meshes];
+        meshletLength = new int[meshes];
+        triangleStart = new long[meshes];
+        triangleLength = new long[meshes];
+        live = new boolean[meshes];
+        fits = new boolean[meshes];
+        retiring = new int[meshes];
+        retireAt = new long[meshes];
     }
 
     /**
-     * Uploads {@code mesh} and returns its number, for instances to draw it by. Waits until the upload has finished.
+     * Uploads {@code mesh} and returns its number, for instances to draw it by: a free one, the lowest removed one first.
+     * Waits until the upload has finished.
      *
      * @throws IllegalStateException if the pool has no room left for it
      */
@@ -113,75 +175,162 @@ public final class GeometryPool implements AutoCloseable {
         if (closed) {
             throw new IllegalStateException("The pool is closed");
         }
+        releaseRetired();
         int meshletVertexTotal = (int) (mesh.meshletVertices().byteSize() / 4);
-        int indexTotal = 3 * mesh.triangleCount();
-        if (meshCount == capacity.meshes() || vertexCount + mesh.vertexCount() > capacity.vertices()
-            || meshletCount + mesh.meshletCount() > capacity.meshlets()
-            || triangleCount + mesh.triangleCount() > capacity.triangles()
-            || meshletVertexCount + meshletVertexTotal > meshletVertices.size() / 4
-            || attributeBytes + mesh.attributes().byteSize() > attributes.size()
-            || mesh.levels().size() > MAX_LEVELS) {
-            throw new IllegalStateException("The geometry pool has no room for a mesh of " + mesh.vertexCount()
-                + " vertices and " + mesh.meshletCount() + " meshlets");
+        long indexTotal = 3L * mesh.triangleCount();
+        long indexRange = (indexTotal + 3) & ~3L; // whole words: the last one is padded
+        if (mesh.levels().size() > MAX_LEVELS || freeIdCount == 0 && idCount == capacity.meshes()) {
+            throw noRoom(mesh);
         }
-        for (int m = 0; m < mesh.meshletCount() && fitsMeshShaders; m++) {
-            fitsMeshShaders = mesh.meshletVertexCount(m) <= MESH_SHADER_VERTICES
+        // Each kind of data in a range of its own; triangle bytes start on a word, so no word holds two meshes.
+        long vertexBase = vertexRanges.allocate(mesh.vertexCount(), 1);
+        long attributeBase = attributeRanges.allocate(mesh.attributes().byteSize(), 4);
+        long meshletVertexBase = meshletVertexRanges.allocate(meshletVertexTotal, 1);
+        long meshletBase = meshletRanges.allocate(mesh.meshletCount(), 1);
+        long indexBase = triangleRanges.allocate(indexRange, 4);
+        if (vertexBase < 0 || attributeBase < 0 || meshletVertexBase < 0 || meshletBase < 0 || indexBase < 0) {
+            give(vertexRanges, vertexBase, mesh.vertexCount());
+            give(attributeRanges, attributeBase, mesh.attributes().byteSize());
+            give(meshletVertexRanges, meshletVertexBase, meshletVertexTotal);
+            give(meshletRanges, meshletBase, mesh.meshletCount());
+            give(triangleRanges, indexBase, indexRange);
+            throw noRoom(mesh);
+        }
+        boolean fitsMesh = true;
+        for (int m = 0; m < mesh.meshletCount() && fitsMesh; m++) {
+            fitsMesh = mesh.meshletVertexCount(m) <= MESH_SHADER_VERTICES
                 && mesh.meshletTriangleCount(m) <= MESH_SHADER_TRIANGLES;
         }
+        int id = freeIdCount > 0 ? takeLowestFreeId() : idCount++;
         // The meshlet records count their vertices and triangles from the mesh's start; shaders add these bases.
-        positions.write((long) MeshData.POSITION_BYTES * vertexCount, mesh.positions());
-        attributes.write(attributeBytes, mesh.attributes());
-        meshletVertices.write(4L * meshletVertexCount, mesh.meshletVertices());
-        writeTriangles(mesh);
-        meshlets.write((long) MeshData.MESHLET_BYTES * meshletCount, mesh.meshlets());
-        clusterLod.write((long) MeshData.CLUSTER_LOD_BYTES * meshletCount, mesh.clusterLod());
-        MemorySegment entry = meshTable.memory().asSlice((long) MESH_ENTRY_BYTES * meshCount, MESH_ENTRY_BYTES);
+        positions.write((long) MeshData.POSITION_BYTES * vertexBase, mesh.positions());
+        attributes.write(attributeBase, mesh.attributes());
+        meshletVertices.write(4L * meshletVertexBase, mesh.meshletVertices());
+        writeTriangles(mesh, indexBase);
+        meshlets.write((long) MeshData.MESHLET_BYTES * meshletBase, mesh.meshlets());
+        clusterLod.write((long) MeshData.CLUSTER_LOD_BYTES * meshletBase, mesh.clusterLod());
+        MemorySegment entry = meshTable.memory().asSlice((long) MESH_ENTRY_BYTES * id, MESH_ENTRY_BYTES);
         for (int axis = 0; axis < 3; axis++) {
             entry.set(F32, 4L * axis, (float) mesh.boxMin(axis));
             entry.set(F32, 16 + 4L * axis, (float) mesh.boxExtent(axis));
         }
-        entry.set(U32, 12, vertexCount);
-        entry.set(U32, 28, meshletCount);
+        entry.set(U32, 12, (int) vertexBase);
+        entry.set(U32, 28, (int) meshletBase);
         entry.set(F32, 32, (float) mesh.bounds().x());
         entry.set(F32, 36, (float) mesh.bounds().y());
         entry.set(F32, 40, (float) mesh.bounds().z());
         entry.set(F32, 44, (float) mesh.bounds().radius());
         entry.set(U32, 48, mesh.meshletCount());
-        entry.set(U32, 52, meshletVertexCount);
-        entry.set(U32, 56, indexCount);
-        entry.set(U32, 60, (int) attributeBytes);
+        entry.set(U32, 52, (int) meshletVertexBase);
+        entry.set(U32, 56, (int) indexBase);
+        entry.set(U32, 60, (int) attributeBase);
         entry.set(U32, 64, mesh.format().mask());
         entry.set(U32, 68, mesh.format().stride());
-        entry.set(U32, 72, MAX_LEVELS * meshCount);
+        entry.set(U32, 72, MAX_LEVELS * id);
         entry.set(U32, 76, mesh.levels().size());
-        writeLevels(mesh, entry);
+        writeLevels(mesh, entry, id);
+        vertexStart[id] = (int) vertexBase;
+        vertexLength[id] = mesh.vertexCount();
+        attributeStart[id] = attributeBase;
+        attributeLength[id] = mesh.attributes().byteSize();
+        meshletVertexStart[id] = (int) meshletVertexBase;
+        meshletVertexLength[id] = meshletVertexTotal;
+        meshletStart[id] = (int) meshletBase;
+        meshletLength[id] = mesh.meshletCount();
+        triangleStart[id] = indexBase;
+        triangleLength[id] = indexRange;
+        live[id] = true;
+        fits[id] = fitsMesh;
+        unfit += fitsMesh ? 0 : 1;
         vertexCount += mesh.vertexCount();
-        attributeBytes += mesh.attributes().byteSize();
-        meshletVertexCount += meshletVertexTotal;
         meshletCount += mesh.meshletCount();
-        indexCount += indexTotal;
-        triangleCount += mesh.triangleCount();
-        return meshCount++;
+        meshCount++;
+        return id;
     }
 
     /**
-     * The meshlet triangles, a byte per local index, from the mesh's index base (its triangles' first index in the
-     * pool, counted in indices). Copied word-aligned: the pool's byte offset may not be a multiple of 4.
+     * Removes mesh {@code mesh}: instances must no longer draw it from the next frame on. Its data stays until no frame
+     * in flight can still draw it, then its ranges and number are reused. Allocates nothing. Geometry that keeps data of
+     * its own per mesh ({@link ClassicLodGeometry}, {@link RayTracing}'s bottom levels) does not follow removals yet:
+     * remove only meshes those were not given.
      */
-    private void writeTriangles(MeshData mesh) {
-        MemorySegment source = mesh.meshletTriangles();
-        long start = indexCount & ~3L;
-        long end = indexCount + source.byteSize();
-        MemorySegment words = Arena.ofAuto().allocate(((end + 3) & ~3L) - start, 4);
-        if (start < indexCount) { // the bytes of the previous mesh sharing the first word
-            MemorySegment.copy(lastWord, 0, words, 0, 4);
+    public void remove(int mesh) {
+        if (!contains(mesh)) {
+            throw new IllegalArgumentException("No mesh " + mesh);
         }
-        MemorySegment.copy(source, 0, words, indexCount - start, source.byteSize());
-        meshletTriangles.write(start, words);
-        MemorySegment.copy(words, words.byteSize() - 4, lastWord, 0, 4);
+        live[mesh] = false;
+        unfit -= fits[mesh] ? 0 : 1;
+        vertexCount -= vertexLength[mesh];
+        meshletCount -= meshletLength[mesh];
+        meshCount--;
+        retiring[retiringCount] = mesh;
+        retireAt[retiringCount++] = slots.retireAt();
     }
 
-    private final MemorySegment lastWord = Arena.ofAuto().allocate(4, 4);
+    /** Whether {@code mesh} is a mesh of the pool, added and not removed. */
+    public boolean contains(int mesh) {
+        return mesh >= 0 && mesh < idCount && live[mesh];
+    }
+
+    /** Gives the ranges and numbers of removed meshes no frame in flight can draw back, oldest first. */
+    private void releaseRetired() {
+        int kept = 0;
+        for (int i = 0; i < retiringCount; i++) {
+            int id = retiring[i];
+            if (slots.isFinished(retireAt[i])) {
+                vertexRanges.release(vertexStart[id], vertexLength[id]);
+                attributeRanges.release(attributeStart[id], attributeLength[id]);
+                meshletVertexRanges.release(meshletVertexStart[id], meshletVertexLength[id]);
+                meshletRanges.release(meshletStart[id], meshletLength[id]);
+                triangleRanges.release(triangleStart[id], triangleLength[id]);
+                freeIds[freeIdCount++] = id;
+            } else {
+                retiring[kept] = id;
+                retireAt[kept++] = retireAt[i];
+            }
+        }
+        retiringCount = kept;
+    }
+
+    /** The lowest free mesh number, taken: deterministic, whatever order meshes were removed in. */
+    private int takeLowestFreeId() {
+        int lowest = 0;
+        for (int i = 1; i < freeIdCount; i++) {
+            if (freeIds[i] < freeIds[lowest]) {
+                lowest = i;
+            }
+        }
+        int id = freeIds[lowest];
+        freeIds[lowest] = freeIds[--freeIdCount];
+        return id;
+    }
+
+    private static void give(RangeAllocator ranges, long start, long length) {
+        if (start >= 0) {
+            ranges.release(start, length);
+        }
+    }
+
+    private IllegalStateException noRoom(MeshData mesh) {
+        return new IllegalStateException("The geometry pool has no room for a mesh of " + mesh.vertexCount()
+            + " vertices, " + mesh.meshletCount() + " meshlets and " + mesh.levels().size() + " levels");
+    }
+
+    /**
+     * The meshlet triangles, a byte per local index, at {@code indexBase} (its triangles' first index in the pool,
+     * counted in indices, a multiple of 4): copied as whole words, the last one padded with zeros.
+     */
+    private void writeTriangles(MeshData mesh, long indexBase) {
+        MemorySegment source = mesh.meshletTriangles();
+        long bytes = (source.byteSize() + 3) & ~3L;
+        if (bytes == source.byteSize()) {
+            meshletTriangles.write(indexBase, source);
+            return;
+        }
+        MemorySegment words = Arena.ofAuto().allocate(bytes, 4);
+        MemorySegment.copy(source, 0, words, 0, source.byteSize());
+        meshletTriangles.write(indexBase, words);
+    }
 
     /**
      * The mesh's level table and the sphere around all its detail groups, for the instance pass: an instance whose
@@ -189,7 +338,7 @@ public final class GeometryPool implements AutoCloseable {
      * meshlet's parent error can exceed it there. Roots and other meshlets past a level whose parent error does exceed
      * it extend that level's end, so the range stays right for any mesh.
      */
-    private void writeLevels(MeshData mesh, MemorySegment entry) {
+    private void writeLevels(MeshData mesh, MemorySegment entry, int id) {
         double[] lod = new double[10];
         double cx = mesh.bounds().x();
         double cy = mesh.bounds().y();
@@ -211,7 +360,7 @@ public final class GeometryPool implements AutoCloseable {
         entry.set(F32, 88, (float) cz);
         entry.set(F32, 92, (float) radius);
         MemorySegment table = levels.memory();
-        long base = 8L * MAX_LEVELS * meshCount;
+        long base = 8L * MAX_LEVELS * id;
         for (int l = 0; l < mesh.levels().size(); l++) {
             var level = mesh.levels().get(l);
             int end = level.firstMeshlet() + level.meshletCount();
@@ -229,9 +378,14 @@ public final class GeometryPool implements AutoCloseable {
         return value * value;
     }
 
-    /** How many meshes the pool holds. */
+    /** How many meshes the pool holds now. */
     public int meshCount() {
         return meshCount;
+    }
+
+    /** One past the highest mesh number handed out: numbers of meshes held are below it. */
+    public int meshSlots() {
+        return idCount;
     }
 
     public int vertexCount() {
@@ -251,7 +405,7 @@ public final class GeometryPool implements AutoCloseable {
      * otherwise the renderer draws with indexed draws.
      */
     public boolean fitsMeshShaders() {
-        return fitsMeshShaders;
+        return unfit == 0;
     }
 
     GpuBuffer meshletVertices() {
@@ -283,7 +437,10 @@ public final class GeometryPool implements AutoCloseable {
     }
 
     private int entryWord(int mesh, long offset) {
-        return meshTable.memory().get(U32, (long) MESH_ENTRY_BYTES * Objects.checkIndex(mesh, meshCount) + offset);
+        if (!contains(mesh)) {
+            throw new IllegalArgumentException("No mesh " + mesh);
+        }
+        return meshTable.memory().get(U32, (long) MESH_ENTRY_BYTES * mesh + offset);
     }
 
     GpuBuffer positions() {

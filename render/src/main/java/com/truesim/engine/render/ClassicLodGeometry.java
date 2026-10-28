@@ -150,7 +150,9 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         if (closed) {
             throw new IllegalStateException("Closed");
         }
-        Objects.checkIndex(mesh, pool.meshCount());
+        if (!pool.contains(mesh)) {
+            throw new IllegalArgumentException("No mesh " + mesh + " in the pool");
+        }
         if (pool.meshletCount(mesh) != data.meshletCount()) {
             throw new IllegalArgumentException("Mesh " + mesh + " of the pool has " + pool.meshletCount(mesh)
                 + " meshlets, the data " + data.meshletCount());

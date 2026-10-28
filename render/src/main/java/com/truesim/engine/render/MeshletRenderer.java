@@ -344,7 +344,7 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void setInstance(int index, int mesh, int material, float x, float y, float z, float qx, float qy, float qz,
         float qw, float sx, float sy, float sz) {
-        if (index < 0 || index >= limits.instances() || mesh < 0 || mesh >= pool.meshCount() || material < 0) {
+        if (index < 0 || index >= limits.instances() || !pool.contains(mesh) || material < 0) {
             throw new IllegalArgumentException("No instance " + index + ", mesh " + mesh + " or material " + material);
         }
         FrameBuffer m = instances;

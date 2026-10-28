@@ -31,6 +31,7 @@ public final class FrameSlots {
     private final List<FrameBuffer> buffers = new ArrayList<>();
     private int current = -1;
     private int last = -1;
+    private long frames;
 
     /** {@code count} slots (frames in flight), none open. */
     public FrameSlots(int count) {
@@ -79,6 +80,7 @@ public final class FrameSlots {
         }
         current = slot;
         last = slot;
+        frames++;
     }
 
     /** Closes the open slot: the frame was submitted, and its copies are the GPU's until the slot opens again. */
@@ -91,6 +93,28 @@ public final class FrameSlots {
     /** The open slot, or -1 between frames. */
     public int current() {
         return current;
+    }
+
+    /** How many frames have begun. */
+    public long frames() {
+        return frames;
+    }
+
+    /**
+     * For a GPU resource no longer used from now on (a mesh, a material, a texture slot), when it can be freed: pass
+     * the result to {@link #isFinished}. Every frame that may still read it has begun by now, so it is free once
+     * {@link #count()} more frames have begun, as beginning a frame waits for the frame that used its slot last.
+     */
+    public long retireAt() {
+        return frames + count;
+    }
+
+    /**
+     * Whether no frame in flight can read what {@link #retireAt()} was asked for, then: always for {@link #single()},
+     * whose callers wait for the GPU between frames.
+     */
+    public boolean isFinished(long retireAt) {
+        return single || frames >= retireAt;
     }
 
     /** The slot opened last (the open one while a frame records), or -1 before the first frame. */

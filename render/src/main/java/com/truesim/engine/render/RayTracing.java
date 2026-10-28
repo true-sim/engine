@@ -198,7 +198,9 @@ public final class RayTracing implements AutoCloseable {
      */
     @AllowAllocation("building, once per mesh")
     public void add(int mesh, MeshData data, int level) {
-        Objects.checkIndex(mesh, pool.meshCount());
+        if (!pool.contains(mesh)) {
+            throw new IllegalArgumentException("No mesh " + mesh + " in the pool");
+        }
         if (bottom[mesh] != null) {
             throw new IllegalStateException("Mesh " + mesh + " has a bottom level already");
         }

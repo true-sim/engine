@@ -154,6 +154,10 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
 
 - **Geometry pool:** every mesh's streams in shared device-local buffers, reached by buffer device address, with a
   table entry per mesh; any number of meshes and instances draw in one pass.
+- **Meshes come and go:** `pool.remove(mesh)` frees a mesh's ranges and number for later meshes, first fit and
+  deterministic, once no frame in flight can draw it (given the graph's `frameSlots()`). `Materials.remove` and
+  `Textures.remove` do the same for material ids and bindless texture slots, so streamed content can be unloaded.
+  Classic LOD and ray tracing data per mesh don't follow removals yet.
 - **Culling on the GPU:** an instance pass tests instance bounds and splits each visible instance into chunks of 64
   meshlets; the chunk count is written straight into an indirect command, so only visible work is launched. Each
   meshlet is tested by the cluster LOD rule (its group's error projected on screen at most the allowed pixels, its

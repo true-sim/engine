@@ -38,6 +38,8 @@ import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.assets.mesh.VertexAttribute;
 import com.truesim.scene.assets.mesh.VertexFormat;
 import com.truesim.scene.meshbuild.MeshBuilder;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -474,6 +476,120 @@ class MeshletRendererTest {
         assumeThat(device.meshShaders()).as("the device has mesh shaders").isFalse();
         assertThat(renderer.path()).isEqualTo(MeshletRenderer.Path.INDEXED);
         assertThatIllegalStateException().isThrownBy(() -> renderer.setPath(MeshletRenderer.Path.MESH_SHADERS));
+    }
+
+    /** The colors of every pixel, read back. */
+    private int[] image() {
+        int[] image = new int[SIZE * SIZE];
+        for (int i = 0; i < image.length; i++) {
+            image[i] = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, i);
+        }
+        return image;
+    }
+
+    @Test
+    void removedMeshesMakeRoomForOthers() {
+        MeshData hill = grid(16, 0.2f, true, VertexFormat.of(VertexAttribute.NORMAL));
+        MeshData square = grid(1, 2, false, VertexFormat.POSITIONS_ONLY);
+        lookForward(1, MeshletRenderer.MODE_LIT);
+        renderer.setInstanceCount(1);
+        // The hill, in a fresh pool of its own.
+        int[] fresh;
+        try (GeometryPool own = new GeometryPool(device, GeometryPool.Capacity.of(1 << 12, 64, 4));
+             MeshletRenderer drawing = new MeshletRenderer(device, own, new MeshletRenderer.Limits(4, 1024, 64, 1 << 16),
+                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)) {
+            drawing.setInstance(0, own.add(hill), 0, -1, -3, 0.3f, 0, 0, 0.954f, 1, 1, 1);
+            drawing.setInstanceCount(1);
+            drawing.setView(camera, 1, MeshletRenderer.MODE_LIT);
+            renderWith(commands -> drawing.record(commands, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
+            fresh = image();
+        }
+        assertThat(java.util.Arrays.stream(fresh).filter(c -> (c & 0xffffff) != 0).count()).isPositive();
+        // In the shared pool, where the terrain was: the same number, other ranges, the same image.
+        int vertices = pool.vertexCount();
+        pool.remove(terrain);
+        assertThat(pool.contains(terrain)).isFalse();
+        assertThat(pool.meshCount()).isEqualTo(1);
+        assertThat(pool.vertexCount()).isEqualTo(vertices - 65 * 65);
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstance(0, terrain, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+            1));
+        assertThatIllegalArgumentException().isThrownBy(() -> pool.remove(terrain));
+        assertThatIllegalArgumentException().isThrownBy(() -> pool.remove(99));
+        int squareId = pool.add(square); // the terrain's number, the lowest free one
+        assertThat(squareId).isEqualTo(terrain);
+        int hillId = pool.add(hill);
+        assertThat(hillId).isEqualTo(2);
+        assertThat(pool.meshSlots()).isEqualTo(3);
+        renderer.setInstance(0, hillId, 0, -1, -3, 0.3f, 0, 0, 0.954f, 1, 1, 1);
+        render();
+        assertThat(image()).isEqualTo(fresh);
+        // And the square in the terrain's place draws as the quad does.
+        renderer.setInstance(0, squareId, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
+        renderer.setView(camera, 1, MeshletRenderer.MODE_WHITE);
+        render();
+        assertThat(covered()).isCloseTo(44 * 44, org.assertj.core.data.Percentage.withPercentage(10));
+    }
+
+    @Test
+    void removedMeshesWaitForTheFramesInFlight() {
+        MeshData square = grid(1, 2, false, VertexFormat.POSITIONS_ONLY);
+        com.truesim.engine.vulkan.FrameSlots slots = new com.truesim.engine.vulkan.FrameSlots(2);
+        try (GeometryPool own = new GeometryPool(device, GeometryPool.Capacity.of(8, 1, 1), slots)) {
+            int first = own.add(square);
+            assertThat(own.fitsMeshShaders()).isTrue();
+            slots.begin(0);
+            own.remove(first);
+            slots.end();
+            // Frames 0 and the next may still draw it: no room yet.
+            assertThatIllegalStateException().isThrownBy(() -> own.add(square));
+            slots.begin(1);
+            slots.end();
+            assertThatIllegalStateException().isThrownBy(() -> own.add(square));
+            slots.begin(0); // waited for frame 0: nothing in flight can draw it
+            assertThat(own.add(square)).isEqualTo(first);
+            slots.end();
+            assertThat(own.meshCount()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void removedMaterialsAndTexturesAreReused() {
+        com.truesim.engine.vulkan.FrameSlots slots = new com.truesim.engine.vulkan.FrameSlots(2);
+        try (Materials materials = new Materials(device, 3, slots); Textures textures = new Textures(device, slots);
+             Arena arena = Arena.ofConfined()) {
+            int a = materials.add(new Material().roughness(0.1f));
+            int b = materials.add(new Material().roughness(0.2f));
+            assertThat(materials.count()).isEqualTo(3);
+            assertThatIllegalStateException().isThrownBy(() -> materials.add(new Material()));
+            materials.remove(a);
+            assertThat(materials.contains(a)).isFalse();
+            assertThat(materials.count()).isEqualTo(2);
+            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(a, new Material()));
+            assertThatIllegalArgumentException().isThrownBy(() -> materials.remove(a));
+            assertThatIllegalArgumentException().isThrownBy(() -> materials.remove(0)); // the default stays
+            assertThatIllegalStateException().isThrownBy(() -> materials.add(new Material())); // still in flight
+            MemorySegment texels = arena.allocate(4 * 4 * 4);
+            int slot = textures.color(4, 4, texels);
+            int inUse = device.bindless().slotsInUse();
+            assertThat(textures.contains(slot)).isTrue();
+            assertThat(textures.bytes()).isPositive();
+            textures.remove(slot);
+            assertThat(textures.contains(slot)).isFalse();
+            assertThat(textures.count()).isZero();
+            assertThat(textures.bytes()).isZero();
+            assertThat(device.bindless().slotsInUse()).isEqualTo(inUse); // still sampled by frames in flight
+            assertThatIllegalArgumentException().isThrownBy(() -> textures.remove(slot));
+            for (int frame = 0; frame < 2; frame++) {
+                slots.begin(frame);
+                slots.end();
+            }
+            assertThat(materials.add(new Material())).isEqualTo(a);
+            assertThat(materials.contains(b)).isTrue();
+            int again = textures.data(4, 4, texels); // frees the removed one first, then takes a slot
+            assertThat(device.bindless().slotsInUse()).isEqualTo(inUse);
+            assertThat(textures.count()).isEqualTo(1);
+            textures.remove(again);
+        }
     }
 
     @Test
