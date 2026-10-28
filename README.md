@@ -104,6 +104,11 @@ try (VulkanInstance instance = VulkanInstance.builder().applicationName("game").
 - **Allocation-free:** `next`, `begin`, `end`, `submit`, `acquire`, `present` and `Images.transition` write
   their Vulkan structs straight into stack memory. LWJGL wraps native pointers in `MemorySegment`s, which the
   JIT removes once the code is compiled by C2.
+- **Per-frame data, per frame in flight:** a `FrameBuffer` (instances, views, lights, materials) keeps a host-visible
+  copy per slot of its `FrameSlots`, plus a master copy in CPU memory. While a frame records, writes reach the master
+  and that frame's copy. Between frames they reach only the master, so frames in flight keep reading what they were
+  given; each copy takes the range it missed from the master when its slot opens. `FrameSlots.single()` is one copy
+  written straight through, for callers that wait for the GPU between frames.
 
 ### Shaders and pipelines
 
@@ -138,7 +143,7 @@ CPU writes instances and a view, the GPU decides what to draw.
 ```java
 try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 22, 65_536, 1024));
      MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000, 1 << 20, 65_535),
-         colorFormat, depthFormat)) {
+         colorFormat, depthFormat, graph.frameSlots())) {      // instances and views: a copy per frame in flight
     int car = pool.add(carMesh);                                   // uploaded once
     renderer.setInstance(0, car, x, y, z, qx, qy, qz, qw, 1, 1, 1); // camera-relative
     renderer.setInstanceCount(1);
@@ -478,7 +483,12 @@ swapchain.present(device.graphics(), image);
 - **Parallel recording:** each batch is cut into chunks of a few passes, and workers record them in parallel, each
   into its own command pools. Chunks are submitted in order, so the GPU sees the same commands on any number of
   threads. Pass bodies then run on worker threads and must not share what they change.
-- `record(commands)` still records everything into one command buffer, for simple uses.
+- **Frame slots:** `graph.frameSlots()` is what renderers, lights and materials given it keep a copy per. `beginFrame`
+  opens the frame's slot once the GPU has finished that slot's previous frame, and `submit` closes it, so instances
+  and lights may change every frame, before `beginFrame`, while recording, or after `submit`, without touching what a
+  frame in flight reads (tested with a quad moving every frame, two frames in flight).
+- `record(commands)` still records everything into one command buffer, for simple uses; its per-frame data is slot
+  0's, and the caller waits for the GPU between frames.
 
 The graph's tests run with synchronization validation, which checks every barrier and cross-queue wait. Dropping the
 waits makes it report races between the queues.

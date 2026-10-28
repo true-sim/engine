@@ -27,6 +27,7 @@ import static org.lwjgl.vulkan.VK10.vkCmdFillBuffer;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 
 import com.truesim.engine.vulkan.Frames;
+import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -650,16 +651,39 @@ class FrameGraphTest {
     }
 
     @Test
+    void recordingOutsideFramesUsesSlotZero() {
+        int[] seen = {-2};
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Image image = g.create("x", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("look").write(image, Access.TRANSFER_DST).record(ctx -> {
+                seen[0] = graph.frameSlots().current();
+                clear(ctx, image, 0, 0, 0, 1);
+            });
+            g.provide(OUT, image);
+        })).output(OUT, output);
+        frame();
+        assertThat(seen[0]).isZero(); // record() opened slot 0 for its passes
+        assertThat(graph.frameSlots().current()).isEqualTo(-1); // and closed it again
+    }
+
+    @Test
     void framesAreBegunThenSubmitted() {
         graph.add(new Fill(A, SIZE, 1, 0, 0, 1)).output(A, output);
+        FrameSlots slots = graph.frameSlots();
+        assertThat(slots.count()).isEqualTo(2);
+        assertThat(slots.current()).isEqualTo(-1);
         assertThatIllegalStateException().isThrownBy(() -> graph.submit(0, 0)).withMessageContaining("beginFrame");
         assertThat(graph.beginFrame()).isZero();
+        assertThat(slots.current()).isZero(); // per-frame data writes to this frame's copies now
         assertThatIllegalStateException().isThrownBy(graph::beginFrame).withMessageContaining("submit()");
         graph.submit(0, 0);
+        assertThat(slots.current()).isEqualTo(-1); // in flight: no copy is written until the next frame begins
         assertThat(graph.beginFrame()).isEqualTo(1);
+        assertThat(slots.current()).isEqualTo(1);
         graph.submit(0, 0);
         assertThat(graph.beginFrame()).isZero(); // two in flight
         graph.submit(0, 0);
+        assertThat(slots.last()).isZero();
         // Nothing to do: an empty graphics batch still signals the frame.
         graph.removeOutput(A);
         graph.beginFrame();

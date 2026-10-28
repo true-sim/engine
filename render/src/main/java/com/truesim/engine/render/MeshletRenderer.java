@@ -52,6 +52,8 @@ import static org.lwjgl.vulkan.VK13.vkCmdEndRendering;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.vulkan.Bindless;
+import com.truesim.engine.vulkan.FrameBuffer;
+import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
@@ -91,8 +93,9 @@ import org.lwjgl.vulkan.VkViewport;
  * }</pre>
  *
  * <p>The CPU writes only instances and the view: its cost does not depend on how many meshlets there are. Instance and
- * view data are read when the commands run, so change them only once the frame that used them has finished (one
- * renderer per frame in flight). Recording allocates nothing.
+ * view data are read when the commands run. Given a frame graph's {@link FrameSlots}, they keep a copy per frame in
+ * flight, so they may change every frame; otherwise change them only once the frame that used them has finished.
+ * Recording allocates nothing.
  */
 @AllowAllocation("created rarely")
 public final class MeshletRenderer implements AutoCloseable {
@@ -171,8 +174,8 @@ public final class MeshletRenderer implements AutoCloseable {
     private final Pipeline meshDepth;
     private final Pipeline idsDraw; // the visibility buffer's: IDs, no shading (null without primitive IDs)
     private final Pipeline idsMesh;
-    private final GpuBuffer view;
-    private final GpuBuffer instances;
+    private final FrameBuffer view;
+    private final FrameBuffer instances;
     private final GpuBuffer chunks;
     private final GpuBuffer chunkCommand;
     // Per view with lists: what culling finds, and the commands drawing it.
@@ -190,8 +193,21 @@ public final class MeshletRenderer implements AutoCloseable {
     private int instanceCount;
     private boolean closed;
 
-    /** A renderer of {@code pool}'s meshes into {@code colorFormat} and {@code depthFormat} attachments. */
+    /**
+     * A renderer of {@code pool}'s meshes into {@code colorFormat} and {@code depthFormat} attachments, with one copy of
+     * its instances and views: for frames the caller waits for before writing the next.
+     */
     public MeshletRenderer(VulkanDevice device, GeometryPool pool, Limits limits, int colorFormat, int depthFormat) {
+        this(device, pool, limits, colorFormat, depthFormat, FrameSlots.single());
+    }
+
+    /**
+     * A renderer whose instances and views keep a copy per frame of {@code slots} (a frame graph's
+     * {@link com.truesim.engine.graph.FrameGraph#frameSlots()}), so they may change every frame while earlier frames
+     * are still drawn.
+     */
+    public MeshletRenderer(VulkanDevice device, GeometryPool pool, Limits limits, int colorFormat, int depthFormat,
+        FrameSlots slots) {
         this.pool = pool;
         this.bindless = device.bindless();
         this.limits = Objects.requireNonNull(limits, "limits");
@@ -255,8 +271,8 @@ public final class MeshletRenderer implements AutoCloseable {
             }
         }
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-        view = GpuBuffer.hostVisible(device, (long) VIEW_BYTES * VIEWS, storage);
-        instances = GpuBuffer.hostVisible(device, (long) INSTANCE_BYTES * limits.instances(), storage);
+        view = FrameBuffer.create(device, (long) VIEW_BYTES * VIEWS, storage, slots);
+        instances = FrameBuffer.create(device, (long) INSTANCE_BYTES * limits.instances(), storage, slots);
         chunks = GpuBuffer.deviceLocal(device, 8L * limits.chunks(), storage);
         chunkCommand = GpuBuffer.deviceLocal(device, 16,
             storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -331,20 +347,20 @@ public final class MeshletRenderer implements AutoCloseable {
         if (index < 0 || index >= limits.instances() || mesh < 0 || mesh >= pool.meshCount() || material < 0) {
             throw new IllegalArgumentException("No instance " + index + ", mesh " + mesh + " or material " + material);
         }
-        MemorySegment m = instances.memory();
+        FrameBuffer m = instances;
         long o = (long) INSTANCE_BYTES * index;
-        m.set(F32, o, qx);
-        m.set(F32, o + 4, qy);
-        m.set(F32, o + 8, qz);
-        m.set(F32, o + 12, qw);
-        m.set(F32, o + 16, x);
-        m.set(F32, o + 20, y);
-        m.set(F32, o + 24, z);
-        m.set(U32, o + 28, mesh);
-        m.set(F32, o + 32, sx);
-        m.set(F32, o + 36, sy);
-        m.set(F32, o + 40, sz);
-        m.set(U32, o + 44, material);
+        m.putFloat(o, qx);
+        m.putFloat(o + 4, qy);
+        m.putFloat(o + 8, qz);
+        m.putFloat(o + 12, qw);
+        m.putFloat(o + 16, x);
+        m.putFloat(o + 20, y);
+        m.putFloat(o + 24, z);
+        m.putInt(o + 28, mesh);
+        m.putFloat(o + 32, sx);
+        m.putFloat(o + 36, sy);
+        m.putFloat(o + 40, sz);
+        m.putInt(o + 44, material);
     }
 
     /** How many instances, from 0, are drawn. */
@@ -370,23 +386,23 @@ public final class MeshletRenderer implements AutoCloseable {
     public void setView(int index, Camera camera, float errorPixels, int mode) {
         Objects.checkIndex(index, VIEWS);
         long o = (long) VIEW_BYTES * index;
-        MemorySegment m = view.memory();
+        FrameBuffer m = view;
         float[] matrix = camera.viewProjection();
         for (int i = 0; i < 16; i++) {
-            m.set(F32, o + 4L * i, matrix[i]);
+            m.putFloat(o + 4L * i, matrix[i]);
         }
         float[] planes = camera.planes();
         for (int i = 0; i < 24; i++) {
-            m.set(F32, o + 64 + 4L * i, planes[i]);
+            m.putFloat(o + 64 + 4L * i, planes[i]);
         }
-        m.set(F32, o + 160, camera.projectionScale());
-        m.set(F32, o + 164, errorPixels);
-        m.set(U32, o + 172, limits.draws());
-        m.set(U32, o + 176, mode);
-        m.set(U32, o + 180, camera.orthographic() ? 1 : 0);
+        m.putFloat(o + 160, camera.projectionScale());
+        m.putFloat(o + 164, errorPixels);
+        m.putInt(o + 172, limits.draws());
+        m.putInt(o + 176, mode);
+        m.putInt(o + 180, camera.orthographic() ? 1 : 0);
         float[] inverse = camera.inverseViewProjection();
         for (int i = 0; i < 16; i++) {
-            m.set(F32, o + 192 + 4L * i, inverse[i]);
+            m.putFloat(o + 192 + 4L * i, inverse[i]);
         }
     }
 
@@ -591,7 +607,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 }
                 int phase = (phases >> (2 * v)) & 3;
                 phaseOf[v] = phase;
-                view.memory().set(U32, (long) VIEW_BYTES * v + 168, instanceCount);
+                view.putInt((long) VIEW_BYTES * v + 168, instanceCount);
                 if (phase != PHASE_LATE) {
                     vkCmdFillBuffer(commands, drawCount.handle(), 8L * v, 8, 0);
                 }
@@ -764,7 +780,7 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /** The view buffer, for other passes drawing the same frame. */
-    GpuBuffer viewBuffer() {
+    FrameBuffer viewBuffer() {
         return view;
     }
 
@@ -784,7 +800,7 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /** The instance buffer, for other passes drawing the same instances. */
-    GpuBuffer instanceBuffer() {
+    FrameBuffer instanceBuffer() {
         return instances;
     }
 
@@ -811,7 +827,9 @@ public final class MeshletRenderer implements AutoCloseable {
             if (idsMesh != null) {
                 idsMesh.close();
             }
-            for (GpuBuffer buffer : new GpuBuffer[] {view, instances, chunks, chunkCommand, lists, drawCount, visibility}) {
+            view.close();
+            instances.close();
+            for (GpuBuffer buffer : new GpuBuffer[] {chunks, chunkCommand, lists, drawCount, visibility}) {
                 buffer.close();
             }
             defaultMaterials.close();

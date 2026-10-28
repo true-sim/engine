@@ -60,6 +60,7 @@ import com.truesim.engine.graph.GraphBuilder.BufferInfo;
 import com.truesim.engine.graph.GraphBuilder.ImageInfo;
 import com.truesim.engine.graph.GraphBuilder.PassInfo;
 import com.truesim.engine.vulkan.Bindless;
+import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.common.jobs.JobSystem;
@@ -133,6 +134,7 @@ public final class FrameGraph implements AutoCloseable {
     private final VulkanDevice device;
     private final Bindless bindless;
     private final int framesInFlight;
+    private final FrameSlots frameSlots;
     private final List<Technique> techniques = new ArrayList<>();
     private final Map<Key, ExternalImage> outputs = new LinkedHashMap<>();
     private final Map<Class<?>, Implementation<?, ?>> implementations = new HashMap<>();
@@ -201,6 +203,7 @@ public final class FrameGraph implements AutoCloseable {
         this.device = Objects.requireNonNull(device, "device");
         this.bindless = device.bindless();
         this.framesInFlight = framesInFlight;
+        this.frameSlots = new FrameSlots(framesInFlight);
         this.graphicsQueue = device.graphics();
         this.computeQueue = device.compute();
         this.asyncCompute = graphicsQueue != computeQueue;
@@ -316,7 +319,17 @@ public final class FrameGraph implements AutoCloseable {
         if (execution == null) {
             execution = new Execution();
         }
-        return execution.begin();
+        int slot = execution.begin();
+        frameSlots.begin(slot);
+        return slot;
+    }
+
+    /**
+     * The frame slots this graph's per-frame data keeps a copy per ({@link com.truesim.engine.vulkan.FrameBuffer}s of renderers, lights, ...):
+     * {@link #beginFrame} opens the frame's slot, once the GPU has finished with it, and {@link #submit} closes it.
+     */
+    public FrameSlots frameSlots() {
+        return frameSlots;
     }
 
     /**
@@ -338,17 +351,27 @@ public final class FrameGraph implements AutoCloseable {
             recordChunks(0, chunkBatch.length, 0);
         }
         execution.submit(acquired, renderFinished);
+        frameSlots.end();
     }
 
     /**
      * Records the whole frame into {@code commands}, on the calling thread: the bindless set, then each needed pass
      * with its barriers, then the outputs' final layouts. Async passes run in their place. Builds the graph first if it
-     * changed; otherwise allocates nothing.
+     * changed; otherwise allocates nothing. Outside {@link #beginFrame} and {@link #submit}, per-frame data uses frame
+     * slot 0: the caller waits for the GPU before recording the next frame.
      */
     public void record(VkCommandBuffer commands) {
+        // Outside beginFrame and submit, frames are the caller's to wait for: their data is slot 0's.
+        boolean open = frameSlots.current() < 0;
+        if (open) {
+            frameSlots.begin(0);
+        }
         prepare();
         bindless.bind(commands);
         recordPasses(commands, 0, order.length, true, contexts[0]);
+        if (open) {
+            frameSlots.end();
+        }
     }
 
     private void prepare() {

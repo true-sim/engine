@@ -233,6 +233,85 @@ class GraphTechniquesTest {
         return sum / ((SIZE / 2.0) * (to - from));
     }
 
+    /** Copies {@link Keys#SCENE_COLOR} of each frame into the readback buffer of the frame's slot. */
+    private record Readback(FrameGraph graph, GpuBuffer[] readbacks) implements Technique {
+        @Override
+        public List<Key> provides() {
+            return List.of();
+        }
+
+        @Override
+        public List<Key> modifies() {
+            return List.of(Keys.SCENE_COLOR);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image color = g.modify(Keys.SCENE_COLOR);
+            g.pass("readback").read(color, Access.TRANSFER_SRC).sideEffects().record(ctx -> {
+                try (MemoryStack stack = stackPush()) {
+                    VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
+                    region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
+                    region.imageExtent().set(SIZE, SIZE, 1);
+                    vkCmdCopyImageToBuffer(ctx.commands(), ctx.image(color), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        readbacks[graph.frameSlots().current()].handle(), region);
+                }
+            });
+            g.provide(Keys.SCENE_COLOR, color);
+        }
+    }
+
+    /** The mean column of the lit (non-black) pixels in {@code readback}. */
+    private static double litColumn(GpuBuffer readback) {
+        double sum = 0;
+        int count = 0;
+        for (int y = 0; y < SIZE; y++) {
+            for (int x = 0; x < SIZE; x++) {
+                if ((readback.memory().getAtIndex(ValueLayout.JAVA_INT, y * SIZE + x) & 0xff) > 128) {
+                    sum += x;
+                    count++;
+                }
+            }
+        }
+        assertThat(count).as("lit pixels").isPositive();
+        return sum / count;
+    }
+
+    @Test
+    void instancesChangeEveryFrameWithFramesInFlight() {
+        // A quad moving left and right every frame, two frames in flight: each frame draws where it was set, as the
+        // instance data has a copy per frame slot.
+        GpuBuffer[] readbacks = {GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+            GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)};
+        try (MeshletRenderer moving = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12),
+            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, graph.frameSlots())) {
+            SceneGeometry geometry = SceneGeometry.meshlets(moving);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            graph.add(new ClusteredForwardShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                    .clearColor(0, 0, 0))
+                .add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+            moving.setInstanceCount(1);
+            for (int frame = 0; frame < 6; frame++) {
+                int slot = graph.beginFrame();
+                assertThat(slot).isEqualTo(frame % 2);
+                // Facing the camera, a quarter of the view wide, left on even frames and right on odd ones.
+                moving.setInstance(0, quad, frame % 2 == 0 ? -1 : 1, 0, -3, HALF, 0, 0, HALF, 0.5f, 0.5f, 0.5f);
+                geometry.setView(0, camera, 1, MeshletRenderer.MODE_WHITE);
+                graph.submit(0, 0);
+                // Changing the instance while both frames are in flight does not reach them.
+                moving.setInstance(0, quad, 0, 0, -3, HALF, 0, 0, HALF, 0.5f, 0.5f, 0.5f);
+            }
+            device.waitIdle();
+            assertThat(litColumn(readbacks[0])).as("the last even frame").isLessThan(SIZE / 2.0 - 4);
+            assertThat(litColumn(readbacks[1])).as("the last odd frame").isGreaterThan(SIZE / 2.0 + 4);
+        } finally {
+            device.waitIdle();
+            for (GpuBuffer readback : readbacks) {
+                readback.close();
+            }
+        }
+    }
+
     @Test
     void clusteredForwardShadingLightsEachPixelByTheLightsNearIt() {
         // A floor below the camera, a red light over its left side and a blue one over its right.
