@@ -4,6 +4,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.util.vma.Vma.VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.util.vma.Vma.vmaCreateAllocator;
 import static org.lwjgl.util.vma.Vma.vmaDestroyAllocator;
+import static org.lwjgl.vulkan.EXTMeshShader.VK_EXT_MESH_SHADER_EXTENSION_NAME;
+import static org.lwjgl.vulkan.EXTMeshShader.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -57,6 +59,7 @@ import org.lwjgl.vulkan.VkDeviceCreateInfo;
 import org.lwjgl.vulkan.VkDeviceQueueCreateInfo;
 import org.lwjgl.vulkan.VkFenceCreateInfo;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
+import org.lwjgl.vulkan.VkPhysicalDeviceMeshShaderFeaturesEXT;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan11Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan13Features;
@@ -86,6 +89,7 @@ public final class VulkanDevice implements AutoCloseable {
     private final long allocator;
     private final int apiVersion;
     private final Vulkan14Features features14;
+    private final boolean meshShaders;
     private final boolean swapchains;
     private boolean closed;
 
@@ -111,6 +115,21 @@ public final class VulkanDevice implements AutoCloseable {
                     .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2).pNext(supported14.address()));
             }
             this.features14 = supported14 == null ? Vulkan14Features.NONE : Vulkan14Features.of(supported14);
+            // Mesh shaders where the GPU has them: task and mesh stages, for the meshlet renderer's faster path.
+            VkPhysicalDeviceMeshShaderFeaturesEXT meshShading = null;
+            if (gpu.supports(VK_EXT_MESH_SHADER_EXTENSION_NAME)) {
+                VkPhysicalDeviceMeshShaderFeaturesEXT query = VkPhysicalDeviceMeshShaderFeaturesEXT.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT);
+                vkGetPhysicalDeviceFeatures2(gpu.handle(), VkPhysicalDeviceFeatures2.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2).pNext(query.address()));
+                if (query.taskShader() && query.meshShader()) {
+                    meshShading = VkPhysicalDeviceMeshShaderFeaturesEXT.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT)
+                        .taskShader(true)
+                        .meshShader(true);
+                }
+            }
+            this.meshShaders = meshShading != null;
             Map<Integer, QueueFamily> distinct = new LinkedHashMap<>();
             for (QueueFamily family : List.of(graphicsFamily, computeFamily, transferFamily)) {
                 distinct.put(family.index(), family);
@@ -127,6 +146,10 @@ public final class VulkanDevice implements AutoCloseable {
                 .maintenance4(true);
             if (supported14 != null) {
                 features13.pNext(supported14.address());
+            }
+            if (meshShading != null) {
+                meshShading.pNext(features13.pNext());
+                features13.pNext(meshShading.address());
             }
             VkPhysicalDeviceVulkan12Features features12 = VkPhysicalDeviceVulkan12Features.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
@@ -154,7 +177,7 @@ public final class VulkanDevice implements AutoCloseable {
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
                 .pNext(features.address())
                 .pQueueCreateInfos(queues.flip())
-                .ppEnabledExtensionNames(swapchains ? stack.pointers(stack.UTF8(VK_KHR_SWAPCHAIN_EXTENSION_NAME)) : null);
+                .ppEnabledExtensionNames(extensions(stack, swapchains, meshShaders));
             PointerBuffer device = stack.mallocPointer(1);
             Vulkan.check(vkCreateDevice(gpu.handle(), info, null, device), "Could not create a device on " + gpu.name());
             this.handle = new VkDevice(device.get(0), gpu.handle(), info, apiVersion);
@@ -207,6 +230,17 @@ public final class VulkanDevice implements AutoCloseable {
         }
         compute = compute == null ? graphics : compute;
         return new QueueFamily[] {graphics, compute, transfer == null ? compute : transfer};
+    }
+
+    private static PointerBuffer extensions(MemoryStack stack, boolean swapchains, boolean meshShaders) {
+        PointerBuffer names = stack.mallocPointer(2);
+        if (swapchains) {
+            names.put(stack.UTF8(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
+        }
+        if (meshShaders) {
+            names.put(stack.UTF8(VK_EXT_MESH_SHADER_EXTENSION_NAME));
+        }
+        return names.position() == 0 ? null : names.flip();
     }
 
     /** A device that can present to windows. */
@@ -276,6 +310,11 @@ public final class VulkanDevice implements AutoCloseable {
     }
 
     /** The Vulkan 1.4 features enabled on this device; {@link Vulkan14Features#NONE} on a 1.3 device. */
+    /** Whether task and mesh shaders (VK_EXT_mesh_shader) are enabled: the GPU has them. */
+    public boolean meshShaders() {
+        return meshShaders;
+    }
+
     public Vulkan14Features features14() {
         return features14;
     }

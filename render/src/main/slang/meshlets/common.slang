@@ -111,3 +111,83 @@ public float projectedError(View view, float3 center, float radius, float error)
     float distance = length(center) - radius;
     return distance > 0 ? error * view.projectionScale / distance : 1.0 / 0.0;
 }
+
+// ---------------------------------------------------------------- shared by both geometry paths
+
+/** Up to 64 meshlets of one instance, from local meshlet firstMeshlet: one culling workgroup's work. */
+public struct Chunk
+{
+    public uint instance;
+    public uint firstMeshlet;
+};
+
+/** What the vertex or mesh shader hands the fragment shader: the same for both paths. */
+public struct VertexOut
+{
+    public float4 position : SV_Position;
+    public float3 normal : NORMAL;
+    public nointerpolation uint meshlet : MESHLET;
+};
+
+/**
+ * Whether meshlet m (a pool meshlet) of an instance is drawn: its detail level is the right one for its distance
+ * (own group's error at most the allowed pixels, parent's more), it is in the frustum and does not face away.
+ */
+public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets, float* clusterLod)
+{
+    float scale = maxScale(instance);
+    uint l = m * 10;
+    float3 own = toWorld(instance, float3(clusterLod[l], clusterLod[l + 1], clusterLod[l + 2]));
+    float3 parent = toWorld(instance, float3(clusterLod[l + 5], clusterLod[l + 6], clusterLod[l + 7]));
+    float ownError = projectedError(view, own, clusterLod[l + 3] * scale, clusterLod[l + 4] * scale);
+    float parentError = projectedError(view, parent, clusterLod[l + 8] * scale, clusterLod[l + 9] * scale);
+    if (!(ownError <= view.errorPixels && parentError > view.errorPixels))
+    {
+        return false;
+    }
+    uint w = m * 8;
+    float3 center = toWorld(instance, asfloat(uint3(meshlets[w + 3], meshlets[w + 4], meshlets[w + 5])));
+    float radius = asfloat(meshlets[w + 6]) * scale;
+    if (!inFrustum(view, center, radius))
+    {
+        return false;
+    }
+    float4 cone = decodeSnorm8(meshlets[w + 7]);
+    return cone.w >= 1 || dot(center, rotate(instance.rotation, cone.xyz)) < cone.w * length(center) + radius;
+}
+
+/** Pool vertex `vertex` of an instance, transformed and with its normal: the vertex stage of both paths. */
+public VertexOut transformVertex(View view, Instance instance, MeshEntry mesh, uint vertex, uint2* positions,
+    uint* attributes, uint meshlet)
+{
+    float3 world = toWorld(instance, decodePosition(positions[vertex], mesh));
+    VertexOut out;
+    out.position = mul(view.viewProjection, float4(world, 1.0));
+    out.normal = float3(0, 1, 0);
+    if ((mesh.attributeFormat & 1) != 0) // NORMAL is the first attribute when present
+    {
+        uint word = attributes[(mesh.attributeBase + (vertex - mesh.vertexBase) * mesh.attributeStride) / 4];
+        out.normal = rotate(instance.rotation, decodeOctahedral(word));
+    }
+    out.meshlet = meshlet;
+    return out;
+}
+
+/** A color per meshlet, to see the clusters. */
+public float3 meshletColor(uint meshlet)
+{
+    uint h = meshlet * 2654435761u;
+    return float3((h >> 8) & 0xff, (h >> 16) & 0xff, (h >> 24) & 0xff) / 255.0 * 0.8 + 0.2;
+}
+
+/** The surface color: the fragment stage of both paths. */
+public float4 shadeSurface(View view, VertexOut in)
+{
+    if (view.mode == 2)
+    {
+        return float4(1, 1, 1, 1);
+    }
+    float3 base = view.mode == 1 ? meshletColor(in.meshlet) : float3(0.8, 0.8, 0.8);
+    float light = 0.25 + 0.75 * saturate(dot(normalize(in.normal), normalize(float3(0.4, 0.8, 0.3))));
+    return float4(base * light, 1);
+}

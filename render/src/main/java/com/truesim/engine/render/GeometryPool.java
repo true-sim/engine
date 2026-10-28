@@ -33,6 +33,10 @@ public final class GeometryPool implements AutoCloseable {
     /** Bytes per mesh table entry. */
     static final int MESH_ENTRY_BYTES = 80;
 
+    /** The most vertices and triangles a meshlet may hold for the mesh shader path: the builder's defaults. */
+    public static final int MESH_SHADER_VERTICES = 64;
+    public static final int MESH_SHADER_TRIANGLES = 124;
+
     private static final ValueLayout.OfInt U32 = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfFloat F32 = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
@@ -71,6 +75,7 @@ public final class GeometryPool implements AutoCloseable {
     private int indexCount;
     private int meshCount;
     private long triangleCount;
+    private boolean fitsMeshShaders = true;
     private boolean closed;
 
     public GeometryPool(VulkanDevice device, Capacity capacity) {
@@ -110,6 +115,10 @@ public final class GeometryPool implements AutoCloseable {
             || attributeBytes + mesh.attributes().byteSize() > attributes.size()) {
             throw new IllegalStateException("The geometry pool has no room for a mesh of " + mesh.vertexCount()
                 + " vertices and " + mesh.meshletCount() + " meshlets");
+        }
+        for (int m = 0; m < mesh.meshletCount() && fitsMeshShaders; m++) {
+            fitsMeshShaders = mesh.meshletVertexCount(m) <= MESH_SHADER_VERTICES
+                && mesh.meshletTriangleCount(m) <= MESH_SHADER_TRIANGLES;
         }
         // The meshlet records count their vertices and triangles from the mesh's start; shaders add these bases.
         positions.write((long) MeshData.POSITION_BYTES * vertexCount, mesh.positions());
@@ -179,6 +188,22 @@ public final class GeometryPool implements AutoCloseable {
 
     public Capacity capacity() {
         return capacity;
+    }
+
+    /**
+     * Whether every meshlet fits the mesh shader path ({@link #MESH_SHADER_VERTICES}, {@link #MESH_SHADER_TRIANGLES});
+     * otherwise the renderer draws with indexed draws.
+     */
+    public boolean fitsMeshShaders() {
+        return fitsMeshShaders;
+    }
+
+    GpuBuffer meshletVertices() {
+        return meshletVertices;
+    }
+
+    GpuBuffer meshletTriangles() {
+        return meshletTriangles;
     }
 
     GpuBuffer positions() {
