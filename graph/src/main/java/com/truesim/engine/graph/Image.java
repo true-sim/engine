@@ -12,8 +12,10 @@ public final class Image {
     final int width;
     final int height;
     final int format;
+    final int mips;
 
-    Image(int id, String name, int width, int height, int format) {
+    Image(int id, String name, int width, int height, int format, int mips) {
+        this.mips = mips;
         this.id = id;
         this.name = name;
         this.width = width;
@@ -31,6 +33,11 @@ public final class Image {
 
     public int height() {
         return height;
+    }
+
+    /** Mip levels: 1, or more for a pyramid (each half the size of the one before). */
+    public int mips() {
+        return mips;
     }
 
     /** The Vulkan format, e.g. {@code VK_FORMAT_R16G16B16A16_SFLOAT}. */

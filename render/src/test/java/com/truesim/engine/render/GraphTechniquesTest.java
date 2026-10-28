@@ -11,6 +11,7 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_DEPTH_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
@@ -28,6 +29,7 @@ import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.blocks.Blur;
+import com.truesim.engine.render.blocks.DepthPyramid;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -205,6 +207,121 @@ class GraphTechniquesTest {
     /** The red channel at (x, y), 0 to 1. */
     private double red(int x, int y) {
         return (pixels.memory().getAtIndex(ValueLayout.JAVA_INT, y * SIZE + x) & 0xff) / 255.0;
+    }
+
+    @Test
+    void depthPyramidsKeepTheFarthestDepthOfEveryFootprint() {
+        int w = 13;
+        int h = 7; // odd sizes: footprints of 3 along the edges
+        float[] depth = new float[w * h];
+        java.util.SplittableRandom random = new java.util.SplittableRandom(3);
+        for (int i = 0; i < depth.length; i++) {
+            depth[i] = (float) random.nextDouble();
+        }
+        // The expected levels, computed the same way on the CPU.
+        List<float[]> levels = new java.util.ArrayList<>();
+        List<int[]> sizes = new java.util.ArrayList<>();
+        float[] below = depth;
+        int bw = w;
+        int bh = h;
+        int lw = (w + 1) / 2;
+        int lh = (h + 1) / 2;
+        int mips = com.truesim.engine.vulkan.GpuImage.fullMipCount(lw, lh);
+        for (int mip = 0; mip < mips; mip++) {
+            float[] level = new float[lw * lh];
+            for (int y = 0; y < lh; y++) {
+                for (int x = 0; x < lw; x++) {
+                    int ex = 2 + ((bw & 1) != 0 && x == lw - 1 ? 1 : 0);
+                    int ey = 2 + ((bh & 1) != 0 && y == lh - 1 ? 1 : 0);
+                    float farthest = 1;
+                    for (int dy = 0; dy < ey; dy++) {
+                        for (int dx = 0; dx < ex; dx++) {
+                            int sx = Math.min(2 * x + dx, bw - 1);
+                            int sy = Math.min(2 * y + dy, bh - 1);
+                            farthest = Math.min(farthest, below[sy * bw + sx]);
+                        }
+                    }
+                    level[y * lw + x] = farthest;
+                }
+            }
+            levels.add(level);
+            sizes.add(new int[] {lw, lh});
+            below = level;
+            bw = lw;
+            bh = lh;
+            lw = Math.max(1, lw / 2);
+            lh = Math.max(1, lh / 2);
+        }
+        try (GpuBuffer upload = GpuBuffer.hostVisible(device, depth.length * 4L, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+             GpuBuffer readback = GpuBuffer.hostVisible(device, depth.length * 4L, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+            for (int i = 0; i < depth.length; i++) {
+                upload.memory().setAtIndex(ValueLayout.JAVA_FLOAT, i, depth[i]);
+            }
+            Key depthKey = Key.of("depth");
+            graph.add(new Technique() {
+                @Override
+                public List<Key> provides() {
+                    return List.of(depthKey);
+                }
+
+                @Override
+                public void build(GraphBuilder g) {
+                    Image image = g.create("depth", w, h, VK_FORMAT_D32_SFLOAT);
+                    g.pass("upload depth").write(image, Access.TRANSFER_DST).record(ctx -> {
+                        try (MemoryStack stack = stackPush()) {
+                            VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
+                            region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_DEPTH_BIT).layerCount(1);
+                            region.imageExtent().set(w, h, 1);
+                            org.lwjgl.vulkan.VK10.vkCmdCopyBufferToImage(ctx.commands(), upload.handle(),
+                                ctx.image(image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+                        }
+                    });
+                    g.provide(depthKey, image);
+                }
+            }).add(new Technique() {
+                @Override
+                public List<Key> provides() {
+                    return List.of(EDGE);
+                }
+
+                @Override
+                public void build(GraphBuilder g) {
+                    Image pyramid = g.request(new DepthPyramid(g.require(depthKey)));
+                    assertThat(pyramid.mips()).isEqualTo(mips);
+                    g.pass("read back").read(pyramid, Access.TRANSFER_SRC).sideEffects().record(ctx -> {
+                        try (MemoryStack stack = stackPush()) {
+                            VkBufferImageCopy.Buffer regions = VkBufferImageCopy.calloc(mips, stack);
+                            long offset = 0;
+                            for (int mip = 0; mip < mips; mip++) {
+                                regions.get(mip).bufferOffset(offset);
+                                regions.get(mip).imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+                                    .mipLevel(mip).layerCount(1);
+                                regions.get(mip).imageExtent().set(sizes.get(mip)[0], sizes.get(mip)[1], 1);
+                                offset += 4L * sizes.get(mip)[0] * sizes.get(mip)[1];
+                            }
+                            vkCmdCopyImageToBuffer(ctx.commands(), ctx.image(pyramid),
+                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.handle(), regions);
+                        }
+                    });
+                    Image marker = g.create("marker", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                    g.pass("marker").write(marker, Access.TRANSFER_DST).record(ctx -> { });
+                    g.provide(EDGE, marker);
+                }
+            }).output(EDGE, output);
+            frame();
+            assertThat(graph.passes()).contains("depth pyramid of depth", "read back");
+            long offset = 0;
+            for (int mip = 0; mip < mips; mip++) {
+                float[] expected = levels.get(mip);
+                for (int i = 0; i < expected.length; i++) {
+                    assertThat(readback.memory().get(ValueLayout.JAVA_FLOAT, offset + 4L * i))
+                        .as("level %d, texel %d", mip, i).isEqualTo(expected[i]);
+                }
+                offset += 4L * expected.length;
+            }
+            device.waitIdle();
+            graph.close();
+        }
     }
 
     @Test

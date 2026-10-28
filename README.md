@@ -203,7 +203,8 @@ that declare how they use each image. The graph does the rest:
   needs are never built, and providers always come before consumers. Errors name the techniques involved: a key
   nobody provides, two providers of one key, a cycle, writing someone else's result, reading an image before
   anything writes it.
-- **Shared work runs once:** building blocks such as `Blur` are `Request`s, values with inputs and parameters. Every
+- **Shared work runs once:** building blocks such as `Blur` and `DepthPyramid` (a farthest-depth pyramid with a full
+  mip chain, for occlusion culling and screen-space effects) are `Request`s, values with inputs and parameters. Every
   equal request from any technique gets the same result: two techniques asking for the scene blurred by 4 texels
   share one blur.
 - **Swappable:** `replace` swaps a technique for another providing the same keys (one lighting or translucency

@@ -630,6 +630,7 @@ class FrameGraphTest {
             }
         }), "needs its own result");
         rejects(List.of(OUT), g -> g.create("x", 0, 1, VK_FORMAT_R8G8B8A8_UNORM), "must be positive");
+        rejects(List.of(OUT), g -> g.create("x", 4, 4, VK_FORMAT_R8G8B8A8_UNORM, 4), "1 to 3 mip levels");
         rejects(List.of(OUT), g -> g.createLike("x", g.require(A), 0), "must be positive");
         rejects(List.of(OUT), g -> g.pass("x").read(g.require(A), Access.TRANSFER_DST), "declare it with write()");
         rejects(List.of(OUT), g -> g.pass("x").write(g.require(A), Access.TRANSFER_SRC), "declare it with read()");
