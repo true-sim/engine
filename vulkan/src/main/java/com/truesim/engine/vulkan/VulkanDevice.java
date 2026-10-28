@@ -138,7 +138,8 @@ public final class VulkanDevice implements AutoCloseable {
                 .descriptorBindingPartiallyBound(true)
                 .scalarBlockLayout(true)
                 .shaderInt8(true)
-                .storageBuffer8BitAccess(true);
+                .storageBuffer8BitAccess(true)
+                .drawIndirectCount(true);
             VkPhysicalDeviceVulkan11Features features11 = VkPhysicalDeviceVulkan11Features.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES)
                 .pNext(features12.address())
@@ -147,7 +148,8 @@ public final class VulkanDevice implements AutoCloseable {
             VkPhysicalDeviceFeatures2 features = VkPhysicalDeviceFeatures2.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
                 .pNext(features11.address());
-            features.features().shaderInt64(true).shaderInt16(true);
+            features.features().shaderInt64(true).shaderInt16(true).multiDrawIndirect(true)
+                .drawIndirectFirstInstance(true);
             VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
                 .pNext(features.address())
@@ -236,6 +238,10 @@ public final class VulkanDevice implements AutoCloseable {
         check(missing, features11.shaderDrawParameters(), "shaderDrawParameters"); // vertex and draw indices
         check(missing, features12.shaderInt8(), "shaderInt8");
         check(missing, features12.storageBuffer8BitAccess(), "storageBuffer8BitAccess");
+        // GPU-driven drawing: many indirect draws, their count and first instance written by the GPU.
+        check(missing, features.features().multiDrawIndirect(), "multiDrawIndirect");
+        check(missing, features.features().drawIndirectFirstInstance(), "drawIndirectFirstInstance");
+        check(missing, features12.drawIndirectCount(), "drawIndirectCount");
         check(missing, features13.dynamicRendering(), "dynamicRendering");
         check(missing, features13.synchronization2(), "synchronization2");
         check(missing, features13.maintenance4(), "maintenance4");

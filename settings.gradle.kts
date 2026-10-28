@@ -18,15 +18,16 @@ plugins {
 
 rootProject.name = "engine"
 
-include("engine-platform", "engine-vulkan")
+include("engine-platform", "engine-vulkan", "engine-render")
 project(":engine-platform").projectDir = file("platform")
 project(":engine-vulkan").projectDir = file("vulkan")
+project(":engine-render").projectDir = file("render")
 
 providers.gradleProperty("truesim.build-logic").orNull?.let { includeBuild(it) }
 
 dependencyResolutionManagement {
     repositories {
-        for (repo in listOf("build-logic", "common-math", "common-jobs")) {
+        for (repo in listOf("build-logic", "common-math", "common-jobs", "scene")) {
             maven("https://maven.pkg.github.com/true-sim/$repo") {
                 credentials {
                     username = providers.gradleProperty("gpr.user").orElse(providers.environmentVariable("GITHUB_ACTOR")).orNull
