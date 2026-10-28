@@ -209,6 +209,51 @@ class GraphTechniquesTest {
         return (pixels.memory().getAtIndex(ValueLayout.JAVA_INT, y * SIZE + x) & 0xff) / 255.0;
     }
 
+    /** Channel {@code shift} (0 red, 16 blue) on average in the lower half, columns {@code from} to {@code to}. */
+    private double lower(int shift, int from, int to) {
+        double sum = 0;
+        for (int y = SIZE / 2; y < SIZE; y++) {
+            for (int x = from; x < to; x++) {
+                sum += (pixels.memory().getAtIndex(ValueLayout.JAVA_INT, y * SIZE + x) >> shift) & 0xff;
+            }
+        }
+        return sum / ((SIZE / 2.0) * (to - from));
+    }
+
+    @Test
+    void clusteredForwardShadingLightsEachPixelByTheLightsNearIt() {
+        // A floor below the camera, a red light over its left side and a blue one over its right.
+        renderer.setInstance(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+        renderer.setInstanceCount(1);
+        renderer.setView(new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1), 1,
+            MeshletRenderer.MODE_LIT);
+        try (Lights lights = new Lights(device, 4, 1)) {
+            lights.point(0, -1, -0.5f, -1.5f, 3, 6, 0, 0).point(1, 1, -0.5f, -1.5f, 3, 0, 0, 6).setCount(2);
+            MeshletScene scene = new MeshletScene(renderer, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                .lights(lights);
+            graph.add(scene).output(Keys.SCENE_COLOR, output);
+            frame();
+            assertThat(graph.passes()).containsOnlyOnce("light clusters");
+            double leftRed = lower(0, 0, SIZE / 4);
+            double leftBlue = lower(16, 0, SIZE / 4);
+            double rightRed = lower(0, 3 * SIZE / 4, SIZE);
+            double rightBlue = lower(16, 3 * SIZE / 4, SIZE);
+            assertThat(leftRed).isGreaterThan(2 * leftBlue);
+            assertThat(rightBlue).isGreaterThan(2 * rightRed);
+            // No lights: the sky alone, gray and dim; the sun is not one of the lights.
+            lights.setCount(0);
+            frame();
+            assertThat(lower(0, 0, SIZE / 4))
+                .isCloseTo(lower(16, 0, SIZE / 4), org.assertj.core.data.Offset.offset(2.0))
+                .isLessThan(leftRed);
+            // Without the lights the scene is lit by the sun again.
+            scene.lights(null);
+            graph.invalidate();
+            frame();
+            assertThat(graph.passes()).doesNotContain("light clusters");
+        }
+    }
+
     @Test
     void depthPyramidsKeepTheFarthestDepthOfEveryFootprint() {
         int w = 13;

@@ -18,6 +18,7 @@ struct MeshPush
     uint2* positions;
     uint* attributes;
     Material* materials;     // at byte 80: the fragment shader in draw.slang reads it from both paths' blocks
+    ClusterHeader* clusters; // at byte 88, likewise
 };
 
 [[vk::push_constant]]
