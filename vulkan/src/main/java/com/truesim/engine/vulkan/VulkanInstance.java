@@ -22,6 +22,9 @@ import static org.lwjgl.vulkan.KHRPortabilityEnumeration.VK_KHR_PORTABILITY_ENUM
 import static org.lwjgl.vulkan.VK10.VK_FALSE;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_APPLICATION_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+import static org.lwjgl.vulkan.EXTValidationFeatures.VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME;
+import static org.lwjgl.vulkan.EXTValidationFeatures.VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+import static org.lwjgl.vulkan.EXTValidationFeatures.VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
 import static org.lwjgl.vulkan.VK10.vkCreateInstance;
 import static org.lwjgl.vulkan.VK10.vkDestroyInstance;
 import static org.lwjgl.vulkan.VK10.vkEnumerateInstanceExtensionProperties;
@@ -51,6 +54,7 @@ import org.lwjgl.vulkan.VkDebugUtilsMessengerCreateInfoEXT;
 import org.lwjgl.vulkan.VkExtensionProperties;
 import org.lwjgl.vulkan.VkInstance;
 import org.lwjgl.vulkan.VkInstanceCreateInfo;
+import org.lwjgl.vulkan.VkValidationFeaturesEXT;
 import org.lwjgl.vulkan.VkLayerProperties;
 import org.lwjgl.vulkan.VkPhysicalDevice;
 import org.slf4j.Logger;
@@ -121,6 +125,9 @@ public final class VulkanInstance implements AutoCloseable {
             if (debug) {
                 extensions.add(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
             }
+            if (layer && builder.synchronization) {
+                extensions.add(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME); // the layer's own
+            }
             boolean portability = Platform.get() == Platform.MACOSX
                 && available.contains(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
             if (portability) {
@@ -149,6 +156,13 @@ public final class VulkanInstance implements AutoCloseable {
             if (debug) {
                 info.pNext(messengerInfo.address()); // also covers instance creation and destruction
             }
+            if (layer && builder.synchronization) {
+                VkValidationFeaturesEXT features = VkValidationFeaturesEXT.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT)
+                    .pNext(info.pNext())
+                    .pEnabledValidationFeatures(stack.ints(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT));
+                info.pNext(features.address());
+            }
             PointerBuffer pointer = stack.mallocPointer(1);
             Vulkan.check(vkCreateInstance(info, null, pointer), "Could not create the Vulkan instance");
             this.handle = new VkInstance(pointer.get(0), info);
@@ -173,6 +187,7 @@ public final class VulkanInstance implements AutoCloseable {
 
         private String applicationName = "true-sim";
         private boolean validation;
+        private boolean synchronization;
         private boolean surfaces = true;
         private int maxApiVersion = MAX_API_VERSION;
 
@@ -187,6 +202,15 @@ public final class VulkanInstance implements AutoCloseable {
         /** Checks every call with the validation layer, if installed, and logs its messages. */
         public Builder validation(boolean validation) {
             this.validation = validation;
+            return this;
+        }
+
+        /**
+         * With {@link #validation}, also checks synchronization: hazards between commands that barriers, semaphores
+         * or queue order do not cover (slower; for tests).
+         */
+        public Builder synchronizationValidation(boolean on) {
+            this.synchronization = on;
             return this;
         }
 

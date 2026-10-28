@@ -7,4 +7,5 @@ description = "Engine frame graph for true-sim: techniques plugged together by t
 
 dependencies {
     api(project(":engine-vulkan"))
+    api("com.truesim.common:common-jobs:0.3.0")
 }

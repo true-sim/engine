@@ -67,7 +67,8 @@ class GraphTechniquesTest {
     @BeforeEach
     void start() {
         try {
-            instance = VulkanInstance.builder().applicationName("tests").validation(true).surfaces(false).build();
+            instance = VulkanInstance.builder().applicationName("tests").validation(true)
+                .synchronizationValidation(true).surfaces(false).build();
         } catch (VulkanException | UnsatisfiedLinkError e) {
             assumeThat(e).as("no Vulkan available").isNull();
             throw e;

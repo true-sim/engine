@@ -19,7 +19,8 @@ import org.lwjgl.system.MemoryStack;
 /**
  * A blurred copy of {@code source}: {@code radius} texels of the source on each side, at {@code scale} times its size
  * (0.5 for half). Equal blurs (the same image, radius and scale) requested by any techniques are computed once. By
- * default a separable Gaussian in two compute passes; {@code FrameGraph.implement(Blur.class, ...)} swaps in another
+ * default a separable Gaussian in two compute passes, async: on the compute queue, beside graphics work that does not
+ * need it; {@code FrameGraph.implement(Blur.class, ...)} swaps in another
  * way for every blur of the graph.
  *
  * <pre>{@code
@@ -56,10 +57,12 @@ public record Blur(Image source, int radius, double scale) implements Request<Im
         g.pass(name + " across")
             .read(source, Access.SAMPLED_COMPUTE)
             .write(across, Access.STORAGE_WRITE)
+            .async()
             .record(ctx -> dispatch(ctx, pipeline, source, across, stepX, 0, radius));
         g.pass(name + " down")
             .read(across, Access.SAMPLED_COMPUTE)
             .write(result, Access.STORAGE_WRITE)
+            .async()
             .record(ctx -> dispatch(ctx, pipeline, across, result, 0, stepY, radius));
         return result;
     }

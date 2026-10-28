@@ -19,7 +19,8 @@ class BindlessTest {
     void slotsAreTakenLowestFirstAndReused() {
         VulkanInstance instance;
         try {
-            instance = VulkanInstance.builder().applicationName("tests").validation(true).surfaces(false).build();
+            instance = VulkanInstance.builder().applicationName("tests").validation(true)
+                .synchronizationValidation(true).surfaces(false).build();
         } catch (VulkanException | UnsatisfiedLinkError e) {
             assumeThat(e).as("no Vulkan available").isNull();
             throw e;
@@ -35,6 +36,15 @@ class BindlessTest {
                 assertThat(bindless.pipelineLayout()).isNotZero();
                 assertThat(bindless.set()).isNotZero();
                 assertThat(copyOnly.view()).as("no view for an image only copied to").isZero();
+                // Bound on a compute-only queue: no graphics bind point there.
+                device.submitAndWait(device.compute(), commands -> bindless.bind(commands, false));
+                if (device.compute().family() != device.graphics().family()) {
+                    try (GpuImage shared = new GpuImage(device, 4, 4, VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, device.graphics().family(),
+                        device.compute().family())) {
+                        assertThat(shared.view()).isNotZero();
+                    }
+                }
                 assertThat(bindless.addSampled(image.view())).isZero();
                 assertThat(bindless.addSampled(image.view())).isEqualTo(1);
                 assertThat(bindless.addStorage(image.view())).isZero();
