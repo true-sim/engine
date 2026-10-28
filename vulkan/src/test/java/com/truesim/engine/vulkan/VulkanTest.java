@@ -332,6 +332,13 @@ class VulkanTest {
                 assertThatIllegalStateException().isThrownBy(local::memory);
                 local.close(); // twice is fine
             }
+            // Shared by the queues of the families given: concurrent where they differ, exclusive where they are one.
+            int graphics = device.graphics().family();
+            int compute = device.compute().family();
+            try (GpuBuffer shared = GpuBuffer.deviceLocal(device, 256, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, graphics,
+                compute, graphics)) {
+                assertThat(shared.handle()).isNotZero();
+            }
             assertThatIllegalArgumentException().isThrownBy(() -> GpuBuffer.hostVisible(device, 0, 0));
             assertThatIllegalArgumentException().isThrownBy(() -> new GpuImage(device, 0, 4, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT));

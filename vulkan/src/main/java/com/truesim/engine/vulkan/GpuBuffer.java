@@ -94,7 +94,7 @@ public final class GpuBuffer implements AutoCloseable {
      */
     public static GpuBuffer deviceLocal(VulkanDevice device, long size, int usage, int... families) {
         int[] distinct = java.util.Arrays.stream(families).distinct().toArray();
-        return new GpuBuffer(device, size, usage, false, distinct.length > 1 ? distinct : new int[0]);
+        return new GpuBuffer(device, size, usage, false, distinct);
     }
 
     /**
