@@ -17,6 +17,7 @@ struct MeshPush
     uint* meshletTriangles;  // 3 bytes per triangle, as words
     uint2* positions;
     uint* attributes;
+    Material* materials;     // at byte 80: the fragment shader in draw.slang reads it from both paths' blocks
 };
 
 [[vk::push_constant]]
@@ -55,7 +56,8 @@ void meshMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertice
     if (thread < vertexCount)
     {
         uint vertex = mesh.vertexBase + push.meshletVertices[mesh.meshletVertexBase + vertexOffset + thread];
-        vertices[thread] = transformVertex(view, instance, mesh, vertex, push.positions, push.attributes, m);
+        vertices[thread] = transformVertex(view, instance, mesh, vertex, push.positions, push.attributes, m,
+            counts >> 16);
     }
     for (uint t = thread; t < triangleCount; t += 64)
     {

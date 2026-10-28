@@ -25,6 +25,8 @@ import static org.lwjgl.vulkan.VK10.vkAllocateCommandBuffers;
 import static org.lwjgl.vulkan.VK10.vkBeginCommandBuffer;
 import static org.lwjgl.vulkan.VK10.vkCreateCommandPool;
 import static org.lwjgl.vulkan.VK10.vkCreateDevice;
+import static org.lwjgl.vulkan.VK10.vkGetPhysicalDeviceFeatures;
+import static org.lwjgl.vulkan.VK10.vkGetPhysicalDeviceProperties;
 import static org.lwjgl.vulkan.VK10.vkCreateFence;
 import static org.lwjgl.vulkan.VK10.vkDestroyCommandPool;
 import static org.lwjgl.vulkan.VK10.vkDestroyDevice;
@@ -63,7 +65,9 @@ import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkDeviceCreateInfo;
 import org.lwjgl.vulkan.VkDeviceQueueCreateInfo;
 import org.lwjgl.vulkan.VkFenceCreateInfo;
+import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
+import org.lwjgl.vulkan.VkPhysicalDeviceProperties;
 import org.lwjgl.vulkan.VkPhysicalDeviceAccelerationStructureFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayQueryFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceMeshShaderFeaturesEXT;
@@ -99,6 +103,8 @@ public final class VulkanDevice implements AutoCloseable {
     private final Vulkan14Features features14;
     private final boolean meshShaders;
     private final boolean rayTracing;
+    private final boolean anisotropic;
+    private final float maxAnisotropy;
     private final boolean swapchains;
     private boolean closed;
 
@@ -115,6 +121,13 @@ public final class VulkanDevice implements AutoCloseable {
         this.apiVersion = Vulkan.min(Vulkan.withoutPatch(gpu.apiVersion()), gpu.instance().apiVersion());
         try (MemoryStack stack = stackPush()) {
             requireFeatures(stack);
+            // Anisotropic filtering where the GPU has it (nearly all do), for textures seen at an angle.
+            VkPhysicalDeviceFeatures core = VkPhysicalDeviceFeatures.calloc(stack);
+            vkGetPhysicalDeviceFeatures(gpu.handle(), core);
+            VkPhysicalDeviceProperties properties = VkPhysicalDeviceProperties.calloc(stack);
+            vkGetPhysicalDeviceProperties(gpu.handle(), properties);
+            this.anisotropic = core.samplerAnisotropy();
+            this.maxAnisotropy = Math.min(16, properties.limits().maxSamplerAnisotropy());
             // Every 1.4 feature the GPU supports is enabled: the queried struct goes into the create chain as it is.
             VkPhysicalDeviceVulkan14Features supported14 = null;
             if (Integer.compareUnsigned(apiVersion, VK_API_VERSION_1_4) >= 0) {
@@ -215,7 +228,7 @@ public final class VulkanDevice implements AutoCloseable {
                 .pNext(features11.address());
             features.features().shaderInt64(true).shaderInt16(true).multiDrawIndirect(true)
                 .drawIndirectFirstInstance(true).shaderStorageImageReadWithoutFormat(true)
-                .shaderStorageImageWriteWithoutFormat(true);
+                .shaderStorageImageWriteWithoutFormat(true).samplerAnisotropy(anisotropic);
             VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
                 .pNext(features.address())
@@ -382,6 +395,16 @@ public final class VulkanDevice implements AutoCloseable {
      */
     public boolean rayTracing() {
         return rayTracing;
+    }
+
+    /** Whether samplers may filter anisotropically (samplerAnisotropy): nearly every GPU can. */
+    public boolean anisotropic() {
+        return anisotropic;
+    }
+
+    /** The most anisotropic filtering samplers use, where {@link #anisotropic()}: the GPU's limit, at most 16. */
+    public float maxAnisotropy() {
+        return maxAnisotropy;
     }
 
     public Vulkan14Features features14() {

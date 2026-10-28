@@ -427,7 +427,7 @@ class MeshletBenchmark {
                     .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, "fragmentMain")
                     .color(VK_FORMAT_R8G8B8A8_UNORM)
                     .depth(VK_FORMAT_D32_SFLOAT)
-                    .pushConstants(40)
+                    .pushConstants(48)
                     .build();
             }
             commands = GpuBuffer.hostVisible(device, 20L * 100_000, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
@@ -484,13 +484,14 @@ class MeshletBenchmark {
                 pipeline.bind(buffer);
                 vkCmdSetViewport(buffer, 0, VkViewport.calloc(1, stack).width(WIDTH).height(HEIGHT).maxDepth(1));
                 vkCmdSetScissor(buffer, 0, VkRect2D.calloc(1, stack).extent(e -> e.set(WIDTH, HEIGHT)));
-                long push = stack.nmalloc(8, 40);
+                long push = stack.nmalloc(8, 48);
                 MemoryUtil.memPutLong(push, renderer.viewBuffer().deviceAddress());
                 MemoryUtil.memPutLong(push + 8, pool.meshTable().deviceAddress());
                 MemoryUtil.memPutLong(push + 16, renderer.instanceBuffer().deviceAddress());
                 MemoryUtil.memPutLong(push + 24, pool.positions().deviceAddress());
                 MemoryUtil.memPutLong(push + 32, pool.attributes().deviceAddress());
-                pipeline.push(buffer, push, 40);
+                MemoryUtil.memPutLong(push + 40, renderer.materialsAddress());
+                pipeline.push(buffer, push, 48);
                 vkCmdBindIndexBuffer(buffer, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
                 if (draws > 0) {
                     vkCmdDrawIndexedIndirect(buffer, commands.handle(), 0, draws, 20);

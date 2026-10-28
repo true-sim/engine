@@ -13,6 +13,8 @@ struct DrawPush
     VisibleMeshlet* visible;
     uint* meshlets;
     uint* meshletVertices;
+    uint64_t unused[2];
+    Material* materials;      // at byte 80, as in mesh.slang's push block: the fragment shader serves both
 };
 
 [[vk::push_constant]]
@@ -26,11 +28,12 @@ VertexOut vertexMain(uint index : SV_VulkanVertexID)
     MeshEntry mesh = push.meshes[instance.mesh];
     uint vertexOffset = push.meshlets[v.meshlet * 8];
     uint vertex = mesh.vertexBase + push.meshletVertices[mesh.meshletVertexBase + vertexOffset + (index & 0xff)];
-    return transformVertex(push.view[0], instance, mesh, vertex, push.positions, push.attributes, v.meshlet);
+    return transformVertex(push.view[0], instance, mesh, vertex, push.positions, push.attributes, v.meshlet,
+        meshletSubmesh(push.meshlets, v.meshlet));
 }
 
 [shader("fragment")]
 float4 fragmentMain(VertexOut in) : SV_Target
 {
-    return shadeSurface(push.view[0], in);
+    return shadeSurface(push.view[0], in, push.materials, ddx(in.uv), ddy(in.uv));
 }

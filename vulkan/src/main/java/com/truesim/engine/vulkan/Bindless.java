@@ -92,9 +92,11 @@ public final class Bindless implements AutoCloseable {
     public static final int NEAREST_CLAMP = 1;
     /** Linear filtering, repeating. */
     public static final int LINEAR_REPEAT = 2;
+    /** Trilinear and anisotropic (as far as the device goes, up to 16), repeating: for material textures. */
+    public static final int MATERIAL = 3;
 
     private final VulkanDevice device;
-    private final long[] samplers = new long[3];
+    private final long[] samplers = new long[4];
     private final long setLayout;
     private final long pipelineLayout;
     private final long pool;
@@ -107,9 +109,10 @@ public final class Bindless implements AutoCloseable {
     Bindless(VulkanDevice device) {
         this.device = device;
         try (MemoryStack stack = stackPush()) {
-            samplers[LINEAR_CLAMP] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-            samplers[NEAREST_CLAMP] = sampler(stack, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-            samplers[LINEAR_REPEAT] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
+            samplers[LINEAR_CLAMP] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
+            samplers[NEAREST_CLAMP] = sampler(stack, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
+            samplers[LINEAR_REPEAT] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, false);
+            samplers[MATERIAL] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, device.anisotropic());
             boolean traced = device.rayTracing();
             int count = traced ? 4 : 3;
             VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(count, stack);
@@ -164,7 +167,7 @@ public final class Bindless implements AutoCloseable {
         }
     }
 
-    private long sampler(MemoryStack stack, int filter, int address) {
+    private long sampler(MemoryStack stack, int filter, int address, boolean anisotropic) {
         LongBuffer handle = stack.mallocLong(1);
         Vulkan.check(vkCreateSampler(device.handle(), VkSamplerCreateInfo.calloc(stack)
             .sType(VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO)
@@ -174,6 +177,8 @@ public final class Bindless implements AutoCloseable {
             .addressModeU(address)
             .addressModeV(address)
             .addressModeW(address)
+            .anisotropyEnable(anisotropic)
+            .maxAnisotropy(device.maxAnisotropy())
             .maxLod(1000)
             .borderColor(VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK), null, handle), "Could not create a sampler");
         return handle.get(0);

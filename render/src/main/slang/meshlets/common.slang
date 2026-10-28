@@ -3,6 +3,7 @@
 module common;
 
 import bindless;
+__exported import shading;
 
 /** One mesh in the geometry pool: where its data lies in the pool's buffers, and its quantization box. 96 bytes. */
 public struct MeshEntry
@@ -37,7 +38,7 @@ public struct Instance
     public float3 position;
     public uint mesh;
     public float3 scale;
-    public uint pad;
+    public uint materialBase;      // the material of submesh s is materialBase + s
 };
 
 /** The frame's view. The camera sits at the origin: instances are camera-relative. */
@@ -88,6 +89,23 @@ public float3 decodeOctahedral(uint word)
         n.xy = (1.0 - abs(n.yx)) * float2(n.x >= 0 ? 1 : -1, n.y >= 0 ? 1 : -1);
     }
     return normalize(n);
+}
+
+/** A float16 in the low 16 bits, by integer arithmetic: no 16-bit float support needed on the device. */
+public float decodeHalf(uint h)
+{
+    uint sign = (h & 0x8000) << 16;
+    uint exponent = (h >> 10) & 0x1f;
+    uint mantissa = h & 0x3ff;
+    if (exponent == 0) // zero and subnormals
+    {
+        return asfloat(sign) + (sign != 0 ? -1.0 : 1.0) * float(mantissa) * 5.9604645e-8;
+    }
+    if (exponent == 31) // infinities and NaN
+    {
+        return asfloat(sign | 0x7f800000 | (mantissa << 13));
+    }
+    return asfloat(sign | ((exponent + 112) << 23) | (mantissa << 13));
 }
 
 /** 4 x snorm8 in one word. */
@@ -226,8 +244,13 @@ public struct ViewLists
 public struct VertexOut
 {
     public float4 position : SV_Position;
+    public float3 world : WORLD;       // camera-relative
     public float3 normal : NORMAL;
+    public float4 tangent : TANGENT;   // w: the bitangent's sign; 0 without tangents
+    public float2 uv : UV;
+    public float4 color : COLOR;
     public nointerpolation uint meshlet : MESHLET;
+    public nointerpolation uint material : MATERIAL;
 };
 
 /**
@@ -259,20 +282,53 @@ public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets,
         || dot(center, rotate(instance.rotation, cone.xyz)) < cone.w * length(center) + radius;
 }
 
-/** Pool vertex `vertex` of an instance, transformed and with its normal: the vertex stage of both paths. */
+/** The submesh of pool meshlet `m`: its material is the instance's material base plus this. */
+public uint meshletSubmesh(uint* meshlets, uint m)
+{
+    return meshlets[m * 8 + 2] >> 16;
+}
+
+/** The word of vertex attribute `bit` (scene's VertexAttribute order) of a mesh vertex: attributes lie in order. */
+uint attributeWord(MeshEntry mesh, uint* attributes, uint vertex, uint bit)
+{
+    uint offset = countbits(mesh.attributeFormat & ((1u << bit) - 1)) * 4;
+    return attributes[(mesh.attributeBase + (vertex - mesh.vertexBase) * mesh.attributeStride + offset) / 4];
+}
+
+/** Pool vertex `vertex` of an instance, transformed, with its attributes: the vertex stage of both paths. */
 public VertexOut transformVertex(View view, Instance instance, MeshEntry mesh, uint vertex, uint2* positions,
-    uint* attributes, uint meshlet)
+    uint* attributes, uint meshlet, uint submesh)
 {
     float3 world = toWorld(instance, decodePosition(positions[vertex], mesh));
     VertexOut out;
     out.position = mul(view.viewProjection, float4(world, 1.0));
-    out.normal = float3(0, 1, 0);
-    if ((mesh.attributeFormat & 1) != 0) // NORMAL is the first attribute when present
+    out.world = world;
+    out.normal = rotate(instance.rotation, float3(0, 1, 0));
+    out.tangent = 0;
+    out.uv = 0;
+    out.color = 1;
+    uint format = mesh.attributeFormat;
+    if ((format & 1) != 0) // NORMAL: octahedral
     {
-        uint word = attributes[(mesh.attributeBase + (vertex - mesh.vertexBase) * mesh.attributeStride) / 4];
-        out.normal = rotate(instance.rotation, decodeOctahedral(word));
+        out.normal = rotate(instance.rotation, decodeOctahedral(attributeWord(mesh, attributes, vertex, 0)));
+    }
+    if ((format & 2) != 0) // TANGENT: octahedral, the bitangent's sign in the lowest bit
+    {
+        uint word = attributeWord(mesh, attributes, vertex, 1);
+        out.tangent = float4(rotate(instance.rotation, decodeOctahedral(word)), (word & 1) != 0 ? -1.0 : 1.0);
+    }
+    if ((format & 4) != 0) // UV0: 2 x float16
+    {
+        uint word = attributeWord(mesh, attributes, vertex, 2);
+        out.uv = float2(decodeHalf(word & 0xffff), decodeHalf(word >> 16));
+    }
+    if ((format & 16) != 0) // COLOR: 4 x unorm8
+    {
+        uint word = attributeWord(mesh, attributes, vertex, 4);
+        out.color = float4(word & 0xff, (word >> 8) & 0xff, (word >> 16) & 0xff, word >> 24) / 255.0;
     }
     out.meshlet = meshlet;
+    out.material = instance.materialBase + submesh;
     return out;
 }
 
@@ -286,14 +342,28 @@ public float3 meshletColor(uint meshlet)
 /** Towards the sun, the scene's one light: (0.4, 0.8, 0.3) normalized, as engine-render's Keys.SUN. */
 public static const float3 SUN = float3(0.42399915, 0.84799830, 0.31799936);
 
-/** The surface color: the fragment stage of both paths. */
-public float4 shadeSurface(View view, VertexOut in)
+/** The sun's irradiance and the sky's, linear: a surface facing the sun gets 0.75 of its albedo, any one 0.25. */
+public static const float3 SUN_IRRADIANCE = float3(2.35619449);
+public static const float3 SKY_IRRADIANCE = float3(0.78539816 / 1.02);
+
+/**
+ * The surface color, with texture coordinate gradients `dx`, `dy` (per pixel): the fragment stage of both paths, and
+ * of anything shading the same surfaces. Lit by the sun and the sky, with its material.
+ */
+public float4 shadeSurface(View view, VertexOut in, Material* materials, float2 dx, float2 dy)
 {
     if (view.mode == 2)
     {
         return float4(1, 1, 1, 1);
     }
-    float3 base = view.mode == 1 ? meshletColor(in.meshlet) : float3(0.8, 0.8, 0.8);
-    float light = 0.25 + 0.75 * saturate(dot(normalize(in.normal), SUN));
-    return float4(base * light, 1);
+    Material m = materials[in.material];
+    if (view.mode == 1)
+    {
+        m.baseColor = float4(meshletColor(in.meshlet), 1);
+        m.baseColorTexture = -1;
+    }
+    Surface s = evaluate(m, in.normal, in.tangent, in.uv, dx, dy, in.color);
+    float3 toViewer = normalize(-in.world);
+    float3 color = reflected(s, toViewer, SUN, SUN_IRRADIANCE) + ambient(s, SKY_IRRADIANCE) + s.emissive;
+    return float4(color, 1);
 }
