@@ -1,14 +1,13 @@
 // Light clustering: the view's frustum cut into tiles of pixels across and slices of depth (exponential: deeper ones
 // longer), and each cluster given the lights whose sphere reaches its box. One thread per cluster; the lights are
 // read in batches of 64 into shared memory, which every thread of the group tests. Directional lights reach every
-// cluster. The header was written before; this fills the counts and the light slots.
-import meshlets.common;
+// cluster. The light list's header was written before; this fills the counts and the light slots.
 import lights;
 
 struct ClusterPush
 {
-    View* view;                // the camera
-    ClusterHeader* header;
+    float4x4 viewProjection;   // the camera's
+    LightListHeader* header;
     uint width;                // the image's pixels
     uint height;
     float far;                 // where the last slice ends
@@ -30,10 +29,15 @@ float3 row(float4x4 m, uint r)
 [numthreads(64, 1, 1)]
 void clusterMain(uint3 id : SV_DispatchThreadID, uint local : SV_GroupIndex)
 {
-    ClusterHeader h = push.header[0];
-    uint clusters = h.dims.x * h.dims.y * h.dims.z;
+    LightListHeader h = push.header[0];
+    uint4 dims = h.ints;
+    uint tileSize = dims.w;
+    float sliceNear = h.floats.x;
+    float sliceScale = h.floats.y;
+    uint maxPerCluster = asuint(h.floats.z);
+    uint clusters = dims.x * dims.y * dims.z;
     uint c = id.x;
-    float4x4 vp = push.view[0].viewProjection;
+    float4x4 vp = push.viewProjection;
     // The camera's axes: right, down and forward, and the projection's scales across and down.
     float3 across = row(vp, 0);
     float3 down = row(vp, 1);
@@ -43,12 +47,12 @@ void clusterMain(uint3 id : SV_DispatchThreadID, uint local : SV_GroupIndex)
     across /= sx;
     down /= sy;
     // The cluster's box in view space (x right, y down, z forward).
-    uint3 cell = uint3(c % h.dims.x, (c / h.dims.x) % h.dims.y, c / (h.dims.x * h.dims.y));
-    float2 from = float2(cell.xy * h.tileSize) / float2(push.width, push.height) * 2 - 1;
-    float2 to = float2(min((cell.xy + 1) * h.tileSize, uint2(push.width, push.height)))
+    uint3 cell = uint3(c % dims.x, (c / dims.x) % dims.y, c / (dims.x * dims.y));
+    float2 from = float2(cell.xy * tileSize) / float2(push.width, push.height) * 2 - 1;
+    float2 to = float2(min((cell.xy + 1) * tileSize, uint2(push.width, push.height)))
         / float2(push.width, push.height) * 2 - 1;
-    float near = cell.z == 0 ? 0 : h.near * exp(float(cell.z) / h.sliceScale);
-    float far = cell.z + 1 == h.dims.z ? push.far : h.near * exp(float(cell.z + 1) / h.sliceScale);
+    float near = cell.z == 0 ? 0 : sliceNear * exp(float(cell.z) / sliceScale);
+    float far = cell.z + 1 == dims.z ? push.far : sliceNear * exp(float(cell.z + 1) / sliceScale);
     float3 lo = float3(min(min(from.x * near, from.x * far), min(to.x * near, to.x * far)) / sx,
         min(min(from.y * near, from.y * far), min(to.y * near, to.y * far)) / sy, near);
     float3 hi = float3(max(max(from.x * near, from.x * far), max(to.x * near, to.x * far)) / sx,
@@ -77,9 +81,9 @@ void clusterMain(uint3 id : SV_DispatchThreadID, uint local : SV_GroupIndex)
             float3 d = sphere.xyz - nearest;
             if (sphere.w < 0 || dot(d, d) <= sphere.w * sphere.w)
             {
-                if (count < h.maxPerCluster)
+                if (count < maxPerCluster)
                 {
-                    h.indices[c * h.maxPerCluster + count] = first + i;
+                    h.data1[c * maxPerCluster + count] = first + i;
                 }
                 count++;
             }
@@ -87,7 +91,7 @@ void clusterMain(uint3 id : SV_DispatchThreadID, uint local : SV_GroupIndex)
     }
     if (c < clusters)
     {
-        h.counts[c] = min(count, h.maxPerCluster);
+        h.data0[c] = min(count, maxPerCluster);
         InterlockedMax(push.header[0].overflow, count);
     }
 }

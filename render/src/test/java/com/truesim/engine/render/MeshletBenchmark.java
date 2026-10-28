@@ -544,14 +544,17 @@ class MeshletBenchmark {
             for (int count : new int[] {0, 256, 4096}) {
                 scatterLights(lights, count, groundY, 20);
                 SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-                Lights lit = count == 0 ? null : lights;
+                ClusteredLights clustered = new ClusteredLights(lights, camera, WIDTH, HEIGHT);
                 for (boolean forward : new boolean[] {true, false}) {
                     try (FrameGraph graph = new FrameGraph(device, 2)) {
                         graph.add(forward ? new ClusteredForwardShading(geometry, WIDTH, HEIGHT,
-                            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).lights(lit)
+                            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
                             : new VisibilityBufferShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
-                                VK_FORMAT_D32_SFLOAT).lights(lit))
+                                VK_FORMAT_D32_SFLOAT))
                             .output(Keys.SCENE_COLOR, target);
+                        if (count > 0) {
+                            graph.add(clustered);
+                        }
                         System.out.printf(Locale.ROOT, "  30,000 rocks on the terrain, %s, %s: %.3f ms median%n",
                             count == 0 ? "the sun" : String.format(Locale.ROOT, "%,d point lights", count),
                             forward ? "clustered forward"

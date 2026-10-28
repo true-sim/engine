@@ -1,5 +1,6 @@
-// Lights and how they reach a surface: the scene's lights (engine-render's Lights), binned per cluster of the view's
-// frustum (LightClusters), each with its shadows. Every way of shading imports this, so lights look the same in all.
+// Lights and how they reach a surface: the scene's lights (engine-render's Lights), each with its shadows, and the light
+// list a binning technique made for the frame (Keys.LIGHT_LIST), read through one interface whatever its layout. Every
+// way of shading imports this, so lights look the same in all.
 //
 // A light may cast shadows from one or more shadow maps, consecutive entries of the shadow table: a spot light one; a
 // directional light one per cascade, chosen by view depth (the first whose split is beyond the surface); a point light
@@ -38,28 +39,68 @@ public struct Shadow
     public uint size;              // texels across
 };
 
-/** What LightClusters made for the frame: 64 bytes, then a light count per cluster. */
-public struct ClusterHeader
+/**
+ * The frame's light list, as a binning technique made it: 80 bytes, then the layout's own data. Shading reads it through
+ * lightList(), which opens the layout's ILightList for a surface.
+ */
+public struct LightListHeader
 {
-    public uint3 dims;             // clusters across, down and deep
-    public uint tileSize;          // pixels per cluster, across and down
-    public float near;             // where the first depth slice starts
-    public float sliceScale;       // slices per unit of log depth: slice = log(depth / near) * sliceScale
-    public uint maxPerCluster;     // light slots per cluster
-    public uint overflow;          // the most lights any cluster wanted
+    public uint layout;            // CLUSTERS, ...
+    public uint lightCount;
+    public uint overflow;          // the most lights a bin wanted, beyond what it holds
+    public uint pad;
     public Light* lights;
     public Shadow* shadows;
-    public uint* indices;          // maxPerCluster slots per cluster
-    public uint* counts;           // per cluster
+    public uint* data0;            // the layout's lists (clusters: a count per cluster)
+    public uint* data1;            // (clusters: maxPerCluster slots per cluster)
+    public uint4 ints;             // the layout's numbers (clusters: across, down, deep, tile size in pixels)
+    public float4 floats;          // (clusters: near, slices per unit of log depth, maxPerCluster as bits, 0)
 };
 
-/** The cluster of a pixel at view depth `depth`. */
-public uint clusterAt(ClusterHeader* h, uint2 pixel, float depth)
+/** Light list layouts. */
+public static const uint CLUSTERS = 1;
+
+/** The lights reaching one surface, from a light list: how a layout is read. A new layout implements this. */
+public interface ILightList
 {
-    ClusterHeader c = h[0];
-    uint slice = uint(clamp(log(max(depth, c.near) / c.near) * c.sliceScale, 0.0, float(c.dims.z - 1)));
-    uint2 tile = min(pixel / c.tileSize, c.dims.xy - 1);
-    return (slice * c.dims.y + tile.y) * c.dims.x + tile.x;
+    /** How many lights may reach the surface. */
+    uint count();
+
+    /** The i-th of them, i < count(). */
+    Light light(uint i);
+}
+
+/**
+ * Clusters: the view's frustum in tiles of pixels across and down and exponential depth slices, each with its own
+ * light slots.
+ */
+public struct ClusterLightList : ILightList
+{
+    LightListHeader header;
+    uint cluster;
+    uint lights;
+
+    /** The cluster of the surface at `pixel`, `depth` from the viewer along the view direction. */
+    public __init(LightListHeader h, uint2 pixel, float depth)
+    {
+        header = h;
+        uint4 dims = h.ints;
+        float near = h.floats.x;
+        uint slice = uint(clamp(log(max(depth, near) / near) * h.floats.y, 0.0, float(dims.z - 1)));
+        uint2 tile = min(pixel / dims.w, dims.xy - 1);
+        cluster = (slice * dims.y + tile.y) * dims.x + tile.x;
+        lights = min(h.data0[cluster], asuint(h.floats.z));
+    }
+
+    public uint count()
+    {
+        return lights;
+    }
+
+    public Light light(uint i)
+    {
+        return header.lights[header.data1[cluster * asuint(header.floats.z) + i]];
+    }
 }
 
 /** How much of the light at `world` (camera-relative) reaches it past shadow `s`: 3 x 3 percentage-closer filtering. */
@@ -150,23 +191,33 @@ public float3 lightSurface(Light light, Shadow* shadows, Surface s, float3 world
     return reflected(s, toViewer, toLight, irradiance);
 }
 
+/** What every light of `list` adds to surface `s` at `world`, seen from `toViewer`, `depth` from the viewer. */
+public float3 lightAll<L : ILightList>(L list, Shadow* shadows, Surface s, float3 world, float3 toViewer, float depth)
+{
+    float3 sum = 0;
+    for (uint i = 0; i < list.count(); i++)
+    {
+        sum += lightSurface(list.light(i), shadows, s, world, toViewer, depth);
+    }
+    return sum;
+}
+
 /**
- * What every light of the surface's cluster adds: `pixel` and `depth` (from the viewer, along the view direction)
- * place it in the grid. Without clusters (null), nothing.
+ * What the lights of light list `h` add to the surface at `pixel` and `depth` (from the viewer, along the view
+ * direction): the layout's ILightList opened there. Without a light list (null), nothing.
  */
-public float3 lightCluster(ClusterHeader* h, Surface s, float3 world, float3 toViewer, uint2 pixel, float depth)
+public float3 lightList(LightListHeader* h, Surface s, float3 world, float3 toViewer, uint2 pixel, float depth)
 {
     if (h == nullptr)
     {
         return 0;
     }
-    ClusterHeader c = h[0];
-    uint cluster = clusterAt(h, pixel, depth);
-    uint count = min(c.counts[cluster], c.maxPerCluster);
-    float3 sum = 0;
-    for (uint i = 0; i < count; i++)
+    LightListHeader header = h[0];
+    switch (header.layout)
     {
-        sum += lightSurface(c.lights[c.indices[cluster * c.maxPerCluster + i]], c.shadows, s, world, toViewer, depth);
+    case CLUSTERS:
+        return lightAll(ClusterLightList(header, pixel, depth), header.shadows, s, world, toViewer, depth);
+    default:
+        return 0;
     }
-    return sum;
 }

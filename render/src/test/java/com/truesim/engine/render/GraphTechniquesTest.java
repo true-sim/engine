@@ -228,13 +228,13 @@ class GraphTechniquesTest {
         // A floor below the camera, a red light over its left side and a blue one over its right.
         renderer.setInstance(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
         renderer.setInstanceCount(1);
-        renderer.setView(new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1), 1,
-            MeshletRenderer.MODE_LIT);
+        Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
         try (Lights lights = new Lights(device, 4, 1)) {
             lights.point(0, -1, -0.5f, -1.5f, 3, 6, 0, 0).point(1, 1, -0.5f, -1.5f, 3, 0, 0, 6).setCount(2);
-            ClusteredForwardShading scene = MeshletBenchmark.forward(renderer, SIZE, SIZE)
-                .lights(lights);
-            graph.add(scene).output(Keys.SCENE_COLOR, output);
+            ClusteredLights clustered = new ClusteredLights(lights, camera, SIZE, SIZE);
+            graph.add(MeshletBenchmark.forward(renderer, SIZE, SIZE)).add(clustered)
+                .output(Keys.SCENE_COLOR, output);
             frame();
             assertThat(graph.passes()).containsOnlyOnce("light clusters");
             double leftRed = lower(0, 0, SIZE / 4);
@@ -249,9 +249,8 @@ class GraphTechniquesTest {
             assertThat(lower(0, 0, SIZE / 4))
                 .isCloseTo(lower(16, 0, SIZE / 4), org.assertj.core.data.Offset.offset(2.0))
                 .isLessThan(leftRed);
-            // Without the lights the scene is lit by the sun again.
-            scene.lights(null);
-            graph.invalidate();
+            // Without a light list the scene is lit by the sun again.
+            graph.remove(clustered);
             frame();
             assertThat(graph.passes()).doesNotContain("light clusters");
         }
@@ -264,17 +263,18 @@ class GraphTechniquesTest {
         renderer.setInstance(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
         renderer.setInstance(1, quad, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
         renderer.setInstanceCount(2);
-        renderer.setView(new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1), 1,
-            MeshletRenderer.MODE_LIT);
+        Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
         try (Lights lights = new Lights(device, 4, 1)) {
             lights.point(0, -1, -0.5f, -1.5f, 3, 6, 0, 0).point(1, 1, -0.5f, -1.5f, 3, 0, 0, 6)
                 .directional(2, -0.4f, -0.8f, -0.3f, 1, 1, 1).setCount(3);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
             ClusteredForwardShading forwardShading = new ClusteredForwardShading(geometry, SIZE, SIZE,
-                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).lights(lights).clearColor(0, 0, 0.5f);
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f);
             VisibilityBufferShading visibilityShading = new VisibilityBufferShading(geometry, SIZE, SIZE,
-                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).lights(lights).clearColor(0, 0, 0.5f);
-            graph.add(forwardShading).output(Keys.SCENE_COLOR, output);
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f);
+            graph.add(forwardShading).add(new ClusteredLights(lights, camera, SIZE, SIZE))
+                .output(Keys.SCENE_COLOR, output);
             for (MeshletRenderer.Path path : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED,
                 MeshletRenderer.Path.AUTO}) {
                 renderer.setPath(path);

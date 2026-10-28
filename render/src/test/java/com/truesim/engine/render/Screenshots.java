@@ -229,24 +229,25 @@ class Screenshots {
             int ground = pool.add(MeshletBenchmark.terrain(1024));
             double groundY = -12;
             MeshletBenchmark.rocksOnTerrain(renderer, rock, ground, 3000, 150, groundY);
-            renderer.setView(new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1,
-                MeshletRenderer.MODE_LIT);
+            Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
+            renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
             MeshletBenchmark.scatterLights(lights, 1024, groundY, 3);
             com.truesim.engine.graph.ExternalImage external = new com.truesim.engine.graph.ExternalImage("target",
                 WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
             ClusteredForwardShading scene = new ClusteredForwardShading(geometry, WIDTH, HEIGHT,
-                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).lights(lights).clearColor(0.02f, 0.02f, 0.05f);
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.02f, 0.05f);
             int[] forward;
             int[] visibility;
             try (com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
-                graph.add(scene).output(Keys.SCENE_COLOR, external);
+                graph.add(scene).add(new ClusteredLights(lights, camera, WIDTH, HEIGHT))
+                    .output(Keys.SCENE_COLOR, external);
                 capture(device, graph, target, pixels); // the first frame's late phase draws everything
                 forward = capture(device, graph, target, pixels);
                 write(forward, out.resolve("lights-forward.png"));
                 graph.replace(new VisibilityBufferShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
-                    VK_FORMAT_D32_SFLOAT).lights(lights).clearColor(0.02f, 0.02f, 0.05f));
+                    VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.02f, 0.05f));
                 capture(device, graph, target, pixels);
                 visibility = capture(device, graph, target, pixels);
                 write(visibility, out.resolve("lights-visibility.png"));

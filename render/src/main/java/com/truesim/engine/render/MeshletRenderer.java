@@ -145,7 +145,7 @@ public final class MeshletRenderer implements AutoCloseable {
     private static final int CULL_PUSH = 80;
     private static final int LISTS_BYTES = 32;
     /**
-     * Both draw paths' push blocks: the materials at byte 80 and the light clusters at 88, where the shared fragment
+     * Both draw paths' push blocks: the materials at byte 80 and the light list at 88, where the shared fragment
      * shader reads them.
      */
     private static final int DRAW_PUSH = 96;
@@ -434,7 +434,7 @@ public final class MeshletRenderer implements AutoCloseable {
         recordLate(commands, colorView, depthView, width, height, pyramid, mips, 0);
     }
 
-    /** Like {@link #recordLate(VkCommandBuffer, long, long, int, int, int, int)}, lit by {@code clusters}. */
+    /** Like {@link #recordLate(VkCommandBuffer, long, long, int, int, int, int)}, lit by the light list {@code lights}. */
     public void recordLate(VkCommandBuffer commands, long colorView, long depthView, int width, int height,
         int pyramid, int mips, long clusters) {
         cull(commands, 1, PHASE_LATE, pyramid, width, height, mips);
@@ -473,7 +473,7 @@ public final class MeshletRenderer implements AutoCloseable {
 
     /**
      * Like {@link #drawView(VkCommandBuffer, int, long, long, int, int, float, float, float)}, shaded with the lights
-     * of {@code clusters} (the device address of a {@link LightClusters} header; 0: the sun alone).
+     * of {@code clusters}: the device address of the frame's light list ({@link Keys#LIGHT_LIST}; 0: the sun alone).
      */
     public void drawView(VkCommandBuffer commands, int index, long colorView, long depthView, int width, int height,
         float r, float g, float b, long clusters) {
