@@ -7,6 +7,11 @@ import static org.lwjgl.util.vma.Vma.vmaDestroyImage;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_TILING_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_TYPE_2D;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_SAMPLED_BIT;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_STORAGE_BIT;
 import static org.lwjgl.vulkan.VK10.VK_SAMPLE_COUNT_1_BIT;
 import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_EXCLUSIVE;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -22,6 +27,10 @@ import org.lwjgl.vulkan.VkImageCreateInfo;
 /** A 2D image in GPU memory with a view of all of it, e.g. a render target, depth buffer or texture. */
 @AllowAllocation("created rarely")
 public final class GpuImage implements AutoCloseable {
+
+    private static final int VIEW_USAGES = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT
+        | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+        | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
 
     private final VulkanDevice device;
     private final long handle;
@@ -60,7 +69,8 @@ public final class GpuImage implements AutoCloseable {
                 "Could not allocate a " + width + " x " + height + " image");
             this.handle = image.get(0);
             this.allocation = allocated.get(0);
-            this.view = Images.createView(device, handle, format, aspect);
+            // Views are for shaders and attachments; an image only copied to and from has none.
+            this.view = (usage & VIEW_USAGES) != 0 ? Images.createView(device, handle, format, aspect) : 0;
         }
     }
 
@@ -68,6 +78,7 @@ public final class GpuImage implements AutoCloseable {
         return handle;
     }
 
+    /** A view of the whole image; 0 for images used only for copies. */
     public long view() {
         return view;
     }
@@ -88,7 +99,9 @@ public final class GpuImage implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
-            vkDestroyImageView(device.handle(), view, null);
+            if (view != 0) {
+                vkDestroyImageView(device.handle(), view, null);
+            }
             vmaDestroyImage(device.allocator(), handle, allocation);
         }
     }

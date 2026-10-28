@@ -1,0 +1,83 @@
+package com.truesim.engine.render.blocks;
+
+import static org.lwjgl.system.MemoryStack.stackPush;
+import static org.lwjgl.system.MemoryUtil.memPutFloat;
+import static org.lwjgl.system.MemoryUtil.memPutInt;
+import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
+
+import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.graph.Access;
+import com.truesim.engine.graph.GraphBuilder;
+import com.truesim.engine.graph.Image;
+import com.truesim.engine.graph.PassContext;
+import com.truesim.engine.graph.Request;
+import com.truesim.engine.vulkan.Pipeline;
+import com.truesim.engine.vulkan.ShaderModule;
+import java.util.Objects;
+import org.lwjgl.system.MemoryStack;
+
+/**
+ * A blurred copy of {@code source}: {@code radius} texels of the source on each side, at {@code scale} times its size
+ * (0.5 for half). Equal blurs (the same image, radius and scale) requested by any techniques are computed once. By
+ * default a separable Gaussian in two compute passes; {@code FrameGraph.implement(Blur.class, ...)} swaps in another
+ * way for every blur of the graph.
+ *
+ * <pre>{@code
+ * Image soft = g.request(new Blur(sceneColor, 8, 0.5));
+ * }</pre>
+ *
+ * <p>The source must be sampleable and its format usable as a storage image (e.g. {@code R16G16B16A16_SFLOAT} or
+ * {@code R8G8B8A8_UNORM}, not an sRGB format).
+ */
+public record Blur(Image source, int radius, double scale) implements Request<Image> {
+
+    public Blur {
+        Objects.requireNonNull(source, "source");
+        if (radius < 1 || radius > 64 || !(scale > 0 && scale <= 1)) {
+            throw new IllegalArgumentException("A blur takes a radius of 1 to 64 texels and a scale up to 1: " + radius
+                + ", " + scale);
+        }
+    }
+
+    /** The Gaussian blur: horizontally into a temporary image, then vertically into the result. */
+    @Override
+    @AllowAllocation("building the graph, when it changes")
+    public Image build(GraphBuilder g) {
+        Pipeline pipeline = g.cached(Blur.class, device -> {
+            try (ShaderModule shader = ShaderModule.load(device, "shaders/blocks/blur.spv")) {
+                return Pipeline.compute(device, shader, "blurMain", 28);
+            }
+        });
+        String name = "blur " + radius + " of " + source.name();
+        Image across = g.createLike(name + " (across)", source, scale);
+        Image result = g.createLike(name, source, scale);
+        float stepX = 1f / source.width();
+        float stepY = 1f / source.height();
+        g.pass(name + " across")
+            .read(source, Access.SAMPLED_COMPUTE)
+            .write(across, Access.STORAGE_WRITE)
+            .record(ctx -> dispatch(ctx, pipeline, source, across, stepX, 0, radius));
+        g.pass(name + " down")
+            .read(across, Access.SAMPLED_COMPUTE)
+            .write(result, Access.STORAGE_WRITE)
+            .record(ctx -> dispatch(ctx, pipeline, across, result, 0, stepY, radius));
+        return result;
+    }
+
+    private static void dispatch(PassContext ctx, Pipeline pipeline, Image from, Image to, float stepX, float stepY,
+        int radius) {
+        try (MemoryStack stack = stackPush()) {
+            long push = stack.nmalloc(8, 28);
+            memPutInt(push, ctx.sampled(from));
+            memPutInt(push + 4, ctx.storage(to));
+            memPutInt(push + 8, to.width());
+            memPutInt(push + 12, to.height());
+            memPutFloat(push + 16, stepX);
+            memPutFloat(push + 20, stepY);
+            memPutInt(push + 24, radius);
+            pipeline.bind(ctx.commands());
+            pipeline.push(ctx.commands(), push, 28);
+            vkCmdDispatch(ctx.commands(), (to.width() + 7) / 8, (to.height() + 7) / 8, 1);
+        }
+    }
+}

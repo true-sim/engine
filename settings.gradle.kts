@@ -18,9 +18,10 @@ plugins {
 
 rootProject.name = "engine"
 
-include("engine-platform", "engine-vulkan", "engine-render")
+include("engine-platform", "engine-vulkan", "engine-graph", "engine-render")
 project(":engine-platform").projectDir = file("platform")
 project(":engine-vulkan").projectDir = file("vulkan")
+project(":engine-graph").projectDir = file("graph")
 project(":engine-render").projectDir = file("render")
 
 providers.gradleProperty("truesim.build-logic").orNull?.let { includeBuild(it) }

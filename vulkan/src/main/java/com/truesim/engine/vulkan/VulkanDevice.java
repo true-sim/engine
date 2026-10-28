@@ -87,6 +87,7 @@ public final class VulkanDevice implements AutoCloseable {
     private final Queue compute;
     private final Queue transfer;
     private final long allocator;
+    private final Bindless bindless;
     private final int apiVersion;
     private final Vulkan14Features features14;
     private final boolean meshShaders;
@@ -159,6 +160,9 @@ public final class VulkanDevice implements AutoCloseable {
                 .descriptorIndexing(true)
                 .runtimeDescriptorArray(true)
                 .descriptorBindingPartiallyBound(true)
+                .descriptorBindingSampledImageUpdateAfterBind(true)
+                .descriptorBindingStorageImageUpdateAfterBind(true)
+                .descriptorBindingUpdateUnusedWhilePending(true)
                 .scalarBlockLayout(true)
                 .shaderInt8(true)
                 .storageBuffer8BitAccess(true)
@@ -172,7 +176,8 @@ public final class VulkanDevice implements AutoCloseable {
                 .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
                 .pNext(features11.address());
             features.features().shaderInt64(true).shaderInt16(true).multiDrawIndirect(true)
-                .drawIndirectFirstInstance(true);
+                .drawIndirectFirstInstance(true).shaderStorageImageReadWithoutFormat(true)
+                .shaderStorageImageWriteWithoutFormat(true);
             VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
                 .pNext(features.address())
@@ -202,6 +207,7 @@ public final class VulkanDevice implements AutoCloseable {
             Vulkan.check(vmaCreateAllocator(allocatorInfo, pointer), "Could not create the memory allocator");
             this.allocator = pointer.get(0);
         }
+        this.bindless = new Bindless(this);
         LOG.info("Device on {}: Vulkan {}, queues graphics {}, compute {}, transfer {}", gpu, Vulkan.version(apiVersion),
             graphics.family(), compute.family(), transfer.family());
     }
@@ -285,6 +291,17 @@ public final class VulkanDevice implements AutoCloseable {
         check(missing, features12.runtimeDescriptorArray(), "runtimeDescriptorArray");
         check(missing, features12.descriptorBindingPartiallyBound(), "descriptorBindingPartiallyBound");
         check(missing, features12.scalarBlockLayout(), "scalarBlockLayout");
+        // The bindless set: image slots written while frames using other slots are in flight; storage images of any
+        // format, so one array holds them all.
+        check(missing, features12.descriptorBindingSampledImageUpdateAfterBind(),
+            "descriptorBindingSampledImageUpdateAfterBind");
+        check(missing, features12.descriptorBindingStorageImageUpdateAfterBind(),
+            "descriptorBindingStorageImageUpdateAfterBind");
+        check(missing, features12.descriptorBindingUpdateUnusedWhilePending(),
+            "descriptorBindingUpdateUnusedWhilePending");
+        check(missing, features.features().shaderStorageImageReadWithoutFormat(), "shaderStorageImageReadWithoutFormat");
+        check(missing, features.features().shaderStorageImageWriteWithoutFormat(),
+            "shaderStorageImageWriteWithoutFormat");
         if (!missing.isEmpty()) {
             throw new VulkanException(gpu.name() + " lacks required features: " + missing);
         }
@@ -322,6 +339,11 @@ public final class VulkanDevice implements AutoCloseable {
     /** The VMA allocator, for buffers and images. */
     public long allocator() {
         return allocator;
+    }
+
+    /** The device's bindless descriptor set and the pipeline layout all pipelines share. */
+    public Bindless bindless() {
+        return bindless;
     }
 
     /** Whether swapchains can be created on this device. */
@@ -397,6 +419,7 @@ public final class VulkanDevice implements AutoCloseable {
         }
         closed = true;
         waitIdle();
+        bindless.close();
         vmaDestroyAllocator(allocator);
         vkDestroyDevice(handle, null);
     }
