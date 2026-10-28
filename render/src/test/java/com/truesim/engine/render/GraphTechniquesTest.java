@@ -334,11 +334,64 @@ class GraphTechniquesTest {
                 .clearColor(0, 0, 1))
             .output(Keys.SCENE_COLOR, output);
         frame();
-        assertThat(graph.passes()).containsExactly("meshlets");
-        assertThat(graph.pooledImages()).isEqualTo(1); // only depth: the color is the target
+        assertThat(graph.passes()).containsExactly("meshlets early", "depth pyramid of scene depth", "meshlets late");
+        assertThat(graph.pooledImages()).isEqualTo(2); // depth and its pyramid: the color is the target
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
         assertThat(red(1, 1)).isZero(); // blue clear color
         assertThat(renderer.visibleMeshlets()).isEqualTo(1);
+        // Without occlusion culling: one pass.
+        graph.close();
+        graph = new FrameGraph(device, 2).add(new MeshletScene(renderer, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_FORMAT_D32_SFLOAT).occlusion(false)).output(Keys.SCENE_COLOR, output);
+        frame();
+        assertThat(graph.passes()).containsExactly("meshlets");
+        assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
+    }
+
+    /** How many pixels are drawn: white, not the blue clear color. */
+    private int covered() {
+        int count = 0;
+        for (int y = 0; y < SIZE; y++) {
+            for (int x = 0; x < SIZE; x++) {
+                count += red(x, y) > 0.5 ? 1 : 0;
+            }
+        }
+        return count;
+    }
+
+    @Test
+    void hiddenObjectsAreCulledAndAppearTheFrameTheyShow() {
+        for (MeshletRenderer.Path path : device.meshShaders()
+            ? new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED, MeshletRenderer.Path.MESH_SHADERS}
+            : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED}) {
+            renderer.setPath(path);
+            // A wall filling the view 5 units ahead, and 8 quads behind it, 10 units ahead.
+            renderer.setInstance(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);
+            for (int i = 1; i <= 8; i++) {
+                renderer.setInstance(i, quad, (i % 4 - 1.5f) * 2.5f, i <= 4 ? -1.5f : 1.5f, -10, HALF, 0, 0, HALF,
+                    0.5f, 0.5f, 0.5f);
+            }
+            renderer.setInstanceCount(9);
+            renderer.setView(new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
+                MeshletRenderer.MODE_WHITE);
+            graph.close();
+            graph = new FrameGraph(device, 2).add(new MeshletScene(renderer, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 1)).output(Keys.SCENE_COLOR, output);
+            frame(); // nothing known yet: the late phase draws all
+            assertThat(renderer.visibleMeshlets()).as("first frame, %s", path).isEqualTo(9);
+            frame(); // all drawn early; the late phase finds the 8 behind the wall hidden
+            assertThat(renderer.visibleMeshlets()).isEqualTo(9);
+            frame(); // only the wall now
+            assertThat(renderer.visibleMeshlets()).as("hidden, %s", path).isEqualTo(1);
+            assertThat(covered()).isEqualTo(SIZE * SIZE);
+            // The wall moves out of view: the quads behind it are drawn the same frame.
+            renderer.setInstance(0, quad, 100, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);
+            frame();
+            assertThat(renderer.visibleMeshlets()).as("shown, %s", path).isEqualTo(8);
+            assertThat(covered()).isPositive().isLessThan(SIZE * SIZE / 2);
+            frame();
+            assertThat(renderer.visibleMeshlets()).isEqualTo(8); // drawn early now
+        }
     }
 
     @Test

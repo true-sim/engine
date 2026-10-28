@@ -12,6 +12,8 @@ struct InstancePush
     uint* chunkCommand;
     Level* levels;
     uint maxChunks;
+    uint* visibility;      // per instance: 1 if it was visible the last time the late phase looked
+    Occlusion occlusion;
 };
 
 [[vk::push_constant]]
@@ -28,7 +30,27 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     }
     Instance instance = push.instances[id.x];
     MeshEntry mesh = push.meshes[instance.mesh];
-    if (!inFrustum(view, toWorld(instance, mesh.sphere.xyz), mesh.sphere.w * maxScale(instance)))
+    float3 center = toWorld(instance, mesh.sphere.xyz);
+    float radius = mesh.sphere.w * maxScale(instance);
+    uint phase = push.occlusion.phase;
+    bool inView = inFrustum(view, center, radius);
+    if (phase == PHASE_EARLY && (!inView || push.visibility[id.x] == 0))
+    {
+        return; // the early phase draws what was visible last frame
+    }
+    if (phase == PHASE_LATE)
+    {
+        // Every instance in view is tested against the pyramid of what the early phase drew; the late phase draws
+        // those now visible that the early phase did not.
+        bool drawnEarly = push.visibility[id.x] != 0;
+        bool visible = inView && unoccluded(view, push.occlusion, center, radius);
+        push.visibility[id.x] = visible ? 1 : 0;
+        if (!visible || drawnEarly)
+        {
+            return;
+        }
+    }
+    else if (!inView)
     {
         return;
     }

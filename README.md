@@ -176,6 +176,21 @@ frames recorded back to back (the paths take turns, so they see the same clocks)
 | 30,000 rocks | 2.46 billion | 0.59 ms | 0.61 ms | 102 ms | 2.80 ms (+0.47 ms CPU) |
 | terrain at a grazing angle | 2.1 M | 0.081 ms | 0.084 ms | 0.17 ms | (one mesh: full detail) |
 
+Small scenes depend on how the GPU clocks for short frames: from one session to the next, the 3,000 rocks and the
+terrain measured 0.08 to 0.14 ms on the same code. Comparisons are made within a session.
+
+**Occlusion culling.** Through the frame graph, `MeshletScene` draws in two phases around a `DepthPyramid`. The early
+phase draws the instances visible last frame (a bit per instance, kept on the GPU). The late phase tests every
+instance in view against the pyramid of that depth, and the meshlets of those newly visible too. It draws what came
+into view in the same frame, so nothing pops in. Hidden objects cost only their instance test. The pyramid test is
+conservative: a sphere's box is projected, and its nearest depth is compared at the level where the box covers at most
+2 x 2 texels, mapped by what each texel really covers. 30,000 rocks, in the same session:
+
+| Scene | Occlusion culling off | On |
+|---|---|---|
+| in the open (rocks hide rocks) | 0.59 ms, 99,052 meshlets | 0.51 ms, 69,507 meshlets |
+| behind a wall (the terrain, upright, 80 units ahead) | 0.64 ms, 99,239 meshlets | 0.17 ms, 2,984 meshlets |
+
 `TRUESIM_SCREENSHOTS=true ./gradlew :engine-render:test --tests '*Screenshots'` renders these scenes to PNGs under
 `render/build/screenshots`, shaded and colored per meshlet.
 

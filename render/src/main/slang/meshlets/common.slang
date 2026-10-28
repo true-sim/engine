@@ -2,6 +2,8 @@
 // writes them (std430-compatible offsets), and the decoders for quantized data. Everything is reached by pointer.
 module common;
 
+import bindless;
+
 /** One mesh in the geometry pool: where its data lies in the pool's buffers, and its quantization box. 96 bytes. */
 public struct MeshEntry
 {
@@ -118,6 +120,66 @@ public float projectedError(View view, float3 center, float radius, float error)
     }
     float distance = length(center) - radius;
     return distance > 0 ? error * view.projectionScale / distance : 1.0 / 0.0;
+}
+
+// ---------------------------------------------------------------- occlusion culling
+
+/** Which phase of two-phase occlusion culling a pass runs, and the depth pyramid the late phase tests against. */
+public struct Occlusion
+{
+    public uint phase;        // 0: no occlusion culling; 1: early, last frame's visible; 2: late, against the pyramid
+    public uint pyramid;      // sampled slot of the depth pyramid (DepthPyramid: farthest depth, reverse)
+    public uint depthWidth;   // the depth image's size: the pyramid's level 0 is half of it, rounded up
+    public uint depthHeight;
+    public uint mips;
+};
+
+public static const uint PHASE_ALL = 0;
+public static const uint PHASE_EARLY = 1;
+public static const uint PHASE_LATE = 2;
+
+/**
+ * Whether a sphere (camera-relative) may be seen past what the depth pyramid holds. Its box is projected; at the
+ * pyramid level where the box covers at most 2 x 2 texels, it is hidden if its nearest depth is farther than all of
+ * them. Texels are found by what they cover (level 0: 2 x 2 depth texels; higher levels: 2 x 2 of the level below,
+ * the last of an odd row 3), so the test never hides anything visible. A box reaching behind the camera is visible.
+ */
+public bool unoccluded(View view, Occlusion hzb, float3 center, float radius)
+{
+    float2 lo = 1.0e9;
+    float2 hi = -1.0e9;
+    float nearest = 0; // reverse depth: the nearest point has the largest depth
+    for (int i = 0; i < 8; i++)
+    {
+        float3 corner = center + radius * float3((i & 1) != 0 ? 1 : -1, (i & 2) != 0 ? 1 : -1, (i & 4) != 0 ? 1 : -1);
+        float4 clip = mul(view.viewProjection, float4(corner, 1.0));
+        if (clip.w <= 1.0e-5)
+        {
+            return true;
+        }
+        float3 ndc = clip.xyz / clip.w;
+        lo = min(lo, ndc.xy);
+        hi = max(hi, ndc.xy);
+        nearest = max(nearest, ndc.z);
+    }
+    // In depth texels, then in level-0 pyramid texels (2 x 2 depth texels each).
+    float2 depthSize = float2(hzb.depthWidth, hzb.depthHeight);
+    float2 from = saturate(lo * 0.5 + 0.5) * depthSize * 0.5;
+    float2 to = saturate(hi * 0.5 + 0.5) * depthSize * 0.5;
+    float extent = max(to.x - from.x, to.y - from.y);
+    uint level = min(hzb.mips - 1, uint(ceil(log2(max(extent, 1.0)))));
+    int2 levelSize = int2(max(uint2((hzb.depthWidth + 1) / 2, (hzb.depthHeight + 1) / 2) >> level, uint2(1, 1)));
+    int2 a = min(int2(from / float(1u << level)), levelSize - 1);
+    int2 b = min(int2(to / float(1u << level)), levelSize - 1);
+    float farthest = 1;
+    for (int y = a.y; y <= b.y; y++)
+    {
+        for (int x = a.x; x <= b.x; x++)
+        {
+            farthest = min(farthest, textures[hzb.pyramid].Load(int3(x, y, int(level))).r);
+        }
+    }
+    return nearest >= farthest;
 }
 
 // ---------------------------------------------------------------- shared by both geometry paths
