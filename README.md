@@ -153,10 +153,10 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
   parent's more), the frustum and its normal cone (whole meshlets facing away).
 - **Two paths, one set of shaders:** with mesh shaders (`VK_EXT_mesh_shader`, enabled where the GPU has it), a task
   workgroup per chunk culls and launches a mesh workgroup per visible meshlet, which emits its vertices and triangles
-  straight from the pool. Without, a compute pass per chunk writes indexed indirect draws, drawn with one
-  `vkCmdDrawIndexedIndirectCount`. The meshlet test, vertex decoding and shading are one Slang module
-  (`meshlets/common.slang`) both paths import, and they draw the same image (tested). `Path.AUTO` picks mesh shaders
-  where available.
+  straight from the pool. Without, a compute pass per chunk lists visible meshlets, an expansion pass writes their
+  triangles into one index buffer, and one `vkCmdDrawIndexedIndirect` draws them. The meshlet test, vertex decoding
+  and shading are one Slang module (`meshlets/common.slang`) both paths import, and they draw the same image
+  (tested). `Path.AUTO` picks mesh shaders where available.
 - **Instance-level LOD range:** before culling meshlets, the instance pass skips every level finer than the first one
   whose error, seen from the instance's nearest point, is within the allowed pixels: the rule could not pick anything
   there. A far instance costs a chunk or two, however detailed its mesh.
@@ -164,19 +164,23 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
 Measured with `MeshletBenchmark` (`TRUESIM_BENCHMARK=true`) on an AMD Radeon RX 9070 XT at 1920 x 1080 with 1 pixel
 of error allowed, GPU time of the whole frame (instance pass, culling, drawing):
 
-| Scene | Source triangles | Mesh shaders | Indexed | Meshlets drawn |
-|---|---|---|---|---|
-| 1,000 rocks (65k-triangle mesh, cluster hierarchy) | 65.5 M | 0.11 ms | 0.75 ms | 19,681 |
-| 3,000 rocks | 197 M | 0.26 ms | 2.07 ms | 57,289 |
-| 10,000 rocks | 655 M | 0.75 ms | 6.86 ms | 190,813 |
-| 30,000 rocks | 1.97 billion | 2.12 ms | 20.6 ms | 576,127 |
-| terrain at a grazing angle | 2.1 M | 0.07 ms | 0.10 ms | 723 |
+| Scene | Source triangles | Mesh shaders | Indexed | No meshlets: full detail | No meshlets: discrete LODs, CPU culling |
+|---|---|---|---|---|---|
+| 1,000 rocks (65k-triangle mesh) | 65.5 M | 0.11 ms | 0.17 ms | 2.79 ms | 0.10 ms (+0.20 ms CPU) |
+| 3,000 rocks | 197 M | 0.24 ms | 0.24 ms | 8.08 ms | 0.27 ms (+0.39 ms CPU) |
+| 10,000 rocks | 655 M | 0.71 ms | 0.88 ms | 27.0 ms | 0.88 ms (+0.19 ms CPU) |
+| 30,000 rocks | 1.97 billion | 2.07 ms | 2.72 ms | 81.6 ms | 2.61 ms (+0.58 ms CPU) |
+| terrain at a grazing angle | 2.1 M | 0.06 ms | 0.08 ms | 0.16 ms | (one mesh: full detail) |
 
 `TRUESIM_SCREENSHOTS=true ./gradlew :engine-render:test --tests '*Screenshots'` renders these scenes to PNGs under
 `render/build/screenshots`, shaded and colored per meshlet.
 
-The indexed path issues one draw per visible meshlet, which dominates at these counts; compacting visible meshlets
-into one draw is #12.
+The indexed path draws everything with one draw: culling lists the visible meshlets, an expansion pass writes their
+triangles into the frame's index buffer (each index is the meshlet's slot and local vertex), and one
+`vkCmdDrawIndexedIndirect` draws them. The baselines without meshlets draw whole meshes, one indirect draw per instance:
+at full detail, or as a classic engine does, picking a discrete LOD per instance and culling on the CPU. For many
+small objects such classic LODs keep up; the cluster hierarchy draws about twice their triangles at the same error
+here, which is being looked into.
 
 - **Reverse depth with an infinite far plane,** camera-relative instances: precise near and far, anywhere in a large
   world.

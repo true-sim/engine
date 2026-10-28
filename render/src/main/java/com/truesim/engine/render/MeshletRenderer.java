@@ -11,6 +11,7 @@ import static org.lwjgl.vulkan.EXTMeshShader.VK_SHADER_STAGE_TASK_BIT_EXT;
 import static org.lwjgl.vulkan.EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_LOAD_OP_CLEAR;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_STORE_OP_STORE;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -24,9 +25,10 @@ import static org.lwjgl.vulkan.VK10.nvkCmdUpdateBuffer;
 import static org.lwjgl.vulkan.VK10.vkCmdBindIndexBuffer;
 import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
 import static org.lwjgl.vulkan.VK10.vkCmdDispatchIndirect;
+import static org.lwjgl.vulkan.VK10.vkCmdDrawIndexedIndirect;
 import static org.lwjgl.vulkan.VK10.vkCmdFillBuffer;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-import static org.lwjgl.vulkan.VK12.vkCmdDrawIndexedIndirectCount;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_INDEX_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
@@ -34,6 +36,7 @@ import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
@@ -70,8 +73,9 @@ import org.lwjgl.vulkan.VkViewport;
  * <ul>
  *   <li>{@link Path#MESH_SHADERS}: a task workgroup per chunk culls and launches a mesh workgroup per visible meshlet,
  *       which emits its vertices and triangles; where the device has mesh shaders.</li>
- *   <li>{@link Path#INDEXED}: a compute workgroup per chunk culls into indexed indirect draws, drawn with one
- *       {@code vkCmdDrawIndexedIndirectCount}; on every device.</li>
+ *   <li>{@link Path#INDEXED}: a compute workgroup per chunk culls and lists the visible meshlets, an expansion pass
+ *       writes their triangles into the frame's index buffer, and one indexed draw draws them all; on every
+ *       device.</li>
  * </ul>
  *
  * <pre>{@code
@@ -106,15 +110,16 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /**
-     * How much a frame holds: instances, visible meshlets on the indexed path, and chunks of 64 meshlets of visible
-     * instances (at most 65,535: the guaranteed dispatch size).
+     * How much a frame holds: instances, visible meshlets, chunks of 64 meshlets of visible instances (at most 65,535:
+     * the guaranteed dispatch size) and, on the indexed path, visible triangles (12 bytes each in the frame's index
+     * buffer). Meshlets beyond these are not drawn.
      */
-    public record Limits(int instances, int draws, int chunks) {
+    public record Limits(int instances, int draws, int chunks, int triangles) {
 
         public Limits {
-            if (instances < 1 || draws < 1 || chunks < 1 || chunks > 65_535) {
-                throw new IllegalArgumentException("Need room for instances, draws and 1 to 65,535 chunks: "
-                    + instances + ", " + draws + ", " + chunks);
+            if (instances < 1 || draws < 1 || chunks < 1 || chunks > 65_535 || triangles < 1) {
+                throw new IllegalArgumentException("Need room for instances, draws, triangles and 1 to 65,535 chunks: "
+                    + instances + ", " + draws + ", " + chunks + ", " + triangles);
             }
         }
     }
@@ -123,7 +128,6 @@ public final class MeshletRenderer implements AutoCloseable {
     private static final long TASK_SHADER_STAGE = VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT;
     static final int INSTANCE_BYTES = 48;
     private static final int VIEW_BYTES = 192;
-    private static final int DRAW_BYTES = 20;
     private static final ValueLayout.OfInt U32 = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfFloat F32 = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
@@ -131,14 +135,17 @@ public final class MeshletRenderer implements AutoCloseable {
     private final Limits limits;
     private final Pipeline instancesPass;
     private final Pipeline cull;
+    private final Pipeline expand;
     private final Pipeline draw;
     private final Pipeline meshDraw;
     private final GpuBuffer view;
     private final GpuBuffer instances;
     private final GpuBuffer chunks;
     private final GpuBuffer chunkCommand;
-    private final GpuBuffer draws;
-    private final GpuBuffer drawMeshlets;
+    private final GpuBuffer visible;
+    private final GpuBuffer frameIndices;
+    private final GpuBuffer expandCommand;
+    private final GpuBuffer drawCommand;
     private final GpuBuffer drawCount;
     private Path path = Path.AUTO;
     private int instanceCount;
@@ -150,15 +157,17 @@ public final class MeshletRenderer implements AutoCloseable {
         this.limits = Objects.requireNonNull(limits, "limits");
         try (ShaderModule instanceShader = ShaderModule.load(device, "shaders/meshlets/instances.spv");
              ShaderModule cullShader = ShaderModule.load(device, "shaders/meshlets/cull.spv");
+             ShaderModule expandShader = ShaderModule.load(device, "shaders/meshlets/expand.spv");
              ShaderModule drawShader = ShaderModule.load(device, "shaders/meshlets/draw.spv")) {
             instancesPass = Pipeline.compute(device, instanceShader, "instancesMain", 56);
-            cull = Pipeline.compute(device, cullShader, "cullMain", 72);
+            cull = Pipeline.compute(device, cullShader, "cullMain", 88);
+            expand = Pipeline.compute(device, expandShader, "expandMain", 64);
             draw = Pipeline.graphics(device)
                 .stage(VK_SHADER_STAGE_VERTEX_BIT, drawShader, "vertexMain")
                 .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "fragmentMain")
                 .color(colorFormat)
                 .depth(depthFormat)
-                .pushConstants(48)
+                .pushConstants(64)
                 .build();
             if (device.meshShaders()) {
                 try (ShaderModule meshShader = ShaderModule.load(device, "shaders/meshlets/mesh.spv")) {
@@ -181,9 +190,12 @@ public final class MeshletRenderer implements AutoCloseable {
         chunks = GpuBuffer.deviceLocal(device, 8L * limits.chunks(), storage);
         chunkCommand = GpuBuffer.deviceLocal(device, 16,
             storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        draws = GpuBuffer.deviceLocal(device, (long) DRAW_BYTES * limits.draws(),
-            storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
-        drawMeshlets = GpuBuffer.deviceLocal(device, 4L * limits.draws(), storage);
+        int commandUsage = storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        visible = GpuBuffer.deviceLocal(device, 16L * limits.draws(), storage);
+        frameIndices = GpuBuffer.deviceLocal(device, 12L * limits.triangles(),
+            storage | VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+        expandCommand = GpuBuffer.deviceLocal(device, 16, commandUsage);
+        drawCommand = GpuBuffer.deviceLocal(device, 24, commandUsage);
         drawCount = GpuBuffer.hostVisible(device, 4,
             storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     }
@@ -273,6 +285,10 @@ public final class MeshletRenderer implements AutoCloseable {
             memPutInt(reset + 8, 1);
             memPutInt(reset + 12, 0);
             nvkCmdUpdateBuffer(commands, chunkCommand.handle(), 0, 16, reset);
+            nvkCmdUpdateBuffer(commands, expandCommand.handle(), 0, 16, reset); // no meshlets: x by 1 by 1
+            long draw = stack.ncalloc(4, 6, 4); // no indices, one instance; word 5 counts reserved indices
+            memPutInt(draw + 4, 1);
+            nvkCmdUpdateBuffer(commands, drawCommand.handle(), 0, 24, draw);
         }
         barrier(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT
@@ -298,23 +314,44 @@ public final class MeshletRenderer implements AutoCloseable {
                 | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         if (!meshShading) {
             try (MemoryStack stack = stackPush()) {
-                long push = stack.nmalloc(8, 72);
+                long push = stack.nmalloc(8, 88);
                 memPutLong(push, view.deviceAddress());
                 memPutLong(push + 8, pool.meshTable().deviceAddress());
                 memPutLong(push + 16, instances.deviceAddress());
                 memPutLong(push + 24, chunks.deviceAddress());
                 memPutLong(push + 32, pool.meshlets().deviceAddress());
                 memPutLong(push + 40, pool.clusterLod().deviceAddress());
-                memPutLong(push + 48, draws.deviceAddress());
-                memPutLong(push + 56, drawMeshlets.deviceAddress());
-                memPutLong(push + 64, drawCount.deviceAddress());
+                memPutLong(push + 48, visible.deviceAddress());
+                memPutLong(push + 56, expandCommand.deviceAddress());
+                memPutLong(push + 64, drawCommand.deviceAddress());
+                memPutLong(push + 72, drawCount.deviceAddress());
+                memPutInt(push + 80, (int) Math.min(Integer.MAX_VALUE, 3L * limits.triangles()));
                 cull.bind(commands);
-                cull.push(commands, push, 72);
+                cull.push(commands, push, 84);
                 vkCmdDispatchIndirect(commands, chunkCommand.handle(), 0);
             }
             barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+                VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+            try (MemoryStack stack = stackPush()) {
+                long push = stack.nmalloc(8, 64);
+                memPutLong(push, view.deviceAddress());
+                memPutLong(push + 8, visible.deviceAddress());
+                memPutLong(push + 16, drawCount.deviceAddress());
+                memPutLong(push + 24, pool.meshlets().deviceAddress());
+                memPutLong(push + 32, pool.meshTable().deviceAddress());
+                memPutLong(push + 40, instances.deviceAddress());
+                memPutLong(push + 48, pool.meshletTriangles().deviceAddress());
+                memPutLong(push + 56, frameIndices.deviceAddress());
+                expand.bind(commands);
+                expand.push(commands, push, 64);
+                vkCmdDispatchIndirect(commands, expandCommand.handle(), 0);
+            }
+            barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT
+                    | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+                VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT
+                    | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
         }
         try (MemoryStack stack = stackPush()) {
             beginRendering(commands, stack, colorView, depthView, width, height, r, g, b);
@@ -336,19 +373,20 @@ public final class MeshletRenderer implements AutoCloseable {
                 meshDraw.push(commands, push, 88);
                 vkCmdDrawMeshTasksIndirectEXT(commands, chunkCommand.handle(), 0, 1, 12);
             } else {
-                long push = stack.nmalloc(8, 48);
+                long push = stack.nmalloc(8, 64);
                 memPutLong(push, view.deviceAddress());
                 memPutLong(push + 8, pool.meshTable().deviceAddress());
                 memPutLong(push + 16, instances.deviceAddress());
                 memPutLong(push + 24, pool.positions().deviceAddress());
                 memPutLong(push + 32, pool.attributes().deviceAddress());
-                memPutLong(push + 40, drawMeshlets.deviceAddress());
+                memPutLong(push + 40, visible.deviceAddress());
+                memPutLong(push + 48, pool.meshlets().deviceAddress());
+                memPutLong(push + 56, pool.meshletVertices().deviceAddress());
                 draw.bind(commands);
                 setViewport(commands, stack, width, height);
-                draw.push(commands, push, 48);
-                vkCmdBindIndexBuffer(commands, pool.indices().handle(), 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexedIndirectCount(commands, draws.handle(), 0, drawCount.handle(), 0, limits.draws(),
-                    DRAW_BYTES);
+                draw.push(commands, push, 64);
+                vkCmdBindIndexBuffer(commands, frameIndices.handle(), 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexedIndirect(commands, drawCommand.handle(), 0, 1, 20);
             }
             vkCmdEndRendering(commands);
         }
@@ -426,17 +464,29 @@ public final class MeshletRenderer implements AutoCloseable {
         return limits;
     }
 
+    /** The view buffer, for other passes drawing the same frame. */
+    GpuBuffer viewBuffer() {
+        return view;
+    }
+
+    /** The instance buffer, for other passes drawing the same instances. */
+    GpuBuffer instanceBuffer() {
+        return instances;
+    }
+
     @Override
     public void close() {
         if (!closed) {
             closed = true;
             instancesPass.close();
             cull.close();
+            expand.close();
             draw.close();
             if (meshDraw != null) {
                 meshDraw.close();
             }
-            for (GpuBuffer buffer : new GpuBuffer[] {view, instances, chunks, chunkCommand, draws, drawMeshlets,
+            for (GpuBuffer buffer : new GpuBuffer[] {view, instances, chunks, chunkCommand, visible, frameIndices,
+                expandCommand, drawCommand,
                 drawCount}) {
                 buffer.close();
             }

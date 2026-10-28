@@ -129,6 +129,15 @@ public struct Chunk
     public uint firstMeshlet;
 };
 
+/** A meshlet the indexed path draws: its instance, pool meshlet and first index in the frame's index buffer. */
+public struct VisibleMeshlet
+{
+    public uint instance;
+    public uint meshlet;
+    public uint firstIndex;
+    public uint pad;
+};
+
 /** What the vertex or mesh shader hands the fragment shader: the same for both paths. */
 public struct VertexOut
 {
