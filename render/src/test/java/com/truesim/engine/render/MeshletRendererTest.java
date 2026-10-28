@@ -109,7 +109,7 @@ class MeshletRendererTest {
      * A grid of {@code n} x {@code n} quads, {@code size} units each, in the x-z plane facing +y, centered on the origin;
      * bumpy (height 0.6 sin(x / 3) cos(z / 4)) when asked, built as a cluster hierarchy.
      */
-    private static MeshData grid(int n, float size, boolean bumpy, VertexFormat format) {
+    static MeshData grid(int n, float size, boolean bumpy, VertexFormat format) {
         int count = (n + 1) * (n + 1);
         float[] positions = new float[count * 3];
         float[] normals = new float[count * 3];

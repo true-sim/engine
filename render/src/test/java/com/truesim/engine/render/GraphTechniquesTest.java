@@ -1,0 +1,269 @@
+package com.truesim.engine.render;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.within;
+import static org.assertj.core.api.Assumptions.assumeThat;
+import static org.lwjgl.system.MemoryStack.stackPush;
+import static org.lwjgl.system.MemoryUtil.memPutInt;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+import static org.lwjgl.vulkan.VK10.nvkCmdCopyBufferToImage;
+import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
+
+import com.truesim.engine.graph.Access;
+import com.truesim.engine.graph.ExternalImage;
+import com.truesim.engine.graph.FrameGraph;
+import com.truesim.engine.graph.GraphBuilder;
+import com.truesim.engine.graph.Image;
+import com.truesim.engine.graph.Key;
+import com.truesim.engine.graph.Technique;
+import com.truesim.engine.render.blocks.Blur;
+import com.truesim.engine.vulkan.GpuBuffer;
+import com.truesim.engine.vulkan.GpuImage;
+import com.truesim.engine.vulkan.VulkanDevice;
+import com.truesim.engine.vulkan.VulkanException;
+import com.truesim.engine.vulkan.VulkanInstance;
+import com.truesim.scene.assets.mesh.VertexFormat;
+import java.lang.foreign.ValueLayout;
+import java.util.List;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkBufferImageCopy;
+import org.lwjgl.vulkan.VkImageSubresourceLayers;
+
+/**
+ * The renderer's techniques in a frame graph, validated: the meshlet scene drawn straight into the target, and the
+ * blur building block, computed once for every technique asking for it.
+ */
+class GraphTechniquesTest {
+
+    private static final int SIZE = 64;
+    private static final float HALF = (float) Math.sqrt(0.5);
+    private static final Key EDGE = Key.of("edge");
+
+    private VulkanInstance instance;
+    private VulkanDevice device;
+    private GeometryPool pool;
+    private MeshletRenderer renderer;
+    private FrameGraph graph;
+    private GpuImage target;
+    private ExternalImage output;
+    private GpuBuffer pixels;
+    private GpuBuffer pattern;
+    private int quad;
+
+    @BeforeEach
+    void start() {
+        try {
+            instance = VulkanInstance.builder().applicationName("tests").validation(true).surfaces(false).build();
+        } catch (VulkanException | UnsatisfiedLinkError e) {
+            assumeThat(e).as("no Vulkan available").isNull();
+            throw e;
+        }
+        assumeThat(instance.gpus()).as("no Vulkan 1.3 GPU").isNotEmpty();
+        device = VulkanDevice.createHeadless(instance.bestGpu());
+        pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 12, 64, 4));
+        quad = pool.add(MeshletRendererTest.grid(1, 2, false, VertexFormat.POSITIONS_ONLY));
+        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12),
+            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+        graph = new FrameGraph(device, 2);
+        int usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+            | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        target = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
+        output = new ExternalImage("target", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
+        pixels = GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        // White on the left half, black on the right.
+        pattern = GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        for (int y = 0; y < SIZE; y++) {
+            for (int x = 0; x < SIZE; x++) {
+                pattern.memory().setAtIndex(ValueLayout.JAVA_INT, y * SIZE + x, x < SIZE / 2 ? 0xffffffff : 0xff000000);
+            }
+        }
+    }
+
+    @AfterEach
+    void stop() {
+        if (device != null) {
+            device.waitIdle();
+            int errors = instance.validationErrors();
+            graph.close();
+            pattern.close();
+            pixels.close();
+            target.close();
+            renderer.close();
+            pool.close();
+            device.close();
+            instance.close();
+            assertThat(errors).as("validation errors").isZero();
+        } else if (instance != null) {
+            instance.close();
+        }
+    }
+
+    /** Provides {@link #EDGE}: the pattern, white left and black right. */
+    private final class Edge implements Technique {
+        @Override
+        public List<Key> provides() {
+            return List.of(EDGE);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image image = g.create("edge", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("upload edge").write(image, Access.TRANSFER_DST).record(ctx -> {
+                try (MemoryStack stack = stackPush()) {
+                    long region = stack.ncalloc(4, 1, VkBufferImageCopy.SIZEOF);
+                    memPutInt(region + VkBufferImageCopy.IMAGESUBRESOURCE + VkImageSubresourceLayers.ASPECTMASK,
+                        VK_IMAGE_ASPECT_COLOR_BIT);
+                    memPutInt(region + VkBufferImageCopy.IMAGESUBRESOURCE + VkImageSubresourceLayers.LAYERCOUNT, 1);
+                    memPutInt(region + VkBufferImageCopy.IMAGEEXTENT, SIZE);
+                    memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 4, SIZE);
+                    memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 8, 1);
+                    nvkCmdCopyBufferToImage(ctx.commands(), pattern.handle(), ctx.image(image),
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, region);
+                }
+            });
+            g.provide(EDGE, image);
+        }
+    }
+
+    /** Provides {@code key}: the blur of {@link #EDGE}, through the shared request. */
+    private record Blurred(Key key, int radius) implements Technique {
+        @Override
+        public List<Key> provides() {
+            return List.of(key);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            g.provide(key, g.request(new Blur(g.require(EDGE), radius, 1)));
+        }
+    }
+
+    /** Provides {@code out}: the left half of {@code left} beside the right half of {@code right}. */
+    private record Halves(Key out, Key left, Key right) implements Technique {
+        @Override
+        public List<Key> provides() {
+            return List.of(out);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image l = g.require(left);
+            Image r = g.require(right);
+            Image image = g.createLike("halves", l, 1);
+            g.pass("halves").read(l, Access.TRANSFER_SRC).read(r, Access.TRANSFER_SRC)
+                .write(image, Access.TRANSFER_DST).record(ctx -> {
+                    copy(ctx.commands(), ctx.image(l), ctx.image(image), 0);
+                    copy(ctx.commands(), ctx.image(r), ctx.image(image), SIZE / 2);
+                });
+            g.provide(out, image);
+        }
+
+        private static void copy(org.lwjgl.vulkan.VkCommandBuffer commands, long from, long to, int x) {
+            try (MemoryStack stack = stackPush()) {
+                org.lwjgl.vulkan.VkImageCopy.Buffer region = org.lwjgl.vulkan.VkImageCopy.calloc(1, stack);
+                region.srcSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
+                region.dstSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
+                region.srcOffset().set(x, 0, 0);
+                region.dstOffset().set(x, 0, 0);
+                region.extent().set(SIZE / 2, SIZE, 1);
+                org.lwjgl.vulkan.VK10.vkCmdCopyImage(commands, from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, to,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+            }
+        }
+    }
+
+    /** Records a frame and reads the target back. */
+    private void frame() {
+        device.submitAndWait(device.graphics(), commands -> {
+            graph.record(commands);
+            try (MemoryStack stack = stackPush()) {
+                VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
+                region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
+                region.imageExtent().set(SIZE, SIZE, 1);
+                vkCmdCopyImageToBuffer(commands, target.handle(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    pixels.handle(), region);
+            }
+        });
+    }
+
+    /** The red channel at (x, y), 0 to 1. */
+    private double red(int x, int y) {
+        return (pixels.memory().getAtIndex(ValueLayout.JAVA_INT, y * SIZE + x) & 0xff) / 255.0;
+    }
+
+    @Test
+    void theMeshletSceneDrawsStraightIntoTheTarget() {
+        renderer.setInstance(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
+        renderer.setInstanceCount(1);
+        renderer.setView(new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
+            MeshletRenderer.MODE_WHITE);
+        graph.add(new MeshletScene(renderer, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                .clearColor(0, 0, 1))
+            .output(Keys.SCENE_COLOR, output);
+        frame();
+        assertThat(graph.passes()).containsExactly("meshlets");
+        assertThat(graph.pooledImages()).isEqualTo(1); // only depth: the color is the target
+        assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
+        assertThat(red(1, 1)).isZero(); // blue clear color
+        assertThat(renderer.visibleMeshlets()).isEqualTo(1);
+    }
+
+    @Test
+    void blursSmoothTheEdgeAndAreComputedOnceForEveryone() {
+        Key soft = Key.of("soft");
+        Key alsoSoft = Key.of("also soft");
+        Key both = Key.of("both");
+        graph.add(new Edge())
+            .add(new Blurred(soft, 4))
+            .add(new Blurred(alsoSoft, 4))
+            .add(new Halves(both, soft, alsoSoft))
+            .output(both, output);
+        frame();
+        assertThat(graph.passes()).containsExactly("upload edge", "blur 4 of edge across", "blur 4 of edge down",
+            "halves");
+        // Far from the edge nothing changes; across it the value falls smoothly from white to black.
+        assertThat(red(2, SIZE / 2)).isEqualTo(1);
+        assertThat(red(SIZE - 3, SIZE / 2)).isZero();
+        assertThat(red(SIZE / 2 - 1, SIZE / 2)).isCloseTo(0.6, within(0.15));
+        assertThat(red(SIZE / 2, SIZE / 2)).isCloseTo(0.4, within(0.15));
+        double previous = 2;
+        for (int x = SIZE / 2 - 6; x <= SIZE / 2 + 6; x++) {
+            assertThat(red(x, SIZE / 2)).isLessThanOrEqualTo(previous);
+            previous = red(x, SIZE / 2);
+        }
+        // A blur at half size: computed apart, a different request.
+        graph.close();
+        graph = new FrameGraph(device, 2).add(new Edge()).add(new Technique() {
+            @Override
+            public List<Key> provides() {
+                return List.of(soft);
+            }
+
+            @Override
+            public void build(GraphBuilder g) {
+                g.provide(soft, g.request(new Blur(g.require(EDGE), 2, 0.5)));
+            }
+        }).output(soft, output);
+        frame();
+        assertThat(graph.passes()).containsExactly("upload edge", "blur 2 of edge across", "blur 2 of edge down",
+            "output target");
+        assertThat(red(2, 2)).isEqualTo(1);
+        assertThat(red(SIZE - 3, 2)).isZero();
+        org.assertj.core.api.Assertions.assertThatNullPointerException().isThrownBy(() -> new Blur(null, 1, 1));
+    }
+}

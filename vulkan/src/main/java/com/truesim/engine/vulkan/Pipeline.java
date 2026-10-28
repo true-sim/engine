@@ -25,7 +25,6 @@ import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -35,9 +34,7 @@ import static org.lwjgl.vulkan.VK10.vkCmdBindPipeline;
 import static org.lwjgl.vulkan.VK10.nvkCmdPushConstants;
 import static org.lwjgl.vulkan.VK10.vkCreateComputePipelines;
 import static org.lwjgl.vulkan.VK10.vkCreateGraphicsPipelines;
-import static org.lwjgl.vulkan.VK10.vkCreatePipelineLayout;
 import static org.lwjgl.vulkan.VK10.vkDestroyPipeline;
-import static org.lwjgl.vulkan.VK10.vkDestroyPipelineLayout;
 import static org.lwjgl.vulkan.VK10.VK_NULL_HANDLE;
 import static org.lwjgl.vulkan.EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
@@ -56,18 +53,17 @@ import org.lwjgl.vulkan.VkPipelineColorBlendStateCreateInfo;
 import org.lwjgl.vulkan.VkPipelineDepthStencilStateCreateInfo;
 import org.lwjgl.vulkan.VkPipelineDynamicStateCreateInfo;
 import org.lwjgl.vulkan.VkPipelineInputAssemblyStateCreateInfo;
-import org.lwjgl.vulkan.VkPipelineLayoutCreateInfo;
 import org.lwjgl.vulkan.VkPipelineMultisampleStateCreateInfo;
 import org.lwjgl.vulkan.VkPipelineRasterizationStateCreateInfo;
 import org.lwjgl.vulkan.VkPipelineRenderingCreateInfo;
 import org.lwjgl.vulkan.VkPipelineShaderStageCreateInfo;
 import org.lwjgl.vulkan.VkPipelineVertexInputStateCreateInfo;
 import org.lwjgl.vulkan.VkPipelineViewportStateCreateInfo;
-import org.lwjgl.vulkan.VkPushConstantRange;
 
 /**
- * A compute or graphics pipeline with its layout. Shaders get their data through buffer device addresses passed in
- * push constants ({@link #push}), so pipelines need no descriptor sets: one push constant range for all stages.
+ * A compute or graphics pipeline. Shaders get buffers through device addresses passed in push constants ({@link #push})
+ * and images through slots of the device's {@link Bindless} set; every pipeline shares the device's one layout, so the
+ * set is bound once per command buffer.
  * Graphics pipelines render with dynamic rendering, have dynamic viewport and scissor, pull vertices themselves (no
  * vertex input) and use reverse depth (greater or equal passes; clear depth to 0).
  *
@@ -105,7 +101,7 @@ public final class Pipeline implements AutoCloseable {
     /** A compute pipeline running {@code entry} of {@code module}, with {@code pushBytes} of push constants. */
     public static Pipeline compute(VulkanDevice device, ShaderModule module, String entry, int pushBytes) {
         try (MemoryStack stack = stackPush()) {
-            long layout = createLayout(device, stack, pushBytes);
+            long layout = layoutFor(device, pushBytes);
             VkComputePipelineCreateInfo.Buffer info = VkComputePipelineCreateInfo.calloc(1, stack)
                 .sType(VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO)
                 .layout(layout);
@@ -115,13 +111,8 @@ public final class Pipeline implements AutoCloseable {
                 .module(module.handle())
                 .pName(stack.UTF8(entry));
             LongBuffer pipeline = stack.mallocLong(1);
-            try {
-                Vulkan.check(vkCreateComputePipelines(device.handle(), VK_NULL_HANDLE, info, null, pipeline),
-                    "Could not create the compute pipeline " + entry + " of " + module.name());
-            } catch (VulkanException e) {
-                vkDestroyPipelineLayout(device.handle(), layout, null);
-                throw e;
-            }
+            Vulkan.check(vkCreateComputePipelines(device.handle(), VK_NULL_HANDLE, info, null, pipeline),
+                "Could not create the compute pipeline " + entry + " of " + module.name());
             return new Pipeline(device, pipeline.get(0), layout, VK_PIPELINE_BIND_POINT_COMPUTE, pushBytes);
         }
     }
@@ -131,20 +122,13 @@ public final class Pipeline implements AutoCloseable {
         return new Graphics(device);
     }
 
-    private static long createLayout(VulkanDevice device, MemoryStack stack, int pushBytes) {
-        if (pushBytes < 0 || pushBytes % 4 != 0 || pushBytes > 128) {
-            throw new IllegalArgumentException("Push constants are 0 to 128 bytes, a multiple of 4: " + pushBytes);
+    /** The device's shared layout, after checking {@code pushBytes} fits it. */
+    private static long layoutFor(VulkanDevice device, int pushBytes) {
+        if (pushBytes < 0 || pushBytes % 4 != 0 || pushBytes > Bindless.PUSH_BYTES) {
+            throw new IllegalArgumentException("Push constants are 0 to " + Bindless.PUSH_BYTES
+                + " bytes, a multiple of 4: " + pushBytes);
         }
-        VkPipelineLayoutCreateInfo info = VkPipelineLayoutCreateInfo.calloc(stack)
-            .sType(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
-        if (pushBytes > 0) {
-            info.pPushConstantRanges(VkPushConstantRange.calloc(1, stack)
-                .stageFlags(VK_SHADER_STAGE_ALL)
-                .size(pushBytes));
-        }
-        LongBuffer layout = stack.mallocLong(1);
-        Vulkan.check(vkCreatePipelineLayout(device.handle(), info, null, layout), "Could not create a pipeline layout");
-        return layout.get(0);
+        return device.bindless().pipelineLayout();
     }
 
     public long handle() {
@@ -178,7 +162,6 @@ public final class Pipeline implements AutoCloseable {
         if (!closed) {
             closed = true;
             vkDestroyPipeline(device.handle(), handle, null);
-            vkDestroyPipelineLayout(device.handle(), layout, null);
         }
     }
 
@@ -235,7 +218,7 @@ public final class Pipeline implements AutoCloseable {
                 throw new IllegalStateException("A graphics pipeline needs shader stages");
             }
             try (MemoryStack stack = stackPush()) {
-                long layout = createLayout(device, stack, pushBytes);
+                long layout = layoutFor(device, pushBytes);
                 VkPipelineShaderStageCreateInfo.Buffer shaderStages =
                     VkPipelineShaderStageCreateInfo.calloc(stages.size(), stack);
                 for (int i = 0; i < stages.size(); i++) {
@@ -300,13 +283,8 @@ public final class Pipeline implements AutoCloseable {
                             .topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST));
                 }
                 LongBuffer pipeline = stack.mallocLong(1);
-                try {
-                    Vulkan.check(vkCreateGraphicsPipelines(device.handle(), VK_NULL_HANDLE, info, null, pipeline),
-                        "Could not create a graphics pipeline from " + stages.getFirst().module.name());
-                } catch (VulkanException e) {
-                    vkDestroyPipelineLayout(device.handle(), layout, null);
-                    throw e;
-                }
+                Vulkan.check(vkCreateGraphicsPipelines(device.handle(), VK_NULL_HANDLE, info, null, pipeline),
+                    "Could not create a graphics pipeline from " + stages.getFirst().module.name());
                 return new Pipeline(device, pipeline.get(0), layout, VK_PIPELINE_BIND_POINT_GRAPHICS, pushBytes);
             }
         }

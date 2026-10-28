@@ -1,0 +1,65 @@
+package com.truesim.engine.render;
+
+import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.graph.Access;
+import com.truesim.engine.graph.GraphBuilder;
+import com.truesim.engine.graph.Image;
+import com.truesim.engine.graph.Key;
+import com.truesim.engine.graph.Technique;
+import java.util.List;
+import java.util.Objects;
+
+/**
+ * The scene drawn by a {@link MeshletRenderer}, as a frame graph technique: provides {@link Keys#SCENE_COLOR} and
+ * {@link Keys#SCENE_DEPTH}, cleared to a color and drawn with the renderer's current instances and view. The renderer
+ * is set up as usual (instances, view, path); the graph records it.
+ *
+ * <pre>{@code
+ * graph.add(new MeshletScene(renderer, 1920, 1080, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT));
+ * }</pre>
+ */
+public final class MeshletScene implements Technique {
+
+    private final MeshletRenderer renderer;
+    private final int width;
+    private final int height;
+    private final int colorFormat;
+    private final int depthFormat;
+    private final float[] clear = new float[3];
+
+    /** The renderer's pipelines must have been made for {@code colorFormat} and {@code depthFormat}. */
+    public MeshletScene(MeshletRenderer renderer, int width, int height, int colorFormat, int depthFormat) {
+        this.renderer = Objects.requireNonNull(renderer, "renderer");
+        this.width = width;
+        this.height = height;
+        this.colorFormat = colorFormat;
+        this.depthFormat = depthFormat;
+    }
+
+    /** The color behind everything; read when recording, so it may change every frame. */
+    public MeshletScene clearColor(float r, float g, float b) {
+        clear[0] = r;
+        clear[1] = g;
+        clear[2] = b;
+        return this;
+    }
+
+    @Override
+    public List<Key> provides() {
+        return List.of(Keys.SCENE_COLOR, Keys.SCENE_DEPTH);
+    }
+
+    @Override
+    @AllowAllocation("building the graph, when it changes")
+    public void build(GraphBuilder g) {
+        Image color = g.create("scene color", width, height, colorFormat);
+        Image depth = g.create("scene depth", width, height, depthFormat);
+        g.pass("meshlets")
+            .write(color, Access.COLOR_ATTACHMENT)
+            .write(depth, Access.DEPTH_ATTACHMENT)
+            .record(ctx -> renderer.record(ctx.commands(), ctx.view(color), ctx.view(depth), width, height, clear[0],
+                clear[1], clear[2]));
+        g.provide(Keys.SCENE_COLOR, color);
+        g.provide(Keys.SCENE_DEPTH, depth);
+    }
+}

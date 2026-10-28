@@ -10,7 +10,8 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 |-------------------|-------------------------------|---------------------------------------------------------|
 | `engine-platform` | `com.truesim.engine.platform` | SDL3: displays, windows, runtime mode changes, all input devices |
 | `engine-vulkan`   | `com.truesim.engine.vulkan`   | Vulkan 1.3, 1.4 where available: instance, GPUs, devices, swapchains, frames |
-| `engine-render`   | `com.truesim.engine.render`   | GPU-driven meshlet rendering of scene's meshes: geometry pool, GPU culling and LOD |
+| `engine-graph`    | `com.truesim.engine.graph`    | Frame graph: techniques plugged together by the results they provide and need |
+| `engine-render`   | `com.truesim.engine.render`   | GPU-driven meshlet rendering of scene's meshes: geometry pool, GPU culling and LOD; blur |
 
 ## Platform
 
@@ -107,8 +108,9 @@ try (VulkanInstance instance = VulkanInstance.builder().applicationName("game").
 ### Shaders and pipelines
 
 Shaders are Slang under `src/main/slang`, compiled to SPIR-V resources by build-logic's `truesim.slang` plugin with
-a pinned compiler. Data reaches shaders through buffer device addresses passed in push constants: no descriptor
-sets, no vertex input; shaders pull what they need.
+a pinned compiler. Buffers reach shaders through device addresses passed in push constants, images through slots of
+the device's one bindless descriptor set (`Bindless`: sampled images, samplers, storage images). Every pipeline shares
+one layout, so the set is bound once per command buffer. There is no vertex input: shaders pull what they need.
 
 ```java
 try (ShaderModule shaders = ShaderModule.load(device, "shaders/meshlets.spv");
@@ -190,7 +192,57 @@ simplification errors, which stay close to the real deviation from full detail.
 - Tested on the GPU: coverage of a quad, culling (behind, outside, facing away), LOD cuts from full detail to a few
   meshlets that keep the covered area within 2 % (no holes), and both paths drawing the same image.
 
-The frame graph (#8) builds on this.
+
+## Frame graph
+
+`engine-graph` assembles the frame from **techniques**, such as the meshlet scene, bloom or tone mapping, without any
+hand wiring. A technique states which results it provides (by `Key`), requires the results it needs, and adds passes
+that declare how they use each image. The graph does the rest:
+
+- **Resolved by key:** requiring a result builds the technique that provides it, the first time. Techniques nothing
+  needs are never built, and providers always come before consumers. Errors name the techniques involved: a key
+  nobody provides, two providers of one key, a cycle, writing someone else's result, reading an image before
+  anything writes it.
+- **Shared work runs once:** building blocks such as `Blur` are `Request`s, values with inputs and parameters. Every
+  equal request from any technique gets the same result: two techniques asking for the scene blurred by 4 texels
+  share one blur.
+- **Swappable:** `replace` swaps a technique for another providing the same keys (one lighting or translucency
+  technique for another). `implement` changes how every request of a type is computed (a cheaper blur on low
+  settings). Nothing else changes.
+- **Culled:** walking back from the outputs, passes whose images nothing needs are dropped.
+- **Synchronized:** barriers and layout transitions come from the declared accesses, batched into one call per pass,
+  with none between reads.
+- **Pooled:** transient images live in a pool kept across frames, and images whose lifetimes do not overlap share
+  one. An output that fits its target (the swapchain image, say) is drawn straight into it; others are blitted.
+
+```java
+graph.add(new MeshletScene(renderer, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT))
+    .add(new Bloom())                       // requires Keys.SCENE_COLOR, provides BLOOM
+    .add(new ToneMap())                     // requires BLOOM, provides TONEMAPPED
+    .output(TONEMAPPED, swapchainImage);    // an ExternalImage, set to the acquired image each frame
+graph.record(commands);                     // per frame: nothing allocated
+
+final class Bloom implements Technique {
+    public List<Key> provides() { return List.of(BLOOM); }
+
+    public void build(GraphBuilder g) {
+        Image scene = g.require(Keys.SCENE_COLOR);
+        Image soft = g.request(new Blur(scene, 8, 0.5));    // shared with any equal request
+        Image out = g.createLike("bloom", scene, 1);
+        g.pass("bloom")
+            .read(scene, Access.SAMPLED_COMPUTE).read(soft, Access.SAMPLED_COMPUTE)
+            .write(out, Access.STORAGE_WRITE)
+            .record(ctx -> ...);                             // ctx.sampled(scene), ctx.storage(out): bindless slots
+        g.provide(BLOOM, out);
+    }
+}
+```
+
+The graph is rebuilt only when it changes: techniques, outputs or implementations, an external image resized, or
+`invalidate()`. Per-frame data lives in the techniques, and pass bodies read it when recording.
+
+Not yet: transient buffers, recording passes in parallel on the JobSystem, async compute, and merging similar work
+across views (#8).
 
 ## Building
 
