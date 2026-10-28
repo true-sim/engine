@@ -1,6 +1,6 @@
 package com.truesim.engine.render;
 
-import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
@@ -12,6 +12,7 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
+import java.util.Objects;
 
 /**
  * Every mesh's GPU data in shared device-local buffers, one per kind, as scene's {@link MeshData} lays it out:
@@ -69,7 +70,6 @@ public final class GeometryPool implements AutoCloseable {
     private final GpuBuffer meshletTriangles;
     private final GpuBuffer meshlets;
     private final GpuBuffer clusterLod;
-    private final GpuBuffer indices;
     private final GpuBuffer meshTable;
     private final GpuBuffer levels;
     private int vertexCount;
@@ -87,8 +87,12 @@ public final class GeometryPool implements AutoCloseable {
         int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         int transferDst = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         long triangleIndices = 3L * capacity.triangles();
+        // Positions are ray tracing's build input too, where the device traces rays: bottom-level acceleration
+        // structures read them as they are.
+        int buildInput = device.rayTracing() ? VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+            : 0;
         positions = GpuBuffer.deviceLocal(device, (long) MeshData.POSITION_BYTES * capacity.vertices(),
-            usage | transferDst);
+            usage | transferDst | buildInput);
         attributes = GpuBuffer.deviceLocal(device, 28L * capacity.vertices(), usage | transferDst);
         meshletVertices = GpuBuffer.deviceLocal(device, 4L * capacity.meshlets() * 255, usage | transferDst);
         meshletTriangles = GpuBuffer.deviceLocal(device, (triangleIndices + 3) & ~3L, usage | transferDst);
@@ -96,8 +100,6 @@ public final class GeometryPool implements AutoCloseable {
             usage | transferDst);
         clusterLod = GpuBuffer.deviceLocal(device, (long) MeshData.CLUSTER_LOD_BYTES * capacity.meshlets(),
             usage | transferDst);
-        indices = GpuBuffer.deviceLocal(device, 4L * triangleIndices,
-            usage | transferDst | VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
         meshTable = GpuBuffer.hostVisible(device, (long) MESH_ENTRY_BYTES * capacity.meshes(), usage);
         levels = GpuBuffer.hostVisible(device, 8L * MAX_LEVELS * capacity.meshes(), usage);
     }
@@ -133,7 +135,6 @@ public final class GeometryPool implements AutoCloseable {
         writeTriangles(mesh);
         meshlets.write((long) MeshData.MESHLET_BYTES * meshletCount, mesh.meshlets());
         clusterLod.write((long) MeshData.CLUSTER_LOD_BYTES * meshletCount, mesh.clusterLod());
-        indices.write(4L * indexCount, mesh.expandIndices());
         MemorySegment entry = meshTable.memory().asSlice((long) MESH_ENTRY_BYTES * meshCount, MESH_ENTRY_BYTES);
         for (int axis = 0; axis < 3; axis++) {
             entry.set(F32, 4L * axis, (float) mesh.boxMin(axis));
@@ -164,8 +165,8 @@ public final class GeometryPool implements AutoCloseable {
     }
 
     /**
-     * The meshlet triangles, at the same position as the mesh's indices: a byte per index, so the index base works for
-     * both. Copied word-aligned: the pool's byte offset may not be a multiple of 4.
+     * The meshlet triangles, a byte per local index, from the mesh's index base (its triangles' first index in the
+     * pool, counted in indices). Copied word-aligned: the pool's byte offset may not be a multiple of 4.
      */
     private void writeTriangles(MeshData mesh) {
         MemorySegment source = mesh.meshletTriangles();
@@ -261,6 +262,11 @@ public final class GeometryPool implements AutoCloseable {
         return meshletTriangles;
     }
 
+    /** Mesh {@code mesh}'s first vertex in {@link #positions()}. */
+    int vertexBase(int mesh) {
+        return meshTable.memory().get(U32, (long) MESH_ENTRY_BYTES * Objects.checkIndex(mesh, meshCount) + 12);
+    }
+
     GpuBuffer positions() {
         return positions;
     }
@@ -277,10 +283,6 @@ public final class GeometryPool implements AutoCloseable {
         return clusterLod;
     }
 
-    GpuBuffer indices() {
-        return indices;
-    }
-
     GpuBuffer meshTable() {
         return meshTable;
     }
@@ -294,7 +296,7 @@ public final class GeometryPool implements AutoCloseable {
         if (!closed) {
             closed = true;
             for (GpuBuffer buffer : new GpuBuffer[] {positions, attributes, meshletVertices, meshletTriangles,
-                meshlets, clusterLod, indices, meshTable, levels}) {
+                meshlets, clusterLod, meshTable, levels}) {
                 buffer.close();
             }
         }

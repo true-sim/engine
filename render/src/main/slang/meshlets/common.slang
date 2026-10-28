@@ -50,6 +50,7 @@ public struct View
     public uint instanceCount;
     public uint maxDraws;
     public uint mode;              // 0 lit, 1 meshlet colors, 2 white
+    public uint orthographic;      // 1: projectionScale is pixels per unit at any distance (e.g. a sun's shadow map)
 };
 
 public float3 rotate(float4 q, float3 v)
@@ -117,6 +118,10 @@ public float projectedError(View view, float3 center, float radius, float error)
     if (error == 0)
     {
         return 0;
+    }
+    if (view.orthographic != 0)
+    {
+        return error * view.projectionScale;
     }
     float distance = length(center) - radius;
     return distance > 0 ? error * view.projectionScale / distance : 1.0 / 0.0;
@@ -232,7 +237,9 @@ public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets,
         return false;
     }
     float4 cone = decodeSnorm8(meshlets[w + 7]);
-    return cone.w >= 1 || dot(center, rotate(instance.rotation, cone.xyz)) < cone.w * length(center) + radius;
+    // The cone test assumes a viewer at the origin; orthographic views (shadow maps) keep back faces.
+    return view.orthographic != 0 || cone.w >= 1
+        || dot(center, rotate(instance.rotation, cone.xyz)) < cone.w * length(center) + radius;
 }
 
 /** Pool vertex `vertex` of an instance, transformed and with its normal: the vertex stage of both paths. */
@@ -259,6 +266,9 @@ public float3 meshletColor(uint meshlet)
     return float3((h >> 8) & 0xff, (h >> 16) & 0xff, (h >> 24) & 0xff) / 255.0 * 0.8 + 0.2;
 }
 
+/** Towards the sun, the scene's one light: (0.4, 0.8, 0.3) normalized, as engine-render's Keys.SUN. */
+public static const float3 SUN = float3(0.42399915, 0.84799830, 0.31799936);
+
 /** The surface color: the fragment stage of both paths. */
 public float4 shadeSurface(View view, VertexOut in)
 {
@@ -267,6 +277,6 @@ public float4 shadeSurface(View view, VertexOut in)
         return float4(1, 1, 1, 1);
     }
     float3 base = view.mode == 1 ? meshletColor(in.meshlet) : float3(0.8, 0.8, 0.8);
-    float light = 0.25 + 0.75 * saturate(dot(normalize(in.normal), normalize(float3(0.4, 0.8, 0.3))));
+    float light = 0.25 + 0.75 * saturate(dot(normalize(in.normal), SUN));
     return float4(base * light, 1);
 }

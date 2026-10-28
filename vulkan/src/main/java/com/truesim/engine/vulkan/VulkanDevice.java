@@ -5,6 +5,11 @@ import static org.lwjgl.util.vma.Vma.VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_
 import static org.lwjgl.util.vma.Vma.vmaCreateAllocator;
 import static org.lwjgl.util.vma.Vma.vmaDestroyAllocator;
 import static org.lwjgl.vulkan.EXTMeshShader.VK_EXT_MESH_SHADER_EXTENSION_NAME;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+import static org.lwjgl.vulkan.KHRDeferredHostOperations.VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME;
+import static org.lwjgl.vulkan.KHRRayQuery.VK_KHR_RAY_QUERY_EXTENSION_NAME;
+import static org.lwjgl.vulkan.KHRRayQuery.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
 import static org.lwjgl.vulkan.EXTMeshShader.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -59,6 +64,8 @@ import org.lwjgl.vulkan.VkDeviceCreateInfo;
 import org.lwjgl.vulkan.VkDeviceQueueCreateInfo;
 import org.lwjgl.vulkan.VkFenceCreateInfo;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
+import org.lwjgl.vulkan.VkPhysicalDeviceAccelerationStructureFeaturesKHR;
+import org.lwjgl.vulkan.VkPhysicalDeviceRayQueryFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceMeshShaderFeaturesEXT;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan11Features;
 import org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Features;
@@ -91,6 +98,7 @@ public final class VulkanDevice implements AutoCloseable {
     private final int apiVersion;
     private final Vulkan14Features features14;
     private final boolean meshShaders;
+    private final boolean rayTracing;
     private final boolean swapchains;
     private boolean closed;
 
@@ -131,6 +139,32 @@ public final class VulkanDevice implements AutoCloseable {
                 }
             }
             this.meshShaders = meshShading != null;
+            // Hardware ray tracing where the GPU has it: acceleration structures, traced by ray queries from any shader.
+            VkPhysicalDeviceAccelerationStructureFeaturesKHR structures = null;
+            VkPhysicalDeviceRayQueryFeaturesKHR queries = null;
+            if (gpu.supports(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) && gpu.supports(VK_KHR_RAY_QUERY_EXTENSION_NAME)
+                && gpu.supports(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)) {
+                VkPhysicalDeviceAccelerationStructureFeaturesKHR structureQuery =
+                    VkPhysicalDeviceAccelerationStructureFeaturesKHR.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR);
+                VkPhysicalDeviceRayQueryFeaturesKHR rayQuery = VkPhysicalDeviceRayQueryFeaturesKHR.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR)
+                    .pNext(structureQuery.address());
+                vkGetPhysicalDeviceFeatures2(gpu.handle(), VkPhysicalDeviceFeatures2.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2).pNext(rayQuery.address()));
+                if (structureQuery.accelerationStructure() && rayQuery.rayQuery()
+                    && structureQuery.descriptorBindingAccelerationStructureUpdateAfterBind()) {
+                    structures = VkPhysicalDeviceAccelerationStructureFeaturesKHR.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR)
+                        .accelerationStructure(true)
+                        .descriptorBindingAccelerationStructureUpdateAfterBind(true);
+                    queries = VkPhysicalDeviceRayQueryFeaturesKHR.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR)
+                        .pNext(structures.address())
+                        .rayQuery(true);
+                }
+            }
+            this.rayTracing = queries != null;
             Map<Integer, QueueFamily> distinct = new LinkedHashMap<>();
             for (QueueFamily family : List.of(graphicsFamily, computeFamily, transferFamily)) {
                 distinct.put(family.index(), family);
@@ -151,6 +185,10 @@ public final class VulkanDevice implements AutoCloseable {
             if (meshShading != null) {
                 meshShading.pNext(features13.pNext());
                 features13.pNext(meshShading.address());
+            }
+            if (queries != null) {
+                structures.pNext(features13.pNext());
+                features13.pNext(queries.address());
             }
             VkPhysicalDeviceVulkan12Features features12 = VkPhysicalDeviceVulkan12Features.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
@@ -182,7 +220,7 @@ public final class VulkanDevice implements AutoCloseable {
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
                 .pNext(features.address())
                 .pQueueCreateInfos(queues.flip())
-                .ppEnabledExtensionNames(extensions(stack, swapchains, meshShaders));
+                .ppEnabledExtensionNames(extensions(stack, swapchains, meshShaders, rayTracing));
             PointerBuffer device = stack.mallocPointer(1);
             Vulkan.check(vkCreateDevice(gpu.handle(), info, null, device), "Could not create a device on " + gpu.name());
             this.handle = new VkDevice(device.get(0), gpu.handle(), info, apiVersion);
@@ -238,13 +276,19 @@ public final class VulkanDevice implements AutoCloseable {
         return new QueueFamily[] {graphics, compute, transfer == null ? compute : transfer};
     }
 
-    private static PointerBuffer extensions(MemoryStack stack, boolean swapchains, boolean meshShaders) {
-        PointerBuffer names = stack.mallocPointer(2);
+    private static PointerBuffer extensions(MemoryStack stack, boolean swapchains, boolean meshShaders,
+        boolean rayTracing) {
+        PointerBuffer names = stack.mallocPointer(5);
         if (swapchains) {
             names.put(stack.UTF8(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
         }
         if (meshShaders) {
             names.put(stack.UTF8(VK_EXT_MESH_SHADER_EXTENSION_NAME));
+        }
+        if (rayTracing) {
+            names.put(stack.UTF8(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME));
+            names.put(stack.UTF8(VK_KHR_RAY_QUERY_EXTENSION_NAME));
+            names.put(stack.UTF8(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME));
         }
         return names.position() == 0 ? null : names.flip();
     }
@@ -330,6 +374,14 @@ public final class VulkanDevice implements AutoCloseable {
     /** Whether task and mesh shaders (VK_EXT_mesh_shader) are enabled: the GPU has them. */
     public boolean meshShaders() {
         return meshShaders;
+    }
+
+    /**
+     * Whether hardware ray tracing is on: acceleration structures (VK_KHR_acceleration_structure), traced with ray
+     * queries from any shader (VK_KHR_ray_query). The bindless set then has a binding for acceleration structures.
+     */
+    public boolean rayTracing() {
+        return rayTracing;
     }
 
     public Vulkan14Features features14() {

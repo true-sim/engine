@@ -9,6 +9,15 @@ public final class Keys {
     public static final Key SCENE_COLOR = Key.of("scene color");
     /** The scene's depth: reverse, 1 near, 0 at infinity. */
     public static final Key SCENE_DEPTH = Key.of("scene depth");
+    /** Where the sun shines: 1 lit, 0 in shadow, per pixel of the scene. */
+    public static final Key SHADOW_MASK = Key.of("shadow mask");
+    /** The scene's color with the sun's shadows. */
+    public static final Key SHADOWED_COLOR = Key.of("shadowed scene color");
+
+    /** Towards the sun, the scene's one light, unit length; the shaders' SUN. */
+    public static final float SUN_X = 0.42399915f;
+    public static final float SUN_Y = 0.84799830f;
+    public static final float SUN_Z = 0.31799936f;
 
     private Keys() {
     }

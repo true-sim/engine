@@ -208,6 +208,62 @@ simplification errors, which stay close to the real deviation from full detail.
   meshlets that keep the covered area within 2 % (no holes), and both paths drawing the same image.
 
 
+**Memory.** The pool keeps what meshlets need and nothing more: quantized vertices, meshlet descriptors and their
+triangles as a byte per local index. An 82k-triangle rock with its whole cluster LOD hierarchy takes 1.50 MiB. A
+classic renderer would add a 32-bit index buffer per mesh and per discrete LOD; the pool has none.
+
+## Ray tracing
+
+Where the GPU has it (`VK_KHR_acceleration_structure` and `VK_KHR_ray_query`), `VulkanDevice.rayTracing()` is true and
+the bindless set gains acceleration structures (binding 3). Everything else runs without it. `RayTracing` builds the
+scene for rays from the geometry pool:
+
+```java
+try (RayTracing rayTracing = new RayTracing(device, pool, 100_000)) { // at most 100,000 instances
+    rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);    // a bottom level from one detail level
+    // per frame, in the frame graph: the top level from the renderer's instances, on the GPU
+}
+```
+
+- **Bottom levels straight from the pool:** built from the pool's quantized positions (16-bit, with the mesh's box as
+  the geometry's transform) where the GPU accepts that format, so no float copy of the vertices is made. Built for fast
+  tracing, then compacted.
+- **Top level on the GPU, every frame:** a compute pass turns the renderer's instances into acceleration structure
+  instances, and the top level is rebuilt from them. Nothing per instance is written on the CPU, and recording
+  allocates nothing.
+- **Shaders** import `raytracing.slang` for `occluded(scene, origin, direction, tMin, tMax)`, a ray query that stops at
+  the first hit.
+
+### Shadows: ray-traced and shadow-mapped
+
+Two techniques provide `Keys.SHADOW_MASK` (1 lit, 0 in shadow), so either one, or `graph.replace` at run time, gives
+`ShadowedScene` what it darkens the scene's color with:
+
+- `RayTracedShadows`: a ray per pixel towards the sun, from the position in the scene's depth, lifted along the normal
+  rebuilt from depth. Surfaces facing away from the sun need no ray.
+- `ShadowMapShadows`, the classic way: the scene's meshlets rendered depth-only from the sun (an orthographic view of
+  the same renderer, through the same culling and LOD), then each pixel compared with the map over 3 x 3 texels, with
+  a depth bias.
+
+Both read depth and write the mask on the async compute queue. 30,000 rocks on the terrain, 1920 x 1080, sun shadows
+over a 600-unit square, GPU time of the whole frame:
+
+| | Frame | Shadows cost | Memory |
+|---|---|---|---|
+| no shadows | 0.64 ms | | |
+| ray-traced | 1.09 ms | 0.45 ms | 103 MiB of bottom levels (the rock and the 2.1 M-triangle terrain, full detail) |
+| shadow map 2048 x 2048 | 1.11 ms | 0.47 ms | 16 MiB |
+| shadow map 4096 x 4096 | 1.61 ms | 0.96 ms | 64 MiB |
+
+For the same cost, ray tracing is exact: crisp contact shadows, thin details, no acne and no peter-panning, at any
+distance. Even at 2048 x 2048 over a 150-unit square, the shadow map shows texel steps along shadow edges and acne
+where the sun grazes. Its bias and resolution trade those off, and both get worse as the area grows. The shadow map
+costs no memory beyond itself and needs no ray tracing. Ray tracing needs bottom levels, which here are mostly the
+terrain's 2.1 M triangles at full detail; a coarser level would cost less.
+
+`Screenshots.renderShadows` renders both (`shadows-traced.png`, `shadows-mapped.png`), their masks, a close-up of the
+nearest rocks side by side, and where the masks differ (red: shadowed only when traced, blue: only by the map).
+
 ## Frame graph
 
 `engine-graph` assembles the frame from **techniques**, such as the meshlet scene, bloom or tone mapping, without any
