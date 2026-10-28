@@ -166,11 +166,11 @@ of error allowed, GPU time of the whole frame (instance pass, culling, drawing):
 
 | Scene | Source triangles | Mesh shaders | Indexed | No meshlets: full detail | No meshlets: discrete LODs, CPU culling |
 |---|---|---|---|---|---|
-| 1,000 rocks (65k-triangle mesh) | 65.5 M | 0.11 ms | 0.17 ms | 2.79 ms | 0.10 ms (+0.20 ms CPU) |
-| 3,000 rocks | 197 M | 0.24 ms | 0.24 ms | 8.08 ms | 0.27 ms (+0.39 ms CPU) |
-| 10,000 rocks | 655 M | 0.71 ms | 0.88 ms | 27.0 ms | 0.88 ms (+0.19 ms CPU) |
-| 30,000 rocks | 1.97 billion | 2.07 ms | 2.72 ms | 81.6 ms | 2.61 ms (+0.58 ms CPU) |
-| terrain at a grazing angle | 2.1 M | 0.06 ms | 0.08 ms | 0.16 ms | (one mesh: full detail) |
+| 1,000 rocks (82k-triangle mesh) | 81.9 M | 0.10 ms | 0.14 ms | 3.47 ms | 0.15 ms (+0.22 ms CPU) |
+| 3,000 rocks | 246 M | 0.12 ms | 0.08 ms | 10.1 ms | 0.38 ms (+0.35 ms CPU) |
+| 10,000 rocks | 819 M | 0.33 ms | 0.20 ms | 34.0 ms | 1.23 ms (+0.15 ms CPU) |
+| 30,000 rocks | 2.46 billion | 0.95 ms | 0.61 ms | 102 ms | 2.80 ms (+0.47 ms CPU) |
+| terrain at a grazing angle | 2.1 M | 0.08 ms | 0.10 ms | 0.17 ms | (one mesh: full detail) |
 
 `TRUESIM_SCREENSHOTS=true ./gradlew :engine-render:test --tests '*Screenshots'` renders these scenes to PNGs under
 `render/build/screenshots`, shaded and colored per meshlet.
@@ -178,9 +178,10 @@ of error allowed, GPU time of the whole frame (instance pass, culling, drawing):
 The indexed path draws everything with one draw: culling lists the visible meshlets, an expansion pass writes their
 triangles into the frame's index buffer (each index is the meshlet's slot and local vertex), and one
 `vkCmdDrawIndexedIndirect` draws them. The baselines without meshlets draw whole meshes, one indirect draw per instance:
-at full detail, or as a classic engine does, picking a discrete LOD per instance and culling on the CPU. For many
-small objects such classic LODs keep up; the cluster hierarchy draws about twice their triangles at the same error
-here, which is being looked into.
+at full detail, or as a classic engine does, picking a discrete LOD per instance and culling on the CPU. At the same
+error the cluster hierarchy draws fewer triangles than discrete LODs (30,000 rocks: 99,052 meshlets, at most 12.3 M
+triangles, against 17.6 M), since each cluster takes the detail its own distance needs. Both builds sum their
+simplification errors, which stay close to the real deviation from full detail.
 
 - **Reverse depth with an infinite far plane,** camera-relative instances: precise near and far, anywhere in a large
   world.

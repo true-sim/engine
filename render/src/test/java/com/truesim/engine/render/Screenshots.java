@@ -67,7 +67,7 @@ class Screenshots {
                  VK_BUFFER_USAGE_TRANSFER_DST_BIT);
              MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
                  1 << 20, 65_535, 80_000_000), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)) {
-            int rock = pool.add(MeshletBenchmark.rock(128));
+            int rock = pool.add(MeshletBenchmark.rock(6));
             int ground = pool.add(MeshletBenchmark.terrain(1024));
             Camera camera = new Camera();
             SplittableRandom random = new SplittableRandom(7);
@@ -90,6 +90,15 @@ class Screenshots {
             save(device, renderer, color, depth, pixels, out.resolve("rocks-lit.png"));
             renderer.setView(camera, 1, MeshletRenderer.MODE_MESHLETS);
             save(device, renderer, color, depth, pixels, out.resolve("rocks-meshlets.png"));
+            // One rock up close at growing error: the coarse levels it falls back to.
+            renderer.setInstance(0, rock, 0, 0, -3.2f, 0, 0, 0, 1, 1, 1, 1);
+            renderer.setInstanceCount(1);
+            for (int error : new int[] {1, 8, 32}) {
+                renderer.setView(camera, error, MeshletRenderer.MODE_LIT);
+                save(device, renderer, color, depth, pixels, out.resolve("rock-" + error + "px-lit.png"));
+                renderer.setView(camera, error, MeshletRenderer.MODE_MESHLETS);
+                save(device, renderer, color, depth, pixels, out.resolve("rock-" + error + "px-meshlets.png"));
+            }
             renderer.setInstance(0, ground, 0, -25, 0, 0, 0, 0, 1, 1, 1, 1);
             renderer.setInstanceCount(1);
             renderer.setView(camera.set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1,
