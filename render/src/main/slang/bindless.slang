@@ -11,6 +11,12 @@ public SamplerState samplers[4];
 [[vk::binding(2, 0)]]
 public RWTexture2D<float4> images[];
 
+// The same storage images, for those of unsigned integer formats (e.g. the visibility buffer's IDs).
+// Two views of one binding, on purpose: each image is read through the one matching its format (the build allows
+// the overlap: render/build.gradle.kts).
+[[vk::binding(2, 0)]]
+public RWTexture2D<uint2> uintImages[];
+
 /** Sampler slots. */
 public static const uint LINEAR_CLAMP = 0;
 public static const uint NEAREST_CLAMP = 1;

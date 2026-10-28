@@ -53,7 +53,8 @@ public struct View
     public uint maxDraws;
     public uint mode;              // 0 lit, 1 meshlet colors, 2 white
     public uint orthographic;      // 1: projectionScale is pixels per unit at any distance (e.g. a sun's shadow map)
-    public uint2 pad;              // to 192 bytes: views are an array
+    public uint2 pad;
+    public float4x4 inverseViewProjection; // clip space back to camera-relative positions; 256 bytes in all
 };
 
 public float3 rotate(float4 q, float3 v)
@@ -252,6 +253,8 @@ public struct VertexOut
     public float4 color : COLOR;
     public nointerpolation uint meshlet : MESHLET;
     public nointerpolation uint material : MATERIAL;
+    public nointerpolation uint instance : INSTANCE;
+    public nointerpolation uint firstTriangle : FIRST_TRIANGLE; // the indexed path's: primitive IDs count from it
 };
 
 /**
@@ -330,6 +333,8 @@ public VertexOut transformVertex(View view, Instance instance, MeshEntry mesh, u
     }
     out.meshlet = meshlet;
     out.material = instance.materialBase + submesh;
+    out.instance = 0;
+    out.firstTriangle = 0;
     return out;
 }
 

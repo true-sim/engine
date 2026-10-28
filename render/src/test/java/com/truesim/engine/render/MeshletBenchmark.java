@@ -310,6 +310,7 @@ class MeshletBenchmark {
                 }
                 occlusion(device, renderer, color, depth, queries, period, rock, ground, placed, camera);
                 shadows(device, pool, renderer, color, depth, queries, period, rock, rockMesh, ground, terrainMesh);
+                lighting(device, renderer, color, depth, queries, period, rock, ground);
                 renderer.setInstance(0, ground, 0, -6, 0, 0, 0, 0, 1, 1, 1, 1);
                 renderer.setInstanceCount(1);
                 renderer.setView(camera.set(0, -0.08, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1,
@@ -497,6 +498,63 @@ class MeshletBenchmark {
                     vkCmdDrawIndexedIndirect(buffer, commands.handle(), 0, draws, 20);
                 }
                 vkCmdEndRendering(buffer);
+            }
+        }
+    }
+
+    /**
+     * {@code count} point lights scattered over the nearest 200 x 200 units of {@link #rocksOnTerrain}, a little above
+     * the ground: ranges of 6 to 15 units, random colors.
+     */
+    static void scatterLights(Lights lights, int count, double groundY) {
+        SplittableRandom random = new SplittableRandom(5);
+        for (int i = 0; i < count; i++) {
+            double x = random.nextDouble(-100, 100);
+            double z = random.nextDouble(-205, -5);
+            double y = groundY + terrainHeight(x, z) + random.nextDouble(1, 4);
+            float range = (float) random.nextDouble(6, 15);
+            lights.point(i, (float) x, (float) y, (float) z, range, (float) random.nextDouble(2, 20),
+                (float) random.nextDouble(2, 20), (float) random.nextDouble(2, 20));
+        }
+        lights.setCount(count);
+    }
+
+    /**
+     * Shading many lights, through the frame graph: 30,000 rocks on the terrain from above, as for the shadows, lit by
+     * the sun alone or by hundreds to thousands of point lights through light clusters; shaded as the meshlets are
+     * drawn (clustered forward) or once per pixel after drawing IDs (visibility buffer). Both write a storage-capable
+     * image blitted into the target, so they finish the same way.
+     */
+    private static void lighting(VulkanDevice device, MeshletRenderer renderer, GpuImage color, GpuImage depth,
+        long queries, double period, int rock, int ground) {
+        if (!device.primitiveIds()) {
+            return;
+        }
+        double extent = 600;
+        double groundY = -12;
+        rocksOnTerrain(renderer, rock, ground, 30_000, extent, groundY);
+        Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
+        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+        try (GpuImage shaded = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+            org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+             Lights lights = new Lights(device, 4096, 1)) {
+            ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shaded.handle(), 0);
+            for (int count : new int[] {0, 256, 4096}) {
+                scatterLights(lights, count, groundY);
+                for (MeshletScene.Shading shading : MeshletScene.Shading.values()) {
+                    try (FrameGraph graph = new FrameGraph(device, 2)) {
+                        graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_FORMAT_D32_SFLOAT).lights(count == 0 ? null : lights).shading(shading))
+                            .output(Keys.SCENE_COLOR, target);
+                        System.out.printf(Locale.ROOT, "  30,000 rocks on the terrain, %s, %s: %.3f ms median%n",
+                            count == 0 ? "the sun" : String.format(Locale.ROOT, "%,d point lights", count),
+                            shading == MeshletScene.Shading.CLUSTERED_FORWARD ? "clustered forward"
+                                : "visibility buffer",
+                            time(device, color, depth, queries, period, BATCH, graph::record));
+                    }
+                }
             }
         }
     }
