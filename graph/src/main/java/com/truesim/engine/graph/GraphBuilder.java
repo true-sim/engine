@@ -16,13 +16,13 @@ import java.util.Set;
 import java.util.function.Function;
 
 /**
- * What techniques and requests build with: images, passes, and the results of other techniques. Requiring a result
- * builds the technique that provides it, the first time, so providers' passes always come before their consumers', and
- * techniques nothing needs are never built. Passes run in the order they are added; their declared accesses decide the
- * barriers.
+ * What techniques and requests build with: images, buffers, passes, and the results of other techniques. Requiring a
+ * result builds the technique that provides it, the first time, so providers' passes always come before their
+ * consumers', and techniques nothing needs are never built. Passes run in the order they are added; their declared
+ * accesses decide the barriers.
  *
- * <p>Results are single owner: a pass may write only images its own technique or request made (or external images),
- * so whoever requires a result sees it complete.
+ * <p>Results are single owner: a pass may write only images and buffers its own technique or request made (or external
+ * images), so whoever requires a result sees it complete.
  */
 @AllowAllocation("building the graph, when it changes")
 public final class GraphBuilder {
@@ -41,22 +41,38 @@ public final class GraphBuilder {
         }
     }
 
+    /** One transient buffer of the build. */
+    static final class BufferInfo {
+        final Buffer buffer;
+        final Object owner;
+        int usage;
+
+        BufferInfo(Buffer buffer, Object owner) {
+            this.buffer = buffer;
+            this.owner = owner;
+        }
+    }
+
     /** One pass of the build: its accesses (image id and access, in pairs) and body. */
     static final class PassInfo {
         final String name;
         final String owner;
         final int[] images;
         final Access[] accesses;
+        final int[] buffers;
+        final BufferAccess[] bufferAccesses;
         final boolean sideEffects;
         final boolean async;
         final PassBody body;
 
-        PassInfo(String name, String owner, int[] images, Access[] accesses, boolean sideEffects, boolean async,
-            PassBody body) {
+        PassInfo(String name, String owner, int[] images, Access[] accesses, int[] buffers,
+            BufferAccess[] bufferAccesses, boolean sideEffects, boolean async, PassBody body) {
             this.name = name;
             this.owner = owner;
             this.images = images;
             this.accesses = accesses;
+            this.buffers = buffers;
+            this.bufferAccesses = bufferAccesses;
             this.sideEffects = sideEffects;
             this.async = async;
             this.body = body;
@@ -64,6 +80,7 @@ public final class GraphBuilder {
     }
 
     final List<ImageInfo> images = new ArrayList<>();
+    final List<BufferInfo> buffers = new ArrayList<>();
     final List<PassInfo> passes = new ArrayList<>();
     private final Map<Key, Technique> providers = new IdentityHashMap<>();
     private final Map<Key, Image> provided = new IdentityHashMap<>();
@@ -238,6 +255,28 @@ public final class GraphBuilder {
         });
     }
 
+    // ---------------------------------------------------------------- buffers
+
+    /**
+     * A new transient buffer of {@code size} bytes, owned by the building technique: device-local, reachable by device
+     * address ({@link PassContext#address}), its contents undefined until a pass of the frame writes them.
+     */
+    public Buffer createBuffer(String name, long size) {
+        if (size < 1) {
+            throw new IllegalArgumentException("Buffer size must be positive: " + name + ", " + size);
+        }
+        Buffer buffer = new Buffer(buffers.size(), Objects.requireNonNull(name, "name"), size);
+        buffers.add(new BufferInfo(buffer, scope));
+        return buffer;
+    }
+
+    private Buffer buffer(Buffer buffer) {
+        if (buffer == null || buffer.id >= buffers.size() || buffers.get(buffer.id).buffer != buffer) {
+            throw new IllegalArgumentException("Not a buffer of this build: " + buffer);
+        }
+        return buffer;
+    }
+
     private Image image(Image image) {
         if (image == null || image.id >= images.size() || images.get(image.id).image != image) {
             throw new IllegalArgumentException("Not an image of this build: " + image);
@@ -258,6 +297,8 @@ public final class GraphBuilder {
         private final String name;
         private final List<Image> used = new ArrayList<>();
         private final List<Access> accesses = new ArrayList<>();
+        private final List<Buffer> usedBuffers = new ArrayList<>();
+        private final List<BufferAccess> bufferAccesses = new ArrayList<>();
         private boolean sideEffects;
         private boolean async;
 
@@ -286,6 +327,34 @@ public final class GraphBuilder {
             return use(image, access);
         }
 
+        /** The pass reads {@code buffer}. */
+        public PassBuilder read(Buffer buffer, BufferAccess access) {
+            if (access.writes) {
+                throw new IllegalArgumentException(name + ": " + access + " writes; declare it with write()");
+            }
+            return use(buffer, access);
+        }
+
+        /** The pass writes {@code buffer}, which its technique or request made. */
+        public PassBuilder write(Buffer buffer, BufferAccess access) {
+            if (!access.writes) {
+                throw new IllegalArgumentException(name + ": " + access + " only reads; declare it with read()");
+            }
+            BufferInfo info = buffers.get(buffer(buffer).id);
+            if (info.owner != scope) {
+                throw new IllegalStateException(name + " writes " + buffer.name + ", a result of " + name(info.owner)
+                    + ": results are written only by whoever makes them");
+            }
+            return use(buffer, access);
+        }
+
+        private PassBuilder use(Buffer buffer, BufferAccess access) {
+            usedBuffers.add(buffer(buffer));
+            bufferAccesses.add(Objects.requireNonNull(access, "access"));
+            buffers.get(buffer.id).usage |= access.usage;
+            return this;
+        }
+
         private PassBuilder use(Image image, Access access) {
             used.add(image(image));
             accesses.add(Objects.requireNonNull(access, "access"));
@@ -301,8 +370,9 @@ public final class GraphBuilder {
 
         /**
          * The pass may run on the async compute queue, beside graphics work it does not depend on: compute, sampling,
-         * storage and transfer accesses only (no attachments, no external images). Where the device has no separate
-         * compute queue, or async compute is off, it runs on the graphics queue in its place.
+         * storage and transfer accesses only (no attachments, no external images, no index buffers or draw shaders).
+         * Where the device has no separate compute queue, or async compute is off, it runs on the graphics queue in its
+         * place.
          */
         public PassBuilder async() {
             async = true;
@@ -315,8 +385,13 @@ public final class GraphBuilder {
             for (int i = 0; i < ids.length; i++) {
                 ids[i] = used.get(i).id;
             }
+            int[] bufferIds = new int[usedBuffers.size()];
+            for (int i = 0; i < bufferIds.length; i++) {
+                bufferIds[i] = usedBuffers.get(i).id;
+            }
             passes.add(new PassInfo(name, scope == null ? "the graph" : name(scope), ids,
-                accesses.toArray(new Access[0]), sideEffects, async, Objects.requireNonNull(body, "body")));
+                accesses.toArray(new Access[0]), bufferIds, bufferAccesses.toArray(new BufferAccess[0]), sideEffects,
+                async, Objects.requireNonNull(body, "body")));
         }
     }
 
