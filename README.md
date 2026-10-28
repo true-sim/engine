@@ -157,6 +157,24 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
   `vkCmdDrawIndexedIndirectCount`. The meshlet test, vertex decoding and shading are one Slang module
   (`meshlets/common.slang`) both paths import, and they draw the same image (tested). `Path.AUTO` picks mesh shaders
   where available.
+- **Instance-level LOD range:** before culling meshlets, the instance pass skips every level finer than the first one
+  whose error, seen from the instance's nearest point, is within the allowed pixels: the rule could not pick anything
+  there. A far instance costs a chunk or two, however detailed its mesh.
+
+Measured with `MeshletBenchmark` (`TRUESIM_BENCHMARK=true`) on an AMD Radeon RX 9070 XT at 1920 x 1080 with 1 pixel
+of error allowed, GPU time of the whole frame (instance pass, culling, drawing):
+
+| Scene | Source triangles | Mesh shaders | Indexed | Meshlets drawn |
+|---|---|---|---|---|
+| 1,000 rocks (65k-triangle mesh, cluster hierarchy) | 65.5 M | 0.11 ms | 0.75 ms | 19,681 |
+| 3,000 rocks | 197 M | 0.26 ms | 2.07 ms | 57,289 |
+| 10,000 rocks | 655 M | 0.75 ms | 6.86 ms | 190,813 |
+| 30,000 rocks | 1.97 billion | 2.12 ms | 20.6 ms | 576,127 |
+| terrain at a grazing angle | 2.1 M | 0.07 ms | 0.10 ms | 723 |
+
+The indexed path issues one draw per visible meshlet, which dominates at these counts; compacting visible meshlets
+into one draw is #12.
+
 - **Reverse depth with an infinite far plane,** camera-relative instances: precise near and far, anywhere in a large
   world.
 - Tested on the GPU: coverage of a quad, culling (behind, outside, facing away), LOD cuts from full detail to a few

@@ -2,7 +2,7 @@
 // writes them (std430-compatible offsets), and the decoders for quantized data. Everything is reached by pointer.
 module common;
 
-/** One mesh in the geometry pool: where its data lies in the pool's buffers, and its quantization box. 80 bytes. */
+/** One mesh in the geometry pool: where its data lies in the pool's buffers, and its quantization box. 96 bytes. */
 public struct MeshEntry
 {
     public float3 boxMin;
@@ -16,8 +16,16 @@ public struct MeshEntry
     public uint attributeBase;     // byte offset of the mesh's attributes
     public uint attributeFormat;   // scene's VertexFormat mask
     public uint attributeStride;
-    public uint pad0;
-    public uint pad1;
+    public uint levelBase;         // its first entry in the pool's level table
+    public uint levelCount;
+    public float4 lodSphere;       // around every detail group: the instance pass's distance bound
+};
+
+/** One detail level: the meshlets up to `end` may be drawn while its `error` is too coarse to stop at. */
+public struct Level
+{
+    public uint end;
+    public float error;
 };
 
 /** One drawn object: camera-relative position, rotation, scale and mesh. 48 bytes. */

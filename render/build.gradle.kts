@@ -8,7 +8,15 @@ description = "Engine renderer for true-sim: GPU-driven meshlet rendering of sce
 
 dependencies {
     api(project(":engine-vulkan"))
-    api("com.truesim.scene:scene-assets:0.17.0")
+    api("com.truesim.scene:scene-assets:0.17.1")
     implementation("com.truesim.common:common-math:0.4.0")
-    testImplementation("com.truesim.scene:scene-meshbuild:0.17.0")
+    testImplementation("com.truesim.scene:scene-meshbuild:0.17.1")
+}
+
+// The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.
+tasks.test {
+    if (providers.environmentVariable("TRUESIM_BENCHMARK").orNull == "true") {
+        maxHeapSize = "4g"
+        extensions.configure<JacocoTaskExtension> { isEnabled = false } // measure the code, not its coverage probes
+    }
 }
