@@ -127,7 +127,7 @@ class Screenshots {
              GpuBuffer pixels = GpuBuffer.hostVisible(device, (long) WIDTH * HEIGHT * 4,
                  VK_BUFFER_USAGE_TRANSFER_DST_BIT);
              MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
-                 1 << 20, 65_535, 80_000_000), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+                 1 << 20, 65_535, 20_000_000, 2), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
              RayTracing rayTracing = device.rayTracing() ? new RayTracing(device, pool, 100_000) : null) {
             com.truesim.scene.assets.mesh.MeshData rockMesh = MeshletBenchmark.rock(6);
             com.truesim.scene.assets.mesh.MeshData terrainMesh = MeshletBenchmark.terrain(1024);

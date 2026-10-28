@@ -2,6 +2,7 @@ package com.truesim.engine.render;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
+import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
@@ -66,18 +67,15 @@ public final class MeshletScene implements Technique {
     public void build(GraphBuilder g) {
         Image color = g.create("scene color", width, height, colorFormat);
         Image depth = g.create("scene depth", width, height, depthFormat);
-        if (!occlusion) {
-            g.pass("meshlets")
-                .write(color, Access.COLOR_ATTACHMENT)
-                .write(depth, Access.DEPTH_ATTACHMENT)
-                .record(ctx -> renderer.record(ctx.commands(), ctx.view(color), ctx.view(depth), width, height,
-                    clear[0], clear[1], clear[2]));
-        } else {
-            g.pass("meshlets early")
-                .write(color, Access.COLOR_ATTACHMENT)
-                .write(depth, Access.DEPTH_ATTACHMENT)
-                .record(ctx -> renderer.recordEarly(ctx.commands(), ctx.view(color), ctx.view(depth), width, height,
-                    clear[0], clear[1], clear[2]));
+        // Culled with the renderer's other views (a shadow map's, say) in one pass.
+        MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)).add(0, occlusion, null);
+        g.pass(occlusion ? "meshlets early" : "meshlets")
+            .read(culling.culled(), BufferAccess.INDIRECT)
+            .write(color, Access.COLOR_ATTACHMENT)
+            .write(depth, Access.DEPTH_ATTACHMENT)
+            .record(ctx -> renderer.drawView(ctx.commands(), 0, ctx.view(color), ctx.view(depth), width, height,
+                clear[0], clear[1], clear[2]));
+        if (occlusion) {
             Image pyramid = g.request(new DepthPyramid(depth));
             g.pass("meshlets late")
                 .read(pyramid, Access.SAMPLED_COMPUTE)

@@ -334,7 +334,8 @@ class GraphTechniquesTest {
                 .clearColor(0, 0, 1))
             .output(Keys.SCENE_COLOR, output);
         frame();
-        assertThat(graph.passes()).containsExactly("meshlets early", "depth pyramid of scene depth", "meshlets late");
+        assertThat(graph.passes()).containsExactly("meshlet culling", "meshlets early", "depth pyramid of scene depth",
+            "meshlets late");
         assertThat(graph.pooledImages()).isEqualTo(2); // depth and its pyramid: the color is the target
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
         assertThat(red(1, 1)).isZero(); // blue clear color
@@ -344,7 +345,7 @@ class GraphTechniquesTest {
         graph = new FrameGraph(device, 2).add(new MeshletScene(renderer, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
             VK_FORMAT_D32_SFLOAT).occlusion(false)).output(Keys.SCENE_COLOR, output);
         frame();
-        assertThat(graph.passes()).containsExactly("meshlets");
+        assertThat(graph.passes()).containsExactly("meshlet culling", "meshlets");
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
     }
 

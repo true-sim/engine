@@ -71,7 +71,7 @@ class ShadowsTest {
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 12, 64, 4));
         quadMesh = MeshletRendererTest.grid(1, 2, false, VertexFormat.POSITIONS_ONLY);
         quad = pool.add(quadMesh);
-        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12),
+        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12, 2),
             VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
         // The camera at the origin looks down at the floor (y = -5, around z = -5); the quad floats at y = -3.
         renderer.setInstance(0, quad, 0, -5, -5, 0, 0, 0, 1, 10, 1, 10);
@@ -165,7 +165,8 @@ class ShadowsTest {
             .output(Keys.SHADOW_MASK, external(maskTarget, VK_FORMAT_R8_UNORM));
         byte[] mapped = frame(maskTarget, 1);
         expectShadow(mapped, "shadow map");
-        assertThat(graph.passes()).contains("shadow map", "shadow-mapped shadows");
+        assertThat(graph.passes()).contains("shadow map", "shadow-mapped shadows")
+            .containsOnlyOnce("meshlet culling"); // the camera and the sun culled together
         assertThat(renderer.visibleMeshlets(1)).isEqualTo(2); // the sun's view drew both quads
 
         if (device.rayTracing()) {

@@ -51,6 +51,7 @@ public struct View
     public uint maxDraws;
     public uint mode;              // 0 lit, 1 meshlet colors, 2 white
     public uint orthographic;      // 1: projectionScale is pixels per unit at any distance (e.g. a sun's shadow map)
+    public uint2 pad;              // to 192 bytes: views are an array
 };
 
 public float3 rotate(float4 q, float3 v)
@@ -129,10 +130,11 @@ public float projectedError(View view, float3 center, float radius, float error)
 
 // ---------------------------------------------------------------- occlusion culling
 
-/** Which phase of two-phase occlusion culling a pass runs, and the depth pyramid the late phase tests against. */
+/** Which phase of two-phase occlusion culling each view runs, and the depth pyramid the late phase tests against. */
 public struct Occlusion
 {
-    public uint phase;        // 0: no occlusion culling; 1: early, last frame's visible; 2: late, against the pyramid
+    public uint phases;       // 2 bits per view: 0 no occlusion culling; 1 early, last frame's visible; 2 late
+    // (against the pyramid)
     public uint pyramid;      // sampled slot of the depth pyramid (DepthPyramid: farthest depth, reverse)
     public uint depthWidth;   // the depth image's size: the pyramid's level 0 is half of it, rounded up
     public uint depthHeight;
@@ -142,6 +144,12 @@ public struct Occlusion
 public static const uint PHASE_ALL = 0;
 public static const uint PHASE_EARLY = 1;
 public static const uint PHASE_LATE = 2;
+
+/** View {@code view}'s phase. */
+public uint phaseOf(Occlusion occlusion, uint view)
+{
+    return (occlusion.phases >> (2 * view)) & 3;
+}
 
 /**
  * Whether a sphere (camera-relative) may be seen past what the depth pyramid holds. Its box is projected; at the
@@ -189,11 +197,11 @@ public bool unoccluded(View view, Occlusion hzb, float3 center, float radius)
 
 // ---------------------------------------------------------------- shared by both geometry paths
 
-/** Up to 64 meshlets of one instance, from local meshlet firstMeshlet: one culling workgroup's work. */
+/** Up to 64 meshlets of one instance for one view, from a local meshlet: one culling workgroup's work. */
 public struct Chunk
 {
     public uint instance;
-    public uint firstMeshlet;
+    public uint firstMeshlet;  // the local meshlet, and the view in the top 2 bits
 };
 
 /** A meshlet the indexed path draws: its instance, pool meshlet and first index in the frame's index buffer. */
@@ -203,6 +211,15 @@ public struct VisibleMeshlet
     public uint meshlet;
     public uint firstIndex;
     public uint pad;
+};
+
+/** Where a view's culling puts what it finds: each view has its own lists, so views cull together. */
+public struct ViewLists
+{
+    public VisibleMeshlet* visible;
+    public uint* expandCommand;  // VkDispatchIndirectCommand
+    public uint* drawCommand;    // VkDrawIndexedIndirectCommand: its index count grows here
+    public uint* visibleCount;   // the early (or only) phase, then the late one
 };
 
 /** What the vertex or mesh shader hands the fragment shader: the same for both paths. */
