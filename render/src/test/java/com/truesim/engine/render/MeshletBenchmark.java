@@ -504,17 +504,17 @@ class MeshletBenchmark {
 
     /**
      * {@code count} point lights scattered over the nearest 200 x 200 units of {@link #rocksOnTerrain}, a little above
-     * the ground: ranges of 6 to 15 units, random colors.
+     * the ground: ranges of 6 to 15 units, random colors, irradiance up to {@code brightness} at 1 unit.
      */
-    static void scatterLights(Lights lights, int count, double groundY) {
+    static void scatterLights(Lights lights, int count, double groundY, double brightness) {
         SplittableRandom random = new SplittableRandom(5);
         for (int i = 0; i < count; i++) {
             double x = random.nextDouble(-100, 100);
             double z = random.nextDouble(-205, -5);
             double y = groundY + terrainHeight(x, z) + random.nextDouble(1, 4);
             float range = (float) random.nextDouble(6, 15);
-            lights.point(i, (float) x, (float) y, (float) z, range, (float) random.nextDouble(2, 20),
-                (float) random.nextDouble(2, 20), (float) random.nextDouble(2, 20));
+            lights.point(i, (float) x, (float) y, (float) z, range, (float) (brightness * random.nextDouble(0.1, 1)),
+                (float) (brightness * random.nextDouble(0.1, 1)), (float) (brightness * random.nextDouble(0.1, 1)));
         }
         lights.setCount(count);
     }
@@ -542,7 +542,7 @@ class MeshletBenchmark {
                 org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shaded.handle(), 0);
             for (int count : new int[] {0, 256, 4096}) {
-                scatterLights(lights, count, groundY);
+                scatterLights(lights, count, groundY, 20);
                 for (MeshletScene.Shading shading : MeshletScene.Shading.values()) {
                     try (FrameGraph graph = new FrameGraph(device, 2)) {
                         graph.add(new MeshletScene(renderer, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
