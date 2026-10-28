@@ -163,6 +163,11 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
 - **Instance-level LOD range:** before culling meshlets, the instance pass skips every level finer than the first one
   whose error, seen from the instance's nearest point, is within the allowed pixels: the rule could not pick anything
   there. A far instance costs a chunk or two, however detailed its mesh.
+- **Views culled together:** up to four views (the camera, a shadow map's sun, cascades) each have their own lists
+  (`Limits.views`). `cullViews` culls several at once: one instance pass with a row per view, and one cull pass over
+  all their chunks, each meshlet into its view's list; `drawView` then draws each. Through the frame graph, the
+  `MeshletCulling` request gathers every view the techniques draw (the scene's camera, `ShadowMapShadows`' sun) into
+  one culling pass.
 
 Measured with `MeshletBenchmark` (`TRUESIM_BENCHMARK=true`) on an AMD Radeon RX 9070 XT at 1920 x 1080 with 1 pixel
 of error allowed, GPU time of the whole frame (instance pass, culling, drawing), median per frame of batches of 32
@@ -244,6 +249,7 @@ Two techniques provide `Keys.SHADOW_MASK` (1 lit, 0 in shadow), so either one, o
 - `ShadowMapShadows`, the classic way: the scene's meshlets rendered depth-only from the sun (an orthographic view of
   the same renderer, through the same culling and LOD), then each pixel compared with the map over 3 x 3 texels, with
   a depth bias.
+  The sun's view is culled in the same pass as the camera's.
 
 Both read depth and write the mask on the async compute queue. 30,000 rocks on the terrain, 1920 x 1080, sun shadows
 over a 600-unit square, GPU time of the whole frame:
@@ -342,8 +348,6 @@ swapchain.present(device.graphics(), image);
 
 The graph's tests run with synchronization validation, which checks every barrier and cross-queue wait. Dropping the
 waits makes it report races between the queues.
-
-Not yet: merging similar work across views (#8).
 
 ## Building
 

@@ -230,7 +230,7 @@ class MeshletBenchmark {
              GpuImage depth = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_D32_SFLOAT,
                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
              MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
-                 1 << 20, 65_535, 80_000_000), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+                 1 << 20, 65_535, 80_000_000, 2), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
              MemoryStack stack = stackPush()) {
             MeshData rockMesh = rock(6);
             MeshData terrainMesh = terrain(1024);

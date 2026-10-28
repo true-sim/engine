@@ -1,11 +1,13 @@
-// The instance pass of both geometry paths: one thread per instance tests its bounds against the frustum, and each
-// visible instance appends a chunk per 64 of the meshlets its distance may need. Words 0-2 of the chunk command are the
-// cull pass's indirect dispatch over the chunks; word 3 counts them all, and the command's X is capped at the capacity.
+// The instance pass of both geometry paths, for up to four views at once (a row of workgroups per view): one thread
+// per instance and view tests the instance's bounds against the view's frustum, and each visible instance appends a
+// chunk per 64 of the meshlets its distance may need, marked with the view. All views share the chunk list, so one
+// cull pass serves them all. Words 0-2 of the chunk command are the cull pass's indirect dispatch over the chunks; word
+// 3 counts them all, and the command's X is capped at the capacity.
 import meshlets.common;
 
 struct InstancePush
 {
-    View* view;
+    View* views;
     MeshEntry* meshes;
     Instance* instances;
     Chunk* chunks;
@@ -14,6 +16,7 @@ struct InstancePush
     uint maxChunks;
     uint* visibility;      // per instance: 1 if it was visible the last time the late phase looked
     Occlusion occlusion;
+    uint viewList;         // the views of the rows, 8 bits each
 };
 
 [[vk::push_constant]]
@@ -23,7 +26,8 @@ ConstantBuffer<InstancePush> push;
 [numthreads(64, 1, 1)]
 void instancesMain(uint3 id : SV_DispatchThreadID)
 {
-    View view = push.view[0];
+    uint v = (push.viewList >> (8 * id.y)) & 0xff;
+    View view = push.views[v];
     if (id.x >= view.instanceCount)
     {
         return;
@@ -32,7 +36,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     MeshEntry mesh = push.meshes[instance.mesh];
     float3 center = toWorld(instance, mesh.sphere.xyz);
     float radius = mesh.sphere.w * maxScale(instance);
-    uint phase = push.occlusion.phase;
+    uint phase = phaseOf(push.occlusion, v);
     bool inView = inFrustum(view, center, radius);
     if (phase == PHASE_EARLY && (!inView || push.visibility[id.x] == 0))
     {
@@ -78,7 +82,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     InterlockedAdd(push.chunkCommand[3], chunks, first);
     for (uint i = 0; i < chunks && first + i < push.maxChunks; i++)
     {
-        push.chunks[first + i] = Chunk(id.x, i * 64);
+        push.chunks[first + i] = Chunk(id.x, (i * 64) | (v << 30));
     }
     InterlockedMax(push.chunkCommand[0], min(first + chunks, push.maxChunks));
 }

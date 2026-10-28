@@ -141,6 +141,12 @@ class MeshletRendererTest {
 
     /** Renders a frame and reads it back; returns the visible meshlets. */
     private int render() {
+        renderWith(commands -> renderer.record(commands, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
+        return renderer.visibleMeshlets();
+    }
+
+    /** Records {@code draw} into the color and depth images and reads the color back. */
+    private void renderWith(java.util.function.Consumer<org.lwjgl.vulkan.VkCommandBuffer> draw) {
         device.submitAndWait(device.graphics(), commands -> {
             Images.transition(commands, color.handle(), VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
@@ -149,7 +155,7 @@ class MeshletRendererTest {
                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-            renderer.record(commands, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
+            draw.accept(commands);
             Images.transition(commands, color.handle(), VK_IMAGE_ASPECT_COLOR_BIT,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -162,7 +168,6 @@ class MeshletRendererTest {
                     pixels.handle(), region);
             }
         });
-        return renderer.visibleMeshlets();
     }
 
     private int pixel(int x, int y) {
@@ -288,6 +293,46 @@ class MeshletRendererTest {
         assertThat(covered()).isGreaterThan(image.length / 4);
         renderer.setPath(MeshletRenderer.Path.AUTO);
         assertThat(renderer.path()).isEqualTo(MeshletRenderer.Path.MESH_SHADERS);
+    }
+
+    @Test
+    void viewsCulledTogetherDrawWhatEachSees() {
+        renderer.close();
+        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(256, 8192, 1024, 1 << 20, 2),
+            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+        renderer.setInstance(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1); // ahead, facing the camera
+        renderer.setInstance(1, quad, 0, 0, 5, -HALF, 0, 0, HALF, 1, 1, 1); // behind, facing it
+        renderer.setInstanceCount(2);
+        lookForward(1, MeshletRenderer.MODE_WHITE);
+        renderer.setView(1, new Camera().set(0, 0, 1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
+            MeshletRenderer.MODE_WHITE);
+        assertThat(render()).isEqualTo(1);
+        int alone = covered();
+        for (MeshletRenderer.Path path : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED,
+            MeshletRenderer.Path.AUTO}) {
+            renderer.setPath(path);
+            renderWith(commands -> {
+                renderer.cullViews(commands, 0b11, 0);
+                renderer.drawView(commands, 0, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
+            });
+            assertThat(covered()).isEqualTo(alone);
+            assertThat(renderer.visibleMeshlets(0)).isEqualTo(1);
+            assertThat(renderer.visibleMeshlets(1)).isEqualTo(1); // each its own quad
+            renderWith(commands -> {
+                renderer.cullViews(commands, 0b11, 0);
+                renderer.drawView(commands, 1, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
+            });
+            assertThat(covered()).isEqualTo(alone); // the other quad, from the other side
+        }
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, 0, 0));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, 0b100, 0)); // no lists
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, 0b01, 0b10));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, 0b11, 0b11));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.drawView(null, 2, 0, 0, 1, 1, 0, 0, 0))
+            .withMessageContaining("has no lists");
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.recordDepth(null, 0, 1, 1, 3));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 1, 1, 0));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 1, 1, 5));
     }
 
     @Test

@@ -9,6 +9,7 @@ import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
+import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
@@ -16,6 +17,7 @@ import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.Keys;
+import com.truesim.engine.render.MeshletCulling;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
@@ -72,12 +74,13 @@ public final class ShadowMapShadows implements Technique {
             }
         });
         Image map = g.create("shadow map", size, size, VK_FORMAT_D32_SFLOAT);
+        // The sun's view is culled with the camera's, in one pass.
+        MeshletCulling.Views culling = g.request(new MeshletCulling(renderer))
+            .add(lightView, false, () -> renderer.setView(lightView, light, 1, MeshletRenderer.MODE_WHITE));
         g.pass("shadow map")
+            .read(culling.culled(), BufferAccess.INDIRECT)
             .write(map, Access.DEPTH_ATTACHMENT)
-            .record(ctx -> {
-                renderer.setView(lightView, light, 1, MeshletRenderer.MODE_WHITE);
-                renderer.recordDepth(ctx.commands(), ctx.view(map), size, size, lightView);
-            });
+            .record(ctx -> renderer.drawView(ctx.commands(), lightView, 0, ctx.view(map), size, size, 0, 0, 0));
         Image depth = g.require(Keys.SCENE_DEPTH);
         Image mask = g.createLike("shadow mask", depth, 1, VK_FORMAT_R8_UNORM);
         g.pass("shadow-mapped shadows")

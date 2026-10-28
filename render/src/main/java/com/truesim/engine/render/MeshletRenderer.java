@@ -115,26 +115,35 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /**
-     * How much a frame holds: instances, visible meshlets (at most 4,194,304: the guaranteed mesh dispatch size),
-     * chunks of 64 meshlets of visible instances (at most 65,535: the guaranteed dispatch size) and, on the indexed
-     * path, visible triangles (12 bytes each in the frame's index buffer). Meshlets beyond these are not drawn.
+     * How much a frame holds: instances; per view, visible meshlets (at most 4,194,304: the guaranteed mesh dispatch
+     * size) and, on the indexed path, visible triangles (12 bytes each in the view's index buffer); chunks of 64
+     * meshlets of visible instances, shared by the views culled together (at most 65,535: the guaranteed dispatch
+     * size); and how many views (1 to {@link #VIEWS}, from 0) have lists of their own, to be drawn. Meshlets beyond
+     * these are not drawn.
      */
-    public record Limits(int instances, int draws, int chunks, int triangles) {
+    public record Limits(int instances, int draws, int chunks, int triangles, int views) {
 
         public Limits {
-            if (instances < 1 || draws < 1 || draws > 1 << 22 || chunks < 1 || chunks > 65_535 || triangles < 1) {
-                throw new IllegalArgumentException("Need room for instances, 1 to 4,194,304 draws, triangles and 1 to "
-                    + "65,535 chunks: " + instances + ", " + draws + ", " + chunks + ", " + triangles);
+            if (instances < 1 || draws < 1 || draws > 1 << 22 || chunks < 1 || chunks > 65_535 || triangles < 1
+                || views < 1 || views > VIEWS) {
+                throw new IllegalArgumentException("Need room for instances, 1 to 4,194,304 draws, triangles, 1 to "
+                    + "65,535 chunks and 1 to " + VIEWS + " views: " + instances + ", " + draws + ", " + chunks + ", "
+                    + triangles + ", " + views);
             }
+        }
+
+        /** Limits for one view, the camera. */
+        public Limits(int instances, int draws, int chunks, int triangles) {
+            this(instances, draws, chunks, triangles, 1);
         }
     }
 
     /** VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT: the same bit as the 32-bit stage. */
     private static final long MESH_SHADER_STAGE = VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
     static final int INSTANCE_BYTES = 48;
-    private static final int INSTANCE_PUSH = 84;
-    private static final int CULL_PUSH = 104;
-    private static final int PHASE_ALL = 0;
+    private static final int INSTANCE_PUSH = 88;
+    private static final int CULL_PUSH = 80;
+    private static final int LISTS_BYTES = 32;
     private static final int PHASE_EARLY = 1;
     private static final int PHASE_LATE = 2;
     private static final int VIEW_BYTES = 192;
@@ -157,12 +166,15 @@ public final class MeshletRenderer implements AutoCloseable {
     private final GpuBuffer instances;
     private final GpuBuffer chunks;
     private final GpuBuffer chunkCommand;
-    private final GpuBuffer visible;
-    private final GpuBuffer frameIndices;
-    private final GpuBuffer expandCommand;
-    private final GpuBuffer drawCommand;
+    // Per view with lists: what culling finds, and the commands drawing it.
+    private final GpuBuffer[] visible;
+    private final GpuBuffer[] frameIndices;
+    private final GpuBuffer[] expandCommand;
+    private final GpuBuffer[] drawCommand;
+    private final GpuBuffer lists; // the shaders' ViewLists, per view
     private final GpuBuffer drawCount;
     private final GpuBuffer visibility;
+    private final int[] phaseOf = new int[VIEWS]; // each view's last culling phase
     private Path path = Path.AUTO;
     private int instanceCount;
     private boolean closed;
@@ -218,13 +230,26 @@ public final class MeshletRenderer implements AutoCloseable {
         chunkCommand = GpuBuffer.deviceLocal(device, 16,
             storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         int commandUsage = storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        visible = GpuBuffer.deviceLocal(device, 16L * limits.draws(), storage);
-        frameIndices = GpuBuffer.deviceLocal(device, 12L * limits.triangles(),
-            storage | VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-        expandCommand = GpuBuffer.deviceLocal(device, 16, commandUsage);
-        drawCommand = GpuBuffer.deviceLocal(device, 24, commandUsage);
         drawCount = GpuBuffer.hostVisible(device, 8L * VIEWS, // per view: the early (or only) and late phases
             storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        int views = limits.views();
+        visible = new GpuBuffer[views];
+        frameIndices = new GpuBuffer[views];
+        expandCommand = new GpuBuffer[views];
+        drawCommand = new GpuBuffer[views];
+        lists = GpuBuffer.hostVisible(device, (long) LISTS_BYTES * views, storage);
+        for (int v = 0; v < views; v++) {
+            visible[v] = GpuBuffer.deviceLocal(device, 16L * limits.draws(), storage);
+            frameIndices[v] = GpuBuffer.deviceLocal(device, 12L * limits.triangles(),
+                storage | VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+            expandCommand[v] = GpuBuffer.deviceLocal(device, 16, commandUsage);
+            drawCommand[v] = GpuBuffer.deviceLocal(device, 24, commandUsage);
+            MemorySegment entry = lists.memory().asSlice((long) LISTS_BYTES * v, LISTS_BYTES);
+            entry.set(ValueLayout.JAVA_LONG_UNALIGNED, 0, visible[v].deviceAddress());
+            entry.set(ValueLayout.JAVA_LONG_UNALIGNED, 8, expandCommand[v].deviceAddress());
+            entry.set(ValueLayout.JAVA_LONG_UNALIGNED, 16, drawCommand[v].deviceAddress());
+            entry.set(ValueLayout.JAVA_LONG_UNALIGNED, 24, drawCount.deviceAddress() + 8L * v);
+        }
         visibility = GpuBuffer.deviceLocal(device, 4L * limits.instances(), storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         device.submitAndWait(device.graphics(), commands -> vkCmdFillBuffer(commands, visibility.handle(), 0,
             visibility.size(), 0)); // nothing visible yet: the first late phase finds out
@@ -288,7 +313,7 @@ public final class MeshletRenderer implements AutoCloseable {
 
     /**
      * Sets view {@code index} (0 to {@link #VIEWS} - 1; 0 is the one {@link #record} draws), e.g. a light's
-     * orthographic view for {@link #recordDepth}. Allocates nothing.
+     * orthographic view for {@link #recordDepth}. Views drawn need lists ({@link Limits#views}). Allocates nothing.
      */
     public void setView(int index, Camera camera, float errorPixels, int mode) {
         Objects.checkIndex(index, VIEWS);
@@ -316,7 +341,8 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void record(VkCommandBuffer commands, long colorView, long depthView, int width, int height, float r,
         float g, float b) {
-        record(commands, colorView, depthView, width, height, r, g, b, PHASE_ALL, 0, 0, 0);
+        cullViews(commands, 1, 0);
+        drawView(commands, 0, colorView, depthView, width, height, r, g, b);
     }
 
     /**
@@ -324,8 +350,8 @@ public final class MeshletRenderer implements AutoCloseable {
      * shadow map from a light's orthographic view ({@link #setView(int, Camera, float, int)}). Allocates nothing.
      */
     public void recordDepth(VkCommandBuffer commands, long depthView, int width, int height, int index) {
-        Objects.checkIndex(index, VIEWS);
-        record(commands, 0, depthView, width, height, 0, 0, 0, PHASE_ALL, 0, 0, index);
+        cullViews(commands, 1 << lists(index), 0);
+        drawView(commands, index, 0, depthView, width, height, 0, 0, 0);
     }
 
     /**
@@ -336,7 +362,8 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void recordEarly(VkCommandBuffer commands, long colorView, long depthView, int width, int height, float r,
         float g, float b) {
-        record(commands, colorView, depthView, width, height, r, g, b, PHASE_EARLY, 0, 0, 0);
+        cullViews(commands, 1, 1);
+        drawView(commands, 0, colorView, depthView, width, height, r, g, b);
     }
 
     /**
@@ -348,114 +375,50 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void recordLate(VkCommandBuffer commands, long colorView, long depthView, int width, int height,
         int pyramid, int mips) {
-        record(commands, colorView, depthView, width, height, 0, 0, 0, PHASE_LATE, pyramid, mips, 0);
+        cull(commands, 1, PHASE_LATE, pyramid, width, height, mips);
+        drawView(commands, 0, colorView, depthView, width, height, 0, 0, 0);
     }
 
-    private void record(VkCommandBuffer commands, long colorView, long depthView, int width, int height, float r,
-        float g, float b, int phase, int pyramid, int mips, int viewIndex) {
-        boolean meshShading = path() == Path.MESH_SHADERS;
-        boolean late = phase == PHASE_LATE;
-        bindless.bind(commands); // the late phase samples the depth pyramid through it
+    /**
+     * Culls the views of {@code viewMask} (bit v: view v) together: one instance pass and one cull pass for them all,
+     * each view's meshlets into its own lists, for {@link #drawView}. Views of {@code earlyMask} run the early phase of
+     * occlusion culling ({@link #recordEarly}; one view at most, as visibility is tracked per instance); the others
+     * draw everything in view. Chunks ({@link Limits#chunks}) are shared by the views. Allocates nothing.
+     */
+    public void cullViews(VkCommandBuffer commands, int viewMask, int earlyMask) {
+        if (viewMask == 0 || viewMask >>> limits.views() != 0 || (earlyMask & ~viewMask) != 0
+            || Integer.bitCount(earlyMask) > 1) {
+            throw new IllegalArgumentException("Views to cull, of the " + limits.views() + " with lists, at most one "
+                + "of them early: " + viewMask + ", " + earlyMask);
+        }
+        int phases = 0;
+        for (int v = 0; v < VIEWS; v++) {
+            phases |= ((earlyMask >> v) & 1) * PHASE_EARLY << (2 * v);
+        }
+        cull(commands, viewMask, phases, 0, 0, 0, 0);
+    }
+
+    /**
+     * Draws view {@code index}, as culled last, into {@code colorView} and {@code depthView} ({@code width} by
+     * {@code height}, in the attachment layouts): cleared to ({@code r}, {@code g}, {@code b}) and depth 0, or after
+     * the late phase drawn over them. With {@code colorView} 0, depth only (no shading): a shadow map, say. Allocates
+     * nothing.
+     */
+    public void drawView(VkCommandBuffer commands, int index, long colorView, long depthView, int width, int height,
+        float r, float g, float b) {
+        int v = lists(index);
+        boolean late = phaseOf[v] == PHASE_LATE;
         boolean depthOnly = colorView == 0;
-        long viewAddress = view.deviceAddress() + (long) VIEW_BYTES * viewIndex;
-        view.memory().set(U32, (long) VIEW_BYTES * viewIndex + 168, instanceCount);
-        // What came before (the early phase, the frame before) used the buffers this phase resets, and the visibility.
-        barrier(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
-        long count = drawCount.deviceAddress() + 8L * viewIndex + (late ? 4 : 0);
-        try (MemoryStack stack = stackPush()) {
-            if (!late) {
-                vkCmdFillBuffer(commands, drawCount.handle(), 8L * viewIndex, 8, 0);
-            }
-            long reset = stack.nmalloc(4, 16); // the chunk command: no chunks yet, a dispatch of x by 1 by 1
-            memPutInt(reset, 0);
-            memPutInt(reset + 4, 1);
-            memPutInt(reset + 8, 1);
-            memPutInt(reset + 12, 0);
-            nvkCmdUpdateBuffer(commands, chunkCommand.handle(), 0, 16, reset);
-            nvkCmdUpdateBuffer(commands, expandCommand.handle(), 0, 16, reset); // no meshlets: x by 1 by 1
-            long draw = stack.ncalloc(4, 6, 4); // no indices, one instance; word 5 counts reserved indices
-            memPutInt(draw + 4, 1);
-            nvkCmdUpdateBuffer(commands, drawCommand.handle(), 0, 24, draw);
-        }
-        barrier(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT
-                | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-        try (MemoryStack stack = stackPush()) {
-            long push = stack.nmalloc(8, INSTANCE_PUSH);
-            memPutLong(push, viewAddress);
-            memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, instances.deviceAddress());
-            memPutLong(push + 24, chunks.deviceAddress());
-            memPutLong(push + 32, chunkCommand.deviceAddress());
-            memPutLong(push + 40, pool.levels().deviceAddress());
-            memPutInt(push + 48, limits.chunks());
-            memPutLong(push + 56, visibility.deviceAddress());
-            occlusion(push + 64, phase, pyramid, width, height, mips);
-            instancesPass.bind(commands);
-            instancesPass.push(commands, push, INSTANCE_PUSH);
-            vkCmdDispatch(commands, (instanceCount + 63) / 64, 1, 1);
-        }
-        // The chunks feed the cull pass's indirect dispatch and the pass itself.
-        barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT
-                | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-        try (MemoryStack stack = stackPush()) {
-            long push = stack.nmalloc(8, CULL_PUSH);
-            memPutLong(push, viewAddress);
-            memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, instances.deviceAddress());
-            memPutLong(push + 24, chunks.deviceAddress());
-            memPutLong(push + 32, pool.meshlets().deviceAddress());
-            memPutLong(push + 40, pool.clusterLod().deviceAddress());
-            memPutLong(push + 48, visible.deviceAddress());
-            memPutLong(push + 56, expandCommand.deviceAddress());
-            memPutLong(push + 64, drawCommand.deviceAddress());
-            memPutLong(push + 72, count);
-            // mesh shaders read no frame index buffer: every listed meshlet fits
-            memPutInt(push + 80, meshShading ? -1 : (int) Math.min(Integer.MAX_VALUE, 3L * limits.triangles()));
-            occlusion(push + 84, phase, pyramid, width, height, mips);
-            cull.bind(commands);
-            cull.push(commands, push, CULL_PUSH);
-            vkCmdDispatchIndirect(commands, chunkCommand.handle(), 0);
-        }
-        if (meshShading) { // the list and its dispatch feed the mesh shaders
-            barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | MESH_SHADER_STAGE,
-                VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-        } else {
-            barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-            try (MemoryStack stack = stackPush()) {
-                long push = stack.nmalloc(8, 64);
-                memPutLong(push, viewAddress);
-                memPutLong(push + 8, visible.deviceAddress());
-                memPutLong(push + 16, count);
-                memPutLong(push + 24, pool.meshlets().deviceAddress());
-                memPutLong(push + 32, pool.meshTable().deviceAddress());
-                memPutLong(push + 40, instances.deviceAddress());
-                memPutLong(push + 48, pool.meshletTriangles().deviceAddress());
-                memPutLong(push + 56, frameIndices.deviceAddress());
-                expand.bind(commands);
-                expand.push(commands, push, 64);
-                vkCmdDispatchIndirect(commands, expandCommand.handle(), 0);
-            }
-            barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT
-                    | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-                VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT
-                    | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-        }
+        long viewAddress = view.deviceAddress() + (long) VIEW_BYTES * v;
+        long count = drawCount.deviceAddress() + 8L * v + (late ? 4 : 0);
         try (MemoryStack stack = stackPush()) {
             beginRendering(commands, stack, colorView, depthView, width, height, r, g, b, late);
-            if (meshShading) {
+            if (path() == Path.MESH_SHADERS) {
                 long push = stack.nmalloc(8, 80);
                 memPutLong(push, viewAddress);
                 memPutLong(push + 8, pool.meshTable().deviceAddress());
                 memPutLong(push + 16, instances.deviceAddress());
-                memPutLong(push + 24, visible.deviceAddress());
+                memPutLong(push + 24, visible[v].deviceAddress());
                 memPutLong(push + 32, count);
                 memPutLong(push + 40, pool.meshlets().deviceAddress());
                 memPutLong(push + 48, pool.meshletVertices().deviceAddress());
@@ -466,7 +429,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 mesh.bind(commands);
                 setViewport(commands, stack, width, height);
                 mesh.push(commands, push, 80);
-                vkCmdDrawMeshTasksIndirectEXT(commands, expandCommand.handle(), 0, 1, 12);
+                vkCmdDrawMeshTasksIndirectEXT(commands, expandCommand[v].handle(), 0, 1, 12);
             } else {
                 long push = stack.nmalloc(8, 64);
                 memPutLong(push, viewAddress);
@@ -474,18 +437,139 @@ public final class MeshletRenderer implements AutoCloseable {
                 memPutLong(push + 16, instances.deviceAddress());
                 memPutLong(push + 24, pool.positions().deviceAddress());
                 memPutLong(push + 32, pool.attributes().deviceAddress());
-                memPutLong(push + 40, visible.deviceAddress());
+                memPutLong(push + 40, visible[v].deviceAddress());
                 memPutLong(push + 48, pool.meshlets().deviceAddress());
                 memPutLong(push + 56, pool.meshletVertices().deviceAddress());
                 Pipeline indexed = depthOnly ? drawDepth : draw;
                 indexed.bind(commands);
                 setViewport(commands, stack, width, height);
                 indexed.push(commands, push, 64);
-                vkCmdBindIndexBuffer(commands, frameIndices.handle(), 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexedIndirect(commands, drawCommand.handle(), 0, 1, 20);
+                vkCmdBindIndexBuffer(commands, frameIndices[v].handle(), 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexedIndirect(commands, drawCommand[v].handle(), 0, 1, 20);
             }
             vkCmdEndRendering(commands);
         }
+    }
+
+    /** {@code index}, a view with lists. */
+    private int lists(int index) {
+        if (index < 0 || index >= limits.views()) {
+            throw new IllegalArgumentException("View " + index + " has no lists: the renderer's limits give "
+                + limits.views() + " views");
+        }
+        return index;
+    }
+
+    /**
+     * Culls the views of {@code viewMask} in their {@code phases} (2 bits per view), the late phase against
+     * {@code pyramid}: resets their lists, then the instance pass (a row per view), the cull pass over all their chunks
+     * and, on the indexed path, each view's expansion.
+     */
+    private void cull(VkCommandBuffer commands, int viewMask, int phases, int pyramid, int width, int height,
+        int mips) {
+        boolean meshShading = path() == Path.MESH_SHADERS;
+        bindless.bind(commands); // the late phase samples the depth pyramid through it
+        // What came before (the early phase, the frame before) used the buffers this resets, and the visibility.
+        barrier(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        int rows = 0;
+        int viewList = 0;
+        try (MemoryStack stack = stackPush()) {
+            long reset = stack.nmalloc(4, 16); // the chunk command: no chunks yet, a dispatch of x by 1 by 1
+            memPutInt(reset, 0);
+            memPutInt(reset + 4, 1);
+            memPutInt(reset + 8, 1);
+            memPutInt(reset + 12, 0);
+            nvkCmdUpdateBuffer(commands, chunkCommand.handle(), 0, 16, reset);
+            long draw = stack.ncalloc(4, 6, 4); // no indices, one instance; word 5 counts reserved indices
+            memPutInt(draw + 4, 1);
+            for (int v = 0; v < limits.views(); v++) {
+                if ((viewMask & 1 << v) == 0) {
+                    continue;
+                }
+                int phase = (phases >> (2 * v)) & 3;
+                phaseOf[v] = phase;
+                view.memory().set(U32, (long) VIEW_BYTES * v + 168, instanceCount);
+                if (phase != PHASE_LATE) {
+                    vkCmdFillBuffer(commands, drawCount.handle(), 8L * v, 8, 0);
+                }
+                nvkCmdUpdateBuffer(commands, expandCommand[v].handle(), 0, 16, reset); // no meshlets: x by 1 by 1
+                nvkCmdUpdateBuffer(commands, drawCommand[v].handle(), 0, 24, draw);
+                viewList |= v << (8 * rows++);
+            }
+        }
+        barrier(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+                | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        try (MemoryStack stack = stackPush()) {
+            long push = stack.nmalloc(8, INSTANCE_PUSH);
+            memPutLong(push, view.deviceAddress());
+            memPutLong(push + 8, pool.meshTable().deviceAddress());
+            memPutLong(push + 16, instances.deviceAddress());
+            memPutLong(push + 24, chunks.deviceAddress());
+            memPutLong(push + 32, chunkCommand.deviceAddress());
+            memPutLong(push + 40, pool.levels().deviceAddress());
+            memPutInt(push + 48, limits.chunks());
+            memPutLong(push + 56, visibility.deviceAddress());
+            occlusion(push + 64, phases, pyramid, width, height, mips);
+            memPutInt(push + 84, viewList);
+            instancesPass.bind(commands);
+            instancesPass.push(commands, push, INSTANCE_PUSH);
+            vkCmdDispatch(commands, (instanceCount + 63) / 64, rows, 1);
+        }
+        // The chunks feed the cull pass's indirect dispatch and the pass itself.
+        barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+                | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        try (MemoryStack stack = stackPush()) {
+            long push = stack.nmalloc(8, CULL_PUSH);
+            memPutLong(push, view.deviceAddress());
+            memPutLong(push + 8, pool.meshTable().deviceAddress());
+            memPutLong(push + 16, instances.deviceAddress());
+            memPutLong(push + 24, chunks.deviceAddress());
+            memPutLong(push + 32, pool.meshlets().deviceAddress());
+            memPutLong(push + 40, pool.clusterLod().deviceAddress());
+            memPutLong(push + 48, lists.deviceAddress());
+            // mesh shaders read no frame index buffer: every listed meshlet fits
+            memPutInt(push + 56, meshShading ? -1 : (int) Math.min(Integer.MAX_VALUE, 3L * limits.triangles()));
+            occlusion(push + 60, phases, pyramid, width, height, mips);
+            cull.bind(commands);
+            cull.push(commands, push, CULL_PUSH);
+            vkCmdDispatchIndirect(commands, chunkCommand.handle(), 0);
+        }
+        if (meshShading) { // the lists and their dispatches feed the mesh shaders
+            barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | MESH_SHADER_STAGE,
+                VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+            return;
+        }
+        barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        expand.bind(commands);
+        for (int v = 0; v < limits.views(); v++) {
+            if ((viewMask & 1 << v) == 0) {
+                continue;
+            }
+            try (MemoryStack stack = stackPush()) {
+                long push = stack.nmalloc(8, 64);
+                memPutLong(push, view.deviceAddress() + (long) VIEW_BYTES * v);
+                memPutLong(push + 8, visible[v].deviceAddress());
+                memPutLong(push + 16, drawCount.deviceAddress() + 8L * v + (phaseOf[v] == PHASE_LATE ? 4 : 0));
+                memPutLong(push + 24, pool.meshlets().deviceAddress());
+                memPutLong(push + 32, pool.meshTable().deviceAddress());
+                memPutLong(push + 40, instances.deviceAddress());
+                memPutLong(push + 48, pool.meshletTriangles().deviceAddress());
+                memPutLong(push + 56, frameIndices[v].deviceAddress());
+                expand.push(commands, push, 64);
+                vkCmdDispatchIndirect(commands, expandCommand[v].handle(), 0);
+            }
+        }
+        barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT
+                | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+            VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     }
 
     /** Begins rendering into the attachments, cleared or, with {@code load}, as they are. */
@@ -532,7 +616,7 @@ public final class MeshletRenderer implements AutoCloseable {
         memPutInt(info + VkRenderingAttachmentInfo.STOREOP, VK_ATTACHMENT_STORE_OP_STORE);
     }
 
-    /** The shaders' Occlusion struct at {@code address}: phase, pyramid slot, depth size, pyramid levels. */
+    /** The shaders' Occlusion struct at {@code address}: phases, pyramid slot, depth size, pyramid levels. */
     private static void occlusion(long address, int phase, int pyramid, int width, int height, int mips) {
         memPutInt(address, phase);
         memPutInt(address + 4, pyramid);
@@ -604,10 +688,14 @@ public final class MeshletRenderer implements AutoCloseable {
                 meshDraw.close();
                 meshDepth.close();
             }
-            for (GpuBuffer buffer : new GpuBuffer[] {view, instances, chunks, chunkCommand, visible, frameIndices,
-                expandCommand, drawCommand,
-                drawCount, visibility}) {
+            for (GpuBuffer buffer : new GpuBuffer[] {view, instances, chunks, chunkCommand, lists, drawCount, visibility}) {
                 buffer.close();
+            }
+            for (int v = 0; v < limits.views(); v++) {
+                visible[v].close();
+                frameIndices[v].close();
+                expandCommand[v].close();
+                drawCommand[v].close();
             }
         }
     }
