@@ -266,9 +266,26 @@ LightClusters.Grid clusters = g.request(new LightClusters(lights, renderer, widt
   lights any cluster wanted is in the header).
 - Tested against the same cluster boxes computed on the CPU.
 
-**Clustered forward shading:** `new MeshletScene(...).lights(lights)` shades each pixel, as it is drawn, with the
-lights of its cluster (and the sky); without lights, with the sun. The clusters are the shared request, so another
-technique shading the same view uses the same ones.
+**Shading: clustered forward or visibility buffer.** `new MeshletScene(...).lights(lights)` shades the scene with the
+lights of each pixel's cluster (and the sky); without lights, with the sun. `.shading(...)` picks when:
+
+- `CLUSTERED_FORWARD` shades as the meshlets are drawn, so pixels covered later are shaded too.
+- `VISIBILITY_BUFFER` draws only IDs (instance, meshlet, triangle: 8 bytes per pixel) and then shades each pixel once
+  in a compute pass. That pass rebuilds the triangle through the same vertex stage, intersects the pixel's ray with it
+  for barycentrics and texture gradients, and uses the same shading. Needs `VulkanDevice.primitiveIds()`.
+
+Both draw the same image (tested; the screenshots differ by 0.014 of 255 on average). GPU time of the whole frame,
+1920 x 1080:
+
+| Scene | Clustered forward | Visibility buffer |
+|---|---|---|
+| 30,000 rocks on the terrain, the sun | 1.27 ms | 0.87 ms |
+| the same, 256 point lights | 1.48 ms | 0.93 ms |
+| the same, 4,096 point lights | 5.56 ms | 1.71 ms |
+| 3,000 rocks, 1,024 point lights (`Screenshots.renderLights`) | 1.86 ms | 0.74 ms |
+
+The enum is a first step: #46 makes shading, light binning, shadows, transparency and post effects swappable
+techniques.
 
 
 ## Ray tracing
