@@ -4,6 +4,7 @@ module common;
 
 import bindless;
 __exported import shading;
+__exported import lights;
 
 /** One mesh in the geometry pool: where its data lies in the pool's buffers, and its quantization box. 96 bytes. */
 public struct MeshEntry
@@ -347,10 +348,12 @@ public static const float3 SUN_IRRADIANCE = float3(2.35619449);
 public static const float3 SKY_IRRADIANCE = float3(0.78539816 / 1.02);
 
 /**
- * The surface color, with texture coordinate gradients `dx`, `dy` (per pixel): the fragment stage of both paths, and
- * of anything shading the same surfaces. Lit by the sun and the sky, with its material.
+ * The surface color at `pixel`, with texture coordinate gradients `dx`, `dy` (per pixel): the fragment stage of both
+ * paths, and of anything shading the same surfaces. Lit by the lights of its cluster (`clusters`, from
+ * LightClusters) and the sky or, without clusters (null), by the sun and the sky.
  */
-public float4 shadeSurface(View view, VertexOut in, Material* materials, float2 dx, float2 dy)
+public float4 shadeSurface(View view, VertexOut in, Material* materials, float2 dx, float2 dy,
+    ClusterHeader* clusters, uint2 pixel)
 {
     if (view.mode == 2)
     {
@@ -364,6 +367,15 @@ public float4 shadeSurface(View view, VertexOut in, Material* materials, float2 
     }
     Surface s = evaluate(m, in.normal, in.tangent, in.uv, dx, dy, in.color);
     float3 toViewer = normalize(-in.world);
-    float3 color = reflected(s, toViewer, SUN, SUN_IRRADIANCE) + ambient(s, SKY_IRRADIANCE) + s.emissive;
+    float3 color = ambient(s, SKY_IRRADIANCE) + s.emissive;
+    if (clusters == nullptr)
+    {
+        color += reflected(s, toViewer, SUN, SUN_IRRADIANCE);
+    }
+    else
+    {
+        float depth = mul(view.viewProjection, float4(in.world, 1)).w; // along the view direction
+        color += lightCluster(clusters, s, in.world, toViewer, pixel, depth);
+    }
     return float4(color, 1);
 }

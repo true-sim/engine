@@ -33,6 +33,7 @@ public final class MeshletScene implements Technique {
     private final int depthFormat;
     private final float[] clear = new float[3];
     private boolean occlusion = true;
+    private Lights lights;
 
     /** The renderer's pipelines must have been made for {@code colorFormat} and {@code depthFormat}. */
     public MeshletScene(MeshletRenderer renderer, int width, int height, int colorFormat, int depthFormat) {
@@ -57,6 +58,16 @@ public final class MeshletScene implements Technique {
         return this;
     }
 
+    /**
+     * Shades with {@code lights} (null, the default: the sun alone): clustered forward shading, each pixel lit by the
+     * lights of its cluster ({@link LightClusters}, shared with other techniques shading the view). The graph rebuilds
+     * when it changes.
+     */
+    public MeshletScene lights(Lights lights) {
+        this.lights = lights;
+        return this;
+    }
+
     @Override
     public List<Key> provides() {
         return List.of(Keys.SCENE_COLOR, Keys.SCENE_DEPTH);
@@ -69,22 +80,30 @@ public final class MeshletScene implements Technique {
         Image depth = g.create("scene depth", width, height, depthFormat);
         // Culled with the renderer's other views (a shadow map's, say) in one pass.
         MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)).add(0, occlusion, null);
-        g.pass(occlusion ? "meshlets early" : "meshlets")
+        LightClusters.Grid clusters = lights == null ? null
+            : g.request(new LightClusters(lights, renderer, width, height));
+        GraphBuilder.PassBuilder early = g.pass(occlusion ? "meshlets early" : "meshlets")
             .read(culling.culled(), BufferAccess.INDIRECT)
             .write(color, Access.COLOR_ATTACHMENT)
-            .write(depth, Access.DEPTH_ATTACHMENT)
-            .record(ctx -> renderer.drawView(ctx.commands(), 0, ctx.view(color), ctx.view(depth), width, height,
-                clear[0], clear[1], clear[2]));
+            .write(depth, Access.DEPTH_ATTACHMENT);
+        lit(early, clusters).record(ctx -> renderer.drawView(ctx.commands(), 0, ctx.view(color), ctx.view(depth), width,
+            height, clear[0], clear[1], clear[2], clusters == null ? 0 : ctx.address(clusters.header())));
         if (occlusion) {
             Image pyramid = g.request(new DepthPyramid(depth));
-            g.pass("meshlets late")
+            GraphBuilder.PassBuilder late = g.pass("meshlets late")
                 .read(pyramid, Access.SAMPLED_COMPUTE)
                 .write(color, Access.COLOR_ATTACHMENT)
-                .write(depth, Access.DEPTH_ATTACHMENT)
-                .record(ctx -> renderer.recordLate(ctx.commands(), ctx.view(color), ctx.view(depth), width, height,
-                    ctx.sampled(pyramid), pyramid.mips()));
+                .write(depth, Access.DEPTH_ATTACHMENT);
+            lit(late, clusters).record(ctx -> renderer.recordLate(ctx.commands(), ctx.view(color), ctx.view(depth),
+                width, height, ctx.sampled(pyramid), pyramid.mips(),
+                clusters == null ? 0 : ctx.address(clusters.header())));
         }
         g.provide(Keys.SCENE_COLOR, color);
         g.provide(Keys.SCENE_DEPTH, depth);
+    }
+
+    /** {@code pass}, reading the light clusters if there are any. */
+    private static GraphBuilder.PassBuilder lit(GraphBuilder.PassBuilder pass, LightClusters.Grid clusters) {
+        return clusters == null ? pass : clusters.readBy(pass, BufferAccess.DRAW_READ);
     }
 }

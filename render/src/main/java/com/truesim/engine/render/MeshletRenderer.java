@@ -144,8 +144,11 @@ public final class MeshletRenderer implements AutoCloseable {
     private static final int INSTANCE_PUSH = 88;
     private static final int CULL_PUSH = 80;
     private static final int LISTS_BYTES = 32;
-    /** Both draw paths' push blocks: the materials at byte 80, where the shared fragment shader reads them. */
-    private static final int DRAW_PUSH = 88;
+    /**
+     * Both draw paths' push blocks: the materials at byte 80 and the light clusters at 88, where the shared fragment
+     * shader reads them.
+     */
+    private static final int DRAW_PUSH = 96;
     private static final int PHASE_EARLY = 1;
     private static final int PHASE_LATE = 2;
     private static final int VIEW_BYTES = 192;
@@ -400,8 +403,14 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void recordLate(VkCommandBuffer commands, long colorView, long depthView, int width, int height,
         int pyramid, int mips) {
+        recordLate(commands, colorView, depthView, width, height, pyramid, mips, 0);
+    }
+
+    /** Like {@link #recordLate(VkCommandBuffer, long, long, int, int, int, int)}, lit by {@code clusters}. */
+    public void recordLate(VkCommandBuffer commands, long colorView, long depthView, int width, int height,
+        int pyramid, int mips, long clusters) {
         cull(commands, 1, PHASE_LATE, pyramid, width, height, mips);
-        drawView(commands, 0, colorView, depthView, width, height, 0, 0, 0);
+        drawView(commands, 0, colorView, depthView, width, height, 0, 0, 0, clusters);
     }
 
     /**
@@ -431,6 +440,15 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void drawView(VkCommandBuffer commands, int index, long colorView, long depthView, int width, int height,
         float r, float g, float b) {
+        drawView(commands, index, colorView, depthView, width, height, r, g, b, 0);
+    }
+
+    /**
+     * Like {@link #drawView(VkCommandBuffer, int, long, long, int, int, float, float, float)}, shaded with the lights
+     * of {@code clusters} (the device address of a {@link LightClusters} header; 0: the sun alone).
+     */
+    public void drawView(VkCommandBuffer commands, int index, long colorView, long depthView, int width, int height,
+        float r, float g, float b, long clusters) {
         int v = lists(index);
         boolean late = phaseOf[v] == PHASE_LATE;
         boolean depthOnly = colorView == 0;
@@ -451,6 +469,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 memPutLong(push + 64, pool.positions().deviceAddress());
                 memPutLong(push + 72, pool.attributes().deviceAddress());
                 memPutLong(push + 80, materials.deviceAddress());
+                memPutLong(push + 88, clusters);
                 Pipeline mesh = depthOnly ? meshDepth : meshDraw;
                 mesh.bind(commands);
                 setViewport(commands, stack, width, height);
@@ -467,6 +486,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 memPutLong(push + 48, pool.meshlets().deviceAddress());
                 memPutLong(push + 56, pool.meshletVertices().deviceAddress());
                 memPutLong(push + 80, materials.deviceAddress());
+                memPutLong(push + 88, clusters);
                 Pipeline indexed = depthOnly ? drawDepth : draw;
                 indexed.bind(commands);
                 setViewport(commands, stack, width, height);

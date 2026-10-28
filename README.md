@@ -266,6 +266,10 @@ LightClusters.Grid clusters = g.request(new LightClusters(lights, renderer, widt
   lights any cluster wanted is in the header).
 - Tested against the same cluster boxes computed on the CPU.
 
+**Clustered forward shading:** `new MeshletScene(...).lights(lights)` shades each pixel, as it is drawn, with the
+lights of its cluster (and the sky); without lights, with the sun. The clusters are the shared request, so another
+technique shading the same view uses the same ones.
+
 
 ## Ray tracing
 

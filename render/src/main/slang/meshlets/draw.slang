@@ -14,7 +14,8 @@ struct DrawPush
     uint* meshlets;
     uint* meshletVertices;
     uint64_t unused[2];
-    Material* materials;      // at byte 80, as in mesh.slang's push block: the fragment shader serves both
+    Material* materials;      // at byte 80 and the clusters at 88, as in mesh.slang's push block: the fragment
+    ClusterHeader* clusters;  // shader serves both paths (null: no clusters, the sun)
 };
 
 [[vk::push_constant]]
@@ -35,5 +36,6 @@ VertexOut vertexMain(uint index : SV_VulkanVertexID)
 [shader("fragment")]
 float4 fragmentMain(VertexOut in) : SV_Target
 {
-    return shadeSurface(push.view[0], in, push.materials, ddx(in.uv), ddy(in.uv));
+    return shadeSurface(push.view[0], in, push.materials, ddx(in.uv), ddy(in.uv), push.clusters,
+        uint2(in.position.xy));
 }
