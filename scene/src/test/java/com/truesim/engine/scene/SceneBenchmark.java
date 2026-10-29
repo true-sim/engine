@@ -231,6 +231,11 @@ class SceneBenchmark {
 
     /** A rock resting on the terrain: half sunk, scaled 0.5 to 3, turned at random, ahead of the camera. */
     private static void place(SceneGraph scene, long node, SplittableRandom random, double[] placed, int i) {
+        place(scene, node, random, placed, i, FAR);
+    }
+
+    /** {@link #place}, around ({@code far}, 0, {@code far}). */
+    static void place(SceneGraph scene, long node, SplittableRandom random, double[] placed, int i, double far) {
         double x = random.nextDouble(-EXTENT / 2, EXTENT / 2);
         double z = random.nextDouble(-EXTENT - 5, -5);
         double scale = random.nextDouble(0.5, 3);
@@ -239,9 +244,9 @@ class SceneBenchmark {
         double qz = random.nextDouble(-1, 1);
         double qw = random.nextDouble(-1, 1);
         double length = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
-        placed[3 * i] = FAR + x;
+        placed[3 * i] = far + x;
         placed[3 * i + 1] = GROUND_Y + terrainHeight(x, z) + 0.4 * scale;
-        placed[3 * i + 2] = FAR + z;
+        placed[3 * i + 2] = far + z;
         scene.setTranslation(node, placed[3 * i], placed[3 * i + 1], placed[3 * i + 2]);
         scene.setRotation(node, qx / length, qy / length, qz / length, qw / length);
         scene.setScale(node, scale, scale, scale);
