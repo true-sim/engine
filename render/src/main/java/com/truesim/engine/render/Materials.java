@@ -69,6 +69,9 @@ public final class Materials implements AutoCloseable {
      */
     public int add(Material material) {
         int id = take(1);
+        if (id < 0) {
+            throw new IllegalStateException("The material table holds " + capacity + " materials: no room");
+        }
         write(id, material);
         return id;
     }
@@ -78,22 +81,44 @@ public final class Materials implements AutoCloseable {
      * an instance names by the first: submesh s takes the first id plus s. {@link #remove} of the first removes them all.
      */
     public int addAll(List<Material> materials) {
+        int first = tryAddAll(materials);
+        if (first < 0) {
+            throw new IllegalStateException("The material table holds " + capacity + " materials: no room for "
+                + materials.size() + " more in a row");
+        }
+        return first;
+    }
+
+    /**
+     * Like {@link #addAll}, or returns -1 if the table has no room for them in a row now: room may come back as removed
+     * blocks leave the frames in flight. Allocates nothing when there is no room.
+     */
+    public int tryAddAll(List<Material> materials) {
         if (materials.isEmpty()) {
             throw new IllegalArgumentException("No materials to add");
         }
         int first = take(materials.size());
-        for (int i = 0; i < materials.size(); i++) {
+        for (int i = 0; first >= 0 && i < materials.size(); i++) {
             write(first + i, materials.get(i));
         }
         return first;
     }
 
+    /**
+     * Whether {@link #tryAddAll} would find {@code length} ids in a row now, counting removed blocks no frame in flight
+     * reads any more. Allocates nothing.
+     */
+    public boolean hasRoom(int length) {
+        releaseRetired();
+        return ids.fits(length);
+    }
+
+    /** The first of {@code length} free ids in a row, taken, or -1 with no room. */
     private int take(int length) {
         releaseRetired();
         long first = ids.allocate(length, 1);
         if (first < 0) {
-            throw new IllegalStateException("The material table holds " + capacity + " materials: no room for "
-                + length + " more in a row");
+            return -1;
         }
         int id = (int) first;
         blockLength[id] = length;

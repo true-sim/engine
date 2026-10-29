@@ -87,6 +87,8 @@ class SceneViewTest {
     }
 
     static final Generator<Square, MeshData> SQUARES = (square, seed) -> square(square.size());
+    /** Squares side by side, one submesh each: a mesh of {@code count} submeshes. */
+    static final Generator<Integer, MeshData> STRIPS = (count, seed) -> strips(count);
     static final Generator<Glow, MaterialData> GLOWS = (glow, seed) -> MaterialData.builder()
         .baseColor(0, 0, 0, 1).emissive(glow.r(), glow.g(), glow.b()).build();
     static final Generator<Plain, TextureData> PLAINS = (plain, seed) -> {
@@ -151,6 +153,30 @@ class SceneViewTest {
         } else if (instance != null) {
             instance.close();
         }
+    }
+
+    static MeshData strips(int count) {
+        float[] positions = new float[12 * count];
+        float[] normals = new float[12 * count];
+        float[] uvs = new float[8 * count];
+        MeshBuilder builder = new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL, VertexAttribute.UV0), 4 * count);
+        int[][] submeshes = new int[count][];
+        for (int i = 0; i < count; i++) {
+            float[] quad = {i, 0, -0.5f, i + 1, 0, -0.5f, i, 0, 0.5f, i + 1, 0, 0.5f};
+            System.arraycopy(quad, 0, positions, 12 * i, 12);
+            for (int v = 0; v < 4; v++) {
+                normals[12 * i + 3 * v + 1] = 1;
+                uvs[8 * i + 2 * v] = v % 2;
+                uvs[8 * i + 2 * v + 1] = v / 2;
+            }
+            int b = 4 * i;
+            submeshes[i] = new int[] {b, b + 2, b + 1, b + 1, b + 2, b + 3};
+        }
+        builder.positions(positions).attribute(VertexAttribute.NORMAL, normals).attribute(VertexAttribute.UV0, uvs);
+        for (int[] submesh : submeshes) {
+            builder.submesh(submesh);
+        }
+        return builder.buildFlat();
     }
 
     static MeshData square(float size) {
@@ -505,7 +531,9 @@ class SceneViewTest {
         renderables.set(rock, SQUARE, List.of(stone));
         renderables.set(bush, SMALL, List.of(moss));
         update(scene, renderables, view);
-        load();
+        load(); // the meshes: drawn at the next update, their materials asked for then
+        update(scene, renderables, view);
+        load(); // the materials, then their textures
         update(scene, renderables, view);
         assertThat(view.instanceCount()).isEqualTo(2);
         assertThat(assets.state(missing)).isEqualTo(AssetState.FAILED);
@@ -689,6 +717,168 @@ class SceneViewTest {
         }, 20_000, 2_000, 5);
         assertThat(view.instanceCount()).isEqualTo(4);
         assertThat(resources.materialSetCount()).isEqualTo(2);
+    }
+
+    @Test
+    void materialsSharedWithinABlockAreLetGoOnce() throws InterruptedException {
+        // Meshes of three submeshes: one material for all (the last one fills the rest), and a list naming a material
+        // twice; the materials share a texture. Removing them lets go of each material and texture once.
+        AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 1);
+        Generator<Glow, MaterialData> textured = (glow, seed) -> MaterialData.builder()
+            .baseColor(glow.r(), glow.g(), glow.b(), 1).baseColorTexture(white).build();
+        AssetRef<MaterialData> a = AssetRef.generated(RenderAssets.MATERIAL, textured, new Glow(1, 0, 0), 5);
+        AssetRef<MaterialData> b = AssetRef.generated(RenderAssets.MATERIAL, textured, new Glow(0, 1, 0), 5);
+        AssetRef<MeshData> strips = AssetRef.generated(RenderAssets.MESH, STRIPS, 3, 1);
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneView view = closing(new SceneView(resources, renderables, renderer()));
+        long one = facing(scene, -2, 0, -6);
+        long twice = facing(scene, 1, 0, -6);
+        renderables.set(one, strips, List.of(a));
+        renderables.set(twice, strips, List.of(a, b, a));
+        update(scene, renderables, view);
+        load();
+        update(scene, renderables, view);
+        load(); // the texture, asked for once the materials loaded
+        update(scene, renderables, view);
+        assertThat(view.instanceCount()).isEqualTo(2);
+        assertThat(resources.materialSetCount()).isEqualTo(2);
+        assertThat(materials.count()).as("the default and two blocks of three").isEqualTo(7);
+        assertThat(textures.count()).isEqualTo(1);
+        assertThat(assets.holders(a)).isEqualTo(1);
+        assertThat(assets.holders(white)).isEqualTo(1);
+        renderables.remove(one);
+        renderables.remove(twice);
+        update(scene, renderables, view);
+        assertThat(resources.materialSetCount()).isZero();
+        assertThat(resources.materialCount()).isZero();
+        assertThat(resources.textureCount()).isZero();
+        assertThat(materials.count()).isEqualTo(1);
+        assertThat(textures.count()).isZero();
+        assertThat(assets.holders(a)).isZero();
+        assertThat(assets.holders(b)).isZero();
+        assertThat(assets.holders(white)).isZero();
+    }
+
+    @Test
+    void renderablesGoneBeforeTheyCouldDrawAreNotDrawn() throws InterruptedException {
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneView view = closing(new SceneView(resources, renderables, renderer()));
+        // Removed while its mesh loads, the mesh arriving at the frame boundary before the view hears of it.
+        long early = facing(scene, 0, 0, -3);
+        long stays = facing(scene, 1, 0, -3);
+        renderables.set(early, SQUARE, List.of());
+        renderables.set(stays, SQUARE, List.of());
+        update(scene, renderables, view);
+        renderables.remove(early);
+        load(); // arrives: the view is told before it follows the removal
+        update(scene, renderables, view);
+        assertThat(view.slotOf(early)).isEqualTo(-1);
+        assertThat(view.slotOf(stays)).isZero();
+        assertThat(view.instanceCount()).isEqualTo(1);
+        // The renderer full, one waiting; a drawn one and the waiting one go in the same frame.
+        long[] nodes = new long[LIMITS.instances() + 1];
+        nodes[0] = stays;
+        for (int i = 1; i < nodes.length; i++) {
+            nodes[i] = facing(scene, i, 0, -3);
+            renderables.set(nodes[i], SQUARE, List.of());
+        }
+        update(scene, renderables, view);
+        assertThat(view.waitingCount()).isEqualTo(1);
+        long waiting = NodeHandle.NONE;
+        for (long node : nodes) {
+            waiting = view.slotOf(node) < 0 ? node : waiting;
+        }
+        renderables.remove(stays);
+        renderables.remove(waiting);
+        update(scene, renderables, view);
+        assertThat(view.waitingCount()).isZero();
+        assertThat(view.instanceCount()).isEqualTo(LIMITS.instances() - 1);
+        assertThat(view.slotOf(waiting)).isEqualTo(-1);
+        // Waiting ones draw oldest first as slots free.
+        long first = facing(scene, 10, 0, -3);
+        long second = facing(scene, 11, 0, -3);
+        long third = facing(scene, 12, 0, -3);
+        renderables.set(first, SQUARE, List.of());
+        renderables.set(second, SQUARE, List.of());
+        renderables.set(third, SQUARE, List.of());
+        update(scene, renderables, view);
+        assertThat(view.slotOf(first)).isNotNegative();
+        assertThat(view.waitingCount()).isEqualTo(2);
+        renderables.remove(first);
+        update(scene, renderables, view);
+        assertThat(view.slotOf(second)).isNotNegative();
+        assertThat(view.slotOf(third)).isEqualTo(-1);
+    }
+
+    @Test
+    void fallingBehindTheRenderablesKeepsWhatIsOnTheGpu() throws InterruptedException {
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene, 4); // keeps four changes
+        SceneView view = closing(new SceneView(resources, renderables, renderer()));
+        long kept = facing(scene, 0, 0, -3);
+        long gone = facing(scene, 1, 0, -3);
+        long changed = facing(scene, 2, 0, -3);
+        renderables.set(kept, SQUARE, List.of(RED));
+        renderables.set(gone, SQUARE, List.of(RED));
+        renderables.set(changed, SQUARE, List.of(RED));
+        update(scene, renderables, view);
+        load();
+        update(scene, renderables, view);
+        int mesh = view.meshOf(kept);
+        int block = view.firstMaterialOf(kept);
+        // More changes than the log keeps: the view reconciles every renderable, and keeps what did not change.
+        renderables.remove(gone);
+        renderables.setMaterials(changed, List.of(GREEN));
+        for (int i = 0; i < 4; i++) {
+            renderables.setCastsShadows(kept, i % 2 == 0);
+        }
+        update(scene, renderables, view);
+        assertThat(view.meshOf(kept)).isEqualTo(mesh);
+        assertThat(view.firstMaterialOf(kept)).isEqualTo(block);
+        assertThat(pool.contains(mesh)).isTrue();
+        assertThat(view.slotOf(gone)).isEqualTo(-1);
+        assertThat(view.renderableCount()).isEqualTo(2);
+        assertThat(assets.holders(SQUARE)).isEqualTo(1);
+        assertThat(resources.materialSetCount()).isEqualTo(2);
+    }
+
+    @Test
+    void renderablesWaitForRoomInTheMaterialTable() throws InterruptedException {
+        // The table holds 16 ids, the default one taken: 15 renderables of materials of their own fit, one more waits.
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneView view = closing(new SceneView(resources, renderables,
+            closing(new MeshletRenderer(device, pool, new MeshletRenderer.Limits(32, 256, 64, 1 << 12),
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, slots))));
+        long[] nodes = new long[16];
+        for (int i = 0; i < nodes.length; i++) {
+            nodes[i] = facing(scene, i, 0, -3);
+            renderables.set(nodes[i], SQUARE,
+                List.of(AssetRef.generated(RenderAssets.MATERIAL, GLOWS, new Glow(i, 0, 0), 9)));
+        }
+        update(scene, renderables, view);
+        load();
+        update(scene, renderables, view);
+        assertThat(view.instanceCount()).isEqualTo(15);
+        assertThat(view.waitingCount()).isEqualTo(1);
+        assertThat(materials.hasRoom(1)).isFalse();
+        // A drawn one goes: its ids free once no frame in flight reads them, and the waiting one draws.
+        long drawn = NodeHandle.NONE;
+        for (long node : nodes) {
+            drawn = view.slotOf(node) >= 0 ? node : drawn;
+        }
+        renderables.remove(drawn);
+        update(scene, renderables, view);
+        assertThat(view.waitingCount()).isEqualTo(1);
+        for (int frame = 0; frame < slots.count(); frame++) {
+            slots.begin(frame);
+            slots.end();
+        }
+        update(scene, renderables, view);
+        assertThat(view.waitingCount()).isZero();
+        assertThat(view.instanceCount()).isEqualTo(15);
     }
 
     @Test

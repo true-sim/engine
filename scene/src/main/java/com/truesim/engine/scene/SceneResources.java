@@ -287,7 +287,8 @@ public final class SceneResources implements AutoCloseable {
 
     /**
      * Holds the block of material ids for {@code materials} on a mesh of {@code slots} submeshes: made and filled the
-     * first time. Allocates nothing when the block exists.
+     * first time; null while the material table has no room for it (try again later). Allocates nothing when the
+     * block exists.
      */
     MaterialSet acquireSet(List<AssetRef<MaterialData>> materials, int slots) {
         checkOpen();
@@ -296,12 +297,16 @@ public final class SceneResources implements AutoCloseable {
         MaterialSet set = sets.get(lookup);
         lookup.materials = List.of(); // the probe holds no list
         if (set == null) {
+            if (!this.materials.hasRoom(slots)) {
+                return null; // checked first: a block waiting for room is not built every update
+            }
             set = newSet(new MaterialKey(materials, slots));
         }
         set.holders++;
         return set;
     }
 
+    /** A new block for {@code key}, its materials held: the table has room for it. */
     @AllowAllocation("a new block of materials")
     private MaterialSet newSet(MaterialKey key) {
         MaterialSet set = new MaterialSet(key);
@@ -327,11 +332,30 @@ public final class SceneResources implements AutoCloseable {
         if (set.dirty) {
             dirtySets.remove(set);
         }
-        for (MaterialEntry entry : set.entries) {
-            if (entry != null) {
+        releaseMaterials(set);
+    }
+
+    /**
+     * Lets go of {@code set}'s materials, each once: submeshes past the end of the material list share the last one,
+     * and a list may name a material twice, but the set holds each once.
+     */
+    private void releaseMaterials(MaterialSet set) {
+        for (int s = 0; s < set.entries.length; s++) {
+            MaterialEntry entry = set.entries[s];
+            if (entry != null && !heldEarlier(set, s)) {
                 releaseMaterial(entry, set);
             }
         }
+    }
+
+    /** Whether submesh {@code s}'s material is also an earlier submesh's of {@code set}. */
+    private static boolean heldEarlier(MaterialSet set, int s) {
+        for (int earlier = 0; earlier < s; earlier++) {
+            if (set.entries[earlier] == set.entries[s]) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

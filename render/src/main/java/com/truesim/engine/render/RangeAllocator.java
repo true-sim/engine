@@ -37,6 +37,16 @@ final class RangeAllocator {
         return free;
     }
 
+    /** Whether {@link #allocate} would find {@code length} units in a row (alignment 1). Allocates nothing. */
+    boolean fits(long length) {
+        for (int i = 0; i < count; i++) {
+            if (lengths[i] >= length) {
+                return true;
+            }
+        }
+        return length == 0;
+    }
+
     /**
      * The start of a free range of {@code length} units beginning at a multiple of {@code alignment}, now in use; -1
      * when none is free. The first such range wins.

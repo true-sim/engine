@@ -90,9 +90,11 @@ public final class SceneView implements AutoCloseable {
     // Instances: slot to item, slots 0 to instanceCount - 1 drawn.
     private final int[] slotItem;
     private int instanceCount;
-    // Items ready to draw while every slot was taken, drawn as slots free (checked again then: they may have changed).
+    // Items to draw at the end of the update, oldest first: their meshes arrived (maybe before the changes of the
+    // frame were followed), or the renderer or the material table had no room. Checked again then: they may be gone.
     private int[] waiting = new int[64];
     private int waitingCount;
+    private boolean[] isWaiting = new boolean[64];
 
     private boolean rewriteAll = true;
 
@@ -106,8 +108,9 @@ public final class SceneView implements AutoCloseable {
 
         @Override
         public void uploaded(SceneResources.Mesh uploaded) {
+            // Drawn at the end of the update, once the frame's changes are followed: a renderable may be gone already.
             for (int item = firstItem; item != NONE; item = itemNext[item]) {
-                show(item);
+                queue(item);
             }
         }
     }
@@ -179,6 +182,7 @@ public final class SceneView implements AutoCloseable {
             }
         }
         resources.flush();
+        drawWaiting();
         if (rewriteAll) {
             for (int slot = 0; slot < instanceCount; slot++) {
                 writeInstance(slotItem[slot]);
@@ -232,22 +236,32 @@ public final class SceneView implements AutoCloseable {
         return item < itemNode.length && itemNode[item] == node ? itemMesh[item].mesh.id : NONE;
     }
 
-    /** Renderables ready to draw that the renderer has no instance slot for: they draw as slots free. */
+    /**
+     * Renderables ready to draw that the renderer has no instance slot for, or the material table no room for their
+     * materials: they draw as room frees.
+     */
     public int waitingCount() {
         int count = 0;
         for (int i = 0; i < waitingCount; i++) {
-            int item = waiting[i];
-            count += itemNode[item] != NodeHandle.NONE && itemSlot[item] == NONE ? 1 : 0;
+            count += drawable(waiting[i]) ? 1 : 0;
         }
         return count;
     }
 
     // ---------------------------------------------------------------- following the renderables
 
-    /** Drops every item and makes them again from the renderables as they are. */
+    /**
+     * Makes every item match the renderables as they are, the first update or once their log no longer holds the
+     * changes since the last: items of renderables gone are dropped, the rest reconciled, so what did not change keeps
+     * its meshes and materials on the GPU.
+     */
     @AllowAllocation("rebuilding, rarely")
     private void rebuild() {
-        destroyAll();
+        for (int item = 0; item < itemNode.length; item++) {
+            if (itemNode[item] != NodeHandle.NONE && !renderables.has(itemNode[item])) {
+                destroy(item);
+            }
+        }
         renderables.forEach(this::reconcile);
         rewriteAll = true;
     }
@@ -257,6 +271,9 @@ public final class SceneView implements AutoCloseable {
             if (itemNode[item] != NodeHandle.NONE) {
                 destroy(item);
             }
+        }
+        for (int i = 0; i < waitingCount; i++) {
+            isWaiting[waiting[i]] = false;
         }
         waitingCount = 0;
     }
@@ -355,6 +372,7 @@ public final class SceneView implements AutoCloseable {
         itemNext = Arrays.copyOf(itemNext, length);
         itemPrevious = Arrays.copyOf(itemPrevious, length);
         moved = Arrays.copyOf(moved, length);
+        isWaiting = Arrays.copyOf(isWaiting, length);
         movedItems = Arrays.copyOf(movedItems, length);
         Arrays.fill(itemSlot, old, length, NONE);
         Arrays.fill(itemNext, old, length, NONE);
@@ -363,18 +381,30 @@ public final class SceneView implements AutoCloseable {
 
     // ---------------------------------------------------------------- instances
 
-    /** Draws {@code item}: an instance slot at the end, and its materials. */
+    /** Draws {@code item}, or has it wait for room: in the renderer, or in the material table. */
     private void show(int item) {
+        if (!tryShow(item)) {
+            queue(item);
+        }
+    }
+
+    /** Draws {@code item}, a live renderable's whose mesh is on the GPU: an instance slot at the end, its materials. */
+    private boolean tryShow(int item) {
         if (instanceCount == slotItem.length) {
-            wait(item); // the renderer holds no more instances: drawn when a slot frees
-            return;
+            return false; // the renderer holds no more instances: drawn when a slot frees
         }
         SceneResources.Mesh mesh = itemMesh[item].mesh;
-        itemSet[item] = resources.acquireSet(renderables.materials(itemNode[item]), mesh.data.materialSlots());
+        SceneResources.MaterialSet set = resources.acquireSet(renderables.materials(itemNode[item]),
+            mesh.data.materialSlots());
+        if (set == null) {
+            return false; // the material table is full: drawn when ids free
+        }
+        itemSet[item] = set;
         int slot = instanceCount++;
         slotItem[slot] = item;
         itemSlot[item] = slot;
         markMoved(item);
+        return true;
     }
 
     /** Stops drawing {@code item}: the last instance moves into its slot. */
@@ -393,22 +423,41 @@ public final class SceneView implements AutoCloseable {
         itemSlot[item] = NONE;
         resources.releaseSet(itemSet[item]);
         itemSet[item] = null;
-        while (waitingCount > 0) {
-            int next = waiting[--waitingCount];
-            if (next != item && itemNode[next] != NodeHandle.NONE && itemSlot[next] == NONE
-                && itemMesh[next].mesh.uploaded()) {
-                show(next);
-                break;
-            }
-        }
     }
 
+    /** Has {@code item} drawn at the end of the update, once. */
     @AllowAllocation("growing the list of waiting items")
-    private void wait(int item) {
+    private void queue(int item) {
+        if (isWaiting[item]) {
+            return;
+        }
         if (waitingCount == waiting.length) {
             waiting = Arrays.copyOf(waiting, waitingCount * 2);
         }
         waiting[waitingCount++] = item;
+        isWaiting[item] = true;
+    }
+
+    /** Whether {@code item} is a live renderable's, not drawn, with its mesh on the GPU. */
+    private boolean drawable(int item) {
+        return itemNode[item] != NodeHandle.NONE && itemSlot[item] == NONE && itemMesh[item].mesh.uploaded();
+    }
+
+    /**
+     * Draws the waiting items, oldest first, as far as there is room; those gone or drawn already leave the list, the
+     * rest keep waiting in order.
+     */
+    private void drawWaiting() {
+        int kept = 0;
+        for (int i = 0; i < waitingCount; i++) {
+            int item = waiting[i];
+            if (drawable(item) && !tryShow(item)) {
+                waiting[kept++] = item;
+            } else {
+                isWaiting[item] = false;
+            }
+        }
+        waitingCount = kept;
     }
 
     private void markMoved(int item) {
