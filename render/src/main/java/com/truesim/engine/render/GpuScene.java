@@ -74,6 +74,7 @@ public final class GpuScene implements AutoCloseable {
     private final FrameSlots slots;
     private final GpuBuffer instances;  // the GPU's, device-local
     private final Pipeline scatter;
+    private final FrameSlots.FrameStart start = this::upload; // frames upload first thing
     // What changed since the last upload: entry e is id ids[e] with record e of records; entryOf[id] is its entry or -1.
     private final Arena arena = Arena.ofShared();
     private final MemorySegment ids;
@@ -125,6 +126,7 @@ public final class GpuScene implements AutoCloseable {
         uploadFrame = new long[uploads.length];
         Arrays.fill(uploadFrame, -1);
         uploadAt = new int[uploads.length];
+        slots.register(start);
         used = new long[(capacity + 63) / 64];
         defaultMaterials = new Materials(device, 1);
         materials = defaultMaterials;
@@ -329,8 +331,8 @@ public final class GpuScene implements AutoCloseable {
      * Brings the GPU's instances up to date, for passes reading them next in {@code commands}: the changes since the
      * last upload are copied into the open frame slot's upload buffer and scattered by a compute pass, ordered after
      * whatever read the instances before (earlier frames too: the queue's order) and before what reads them after.
-     * Nothing without changes, so every pass reading instances calls it first: the first in a frame uploads. Allocates
-     * nothing.
+     * Nothing without changes: frames do it first ({@link FrameSlots#recordStart}, as a frame graph records them), and
+     * every pass reading instances calls it too, for frames recorded otherwise. Allocates nothing.
      */
     public synchronized void upload(VkCommandBuffer commands) {
         if (pending == 0) {
@@ -395,6 +397,7 @@ public final class GpuScene implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
+            slots.unregister(start);
             instances.close();
             scatter.close();
             for (GpuBuffer upload : uploads) {

@@ -6,10 +6,10 @@ import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.vulkan.FrameSlots;
+import com.truesim.engine.vulkan.FrameUploads;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.assets.mesh.MeshData;
-import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
@@ -29,7 +29,10 @@ import java.util.Objects;
  *
  * <p>Meshes are removed with {@link #remove}: their ranges are reused once no frame in flight can draw them (the
  * pool's {@link FrameSlots}). Ranges are handed out first fit, so the same adds and removes give the same layout.
- * Use it from one thread.
+ *
+ * <p>Given a frame graph's {@link FrameSlots}, adding a mesh does not wait for the GPU: its data is staged at once and
+ * copied in at the start of the next frame ({@link FrameUploads}), so it draws from the next frame recorded on.
+ * Without, adding waits until the upload has finished. Use it from one thread, the one recording frames.
  */
 @AllowAllocation("created rarely; adding meshes uploads them")
 public final class GeometryPool implements AutoCloseable {
@@ -76,6 +79,7 @@ public final class GeometryPool implements AutoCloseable {
     private final GpuBuffer meshTable;
     private final GpuBuffer levels;
     private final FrameSlots slots;
+    private final FrameUploads uploads;
     // Where meshes live: ranges of each kind of data, and mesh numbers.
     private final RangeAllocator vertexRanges;
     private final RangeAllocator attributeRanges;
@@ -123,6 +127,7 @@ public final class GeometryPool implements AutoCloseable {
     public GeometryPool(VulkanDevice device, Capacity capacity, FrameSlots slots) {
         this.capacity = capacity;
         this.slots = Objects.requireNonNull(slots, "slots");
+        this.uploads = new FrameUploads(device, slots);
         int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         int transferDst = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         long triangleIndices = 3L * capacity.triangles();
@@ -167,7 +172,7 @@ public final class GeometryPool implements AutoCloseable {
 
     /**
      * Uploads {@code mesh} and returns its number, for instances to draw it by: a free one, the lowest removed one first.
-     * Waits until the upload has finished.
+     * Drawn from the next frame on (or, without frame slots, waits until the upload has finished).
      *
      * @throws IllegalStateException if the pool has no room left for it
      */
@@ -215,12 +220,12 @@ public final class GeometryPool implements AutoCloseable {
         }
         int id = freeIdCount > 0 ? takeLowestFreeId() : idCount++;
         // The meshlet records count their vertices and triangles from the mesh's start; shaders add these bases.
-        positions.write((long) MeshData.POSITION_BYTES * vertexBase, mesh.positions());
-        attributes.write(attributeBase, mesh.attributes());
-        meshletVertices.write(4L * meshletVertexBase, mesh.meshletVertices());
+        uploads.write(positions, (long) MeshData.POSITION_BYTES * vertexBase, mesh.positions());
+        uploads.write(attributes, attributeBase, mesh.attributes());
+        uploads.write(meshletVertices, 4L * meshletVertexBase, mesh.meshletVertices());
         writeTriangles(mesh, indexBase);
-        meshlets.write((long) MeshData.MESHLET_BYTES * meshletBase, mesh.meshlets());
-        clusterLod.write((long) MeshData.CLUSTER_LOD_BYTES * meshletBase, mesh.clusterLod());
+        uploads.write(meshlets, (long) MeshData.MESHLET_BYTES * meshletBase, mesh.meshlets());
+        uploads.write(clusterLod, (long) MeshData.CLUSTER_LOD_BYTES * meshletBase, mesh.clusterLod());
         MemorySegment entry = meshTable.memory().asSlice((long) MESH_ENTRY_BYTES * id, MESH_ENTRY_BYTES);
         for (int axis = 0; axis < 3; axis++) {
             entry.set(F32, 4L * axis, (float) mesh.boxMin(axis));
@@ -334,14 +339,7 @@ public final class GeometryPool implements AutoCloseable {
      */
     private void writeTriangles(MeshData mesh, long indexBase) {
         MemorySegment source = mesh.meshletTriangles();
-        long bytes = (source.byteSize() + 3) & ~3L;
-        if (bytes == source.byteSize()) {
-            meshletTriangles.write(indexBase, source);
-            return;
-        }
-        MemorySegment words = Arena.ofAuto().allocate(bytes, 4);
-        MemorySegment.copy(source, 0, words, 0, source.byteSize());
-        meshletTriangles.write(indexBase, words);
+        uploads.write(meshletTriangles, indexBase, source, (source.byteSize() + 3) & ~3L); // whole words
     }
 
     /**
@@ -455,6 +453,11 @@ public final class GeometryPool implements AutoCloseable {
         return meshTable.memory().get(U32, (long) MESH_ENTRY_BYTES * mesh + offset);
     }
 
+    /** The pool's uploads, for work outside frames that reads meshes added since the last frame. */
+    FrameUploads uploads() {
+        return uploads;
+    }
+
     GpuBuffer positions() {
         return positions;
     }
@@ -483,6 +486,7 @@ public final class GeometryPool implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
+            uploads.close();
             for (GpuBuffer buffer : new GpuBuffer[] {positions, attributes, meshletVertices, meshletTriangles,
                 meshlets, clusterLod, meshTable, levels}) {
                 buffer.close();

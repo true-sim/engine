@@ -185,6 +185,7 @@ public final class FrameGraph implements AutoCloseable {
     private boolean[] batchAcquire = {false};
     private int[] batchFirstChunk = {0, 1};
     private int lastGraphicsBatch;
+    private int firstGraphicsChunk; // where the frame slots' frame start is recorded
     private int graphicsBatches = 1;
     private int computeBatches;
     private int graphicsChunks = 1;
@@ -396,6 +397,7 @@ public final class FrameGraph implements AutoCloseable {
         }
         prepare();
         bindless.bind(commands);
+        frameSlots.recordStart(commands);
         recordPasses(commands, 0, order.length, true, contexts[0]);
         if (open) {
             frameSlots.end();
@@ -425,6 +427,9 @@ public final class FrameGraph implements AutoCloseable {
             VkCommandBuffer commands = execution.commandBuffer(worker, batchQueue[batch]);
             bindless.bind(commands, graphics);
             boolean last = batch == lastGraphicsBatch && c == batchFirstChunk[batch + 1] - 1;
+            if (c == firstGraphicsChunk) {
+                frameSlots.recordStart(commands); // uploads and such, ahead of every pass on the graphics queue
+            }
             recordPasses(commands, chunkFirstPass[c], chunkEndPass[c], last, contexts[worker]);
             Vulkan.check(vkEndCommandBuffer(commands), "Could not finish recording");
             chunkCommands[c] = commands;
@@ -1201,6 +1206,10 @@ public final class FrameGraph implements AutoCloseable {
             chunkBatch[c] = chunks.get(c)[0];
             chunkFirstPass[c] = chunks.get(c)[1];
             chunkEndPass[c] = chunks.get(c)[2];
+        }
+        firstGraphicsChunk = 0;
+        while (batchQueue[chunkBatch[firstGraphicsChunk]] != GRAPHICS) {
+            firstGraphicsChunk++; // there is one: the last graphics batch has a chunk at least
         }
         chunkCommands = new VkCommandBuffer[chunks.size()];
         graphicsChunks = 0;

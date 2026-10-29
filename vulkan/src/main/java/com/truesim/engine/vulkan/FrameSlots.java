@@ -3,6 +3,7 @@ package com.truesim.engine.vulkan;
 import com.truesim.annotations.AllowAllocation;
 import java.util.ArrayList;
 import java.util.List;
+import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
  * The frames in flight that {@link FrameBuffer}s keep a copy per: which copy the CPU writes now, and when each catches
@@ -22,6 +23,10 @@ import java.util.List;
  *
  * <p>{@link #single()} is one copy, always open, with no master: writes go straight to the GPU, as for a plain
  * host-visible buffer, for users who wait for the GPU between frames. Used from one thread at a time.
+ *
+ * <p>Work deferred to the frame ({@link FrameUploads}' copies, say) registers a {@link FrameStart}: whoever records the
+ * frame calls {@link #recordStart} first thing on the graphics queue (a frame graph does), before any pass reads what
+ * it brings.
  */
 @AllowAllocation("created rarely; buffers register when they are created")
 public final class FrameSlots {
@@ -29,6 +34,7 @@ public final class FrameSlots {
     private final int count;
     private final boolean single;
     private final List<FrameBuffer> buffers = new ArrayList<>();
+    private final List<FrameStart> starts = new ArrayList<>();
     private int current = -1;
     private int last = -1;
     private long frames;
@@ -120,6 +126,33 @@ public final class FrameSlots {
     /** The slot opened last (the open one while a frame records), or -1 before the first frame. */
     public int last() {
         return last;
+    }
+
+    /** Commands recorded at the start of each frame, before its passes, on the graphics queue. */
+    @FunctionalInterface
+    public interface FrameStart {
+        /** Records what the frame needs first into {@code commands}; nothing if nothing is waiting. */
+        void record(VkCommandBuffer commands);
+    }
+
+    /** Has {@code start} record at the start of every frame from now on, after those registered before. */
+    public void register(FrameStart start) {
+        starts.add(start);
+    }
+
+    /** Stops {@code start} recording. */
+    public void unregister(FrameStart start) {
+        starts.remove(start);
+    }
+
+    /**
+     * Records every registered {@link FrameStart} into {@code commands}, the frame's first graphics commands, before its
+     * passes. A frame graph calls it; record frames otherwise, and call it first. Allocates nothing.
+     */
+    public void recordStart(VkCommandBuffer commands) {
+        for (int i = 0; i < starts.size(); i++) {
+            starts.get(i).record(commands);
+        }
     }
 
     void register(FrameBuffer buffer) {
