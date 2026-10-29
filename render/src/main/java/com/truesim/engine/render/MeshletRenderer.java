@@ -57,6 +57,7 @@ import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Pipeline;
+import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.ShaderModule;
 import com.truesim.engine.vulkan.VulkanDevice;
 import java.lang.foreign.MemorySegment;
@@ -173,8 +174,7 @@ public final class MeshletRenderer implements AutoCloseable {
     // phase each). Both grow as views are made; the old ones go once no frame in flight reads them.
     private FrameBuffer viewTable;
     private GpuBuffer rows;
-    private final List<AutoCloseable> retiring = new ArrayList<>();
-    private final List<Long> retireAt = new ArrayList<>();
+    private final Retiring retiring; // the old tables, rows and view lists, until no frame reads them
     // Read only: a frame graph may record passes on several threads at once, so recording changes no field.
     private static final boolean[] NOT_EARLY = {false};
     private static final boolean[] EARLY = {true};
@@ -206,6 +206,7 @@ public final class MeshletRenderer implements AutoCloseable {
         this.bindless = device.bindless();
         this.slots = Objects.requireNonNull(slots, "slots");
         this.maxChunks = chunks;
+        this.retiring = new Retiring(slots);
         try (ShaderModule instanceShader = ShaderModule.load(device, "shaders/meshlets/instances.spv");
              ShaderModule cullShader = ShaderModule.load(device, "shaders/meshlets/cull.spv");
              ShaderModule expandShader = ShaderModule.load(device, "shaders/meshlets/expand.spv");
@@ -288,27 +289,8 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /** Has {@code resource} freed once no frame in flight reads it. */
-    synchronized void retire(AutoCloseable resource) {
+    void retire(AutoCloseable resource) {
         retiring.add(resource);
-        retireAt.add(slots.retireAt());
-    }
-
-    /** Frees what was retired once no frame in flight reads it; culls of one frame may run on several threads. */
-    private synchronized void releaseRetired() {
-        for (int i = retiring.size() - 1; i >= 0; i--) {
-            if (slots.isFinished(retireAt.get(i))) {
-                close(retiring.remove(i));
-                retireAt.remove(i);
-            }
-        }
-    }
-
-    private static void close(AutoCloseable resource) {
-        try {
-            resource.close();
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
     }
 
     /** The views made, by index. */
@@ -585,7 +567,7 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     private void cull(VkCommandBuffer commands, RenderView[] views, boolean[] early, int count, int pyramid, int width,
         int height, int mips) {
-        releaseRetired();
+        retiring.release(); // culls of one frame may run on several threads: it locks
         scene.upload(commands);
         boolean meshShading = path() == Path.MESH_SHADERS;
         int instanceCount = scene.highWater();
@@ -829,9 +811,7 @@ public final class MeshletRenderer implements AutoCloseable {
             for (RenderView view : views) {
                 view.close();
             }
-            for (AutoCloseable resource : retiring) {
-                close(resource);
-            }
+            retiring.close();
             viewTable.close();
             rows.close();
             chunks.close();
