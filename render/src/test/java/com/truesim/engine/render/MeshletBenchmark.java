@@ -493,7 +493,7 @@ class MeshletBenchmark {
                 long push = stack.nmalloc(8, 48);
                 MemoryUtil.memPutLong(push, mainView(renderer).address());
                 MemoryUtil.memPutLong(push + 8, pool.meshTable().deviceAddress());
-                MemoryUtil.memPutLong(push + 16, renderer.scene().instanceBuffer().deviceAddress());
+                MemoryUtil.memPutLong(push + 16, renderer.scene().instanceAddress());
                 MemoryUtil.memPutLong(push + 24, pool.positions().deviceAddress());
                 MemoryUtil.memPutLong(push + 32, pool.attributes().deviceAddress());
                 MemoryUtil.memPutLong(push + 40, renderer.scene().materialsAddress());

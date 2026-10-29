@@ -110,11 +110,15 @@ try (VulkanInstance instance = VulkanInstance.builder().applicationName("game").
   and that frame's copy. Between frames they reach only the master, so frames in flight keep reading what they were
   given; each copy takes the range it missed from the master when its slot opens. `FrameSlots.single()` is one copy
   written straight through, for callers that wait for the GPU between frames.
-- **Instances, the GPU's alone:** a `GpuScene` keeps its instances in one device-local buffer. Setting one writes its
-  64-byte record once into a list of what changed (an id at most once a frame); the first pass reading instances
-  copies the list into the frame slot's upload buffer (`GpuBuffer.hostWritten`: write-combined, or BAR memory where the
-  GPU has it) and a compute pass scatters it. The CPU pays per instance changed, frames in flight keep no copies (the
-  queue orders the scatter after the frames before), and every pass reads instances from device-local memory.
+- **Records that change a few at a time:** a `RecordBuffer` is a device-local buffer of fixed-size records (any
+  multiple of 16 bytes: instances, particles, game data per object). Changing one writes its bytes once into a list of
+  changes (`claim`, then the bytes in `changes()`; a record at most once per upload, from any thread once claimed); the
+  frame's first commands copy the list into the frame slot's upload buffer (`GpuBuffer.hostWritten`: write-combined,
+  or BAR memory where the GPU has it) and a compute pass scatters it. The CPU pays per record changed, frames in flight
+  keep no copies (the queue orders the scatter after the frames before), and shaders read device-local memory.
+  `GpuScene`'s instances are one.
+- **Work at the frame's start:** `FrameSlots.register(FrameStart)` records commands before every frame's passes (the
+  frame graph calls `recordStart`); `FrameUploads` and `RecordBuffer` use it, and so may a game.
 
 ### Shaders and pipelines
 
@@ -467,6 +471,13 @@ that declare how they use each image. The graph does the rest:
   barriers come from those accesses like image barriers do, across queues as well: a buffer used by both is shared
   concurrently.
 - **Keys name buffers too:** `g.provide(key, buffer)` and `g.requireBuffer(key)`, e.g. a light list.
+- **External buffers:** `g.importBuffer(new ExternalBuffer(name, gpuBuffer))` brings a buffer the graph does not own
+  (a game's simulation state, a `RecordBuffer`, the engine's instances) into the graph: passes declare their accesses
+  and the graph orders them. Its contents outlive the frame, so passes writing it are kept, and the frame's first use
+  waits for whatever came before (uploads, earlier frames). Graphics-queue passes only.
+- **The engine's data for custom passes:** `GpuScene.instanceAddress()`/`instanceBuffer()` (records as
+  `meshlets/common.slang`'s `Instance`), `GpuScene.materialsAddress()`, and the `GeometryPool`'s buffers and per-mesh
+  bases, by device address, for a game's own passes and shaders.
 - **Modifiers:** a technique listing a key in `modifies()` takes it after its provider with `g.modify(key)` and
   writes it in place (transparency over the scene, decals) or provides a new version (a post effect). Modifiers of a
   key run in `stage()` order, so a chain such as exposure, bloom, tone mapping needs no rewiring when an effect is

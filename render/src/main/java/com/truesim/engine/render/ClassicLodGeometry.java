@@ -314,7 +314,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             long push = stack.nmalloc(8, SELECT_PUSH);
             memPutLong(push, view.address());
             memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, scene.instanceBuffer().deviceAddress());
+            memPutLong(push + 16, scene.instanceAddress());
             memPutLong(push + 24, meshes.deviceAddress());
             memPutLong(push + 32, levels.deviceAddress());
             memPutLong(push + 40, parts.deviceAddress());
@@ -339,7 +339,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             long push = stack.ncalloc(8, 1, DRAW_PUSH);
             memPutLong(push, view.address());
             memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, renderer.scene().instanceBuffer().deviceAddress());
+            memPutLong(push + 16, renderer.scene().instanceAddress());
             memPutLong(push + 24, pool.positions().deviceAddress());
             memPutLong(push + 32, pool.attributes().deviceAddress());
             memPutLong(push + 40, ctx.address(list) + recordsOffset);

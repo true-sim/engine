@@ -282,6 +282,55 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void customPassesReadTheInstancesThroughTheGraph() {
+        // A pass of a game's own, reading the engine's instances as an external buffer of the graph: ordered after
+        // the scatter of the frame's changes, which the frame's first commands upload.
+        try (GpuScene shared = new GpuScene(device, pool, SIZE * SIZE * 4 / GpuScene.INSTANCE_BYTES,
+            graph.frameSlots())) {
+            com.truesim.engine.graph.ExternalBuffer instances = new com.truesim.engine.graph.ExternalBuffer("instances",
+                shared.instanceBuffer());
+            assertThat(shared.instanceAddress()).isEqualTo(shared.instanceBuffer().deviceAddress());
+            assertThat(shared.materialsAddress()).isEqualTo(shared.materials().deviceAddress());
+            assertThat(pool.meshTable().deviceAddress()).isNotZero();
+            assertThat(pool.vertexBase(quad)).isNotNegative();
+            graph.add(new Technique() {
+                @Override
+                public List<Key> provides() {
+                    return List.of(EDGE);
+                }
+
+                @Override
+                public void build(GraphBuilder g) {
+                    com.truesim.engine.graph.Buffer buffer = g.importBuffer(instances);
+                    Image image = g.create("instances as texels", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                    g.pass("copy instances").read(buffer, com.truesim.engine.graph.BufferAccess.TRANSFER_SRC)
+                        .write(image, Access.TRANSFER_DST).record(ctx -> {
+                            try (MemoryStack stack = stackPush()) {
+                                VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
+                                region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
+                                region.imageExtent().set(SIZE, SIZE, 1);
+                                org.lwjgl.vulkan.VK10.vkCmdCopyBufferToImage(ctx.commands(), ctx.buffer(buffer),
+                                    ctx.image(image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+                            }
+                        });
+                    g.provide(EDGE, image);
+                }
+            }).output(EDGE, output);
+            shared.set(2, quad, 0, 4, false, 1.5, -2, 3, 0, 0, 0, 1, 1, 1, 1);
+            frame();
+            int[] words = new int[SIZE * SIZE];
+            for (int i = 0; i < words.length; i++) {
+                words[i] = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, i);
+            }
+            int record = 2 * GpuScene.INSTANCE_BYTES / 4;
+            assertThat(words[record + 7]).as("mesh word: the mesh, live").isEqualTo(quad | 1 << 24);
+            assertThat(Float.intBitsToFloat(words[record + 4])).as("x").isEqualTo(1.5f);
+            assertThat(words[record + 15]).as("layers").isEqualTo(4);
+            assertThat(words[7]).as("instance 0, a hole").isZero();
+        }
+    }
+
+    @Test
     void meshesAddedWhileFramesAreInFlightDrawTheirFirstFrame() {
         // Every frame a mesh is added (and the one from two frames before removed) while frames are in flight, and the
         // quad draws with it at once: the upload is staged without waiting and recorded first thing in the frame.

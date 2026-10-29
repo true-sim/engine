@@ -335,7 +335,7 @@ public final class RayTracing implements AutoCloseable {
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, PUSH_BYTES);
-            memPutLong(push, scene.instanceBuffer().deviceAddress());
+            memPutLong(push, scene.instanceAddress());
             memPutLong(push + 8, bottomTable.deviceAddress());
             memPutLong(push + 16, instancesAddress);
             memPutInt(push + 24, count);

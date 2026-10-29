@@ -201,7 +201,10 @@ public final class Materials implements AutoCloseable {
         return live;
     }
 
-    long deviceAddress() {
+    /**
+     * The table's device address, for shaders: material i's {@code BYTES} at {@code i * 64}, as shading.slang reads it.
+     */
+    public long deviceAddress() {
         return table.deviceAddress();
     }
 

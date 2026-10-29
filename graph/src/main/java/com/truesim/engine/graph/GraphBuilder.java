@@ -46,12 +46,18 @@ public final class GraphBuilder {
     /** One transient buffer of the build. */
     static final class BufferInfo {
         final Buffer buffer;
+        final ExternalBuffer external; // or null: a transient buffer
         Object owner;
         int usage;
 
         BufferInfo(Buffer buffer, Object owner) {
+            this(buffer, owner, null);
+        }
+
+        BufferInfo(Buffer buffer, Object owner, ExternalBuffer external) {
             this.buffer = buffer;
             this.owner = owner;
+            this.external = external;
         }
     }
 
@@ -94,6 +100,7 @@ public final class GraphBuilder {
     private final Deque<Technique> building = new ArrayDeque<>();
     private final Map<Request<?>, Object> requests = new HashMap<>();
     private final Map<ExternalImage, Image> externals = new IdentityHashMap<>();
+    private final Map<ExternalBuffer, Buffer> externalBuffers = new IdentityHashMap<>();
     private Object scope;
 
     private final Map<Class<?>, Implementation<?, ?>> implementations;
@@ -417,6 +424,18 @@ public final class GraphBuilder {
         return buffer;
     }
 
+    /**
+     * {@code external} as a buffer of this build, the same one each time: passes declare their reads and writes of it
+     * as of any buffer, and the graph orders them; its contents outlive the frame.
+     */
+    public Buffer importBuffer(ExternalBuffer external) {
+        return externalBuffers.computeIfAbsent(external, e -> {
+            Buffer buffer = new Buffer(buffers.size(), e.name, e.size);
+            buffers.add(new BufferInfo(buffer, null, e));
+            return buffer;
+        });
+    }
+
     private Buffer buffer(Buffer buffer) {
         if (buffer == null || buffer.id >= buffers.size() || buffers.get(buffer.id).buffer != buffer) {
             throw new IllegalArgumentException("Not a buffer of this build: " + buffer);
@@ -485,13 +504,13 @@ public final class GraphBuilder {
             return use(buffer, access);
         }
 
-        /** The pass writes {@code buffer}, which its technique or request made. */
+        /** The pass writes {@code buffer}, which its technique or request made, or an imported one. */
         public PassBuilder write(Buffer buffer, BufferAccess access) {
             if (!access.writes) {
                 throw new IllegalArgumentException(name + ": " + access + " only reads; declare it with read()");
             }
             BufferInfo info = buffers.get(buffer(buffer).id);
-            if (info.owner != scope) {
+            if (info.external == null && info.owner != scope) {
                 throw new IllegalStateException(name + " writes " + buffer.name + ", a result of " + name(info.owner)
                     + ": results are written only by whoever makes them");
             }

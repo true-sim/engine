@@ -499,7 +499,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 long push = stack.nmalloc(8, DRAW_PUSH);
                 memPutLong(push, v.address());
                 memPutLong(push + 8, pool.meshTable().deviceAddress());
-                memPutLong(push + 16, scene.instanceBuffer().deviceAddress());
+                memPutLong(push + 16, scene.instanceAddress());
                 memPutLong(push + 24, v.visible().deviceAddress());
                 memPutLong(push + 32, count);
                 memPutLong(push + 40, pool.meshlets().deviceAddress());
@@ -517,7 +517,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 long push = stack.ncalloc(8, 1, DRAW_PUSH);
                 memPutLong(push, v.address());
                 memPutLong(push + 8, pool.meshTable().deviceAddress());
-                memPutLong(push + 16, scene.instanceBuffer().deviceAddress());
+                memPutLong(push + 16, scene.instanceAddress());
                 memPutLong(push + 24, pool.positions().deviceAddress());
                 memPutLong(push + 32, pool.attributes().deviceAddress());
                 memPutLong(push + 40, v.visible().deviceAddress());
@@ -580,7 +580,7 @@ public final class MeshletRenderer implements AutoCloseable {
             long push = stack.nmalloc(8, INSTANCE_PUSH);
             memPutLong(push, viewTable.deviceAddress());
             memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, scene.instanceBuffer().deviceAddress());
+            memPutLong(push + 16, scene.instanceAddress());
             memPutLong(push + 24, chunks.deviceAddress());
             memPutLong(push + 32, chunkCommand.deviceAddress());
             memPutLong(push + 40, pool.levels().deviceAddress());
@@ -604,7 +604,7 @@ public final class MeshletRenderer implements AutoCloseable {
             long push = stack.nmalloc(8, CULL_PUSH);
             memPutLong(push, viewTable.deviceAddress());
             memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, scene.instanceBuffer().deviceAddress());
+            memPutLong(push + 16, scene.instanceAddress());
             memPutLong(push + 24, chunks.deviceAddress());
             memPutLong(push + 32, pool.meshlets().deviceAddress());
             memPutLong(push + 40, pool.clusterLod().deviceAddress());
@@ -632,7 +632,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 memPutLong(push + 16, v.drawCount().deviceAddress() + (v.phase == PHASE_LATE ? 4 : 0));
                 memPutLong(push + 24, pool.meshlets().deviceAddress());
                 memPutLong(push + 32, pool.meshTable().deviceAddress());
-                memPutLong(push + 40, scene.instanceBuffer().deviceAddress());
+                memPutLong(push + 40, scene.instanceAddress());
                 memPutLong(push + 48, pool.meshletTriangles().deviceAddress());
                 memPutLong(push + 56, v.frameIndices().deviceAddress());
                 expand.push(commands, push, 64);

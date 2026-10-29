@@ -38,7 +38,7 @@ import java.util.Objects;
 public final class GeometryPool implements AutoCloseable {
 
     /** Bytes per mesh table entry. */
-    static final int MESH_ENTRY_BYTES = 96;
+    public static final int MESH_ENTRY_BYTES = 96;
 
     /** The most detail levels a mesh may have here. */
     public static final int MAX_LEVELS = 32;
@@ -418,31 +418,39 @@ public final class GeometryPool implements AutoCloseable {
         return unfit == 0;
     }
 
-    GpuBuffer meshletVertices() {
+    /**
+     * Each meshlet's vertex indices, 32 bits each (mesh-relative, the mesh's {@link #vertexBase} added). For custom
+     * passes, by device address.
+     */
+    public GpuBuffer meshletVertices() {
         return meshletVertices;
     }
 
-    GpuBuffer meshletTriangles() {
+    /**
+     * Each meshlet's triangles, three 8-bit meshlet-local indices each, from {@link #indexBase}. For custom passes, by
+     * device address.
+     */
+    public GpuBuffer meshletTriangles() {
         return meshletTriangles;
     }
 
     /** Mesh {@code mesh}'s first vertex in {@link #positions()}. */
-    int vertexBase(int mesh) {
+    public int vertexBase(int mesh) {
         return entryWord(mesh, 12);
     }
 
     /** Mesh {@code mesh}'s first meshlet in {@link #meshlets()}. */
-    int meshletBase(int mesh) {
+    public int meshletBase(int mesh) {
         return entryWord(mesh, 28);
     }
 
     /** How many meshlets mesh {@code mesh} has. */
-    int meshletCount(int mesh) {
+    public int meshletCount(int mesh) {
         return entryWord(mesh, 48);
     }
 
     /** Mesh {@code mesh}'s first index (byte) in {@link #meshletTriangles()}: its triangle t's indices are 3t on. */
-    int indexBase(int mesh) {
+    public int indexBase(int mesh) {
         return entryWord(mesh, 56);
     }
 
@@ -458,27 +466,51 @@ public final class GeometryPool implements AutoCloseable {
         return uploads;
     }
 
-    GpuBuffer positions() {
+    /**
+     * Every mesh's quantized positions, {@code MeshData.POSITION_BYTES} each, from {@link #vertexBase}. For custom
+     * passes, by device address.
+     */
+    public GpuBuffer positions() {
         return positions;
     }
 
-    GpuBuffer attributes() {
+    /**
+     * Every mesh's vertex attributes, in its format's layout (the mesh table's format and stride). For custom passes,
+     * by device address.
+     */
+    public GpuBuffer attributes() {
         return attributes;
     }
 
-    GpuBuffer meshlets() {
+    /**
+     * Every mesh's meshlet records, {@code MeshData.MESHLET_BYTES} each, from {@link #meshletBase}. For custom passes,
+     * by device address.
+     */
+    public GpuBuffer meshlets() {
         return meshlets;
     }
 
-    GpuBuffer clusterLod() {
+    /**
+     * Every meshlet's cluster LOD record, {@code MeshData.CLUSTER_LOD_BYTES} each, as the meshlets. For custom passes,
+     * by device address.
+     */
+    public GpuBuffer clusterLod() {
         return clusterLod;
     }
 
-    GpuBuffer meshTable() {
+    /**
+     * The mesh table: an entry of {@link #MESH_ENTRY_BYTES} per mesh number, as {@code meshlets/common.slang}'s {@code
+     * MeshEntry}. For custom passes, by device address.
+     */
+    public GpuBuffer meshTable() {
         return meshTable;
     }
 
-    GpuBuffer levels() {
+    /**
+     * Every mesh's level table, {@link #MAX_LEVELS} entries of 8 bytes per mesh number. For custom passes, by device
+     * address.
+     */
+    public GpuBuffer levels() {
         return levels;
     }
 

@@ -41,14 +41,14 @@ public final class PassContext {
         return graph.storageSlotOf(image.id, 0);
     }
 
-    /** The {@code VkBuffer} of a transient buffer. */
+    /** The {@code VkBuffer} of a buffer of the graph, transient or imported. */
     public long buffer(Buffer buffer) {
-        return graph.bufferOf(buffer.id).handle();
+        return graph.bufferHandle(buffer.id);
     }
 
-    /** The device address of a transient buffer, for shaders to take in their push constants. */
+    /** The device address of a buffer of the graph, for shaders to take in their push constants. */
     public long address(Buffer buffer) {
-        return graph.bufferOf(buffer.id).deviceAddress();
+        return graph.bufferAddress(buffer.id);
     }
 
     /** Whether {@code history}'s last frame image holds what that frame wrote: not on its first frame. */

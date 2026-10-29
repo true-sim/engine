@@ -129,7 +129,7 @@ public final class VisibilityBufferShading implements Technique {
             long push = stack.nmalloc(16, PUSH_BYTES);
             memPutLong(push, view.address());
             memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, renderer.scene().instanceBuffer().deviceAddress());
+            memPutLong(push + 16, renderer.scene().instanceAddress());
             memPutLong(push + 24, pool.positions().deviceAddress());
             memPutLong(push + 32, pool.attributes().deviceAddress());
             memPutLong(push + 40, pool.meshlets().deviceAddress());

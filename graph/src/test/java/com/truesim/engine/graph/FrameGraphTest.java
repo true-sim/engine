@@ -444,6 +444,66 @@ class FrameGraphTest {
     }
 
     @Test
+    void importedBuffersKeepTheirContentsAndAreOrdered() {
+        int usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+            | org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        try (GpuBuffer first = GpuBuffer.deviceLocal(device, 4L * SIZE * SIZE, usage);
+             GpuBuffer second = GpuBuffer.deviceLocal(device, 8L * SIZE * SIZE, usage)) {
+            ExternalBuffer state = new ExternalBuffer("state", first);
+            assertThat(state.name()).isEqualTo("state");
+            assertThat(state.size()).isEqualTo(4L * SIZE * SIZE);
+            device.submitAndWait(device.graphics(), commands -> {
+                vkCmdFillBuffer(commands, first.handle(), 0, VK_WHOLE_SIZE, RED);
+                vkCmdFillBuffer(commands, second.handle(), 0, VK_WHOLE_SIZE, GREEN);
+            });
+            int[] fill = {BLUE};
+            // Read, then written: nothing in the frame reads the write, which is kept, as the buffer outlives the frame.
+            graph.add(new Lambda(List.of(OUT), g -> {
+                Buffer buffer = g.importBuffer(state);
+                assertThat(g.importBuffer(state)).as("the same each time").isSameAs(buffer);
+                Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                g.pass("read state").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                    .record(ctx -> unpack(ctx, buffer, image));
+                g.pass("write state").write(buffer, BufferAccess.TRANSFER_DST).record(ctx -> {
+                    assertThat(ctx.address(buffer)).isEqualTo(state.address);
+                    vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0, VK_WHOLE_SIZE, fill[0]);
+                });
+                g.provide(OUT, image);
+            })).output(OUT, output);
+            assertThat(frame()[0]).as("what came before the frame").isEqualTo(RED);
+            assertThat(graph.passes()).containsExactly("read state", "write state");
+            assertThat(graph.pooledBuffers()).as("not pooled").isZero();
+            assertThat(frame()[0]).as("what the frame before wrote").isEqualTo(BLUE);
+            // Another buffer, of another size: the graph rebuilds and uses it.
+            state.set(second);
+            fill[0] = GREEN;
+            assertThat(frame()[SIZE * SIZE - 1]).isEqualTo(GREEN);
+            // Only the reader now: what the frames before wrote is still there.
+            graph.close();
+            graph = new FrameGraph(device, 2).add(new Lambda(List.of(OUT), g -> {
+                Buffer buffer = g.importBuffer(state);
+                Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                g.pass("read state").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                    .record(ctx -> unpack(ctx, buffer, image));
+                g.provide(OUT, image);
+            })).output(OUT, output);
+            assertThat(frame()[0]).isEqualTo(GREEN);
+            // Async passes stay off it: it is the graphics queue's.
+            graph.close();
+            graph = new FrameGraph(device, 2).add(new Lambda(List.of(OUT), g -> {
+                Buffer buffer = g.importBuffer(state);
+                g.pass("async write").write(buffer, BufferAccess.TRANSFER_DST).async().record(ctx -> { });
+                Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                g.pass("read state").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                    .record(ctx -> unpack(ctx, buffer, image));
+                g.provide(OUT, image);
+            })).output(OUT, output);
+            assertThatIllegalStateException().isThrownBy(() -> device.submitAndWait(device.graphics(), graph::record))
+                .withMessageContaining("external buffer");
+        }
+    }
+
+    @Test
     void buffersWhoseLifetimesDoNotOverlapShareMemory() {
         long half = 2L * SIZE * SIZE;
         graph.add(new Lambda(List.of(OUT), g -> {
