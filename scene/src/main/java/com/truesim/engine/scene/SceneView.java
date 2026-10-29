@@ -42,7 +42,7 @@ import java.util.Objects;
  *
  * <p>Several scenes draw as several views, each with its own renderer and frame graph, all from one
  * {@link SceneResources}: a mesh or material used by several views is on the GPU once. Several cameras on one scene
- * are several of the renderer's views (up to {@link MeshletRenderer#VIEWS}), each drawn by a graph of its own.
+ * are several of the renderer's views (as many as its limits give), each drawn by a graph of its own.
  *
  * <ul>
  *   <li><b>Assets by reference:</b> a renderable draws once its mesh is on the GPU; materials draw untextured until

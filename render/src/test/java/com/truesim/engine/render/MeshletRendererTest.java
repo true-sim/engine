@@ -314,27 +314,29 @@ class MeshletRendererTest {
             MeshletRenderer.Path.AUTO}) {
             renderer.setPath(path);
             renderWith(commands -> {
-                renderer.cullViews(commands, 0b11, 0);
+                renderer.cullViews(commands, new int[] {0, 1}, 2, -1);
                 renderer.drawView(commands, 0, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
             });
             assertThat(covered()).isEqualTo(alone);
             assertThat(renderer.visibleMeshlets(0)).isEqualTo(1);
             assertThat(renderer.visibleMeshlets(1)).isEqualTo(1); // each its own quad
             renderWith(commands -> {
-                renderer.cullViews(commands, 0b11, 0);
+                renderer.cullViews(commands, new int[] {0, 1}, 2, -1);
                 renderer.drawView(commands, 1, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
             });
             assertThat(covered()).isEqualTo(alone); // the other quad, from the other side
         }
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, 0, 0));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, 0b100, 0)); // no lists
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, 0b01, 0b10));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, 0b11, 0b11));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, new int[0], 0, -1));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, new int[] {2}, 1, -1)); // none
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, new int[] {-1}, 1, -1));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, new int[] {0}, 2, -1));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, new int[] {0}, 1, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, new int[] {0, 0}, 2, -1));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.setView(2, camera, 1, 0));
         assertThatIllegalArgumentException().isThrownBy(() -> renderer.drawView(null, 2, 0, 0, 1, 1, 0, 0, 0))
             .withMessageContaining("has no lists");
         assertThatIllegalArgumentException().isThrownBy(() -> renderer.recordDepth(null, 0, 1, 1, 3));
         assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 1, 1, 0));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 1, 1, MeshletRenderer.VIEWS + 1));
     }
 
     @Test
@@ -380,11 +382,11 @@ class MeshletRendererTest {
 
     @Test
     void camerasAtTheirOwnPositionsAreCulledTogether() {
-        // Eight cameras, each 5 units in front of a quad of its own, the quads 1,000 units apart far from the origin:
-        // more views than four, culled in one pass, each seeing only its quad.
-        int views = 8;
+        // Forty cameras, each 5 units in front of a quad of its own, the quads 1,000 units apart far from the origin:
+        // views as many as there are, culled in one pass, each seeing only its quad.
+        int views = 40;
         renderer.close();
-        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 4096, 1024, 1 << 16, views),
+        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(views, 1024, 1024, 1 << 12, views),
             VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
         Camera[] cameras = new Camera[views];
         for (int v = 0; v < views; v++) {
@@ -394,17 +396,21 @@ class MeshletRendererTest {
             renderer.setView(v, cameras[v], 1, MeshletRenderer.MODE_WHITE);
         }
         renderer.setInstanceCount(views);
+        int[] all = new int[views];
+        for (int v = 0; v < views; v++) {
+            all[v] = v;
+        }
         renderWith(commands -> {
-            renderer.cullViews(commands, (1 << views) - 1, 0);
-            renderer.drawView(commands, 5, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
+            renderer.cullViews(commands, all, views, -1);
+            renderer.drawView(commands, 37, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
         });
         for (int v = 0; v < views; v++) {
             assertThat(renderer.visibleMeshlets(v)).as("view %d", v).isEqualTo(1);
         }
-        // View 5 drew its quad where a camera 5 units in front of it sees it: the middle, 44 pixels across.
+        // View 37 drew its quad where a camera 5 units in front of it sees it: the middle, 44 pixels across.
         assertThat(pixel(SIZE / 2, SIZE / 2)).isEqualTo(WHITE);
         assertThat(covered()).isCloseTo(44 * 44, org.assertj.core.data.Percentage.withPercentage(10));
-        assertThat(renderer.viewPosition(5, 0)).isEqualTo(5e6 + 5000);
+        assertThat(renderer.viewPosition(37, 0)).isEqualTo(5e6 + 37_000);
     }
 
     /**

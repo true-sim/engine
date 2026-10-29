@@ -221,10 +221,10 @@ class SceneBenchmark {
                 run("camera moving, visibility buffer", graph, slots, tasks, scene, renderables, view, camera,
                     frame -> camera.position(FAR - 0.05 * frame, 0, FAR + 0.1 * frame));
             }
+            device.waitIdle(); // the counts are the last frame's once it has finished
             System.out.printf(Locale.ROOT, "  %,d instances, %,d meshlets visible in the last frame, %d meshes, "
                 + "%d material blocks%n", view.instanceCount(), renderer.visibleMeshlets(), resources.meshCount(),
                 resources.materialSetCount());
-            device.waitIdle();
             view.close();
         }
     }

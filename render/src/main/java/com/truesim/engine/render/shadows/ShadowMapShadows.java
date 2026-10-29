@@ -10,7 +10,6 @@ import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.Lights;
-import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.SceneGeometry;
 import com.truesim.engine.render.ShadowInputs;
@@ -53,7 +52,10 @@ public final class ShadowMapShadows implements Technique {
         this.entry = entry;
         this.camera = Objects.requireNonNull(camera, "camera");
         this.size = size;
-        this.view = Objects.checkIndex(view, MeshletRenderer.VIEWS);
+        if (view < 0) {
+            throw new IllegalArgumentException("No view " + view);
+        }
+        this.view = view;
         this.bias = bias;
     }
 

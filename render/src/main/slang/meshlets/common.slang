@@ -180,12 +180,9 @@ public float projectedError(View view, float3 center, float radius, float error)
 
 // ---------------------------------------------------------------- occlusion culling
 
-/** Which phase of two-phase occlusion culling each view runs, and the depth pyramid the late phase tests against. */
+/** The depth pyramid the late phase of two-phase occlusion culling tests against. */
 public struct Occlusion
 {
-    public uint phases;       // 2 bits per view, views 0 to 15: 0 no occlusion culling; 1 early, last frame's
-    // visible; 2 late (against the pyramid)
-    public uint phasesHigh;   // views 16 to 31
     public uint pyramid;      // sampled slot of the depth pyramid (DepthPyramid: farthest depth, reverse)
     public uint depthWidth;   // the depth image's size: the pyramid's level 0 is half of it, rounded up
     public uint depthHeight;
@@ -196,11 +193,12 @@ public static const uint PHASE_ALL = 0;
 public static const uint PHASE_EARLY = 1;
 public static const uint PHASE_LATE = 2;
 
-/** View {@code view}'s phase. */
-public uint phaseOf(Occlusion occlusion, uint view)
+/** A view the instance pass culls, one per row of workgroups: which, and its phase (PHASE_ALL, _EARLY, _LATE). */
+public struct CulledView
 {
-    return view < 16 ? (occlusion.phases >> (2 * view)) & 3 : (occlusion.phasesHigh >> (2 * (view - 16))) & 3;
-}
+    public uint view;
+    public uint phase;
+};
 
 /**
  * Whether a sphere (camera-relative) may be seen past what the depth pyramid holds. Its box is projected; at the
@@ -252,7 +250,9 @@ public bool unoccluded(View view, Occlusion hzb, float3 center, float radius)
 public struct Chunk
 {
     public uint instance;
-    public uint firstMeshlet;  // the local meshlet, and the view in the top 5 bits
+    public uint firstMeshlet;  // the local meshlet
+    public uint view;
+    public uint phase;         // the view's, as the instance pass culled it
 };
 
 /** A meshlet the indexed path draws: its instance, pool meshlet and first index in the frame's index buffer. */

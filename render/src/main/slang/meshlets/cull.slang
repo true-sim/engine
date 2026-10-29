@@ -26,11 +26,11 @@ ConstantBuffer<CullPush> push;
 void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     Chunk chunk = push.chunks[group.x];
-    uint v = chunk.firstMeshlet >> 27;
+    uint v = chunk.view;
     View view = push.views[v];
     Instance instance = relative(push.instances[chunk.instance], view);
     MeshEntry mesh = push.meshes[instance.mesh];
-    uint local = (chunk.firstMeshlet & 0x07ffffff) + thread.x;
+    uint local = chunk.firstMeshlet + thread.x;
     if (local >= mesh.meshletCount)
     {
         return;
@@ -40,7 +40,7 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     {
         return;
     }
-    bool late = phaseOf(push.occlusion, v) == PHASE_LATE;
+    bool late = chunk.phase == PHASE_LATE;
     if (late)
     {
         // A newly visible instance: only its meshlets the pyramid does not hide.

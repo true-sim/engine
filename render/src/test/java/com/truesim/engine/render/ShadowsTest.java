@@ -307,8 +307,6 @@ class ShadowsTest {
             assertThat(cascades.split(0)).isCloseTo((float) (0.1 + 39.9 / 3),
                 org.assertj.core.data.Offset.offset(1e-3f));
             assertThatIllegalArgumentException().isThrownBy(() -> new CascadedShadowMaps(geometry, lights, 0, 0, camera,
-                MeshletRenderer.VIEWS, 1024, 1, 40)); // views 1 on have room for VIEWS - 1
-            assertThatIllegalArgumentException().isThrownBy(() -> new CascadedShadowMaps(geometry, lights, 0, 0, camera,
                 1, 1024, 0, 40));
         }
     }

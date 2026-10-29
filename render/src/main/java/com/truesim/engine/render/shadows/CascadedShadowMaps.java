@@ -11,7 +11,6 @@ import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.Lights;
-import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.SceneGeometry;
 import com.truesim.engine.render.ShadowInputs;
@@ -69,10 +68,9 @@ public final class CascadedShadowMaps implements Technique {
         this.geometry = Objects.requireNonNull(geometry, "geometry");
         this.lights = Objects.requireNonNull(lights, "lights");
         this.camera = Objects.requireNonNull(camera, "camera");
-        if (cascades < 1 || firstView < 1 || firstView + cascades > MeshletRenderer.VIEWS || size < 1
-            || !(maxDistance > 0)) {
-            throw new IllegalArgumentException("Cascades need views of their own (1 to " + (MeshletRenderer.VIEWS - 1)
-                + " from view 1), a size and a distance: " + cascades + " from view " + firstView + ", " + size + ", "
+        if (cascades < 1 || firstView < 1 || size < 1 || !(maxDistance > 0)) {
+            throw new IllegalArgumentException("Cascades need views of their own (from view 1 on: the renderer needs as "
+                + "many), a size and a distance: " + cascades + " from view " + firstView + ", " + size + ", "
                 + maxDistance);
         }
         this.light = light;

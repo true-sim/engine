@@ -42,8 +42,8 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
     public static final class Views {
         private final MeshletRenderer renderer;
         private final Buffer culled;
-        private int viewMask;
-        private int earlyMask;
+        private int[] views = new int[0];
+        private int early = -1;
         private Runnable[] before = new Runnable[0];
 
         Views(MeshletRenderer renderer, Buffer culled) {
@@ -57,11 +57,20 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
          * recording.
          */
         public Views add(int index, boolean early, Runnable before) {
-            if ((viewMask & 1 << index) != 0) {
-                throw new IllegalStateException("View " + index + " is culled already");
+            Objects.checkIndex(index, renderer.limits().views());
+            for (int view : views) {
+                if (view == index) {
+                    throw new IllegalStateException("View " + index + " is culled already");
+                }
             }
-            viewMask |= 1 << Objects.checkIndex(index, MeshletRenderer.VIEWS);
-            earlyMask |= early ? 1 << index : 0;
+            views = Arrays.copyOf(views, views.length + 1);
+            views[views.length - 1] = index;
+            if (early) {
+                if (this.early >= 0) {
+                    throw new IllegalStateException("View " + this.early + " culls early already: one view may");
+                }
+                this.early = index;
+            }
             if (before != null) {
                 this.before = Arrays.copyOf(this.before, this.before.length + 1);
                 this.before[this.before.length - 1] = before;
@@ -78,7 +87,7 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
             for (Runnable runnable : before) {
                 runnable.run();
             }
-            renderer.cullViews(commands, viewMask, earlyMask);
+            renderer.cullViews(commands, views, views.length, early);
         }
     }
 }

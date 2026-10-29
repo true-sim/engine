@@ -181,11 +181,12 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
   camera, as precise anywhere in the world as at its origin (tested: the same image 7,000 km out; floats alone are
   visibly off there). Moving a camera rewrites nothing but its view; a shadow camera stays where its light is, so its
   map does not change as other cameras move.
-- **Views culled together:** up to 32 views (cameras, shadow maps, cascades, mirrors) each have their own lists
-  (`Limits.views`). `cullViews` culls several at once: one instance pass with a row per view, and one cull pass over
-  all their chunks, each meshlet into its view's list; `drawView` then draws each. Through the frame graph, the
-  `MeshletCulling` request gathers every view the techniques draw (the scene's camera, `ShadowMapShadows`' sun) into
-  one culling pass.
+- **Views culled together:** as many views as the frame has (cameras, shadow maps, cascades, mirrors; `Limits.views`)
+  each have their own lists. `cullViews` culls any number at once: one instance pass with a row per view (in
+  dispatches of up to 65,535 rows), and one cull pass over all their chunks, each meshlet into its view's list;
+  `drawView` then draws each. Each view's lists are as big as `Limits.draws` and `Limits.triangles`. Through the
+  frame graph, the `MeshletCulling` request gathers every view the techniques draw (the scene's camera,
+  `ShadowMapShadows`' sun) into one culling pass.
 
 Measured with `MeshletBenchmark` (`TRUESIM_BENCHMARK=true`) on an AMD Radeon RX 9070 XT at 1920 x 1080 with 1 pixel
 of error allowed, GPU time of the whole frame (instance pass, culling, drawing), median per frame of batches of 32
