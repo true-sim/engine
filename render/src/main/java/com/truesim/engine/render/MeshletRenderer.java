@@ -170,6 +170,7 @@ public final class MeshletRenderer implements AutoCloseable {
     private final GpuBuffer chunks;
     private final GpuBuffer chunkCommand;
     private final List<RenderView> views = new ArrayList<>();
+    private final java.util.BitSet indices = new java.util.BitSet(); // those of the open views
     // The views' addresses, by index, for the culling passes; and the rows the instance pass culls (a view and its
     // phase each). Both grow as views are made; the old ones go once no frame in flight reads them.
     private FrameBuffer viewTable;
@@ -259,11 +260,11 @@ public final class MeshletRenderer implements AutoCloseable {
 
     /**
      * A new view of the scene, with lists and history as {@code options} say: as many as the frame needs (cameras,
-     * shadow maps, mirrors). Views live as long as the renderer.
+     * shadow maps, mirrors), each at the lowest index free. Views live until closed, or until the renderer closes.
      */
     public RenderView createView(ViewOptions options) {
         checkOpen();
-        int index = views.size();
+        int index = indices.nextClearBit(0);
         if (8L * (index + 1) > viewTable.size()) {
             grow(2 * (index + 1));
         }
@@ -272,8 +273,21 @@ public final class MeshletRenderer implements AutoCloseable {
             view.frameIndices(); // the indexed path draws it; on mesh shaders no view has one
         }
         views.add(view);
+        indices.set(index);
         viewTable.putLong(8L * index, view.address());
         return view;
+    }
+
+    /**
+     * Takes {@code view} (closed) out: its index is free for the next view, and its buffers go once no frame in flight
+     * reads them.
+     */
+    @AllowAllocation("closing a view")
+    void removeView(RenderView view) {
+        views.remove(view);
+        indices.clear(view.index());
+        viewTable.putLong(8L * view.index(), 0);
+        view.freeBuffers(retiring);
     }
 
     /** Makes room for {@code capacity} views: a new table and rows, the old ones kept until no frame reads them. */
@@ -293,7 +307,7 @@ public final class MeshletRenderer implements AutoCloseable {
         retiring.add(resource);
     }
 
-    /** The views made, by index. */
+    /** The views open, in the order they were made. */
     public List<RenderView> views() {
         return java.util.Collections.unmodifiableList(views);
     }
@@ -433,6 +447,7 @@ public final class MeshletRenderer implements AutoCloseable {
         if (view.renderer() != this) {
             throw new IllegalArgumentException("A view of another renderer");
         }
+        view.checkOpen();
         return view;
     }
 
@@ -808,10 +823,11 @@ public final class MeshletRenderer implements AutoCloseable {
                     }
                 }
             }
+            retiring.close(); // the GPU is done: what is retired from now on goes at once
             for (RenderView view : views) {
-                view.close();
+                view.freeBuffers(retiring);
             }
-            retiring.close();
+            views.clear();
             viewTable.close();
             rows.close();
             chunks.close();
