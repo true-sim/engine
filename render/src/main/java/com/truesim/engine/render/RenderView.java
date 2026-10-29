@@ -45,7 +45,7 @@ public final class RenderView implements AutoCloseable {
     private final VulkanDevice device;
     private GpuBuffer frameIndices; // the indexed path's, made when it first draws
     private final double[] position = new double[3];
-    int phase;
+    final RenderView[] alone = {this}; // to cull the view by itself; never written
     boolean marked; // while a cull checks its views
     private boolean closed;
 
@@ -258,7 +258,7 @@ public final class RenderView implements AutoCloseable {
     }
 
     /** Lets the indexed path's index buffer go, once no frame in flight reads it: the path is mesh shaders now. */
-    void dropIndices() {
+    synchronized void dropIndices() {
         if (frameIndices != null) {
             renderer.retire(frameIndices);
             frameIndices = null;
@@ -270,9 +270,12 @@ public final class RenderView implements AutoCloseable {
         return frameIndices != null;
     }
 
-    /** The indexed path's index buffer, made the first time it is needed (rarely: the path changed). */
+    /**
+     * The indexed path's index buffer, made the first time it is needed (rarely: the path changed), by whichever of
+     * the passes culling and drawing the view records first.
+     */
     @AllowAllocation("the indexed path drawing the view for the first time")
-    GpuBuffer frameIndices() {
+    synchronized GpuBuffer frameIndices() {
         if (frameIndices == null) {
             frameIndices = GpuBuffer.deviceLocal(device, 12L * options.allTriangles(),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT

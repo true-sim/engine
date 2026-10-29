@@ -196,6 +196,9 @@ public final class FrameGraph implements AutoCloseable {
     private int[] chunkFirstPass = {0};
     private int[] chunkEndPass = {0};
     private VkCommandBuffer[] chunkCommands = new VkCommandBuffer[1];
+    // Recording on several threads: the frame start, recorded first on the calling thread and submitted ahead of the
+    // first graphics chunk, so no pass body runs before what it uploads is recorded. Null on one thread.
+    private VkCommandBuffer frameStart;
 
     /** A graph on {@code device} whose frames may be {@code framesInFlight} deep (images retire after that). */
     public FrameGraph(VulkanDevice device, int framesInFlight) {
@@ -375,8 +378,13 @@ public final class FrameGraph implements AutoCloseable {
         prepare();
         execution.ensureCommandBuffers();
         if (jobs != null && chunkBatch.length > 1) {
+            frameStart = execution.commandBuffer(0, GRAPHICS);
+            bindless.bind(frameStart, true);
+            frameSlots.recordStart(frameStart);
+            Vulkan.check(vkEndCommandBuffer(frameStart), "Could not finish recording");
             jobs.parallelFor(chunkBatch.length, 1, recordChunks);
         } else {
+            frameStart = null;
             recordChunks(0, chunkBatch.length, 0);
         }
         execution.submit(acquired, renderFinished);
@@ -429,7 +437,7 @@ public final class FrameGraph implements AutoCloseable {
             VkCommandBuffer commands = execution.commandBuffer(worker, batchQueue[batch]);
             bindless.bind(commands, graphics);
             boolean last = batch == lastGraphicsBatch && c == batchFirstChunk[batch + 1] - 1;
-            if (c == firstGraphicsChunk) {
+            if (c == firstGraphicsChunk && frameStart == null) {
                 frameSlots.recordStart(commands); // uploads and such, ahead of every pass on the graphics queue
             }
             recordPasses(commands, chunkFirstPass[c], chunkEndPass[c], last, contexts[worker]);
@@ -551,7 +559,8 @@ public final class FrameGraph implements AutoCloseable {
         /** Makes sure each worker could record every chunk of each queue: workers take chunks as they come free. */
         void ensureCommandBuffers() {
             for (int i = 0; i < used.length; i++) {
-                int needed = i % 2 == GRAPHICS ? graphicsChunks : computeChunks;
+                // The calling thread (worker 0) records the frame start too, when recording on several threads.
+                int needed = i % 2 == GRAPHICS ? graphicsChunks + (i == GRAPHICS ? 1 : 0) : computeChunks;
                 if (buffers[slot][i].length < needed) {
                     grow(i, needed);
                 }
@@ -602,12 +611,19 @@ public final class FrameGraph implements AutoCloseable {
                 try (MemoryStack stack = stackPush()) {
                     int from = batchFirstChunk[b];
                     int count = batchFirstChunk[b + 1] - from;
-                    long infos = stack.ncalloc(VkCommandBufferSubmitInfo.ALIGNOF, Math.max(1, count),
+                    boolean start = frameStart != null && from <= firstGraphicsChunk
+                        && firstGraphicsChunk < from + count;
+                    long infos = stack.ncalloc(VkCommandBufferSubmitInfo.ALIGNOF, count + 1,
                         VkCommandBufferSubmitInfo.SIZEOF);
+                    if (start) {
+                        commandBufferInfo(infos, frameStart);
+                    }
                     for (int c = 0; c < count; c++) {
-                        long info = infos + (long) c * VkCommandBufferSubmitInfo.SIZEOF;
-                        memPutInt(info + VkCommandBufferSubmitInfo.STYPE, VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO);
-                        memPutAddress(info + VkCommandBufferSubmitInfo.COMMANDBUFFER, chunkCommands[from + c].address());
+                        commandBufferInfo(infos + (long) (start ? c + 1 : c) * VkCommandBufferSubmitInfo.SIZEOF,
+                            chunkCommands[from + c]);
+                    }
+                    if (start) {
+                        count++;
                     }
                     // Waits: the other queue's batch this one depends on (or, first on its queue, all the other queue
                     // did in the frame before, as images pass between queues), and the acquired image.
@@ -654,6 +670,11 @@ public final class FrameGraph implements AutoCloseable {
             slotGraphicsValue[slot] = graphicsValue;
             slotComputeValue[slot] = computeValue;
             begun = false;
+        }
+
+        private static void commandBufferInfo(long info, VkCommandBuffer commands) {
+            memPutInt(info + VkCommandBufferSubmitInfo.STYPE, VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO);
+            memPutAddress(info + VkCommandBufferSubmitInfo.COMMANDBUFFER, commands.address());
         }
 
         private static void semaphore(long info, long semaphore, long value) {

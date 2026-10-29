@@ -622,7 +622,9 @@ swapchain.present(device.graphics(), image);
   swapchain image waits for its acquisition, so everything before it can start earlier.
 - **Parallel recording:** each batch is cut into chunks of a few passes, and workers record them in parallel, each
   into its own command pools. Chunks are submitted in order, so the GPU sees the same commands on any number of
-  threads. Pass bodies then run on worker threads and must not share what they change.
+  threads. The frame start (uploads of instances and such) is recorded first, on the calling thread, and submitted ahead
+  of the first graphics chunk. Pass bodies then run on worker threads and must not share what they change; the
+  engine's own techniques are tested to draw the same images on one thread and on four.
 - **Frame slots:** `graph.frameSlots()` is what renderers, lights and materials given it keep a copy per. `beginFrame`
   opens the frame's slot once the GPU has finished that slot's previous frame, and `submit` closes it, so instances
   and lights may change every frame, before `beginFrame`, while recording, or after `submit`, without touching what a
