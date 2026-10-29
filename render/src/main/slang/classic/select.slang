@@ -30,7 +30,12 @@ void selectMain(uint3 id : SV_DispatchThreadID)
         return;
     }
     View view = push.view[0];
-    Instance instance = relative(push.instances[id.x], view);
+    Instance stored = push.instances[id.x];
+    if (!drawnIn(stored, view))
+    {
+        return;
+    }
+    Instance instance = relative(stored, view);
     ClassicMesh classic = push.classicMeshes[instance.mesh];
     if (classic.levelCount == 0)
     {

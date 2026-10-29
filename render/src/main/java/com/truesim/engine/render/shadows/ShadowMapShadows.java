@@ -73,6 +73,7 @@ public final class ShadowMapShadows implements Technique {
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
         g.modifyBuffer(Keys.LIGHT_LIST);
+        geometry.setViewFilter(view, -1, true); // the map holds the casters only
         Image map = g.request(new SceneDraw(geometry, view, camera, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT,
             size, size, false)).depth();
         g.request(new ShadowInputs()).sample(map).setup(ctx -> {

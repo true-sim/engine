@@ -882,6 +882,54 @@ class SceneViewTest {
     }
 
     @Test
+    void idsStayWhileDrawnAndLayersAndShadowsFollowTheScene() throws InterruptedException {
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        MeshletRenderer renderer = renderer();
+        SceneView view = closing(new SceneView(resources, renderables, renderer));
+        GpuBuffer[] readbacks = {readback(), readback()};
+        List<FrameGraph> graphs = List.of(graph(view, false, readbacks));
+        long[] nodes = new long[3];
+        for (int i = 0; i < 3; i++) {
+            nodes[i] = facing(scene, 2 * i - 2, 0, -8);
+            renderables.set(nodes[i], SQUARE, List.of());
+        }
+        frame(graphs, List.of(view), camera);
+        load();
+        frame(graphs, List.of(view), camera);
+        int[] ids = {view.slotOf(nodes[0]), view.slotOf(nodes[1]), view.slotOf(nodes[2])};
+        assertThat(ids).containsExactlyInAnyOrder(0, 1, 2);
+        // The middle one goes: the others keep their ids, the renderer keeps the hole.
+        renderables.remove(nodes[1]);
+        frame(graphs, List.of(view), camera);
+        assertThat(view.slotOf(nodes[0])).isEqualTo(ids[0]);
+        assertThat(view.slotOf(nodes[2])).isEqualTo(ids[2]);
+        assertThat(view.instanceCount()).isEqualTo(2);
+        assertThat(renderer.instanceCount()).isEqualTo(Math.max(ids[0], ids[2]) + 1);
+        // A new one takes the lowest free id.
+        long next = facing(scene, 0, 0, -8);
+        renderables.set(next, SQUARE, List.of());
+        frame(graphs, List.of(view), camera);
+        assertThat(view.slotOf(next)).isEqualTo(ids[1]);
+        // Layers and shadows, from the scene: one node on layer 5, one casting no shadow.
+        scene.setLayers(nodes[0], 1 << 5);
+        renderables.setCastsShadows(nodes[2], false);
+        renderer.setViewFilter(0, 1, false);
+        frame(graphs, List.of(view), camera);
+        device.waitIdle();
+        assertThat(renderer.visibleMeshlets()).as("on layer 0").isEqualTo(2);
+        renderer.setViewFilter(0, -1, true);
+        frame(graphs, List.of(view), camera);
+        device.waitIdle();
+        assertThat(renderer.visibleMeshlets()).as("casting shadows").isEqualTo(2);
+        // The highest id goes: the renderer's count shrinks to the highest in use.
+        renderables.remove(nodes[2]);
+        renderables.remove(nodes[0]);
+        frame(graphs, List.of(view), camera);
+        assertThat(renderer.instanceCount()).isEqualTo(view.slotOf(next) + 1);
+    }
+
+    @Test
     void misuseIsChecked() {
         SceneGraph scene = new SceneGraph(new ChangeClock());
         try (GeometryPool other = new GeometryPool(device, GeometryPool.Capacity.of(64, 1, 1));

@@ -258,6 +258,11 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     }
 
     @Override
+    public void setViewFilter(int index, int layers, boolean castersOnly) {
+        renderer.setViewFilter(index, layers, castersOnly);
+    }
+
+    @Override
     @AllowAllocation("building the graph, when it changes")
     public void drawFirst(GraphBuilder g, SceneDraw draw, SceneDraw.Targets targets, boolean load) {
         SurfaceOutput.Kind kind = draw.output().kind();

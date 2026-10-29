@@ -271,6 +271,31 @@ class ShadowsTest {
     }
 
     @Test
+    void instancesCastingNoShadowCastNone() {
+        // The floating quad casts no shadow: the shadow map's view leaves it out, the floor under it is lit.
+        renderer.setInstance(1, quad, 0, 1, false, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
+        try (Lights lights = new Lights(device, 4, 4)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            graph.close();
+            graph = new FrameGraph(device, 2)
+                .add(new ClusteredForwardShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
+                .add(new ClusteredLights(lights, camera, SIZE, SIZE))
+                .add(new ShadowMapShadows(geometry, lights, 0, 0, lightCamera(sun[0], sun[1], sun[2]), 1024, 1,
+                    1.5e-3f))
+                .output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+            frame(colorTarget, 4);
+            byte[] color = frame(colorTarget, 4);
+            double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
+            int lit = floor(color, this, 3, -2);
+            assertThat(floor(color, this, shadow[0], shadow[1])).as("where its shadow would fall")
+                .isGreaterThan((int) (lit * 0.9));
+            assertThat(renderer.visibleMeshlets(1)).as("the sun's view drew the floor alone").isEqualTo(1);
+        }
+    }
+
+    @Test
     void cascadesShadowNearAndFar() {
         // A second quad, farther out on a longer floor: its shadow falls in a farther cascade.
         renderer.setInstance(0, quad, 0, -5, -10, 0, 0, 0, 1, 10, 1, 15);

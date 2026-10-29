@@ -226,6 +226,7 @@ public final class CascadedShadowMaps implements Technique {
         ShadowInputs.Set inputs = g.request(new ShadowInputs());
         Image[] maps = new Image[cascades];
         for (int i = 0; i < cascades; i++) {
+            geometry.setViewFilter(firstView + i, -1, true); // the maps hold the casters only
             maps[i] = g.request(new SceneDraw(geometry, firstView + i, cameras[i], SurfaceOutput.depth(),
                 VK_FORMAT_D32_SFLOAT, size, size, false)).depth();
             inputs.sample(maps[i]);

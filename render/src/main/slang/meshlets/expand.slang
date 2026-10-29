@@ -38,7 +38,7 @@ void expandMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
     {
         return; // over the index capacity: not written
     }
-    MeshEntry mesh = push.meshes[push.instances[v.instance].mesh];
+    MeshEntry mesh = push.meshes[push.instances[v.instance].mesh & INSTANCE_MESH];
     uint w = v.meshlet * 8;
     uint count = ((push.meshlets[w + 2] >> 8) & 0xff) * 3;
     uint first = mesh.indexBase + push.meshlets[w + 1];

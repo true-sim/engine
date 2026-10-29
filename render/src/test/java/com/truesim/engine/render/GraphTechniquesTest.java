@@ -407,6 +407,10 @@ class GraphTechniquesTest {
             }
 
             @Override
+            public void setViewFilter(int index, int layers, boolean castersOnly) {
+            }
+
+            @Override
             public void drawFirst(GraphBuilder g, SceneDraw draw, SceneDraw.Targets targets, boolean load) {
             }
         }).provider(MeshletGeometry.class)).isNull();

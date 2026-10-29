@@ -340,6 +340,38 @@ class MeshletRendererTest {
     }
 
     @Test
+    void holesLayersAndCastersDecideWhatAViewDraws() {
+        // Three quads side by side, facing the camera, one meshlet each.
+        for (int i = 0; i < 3; i++) {
+            renderer.setInstance(i, quad, 0, 2 * i - 2, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
+        }
+        renderer.setInstanceCount(3);
+        lookForward(1, MeshletRenderer.MODE_WHITE);
+        assertThat(render()).isEqualTo(3);
+        // A removed instance is a hole: skipped, the others keep their ids.
+        renderer.removeInstance(1);
+        assertThat(render()).isEqualTo(2);
+        renderer.setInstance(1, quad, 0, 0, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
+        assertThat(render()).isEqualTo(3);
+        // Layers: the right quad on layer 3 only, the left one casting no shadow.
+        renderer.setInstance(2, quad, 0, 1 << 3, true, 2, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
+        renderer.setInstance(0, quad, 0, 1, false, -2, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
+        assertThat(render()).as("every layer, by default").isEqualTo(3);
+        renderer.setViewFilter(0, 1, false);
+        assertThat(render()).as("layer 0").isEqualTo(2);
+        renderer.setViewFilter(0, 1 << 3 | 1 << 7, false);
+        assertThat(render()).as("layers 3 and 7").isEqualTo(1);
+        assertThat(pixel(SIZE / 2 + 30, SIZE / 2)).isEqualTo(WHITE); // the right one
+        renderer.setViewFilter(0, -1, true);
+        assertThat(render()).as("casters only").isEqualTo(2);
+        assertThat(pixel(SIZE / 2 - 30, SIZE / 2) & 0xffffff).isZero(); // not the left one
+        renderer.setViewFilter(0, -1, false);
+        org.assertj.core.api.Assertions.assertThatIndexOutOfBoundsException()
+            .isThrownBy(() -> renderer.removeInstance(-1));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.setViewFilter(1, -1, false));
+    }
+
+    @Test
     void farFromTheOriginTheImageIsTheSame() {
         // The terrain and a quad near the origin, then the same 7,000 km away with the camera there: positions are kept
         // in two floats per axis and drawn relative to the camera, so the image does not change.

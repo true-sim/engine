@@ -32,6 +32,11 @@ public final class MeshletGeometry implements GeometryProvider {
     }
 
     @Override
+    public void setViewFilter(int index, int layers, boolean castersOnly) {
+        renderer.setViewFilter(index, layers, castersOnly);
+    }
+
+    @Override
     @AllowAllocation("building the graph, when it changes")
     public void drawFirst(GraphBuilder g, SceneDraw draw, SceneDraw.Targets targets, boolean load) {
         if (load) {

@@ -40,6 +40,14 @@ public final class SceneGeometry {
         return this;
     }
 
+    /** Sets view {@code index}'s filter on every provider ({@link GeometryProvider#setViewFilter}). */
+    public SceneGeometry setViewFilter(int index, int layers, boolean castersOnly) {
+        for (int i = 0; i < providers.size(); i++) {
+            providers.get(i).setViewFilter(index, layers, castersOnly);
+        }
+        return this;
+    }
+
     /** The provider of type {@code type}, e.g. for a technique needing what only it can give; null if none. */
     public <T extends GeometryProvider> T provider(Class<T> type) {
         for (GeometryProvider provider : providers) {

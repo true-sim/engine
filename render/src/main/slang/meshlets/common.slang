@@ -41,12 +41,27 @@ public struct Instance
 {
     public float4 rotation;        // quaternion x, y, z, w
     public float3 position;        // world position, high part; after relative(): camera-relative
-    public uint mesh;
+    public uint mesh;              // the mesh in the low 24 bits, the flags (INSTANCE_*) above; after relative(): the mesh
     public float3 scale;
     public uint materialBase;      // the material of submesh s is materialBase + s
     public float3 positionLow;     // world position, the rest; after relative(): 0
-    public uint pad;
+    public uint layers;            // the layers it is on: drawn in views of any of them
 };
+
+/** Instance flags, in the mesh word's top 8 bits. */
+public static const uint INSTANCE_LIVE = 1u << 24;          // 0: a hole, an id not in use
+public static const uint INSTANCE_CASTS_SHADOWS = 1u << 25;
+public static const uint INSTANCE_MESH = 0xffffffu;
+
+/** View flags. */
+public static const uint VIEW_CASTERS_ONLY = 1;             // shadow views: instances casting shadows only
+
+/** Whether stored instance `instance` (as stored, before relative()) is drawn in `view`: live, on its layers. */
+public bool drawnIn(Instance instance, View view)
+{
+    return (instance.mesh & INSTANCE_LIVE) != 0 && (instance.layers & view.layers) != 0
+        && ((view.flags & VIEW_CASTERS_ONLY) == 0 || (instance.mesh & INSTANCE_CASTS_SHADOWS) != 0);
+}
 
 /**
  * A view of the frame: a camera, with its world position (two floats per axis, as instances') and the matrices from
@@ -68,9 +83,9 @@ public struct View
     public float3 position;        // the camera's world position, high part
     public uint pad1;
     public float3 positionLow;     // and the rest
-    public uint pad2;
+    public uint layers;            // the layers it draws
     public float3 eye;             // where the view looks from, relative to its position (0 but for shadow views)
-    public uint pad3;              // 304 bytes in all
+    public uint flags;             // VIEW_*; 304 bytes in all
 };
 
 /**
@@ -84,6 +99,7 @@ public Instance relative(Instance instance, View view)
     Instance r = instance;
     r.position = high + low;
     r.positionLow = float3(0);
+    r.mesh = instance.mesh & INSTANCE_MESH;
     return r;
 }
 

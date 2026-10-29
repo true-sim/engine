@@ -147,6 +147,12 @@ public final class MeshletRenderer implements AutoCloseable {
     /** VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT: the same bit as the 32-bit stage. */
     private static final long MESH_SHADER_STAGE = VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
     static final int INSTANCE_BYTES = 64;
+    /** Instance flags above the mesh id, as meshlets/common.slang has them. */
+    private static final int LIVE = 1 << 24;
+    private static final int CASTS_SHADOWS = 1 << 25;
+    private static final int MESH_BITS = (1 << 24) - 1;
+    /** Layer 0: where instances are unless set otherwise. */
+    private static final int DEFAULT_LAYERS = 1;
     private static final int INSTANCE_PUSH = 92;
     private static final int CULL_PUSH = 76;
     private static final int PHASE_ALL = 0;
@@ -285,6 +291,9 @@ public final class MeshletRenderer implements AutoCloseable {
         }
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         view = FrameBuffer.create(device, (long) VIEW_BYTES * limits.views(), storage, slots);
+        for (int v = 0; v < limits.views(); v++) {
+            view.putInt((long) VIEW_BYTES * v + 284, -1); // every layer
+        }
         instances = FrameBuffer.create(device, (long) INSTANCE_BYTES * limits.instances(), storage, slots);
         chunks = GpuBuffer.deviceLocal(device, 16L * limits.chunks(), storage);
         rows = GpuBuffer.deviceLocal(device, 8L * limits.views(), storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -370,7 +379,18 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void setInstance(int index, int mesh, int material, double x, double y, double z, float qx, float qy,
         float qz, float qw, float sx, float sy, float sz) {
-        if (index < 0 || index >= limits.instances() || !pool.contains(mesh) || material < 0) {
+        setInstance(index, mesh, material, DEFAULT_LAYERS, true, x, y, z, qx, qy, qz, qw, sx, sy, sz);
+    }
+
+    /**
+     * Like {@link #setInstance(int, int, int, double, double, double, float, float, float, float, float, float,
+     * float)}, on the layers of {@code layers} (bit n: layer n; drawn in views of any of them, see
+     * {@link #setViewFilter}) and casting shadows or not (shadow views and shadow rays leave out those that do not).
+     * Instances are on layer 0 and cast shadows otherwise. Allocates nothing.
+     */
+    public void setInstance(int index, int mesh, int material, int layers, boolean castsShadows, double x, double y,
+        double z, float qx, float qy, float qz, float qw, float sx, float sy, float sz) {
+        if (index < 0 || index >= limits.instances() || !pool.contains(mesh) || mesh > MESH_BITS || material < 0) {
             throw new IllegalArgumentException("No instance " + index + ", mesh " + mesh + " or material " + material);
         }
         FrameBuffer m = instances;
@@ -385,7 +405,7 @@ public final class MeshletRenderer implements AutoCloseable {
         m.putFloat(o + 16, hx);
         m.putFloat(o + 20, hy);
         m.putFloat(o + 24, hz);
-        m.putInt(o + 28, mesh);
+        m.putInt(o + 28, mesh | LIVE | (castsShadows ? CASTS_SHADOWS : 0));
         m.putFloat(o + 32, sx);
         m.putFloat(o + 36, sy);
         m.putFloat(o + 40, sz);
@@ -393,9 +413,30 @@ public final class MeshletRenderer implements AutoCloseable {
         m.putFloat(o + 48, (float) (x - hx));
         m.putFloat(o + 52, (float) (y - hy));
         m.putFloat(o + 56, (float) (z - hz));
+        m.putInt(o + 60, layers);
     }
 
-    /** How many instances, from 0, are drawn. */
+    /**
+     * Removes instance {@code index}: it is a hole from now on, culled at no cost but a thread, until set again. Ids
+     * stay where they are, so whatever is kept per instance (occlusion history) stays with its instance.
+     * Allocates nothing.
+     */
+    public void removeInstance(int index) {
+        Objects.checkIndex(index, limits.instances());
+        instances.putInt((long) INSTANCE_BYTES * index + 28, 0);
+    }
+
+    /**
+     * Which instances view {@code index} draws: those on any layer of {@code layers} (all by default), and with
+     * {@code castersOnly} only those casting shadows (a shadow map's view). Kept until set again. Allocates nothing.
+     */
+    public void setViewFilter(int index, int layers, boolean castersOnly) {
+        long o = (long) VIEW_BYTES * lists(index);
+        view.putInt(o + 284, layers);
+        view.putInt(o + 300, castersOnly ? 1 : 0);
+    }
+
+    /** How many instances, from 0, are drawn: ids up to the highest in use, holes ({@link #removeInstance}) skipped. */
     public void setInstanceCount(int count) {
         if (count < 0 || count > limits.instances()) {
             throw new IllegalArgumentException("0 to " + limits.instances() + " instances: " + count);
@@ -885,7 +926,8 @@ public final class MeshletRenderer implements AutoCloseable {
         return instances;
     }
 
-    int instanceCount() {
+    /** How many instance ids, from 0, the renderer draws: holes included ({@link #setInstanceCount}). */
+    public int instanceCount() {
         return instanceCount;
     }
 

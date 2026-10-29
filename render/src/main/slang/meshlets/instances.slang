@@ -34,7 +34,12 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     {
         return;
     }
-    Instance instance = relative(push.instances[id.x], view);
+    Instance stored = push.instances[id.x];
+    if (!drawnIn(stored, view))
+    {
+        return; // a hole, on other layers, or casting no shadow in a shadow view
+    }
+    Instance instance = relative(stored, view);
     MeshEntry mesh = push.meshes[instance.mesh];
     float3 center = toWorld(instance, mesh.sphere.xyz);
     float radius = mesh.sphere.w * maxScale(instance);

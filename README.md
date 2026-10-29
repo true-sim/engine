@@ -181,6 +181,11 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
   camera, as precise anywhere in the world as at its origin (tested: the same image 7,000 km out; floats alone are
   visibly off there). Moving a camera rewrites nothing but its view; a shadow camera stays where its light is, so its
   map does not change as other cameras move.
+- **Stable instance ids, layers and shadows:** `removeInstance` leaves a hole the culling skips, so ids stay with
+  their instances (whatever the GPU keeps per instance, such as occlusion history, stays right; previous transforms
+  and custom data per instance will be buffers by id). Each instance is on layers (32 bits) and casts shadows or
+  not; `setViewFilter` makes a view draw some layers only, and shadow views (set by the shadow techniques) and shadow
+  rays leave out what casts none.
 - **Views culled together:** as many views as the frame has (cameras, shadow maps, cascades, mirrors; `Limits.views`)
   each have their own lists. `cullViews` culls any number at once: one instance pass with a row per view (in
   dispatches of up to 65,535 rows), and one cull pass over all their chunks, each meshlet into its view's list;
@@ -561,8 +566,8 @@ from the same resources, each with its own graph (the
 graph's keys, such as the scene color and light list, are one per graph); a mesh both use is on the GPU once. The
 tests draw two scenes in step, one forward and one through a visibility buffer, with validation on.
 
-Not followed yet: shadow casting per renderable, alpha modes and double-sidedness (everything draws opaque and casts
-shadows), nodes' layers, and lights and cameras from the scene. Removed meshes are not yet followed by
+Renderables keep their instance ids while drawn, are on their nodes' layers and cast shadows as they say. Not
+followed yet: alpha modes and double-sidedness (everything draws opaque), and lights and cameras from the scene. Removed meshes are not yet followed by
 `ClassicLodGeometry` and ray tracing, so draw views with meshlets.
 
 ## Building

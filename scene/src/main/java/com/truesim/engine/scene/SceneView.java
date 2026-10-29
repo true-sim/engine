@@ -51,12 +51,16 @@ import java.util.Objects;
  *       submesh of its mesh, shared by every renderable of every view with the same materials and mesh layout.</li>
  *   <li><b>Changes, not the whole scene:</b> renderables added, changed or removed, and nodes moved, are found in the
  *       change logs. Only moved instances are written, or every one when most nodes moved.</li>
- *   <li><b>Deterministic:</b> the same changes give the same instances, slots and ids.</li>
+ *   <li><b>Stable ids:</b> a renderable keeps its instance id while drawn; a removed one leaves a hole the next takes
+ *       (the lowest free id), so what the GPU keeps per instance stays with it. Deterministic: the same changes give the
+ *       same ids.</li>
+ *   <li><b>Layers and shadows:</b> instances are on their nodes' layers ({@code SceneGraph.setLayers}), drawn in views
+ *       of any of them ({@code renderer.setViewFilter}), and cast shadows as their renderables say: shadow maps and
+ *       shadow rays leave out those that do not.</li>
  * </ul>
  *
- * <p>Not yet followed: shadow casting per renderable, alpha modes and double-sidedness (the renderer draws everything
- * opaque and casting shadows), and the nodes' layers. Updating allocates nothing once warm when nothing but transforms
- * changed. Use it on the main thread, the asset cache's.
+ * <p>Not yet followed: alpha modes and double-sidedness (the renderer draws everything opaque). Updating allocates
+ * nothing once warm when nothing but transforms changed. Use it on the main thread, the asset cache's.
  */
 public final class SceneView implements AutoCloseable {
 
@@ -87,9 +91,12 @@ public final class SceneView implements AutoCloseable {
     private int movedCount;
     private int itemCount;
 
-    // Instances: slot to item, slots 0 to instanceCount - 1 drawn.
+    // Instances: id (the renderer's index) to item, NONE for a hole. Ids are stable while drawn, the lowest free one
+    // taken: what the GPU keeps per instance (occlusion history, later previous transforms) stays with its instance.
     private final int[] slotItem;
-    private int instanceCount;
+    private final long[] usedIds;
+    private int instanceCount;          // drawn
+    private int highWater;              // ids from 0 up to here, holes included, are the renderer's
     // Items to draw at the end of the update, oldest first: their meshes arrived (maybe before the changes of the
     // frame were followed), or the renderer or the material table had no room. Checked again then: they may be gone.
     private int[] waiting = new int[64];
@@ -131,6 +138,7 @@ public final class SceneView implements AutoCloseable {
         this.clock = scene.clock();
         this.geometry = SceneGeometry.meshlets(renderer);
         slotItem = filled(renderer.limits().instances());
+        usedIds = new long[(renderer.limits().instances() + 63) / 64];
         renderer.setMaterials(resources.materials());
     }
 
@@ -184,8 +192,10 @@ public final class SceneView implements AutoCloseable {
         resources.flush();
         drawWaiting();
         if (rewriteAll) {
-            for (int slot = 0; slot < instanceCount; slot++) {
-                writeInstance(slotItem[slot]);
+            for (int slot = 0; slot < highWater; slot++) {
+                if (slotItem[slot] != NONE) {
+                    writeInstance(slotItem[slot]);
+                }
             }
             rewriteAll = false;
         } else {
@@ -200,7 +210,7 @@ public final class SceneView implements AutoCloseable {
             moved[movedItems[i]] = false;
         }
         movedCount = 0;
-        renderer.setInstanceCount(instanceCount);
+        renderer.setInstanceCount(highWater);
     }
 
     /** How many renderables are drawn now: those whose meshes are on the GPU. */
@@ -218,7 +228,7 @@ public final class SceneView implements AutoCloseable {
         return meshes.size();
     }
 
-    /** The instance slot {@code node}'s renderable is drawn in, or -1 while it is not drawn. */
+    /** The instance id {@code node}'s renderable is drawn as (stable while drawn), or -1 while it is not drawn. */
     public int slotOf(long node) {
         int item = NodeHandle.index(node);
         return item < itemNode.length && itemNode[item] == node ? itemSlot[item] : NONE;
@@ -299,7 +309,10 @@ public final class SceneView implements AutoCloseable {
         if (itemNode[item] == node) {
             if (itemMesh[item].mesh.ref.equals(ref)
                 && (itemSet[item] == null || SceneResources.sameMaterials(itemSet[item].key.materials(), list))) {
-                return; // nothing a view follows changed (e.g. shadows)
+                if (itemSlot[item] != NONE) {
+                    markMoved(item); // whether it casts shadows, written with the instance
+                }
+                return;
             }
             destroy(item);
         }
@@ -321,7 +334,8 @@ public final class SceneView implements AutoCloseable {
 
     private void sceneChanged(long node, int changes) {
         int item = NodeHandle.index(node);
-        if (NodeChange.has(changes, NodeChange.TRANSFORM) && item < itemNode.length && itemNode[item] == node
+        if ((NodeChange.has(changes, NodeChange.TRANSFORM) || NodeChange.has(changes, NodeChange.LAYERS))
+            && item < itemNode.length && itemNode[item] == node
             && itemSlot[item] != NONE) {
             markMoved(item);
         }
@@ -388,7 +402,7 @@ public final class SceneView implements AutoCloseable {
         }
     }
 
-    /** Draws {@code item}, a live renderable's whose mesh is on the GPU: an instance slot at the end, its materials. */
+    /** Draws {@code item}, a live renderable's whose mesh is on the GPU: the lowest free instance id, its materials. */
     private boolean tryShow(int item) {
         if (instanceCount == slotItem.length) {
             return false; // the renderer holds no more instances: drawn when a slot frees
@@ -400,29 +414,43 @@ public final class SceneView implements AutoCloseable {
             return false; // the material table is full: drawn when ids free
         }
         itemSet[item] = set;
-        int slot = instanceCount++;
+        int slot = takeId();
+        instanceCount++;
+        highWater = Math.max(highWater, slot + 1);
         slotItem[slot] = item;
         itemSlot[item] = slot;
         markMoved(item);
         return true;
     }
 
-    /** Stops drawing {@code item}: the last instance moves into its slot. */
+    /** Stops drawing {@code item}: its id becomes a hole, free for the next renderable drawn. */
     private void hide(int item) {
         int slot = itemSlot[item];
         if (slot == NONE) {
             return;
         }
-        int last = slotItem[--instanceCount];
-        slotItem[instanceCount] = NONE;
-        if (last != item) {
-            slotItem[slot] = last;
-            itemSlot[last] = slot;
-            markMoved(last);
+        renderer.removeInstance(slot);
+        slotItem[slot] = NONE;
+        usedIds[slot >>> 6] &= ~(1L << slot);
+        instanceCount--;
+        while (highWater > 0 && slotItem[highWater - 1] == NONE) {
+            highWater--;
         }
         itemSlot[item] = NONE;
         resources.releaseSet(itemSet[item]);
         itemSet[item] = null;
+    }
+
+    /** The lowest free instance id, taken: there is one. */
+    private int takeId() {
+        for (int w = 0; ; w++) {
+            long free = ~usedIds[w];
+            if (free != 0) {
+                int id = (w << 6) + Long.numberOfTrailingZeros(free);
+                usedIds[w] |= 1L << id;
+                return id;
+            }
+        }
     }
 
     /** Has {@code item} drawn at the end of the update, once. */
@@ -467,13 +495,14 @@ public final class SceneView implements AutoCloseable {
         }
     }
 
-    /** Writes {@code item}'s instance: its node's world transform, its mesh and materials. */
+    /** Writes {@code item}'s instance: its node's world transform and layers, its mesh, materials and shadows. */
     private void writeInstance(int item) {
         TransformArray world = scene.worldTransforms();
         MemorySegment s = world.segment();
         long o = NodeHandle.index(itemNode[item]) * world.stride();
-        renderer.setInstance(itemSlot[item], itemMesh[item].mesh.id, itemSet[item].first,
-            s.get(DOUBLE, o), s.get(DOUBLE, o + 8), s.get(DOUBLE, o + 16),
+        long node = itemNode[item];
+        renderer.setInstance(itemSlot[item], itemMesh[item].mesh.id, itemSet[item].first, scene.layers(node),
+            renderables.castsShadows(node), s.get(DOUBLE, o), s.get(DOUBLE, o + 8), s.get(DOUBLE, o + 16),
             (float) s.get(DOUBLE, o + 24), (float) s.get(DOUBLE, o + 32), (float) s.get(DOUBLE, o + 40),
             (float) s.get(DOUBLE, o + 48),
             (float) s.get(DOUBLE, o + 56), (float) s.get(DOUBLE, o + 64), (float) s.get(DOUBLE, o + 72));
