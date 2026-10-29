@@ -322,6 +322,12 @@ try (Textures textures = new Textures(device); Materials materials = new Materia
   without hardware derivatives can use it too) and the shading model: Lambert diffuse and a GGX specular lobe with
   height-correlated Smith visibility and Schlick Fresnel. The vertex stage decodes normals, tangents, texture
   coordinates and vertex colors from the pool's attributes.
+- **Material types:** a type is a Slang `IMaterial` (`surface(Material, SurfaceInput)`: what the surface is at a
+  point); lighting stays the engine's. Type 0 is the standard metallic-roughness one. A game registers its own with
+  `materials.register(new MaterialType("water", "shaders/water.spv", "waterMain"))` and sets `Material.type(id)`;
+  its entry point calls `visibility.resolve`'s `shadeTiles<Water>`. The visibility buffer sorts the screen's 8x8 tiles
+  into a list per type they show and shades each type with one indirect dispatch. Forward shading draws every type as
+  the standard one, for now.
 
 
 ### Lights and light lists

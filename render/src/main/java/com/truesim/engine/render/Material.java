@@ -14,7 +14,8 @@ package com.truesim.engine.render;
  *
  * <p>How it rasterizes, its header: opaque by default; {@link #alphaMask alpha-masked} (texels below the cutoff are not
  * drawn, in every pass: shadows too); {@link #doubleSided double-sided} (back faces drawn and lit as the front). The
- * renderer draws each kind in a raster bin of its own; ordinary opaque materials keep the fastest one.
+ * renderer draws each kind in a raster bin of its own; ordinary opaque materials keep the fastest one. And its
+ * {@link #type type}: {@link MaterialType#STANDARD standard} by default, or one registered with {@link Materials}.
  */
 public final class Material {
 
@@ -35,6 +36,7 @@ public final class Material {
     int emissiveTexture = -1;
     float alphaCutoff = -1; // below 0: opaque
     boolean doubleSided;
+    int type;
 
     /** The base color, linear: diffuse color, or a metal's reflectance. Light gray by default. */
     public Material baseColor(float r, float g, float b) {
@@ -115,6 +117,22 @@ public final class Material {
         return this;
     }
 
+    /**
+     * Its {@link MaterialType}: an id {@link Materials#register} returned, 0 (standard, the default) to 255. A type the
+     * table has not registered shades as the standard one.
+     */
+    public Material type(int id) {
+        if (id < 0 || id > Materials.MAX_TYPES - 1) {
+            throw new IllegalArgumentException("A material type of 0 to " + (Materials.MAX_TYPES - 1) + ": " + id);
+        }
+        this.type = id;
+        return this;
+    }
+
+    public int type() {
+        return type;
+    }
+
     public boolean masked() {
         return alphaCutoff >= 0;
     }
@@ -125,7 +143,7 @@ public final class Material {
 
     /** The header word shaders read: type (0, standard) in bits 0-7, double-sided bit 8, masked bit 9, cutoff 16-31. */
     int header() {
-        int header = doubleSided ? 1 << 8 : 0;
+        int header = type | (doubleSided ? 1 << 8 : 0);
         if (alphaCutoff >= 0) {
             header |= 1 << 9 | Math.round(alphaCutoff * 65_535) << 16;
         }

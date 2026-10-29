@@ -1,11 +1,5 @@
 package com.truesim.engine.render;
 
-import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.memPutFloat;
-import static org.lwjgl.system.MemoryUtil.memPutInt;
-import static org.lwjgl.system.MemoryUtil.memPutLong;
-import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
-
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.Buffer;
@@ -16,10 +10,10 @@ import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.vulkan.Pipeline;
+import com.truesim.engine.vulkan.Push;
 import com.truesim.engine.vulkan.ShaderModule;
 import java.util.List;
 import java.util.Objects;
-import org.lwjgl.system.MemoryStack;
 
 /**
  * The scene shaded through a visibility buffer: provides {@link Keys#SCENE_COLOR} and {@link Keys#SCENE_DEPTH} from a
@@ -29,13 +23,18 @@ import org.lwjgl.system.MemoryStack;
  * longer grows with overdraw; triangles are read twice.
  * {@code graph.replace} swaps the two.
  *
+ * <p>Shading is by {@link MaterialType}: a pass sorts the screen's 8x8 tiles into a list per type they show, and each
+ * type of the scene's {@link Materials} (as they are when the graph builds) shades its tiles' pixels with its own
+ * shader, by an indirect dispatch.
+ *
  * <p>The color format must allow storage images (not sRGB). Needs
  * {@link com.truesim.engine.vulkan.VulkanDevice#primitiveIds()}, and one provider whose triangles the shading pass can
  * rebuild: {@link MeshletGeometry} or {@link ClassicLodGeometry}.
  */
 public final class VisibilityBufferShading implements Technique {
 
-    private static final int PUSH_BYTES = 120;
+    private static final int PUSH_BYTES = 128;
+    private static final int TILE = 8;
 
     private final SceneGeometry geometry;
     private final MeshletRenderer renderer;
@@ -47,6 +46,7 @@ public final class VisibilityBufferShading implements Technique {
     private final float[] clear = new float[3];
     private final RenderView view;
     private boolean occlusion = true;
+    private final Push push = new Push();
 
     /** {@code geometry} shaded as {@code view} sees it. */
     public VisibilityBufferShading(SceneGeometry geometry, RenderView view, int width, int height, int colorFormat,
@@ -60,6 +60,9 @@ public final class VisibilityBufferShading implements Technique {
                 "The visibility buffer shades one provider's geometry, meshlets or classic LOD, for now");
         }
         this.renderer = meshlets != null ? meshlets.renderer() : classic.renderer();
+        if (width < 1 || height < 1 || width > 0xffff || height > 0xffff) {
+            throw new IllegalArgumentException("A size of 1 to 65,535 per side: " + width + " x " + height);
+        }
         this.width = width;
         this.height = height;
         this.colorFormat = colorFormat;
@@ -96,16 +99,31 @@ public final class VisibilityBufferShading implements Technique {
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs());
         // With inline ray shadows, the variant tracing them, where the device can.
         boolean traced = shadows != null && shadows.traced() && g.device().rayTracing();
-        Pipeline shade = g.cached(traced ? "visibility shading, traced" : "visibility shading", device -> {
-            try (ShaderModule shader = ShaderModule.load(device, traced ? "shaders/visibility/shadeTraced.spv"
-                : "shaders/visibility/shade.spv")) {
-                return Pipeline.compute(device, shader, traced ? "shadeTracedMain" : "shadeMain", PUSH_BYTES);
-            }
-        });
+        List<MaterialType> types = renderer.scene().materials().types();
+        Pipeline[] shade = new Pipeline[types.size()];
+        for (int t = 0; t < shade.length; t++) {
+            MaterialType type = types.get(t);
+            boolean rays = traced && type.tracedShader() != null;
+            shade[t] = compute(g, rays ? type.tracedShader() : type.shader(), rays ? type.tracedEntry() : type.entry());
+        }
+        Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain");
         Image ids = targets.color();
         Image color = g.create("scene color", width, height, colorFormat);
+        int tilesX = (width + TILE - 1) / TILE;
+        int tilesY = (height + TILE - 1) / TILE;
+        // Per type: its indirect dispatch (x, y, z), its tile count, then its tiles.
+        long listBytes = 4L * (4 + (long) tilesX * tilesY);
+        Buffer tiles = g.createBuffer("material tiles", listBytes * types.size());
+        g.pass("material tiles reset").write(tiles, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(tiles, 0));
+        g.pass("material classification")
+            .read(ids, Access.STORAGE_READ)
+            .write(tiles, BufferAccess.STORAGE_WRITE)
+            .record(ctx -> ctx.dispatch(classify, push(ctx, ids, null, lights, types.size(), 0, ctx.address(tiles)),
+                tilesX, tilesY, 1));
         GraphBuilder.PassBuilder pass = g.pass("visibility shading")
             .read(ids, Access.STORAGE_READ)
+            .read(tiles, BufferAccess.INDIRECT)
+            .read(tiles, BufferAccess.STORAGE_READ)
             .write(color, Access.STORAGE_WRITE);
         if (lights != null) {
             pass.read(lights, BufferAccess.STORAGE_READ);
@@ -117,37 +135,46 @@ public final class VisibilityBufferShading implements Technique {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            shade(ctx, shade, ids, color, lights);
+            for (int t = 0; t < shade.length; t++) {
+                long list = listBytes * t;
+                ctx.dispatchIndirect(shade[t], push(ctx, ids, color, lights, shade.length, t, ctx.address(tiles) + list),
+                    tiles, list);
+            }
         });
         g.provide(Keys.SCENE_COLOR, color);
         g.provide(Keys.SCENE_DEPTH, targets.depth());
     }
 
-    private void shade(PassContext ctx, Pipeline pipeline, Image ids, Image color, Buffer lights) {
+    @AllowAllocation("building the graph, when it changes")
+    private static Pipeline compute(GraphBuilder g, String shader, String entry) {
+        return g.cached("visibility shading: " + shader + " " + entry, device -> {
+            try (ShaderModule module = ShaderModule.load(device, shader)) {
+                return Pipeline.compute(device, module, entry, PUSH_BYTES);
+            }
+        });
+    }
+
+    /** resolve.slang's ShadePush: for {@code types} types, shading type {@code type}'s tiles at {@code tiles}. */
+    private Push push(PassContext ctx, Image ids, Image color, Buffer lights, int types, int type, long tiles) {
         GeometryPool pool = renderer.pool();
-        try (MemoryStack stack = stackPush()) {
-            long push = stack.nmalloc(16, PUSH_BYTES);
-            memPutLong(push, view.address());
-            memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, renderer.scene().instanceAddress());
-            memPutLong(push + 24, pool.positions().deviceAddress());
-            memPutLong(push + 32, pool.attributes().deviceAddress());
-            memPutLong(push + 40, pool.meshlets().deviceAddress());
-            memPutLong(push + 48, pool.meshletVertices().deviceAddress());
-            memPutLong(push + 56, pool.meshletTriangles().deviceAddress());
-            memPutLong(push + 64, renderer.scene().materialsAddress());
-            memPutLong(push + 72, lights == null ? 0 : ctx.address(lights));
-            memPutInt(push + 80, ctx.storage(ids));
-            memPutInt(push + 84, ctx.storage(color));
-            memPutInt(push + 88, width);
-            memPutInt(push + 92, height);
-            memPutFloat(push + 96, clear[0]);
-            memPutFloat(push + 100, clear[1]);
-            memPutFloat(push + 104, clear[2]);
-            memPutLong(push + 112, classic == null ? 0 : classic.indicesAddress());
-            pipeline.bind(ctx.commands());
-            pipeline.push(ctx.commands(), push, PUSH_BYTES);
-            vkCmdDispatch(ctx.commands(), (width + 7) / 8, (height + 7) / 8, 1);
-        }
+        return push.clear()
+            .address(view.address())
+            .address(pool.meshTable().deviceAddress())
+            .address(renderer.scene().instanceAddress())
+            .address(pool.positions().deviceAddress())
+            .address(pool.attributes().deviceAddress())
+            .address(pool.meshlets().deviceAddress())
+            .address(pool.meshletVertices().deviceAddress())
+            .address(pool.meshletTriangles().deviceAddress())
+            .address(renderer.scene().materialsAddress())
+            .address(lights == null ? 0 : ctx.address(lights))
+            .u32(ctx.storage(ids))
+            .u32(color == null ? 0 : ctx.storage(color))
+            .u32(width | height << 16)
+            .u32(types)
+            .vec3(clear[0], clear[1], clear[2])
+            .u32(type)
+            .address(classic == null ? 0 : classic.indicesAddress())
+            .address(tiles);
     }
 }

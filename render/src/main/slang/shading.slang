@@ -113,6 +113,44 @@ public Surface evaluate(Material m, float3 normal, float4 tangent, float2 uv, fl
     return s;
 }
 
+/** What a material gets at one point of a surface: interpolated, normal facing the viewer (double-sided). */
+public struct SurfaceInput
+{
+    public float3 world;           // camera-relative
+    public float3 toViewer;        // unit
+    public float3 normal;          // interpolated, not yet normalized
+    public float4 tangent;         // w: the bitangent's sign; 0 without tangents
+    public float2 uv;
+    public float2 dx;              // the texture coordinates' gradients, per pixel
+    public float2 dy;
+    public float4 color;           // the vertex color
+};
+
+/**
+ * A material type: how its materials' data becomes a surface to light. Lighting is the engine's; a type says only
+ * what the surface is at a point, from its Material record (whose fields it may read its own way). Type 0 is
+ * StandardMaterial. A game's type is a struct of its own, shaded through visibility.resolve's shadeTiles.
+ */
+public interface IMaterial
+{
+    static Surface surface(Material m, SurfaceInput in);
+};
+
+/** Type 0: metallic-roughness as in glTF, evaluate(). */
+public struct StandardMaterial : IMaterial
+{
+    public static Surface surface(Material m, SurfaceInput in)
+    {
+        return evaluate(m, in.normal, in.tangent, in.uv, in.dx, in.dy, in.color);
+    }
+};
+
+/** The type of `m`, bits 0-7 of its header. */
+public uint materialType(Material m)
+{
+    return m.header & 0xff;
+}
+
 static const float PI = 3.14159265;
 
 /**

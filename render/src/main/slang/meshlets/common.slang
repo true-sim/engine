@@ -480,6 +480,13 @@ public void discardMasked(Material m, VertexOut in, bool front)
 public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Material* materials, float2 dx,
     float2 dy, LightListHeader* lights, uint2 pixel)
 {
+    return shadeMaterial<StandardMaterial, R>(rays, view, in, materials, dx, dy, lights, pixel);
+}
+
+/** shadeSurface with the surface from material type M: the lighting is the same for every type. */
+public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
+    float2 dx, float2 dy, LightListHeader* lights, uint2 pixel)
+{
     if (view.mode == 2)
     {
         return float4(1, 1, 1, 1);
@@ -498,7 +505,16 @@ public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Mat
         normal = -normal; // a back face: lit as the front
         tangent.w = -tangent.w;
     }
-    Surface s = evaluate(m, normal, tangent, in.uv, dx, dy, in.color);
+    SurfaceInput input;
+    input.world = in.world;
+    input.toViewer = toViewer;
+    input.normal = normal;
+    input.tangent = tangent;
+    input.uv = in.uv;
+    input.dx = dx;
+    input.dy = dy;
+    input.color = in.color;
+    Surface s = M.surface(m, input);
     float3 color = ambient(s, SKY_IRRADIANCE) + s.emissive;
     if (lights == nullptr)
     {

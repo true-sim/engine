@@ -7,6 +7,7 @@ import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.VulkanDevice;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -15,6 +16,9 @@ import java.util.List;
  * material ({@link GpuScene#set(int, int, int, float, float, float, float, float, float, float, float, float,
  * float)}); each submesh of the mesh takes the next.
  *
+ * <p>The table also names the {@link MaterialType material types} its materials may have ({@link Material#type}):
+ * {@link MaterialType#STANDARD} as type 0, and those {@link #register registered}.
+ *
  * <p>Materials are read when the frame's commands run. Given a frame graph's {@link FrameSlots}, the table keeps a copy
  * per frame in flight; otherwise change a material only once the frames using it have finished.
  */
@@ -22,6 +26,8 @@ import java.util.List;
 public final class Materials implements AutoCloseable {
 
     static final int BYTES = 64;
+    /** Material types a table may name: their ids fill a header's 8 bits. */
+    public static final int MAX_TYPES = 256;
 
     private final FrameBuffer table;
     private final int capacity;
@@ -35,6 +41,7 @@ public final class Materials implements AutoCloseable {
     private final int[] retiring;
     private final long[] retireAt;
     private int retiringCount;
+    private final List<MaterialType> types = new ArrayList<>(List.of(MaterialType.STANDARD));
 
     /**
      * A table of up to {@code capacity} materials, the default one included, in one copy: for frames the caller waits
@@ -194,6 +201,27 @@ public final class Materials implements AutoCloseable {
         table.putInt(o + 52, material.normalTexture);
         table.putInt(o + 56, material.ormTexture);
         table.putInt(o + 60, material.emissiveTexture);
+    }
+
+    /**
+     * Registers material type {@code type} and returns its id, for {@link Material#type}: the next one, from 1.
+     * Renderers shading by type take the types when their graph builds: register them first, or
+     * {@link com.truesim.engine.graph.FrameGraph#invalidate} the graph.
+     */
+    public int register(MaterialType type) {
+        if (types.contains(type)) {
+            throw new IllegalArgumentException("Material type " + type.name() + " is registered already");
+        }
+        if (types.size() == MAX_TYPES) {
+            throw new IllegalStateException("A table names at most " + MAX_TYPES + " material types");
+        }
+        types.add(type);
+        return types.size() - 1;
+    }
+
+    /** The material types, by id: the standard one first. */
+    public List<MaterialType> types() {
+        return List.copyOf(types);
     }
 
     /** How many materials the table holds, the default one included. */

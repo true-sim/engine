@@ -494,6 +494,62 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void theVisibilityBufferShadesEachMaterialTypeWithItsOwnShader() {
+        assumeThat(device.primitiveIds()).as("primitive IDs in fragment shaders").isTrue();
+        // The lit floor, standard, and a quad standing on it, of the type under test.
+        scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+        scene.removeFrom(2);
+        Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        try (Materials materials = new Materials(device, 4)) {
+            int standard = materials.add(new Material().baseColor(1, 0, 1));
+            scene.setMaterials(materials);
+            scene.set(1, quad, standard, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+            int glow = materials.register(new MaterialType("glow", "shaders/test/glow.spv", "glowMain"));
+            assertThat(glow).isEqualTo(1);
+            assertThat(materials.types()).containsExactly(MaterialType.STANDARD, materials.types().get(1));
+            graph.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), view, SIZE, SIZE,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f))
+                .output(Keys.SCENE_COLOR, output);
+            frame();
+            frame();
+            assertThat(graph.passes()).containsSubsequence("material tiles reset", "material classification",
+                "visibility shading");
+            int[] before = pixels.memory().toArray(ValueLayout.JAVA_INT);
+            assertThat(glowing(before)).as("the standard quad is lit, not glowing").isZero();
+            materials.set(standard, new Material().baseColor(1, 0, 1).type(glow));
+            frame();
+            int[] after = pixels.memory().toArray(ValueLayout.JAVA_INT);
+            assertThat(glowing(after)).as("the quad's pixels").isGreaterThan(SIZE * SIZE / 40);
+            for (int i = 0; i < after.length; i++) {
+                if (!glowing(after[i])) {
+                    assertThat(after[i]).as("pixel %d, standard as before", i).isEqualTo(before[i]);
+                }
+            }
+            // A type the table does not name shades as the standard one.
+            materials.set(standard, new Material().baseColor(1, 0, 1).type(7));
+            frame();
+            assertThat(pixels.memory().toArray(ValueLayout.JAVA_INT)).isEqualTo(before);
+            assertThatIllegalArgumentException().isThrownBy(() -> materials.register(MaterialType.STANDARD));
+            assertThatIllegalArgumentException().isThrownBy(() -> new Material().type(256));
+            assertThatIllegalArgumentException().isThrownBy(() -> new MaterialType("half", "a.spv", "a", "b.spv", null));
+            scene.setMaterials(null);
+        }
+    }
+
+    private static boolean glowing(int pixel) {
+        return (pixel & 0xff) >= 250 && (pixel >> 8 & 0xff) <= 5 && (pixel >> 16 & 0xff) >= 250;
+    }
+
+    private static int glowing(int[] image) {
+        int count = 0;
+        for (int pixel : image) {
+            count += glowing(pixel) ? 1 : 0;
+        }
+        return count;
+    }
+
+    @Test
     void sceneDrawsAreSharedAndChecked() {
         SceneGeometry geometry = SceneGeometry.meshlets(renderer);
         assertThat(geometry.provider(MeshletGeometry.class).renderer()).isSameAs(renderer);
