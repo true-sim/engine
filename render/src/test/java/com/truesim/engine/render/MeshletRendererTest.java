@@ -649,6 +649,26 @@ class MeshletRendererTest {
         assertThat(all[37].position(0)).isEqualTo(5e6 + 37_000);
         assertThat(all[37].index()).isEqualTo(37);
         assertThat(renderer.views()).hasSize(views);
+        // Two views close: they leave the renderer, can no longer be drawn, and their indices go to the next views.
+        long bytes = renderer.viewBytes();
+        all[5].close();
+        all[20].close();
+        all[20].close(); // twice is fine
+        assertThat(renderer.views()).hasSize(views - 2).doesNotContain(all[5], all[20]);
+        assertThat(renderer.viewBytes()).isLessThan(bytes);
+        RenderView closed = all[5];
+        assertThatIllegalStateException().isThrownBy(() -> renderer.drawView(null, closed, 0, 0, 1, 1, 0, 0, 0));
+        all[5] = renderer.createView(ViewOptions.of(1024, 1 << 12));
+        all[20] = renderer.createView(ViewOptions.of(1024, 1 << 12));
+        assertThat(all[5].index()).isEqualTo(5);
+        assertThat(all[20].index()).isEqualTo(20);
+        assertThat(renderer.createView(ViewOptions.of(16, 64)).index()).isEqualTo(views);
+        all[5].set(cameras[5], 1, MeshletRenderer.MODE_WHITE);
+        all[20].set(cameras[20], 1, MeshletRenderer.MODE_WHITE);
+        renderWith(commands -> renderer.cullViews(commands, all, new boolean[views], views));
+        for (int v = 0; v < views; v++) {
+            assertThat(all[v].visibleMeshlets()).as("view %d, after views closed", v).isEqualTo(1);
+        }
     }
 
     /**

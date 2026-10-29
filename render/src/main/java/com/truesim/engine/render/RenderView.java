@@ -11,6 +11,7 @@ import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
+import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
@@ -288,28 +289,36 @@ public final class RenderView implements AutoCloseable {
         return visibility != null;
     }
 
-    private void checkOpen() {
+    void checkOpen() {
         if (closed) {
             throw new IllegalStateException("The view is closed");
         }
     }
 
-    /** Frees the view's buffers: the renderer closes its views as it closes. */
+    /**
+     * Removes the view from its renderer: drawing or culling it throws from now on, its index goes to the next view
+     * made, and its buffers are freed once no frame in flight reads them. Rebuild graphs that drew it. The renderer
+     * closes its views as it closes.
+     */
     @Override
     public void close() {
         if (!closed) {
             closed = true;
-            view.close();
-            visible.close();
-            expandCommand.close();
-            drawCommand.close();
-            drawCount.close();
-            if (visibility != null) {
-                visibility.close();
-            }
-            if (frameIndices != null) {
-                frameIndices.close();
-            }
+            renderer.removeView(this);
         }
+    }
+
+    /** Frees the view's buffers through {@code retiring}: once no frame in flight reads them, or now once it closed. */
+    @AllowAllocation("closing a view")
+    void freeBuffers(Retiring retiring) {
+        closed = true;
+        for (AutoCloseable buffer : new AutoCloseable[] {view, visible, expandCommand, drawCommand, drawCount,
+            visibility, frameIndices}) {
+            if (buffer == null) {
+                continue;
+            }
+            retiring.add(buffer);
+        }
+        frameIndices = null;
     }
 }
