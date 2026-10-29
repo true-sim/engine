@@ -1159,6 +1159,63 @@ class SceneSyncTest {
     }
 
     @Test
+    void nodesRemovedAfterTheRenderablesUpdateStopDrawing() throws InterruptedException {
+        // A node moved, then removed between renderables.update() and sync.update(): the renderables have not seen the
+        // removal yet, the scene's log has. Its instance goes at once, whether the sync follows the changes (one node
+        // of four moved) or rewrites every instance (all three left moved).
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        GpuScene gpu = gpu();
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu));
+        List<FrameGraph> graphs = List.of(graph(sync, false, new GpuBuffer[] {readback(), readback()}));
+        long[] nodes = new long[4];
+        for (int i = 0; i < nodes.length; i++) {
+            nodes[i] = facing(scene, 2 * i - 3, 0, -8);
+            renderables.set(nodes[i], SQUARE, List.of());
+        }
+        frame(graphs, List.of(sync), camera);
+        load();
+        frame(graphs, List.of(sync), camera);
+        assertThat(sync.instanceCount()).isEqualTo(4);
+        for (int moving : new int[] {1, 3}) {
+            // First the last node moves and goes; then the three left move and the first goes.
+            int from = moving == 1 ? 3 : 0;
+            long removed = nodes[from];
+            for (int i = from; i < from + moving; i++) {
+                scene.setTranslation(nodes[i], 2 * i - 3, 1, -8);
+            }
+            int slot = graphs.getFirst().beginFrame();
+            slots.begin(slot);
+            tasks.drainCompleted();
+            scene.update();
+            renderables.update();
+            scene.remove(removed);
+            sync.update();
+            graphs.getFirst().submit(0, 0);
+            slots.end();
+            assertThat(sync.slotOf(removed)).as("%d moved", moving).isEqualTo(-1);
+            assertThat(sync.instanceCount()).as("%d moved", moving).isEqualTo(moving == 1 ? 3 : 2);
+            frame(graphs, List.of(sync), camera); // the renderables see the removal: nothing changes
+            assertThat(sync.instanceCount()).isEqualTo(moving == 1 ? 3 : 2);
+            assertThat(sync.renderableCount()).isEqualTo(moving == 1 ? 3 : 2);
+        }
+        // A renderable set after the renderables' update, its node removed the same frame: never drawn.
+        int slot = graphs.getFirst().beginFrame();
+        slots.begin(slot);
+        tasks.drainCompleted();
+        scene.update();
+        renderables.update();
+        long brief = facing(scene, 0, 0, -8);
+        renderables.set(brief, SQUARE, List.of());
+        scene.remove(brief);
+        sync.update();
+        graphs.getFirst().submit(0, 0);
+        slots.end();
+        assertThat(sync.slotOf(brief)).isEqualTo(-1);
+        assertThat(sync.renderableCount()).isEqualTo(2);
+    }
+
+    @Test
     void misuseIsChecked() {
         SceneGraph scene = new SceneGraph(new ChangeClock());
         try (GeometryPool other = new GeometryPool(device, GeometryPool.Capacity.of(64, 1, 1));

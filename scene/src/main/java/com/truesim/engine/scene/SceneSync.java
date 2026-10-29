@@ -53,7 +53,8 @@ import java.util.Objects;
  *       change logs. Only moved instances are written, or every one when most nodes moved.</li>
  *   <li><b>Stable ids:</b> a renderable keeps its instance id while drawn; a removed one leaves a hole the next takes
  *       (the lowest free id), so what the GPU keeps per instance stays with it. Deterministic: the same changes give the
- *       same ids.</li>
+ *       same ids. A new renderable may take an id freed the same frame, and then starts with what the GPU kept for the
+ *       id (seen or hidden by occlusion culling) for its first frame.</li>
  *   <li><b>Layers and shadows:</b> instances are on their nodes' layers ({@code SceneGraph.setLayers}), drawn in views
  *       of any of them ({@link com.truesim.engine.render.RenderView#filter}), and cast shadows as their renderables
  *       say: shadow maps and shadow rays leave out those that do not.</li>
@@ -198,6 +199,15 @@ public final class SceneSync implements AutoCloseable {
                 scene.changesSince(since, onSceneChange);
             }
         }
+        if (rewriteAll) {
+            // Not following the scene's log: nodes removed after the renderables' update (which drops their renderables
+            // next frame) go now, before anything reads them.
+            for (int item = 0; item < itemNode.length; item++) {
+                if (itemNode[item] != NodeHandle.NONE && !scene.contains(itemNode[item])) {
+                    destroy(item);
+                }
+            }
+        }
         resources.flush();
         drawWaiting();
         int count = 0;
@@ -315,7 +325,7 @@ public final class SceneSync implements AutoCloseable {
         if (itemNode[item] != NodeHandle.NONE && itemNode[item] != node) {
             destroy(item); // a removed node's, whose slot the scene reused
         }
-        if (!renderables.has(node)) {
+        if (!renderables.has(node) || !scene.contains(node)) { // gone, or its node is: the renderables see it later
             if (itemNode[item] == node) {
                 destroy(item);
             }
@@ -351,6 +361,14 @@ public final class SceneSync implements AutoCloseable {
 
     private void sceneChanged(long node, int changes) {
         int item = NodeHandle.index(node);
+        if (NodeChange.has(changes, NodeChange.REMOVED)) {
+            // Removed after the renderables' update, which drops its renderable next frame: its instance goes now, and
+            // nothing reads the node again.
+            if (item < itemNode.length && itemNode[item] == node) {
+                destroy(item);
+            }
+            return;
+        }
         if ((NodeChange.has(changes, NodeChange.TRANSFORM) || NodeChange.has(changes, NodeChange.LAYERS))
             && item < itemNode.length && itemNode[item] == node
             && itemSlot[item] != NONE) {
