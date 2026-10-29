@@ -21,9 +21,11 @@ import com.truesim.scene.render.RenderAssets;
 import com.truesim.scene.render.TextureData;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,6 +59,7 @@ public final class SceneResources implements AutoCloseable {
     private final Materials materials;
     private final Textures textures;
     private final AssetCache.Listener listener = new Listener();
+    private Diagnostics diagnostics = new Diagnostics() { };
     private final Map<AssetRef<MeshData>, Mesh> meshes = new HashMap<>();
     private final Map<MaterialKey, MaterialSet> sets = new HashMap<>();
     private final Map<AssetRef<MaterialData>, MaterialEntry> materialEntries = new HashMap<>();
@@ -65,6 +68,35 @@ public final class SceneResources implements AutoCloseable {
     /** Loaded meshes the pool had no room for: tried again as views update, as room frees. */
     private final List<Mesh> waitingForRoom = new ArrayList<>();
     private boolean closed;
+
+    /**
+     * Hears what keeps a scene from drawing as its data says, which is otherwise only logged: games show it, count it
+     * or fail a test on it. Every method does nothing by default. Room running out is not reported here: it is
+     * waited out, see {@link #waitingForRoomCount()} and {@link SceneSync#waitingCount()}.
+     */
+    public interface Diagnostics {
+
+        /**
+         * An asset a scene uses could not load, for {@code cause}: what uses it does not draw (a mesh), or draws as the
+         * default (a material) or untextured (a texture).
+         */
+        default void assetFailed(AssetRef<?> asset, Throwable cause) {
+        }
+
+        /**
+         * Material {@code material} cannot be drawn as its data says, for {@code problem}: a type not registered or values
+         * out of range (it draws as the default), a feature unknown or not allowed by its type (shown without it), or
+         * field names its type does not have (ignored).
+         */
+        default void materialProblem(AssetRef<MaterialData> material, String problem) {
+        }
+    }
+
+    /** Reports what keeps scenes from drawing as their data says to {@code listener}, from now on. */
+    public SceneResources diagnostics(Diagnostics listener) {
+        this.diagnostics = Objects.requireNonNull(listener, "listener");
+        return this;
+    }
 
     /** Hears that a mesh it holds is on the GPU now. */
     interface MeshUser {
@@ -472,37 +504,64 @@ public final class SceneResources implements AutoCloseable {
      * The renderer's material for {@code entry}: the default until it loads, untextured where textures are missing. Its
      * type by name, its parameters and features by field name (what the data lacks keeps the defaults); masked alpha
      * and double-sidedness follow; blended alpha draws opaque until transparents come. Data the renderer cannot use
-     * (a type not registered, values out of range) draws as the default, with a warning.
+     * (a type not registered, values out of range) draws as the default; field names its type does not read are
+     * ignored. Each problem is logged and reported to the {@link Diagnostics}.
      */
     @AllowAllocation("materials change rarely")
     private Material convert(MaterialEntry entry) {
         MaterialData d = entry == null || entry.data == null ? MaterialData.DEFAULT : entry.data;
         MaterialType type = materials.type(d.type());
         if (type == null) {
-            LOG.warn("No material type {} is registered: {} draws as the default", d.type(), entry.ref);
+            problem(entry, "no material type " + d.type() + " is registered: it draws as the default");
             return Material.DEFAULT;
         }
         try {
-            Material material = new Material(type, type.fromValues().apply(new DataValues(d.values(), "")))
+            Set<String> read = new HashSet<>();
+            Material material = new Material(type, type.fromValues().apply(new DataValues(d.values(), "", read)))
                 .doubleSided(d.doubleSided());
             if (d.alphaMode() == MaterialData.AlphaMode.MASK) {
                 material = material.alphaMask(d.alphaCutoff());
             }
+            unread(entry, d.values(), read, "");
             for (String name : d.features()) {
-                MaterialFeature feature = MaterialFeatures.fromValues(name, new DataValues(d.feature(name), ""));
+                Set<String> readOfFeature = new HashSet<>();
+                MaterialFeature feature = MaterialFeatures.fromValues(name, new DataValues(d.feature(name), "",
+                    readOfFeature));
                 if (feature == null) {
-                    LOG.warn("No material feature {}: {} shows it not", name, entry.ref);
+                    problem(entry, "no material feature " + name + ": it is shown without it");
                 } else if ((type.allowedFeatures() & feature.feature()) == 0) {
-                    LOG.warn("Material type {} allows no {}: {} shows it not", type.name(), name, entry.ref);
+                    problem(entry, "material type " + type.name() + " allows no " + name + ": it is shown without it");
                 } else {
                     material = material.feature(feature);
+                    unread(entry, d.feature(name), readOfFeature, name + ": ");
                 }
             }
             return material;
         } catch (IllegalArgumentException e) {
-            LOG.warn("{} draws as the default: {}", entry.ref, e.getMessage());
+            problem(entry, e.getMessage() + ": it draws as the default");
             return Material.DEFAULT;
         }
+    }
+
+    /** Reports the names of {@code values} that the type never read: names it does not have, ignored. */
+    @AllowAllocation("materials change rarely")
+    private void unread(MaterialEntry entry, MaterialData.Values values, Set<String> read, String where) {
+        List<String> unknown = new ArrayList<>();
+        for (String name : values.names()) {
+            if (!read.contains(name)) {
+                unknown.add(name);
+            }
+        }
+        if (!unknown.isEmpty()) {
+            java.util.Collections.sort(unknown);
+            problem(entry, where + "no field " + String.join(", ", unknown) + " in its type: ignored");
+        }
+    }
+
+    @AllowAllocation("materials change rarely")
+    private void problem(MaterialEntry entry, String problem) {
+        LOG.warn("{}: {}", entry.ref, problem);
+        diagnostics.materialProblem(entry.ref, problem);
     }
 
     /** Material data's values as a generated record reads them: textures as the slots they have, nested by path. */
@@ -510,20 +569,27 @@ public final class SceneResources implements AutoCloseable {
     private final class DataValues implements MaterialValues {
         private final MaterialData.Values values;
         private final String prefix;
+        private final Set<String> read; // the names asked for, by path
 
-        DataValues(MaterialData.Values values, String prefix) {
+        DataValues(MaterialData.Values values, String prefix, Set<String> read) {
             this.values = values;
             this.prefix = prefix;
+            this.read = read;
+        }
+
+        private String name(String name) {
+            read.add(prefix + name);
+            return prefix + name;
         }
 
         @Override
         public float f32(String name, float fallback) {
-            return values.f32(prefix + name, fallback);
+            return values.f32(name(name), fallback);
         }
 
         @Override
         public int i32(String name, int fallback) {
-            return values.i32(prefix + name, fallback);
+            return values.i32(name(name), fallback);
         }
 
         @Override
@@ -552,7 +618,7 @@ public final class SceneResources implements AutoCloseable {
         }
 
         private float[] floats(String name, int min, int max) {
-            float[] v = values.floats(prefix + name);
+            float[] v = values.floats(name(name));
             if (v != null && (v.length < min || v.length > max)) {
                 throw new IllegalArgumentException(prefix + name + " is " + min + (max > min ? " to " + max : "")
                     + " floats, not " + v.length);
@@ -562,13 +628,13 @@ public final class SceneResources implements AutoCloseable {
 
         @Override
         public int texture(String name, boolean srgb, int fallback) {
-            AssetRef<TextureData> ref = values.texture(prefix + name);
+            AssetRef<TextureData> ref = values.texture(name(name));
             return ref == null ? fallback : slot(ref); // its color space is the texture data's own
         }
 
         @Override
         public MaterialValues nested(String name) {
-            return new DataValues(values, prefix + name + ".");
+            return new DataValues(values, prefix + name + ".", read);
         }
     }
 
@@ -602,6 +668,13 @@ public final class SceneResources implements AutoCloseable {
         @Override
         public void evicted(AssetRef<?> ref, Object data) {
             // What views use is held, so never evicted; nothing else is on the GPU.
+        }
+
+        @Override
+        public void failed(AssetRef<?> ref, Throwable cause) {
+            if (meshes.containsKey(ref) || materialEntries.containsKey(ref) || textureEntries.containsKey(ref)) {
+                diagnostics.assetFailed(ref, cause); // one a scene uses
+            }
         }
     }
 
