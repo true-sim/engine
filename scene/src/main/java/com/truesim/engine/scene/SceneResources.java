@@ -50,7 +50,8 @@ public final class SceneResources implements AutoCloseable {
     private final Map<AssetRef<MaterialData>, MaterialEntry> materialEntries = new HashMap<>();
     private final Map<AssetRef<TextureData>, TextureEntry> textureEntries = new HashMap<>();
     private final List<MaterialSet> dirtySets = new ArrayList<>();
-    private int failedUploads;
+    /** Loaded meshes the pool had no room for: tried again as views update, as room frees. */
+    private final List<Mesh> waitingForRoom = new ArrayList<>();
     private boolean closed;
 
     /** Hears that a mesh it holds is on the GPU now. */
@@ -74,9 +75,59 @@ public final class SceneResources implements AutoCloseable {
         }
     }
 
-    /** The materials of a renderable whose mesh has {@code slots} submeshes: what a block of material ids holds. */
-    record MaterialKey(List<AssetRef<MaterialData>> materials, int slots) {
+    /**
+     * The materials of a renderable whose mesh has {@code slots} submeshes: what a block of material ids holds. Looked
+     * up through one reused key, so finding a block that exists allocates nothing.
+     */
+    static final class MaterialKey {
+        List<AssetRef<MaterialData>> materials;
+        int slots;
+
+        MaterialKey(List<AssetRef<MaterialData>> materials, int slots) {
+            this.materials = materials;
+            this.slots = slots;
+        }
+
+        List<AssetRef<MaterialData>> materials() {
+            return materials;
+        }
+
+        int slots() {
+            return slots;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof MaterialKey key && key.slots == slots && sameMaterials(key.materials, materials);
+        }
+
+        @Override
+        public int hashCode() {
+            int hash = slots;
+            for (int i = 0; i < materials.size(); i++) {
+                hash = 31 * hash + materials.get(i).hashCode();
+            }
+            return hash;
+        }
     }
+
+    /** Whether two material lists are equal, compared by index: no iterators. */
+    static boolean sameMaterials(List<AssetRef<MaterialData>> a, List<AssetRef<MaterialData>> b) {
+        if (a == b) {
+            return true;
+        }
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (int i = 0; i < a.size(); i++) {
+            if (!a.get(i).equals(b.get(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private final MaterialKey lookup = new MaterialKey(List.of(), 0);
 
     /** A block of material ids, one per submesh, shared by every renderable of every view with the same key. */
     static final class MaterialSet {
@@ -165,9 +216,12 @@ public final class SceneResources implements AutoCloseable {
         return textureEntries.size();
     }
 
-    /** Meshes that did not fit the geometry pool: they stay undrawn. */
-    public int failedUploads() {
-        return failedUploads;
+    /**
+     * Loaded meshes waiting for room in the geometry pool: they draw once it has room, e.g. when removed meshes have
+     * left the frames in flight.
+     */
+    public int waitingForRoomCount() {
+        return waitingForRoom.size();
     }
 
     // ---------------------------------------------------------------- meshes
@@ -202,44 +256,64 @@ public final class SceneResources implements AutoCloseable {
             meshes.remove(mesh.ref);
             if (mesh.uploaded()) {
                 pool.remove(mesh.id);
+            } else {
+                waitingForRoom.remove(mesh);
             }
             assets.release(mesh.ref);
         }
     }
 
+    @AllowAllocation("growing the list of meshes waiting for room")
     private void upload(Mesh mesh, MeshData data) {
         mesh.data = data;
-        try {
-            mesh.id = pool.add(data);
-        } catch (IllegalStateException full) {
-            failedUploads++;
-            return;
+        if (!tryUpload(mesh)) {
+            waitingForRoom.add(mesh);
+        }
+    }
+
+    /** Puts {@code mesh} in the pool if it has room, and tells its users. Allocates nothing. */
+    private boolean tryUpload(Mesh mesh) {
+        mesh.id = pool.tryAdd(mesh.data);
+        if (mesh.id == NONE) {
+            return false;
         }
         for (int i = 0; i < mesh.users.size(); i++) {
             mesh.users.get(i).uploaded(mesh);
         }
+        return true;
     }
 
     // ---------------------------------------------------------------- materials and textures
 
-    /** Holds the block of material ids for {@code key}: made and filled the first time. */
-    @AllowAllocation("a new block of materials")
-    MaterialSet acquireSet(MaterialKey key) {
+    /**
+     * Holds the block of material ids for {@code materials} on a mesh of {@code slots} submeshes: made and filled the
+     * first time. Allocates nothing when the block exists.
+     */
+    MaterialSet acquireSet(List<AssetRef<MaterialData>> materials, int slots) {
         checkOpen();
-        MaterialSet set = sets.get(key);
+        lookup.materials = materials;
+        lookup.slots = slots;
+        MaterialSet set = sets.get(lookup);
+        lookup.materials = List.of(); // the probe holds no list
         if (set == null) {
-            set = new MaterialSet(key);
-            List<Material> initial = new ArrayList<>(key.slots());
-            for (int s = 0; s < key.slots(); s++) {
-                AssetRef<MaterialData> ref = key.materials().isEmpty() ? null
-                    : key.materials().get(Math.min(s, key.materials().size() - 1));
-                set.entries[s] = ref == null ? null : acquireMaterial(ref, set);
-                initial.add(convert(set.entries[s]));
-            }
-            set.first = materials.addAll(initial);
-            sets.put(key, set);
+            set = newSet(new MaterialKey(materials, slots));
         }
         set.holders++;
+        return set;
+    }
+
+    @AllowAllocation("a new block of materials")
+    private MaterialSet newSet(MaterialKey key) {
+        MaterialSet set = new MaterialSet(key);
+        List<Material> initial = new ArrayList<>(key.slots());
+        for (int s = 0; s < key.slots(); s++) {
+            AssetRef<MaterialData> ref = key.materials().isEmpty() ? null
+                : key.materials().get(Math.min(s, key.materials().size() - 1));
+            set.entries[s] = ref == null ? null : acquireMaterial(ref, set);
+            initial.add(convert(set.entries[s]));
+        }
+        set.first = materials.addAll(initial);
+        sets.put(key, set);
         return set;
     }
 
@@ -260,8 +334,18 @@ public final class SceneResources implements AutoCloseable {
         }
     }
 
-    /** Writes the material blocks whose materials or textures arrived since: called by views as they update. */
-    void flushMaterials() {
+    /**
+     * Brings the GPU up to date, called by views as they update: meshes waiting for room go in where it has freed, and
+     * material blocks whose materials or textures arrived are written.
+     */
+    void flush() {
+        for (int i = 0; i < waitingForRoom.size(); ) { // the longest waiting first
+            if (tryUpload(waitingForRoom.get(i))) {
+                waitingForRoom.remove(i);
+            } else {
+                i++;
+            }
+        }
         for (int i = 0; i < dirtySets.size(); i++) {
             MaterialSet set = dirtySets.get(i);
             set.dirty = false;

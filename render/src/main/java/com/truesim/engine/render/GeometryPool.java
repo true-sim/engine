@@ -172,6 +172,18 @@ public final class GeometryPool implements AutoCloseable {
      * @throws IllegalStateException if the pool has no room left for it
      */
     public int add(MeshData mesh) {
+        int id = tryAdd(mesh);
+        if (id < 0) {
+            throw noRoom(mesh);
+        }
+        return id;
+    }
+
+    /**
+     * Adds {@code mesh} as {@link #add} does, or returns -1 if the pool has no room for it now: room may come back as
+     * removed meshes leave the frames in flight. Allocates nothing when there is no room.
+     */
+    public int tryAdd(MeshData mesh) {
         if (closed) {
             throw new IllegalStateException("The pool is closed");
         }
@@ -180,7 +192,7 @@ public final class GeometryPool implements AutoCloseable {
         long indexTotal = 3L * mesh.triangleCount();
         long indexRange = (indexTotal + 3) & ~3L; // whole words: the last one is padded
         if (mesh.levels().size() > MAX_LEVELS || freeIdCount == 0 && idCount == capacity.meshes()) {
-            throw noRoom(mesh);
+            return -1;
         }
         // Each kind of data in a range of its own; triangle bytes start on a word, so no word holds two meshes.
         long vertexBase = vertexRanges.allocate(mesh.vertexCount(), 1);
@@ -194,7 +206,7 @@ public final class GeometryPool implements AutoCloseable {
             give(meshletVertexRanges, meshletVertexBase, meshletVertexTotal);
             give(meshletRanges, meshletBase, mesh.meshletCount());
             give(triangleRanges, indexBase, indexRange);
-            throw noRoom(mesh);
+            return -1;
         }
         boolean fitsMesh = true;
         for (int m = 0; m < mesh.meshletCount() && fitsMesh; m++) {

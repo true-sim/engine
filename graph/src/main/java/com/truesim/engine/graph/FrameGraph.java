@@ -24,7 +24,6 @@ import static org.lwjgl.vulkan.VK10.VK_QUEUE_FAMILY_IGNORED;
 import static org.lwjgl.vulkan.VK10.VK_REMAINING_MIP_LEVELS;
 import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-import static org.lwjgl.vulkan.VK10.nvkCmdBlitImage;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -43,7 +42,6 @@ import static org.lwjgl.vulkan.VK10.vkResetCommandPool;
 import static org.lwjgl.vulkan.VK12.VK_SEMAPHORE_TYPE_TIMELINE;
 import static org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
 import static org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-import static org.lwjgl.vulkan.VK12.nvkWaitSemaphores;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
@@ -535,7 +533,7 @@ public final class FrameGraph implements AutoCloseable {
                 memPutInt(info + VkSemaphoreWaitInfo.SEMAPHORECOUNT, 2);
                 memPutAddress(info + VkSemaphoreWaitInfo.PSEMAPHORES, semaphores);
                 memPutAddress(info + VkSemaphoreWaitInfo.PVALUES, values);
-                Vulkan.check(nvkWaitSemaphores(device.handle(), info, Long.MAX_VALUE), "Could not wait for a frame");
+                Vulkan.check(device.direct().waitSemaphores(info, Long.MAX_VALUE), "Could not wait for a frame");
             }
         }
 
@@ -1350,7 +1348,7 @@ public final class FrameGraph implements AutoCloseable {
         }
     }
 
-    private static void blit(PassContext ctx, Image from, Image to) {
+    private void blit(PassContext ctx, Image from, Image to) {
         try (MemoryStack stack = stackPush()) {
             long region = stack.ncalloc(VkImageBlit.ALIGNOF, 1, VkImageBlit.SIZEOF);
             layers(region + VkImageBlit.SRCSUBRESOURCE);
@@ -1358,7 +1356,7 @@ public final class FrameGraph implements AutoCloseable {
             offsets(region + VkImageBlit.SRCOFFSETS, from.width, from.height);
             offsets(region + VkImageBlit.DSTOFFSETS, to.width, to.height);
             boolean same = from.width == to.width && from.height == to.height;
-            nvkCmdBlitImage(ctx.commands(), ctx.image(from), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            device.direct().cmdBlitImage(ctx.commands(), ctx.image(from), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 ctx.image(to), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, region,
                 same ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
         }

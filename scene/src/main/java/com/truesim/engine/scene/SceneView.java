@@ -49,7 +49,8 @@ import java.util.Objects;
  *   <li><b>Materials per submesh:</b> a renderable's materials take consecutive ids in the material table, one per
  *       submesh of its mesh, shared by every renderable of every view with the same materials and mesh layout.</li>
  *   <li><b>Changes, not the whole scene:</b> renderables added, changed or removed, and nodes moved, are found in the
- *       change logs. A frame where the origin moves rewrites every instance; otherwise only moved ones.</li>
+ *       change logs. A frame where the origin moves, or most nodes moved, rewrites every instance; otherwise only
+ *       moved ones.</li>
  *   <li><b>Deterministic:</b> the same changes give the same instances, slots and ids.</li>
  * </ul>
  *
@@ -180,10 +181,17 @@ public final class SceneView implements AutoCloseable {
             started = true;
             rebuild(); // the first update, or fell behind the renderables' log
         }
-        if (!originMoved && !scene.changesSince(since, onSceneChange)) {
-            originMoved = true; // fell behind the scene's log: every instance may have moved
+        if (!originMoved) {
+            // More changed nodes than half the instances (or more than the scene's log kept): rewriting every
+            // instance, in slot order, costs less than following the changes.
+            int changed = scene.changeCountSince(since);
+            if (changed < 0 || changed > instanceCount / 2) {
+                originMoved = true;
+            } else {
+                scene.changesSince(since, onSceneChange);
+            }
         }
-        resources.flushMaterials();
+        resources.flush();
         if (originMoved) {
             for (int slot = 0; slot < instanceCount; slot++) {
                 writeInstance(slotItem[slot]);
@@ -286,7 +294,7 @@ public final class SceneView implements AutoCloseable {
         List<AssetRef<MaterialData>> list = renderables.materials(node);
         if (itemNode[item] == node) {
             if (itemMesh[item].mesh.ref.equals(ref)
-                && (itemSet[item] == null || itemSet[item].key.materials().equals(list))) {
+                && (itemSet[item] == null || SceneResources.sameMaterials(itemSet[item].key.materials(), list))) {
                 return; // nothing a view follows changed (e.g. shadows)
             }
             destroy(item);
@@ -369,15 +377,13 @@ public final class SceneView implements AutoCloseable {
     // ---------------------------------------------------------------- instances
 
     /** Draws {@code item}: an instance slot at the end, and its materials. */
-    @AllowAllocation("a renderable drawn anew: the key of its materials")
     private void show(int item) {
         if (instanceCount == slotItem.length) {
             wait(item); // the renderer holds no more instances: drawn when a slot frees
             return;
         }
         SceneResources.Mesh mesh = itemMesh[item].mesh;
-        itemSet[item] = resources.acquireSet(
-            new SceneResources.MaterialKey(renderables.materials(itemNode[item]), mesh.data.materialSlots()));
+        itemSet[item] = resources.acquireSet(renderables.materials(itemNode[item]), mesh.data.materialSlots());
         int slot = instanceCount++;
         slotItem[slot] = item;
         itemSlot[item] = slot;

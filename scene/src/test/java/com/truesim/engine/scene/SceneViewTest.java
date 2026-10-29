@@ -46,6 +46,7 @@ import com.truesim.scene.assets.Generator;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.assets.mesh.VertexAttribute;
 import com.truesim.scene.assets.mesh.VertexFormat;
+import com.truesim.scene.core.NodeHandle;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.meshbuild.MeshBuilder;
 import com.truesim.scene.render.MaterialData;
@@ -244,19 +245,20 @@ class SceneViewTest {
      */
     private int frame(List<FrameGraph> graphs, List<SceneView> views, Camera camera) {
         int slot = -1;
-        for (FrameGraph graph : graphs) {
-            slot = graph.beginFrame();
+        for (int g = 0; g < graphs.size(); g++) {
+            slot = graphs.get(g).beginFrame();
         }
         slots.begin(slot);
         tasks.drainCompleted(); // the frame boundary: loads arrive
-        for (SceneView view : views) {
+        for (int v = 0; v < views.size(); v++) {
+            SceneView view = views.get(v);
             view.renderables().scene().update();
             view.renderables().update();
             view.update();
             view.geometry().setView(0, camera, 1, MeshletRenderer.MODE_LIT);
         }
-        for (FrameGraph graph : graphs) {
-            graph.submit(0, 0);
+        for (int g = 0; g < graphs.size(); g++) {
+            graphs.get(g).submit(0, 0);
         }
         slots.end();
         return slot;
@@ -542,23 +544,54 @@ class SceneViewTest {
     }
 
     @Test
-    void meshesThatDoNotFitStayUndrawn() throws InterruptedException {
+    void meshesWaitForRoomInThePool() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Renderables renderables = new Renderables(scene);
         SceneView view = closing(new SceneView(resources, renderables, renderer()));
         int meshes = pool.capacity().meshes() + 1;
+        long[] nodes = new long[meshes];
         for (int i = 0; i < meshes; i++) {
-            renderables.set(facing(scene, i, 0, -3),
-                AssetRef.generated(RenderAssets.MESH, SQUARES, new Square(i + 1), 1), List.of());
+            nodes[i] = facing(scene, i, 0, -3);
+            renderables.set(nodes[i], AssetRef.generated(RenderAssets.MESH, SQUARES, new Square(i + 1), 1), List.of());
         }
         update(scene, renderables, view);
         load();
         update(scene, renderables, view);
-        assertThat(resources.failedUploads()).isEqualTo(1);
+        assertThat(resources.waitingForRoomCount()).isEqualTo(1);
         assertThat(resources.meshCount()).isEqualTo(meshes);
         assertThat(resources.uploadedMeshCount()).isEqualTo(meshes - 1);
         assertThat(view.instanceCount()).isEqualTo(meshes - 1);
         assertThat(view.renderableCount()).isEqualTo(meshes);
+        // A drawn one goes: its room frees once no frame in flight draws it, and the waiting mesh goes in.
+        long drawn = NodeHandle.NONE;
+        long waiting = NodeHandle.NONE;
+        for (long node : nodes) {
+            if (view.meshOf(node) < 0) {
+                waiting = node;
+            } else {
+                drawn = node;
+            }
+        }
+        renderables.remove(drawn);
+        update(scene, renderables, view);
+        assertThat(view.meshOf(waiting)).as("the room is still drawn by frames in flight").isEqualTo(-1);
+        for (int frame = 0; frame < slots.count(); frame++) {
+            slots.begin(frame);
+            slots.end();
+        }
+        update(scene, renderables, view);
+        assertThat(resources.waitingForRoomCount()).isZero();
+        assertThat(view.meshOf(waiting)).isNotNegative();
+        assertThat(view.instanceCount()).isEqualTo(meshes - 1);
+        // A waiting mesh nobody uses any more stops waiting.
+        renderables.set(scene.create(), AssetRef.generated(RenderAssets.MESH, SQUARES, new Square(99), 1), List.of());
+        update(scene, renderables, view);
+        load();
+        update(scene, renderables, view);
+        assertThat(resources.waitingForRoomCount()).isEqualTo(1);
+        view.close();
+        assertThat(resources.waitingForRoomCount()).isZero();
+        assertThat(resources.meshCount()).isZero();
     }
 
     @Test
@@ -606,6 +639,60 @@ class SceneViewTest {
     }
 
     @Test
+    void framesAllocateNothingOnceWarm() throws InterruptedException {
+        // The whole frame, as an application runs it: the frame boundary, the scene, the view and both graphs'
+        // frames, one forward, one through a visibility buffer, blitted into their targets.
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneView view = closing(new SceneView(resources, renderables, renderer()));
+        long[] nodes = new long[3];
+        for (int i = 0; i < nodes.length; i++) {
+            nodes[i] = facing(scene, i - 1, 0, -3);
+            renderables.set(nodes[i], SQUARE, List.of(RED));
+        }
+        List<FrameGraph> graphs = List.of(graph(view, false, new GpuBuffer[] {readback(), readback()}),
+            graph(view, device.primitiveIds(), new GpuBuffer[] {readback(), readback()}));
+        List<SceneView> views = List.of(view);
+        frame(graphs, views, camera);
+        load();
+        int[] frame = {0};
+        com.truesim.testing.AllocationAssertions.assertAllocationFree(() -> {
+            scene.setTranslation(nodes[0], -1, 0.01 * (frame[0]++ % 8), -3);
+            view.setOrigin(0, 0, 0.001 * (frame[0] % 4));
+            frame(graphs, views, camera);
+        }, 3000, 300, 5);
+    }
+
+    @Test
+    void renderablesComingGoingAndChangingAllocateNothingOnceTheirAssetsAreIn() throws InterruptedException {
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneView view = closing(new SceneView(resources, renderables, renderer()));
+        List<AssetRef<MaterialData>> red = List.of(RED);
+        List<AssetRef<MaterialData>> green = List.of(GREEN);
+        long kept = facing(scene, 0, 0, -3);
+        renderables.set(kept, SQUARE, red);
+        renderables.set(facing(scene, 1, 0, -3), SQUARE, green); // both blocks stay in use
+        renderables.set(facing(scene, 2, 0, -3), SQUARE, red);
+        long[] coming = {facing(scene, -1, 0, -3)};
+        renderables.set(coming[0], SQUARE, red);
+        update(scene, renderables, view);
+        load();
+        update(scene, renderables, view);
+        int[] frame = {0};
+        com.truesim.testing.AllocationAssertions.assertAllocationFree(() -> {
+            boolean even = frame[0]++ % 2 == 0;
+            renderables.setMaterials(kept, even ? green : red);
+            scene.remove(coming[0]);
+            coming[0] = scene.create();
+            renderables.set(coming[0], SQUARE, even ? red : green);
+            update(scene, renderables, view);
+        }, 20_000, 2_000, 5);
+        assertThat(view.instanceCount()).isEqualTo(4);
+        assertThat(resources.materialSetCount()).isEqualTo(2);
+    }
+
+    @Test
     void misuseIsChecked() {
         SceneGraph scene = new SceneGraph(new ChangeClock());
         try (GeometryPool other = new GeometryPool(device, GeometryPool.Capacity.of(64, 1, 1));
@@ -623,7 +710,7 @@ class SceneViewTest {
         assertThat(resources.pool()).isSameAs(pool);
         assertThat(resources.materials()).isSameAs(materials);
         assertThat(resources.textures()).isSameAs(textures);
-        assertThat(resources.failedUploads()).isZero();
+        assertThat(resources.waitingForRoomCount()).isZero();
         Renderables renderables = view.renderables();
         renderables.set(scene.create(), SQUARE, List.of());
         assertThatIllegalStateException().isThrownBy(view::update).withMessageContaining("closed");

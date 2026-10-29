@@ -99,6 +99,7 @@ public final class VulkanDevice implements AutoCloseable {
     private final Queue transfer;
     private final long allocator;
     private final Bindless bindless;
+    private final DirectCalls direct;
     private final int apiVersion;
     private final Vulkan14Features features14;
     private final boolean meshShaders;
@@ -263,6 +264,7 @@ public final class VulkanDevice implements AutoCloseable {
             this.allocator = pointer.get(0);
         }
         this.bindless = new Bindless(this);
+        this.direct = new DirectCalls(handle);
         LOG.info("Device on {}: Vulkan {}, queues graphics {}, compute {}, transfer {}", gpu, Vulkan.version(apiVersion),
             graphics.family(), compute.family(), transfer.family());
     }
@@ -432,6 +434,11 @@ public final class VulkanDevice implements AutoCloseable {
     }
 
     /** The device's bindless descriptor set and the pipeline layout all pipelines share. */
+    /** The Vulkan calls of every frame made allocation free, past LWJGL. */
+    public DirectCalls direct() {
+        return direct;
+    }
+
     public Bindless bindless() {
         return bindless;
     }

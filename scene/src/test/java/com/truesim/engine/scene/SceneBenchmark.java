@@ -90,11 +90,11 @@ class SceneBenchmark {
 
     /** Per-frame timings of one scenario, in nanoseconds, and bytes allocated. */
     private static final class Stats {
-        final long[][] stages = new long[5][FRAMES]; // scene, renderables, view, graph, frame
+        final long[][] stages = new long[6][FRAMES]; // drain, scene, renderables, view, graph, frame
         final long[] allocated = new long[FRAMES];
 
         void print(String scenario) {
-            String[] names = {"scene", "renderables", "view", "graph", "frame"};
+            String[] names = {"drain", "scene", "renderables", "view", "graph", "frame"};
             StringBuilder line = new StringBuilder(String.format(Locale.ROOT, "  %-34s", scenario));
             for (int s = 0; s < names.length; s++) {
                 long[] sorted = stages[s].clone();
@@ -166,7 +166,7 @@ class SceneBenchmark {
             // Loading: the meshes are generated in the background, uploaded as they arrive at frame boundaries.
             start = System.nanoTime();
             frame(graph, slots, tasks, scene, renderables, view, camera, unused, 0);
-            long firstUpdate = unused.stages[2][0];
+            long firstUpdate = unused.stages[3][0];
             int frames = 1;
             while (resources.uploadedMeshCount() < 2) {
                 Thread.sleep(1);
@@ -174,12 +174,12 @@ class SceneBenchmark {
                 frames++;
             }
             long loaded = System.nanoTime() - start;
-            long uploadFrame = unused.stages[2][0];
+            long uploadFrame = unused.stages[0][0] + unused.stages[3][0]; // uploads and shows land in the drain
             System.out.printf(Locale.ROOT, "  loading: %.1f ms over %d frames to generate and upload the rock "
                 + "(%,d meshlets) and the terrain (%,d meshlets); first view update (%,d renderables waiting) %.3f ms,"
-                + " the frame they arrived %.1f ms; %,d instances drawn%n", loaded / 1e6, frames,
+                + " the frame they arrived (uploads, %,d shown and written) %.1f ms%n", loaded / 1e6, frames,
                 assets.get(ROCK).meshletCount(), assets.get(GROUND).meshletCount(), view.renderableCount(),
-                firstUpdate / 1e6, uploadFrame / 1e6, view.instanceCount());
+                firstUpdate / 1e6, view.instanceCount(), uploadFrame / 1e6);
 
             run("still", graph, slots, tasks, scene, renderables, view, camera, frame -> { });
             run("camera moving (all rewritten)", graph, slots, tasks, scene, renderables, view, camera,
@@ -264,8 +264,9 @@ class SceneBenchmark {
         long t0 = System.nanoTime();
         int slot = graph.beginFrame();
         slots.begin(slot);
-        tasks.drainCompleted();
         long t1 = System.nanoTime();
+        tasks.drainCompleted(); // loads arrive: uploads, and renderables waiting for them shown
+        long t1b = System.nanoTime();
         scene.update();
         long t2 = System.nanoTime();
         renderables.update();
@@ -276,11 +277,12 @@ class SceneBenchmark {
         graph.submit(0, 0);
         slots.end();
         long t5 = System.nanoTime();
-        stats.stages[0][index] = t2 - t1;
-        stats.stages[1][index] = t3 - t2;
-        stats.stages[2][index] = t4 - t3;
-        stats.stages[3][index] = t5 - t4;
-        stats.stages[4][index] = t5 - t0; // with the wait for the frame two back: GPU-bound frames show here
+        stats.stages[0][index] = t1b - t1;
+        stats.stages[1][index] = t2 - t1b;
+        stats.stages[2][index] = t3 - t2;
+        stats.stages[3][index] = t4 - t3;
+        stats.stages[4][index] = t5 - t4;
+        stats.stages[5][index] = t5 - t0; // with the wait for the frame two back: GPU-bound frames show here
         stats.allocated[index] = THREADS.getCurrentThreadAllocatedBytes() - allocated;
     }
 
