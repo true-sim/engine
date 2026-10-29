@@ -53,8 +53,7 @@ public final class FrameUploads implements AutoCloseable {
     private final List<Long> offsets = new ArrayList<>();
     private final List<BiConsumer<VkCommandBuffer, GpuBuffer>> commands = new ArrayList<>();
     // Recorded: staging buffers the frames in flight may still read, and when they are free.
-    private final List<GpuBuffer> retiring = new ArrayList<>();
-    private final List<Long> retireAt = new ArrayList<>();
+    private final Retiring retiring; // staging buffers copied from, until their frames finish
     private long pendingBytes;
     private boolean closed;
 
@@ -62,6 +61,7 @@ public final class FrameUploads implements AutoCloseable {
     public FrameUploads(VulkanDevice device, FrameSlots slots) {
         this.device = Objects.requireNonNull(device, "device");
         this.slots = Objects.requireNonNull(slots, "slots");
+        this.retiring = new Retiring(slots);
         this.deferred = !slots.isSingle();
         if (deferred) {
             slots.register(start);
@@ -166,12 +166,11 @@ public final class FrameUploads implements AutoCloseable {
      * uploaded (a build reading it, say) calls it on the graphics queue first. Allocates nothing without uploads.
      */
     public void flush(VkCommandBuffer commands) {
-        releaseRetired();
+        retiring.release();
         if (staging.isEmpty()) {
             return;
         }
         barrier(commands, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
-        long free = slots.retireAt();
         for (int i = 0; i < staging.size(); i++) {
             GpuBuffer buffer = staging.get(i);
             if (targets.get(i) != null) {
@@ -180,7 +179,6 @@ public final class FrameUploads implements AutoCloseable {
                 this.commands.get(i).accept(commands, buffer);
             }
             retiring.add(buffer);
-            retireAt.add(free);
         }
         barrier(commands, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         staging.clear();
@@ -188,15 +186,6 @@ public final class FrameUploads implements AutoCloseable {
         offsets.clear();
         this.commands.clear();
         pendingBytes = 0;
-    }
-
-    private void releaseRetired() {
-        for (int i = retiring.size() - 1; i >= 0; i--) {
-            if (slots.isFinished(retireAt.get(i))) {
-                retiring.remove(i).close();
-                retireAt.remove(i);
-            }
-        }
     }
 
     private static void barrier(VkCommandBuffer commands, long srcAccess, long dstAccess) {
@@ -234,11 +223,8 @@ public final class FrameUploads implements AutoCloseable {
             for (GpuBuffer buffer : staging) {
                 buffer.close();
             }
-            for (GpuBuffer buffer : retiring) {
-                buffer.close();
-            }
             staging.clear();
-            retiring.clear();
+            retiring.close();
         }
     }
 }

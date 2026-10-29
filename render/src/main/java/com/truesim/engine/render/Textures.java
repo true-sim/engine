@@ -30,15 +30,15 @@ import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
 import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.FrameUploads;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
+import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
 import java.lang.foreign.MemorySegment;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkBufferImageCopy;
@@ -78,10 +78,7 @@ public final class Textures implements AutoCloseable {
     private final Map<Integer, Long> sizes = new HashMap<>();
     // Per live texture whose upload may still wait for a frame: set once it is freed, so the upload is dropped.
     private final Map<Integer, boolean[]> freed = new HashMap<>();
-    private final List<boolean[]> retiringFreed = new ArrayList<>();
-    private final List<Integer> retiring = new ArrayList<>();
-    private final List<GpuImage> retiringImages = new ArrayList<>();
-    private final List<Long> retireAt = new ArrayList<>();
+    private final Retiring retiring;
     private long bytes;
     private boolean closed;
 
@@ -95,6 +92,7 @@ public final class Textures implements AutoCloseable {
         this.device = device;
         this.frames = frames;
         this.uploads = new FrameUploads(device, frames);
+        this.retiring = new Retiring(frames);
     }
 
     /** An sRGB color texture, {@code rgba} 4 bytes per texel; its sampled slot. */
@@ -129,7 +127,7 @@ public final class Textures implements AutoCloseable {
             image.close();
             throw e;
         }
-        releaseRetired();
+        retiring.release();
         int slot = device.bindless().addSampled(image.view());
         long size = 4L * width * height * 4 / 3;
         images.put(slot, image);
@@ -228,29 +226,19 @@ public final class Textures implements AutoCloseable {
             throw new IllegalArgumentException("No texture in slot " + slot);
         }
         bytes -= sizes.remove(slot);
-        retiring.add(slot);
-        retiringImages.add(image);
-        retiringFreed.add(freed.remove(slot));
-        retireAt.add(frames.retireAt());
-        releaseRetired();
+        boolean[] gone = freed.remove(slot);
+        Bindless bindless = device.bindless();
+        retiring.add(() -> {
+            gone[0] = true;
+            bindless.removeSampled(slot);
+            image.close();
+        });
+        retiring.release();
     }
 
     /** Whether sampled slot {@code slot} holds one of these textures. */
     public boolean contains(int slot) {
         return images.containsKey(slot);
-    }
-
-    /**
-     * Frees removed textures no frame in flight can sample, oldest first: an upload of one still waiting for a frame
-     * (no frame was recorded since) is dropped.
-     */
-    private void releaseRetired() {
-        while (!retiring.isEmpty() && frames.isFinished(retireAt.getFirst())) {
-            retireAt.removeFirst();
-            retiringFreed.removeFirst()[0] = true;
-            device.bindless().removeSampled(retiring.removeFirst());
-            retiringImages.removeFirst().close();
-        }
     }
 
     /** How many textures there are. */
@@ -273,10 +261,7 @@ public final class Textures implements AutoCloseable {
                 device.bindless().removeSampled(entry.getKey());
                 entry.getValue().close();
             }
-            for (int i = 0; i < retiring.size(); i++) {
-                device.bindless().removeSampled(retiring.get(i));
-                retiringImages.get(i).close();
-            }
+            retiring.close();
         }
     }
 }
