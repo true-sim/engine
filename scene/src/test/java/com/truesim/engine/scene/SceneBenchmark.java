@@ -64,6 +64,8 @@ class SceneBenchmark {
     private static final int HEIGHT = 1080;
     private static final int ROCKS = 30_000;
     private static final int FRAMES = 20;
+    /** Runs only the scenarios whose names contain it (TRUESIM_BENCHMARK_SCENARIO), e.g. "30,000 rocks moving". */
+    private static final String SCENARIO = System.getenv().getOrDefault("TRUESIM_BENCHMARK_SCENARIO", "");
     private static final double EXTENT = 600;
     private static final double GROUND_Y = -12;
     /** Where the world puts the scene: far from its origin, so instances must be camera-relative. */
@@ -260,6 +262,9 @@ class SceneBenchmark {
 
     private static void run(String scenario, FrameGraph graph, FrameSlots slots, TaskScheduler tasks,
         SceneGraph scene, Renderables renderables, SceneSync sync, RenderView cameraView, Camera camera, Change change) {
+        if (!scenario.contains(SCENARIO)) {
+            return;
+        }
         Stats stats = new Stats();
         for (int frame = -2; frame < FRAMES; frame++) {
             change.before(frame + 2);
