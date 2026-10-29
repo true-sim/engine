@@ -1,7 +1,8 @@
 // The classic LOD path's selection, one view: one thread per instance tests the mesh's bounds against the frustum,
 // picks the coarsest level whose error, seen from the mesh's nearest point, is within the allowed pixels (the meshlet
-// path's rule for discrete LODs), and appends a VkDrawIndexedIndirectCommand per part of it. Word 0 of the draw list
-// counts them; draws past the capacity are not written, and the draw's count is capped.
+// path's rule for discrete LODs), and appends a VkDrawIndexedIndirectCommand per part of it to the list of the part's
+// raster bin (by its material: opaque, double-sided, masked). Words 0 to 2 of the draw list count each bin's; draws
+// past a bin's capacity are not written, and its draw's count is capped.
 import classic.parts;
 
 struct SelectPush
@@ -12,10 +13,11 @@ struct SelectPush
     ClassicMesh* classicMeshes;
     ClassicLevel* levels;
     ClassicPart* parts;
-    uint* draws;           // the count, then from word 4 the commands, 5 words each
-    ClassicDraw* records;  // per draw slot
+    uint* draws;           // the bins' counts, then from word 4 each bin's commands (maxDraws of 5 words each)
+    ClassicDraw* records;  // per draw slot: bin * maxDraws + the draw in the bin
     uint instanceCount;
-    uint maxDraws;
+    uint maxDraws;         // per bin
+    Material* materials;   // for each part's raster bin
 };
 
 [[vk::push_constant]]
@@ -29,13 +31,18 @@ void selectMain(uint3 id : SV_DispatchThreadID)
     {
         return;
     }
-    Instance instance = push.instances[id.x];
+    View view = push.view[0];
+    Instance stored = push.instances[id.x];
+    if (!drawnIn(stored, view))
+    {
+        return;
+    }
+    Instance instance = relative(stored, view);
     ClassicMesh classic = push.classicMeshes[instance.mesh];
     if (classic.levelCount == 0)
     {
         return;
     }
-    View view = push.view[0];
     MeshEntry mesh = push.meshes[instance.mesh];
     float scale = maxScale(instance);
     float3 center = toWorld(instance, mesh.sphere.xyz);
@@ -54,12 +61,17 @@ void selectMain(uint3 id : SV_DispatchThreadID)
             break;
         }
     }
-    uint first;
-    InterlockedAdd(push.draws[0], level.partCount, first);
-    for (uint p = 0; p < level.partCount && first + p < push.maxDraws; p++)
+    for (uint p = 0; p < level.partCount; p++)
     {
         ClassicPart part = push.parts[level.firstPart + p];
-        uint slot = first + p;
+        uint bin = rasterBin(push.materials[instance.materialBase + ((part.tag >> 24) & 0x7f)]);
+        uint local;
+        InterlockedAdd(push.draws[bin], 1, local);
+        if (local >= push.maxDraws)
+        {
+            continue; // over the bin's capacity: counted, not drawn
+        }
+        uint slot = bin * push.maxDraws + local;
         uint c = 4 + slot * 5;
         push.draws[c] = part.indexCount;
         push.draws[c + 1] = 1;

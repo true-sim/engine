@@ -5,16 +5,15 @@ import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.math.Maths;
-import com.truesim.engine.vulkan.GpuBuffer;
+import com.truesim.engine.vulkan.FrameBuffer;
+import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.VulkanDevice;
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
-import java.nio.ByteOrder;
 import java.util.Objects;
 
 /**
- * The scene's lights, as shaders read them (engine-render's {@code lights.slang}): point, spot and directional lights,
- * camera-relative like instances, and the shadow maps they cast through. {@link ClusteredLights} bins them per cluster
+ * The scene's lights, as shaders read them (engine-render's {@code lights.slang}): point, spot and directional lights
+ * at world positions (two floats per axis, as instances keep theirs: a light list hands them to shading relative to its
+ * camera, so one set of lights serves every view), and the shadow maps they cast through. {@link ClusteredLights} bins them per cluster
  * of the view for shading.
  *
  * <p>Shadows: a light names a range of consecutive entries of the shadow table, each of a kind evaluated its own way
@@ -29,14 +28,15 @@ import java.util.Objects;
  * lights.setCount(2);
  * }</pre>
  *
- * <p>Lights are read when the frame's commands run: change them only once the frames using them have finished.
+ * <p>Lights are read when the frame's commands run. Given a frame graph's {@link FrameSlots}, they keep a copy per frame
+ * in flight and may change every frame; otherwise change them only once the frames using them have finished.
  * Allocates nothing once created.
  */
 @AllowAllocation("created rarely")
 public final class Lights implements AutoCloseable {
 
-    static final int LIGHT_BYTES = 64;
-    static final int SHADOW_BYTES = 96;
+    static final int LIGHT_BYTES = 80;
+    static final int SHADOW_BYTES = 128;
     /** Shadow kinds and map filters, as lights.slang numbers them. */
     private static final int SHADOW_MAP = 0;
     private static final int SHADOW_MASK = 1;
@@ -45,32 +45,42 @@ public final class Lights implements AutoCloseable {
     private static final int POINT = 0;
     private static final int SPOT = 1;
     private static final int DIRECTIONAL = 2;
-    private static final ValueLayout.OfInt U32 = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
-    private static final ValueLayout.OfFloat F32 = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
-    private final GpuBuffer lights;
-    private final GpuBuffer shadows;
+    private final FrameBuffer lights;
+    private final FrameBuffer shadows;
     private final int capacity;
     private final int shadowCapacity;
     private int count;
 
-    /** Room for {@code capacity} lights and {@code shadowCapacity} shadow maps. */
+    /**
+     * Room for {@code capacity} lights and {@code shadowCapacity} shadow maps, one copy of them: for frames the caller
+     * waits for before changing lights.
+     */
     public Lights(VulkanDevice device, int capacity, int shadowCapacity) {
+        this(device, capacity, shadowCapacity, FrameSlots.single());
+    }
+
+    /**
+     * Room for {@code capacity} lights and {@code shadowCapacity} shadow maps, a copy per frame of {@code slots} (a
+     * frame graph's), so lights and shadow entries may change every frame, also while the frame records.
+     */
+    public Lights(VulkanDevice device, int capacity, int shadowCapacity, FrameSlots slots) {
         if (capacity < 1 || shadowCapacity < 1) {
             throw new IllegalArgumentException("Room for lights and shadows: " + capacity + ", " + shadowCapacity);
         }
         this.capacity = capacity;
         this.shadowCapacity = shadowCapacity;
         int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-        lights = GpuBuffer.hostVisible(device, (long) LIGHT_BYTES * capacity, usage);
-        shadows = GpuBuffer.hostVisible(device, (long) SHADOW_BYTES * shadowCapacity, usage);
+        lights = FrameBuffer.create(device, (long) LIGHT_BYTES * capacity, usage, slots);
+        shadows = FrameBuffer.create(device, (long) SHADOW_BYTES * shadowCapacity, usage, slots);
     }
 
     /**
-     * Light {@code index} shines in all directions from ({@code x}, {@code y}, {@code z}), up to {@code range}:
+     * Light {@code index} shines in all directions from world position ({@code x}, {@code y}, {@code z}), up to
+     * {@code range}:
      * irradiance ({@code r}, {@code g}, {@code b}) at 1 unit, falling with the square of the distance. No shadows.
      */
-    public Lights point(int index, float x, float y, float z, float range, float r, float g, float b) {
+    public Lights point(int index, double x, double y, double z, float range, float r, float g, float b) {
         return set(index, POINT, x, y, z, range, r, g, b, 0, 0, 0, -1, -1);
     }
 
@@ -78,8 +88,8 @@ public final class Lights implements AutoCloseable {
      * Like {@link #point}, but only along ({@code dx}, {@code dy}, {@code dz}): full light within {@code inner}
      * radians of it, fading to none at {@code outer}.
      */
-    public Lights spot(int index, float x, float y, float z, float range, float r, float g, float b, float dx, float dy,
-        float dz, double inner, double outer) {
+    public Lights spot(int index, double x, double y, double z, float range, float r, float g, float b, float dx,
+        float dy, float dz, double inner, double outer) {
         return set(index, SPOT, x, y, z, range, r, g, b, dx, dy, dz, (float) Maths.cos(inner),
             (float) Maths.cos(outer));
     }
@@ -89,27 +99,41 @@ public final class Lights implements AutoCloseable {
         return set(index, DIRECTIONAL, 0, 0, 0, 0, r, g, b, dx, dy, dz, -1, -1);
     }
 
-    private Lights set(int index, int type, float x, float y, float z, float range, float r, float g, float b,
+    private Lights set(int index, int type, double x, double y, double z, float range, float r, float g, float b,
         float dx, float dy, float dz, float cosInner, float cosOuter) {
-        MemorySegment m = light(index);
+        long o = light(index);
         float length = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
         float scale = length > 0 ? 1 / length : 0;
-        m.set(F32, 0, x);
-        m.set(F32, 4, y);
-        m.set(F32, 8, z);
-        m.set(F32, 12, range);
-        m.set(F32, 16, r);
-        m.set(F32, 20, g);
-        m.set(F32, 24, b);
-        m.set(U32, 28, type);
-        m.set(F32, 32, dx * scale);
-        m.set(F32, 36, dy * scale);
-        m.set(F32, 40, dz * scale);
-        m.set(F32, 44, cosOuter);
-        m.set(F32, 48, cosInner);
-        m.set(U32, 52, -1); // no shadows until shadows() says so
-        m.set(U32, 56, 0);
+        putPosition(lights, o, 64, x, y, z);
+        lights.putFloat(o + 12, range);
+        lights.putFloat(o + 16, r);
+        lights.putFloat(o + 20, g);
+        lights.putFloat(o + 24, b);
+        lights.putInt(o + 28, type);
+        lights.putFloat(o + 32, dx * scale);
+        lights.putFloat(o + 36, dy * scale);
+        lights.putFloat(o + 40, dz * scale);
+        lights.putFloat(o + 44, cosOuter);
+        lights.putFloat(o + 48, cosInner);
+        lights.putInt(o + 52, -1); // no shadows until shadows() says so
+        lights.putInt(o + 56, 0);
         return this;
+    }
+
+    /**
+     * Writes world position ({@code x}, {@code y}, {@code z}) at {@code o} of {@code buffer}: the high parts there, the
+     * rest {@code lowOffset} bytes on, as shaders split them.
+     */
+    static void putPosition(FrameBuffer buffer, long o, long lowOffset, double x, double y, double z) {
+        float hx = (float) x;
+        float hy = (float) y;
+        float hz = (float) z;
+        buffer.putFloat(o, hx);
+        buffer.putFloat(o + 4, hy);
+        buffer.putFloat(o + 8, hz);
+        buffer.putFloat(o + lowOffset, (float) (x - hx));
+        buffer.putFloat(o + lowOffset + 4, (float) (y - hy));
+        buffer.putFloat(o + lowOffset + 8, (float) (z - hz));
     }
 
     /** Light {@code index} casts shadows through shadow table entries {@code first} to {@code first + count - 1}. */
@@ -118,37 +142,38 @@ public final class Lights implements AutoCloseable {
             throw new IllegalArgumentException("Shadow entries " + first + " to " + (first + count - 1) + " of "
                 + shadowCapacity);
         }
-        MemorySegment m = light(index);
-        m.set(U32, 52, first);
-        m.set(U32, 56, count);
+        long o = light(index);
+        lights.putInt(o + 52, first);
+        lights.putInt(o + 56, count);
         return this;
     }
 
     /**
      * Shadow table entry {@code entry}, a shadow map filtered by 3 x 3 PCF: the depth map in sampled slot {@code map},
-     * {@code size} texels across, drawn with {@code toShadow} (camera-relative positions to its clip space,
-     * column-major, reverse depth, e.g. the light camera's {@link Camera#viewProjection()}), compared with
-     * {@code bias}; a cascade covers view depths up to {@code split} (others: any). Allocates nothing.
+     * {@code size} texels across, drawn from {@code camera} (its view-projection and world position: the map serves
+     * every view, and stays valid while the light camera stays), compared with {@code bias}; a cascade covers view
+     * depths up to {@code split} (others: any). Allocates nothing.
      */
-    public Lights shadowMap(int entry, float[] toShadow, int map, int size, float bias, float split) {
-        return shadowMap(entry, toShadow, map, size, bias, split, 0);
+    public Lights shadowMap(int entry, Camera camera, int map, int size, float bias, float split) {
+        return shadowMap(entry, camera, map, size, bias, split, 0);
     }
 
     /**
-     * Like {@link #shadowMap(int, float[], int, int, float, float)}, looked up from the surface moved {@code normalOffset}
-     * units along its normal (about a texel's size in the world): against acne where the light grazes, beyond what
-     * the depth bias does. Allocates nothing.
+     * Like {@link #shadowMap(int, Camera, int, int, float, float)}, looked up from the surface moved
+     * {@code normalOffset} units along its normal (about a texel's size in the world): against acne where the light
+     * grazes, beyond what the depth bias does. Allocates nothing.
      */
-    public Lights shadowMap(int entry, float[] toShadow, int map, int size, float bias, float split,
-        float normalOffset) {
-        MemorySegment m = shadow(entry, SHADOW_MAP, PCF, map);
-        m.set(F32, 88, normalOffset);
+    public Lights shadowMap(int entry, Camera camera, int map, int size, float bias, float split, float normalOffset) {
+        long o = shadow(entry, SHADOW_MAP, PCF, map);
+        shadows.putFloat(o + 88, normalOffset);
+        float[] toShadow = camera.viewProjection();
         for (int i = 0; i < 16; i++) {
-            m.set(F32, 4L * i, toShadow[i]);
+            shadows.putFloat(o + 4L * i, toShadow[i]);
         }
-        m.set(U32, 76, size);
-        m.set(F32, 80, bias);
-        m.set(F32, 84, split);
+        shadows.putInt(o + 76, size);
+        shadows.putFloat(o + 80, bias);
+        shadows.putFloat(o + 84, split);
+        putPosition(shadows, o + 96, 16, camera.position(0), camera.position(1), camera.position(2));
         return this;
     }
 
@@ -157,45 +182,55 @@ public final class Lights implements AutoCloseable {
      * {@code mask}, the size of the shaded image, 1 lit and 0 in shadow per pixel. Allocates nothing.
      */
     public Lights shadowMask(int entry, int mask, int channel) {
-        MemorySegment m = shadow(entry, SHADOW_MASK, 0, mask);
-        m.set(F32, 88, channel);
+        long o = shadow(entry, SHADOW_MASK, 0, mask);
+        shadows.putFloat(o + 88, channel);
         return this;
     }
 
     /**
      * Shadow table entry {@code entry}, an inline ray query into the top level in acceleration structure slot
-     * {@code scene}, from {@code offset} per unit of distance off the surface (the drawn surface may be a detail level
-     * within a pixel of the traced one). Shading that cannot trace counts it as lit. Allocates nothing.
+     * {@code scene}, built relative to world position ({@code x}, {@code y}, {@code z}), from {@code offset} per unit of
+     * distance off the surface (the drawn surface may be a detail level within a pixel of the traced one). Shading
+     * that cannot trace counts it as lit. Allocates nothing.
      */
-    public Lights shadowRay(int entry, int scene, float offset) {
-        MemorySegment m = shadow(entry, SHADOW_RAY, 0, scene);
-        m.set(F32, 88, offset);
+    public Lights shadowRay(int entry, int scene, float offset, double x, double y, double z) {
+        long o = shadow(entry, SHADOW_RAY, 0, scene);
+        shadows.putFloat(o + 88, offset);
+        putPosition(shadows, o + 96, 16, x, y, z);
         return this;
     }
 
-    private MemorySegment shadow(int entry, int kind, int filter, int map) {
+    /** Shadow table entry {@code entry}'s offset, its kind, filter and image set, the rest reset. */
+    private long shadow(int entry, int kind, int filter, int map) {
         Objects.checkIndex(entry, shadowCapacity);
-        MemorySegment m = shadows.memory().asSlice((long) SHADOW_BYTES * entry, SHADOW_BYTES);
-        m.set(U32, 64, kind);
-        m.set(U32, 68, filter);
-        m.set(U32, 72, map);
-        m.set(F32, 84, Float.MAX_VALUE); // covers every depth, unless a cascade's split says otherwise
-        m.set(F32, 88, 0);
-        m.set(F32, 92, 0);
-        return m;
+        long o = (long) SHADOW_BYTES * entry;
+        shadows.putInt(o + 64, kind);
+        shadows.putInt(o + 68, filter);
+        shadows.putInt(o + 72, map);
+        shadows.putFloat(o + 84, Float.MAX_VALUE); // covers every depth, unless a cascade's split says otherwise
+        shadows.putFloat(o + 88, 0);
+        shadows.putFloat(o + 92, 0);
+        return o;
     }
 
-    private MemorySegment light(int index) {
+    /** Light {@code index}'s offset. */
+    private long light(int index) {
         Objects.checkIndex(index, capacity);
-        return lights.memory().asSlice((long) LIGHT_BYTES * index, LIGHT_BYTES);
+        return (long) LIGHT_BYTES * index;
+    }
+
+    /** Light {@code index}'s world position along {@code axis} (0 x, 1 y, 2 z), as set. */
+    public double position(int index, int axis) {
+        long o = light(index) + 4L * Objects.checkIndex(axis, 3);
+        return (double) lights.getFloat(o) + lights.getFloat(o + 64);
     }
 
     /** Light {@code index}'s direction (where it shines; unit length) into {@code out}. Allocates nothing. */
     public void direction(int index, double[] out) {
-        MemorySegment m = light(index);
-        out[0] = m.get(F32, 32);
-        out[1] = m.get(F32, 36);
-        out[2] = m.get(F32, 40);
+        long o = light(index);
+        out[0] = lights.getFloat(o + 32);
+        out[1] = lights.getFloat(o + 36);
+        out[2] = lights.getFloat(o + 40);
     }
 
     /** How many lights, from 0, shine. */

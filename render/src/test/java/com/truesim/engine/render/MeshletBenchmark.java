@@ -231,9 +231,11 @@ class MeshletBenchmark {
                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
              GpuImage depth = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_D32_SFLOAT,
                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
-             MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
-                 1 << 20, 65_535, 80_000_000, 4), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+             GpuScene gpu = new GpuScene(device, pool, 100_000);
+             MeshletRenderer renderer = new MeshletRenderer(device, gpu, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT);
              MemoryStack stack = stackPush()) {
+            renderer.createView(ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true)); // the camera's
             MeshData rockMesh = rock(6);
             MeshData terrainMesh = terrain(1024);
             int rock = pool.add(rockMesh);
@@ -273,10 +275,10 @@ class MeshletBenchmark {
                             (float) random.nextDouble(-1500, -10), (float) (qx / length), (float) (qy / length),
                             (float) (qz / length), (float) (qw / length), scale};
                         System.arraycopy(p, 0, placed, 8 * i, 8);
-                        renderer.setInstance(i, rock, p[0], p[1], p[2], p[3], p[4], p[5], p[6], scale, scale, scale);
+                        renderer.scene().set(i, rock, p[0], p[1], p[2], p[3], p[4], p[5], p[6], scale, scale, scale);
                     }
-                    renderer.setInstanceCount(count);
-                    renderer.setView(camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1,
+                    renderer.scene().removeFrom(count);
+                    mainView(renderer).set(camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1,
                         MeshletRenderer.MODE_LIT);
                     String scene = String.format(Locale.ROOT, "%,d rocks (%,d triangles in all)", count,
                         (long) count * triangles(rockMesh));
@@ -291,7 +293,7 @@ class MeshletBenchmark {
                     // The classic engine: discrete LODs picked per instance and frustum culling, on the CPU.
                     for (int i = 0; i < count; i++) {
                         float[] p = java.util.Arrays.copyOfRange(placed, 8 * i, 8 * i + 8);
-                        renderer.setInstance(i, rockLod, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[7], p[7]);
+                        renderer.scene().set(i, rockLod, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[7], p[7]);
                     }
                     long cpu = 0;
                     int lodDrawn = 0;
@@ -314,9 +316,9 @@ class MeshletBenchmark {
                 classicLod(device, renderer, color, depth, queries, period, rock, rockLod, rockLods, placed, camera);
                 shadows(device, pool, renderer, color, depth, queries, period, rock, rockMesh, ground, terrainMesh);
                 lighting(device, renderer, color, depth, queries, period, rock, ground);
-                renderer.setInstance(0, ground, 0, -6, 0, 0, 0, 0, 1, 1, 1, 1);
-                renderer.setInstanceCount(1);
-                renderer.setView(camera.set(0, -0.08, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1,
+                renderer.scene().set(0, ground, 0, -6, 0, 0, 0, 0, 1, 1, 1, 1);
+                renderer.scene().removeFrom(1);
+                mainView(renderer).set(camera.set(0, -0.08, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1,
                     MeshletRenderer.MODE_LIT);
                 measure("terrain at a grazing angle", device, renderer, color, depth, queries, period);
                 var terrainFinest = terrainMesh.levels().getLast();
@@ -489,12 +491,12 @@ class MeshletBenchmark {
                 vkCmdSetViewport(buffer, 0, VkViewport.calloc(1, stack).width(WIDTH).height(HEIGHT).maxDepth(1));
                 vkCmdSetScissor(buffer, 0, VkRect2D.calloc(1, stack).extent(e -> e.set(WIDTH, HEIGHT)));
                 long push = stack.nmalloc(8, 48);
-                MemoryUtil.memPutLong(push, renderer.viewBuffer().deviceAddress());
+                MemoryUtil.memPutLong(push, mainView(renderer).address());
                 MemoryUtil.memPutLong(push + 8, pool.meshTable().deviceAddress());
-                MemoryUtil.memPutLong(push + 16, renderer.instanceBuffer().deviceAddress());
+                MemoryUtil.memPutLong(push + 16, renderer.scene().instanceAddress());
                 MemoryUtil.memPutLong(push + 24, pool.positions().deviceAddress());
                 MemoryUtil.memPutLong(push + 32, pool.attributes().deviceAddress());
-                MemoryUtil.memPutLong(push + 40, renderer.materialsAddress());
+                MemoryUtil.memPutLong(push + 40, renderer.scene().materialsAddress());
                 pipeline.push(buffer, push, 48);
                 vkCmdBindIndexBuffer(buffer, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
                 if (draws > 0) {
@@ -537,7 +539,7 @@ class MeshletBenchmark {
         double groundY = -12;
         rocksOnTerrain(renderer, rock, ground, 30_000, extent, groundY);
         Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+        mainView(renderer).set(camera, 1, MeshletRenderer.MODE_LIT);
         try (GpuImage shaded = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
             org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
              Lights lights = new Lights(device, 4096, 1)) {
@@ -550,9 +552,9 @@ class MeshletBenchmark {
                 ClusteredLights clustered = new ClusteredLights(lights, camera, WIDTH, HEIGHT);
                 for (boolean forward : new boolean[] {true, false}) {
                     try (FrameGraph graph = new FrameGraph(device, 2)) {
-                        graph.add(forward ? new ClusteredForwardShading(geometry, WIDTH, HEIGHT,
+                        graph.add(forward ? new ClusteredForwardShading(geometry, mainView(renderer), WIDTH, HEIGHT,
                             VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
-                            : new VisibilityBufferShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                            : new VisibilityBufferShading(geometry, mainView(renderer), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                                 VK_FORMAT_D32_SFLOAT))
                             .output(Keys.SCENE_COLOR, target);
                         if (count > 0) {
@@ -569,10 +571,21 @@ class MeshletBenchmark {
         }
     }
 
-    /** Clustered forward shading of {@code renderer}'s meshlets into RGBA8 and D32 images. */
-    static ClusteredForwardShading forward(MeshletRenderer renderer, int width, int height) {
-        return new ClusteredForwardShading(SceneGeometry.meshlets(renderer), width, height, VK_FORMAT_R8G8B8A8_UNORM,
-            VK_FORMAT_D32_SFLOAT);
+    /** Clustered forward shading of {@code view}'s renderer's meshlets, as {@code view} sees them, into RGBA8 and D32. */
+    static ClusteredForwardShading forward(RenderView view, int width, int height) {
+        return new ClusteredForwardShading(SceneGeometry.meshlets(view.renderer()), view, width, height,
+            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+    }
+
+    /** {@code renderer} with the camera's view, room for {@code triangles} on the indexed path, with occlusion. */
+    static MeshletRenderer withView(MeshletRenderer renderer, int triangles) {
+        renderer.createView(ViewOptions.of(1 << 20, triangles).withOcclusion(true));
+        return renderer;
+    }
+
+    /** The camera's view of {@code renderer}: its first. */
+    static RenderView mainView(MeshletRenderer renderer) {
+        return renderer.views().getFirst();
     }
 
     /** The height of {@link #terrain}(1024), placed at the origin, at x, z. */
@@ -588,7 +601,7 @@ class MeshletBenchmark {
      */
     static void rocksOnTerrain(MeshletRenderer renderer, int rock, int ground, int count, double extent,
         double groundY) {
-        renderer.setInstance(0, ground, 0, (float) groundY, 0, 0, 0, 0, 1, 1, 1, 1);
+        renderer.scene().set(0, ground, 0, (float) groundY, 0, 0, 0, 0, 1, 1, 1, 1);
         SplittableRandom random = new SplittableRandom(11);
         for (int i = 1; i <= count; i++) {
             double x = random.nextDouble(-extent / 2, extent / 2);
@@ -599,11 +612,11 @@ class MeshletBenchmark {
             double qz = random.nextDouble(-1, 1);
             double qw = random.nextDouble(-1, 1);
             double length = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
-            renderer.setInstance(i, rock, (float) x, (float) (groundY + terrainHeight(x, z) + 0.4 * scale), (float) z,
+            renderer.scene().set(i, rock, (float) x, (float) (groundY + terrainHeight(x, z) + 0.4 * scale), (float) z,
                 (float) (qx / length), (float) (qy / length), (float) (qz / length), (float) (qw / length), scale,
                 scale, scale);
         }
-        renderer.setInstanceCount(count + 1);
+        renderer.scene().removeFrom(count + 1);
     }
 
     /**
@@ -633,7 +646,7 @@ class MeshletBenchmark {
         double groundY = -12;
         rocksOnTerrain(renderer, rock, ground, 30_000, extent, groundY);
         Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+        mainView(renderer).set(camera, 1, MeshletRenderer.MODE_LIT);
         SceneGeometry geometry = SceneGeometry.meshlets(renderer);
         try (GpuImage shaded = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
             org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -655,32 +668,33 @@ class MeshletBenchmark {
                     + "bytes compacted, built in %.0f ms%n", rayTracing.quantizedVertices() ? "quantized" : "decoded",
                     rayTracing.bottomLevelBytes(), (System.nanoTime() - t0) / 1e6);
             }
-            SceneDraw depthOnly = new SceneDraw(geometry, 2, camera, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, WIDTH,
+            SceneDraw depthOnly = new SceneDraw(geometry, geometry.createView(ViewOptions.of(1 << 20, 80_000_000)), camera, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, WIDTH,
                 HEIGHT, false); // forward's depth for the mask: the camera as a view of its own
-            SceneDraw ids = new SceneDraw(geometry, 0, null, SurfaceOutput.ids(), VK_FORMAT_D32_SFLOAT, WIDTH, HEIGHT,
+            SceneDraw ids = new SceneDraw(geometry, mainView(renderer), null, SurfaceOutput.ids(), VK_FORMAT_D32_SFLOAT, WIDTH, HEIGHT,
                 true);
+            RenderView sunView = geometry.createView(ViewOptions.shadow(1 << 18, 1 << 24));
+            CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, cascadeLights, 0, 0, camera, 3, 2048,
+                ViewOptions.shadow(1 << 18, 1 << 24), 300);
             for (boolean forward : new boolean[] {true, false}) {
-                Technique shading = forward ? forward(renderer, WIDTH, HEIGHT) : new VisibilityBufferShading(geometry,
-                    WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+                Technique shading = forward ? forward(mainView(renderer), WIDTH, HEIGHT) : new VisibilityBufferShading(
+                    geometry, mainView(renderer), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
                 String scene = "30,000 rocks on the terrain, from above, "
                     + (forward ? "forward" : "visibility buffer");
                 time(device, color, depth, queries, period, scene + ", the sun unshadowed", target, shading, sun);
                 for (int size : new int[] {2048, 4096}) {
                     time(device, color, depth, queries, period, scene + ", shadow map " + size + " x " + size, target,
-                        shading, sun, new ShadowMapShadows(geometry, lights, 0, 0, sun(extent, groundY, size), size, 1,
-                            sunBias(extent, size)));
+                        shading, sun, new ShadowMapShadows(geometry, lights, 0, 0, sun(extent, groundY, size), size,
+                            sunView, sunBias(extent, size)));
                 }
-                CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, cascadeLights, 0, 0, camera, 3, 2048, 1,
-                    300);
-                cascades.update(0, 0, 0);
+                cascades.update();
                 time(device, color, depth, queries, period, scene + ", 3 cascades of 2048 x 2048 to 300 units", target,
                     shading, cascadeSun, cascades);
                 if (rayTracing != null) {
                     time(device, color, depth, queries, period, scene + ", ray-traced mask", target, shading, sun,
-                        new RayTracedShadows(rayTracing, renderer, lights, 0, 0, forward ? depthOnly : ids, camera));
+                        new RayTracedShadows(rayTracing, lights, 0, 0, forward ? depthOnly : ids, camera));
                     if (!forward) {
                         time(device, color, depth, queries, period, scene + ", inline rays", target, shading, sun,
-                            new InlineRayShadows(rayTracing, renderer, lights, 0, 0));
+                            new InlineRayShadows(rayTracing, mainView(renderer), lights, 0, 0));
                     }
                 }
             }
@@ -709,25 +723,25 @@ class MeshletBenchmark {
         int count = 30_000;
         for (int i = 0; i < count; i++) {
             int o = 8 * i;
-            renderer.setInstance(i, rock, placed[o], placed[o + 1], placed[o + 2], placed[o + 3], placed[o + 4],
+            renderer.scene().set(i, rock, placed[o], placed[o + 1], placed[o + 2], placed[o + 3], placed[o + 4],
                 placed[o + 5], placed[o + 6], placed[o + 7], placed[o + 7], placed[o + 7]);
         }
-        renderer.setView(camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1, MeshletRenderer.MODE_LIT);
+        mainView(renderer).set(camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1, MeshletRenderer.MODE_LIT);
         ExternalImage target = new ExternalImage("target", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
             .set(color.handle(), color.view());
         float half = (float) Math.sqrt(0.5);
         for (boolean wall : new boolean[] {false, true}) {
-            renderer.setInstance(count, ground, 0, 0, -80, half, 0, 0, half, 1, 1, 1);
-            renderer.setInstanceCount(wall ? count + 1 : count);
+            renderer.scene().set(count, ground, 0, 0, -80, half, 0, 0, half, 1, 1, 1);
+            renderer.scene().removeFrom(wall ? count + 1 : count);
             for (boolean occlusion : new boolean[] {false, true}) {
                 try (FrameGraph graph = new FrameGraph(device, 2)) {
-                    graph.add(forward(renderer, WIDTH, HEIGHT)
+                    graph.add(forward(mainView(renderer), WIDTH, HEIGHT)
                         .occlusion(occlusion)).output(Keys.SCENE_COLOR, target);
                     double time = time(device, color, depth, queries, period, BATCH, graph::record);
                     System.out.printf(Locale.ROOT, "  %,d rocks%s, through the graph, occlusion culling %s: %.3f ms "
                         + "median, %,d meshlets drawn%n", count, wall ? " behind a wall" : "", occlusion ? "on" : "off",
-                        time, renderer.visibleMeshlets());
+                        time, mainView(renderer).visibleMeshlets());
                 }
             }
         }
@@ -741,7 +755,7 @@ class MeshletBenchmark {
     private static void classicLod(VulkanDevice device, MeshletRenderer renderer, GpuImage color, GpuImage depth,
         long queries, double period, int rock, int rockLod, MeshData rockLods, float[] placed, Camera camera) {
         int count = 30_000;
-        renderer.setView(camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1, MeshletRenderer.MODE_LIT);
+        mainView(renderer).set(camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1, MeshletRenderer.MODE_LIT);
         ExternalImage target = new ExternalImage("target", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
             .set(color.handle(), color.view());
@@ -751,16 +765,16 @@ class MeshletBenchmark {
             for (int mesh : new int[] {rock, rockLod, -1}) {
                 for (int i = 0; i < count; i++) {
                     int o = 8 * i;
-                    renderer.setInstance(i, mesh < 0 ? rockLod : mesh, placed[o], placed[o + 1], placed[o + 2],
+                    renderer.scene().set(i, mesh < 0 ? rockLod : mesh, placed[o], placed[o + 1], placed[o + 2],
                         placed[o + 3], placed[o + 4], placed[o + 5], placed[o + 6], placed[o + 7], placed[o + 7],
                         placed[o + 7]);
                 }
-                renderer.setInstanceCount(count);
+                renderer.scene().removeFrom(count);
                 SceneGeometry geometry = mesh < 0 ? new SceneGeometry(classic) : SceneGeometry.meshlets(renderer);
                 time(device, color, depth, queries, period, String.format(Locale.ROOT, "%,d rocks, through the graph, "
                     + "%s", count, mesh == rock ? "meshlets, cluster hierarchy" : mesh == rockLod
                     ? "meshlets, discrete LODs" : "classic LOD (discrete LODs, a level per instance)"), target,
-                    new ClusteredForwardShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                    new ClusteredForwardShading(geometry, mainView(renderer), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                         VK_FORMAT_D32_SFLOAT).occlusion(false));
             }
         }
@@ -804,7 +818,7 @@ class MeshletBenchmark {
                             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
                             VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-                        renderer.record(commands, color.view(), depth.view(), WIDTH, HEIGHT, 0.1f, 0.12f, 0.15f);
+                        renderer.record(commands, mainView(renderer), color.view(), depth.view(), WIDTH, HEIGHT, 0.1f, 0.12f, 0.15f);
                         fullBarrier(commands); // the next frame resets what this one reads
                     }
                     vkCmdWriteTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 1);
@@ -825,7 +839,7 @@ class MeshletBenchmark {
             System.out.printf(Locale.ROOT, "  %s, %s: %.3f ms median, %.3f ms best%n", scene, paths[v] == MeshletRenderer.Path.INDEXED ? "indexed" : "mesh shaders",
                 times[v][FRAMES / 2], times[v][0]);
         }
-        System.out.printf(Locale.ROOT, "  %s: %,d meshlets drawn%n", scene, renderer.visibleMeshlets());
+        System.out.printf(Locale.ROOT, "  %s: %,d meshlets drawn%n", scene, mainView(renderer).visibleMeshlets());
     }
 
     private static void fullBarrier(VkCommandBuffer commands) {

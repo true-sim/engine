@@ -16,10 +16,13 @@ public static const uint POINT = 0;
 public static const uint SPOT = 1;
 public static const uint DIRECTIONAL = 2;
 
-/** One light: 64 bytes. Positions are camera-relative, as instances are. */
+/**
+ * One light: 80 bytes. At a world position in two floats per axis, as instances are; a light list hands it out
+ * relative to the camera it shades for (relativeTo()).
+ */
 public struct Light
 {
-    public float3 position;
+    public float3 position;        // world position, high part; relative to the shading camera once handed out
     public float range;            // where its light ends (smoothly); unused for directional lights
     public float3 color;           // linear, intensity included: irradiance at 1 unit (directional: at any distance)
     public uint type;
@@ -29,12 +32,26 @@ public struct Light
     public int shadowFirst;        // its first shadow map in the shadow table, or -1
     public uint shadowCount;
     public uint pad;
+    public float3 positionLow;     // world position, the rest
+    public uint pad1;
 };
 
-/** One shadow table entry: 96 bytes. What `map` and `params` mean depends on the kind. */
+/** The world position (high, low) less the camera's: what a float near the camera holds. */
+public float3 lessCamera(float3 high, float3 low, float3 cameraHigh, float3 cameraLow)
+{
+    precise float3 h = high - cameraHigh;
+    precise float3 l = low - cameraLow;
+    return h + l;
+}
+
+/**
+ * One shadow table entry: 128 bytes. What `map` and `params` mean depends on the kind. Each entry has a world position
+ * of its own (a map's: its light camera's; a ray's: its top level's), so it serves any view: a surface is moved from
+ * the shading camera's positions into the entry's before the lookup.
+ */
 public struct Shadow
 {
-    public float4x4 toShadow;      // maps: camera-relative positions to the map's clip space (reverse depth)
+    public float4x4 toShadow;      // maps: positions relative to the entry's to the map's clip space (reverse depth)
     public uint kind;              // SHADOW_MAP, SHADOW_MASK, SHADOW_RAY
     public uint filter;            // maps: PCF, ...
     public uint map;               // maps: the depth map's sampled slot; masks: the mask's; rays: the scene's slot
@@ -42,6 +59,10 @@ public struct Shadow
     public float bias;             // maps: in the map's depth units
     public float split;            // cascades: the view depth this cascade reaches
     public float2 params;          // maps: (normal offset, 0); masks: (channel, 0); rays: (offset per unit of distance, 0)
+    public float3 position;        // the entry's world position, high part
+    public uint pad;
+    public float3 positionLow;     // and the rest
+    public uint pad1;
 };
 
 /** Shadow kinds. */
@@ -68,6 +89,25 @@ public struct LightListHeader
     public uint* data1;            // (clusters: maxPerCluster slots per cluster)
     public uint4 ints;             // the layout's numbers (clusters: across, down, deep, tile size in pixels)
     public float4 floats;          // (clusters: near, slices per unit of log depth, maxPerCluster as bits, 0)
+    public float3 camera;          // the world position of the camera it shades for, high part
+    public uint pad1;
+    public float3 cameraLow;       // and the rest; 112 bytes in all
+    public uint pad2;
+
+    /** `light` as this list's shading sees it: its position relative to the camera. */
+    public Light relativeTo(Light light)
+    {
+        Light r = light;
+        r.position = lessCamera(light.position, light.positionLow, camera, cameraLow);
+        r.positionLow = float3(0);
+        return r;
+    }
+
+    /** What moves a position relative to the camera into shadow entry `s`'s. */
+    public float3 toEntry(Shadow s)
+    {
+        return lessCamera(camera, cameraLow, s.position, s.positionLow);
+    }
 };
 
 /** Light list layouts. */
@@ -112,19 +152,20 @@ public struct ClusterLightList : ILightList
 
     public Light light(uint i)
     {
-        return header.lights[header.data1[cluster * asuint(header.floats.z) + i]];
+        return header.relativeTo(header.lights[header.data1[cluster * asuint(header.floats.z) + i]]);
     }
 }
 
 /** Where a surface asks for its shadow: what every kind of shadow may need. */
 public struct ShadowQuery
 {
-    public float3 world;           // camera-relative position
+    public float3 world;           // position relative to the entry's (Shadow.position)
     public float3 normal;          // the surface's
     public float3 toLight;         // unit
     public float distance;         // to the light (directional: infinite)
     public uint2 pixel;
     public float depth;            // from the viewer, along the view direction
+    public float fromViewer;       // distance from the viewer
 };
 
 /** Traces shadow rays, or not: pipelines without ray queries use NoRays, so only traced variants need the feature. */
@@ -203,7 +244,7 @@ public struct RayShadow<R : IShadowRays> : IShadow
 
     public float visibility(Shadow s, ShadowQuery q)
     {
-        float offset = s.params.x * length(q.world) + 1.0e-3;
+        float offset = s.params.x * q.fromViewer + 1.0e-3;
         float3 normal = dot(q.normal, q.toLight) < 0 ? -q.normal : q.normal;
         return rays.clear(s.map, q.world + normal * offset, q.toLight, q.distance);
     }
@@ -258,9 +299,10 @@ int shadowFor(Light light, Shadow* shadows, float3 world, float depth)
  * What light `light` adds to surface `s` at `world`, seen from `toViewer`, at `pixel`, `depth` from the viewer; shadow
  * rays traced by `rays`.
  */
-public float3 lightSurface<R : IShadowRays>(R rays, Light light, Shadow* shadows, Surface s, float3 world,
+public float3 lightSurface<R : IShadowRays>(R rays, LightListHeader h, Light light, Surface s, float3 world,
     float3 toViewer, uint2 pixel, float depth)
 {
+    Shadow* shadows = h.shadows;
     float3 toLight;
     float3 irradiance = light.color;
     float distance = 1.0e30;
@@ -290,20 +332,21 @@ public float3 lightSurface<R : IShadowRays>(R rays, Light light, Shadow* shadows
     int shadow = shadowFor(light, shadows, world, depth);
     if (shadow >= 0)
     {
-        ShadowQuery q = { world, s.normal, toLight, distance, pixel, depth };
-        irradiance *= shadowVisibility(rays, shadows[shadow], q);
+        Shadow entry = shadows[shadow];
+        ShadowQuery q = { world + h.toEntry(entry), s.normal, toLight, distance, pixel, depth, length(world) };
+        irradiance *= shadowVisibility(rays, entry, q);
     }
     return reflected(s, toViewer, toLight, irradiance);
 }
 
 /** What every light of `list` adds to surface `s` at `world`, seen from `toViewer`, `depth` from the viewer. */
-public float3 lightAll<L : ILightList, R : IShadowRays>(L list, R rays, Shadow* shadows, Surface s, float3 world,
+public float3 lightAll<L : ILightList, R : IShadowRays>(L list, R rays, LightListHeader h, Surface s, float3 world,
     float3 toViewer, uint2 pixel, float depth)
 {
     float3 sum = 0;
     for (uint i = 0; i < list.count(); i++)
     {
-        sum += lightSurface(rays, list.light(i), shadows, s, world, toViewer, pixel, depth);
+        sum += lightSurface(rays, h, list.light(i), s, world, toViewer, pixel, depth);
     }
     return sum;
 }
@@ -324,8 +367,7 @@ public float3 lightList<R : IShadowRays>(R rays, LightListHeader* h, Surface s, 
     switch (header.layout)
     {
     case CLUSTERS:
-        return lightAll(ClusterLightList(header, pixel, depth), rays, header.shadows, s, world, toViewer, pixel,
-            depth);
+        return lightAll(ClusterLightList(header, pixel, depth), rays, header, s, world, toViewer, pixel, depth);
     default:
         return 0;
     }

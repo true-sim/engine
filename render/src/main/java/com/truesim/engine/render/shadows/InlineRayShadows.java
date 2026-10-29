@@ -9,6 +9,7 @@ import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.Lights;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RayTracing;
+import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.ShadowInputs;
 import java.util.List;
 import java.util.Objects;
@@ -22,16 +23,19 @@ import java.util.Objects;
 public final class InlineRayShadows implements Technique {
 
     private final RayTracing rayTracing;
-    private final MeshletRenderer renderer;
+    private final RenderView view;
     private final Lights lights;
     private final int light;
     private final int entry;
     private float offset = 2.0e-3f;
 
-    /** Shadows of light {@code light} of {@code lights}, traced into {@code renderer}'s instances, in {@code entry}. */
-    public InlineRayShadows(RayTracing rayTracing, MeshletRenderer renderer, Lights lights, int light, int entry) {
+    /**
+     * Shadows of light {@code light} of {@code lights}, traced into a top level of {@code view}'s scene relative to its
+     * camera (the view shading them), in {@code entry}.
+     */
+    public InlineRayShadows(RayTracing rayTracing, RenderView view, Lights lights, int light, int entry) {
         this.rayTracing = Objects.requireNonNull(rayTracing, "rayTracing");
-        this.renderer = Objects.requireNonNull(renderer, "renderer");
+        this.view = Objects.requireNonNull(view, "view");
         this.lights = Objects.requireNonNull(lights, "lights");
         this.light = light;
         this.entry = entry;
@@ -57,9 +61,10 @@ public final class InlineRayShadows implements Technique {
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
         g.modifyBuffer(Keys.LIGHT_LIST);
-        Buffer topLevel = g.request(new TopLevel(rayTracing, renderer));
+        Buffer topLevel = g.request(new TopLevel(rayTracing, view));
         g.request(new ShadowInputs()).after(topLevel).rays().setup(ctx -> {
-            lights.shadowRay(entry, rayTracing.slot(), offset);
+            lights.shadowRay(entry, rayTracing.slot(), offset, view.position(0), view.position(1),
+                view.position(2)); // the top level is relative to the view's camera
             lights.shadows(light, entry, 1);
         });
     }

@@ -10,7 +10,7 @@ import lights;
 
 struct TracedPush
 {
-    float4x4 inverseViewProjection;  // clip space back to camera-relative positions
+    float4x4 inverseViewProjection;  // clip space back to positions relative to the camera
     uint depth;                      // sampled slot of the scene's depth
     uint mask;                       // storage slot of the mask: 1 lit, 0 in shadow
     uint scene;                      // the top level's slot
@@ -19,6 +19,12 @@ struct TracedPush
     float offset;                    // off the surface, per unit of distance from the camera
     Light* lights;
     uint light;                      // which of them
+    float toTopLevelX;               // what moves a position relative to the camera into the top level's
+    float toTopLevelY;
+    float toTopLevelZ;
+    float lightX;                    // the light's position relative to the camera
+    float lightY;
+    float lightZ;
 };
 
 [[vk::push_constant]]
@@ -63,6 +69,7 @@ void tracedMain(uint3 id : SV_DispatchThreadID)
             neighbour(pixel, int2(0, 1), depth, position)));
         normal = dot(normal, position) > 0 ? -normal : normal; // towards the camera
         Light light = push.lights[push.light];
+        light.position = float3(push.lightX, push.lightY, push.lightZ);
         float3 toLight = -light.direction;
         float distance = 1.0e30;
         if (light.type != DIRECTIONAL)
@@ -78,7 +85,8 @@ void tracedMain(uint3 id : SV_DispatchThreadID)
         else
         {
             float offset = push.offset * length(position) + 1.0e-3;
-            lit = occluded(push.scene, position + normal * offset, toLight, 0, distance) ? 0 : 1;
+            float3 from = position + normal * offset + float3(push.toTopLevelX, push.toTopLevelY, push.toTopLevelZ);
+            lit = occluded(push.scene, from, toLight, 0, distance) ? 0 : 1;
         }
     }
     images[push.mask][id.xy] = float4(lit, 0, 0, 0);

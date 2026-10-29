@@ -1,4 +1,4 @@
-// The instance pass of both geometry paths, for up to four views at once (a row of workgroups per view): one thread
+// The instance pass of both geometry paths, for any number of views at once (a row of workgroups per view): one thread
 // per instance and view tests the instance's bounds against the view's frustum, and each visible instance appends a
 // chunk per 64 of the meshlets its distance may need, marked with the view. All views share the chunk list, so one
 // cull pass serves them all. Words 0-2 of the chunk command are the cull pass's indirect dispatch over the chunks; word
@@ -7,16 +7,16 @@ import meshlets.common;
 
 struct InstancePush
 {
-    View* views;
+    ViewRef* views;        // the renderer's views, by index
     MeshEntry* meshes;
     Instance* instances;
     Chunk* chunks;
     uint* chunkCommand;
     Level* levels;
     uint maxChunks;
-    uint* visibility;      // per instance: 1 if it was visible the last time the late phase looked
     Occlusion occlusion;
-    uint viewList;         // the views of the rows, 8 bits each
+    CulledView* rows;      // the views of the rows, and their phases
+    uint firstRow;         // the row of this dispatch's first (dispatches have at most 65,535 rows)
 };
 
 [[vk::push_constant]]
@@ -26,19 +26,25 @@ ConstantBuffer<InstancePush> push;
 [numthreads(64, 1, 1)]
 void instancesMain(uint3 id : SV_DispatchThreadID)
 {
-    uint v = (push.viewList >> (8 * id.y)) & 0xff;
-    View view = push.views[v];
+    CulledView row = push.rows[push.firstRow + id.y];
+    uint v = row.view;
+    View view = push.views[v].view[0];
     if (id.x >= view.instanceCount)
     {
         return;
     }
-    Instance instance = push.instances[id.x];
+    Instance stored = push.instances[id.x];
+    if (!drawnIn(stored, view))
+    {
+        return; // a hole, on other layers, or casting no shadow in a shadow view
+    }
+    Instance instance = relative(stored, view);
     MeshEntry mesh = push.meshes[instance.mesh];
     float3 center = toWorld(instance, mesh.sphere.xyz);
     float radius = mesh.sphere.w * maxScale(instance);
-    uint phase = phaseOf(push.occlusion, v);
+    uint phase = row.phase;
     bool inView = inFrustum(view, center, radius);
-    if (phase == PHASE_EARLY && (!inView || push.visibility[id.x] == 0))
+    if (phase == PHASE_EARLY && (!inView || view.visibility[id.x] == 0))
     {
         return; // the early phase draws what was visible last frame
     }
@@ -46,9 +52,9 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     {
         // Every instance in view is tested against the pyramid of what the early phase drew; the late phase draws
         // those now visible that the early phase did not.
-        bool drawnEarly = push.visibility[id.x] != 0;
+        bool drawnEarly = view.visibility[id.x] != 0;
         bool visible = inView && unoccluded(view, push.occlusion, center, radius);
-        push.visibility[id.x] = visible ? 1 : 0;
+        view.visibility[id.x] = visible ? 1 : 0;
         if (!visible || drawnEarly)
         {
             return;
@@ -64,7 +70,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     float scale = maxScale(instance);
     // Orthographic views: errors do not shrink with distance (as if at distance 1).
     float distance = view.orthographic != 0 ? 1.0
-        : length(toWorld(instance, mesh.lodSphere.xyz)) - mesh.lodSphere.w * scale;
+        : length(toWorld(instance, mesh.lodSphere.xyz) - view.eye) - mesh.lodSphere.w * scale;
     if (distance > 0)
     {
         for (uint l = 0; l < mesh.levelCount; l++)
@@ -82,7 +88,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     InterlockedAdd(push.chunkCommand[3], chunks, first);
     for (uint i = 0; i < chunks && first + i < push.maxChunks; i++)
     {
-        push.chunks[first + i] = Chunk(id.x, (i * 64) | (v << 30));
+        push.chunks[first + i] = Chunk(id.x, i * 64, v, phase);
     }
     InterlockedMax(push.chunkCommand[0], min(first + chunks, push.maxChunks));
 }

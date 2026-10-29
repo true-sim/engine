@@ -3,7 +3,8 @@
 module common;
 
 import bindless;
-__exported import shading;
+__exported import materials.metallicRoughness;
+__exported import materials.clearcoat;
 __exported import lights;
 
 /** One mesh in the geometry pool: where its data lies in the pool's buffers, and its quantization box. 96 bytes. */
@@ -32,17 +33,42 @@ public struct Level
     public float error;
 };
 
-/** One drawn object: camera-relative position, rotation, scale and mesh. 48 bytes. */
+/**
+ * One drawn object: world position, rotation, scale and mesh. 64 bytes. The position is two floats per axis, a high
+ * part and the rest (position + positionLow), about 48 bits: precise anywhere in a large world. Loaded through
+ * relative(), which makes it relative to a view's camera; everything after works camera-relative, in floats.
+ */
 public struct Instance
 {
     public float4 rotation;        // quaternion x, y, z, w
-    public float3 position;
-    public uint mesh;
+    public float3 position;        // world position, high part; after relative(): camera-relative
+    public uint mesh;              // the mesh in the low 24 bits, the flags (INSTANCE_*) above; after relative(): the mesh
     public float3 scale;
     public uint materialBase;      // the material of submesh s is materialBase + s
+    public float3 positionLow;     // world position, the rest; after relative(): 0
+    public uint layers;            // the layers it is on: drawn in views of any of them
 };
 
-/** The frame's view. The camera sits at the origin: instances are camera-relative. */
+/** Instance flags, in the mesh word's top 8 bits. */
+public static const uint INSTANCE_LIVE = 1u << 24;          // 0: a hole, an id not in use
+public static const uint INSTANCE_CASTS_SHADOWS = 1u << 25;
+public static const uint INSTANCE_MESH = 0xffffffu;
+
+/** View flags. */
+public static const uint VIEW_CASTERS_ONLY = 1;             // shadow views: instances casting shadows only
+
+/** Whether stored instance `instance` (as stored, before relative()) is drawn in `view`: live, on its layers. */
+public bool drawnIn(Instance instance, View view)
+{
+    return (instance.mesh & INSTANCE_LIVE) != 0 && (instance.layers & view.layers) != 0
+        && ((view.flags & VIEW_CASTERS_ONLY) == 0 || (instance.mesh & INSTANCE_CASTS_SHADOWS) != 0);
+}
+
+/**
+ * A view of the frame: a camera, with its world position (two floats per axis, as instances') and the matrices from
+ * positions relative to it. A view may look from an eye off that position (a light's shadow map from a camera's
+ * position): the cone test and level selection use the eye.
+ */
 public struct View
 {
     public float4x4 viewProjection;
@@ -53,9 +79,81 @@ public struct View
     public uint maxDraws;
     public uint mode;              // 0 lit, 1 meshlet colors, 2 white
     public uint orthographic;      // 1: projectionScale is pixels per unit at any distance (e.g. a sun's shadow map)
-    public uint2 pad;
-    public float4x4 inverseViewProjection; // clip space back to camera-relative positions; 256 bytes in all
+    public uint maxIndices;        // the indexed path's index buffer holds this many (-1: mesh shaders, no buffer)
+    public uint binDraws;          // room for this many meshlets in each raster bin but the first (BIN_*)
+    public float4x4 inverseViewProjection; // clip space back to camera-relative positions
+    public float3 position;        // the camera's world position, high part
+    public uint pad1;
+    public float3 positionLow;     // and the rest
+    public uint layers;            // the layers it draws
+    public float3 eye;             // where the view looks from, relative to its position (0 but for shadow views)
+    public uint flags;             // VIEW_*
+    public ViewLists lists;        // where culling lists what the view draws
+    public uint* visibility;       // per instance: 1 if the view saw it the last time its late phase looked; or null
+    public uint binIndices;        // the indexed path's room in each raster bin but the first, after maxIndices
+    public uint pad3;              // 352 bytes in all
 };
+
+/**
+ * Raster bins: how meshlets rasterize, by their material. Each has its own lists and draw: the first is ordinary
+ * opaque and one-sided (back faces culled, no discard: the fastest), then double-sided opaque (no culling), then
+ * alpha-masked (no culling; back faces of one-sided masked materials discarded with the masked texels).
+ */
+public static const uint BINS = 3;
+public static const uint BIN_OPAQUE = 0;
+public static const uint BIN_DOUBLE_SIDED = 1;
+public static const uint BIN_MASKED = 2;
+
+/** The raster bin of a meshlet of material `m`. */
+public uint rasterBin(Material m)
+{
+    return materialMasked(m) ? BIN_MASKED : materialDoubleSided(m) ? BIN_DOUBLE_SIDED : BIN_OPAQUE;
+}
+
+/** The first slot of `bin` in `view`'s visible list. */
+public uint binFirstSlot(View view, uint bin)
+{
+    return bin == 0 ? 0 : view.maxDraws + (bin - 1) * view.binDraws;
+}
+
+/** How many meshlets `bin` has room for in `view`'s visible list. */
+public uint binDrawCapacity(View view, uint bin)
+{
+    return bin == 0 ? view.maxDraws : view.binDraws;
+}
+
+/** The first index of `bin` in `view`'s index buffer (the indexed path's). */
+public uint binFirstIndex(View view, uint bin)
+{
+    return bin == 0 ? 0 : view.maxIndices + (bin - 1) * view.binIndices;
+}
+
+/** How many indices `bin` has room for (-1: mesh shaders, no index buffer). */
+public uint binIndexCapacity(View view, uint bin)
+{
+    return bin == 0 ? view.maxIndices : view.binIndices;
+}
+
+/** A view's place in a renderer's table of views. */
+public struct ViewRef
+{
+    public View* view;
+};
+
+/**
+ * `instance` relative to `view`'s camera: its world position minus the camera's, the high parts and the rest apart,
+ * so the difference keeps what floats near the camera can hold.
+ */
+public Instance relative(Instance instance, View view)
+{
+    precise float3 high = instance.position - view.position;
+    precise float3 low = instance.positionLow - view.positionLow;
+    Instance r = instance;
+    r.position = high + low;
+    r.positionLow = float3(0);
+    r.mesh = instance.mesh & INSTANCE_MESH;
+    return r;
+}
 
 public float3 rotate(float4 q, float3 v)
 {
@@ -144,17 +242,15 @@ public float projectedError(View view, float3 center, float radius, float error)
     {
         return error * view.projectionScale;
     }
-    float distance = length(center) - radius;
+    float distance = length(center - view.eye) - radius;
     return distance > 0 ? error * view.projectionScale / distance : 1.0 / 0.0;
 }
 
 // ---------------------------------------------------------------- occlusion culling
 
-/** Which phase of two-phase occlusion culling each view runs, and the depth pyramid the late phase tests against. */
+/** The depth pyramid the late phase of two-phase occlusion culling tests against. */
 public struct Occlusion
 {
-    public uint phases;       // 2 bits per view: 0 no occlusion culling; 1 early, last frame's visible; 2 late
-    // (against the pyramid)
     public uint pyramid;      // sampled slot of the depth pyramid (DepthPyramid: farthest depth, reverse)
     public uint depthWidth;   // the depth image's size: the pyramid's level 0 is half of it, rounded up
     public uint depthHeight;
@@ -165,11 +261,12 @@ public static const uint PHASE_ALL = 0;
 public static const uint PHASE_EARLY = 1;
 public static const uint PHASE_LATE = 2;
 
-/** View {@code view}'s phase. */
-public uint phaseOf(Occlusion occlusion, uint view)
+/** A view the instance pass culls, one per row of workgroups: which, and its phase (PHASE_ALL, _EARLY, _LATE). */
+public struct CulledView
 {
-    return (occlusion.phases >> (2 * view)) & 3;
-}
+    public uint view;
+    public uint phase;
+};
 
 /**
  * Whether a sphere (camera-relative) may be seen past what the depth pyramid holds. Its box is projected; at the
@@ -221,7 +318,9 @@ public bool unoccluded(View view, Occlusion hzb, float3 center, float radius)
 public struct Chunk
 {
     public uint instance;
-    public uint firstMeshlet;  // the local meshlet, and the view in the top 2 bits
+    public uint firstMeshlet;  // the local meshlet
+    public uint view;
+    public uint phase;         // the view's, as the instance pass culled it
 };
 
 /** A meshlet the indexed path draws: its instance, pool meshlet and first index in the frame's index buffer. */
@@ -237,9 +336,11 @@ public struct VisibleMeshlet
 public struct ViewLists
 {
     public VisibleMeshlet* visible;
-    public uint* expandCommand;  // VkDispatchIndirectCommand
-    public uint* drawCommand;    // VkDrawIndexedIndirectCommand: its index count grows here
-    public uint* visibleCount;   // the early (or only) phase, then the late one
+    public uint* expandCommand;  // per raster bin, 4 words: VkDispatchIndirectCommand (the mesh dispatch too)
+    public uint* drawCommand;    // per bin, 6 words: VkDrawIndexedIndirectCommand, its index count growing; word 5
+                                 // counts the indices reserved
+    public uint* visibleCount;   // per bin the early (or only) phase, then the late one (words 2 * bin + phase); then
+                                 // per bin the most indices a phase wanted (words 6 + bin)
 };
 
 /**
@@ -267,7 +368,8 @@ public struct VertexOut
  * Whether meshlet m (a pool meshlet) of an instance is drawn: its detail level is the right one for its distance
  * (own group's error at most the allowed pixels, parent's more), it is in the frustum and does not face away.
  */
-public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets, float* clusterLod)
+public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets, float* clusterLod,
+    bool doubleSided)
 {
     float scale = maxScale(instance);
     uint l = m * 10;
@@ -287,9 +389,10 @@ public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets,
         return false;
     }
     float4 cone = decodeSnorm8(meshlets[w + 7]);
-    // The cone test assumes a viewer at the origin; orthographic views (shadow maps) keep back faces.
-    return view.orthographic != 0 || cone.w >= 1
-        || dot(center, rotate(instance.rotation, cone.xyz)) < cone.w * length(center) + radius;
+    // Back faces as seen from the eye; orthographic views (shadow maps) keep them.
+    float3 fromEye = center - view.eye;
+    return doubleSided || view.orthographic != 0 || cone.w >= 1
+        || dot(fromEye, rotate(instance.rotation, cone.xyz)) < cone.w * length(fromEye) + radius;
 }
 
 /** The submesh of pool meshlet `m`: its material is the instance's material base plus this. */
@@ -363,22 +466,89 @@ public static const float3 SKY_IRRADIANCE = float3(0.78539816 / 1.02);
  * paths, and of anything shading the same surfaces. Lit by the lights `lights` gives it (the frame's light list) and
  * the sky or, without a light list (null), by the sun and the sky. Shadow rays are traced by `rays` (NoRays: none).
  */
+/**
+ * Discards what a masked material does not draw at this fragment: its masked texels, and back faces unless it is
+ * double-sided (the masked bin draws without culling). Every pass rasterizing the masked bin calls it, shadows too.
+ */
+public void discardMasked(Material m, VertexOut in, bool front)
+{
+    if ((!front && !materialDoubleSided(m)) || alphaClipped(m, in.uv, ddx(in.uv), ddy(in.uv), in.color))
+    {
+        discard;
+    }
+}
+
 public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Material* materials, float2 dx,
     float2 dy, LightListHeader* lights, uint2 pixel)
+{
+    Material m = materials[in.material];
+    if (materialType(m) != 0)
+    {
+        // Forward shading draws only metallic-roughness for now: other types as its defaults.
+        return shadeMaterial<DefaultSurface, R>(rays, view, in, materials, dx, dy, lights, pixel,
+            materialFeatures(m));
+    }
+    return shadeMaterial<MetallicRoughnessMaterial, R>(rays, view, in, materials, dx, dy, lights, pixel,
+        materialFeatures(m));
+}
+
+/** Metallic-roughness's defaults, whatever the material's parameters: for types a pass cannot shade yet. */
+struct DefaultSurface : IMaterial
+{
+    typealias Parameters = NoParameters;
+
+    static Surface surface(NoParameters p, MaterialRef m, SurfaceInput in)
+    {
+        MetallicRoughnessParameters defaults = {};
+        return evaluate(defaults, in);
+    }
+};
+
+/**
+ * shadeSurface with the surface from material type M, showing the features of `features` (FEATURE_*; where it is a
+ * constant, the code of the others is left out): the lighting is the same for every type.
+ */
+public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
+    float2 dx, float2 dy, LightListHeader* lights, uint2 pixel, uint features)
 {
     if (view.mode == 2)
     {
         return float4(1, 1, 1, 1);
     }
-    Material m = materials[in.material];
+    MaterialRef ref = { materials, in.material };
+    Material m = ref.slot();
+    float3 toViewer = normalize(view.eye - in.world);
+    float3 normal = in.normal;
+    float4 tangent = in.tangent;
+    if (materialDoubleSided(m) && dot(normal, toViewer) < 0)
+    {
+        normal = -normal; // a back face: lit as the front
+        tangent.w = -tangent.w;
+    }
+    SurfaceInput input;
+    input.world = in.world;
+    input.toViewer = toViewer;
+    input.normal = normal;
+    input.tangent = tangent;
+    input.uv = in.uv;
+    input.dx = dx;
+    input.dy = dy;
+    input.color = in.color;
+    input.features = features;
+    Surface s = M.surface(materialParameters<M.Parameters>(ref), ref, input);
     if (view.mode == 1)
     {
-        m.baseColor = float4(meshletColor(in.meshlet), 1);
-        m.baseColorTexture = -1;
+        s.albedo = meshletColor(in.meshlet) * in.color.rgb;
     }
-    Surface s = evaluate(m, in.normal, in.tangent, in.uv, dx, dy, in.color);
-    float3 toViewer = normalize(-in.world);
-    float3 color = ambient(s, SKY_IRRADIANCE) + s.emissive;
+    // The features, the engine's: on any type's surface.
+    s.clearcoat = 0;
+    float3 emissive = s.emissive;
+    if ((features & FEATURE_CLEARCOAT) != 0)
+    {
+        applyClearcoat(s, materialFeature<ClearcoatParameters>(ref, FEATURE_CLEARCOAT), input);
+        emissive *= 1 - s.clearcoat * coatFresnel(dot(s.clearcoatNormal, toViewer)); // seen through the coat
+    }
+    float3 color = ambient(s, SKY_IRRADIANCE) + emissive;
     if (lights == nullptr)
     {
         color += reflected(s, toViewer, SUN, SUN_IRRADIANCE);

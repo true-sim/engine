@@ -1,85 +1,151 @@
 package com.truesim.engine.render;
 
+import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.render.materials.MetallicRoughnessParameters;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+
 /**
- * A physically based material, metallic-roughness as in glTF: base color, metalness, roughness, a normal map,
- * occlusion and emission, each a factor times an optional texture (a sampled slot from {@link Textures}). Set it up,
- * then add it to {@link Materials}, which copies it: it may be changed and added again.
+ * A material: its type's parameters (a generated record), the features it shows with theirs, and how it rasterizes.
+ * Immutable; {@link Materials} copies it into the table.
  *
  * <pre>{@code
- * Material rock = new Material().baseColor(0.5f, 0.45f, 0.4f).roughness(0.9f)
- *     .baseColorTexture(albedo).normalTexture(normals);
+ * Material rock = new Material(MetallicRoughnessParameters.DEFAULTS.withRoughness(0.9f).withBaseColorTexture(albedo));
+ * Material leaves = new Material(leafParameters).alphaMask(0.5f).doubleSided(true);
+ * Material paint = new Material(carPaint).feature(ClearcoatParameters.DEFAULTS.withRoughness(0.05f));
  * int id = materials.add(rock);
  * }</pre>
+ *
+ * <p>Its type is that of its parameters' record: the one type registered for it, unless named. How it rasterizes:
+ * opaque by default; {@link #alphaMask alpha-masked} (texels below the cutoff are not drawn, in every pass: shadows
+ * too, by the parameters' {@code [MaskAlpha]} and {@code [MaskTexture]}); {@link #doubleSided double-sided} (back faces
+ * drawn and lit as the front). The renderer draws each kind in a raster bin of its own.
+ *
+ * <p>Features are parts of the lighting any type allowing them gets: a material shows one where it has its
+ * parameters. Materials without a feature never pay for it: the visibility buffer shades each combination with a
+ * variant of its own.
+ *
+ * @param type        its type, or null for the one registered for its parameters' record
+ * @param parameters  its type's parameters
+ * @param features    the features it shows, one per bit
+ * @param doubleSided whether back faces show too, lit as the front
+ * @param alphaCutoff below 0: opaque; else the alpha below which nothing is drawn
  */
-public final class Material {
+@AllowAllocation("materials are made when they change")
+public record Material(MaterialType type, MaterialParameters parameters, List<MaterialFeature> features,
+    boolean doubleSided, float alphaCutoff) {
 
-    float r = 0.8f;
-    float g = 0.8f;
-    float b = 0.8f;
-    float a = 1;
-    float er;
-    float eg;
-    float eb;
-    float roughness = 0.7f;
-    float metallic;
-    float normalScale = 1;
-    float occlusion = 1;
-    int baseColorTexture = -1;
-    int normalTexture = -1;
-    int ormTexture = -1;
-    int emissiveTexture = -1;
+    /** A clear coat: a glossy dielectric layer over the base, as car paint or varnish. */
+    public static final int FEATURE_CLEARCOAT = 1;
+    /** How many feature bits there are, as materials.slang has them. */
+    static final int FEATURE_BITS = 1;
+    /** Every feature bit. */
+    static final int FEATURES = (1 << FEATURE_BITS) - 1;
 
-    /** The base color, linear: diffuse color, or a metal's reflectance. Light gray by default. */
-    public Material baseColor(float r, float g, float b) {
-        this.r = r;
-        this.g = g;
-        this.b = b;
-        return this;
+    /** Metallic-roughness's defaults: light gray, rough, opaque. Material 0 of every table. */
+    public static final Material DEFAULT = new Material(MetallicRoughnessParameters.DEFAULTS);
+
+    public Material {
+        Objects.requireNonNull(parameters, "parameters");
+        features = List.copyOf(features);
+        int seen = 0;
+        for (MaterialFeature feature : features) {
+            if (Integer.bitCount(feature.feature()) != 1 || (feature.feature() & ~FEATURES) != 0) {
+                throw new IllegalArgumentException("No feature " + feature.feature() + ": " + feature);
+            }
+            if ((seen & feature.feature()) != 0) {
+                throw new IllegalArgumentException("Feature " + feature.feature() + " twice");
+            }
+            seen |= feature.feature();
+        }
+        if (type != null && !type.parameters().isInstance(parameters)) {
+            throw new IllegalArgumentException(type.name() + " takes " + type.parameters().getSimpleName() + ", not "
+                + parameters.getClass().getSimpleName());
+        }
+        if (!(alphaCutoff < 0 || alphaCutoff <= 1)) {
+            throw new IllegalArgumentException("A cutoff of 0 to 1: " + alphaCutoff);
+        }
     }
 
-    /** Perceptual roughness, 0 (mirror) to 1; 0.7 by default. With an ORM texture, times its green. */
-    public Material roughness(float roughness) {
-        this.roughness = roughness;
-        return this;
+    /** {@code parameters}, of the type registered for their record; opaque, one-sided, no features. */
+    public Material(MaterialParameters parameters) {
+        this(null, parameters, List.of(), false, -1);
     }
 
-    /** 0 (dielectric, the default) to 1 (metal). With an ORM texture, times its blue. */
-    public Material metallic(float metallic) {
-        this.metallic = metallic;
-        return this;
+    /** {@code parameters} of type {@code type}: for records more than one type takes. */
+    public Material(MaterialType type, MaterialParameters parameters) {
+        this(Objects.requireNonNull(type, "type"), parameters, List.of(), false, -1);
     }
 
-    /** Light the surface gives off, linear; none by default. With an emissive texture, times it. */
-    public Material emissive(float r, float g, float b) {
-        this.er = r;
-        this.eg = g;
-        this.eb = b;
-        return this;
+    /** This with {@code parameters} instead. */
+    public Material parameters(MaterialParameters parameters) {
+        return new Material(type, parameters, features, doubleSided, alphaCutoff);
     }
 
-    /** An sRGB base color texture, times the base color. */
-    public Material baseColorTexture(int slot) {
-        this.baseColorTexture = slot;
-        return this;
+    /** This showing {@code feature}, instead of any parameters it had for it. */
+    public Material feature(MaterialFeature feature) {
+        List<MaterialFeature> with = new ArrayList<>(features.size() + 1);
+        for (MaterialFeature f : features) {
+            if (f.feature() != feature.feature()) {
+                with.add(f);
+            }
+        }
+        with.add(feature);
+        with.sort((a, b) -> Integer.compare(a.feature(), b.feature()));
+        return new Material(type, parameters, with, doubleSided, alphaCutoff);
     }
 
-    /** A tangent-space normal map (xyz in rgb), bent by {@code scale} (1: as it is). Needs tangents on the mesh. */
-    public Material normalTexture(int slot, float scale) {
-        this.normalTexture = slot;
-        this.normalScale = scale;
-        return this;
+    /** This without feature {@code feature} (a {@code FEATURE_*} bit). */
+    public Material withoutFeature(int feature) {
+        List<MaterialFeature> without = new ArrayList<>(features);
+        without.removeIf(f -> f.feature() == feature);
+        return new Material(type, parameters, without, doubleSided, alphaCutoff);
     }
 
-    /** Occlusion, roughness and metalness in red, green and blue; occlusion darkens ambient light by {@code strength}. */
-    public Material ormTexture(int slot, float strength) {
-        this.ormTexture = slot;
-        this.occlusion = strength;
-        return this;
+    /** Whether back faces show too, lit as the front: leaves, cloth, thin walls. */
+    public Material doubleSided(boolean twoSided) {
+        return new Material(type, parameters, features, twoSided, alphaCutoff);
     }
 
-    /** An sRGB emissive texture, times the emissive color. */
-    public Material emissiveTexture(int slot) {
-        this.emissiveTexture = slot;
-        return this;
+    /**
+     * Alpha-masked: where the parameters' mask alpha (times their mask texture's, times the vertex color's) is below
+     * {@code cutoff}, nothing is drawn, the rest is opaque, as glTF's {@code MASK}: foliage, fences. In every pass.
+     */
+    public Material alphaMask(float cutoff) {
+        if (!(cutoff >= 0 && cutoff <= 1)) {
+            throw new IllegalArgumentException("A cutoff of 0 to 1: " + cutoff);
+        }
+        return new Material(type, parameters, features, doubleSided, cutoff);
+    }
+
+    /** Opaque again: alpha is not compared. */
+    public Material opaque() {
+        return new Material(type, parameters, features, doubleSided, -1);
+    }
+
+    public boolean masked() {
+        return alphaCutoff >= 0;
+    }
+
+    /** The features it shows, {@code FEATURE_*} bits. */
+    public int featureMask() {
+        int mask = 0;
+        for (MaterialFeature feature : features) {
+            mask |= feature.feature();
+        }
+        return mask;
+    }
+
+    /**
+     * The header word shaders read, for type id {@code typeId}: type in bits 0-7, double-sided bit 8, masked bit 9,
+     * features 10-15, cutoff 16-31.
+     */
+    int header(int typeId) {
+        int header = typeId | (doubleSided ? 1 << 8 : 0) | featureMask() << 10;
+        if (alphaCutoff >= 0) {
+            header |= 1 << 9 | Math.round(alphaCutoff * 65_535) << 16;
+        }
+        return header;
     }
 }

@@ -27,6 +27,7 @@ import static org.lwjgl.vulkan.VK10.vkCmdFillBuffer;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 
 import com.truesim.engine.vulkan.Frames;
+import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -443,6 +444,66 @@ class FrameGraphTest {
     }
 
     @Test
+    void importedBuffersKeepTheirContentsAndAreOrdered() {
+        int usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+            | org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        try (GpuBuffer first = GpuBuffer.deviceLocal(device, 4L * SIZE * SIZE, usage);
+             GpuBuffer second = GpuBuffer.deviceLocal(device, 8L * SIZE * SIZE, usage)) {
+            ExternalBuffer state = new ExternalBuffer("state", first);
+            assertThat(state.name()).isEqualTo("state");
+            assertThat(state.size()).isEqualTo(4L * SIZE * SIZE);
+            device.submitAndWait(device.graphics(), commands -> {
+                vkCmdFillBuffer(commands, first.handle(), 0, VK_WHOLE_SIZE, RED);
+                vkCmdFillBuffer(commands, second.handle(), 0, VK_WHOLE_SIZE, GREEN);
+            });
+            int[] fill = {BLUE};
+            // Read, then written: nothing in the frame reads the write, which is kept, as the buffer outlives the frame.
+            graph.add(new Lambda(List.of(OUT), g -> {
+                Buffer buffer = g.importBuffer(state);
+                assertThat(g.importBuffer(state)).as("the same each time").isSameAs(buffer);
+                Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                g.pass("read state").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                    .record(ctx -> unpack(ctx, buffer, image));
+                g.pass("write state").write(buffer, BufferAccess.TRANSFER_DST).record(ctx -> {
+                    assertThat(ctx.address(buffer)).isEqualTo(state.address);
+                    vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0, VK_WHOLE_SIZE, fill[0]);
+                });
+                g.provide(OUT, image);
+            })).output(OUT, output);
+            assertThat(frame()[0]).as("what came before the frame").isEqualTo(RED);
+            assertThat(graph.passes()).containsExactly("read state", "write state");
+            assertThat(graph.pooledBuffers()).as("not pooled").isZero();
+            assertThat(frame()[0]).as("what the frame before wrote").isEqualTo(BLUE);
+            // Another buffer, of another size: the graph rebuilds and uses it.
+            state.set(second);
+            fill[0] = GREEN;
+            assertThat(frame()[SIZE * SIZE - 1]).isEqualTo(GREEN);
+            // Only the reader now: what the frames before wrote is still there.
+            graph.close();
+            graph = new FrameGraph(device, 2).add(new Lambda(List.of(OUT), g -> {
+                Buffer buffer = g.importBuffer(state);
+                Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                g.pass("read state").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                    .record(ctx -> unpack(ctx, buffer, image));
+                g.provide(OUT, image);
+            })).output(OUT, output);
+            assertThat(frame()[0]).isEqualTo(GREEN);
+            // Async passes stay off it: it is the graphics queue's.
+            graph.close();
+            graph = new FrameGraph(device, 2).add(new Lambda(List.of(OUT), g -> {
+                Buffer buffer = g.importBuffer(state);
+                g.pass("async write").write(buffer, BufferAccess.TRANSFER_DST).async().record(ctx -> { });
+                Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                g.pass("read state").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                    .record(ctx -> unpack(ctx, buffer, image));
+                g.provide(OUT, image);
+            })).output(OUT, output);
+            assertThatIllegalStateException().isThrownBy(() -> device.submitAndWait(device.graphics(), graph::record))
+                .withMessageContaining("external buffer");
+        }
+    }
+
+    @Test
     void buffersWhoseLifetimesDoNotOverlapShareMemory() {
         long half = 2L * SIZE * SIZE;
         graph.add(new Lambda(List.of(OUT), g -> {
@@ -650,16 +711,59 @@ class FrameGraphTest {
     }
 
     @Test
+    void graphsSharingSlotsLeaveThemToTheCaller() {
+        FrameSlots shared = new FrameSlots(2);
+        try (FrameGraph other = new FrameGraph(device, shared)) {
+            assertThat(other.frameSlots()).isSameAs(shared);
+            other.add(new Fill(A, SIZE, 0, 1, 0, 1)).output(A, output);
+            for (int frame = 0; frame < 3; frame++) {
+                int slot = other.beginFrame();
+                assertThat(slot).isEqualTo(frame % 2);
+                assertThat(shared.current()).isEqualTo(-1); // the caller opens it, once every graph has begun
+                shared.begin(slot);
+                other.submit(0, 0);
+                assertThat(shared.current()).isEqualTo(slot); // and closes it, once every graph has submitted
+                shared.end();
+            }
+            device.waitIdle();
+        }
+        assertThat(shared.frames()).isEqualTo(3);
+    }
+
+    @Test
+    void recordingOutsideFramesUsesSlotZero() {
+        int[] seen = {-2};
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Image image = g.create("x", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("look").write(image, Access.TRANSFER_DST).record(ctx -> {
+                seen[0] = graph.frameSlots().current();
+                clear(ctx, image, 0, 0, 0, 1);
+            });
+            g.provide(OUT, image);
+        })).output(OUT, output);
+        frame();
+        assertThat(seen[0]).isZero(); // record() opened slot 0 for its passes
+        assertThat(graph.frameSlots().current()).isEqualTo(-1); // and closed it again
+    }
+
+    @Test
     void framesAreBegunThenSubmitted() {
         graph.add(new Fill(A, SIZE, 1, 0, 0, 1)).output(A, output);
+        FrameSlots slots = graph.frameSlots();
+        assertThat(slots.count()).isEqualTo(2);
+        assertThat(slots.current()).isEqualTo(-1);
         assertThatIllegalStateException().isThrownBy(() -> graph.submit(0, 0)).withMessageContaining("beginFrame");
         assertThat(graph.beginFrame()).isZero();
+        assertThat(slots.current()).isZero(); // per-frame data writes to this frame's copies now
         assertThatIllegalStateException().isThrownBy(graph::beginFrame).withMessageContaining("submit()");
         graph.submit(0, 0);
+        assertThat(slots.current()).isEqualTo(-1); // in flight: no copy is written until the next frame begins
         assertThat(graph.beginFrame()).isEqualTo(1);
+        assertThat(slots.current()).isEqualTo(1);
         graph.submit(0, 0);
         assertThat(graph.beginFrame()).isZero(); // two in flight
         graph.submit(0, 0);
+        assertThat(slots.last()).isZero();
         // Nothing to do: an empty graphics batch still signals the frame.
         graph.removeOutput(A);
         graph.beginFrame();

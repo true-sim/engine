@@ -10,6 +10,7 @@ struct InstancesPush
     uint64_t* bottom;     // per pool mesh: its bottom level's address, or 0
     uint* records;        // 16 words per instance
     uint count;
+    View* view;           // the camera the top level is relative to: shading's
 };
 
 [[vk::push_constant]]
@@ -24,7 +25,8 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     {
         return;
     }
-    Instance instance = push.instances[i];
+    Instance stored = push.instances[i];
+    Instance instance = relative(stored, push.view[0]);
     float3 x = rotate(instance.rotation, float3(instance.scale.x, 0, 0));
     float3 y = rotate(instance.rotation, float3(0, instance.scale.y, 0));
     float3 z = rotate(instance.rotation, float3(0, 0, instance.scale.z));
@@ -38,7 +40,9 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
         push.records[w + r * 4 + 3] = asuint(instance.position[r]);
     }
     uint64_t bottom = push.bottom[instance.mesh];
-    uint mask = bottom != 0 ? 0xffu : 0u;
+    // Rays trace shadows: holes and instances casting none are left out.
+    bool casts = (stored.mesh & INSTANCE_LIVE) != 0 && (stored.mesh & INSTANCE_CASTS_SHADOWS) != 0;
+    uint mask = bottom != 0 && casts ? 0xffu : 0u;
     push.records[w + 12] = (i & 0xffffffu) | (mask << 24);
     push.records[w + 13] = 0x5u << 24;       // triangle facing cull disable | force opaque
     push.records[w + 14] = uint(bottom);

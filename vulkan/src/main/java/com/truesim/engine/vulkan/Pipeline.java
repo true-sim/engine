@@ -40,6 +40,7 @@ import static org.lwjgl.vulkan.EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
 
 import com.truesim.annotations.AllowAllocation;
+import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -59,6 +60,8 @@ import org.lwjgl.vulkan.VkPipelineRenderingCreateInfo;
 import org.lwjgl.vulkan.VkPipelineShaderStageCreateInfo;
 import org.lwjgl.vulkan.VkPipelineVertexInputStateCreateInfo;
 import org.lwjgl.vulkan.VkPipelineViewportStateCreateInfo;
+import org.lwjgl.vulkan.VkSpecializationInfo;
+import org.lwjgl.vulkan.VkSpecializationMapEntry;
 
 /**
  * A compute or graphics pipeline. Shaders get buffers through device addresses passed in push constants ({@link #push})
@@ -100,6 +103,16 @@ public final class Pipeline implements AutoCloseable {
 
     /** A compute pipeline running {@code entry} of {@code module}, with {@code pushBytes} of push constants. */
     public static Pipeline compute(VulkanDevice device, ShaderModule module, String entry, int pushBytes) {
+        return compute(device, module, entry, pushBytes, new int[0]);
+    }
+
+    /**
+     * A compute pipeline running {@code entry} of {@code module}, with {@code pushBytes} of push constants and its
+     * specialization constants (32-bit, as {@code [vk::constant_id(i)]}) i = 0, 1, ... set to {@code constants}: one
+     * shader, variants the driver compiles with those values known, e.g. a branch on a feature removed.
+     */
+    public static Pipeline compute(VulkanDevice device, ShaderModule module, String entry, int pushBytes,
+        int... constants) {
         try (MemoryStack stack = stackPush()) {
             long layout = layoutFor(device, pushBytes);
             VkComputePipelineCreateInfo.Buffer info = VkComputePipelineCreateInfo.calloc(1, stack)
@@ -110,6 +123,15 @@ public final class Pipeline implements AutoCloseable {
                 .stage(VK_SHADER_STAGE_COMPUTE_BIT)
                 .module(module.handle())
                 .pName(stack.UTF8(entry));
+            if (constants.length > 0) {
+                VkSpecializationMapEntry.Buffer entries = VkSpecializationMapEntry.calloc(constants.length, stack);
+                ByteBuffer data = stack.malloc(4 * constants.length);
+                for (int i = 0; i < constants.length; i++) {
+                    entries.get(i).constantID(i).offset(4 * i).size(4);
+                    data.putInt(4 * i, constants[i]);
+                }
+                info.stage().pSpecializationInfo(VkSpecializationInfo.calloc(stack).pMapEntries(entries).pData(data));
+            }
             LongBuffer pipeline = stack.mallocLong(1);
             Vulkan.check(vkCreateComputePipelines(device.handle(), VK_NULL_HANDLE, info, null, pipeline),
                 "Could not create the compute pipeline " + entry + " of " + module.name());
@@ -147,6 +169,13 @@ public final class Pipeline implements AutoCloseable {
     /** Binds the pipeline. Allocates nothing. */
     public void bind(VkCommandBuffer commands) {
         vkCmdBindPipeline(commands, bindPoint, handle);
+    }
+
+    /** Sets the push constants to {@code push}'s fields. Allocates nothing. */
+    public void push(VkCommandBuffer commands, Push push) {
+        if (push.size() > 0) {
+            push(commands, push.address(), push.size());
+        }
     }
 
     /** Sets the push constants from {@code size} bytes at native address {@code data}. Allocates nothing. */

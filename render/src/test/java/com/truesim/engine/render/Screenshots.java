@@ -65,8 +65,9 @@ class Screenshots {
                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
              GpuBuffer pixels = GpuBuffer.hostVisible(device, (long) WIDTH * HEIGHT * 4,
                  VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-             MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
-                 1 << 20, 65_535, 80_000_000), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)) {
+             GpuScene gpu = new GpuScene(device, pool, 100_000);
+             MeshletRenderer renderer = MeshletBenchmark.withView(new MeshletRenderer(device, gpu,
+                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT), 80_000_000)) {
             int rock = pool.add(MeshletBenchmark.rock(6));
             int ground = pool.add(MeshletBenchmark.terrain(1024));
             Camera camera = new Camera();
@@ -79,32 +80,32 @@ class Screenshots {
                 double qw = random.nextDouble(-1, 1);
                 double length = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
                 float scale = (float) random.nextDouble(1, 6);
-                renderer.setInstance(i, rock, (float) random.nextDouble(-300, 300),
+                renderer.scene().set(i, rock, (float) random.nextDouble(-300, 300),
                     (float) random.nextDouble(-150, 150), (float) random.nextDouble(-1500, -10),
                     (float) (qx / length), (float) (qy / length), (float) (qz / length), (float) (qw / length),
                     scale, scale, scale);
             }
-            renderer.setInstanceCount(count);
+            renderer.scene().removeFrom(count);
             camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-            renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+            MeshletBenchmark.mainView(renderer).set(camera, 1, MeshletRenderer.MODE_LIT);
             save(device, renderer, color, depth, pixels, out.resolve("rocks-lit.png"));
-            renderer.setView(camera, 1, MeshletRenderer.MODE_MESHLETS);
+            MeshletBenchmark.mainView(renderer).set(camera, 1, MeshletRenderer.MODE_MESHLETS);
             save(device, renderer, color, depth, pixels, out.resolve("rocks-meshlets.png"));
             // One rock up close at growing error: the coarse levels it falls back to.
-            renderer.setInstance(0, rock, 0, 0, -3.2f, 0, 0, 0, 1, 1, 1, 1);
-            renderer.setInstanceCount(1);
+            renderer.scene().set(0, rock, 0, 0, -3.2f, 0, 0, 0, 1, 1, 1, 1);
+            renderer.scene().removeFrom(1);
             for (int error : new int[] {1, 8, 32}) {
-                renderer.setView(camera, error, MeshletRenderer.MODE_LIT);
+                MeshletBenchmark.mainView(renderer).set(camera, error, MeshletRenderer.MODE_LIT);
                 save(device, renderer, color, depth, pixels, out.resolve("rock-" + error + "px-lit.png"));
-                renderer.setView(camera, error, MeshletRenderer.MODE_MESHLETS);
+                MeshletBenchmark.mainView(renderer).set(camera, error, MeshletRenderer.MODE_MESHLETS);
                 save(device, renderer, color, depth, pixels, out.resolve("rock-" + error + "px-meshlets.png"));
             }
-            renderer.setInstance(0, ground, 0, -25, 0, 0, 0, 0, 1, 1, 1, 1);
-            renderer.setInstanceCount(1);
-            renderer.setView(camera.set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1,
+            renderer.scene().set(0, ground, 0, -25, 0, 0, 0, 0, 1, 1, 1, 1);
+            renderer.scene().removeFrom(1);
+            MeshletBenchmark.mainView(renderer).set(camera.set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1,
                 MeshletRenderer.MODE_MESHLETS);
             save(device, renderer, color, depth, pixels, out.resolve("terrain-meshlets.png"));
-            renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+            MeshletBenchmark.mainView(renderer).set(camera, 1, MeshletRenderer.MODE_LIT);
             save(device, renderer, color, depth, pixels, out.resolve("terrain-lit.png"));
         }
     }
@@ -127,8 +128,9 @@ class Screenshots {
                  VK_IMAGE_ASPECT_COLOR_BIT);
              GpuBuffer pixels = GpuBuffer.hostVisible(device, (long) WIDTH * HEIGHT * 4,
                  VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-             MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
-                 1 << 20, 65_535, 20_000_000, 4), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+             GpuScene gpu = new GpuScene(device, pool, 100_000);
+             MeshletRenderer renderer = MeshletBenchmark.withView(new MeshletRenderer(device, gpu,
+                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT), 20_000_000);
              RayTracing rayTracing = device.rayTracing() ? new RayTracing(device, pool, 100_000) : null) {
             com.truesim.scene.assets.mesh.MeshData rockMesh = MeshletBenchmark.rock(6);
             com.truesim.scene.assets.mesh.MeshData terrainMesh = MeshletBenchmark.terrain(1024);
@@ -138,7 +140,7 @@ class Screenshots {
             double groundY = -12;
             MeshletBenchmark.rocksOnTerrain(renderer, rock, ground, 3000, extent, groundY);
             Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-            renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+            MeshletBenchmark.mainView(renderer).set(camera, 1, MeshletRenderer.MODE_LIT);
             com.truesim.engine.graph.ExternalImage external = new com.truesim.engine.graph.ExternalImage("target",
                 WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
@@ -151,9 +153,9 @@ class Screenshots {
                  com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
                 lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
                 com.truesim.engine.graph.Technique map = new com.truesim.engine.render.shadows.ShadowMapShadows(
-                    geometry, lights, 0, 0, MeshletBenchmark.sun(extent, groundY, size), size, 1,
-                    MeshletBenchmark.sunBias(extent, size));
-                graph.add(new VisibilityBufferShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                    geometry, lights, 0, 0, MeshletBenchmark.sun(extent, groundY, size), size,
+                    geometry.createView(ViewOptions.shadow(1 << 18, 1 << 24)), MeshletBenchmark.sunBias(extent, size));
+                graph.add(new VisibilityBufferShading(geometry, MeshletBenchmark.mainView(renderer), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                     VK_FORMAT_D32_SFLOAT)).add(new ClusteredLights(lights, camera, WIDTH, HEIGHT)).add(map)
                     .output(Keys.SCENE_COLOR, external);
                 capture(device, graph, target, pixels); // the first frame's late phase draws everything
@@ -161,9 +163,9 @@ class Screenshots {
                 write(mapped, out.resolve("shadows-mapped.png"));
                 // Three cascades of 2048 x 2048 over the 150 units ahead instead of one map over all of it.
                 com.truesim.engine.render.shadows.CascadedShadowMaps cascades =
-                    new com.truesim.engine.render.shadows.CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, size, 1,
-                        150);
-                cascades.update(0, 0, 0);
+                    new com.truesim.engine.render.shadows.CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, size,
+                        ViewOptions.shadow(1 << 18, 1 << 24), 150);
+                cascades.update();
                 graph.remove(map).add(cascades);
                 capture(device, graph, target, pixels);
                 cascaded = capture(device, graph, target, pixels);
@@ -173,7 +175,7 @@ class Screenshots {
                     rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
                     rayTracing.add(ground, terrainMesh, terrainMesh.levels().size() - 1);
                     graph.remove(map).add(new com.truesim.engine.render.shadows.InlineRayShadows(
-                        rayTracing, renderer, lights, 0, 0));
+                        rayTracing, MeshletBenchmark.mainView(renderer), lights, 0, 0));
                     capture(device, graph, target, pixels);
                     traced = capture(device, graph, target, pixels);
                     write(traced, out.resolve("shadows-traced.png"));
@@ -238,21 +240,22 @@ class Screenshots {
                  VK_IMAGE_ASPECT_COLOR_BIT);
              GpuBuffer pixels = GpuBuffer.hostVisible(device, (long) WIDTH * HEIGHT * 4,
                  VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-             MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
-                 1 << 20, 65_535, 20_000_000), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+             GpuScene gpu = new GpuScene(device, pool, 100_000);
+             MeshletRenderer renderer = MeshletBenchmark.withView(new MeshletRenderer(device, gpu,
+                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT), 20_000_000);
              Lights lights = new Lights(device, 4096, 1)) {
             int rock = pool.add(MeshletBenchmark.rock(6));
             int ground = pool.add(MeshletBenchmark.terrain(1024));
             double groundY = -12;
             MeshletBenchmark.rocksOnTerrain(renderer, rock, ground, 3000, 150, groundY);
             Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-            renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+            MeshletBenchmark.mainView(renderer).set(camera, 1, MeshletRenderer.MODE_LIT);
             MeshletBenchmark.scatterLights(lights, 1024, groundY, 3);
             com.truesim.engine.graph.ExternalImage external = new com.truesim.engine.graph.ExternalImage("target",
                 WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-            ClusteredForwardShading scene = new ClusteredForwardShading(geometry, WIDTH, HEIGHT,
+            ClusteredForwardShading scene = new ClusteredForwardShading(geometry, MeshletBenchmark.mainView(renderer), WIDTH, HEIGHT,
                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.02f, 0.05f);
             int[] forward;
             int[] visibility;
@@ -262,7 +265,7 @@ class Screenshots {
                 capture(device, graph, target, pixels); // the first frame's late phase draws everything
                 forward = capture(device, graph, target, pixels);
                 write(forward, out.resolve("lights-forward.png"));
-                graph.replace(new VisibilityBufferShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                graph.replace(new VisibilityBufferShading(geometry, MeshletBenchmark.mainView(renderer), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                     VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.02f, 0.05f));
                 capture(device, graph, target, pixels);
                 visibility = capture(device, graph, target, pixels);
@@ -301,8 +304,9 @@ class Screenshots {
                  VK_IMAGE_ASPECT_COLOR_BIT);
              GpuBuffer pixels = GpuBuffer.hostVisible(device, (long) WIDTH * HEIGHT * 4,
                  VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-             MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000,
-                 1 << 20, 65_535, 20_000_000), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+             GpuScene gpu = new GpuScene(device, pool, 100_000);
+             MeshletRenderer renderer = MeshletBenchmark.withView(new MeshletRenderer(device, gpu,
+                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT), 20_000_000);
              ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
                  VK_FORMAT_D32_SFLOAT, 100_000)) {
             int rock = pool.add(MeshletBenchmark.rock(6));
@@ -319,11 +323,11 @@ class Screenshots {
                 boolean meshlets = image == 0;
                 // The terrain's place takes a rock too: the terrain is a cluster hierarchy, which classic LOD skips.
                 MeshletBenchmark.rocksOnTerrain(renderer, meshlets ? rock : rockLod, ground, 3000, 150, -12);
-                renderer.setInstance(0, meshlets ? rock : rockLod, 0, -12, -12, 0, 0, 0, 1, 2, 2, 2);
-                renderer.setView(camera, 1, image == 2 ? MeshletRenderer.MODE_LIT : MeshletRenderer.MODE_MESHLETS);
+                renderer.scene().set(0, meshlets ? rock : rockLod, 0, -12, -12, 0, 0, 0, 1, 2, 2, 2);
+                MeshletBenchmark.mainView(renderer).set(camera, 1, image == 2 ? MeshletRenderer.MODE_LIT : MeshletRenderer.MODE_MESHLETS);
                 SceneGeometry geometry = meshlets ? SceneGeometry.meshlets(renderer) : new SceneGeometry(classic);
                 try (com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
-                    graph.add(new ClusteredForwardShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                    graph.add(new ClusteredForwardShading(geometry, MeshletBenchmark.mainView(renderer), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                         VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.02f, 0.05f)).output(Keys.SCENE_COLOR, external);
                     capture(device, graph, target, pixels); // the first frame's late phase draws everything
                     write(capture(device, graph, target, pixels), out.resolve(names[image]));
@@ -373,7 +377,7 @@ class Screenshots {
                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
                 VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
-            renderer.record(commands, color.view(), depth.view(), WIDTH, HEIGHT, 0.45f, 0.55f, 0.65f);
+            renderer.record(commands, MeshletBenchmark.mainView(renderer), color.view(), depth.view(), WIDTH, HEIGHT, 0.45f, 0.55f, 0.65f);
             Images.transition(commands, color.handle(), VK_IMAGE_ASPECT_COLOR_BIT,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -397,6 +401,7 @@ class Screenshots {
             }
         }
         ImageIO.write(image, "png", file.toFile());
-        System.out.printf("%s: %,d meshlets drawn%n", file.getFileName(), renderer.visibleMeshlets());
+        System.out.printf("%s: %,d meshlets drawn%n", file.getFileName(),
+            MeshletBenchmark.mainView(renderer).visibleMeshlets());
     }
 }

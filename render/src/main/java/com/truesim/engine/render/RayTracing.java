@@ -101,7 +101,7 @@ import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
  *   <li>a bottom-level acceleration structure per mesh ({@link #add}), built once from one of its detail levels,
  *       straight from the pool's quantized positions (the mesh's box as the build transform) where the GPU
  *       takes that vertex format, from decoded positions where not, then compacted;</li>
- *   <li>a top-level one, rebuilt on the GPU every frame ({@link #buildTopLevel}) from the renderer's instance buffer
+ *   <li>a top-level one, rebuilt on the GPU every frame ({@link #buildTopLevel}) from a scene's instance buffer
  *       by a compute pass: no work per instance on the CPU.</li>
  * </ul>
  *
@@ -112,7 +112,7 @@ import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
 public final class RayTracing implements AutoCloseable {
 
     private static final int AS_INSTANCE_BYTES = 64; // VkAccelerationStructureInstanceKHR
-    private static final int PUSH_BYTES = 28;
+    private static final int PUSH_BYTES = 40;
 
     private final VulkanDevice device;
     private final GeometryPool pool;
@@ -198,7 +198,9 @@ public final class RayTracing implements AutoCloseable {
      */
     @AllowAllocation("building, once per mesh")
     public void add(int mesh, MeshData data, int level) {
-        Objects.checkIndex(mesh, pool.meshCount());
+        if (!pool.contains(mesh)) {
+            throw new IllegalArgumentException("No mesh " + mesh + " in the pool");
+        }
         if (bottom[mesh] != null) {
             throw new IllegalStateException("Mesh " + mesh + " has a bottom level already");
         }
@@ -281,6 +283,7 @@ public final class RayTracing implements AutoCloseable {
                     .queryCount(1), null, queryPool), "Could not create a query pool");
                 LongBuffer handles = stack.longs(built.handle());
                 device.submitAndWait(device.graphics(), commands -> {
+                    pool.uploads().flush(commands); // the mesh's positions, if added since the last frame
                     vkCmdResetQueryPool(commands, queryPool.get(0), 0, 1);
                     vkCmdBuildAccelerationStructuresKHR(commands, info, ranges);
                     barrier(commands, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
@@ -318,21 +321,25 @@ public final class RayTracing implements AutoCloseable {
     }
 
     /**
-     * Records the top level's build from {@code renderer}'s instances: a compute pass writes the instance records
+     * Records the top level's build from {@code view}'s scene's instances, relative to the view's camera (where the
+     * traced points are): a compute pass writes the instance records
      * (transform, mesh's bottom level), then the top level is built, ready for ray queries after this. Allocates
      * nothing.
      */
-    public void buildTopLevel(VkCommandBuffer commands, MeshletRenderer renderer) {
-        int count = Math.min(renderer.instanceCount(), maxInstances);
+    public void buildTopLevel(VkCommandBuffer commands, RenderView view) {
+        GpuScene scene = view.renderer().scene();
+        int count = Math.min(scene.highWater(), maxInstances);
+        scene.upload(commands);
         // Whatever traced the top level before (the last frame) is done with it before it is rebuilt.
         barrier(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, PUSH_BYTES);
-            memPutLong(push, renderer.instanceBuffer().deviceAddress());
+            memPutLong(push, scene.instanceAddress());
             memPutLong(push + 8, bottomTable.deviceAddress());
             memPutLong(push + 16, instancesAddress);
             memPutInt(push + 24, count);
+            memPutLong(push + 32, view.address()); // relative to the camera shading the traced points
             instancePass.bind(commands);
             instancePass.push(commands, push, PUSH_BYTES);
             vkCmdDispatch(commands, (count + 63) / 64, 1, 1);

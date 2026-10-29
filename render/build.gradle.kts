@@ -8,9 +8,14 @@ description = "Engine renderer for true-sim: GPU-driven meshlet rendering of sce
 
 dependencies {
     api(project(":engine-graph"))
-    api("com.truesim.scene:scene-assets:0.17.2")
-    implementation("com.truesim.common:common-math:0.4.0")
-    testImplementation("com.truesim.scene:scene-meshbuild:0.17.2")
+    api("com.truesim.scene:scene-assets:0.18.0")
+    api("com.truesim.common:common-math:0.4.0") // the material records' colors and vectors
+    testImplementation("com.truesim.scene:scene-meshbuild:0.18.0")
+}
+
+// The material records of src/main/slang (materials.slang), as Java: MetallicRoughnessParameters and the others.
+slang {
+    javaPackage = "com.truesim.engine.render.materials"
 }
 
 // The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.
@@ -24,7 +29,5 @@ tasks.test {
 
 // The bindless storage images are declared twice on one binding, as float and as unsigned integer images: Slang's
 // overlap check (E39001) would reject that. Indexing them per pixel (NonUniformResourceIndex) adds SPIR-V capabilities
-// beyond the base profile, which Slang adds itself but reports (E41012).
-tasks.withType<com.truesim.build.slang.CompileSlang>().configureEach {
-    arguments.addAll("-warnings-disable", "39001,41012")
-}
+// beyond the base profile, which Slang adds itself but reports (E41012). Both are turned off by src/main/slang's
+// slangc.arguments, for these shaders and those of any project importing these modules.

@@ -60,7 +60,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     static final int CLASSIC_TRIANGLE = 0x80000000;
     private static final int MAX_TRIANGLES = 1 << 24;
     private static final int MAX_SUBMESHES = 128;
-    private static final int SELECT_PUSH = 72;
+    private static final int SELECT_PUSH = 80;
     private static final int DRAW_PUSH = 96;
     private static final int COMMAND_BYTES = 20;
     private static final int RECORD_BYTES = 16;
@@ -73,9 +73,10 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     private final int maxDraws;
     private final long recordsOffset;
     private final Pipeline select;
-    private final Pipeline draw;
-    private final Pipeline drawDepth;
-    private final Pipeline drawIds; // null without primitive IDs
+    // Per raster bin: shaded, depth only, the visibility buffer's IDs (null without primitive IDs).
+    private final Pipeline[] draw;
+    private final Pipeline[] drawDepth;
+    private final Pipeline[] drawIds;
     private final GpuBuffer indices;
     private final GpuBuffer meshes;
     private final GpuBuffer levels;
@@ -96,35 +97,33 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         }
         this.pool = renderer.pool();
         this.maxDraws = maxDraws;
-        this.recordsOffset = (16 + (long) COMMAND_BYTES * maxDraws + 15) & ~15L;
+        // The bins' counts, each bin's commands, then a record per draw slot of every bin.
+        this.recordsOffset = (16 + (long) COMMAND_BYTES * maxDraws * MeshletRenderer.BINS + 15) & ~15L;
         try (ShaderModule selectShader = ShaderModule.load(device, "shaders/classic/select.spv");
              ShaderModule vertexShader = ShaderModule.load(device, "shaders/classic/draw.spv");
              ShaderModule shading = ShaderModule.load(device, "shaders/meshlets/draw.spv")) {
             select = Pipeline.compute(device, selectShader, "selectMain", SELECT_PUSH);
-            draw = Pipeline.graphics(device)
-                .stage(VK_SHADER_STAGE_VERTEX_BIT, vertexShader, "classicVertexMain")
-                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading, "fragmentMain") // the meshlet paths' shading
-                .color(colorFormat)
-                .depth(depthFormat)
-                .pushConstants(DRAW_PUSH)
-                .build();
-            drawDepth = Pipeline.graphics(device)
-                .stage(VK_SHADER_STAGE_VERTEX_BIT, vertexShader, "classicVertexMain")
-                .depth(depthFormat)
-                .pushConstants(DRAW_PUSH)
-                .build();
-            if (device.primitiveIds()) {
-                try (ShaderModule idsShader = ShaderModule.load(device, "shaders/classic/ids.spv")) {
-                    drawIds = Pipeline.graphics(device)
-                        .stage(VK_SHADER_STAGE_VERTEX_BIT, vertexShader, "classicVertexMain")
-                        .stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader, "classicIdsMain")
-                        .color(MeshletRenderer.ID_FORMAT)
-                        .depth(depthFormat)
-                        .pushConstants(DRAW_PUSH)
-                        .build();
+            // A pipeline per raster bin, as the meshlet paths have them: the double-sided and masked bins cull
+            // nothing, the masked one discards what it masks (in depth only too).
+            draw = new Pipeline[MeshletRenderer.BINS];
+            drawDepth = new Pipeline[MeshletRenderer.BINS];
+            drawIds = device.primitiveIds() ? new Pipeline[MeshletRenderer.BINS] : null;
+            try (ShaderModule idsShader = device.primitiveIds() ? ShaderModule.load(device, "shaders/classic/ids.spv")
+                : null) {
+                for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {
+                    boolean masked = bin == MeshletRenderer.BIN_MASKED;
+                    draw[bin] = raster(device, bin, vertexShader)
+                        .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading, masked ? "maskedMain" : "fragmentMain")
+                        .color(colorFormat).depth(depthFormat).build(); // the meshlet paths' shading
+                    Pipeline.Graphics depth = raster(device, bin, vertexShader).depth(depthFormat);
+                    drawDepth[bin] = (masked ? depth.stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading, "maskedDepthMain")
+                        : depth).build();
+                    if (idsShader != null) {
+                        drawIds[bin] = raster(device, bin, vertexShader).stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader,
+                            masked ? "maskedClassicIdsMain" : "classicIdsMain")
+                            .color(MeshletRenderer.ID_FORMAT).depth(depthFormat).build();
+                    }
                 }
-            } else {
-                drawIds = null;
             }
         }
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
@@ -150,7 +149,9 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         if (closed) {
             throw new IllegalStateException("Closed");
         }
-        Objects.checkIndex(mesh, pool.meshCount());
+        if (!pool.contains(mesh)) {
+            throw new IllegalArgumentException("No mesh " + mesh + " in the pool");
+        }
         if (pool.meshletCount(mesh) != data.meshletCount()) {
             throw new IllegalArgumentException("Mesh " + mesh + " of the pool has " + pool.meshletCount(mesh)
                 + " meshlets, the data " + data.meshletCount());
@@ -251,30 +252,26 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     }
 
     @Override
-    public void setView(int index, Camera camera, float errorPixels, int mode) {
-        renderer.setView(index, camera, errorPixels, mode);
-    }
-
-    @Override
     @AllowAllocation("building the graph, when it changes")
     public void drawFirst(GraphBuilder g, SceneDraw draw, SceneDraw.Targets targets, boolean load) {
         SurfaceOutput.Kind kind = draw.output().kind();
         if (kind == SurfaceOutput.Kind.IDS && drawIds == null) {
             throw new IllegalStateException("The device has no primitive IDs in fragment shaders (geometryShader)");
         }
-        int view = draw.view();
+        RenderView view = draw.view();
         Camera camera = draw.camera();
         String name = switch (kind) {
-            case DEPTH -> "classic depth, view " + view;
+            case DEPTH -> "classic depth, view " + view.index();
             case SHADED -> "classic LOD";
             case IDS -> "classic LOD ids";
         };
-        Buffer list = g.createBuffer(name + " draws", recordsOffset + (long) RECORD_BYTES * maxDraws);
+        Buffer list = g.createBuffer(name + " draws", recordsOffset + (long) RECORD_BYTES * maxDraws
+            * MeshletRenderer.BINS);
         g.pass(name + " reset").write(list, BufferAccess.TRANSFER_DST)
             .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(list), 0, 16, 0));
         g.pass(name + " selection").write(list, BufferAccess.STORAGE_WRITE).record(ctx -> {
             if (camera != null) {
-                renderer.setView(view, camera, 1, MeshletRenderer.MODE_LIT);
+                view.set(camera, 1, MeshletRenderer.MODE_LIT);
             }
             select(ctx.commands(), view, ctx.address(list));
         });
@@ -293,7 +290,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         if (shadows != null) {
             shadows.readBy(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
         }
-        Pipeline pipeline = switch (kind) {
+        Pipeline[] pipeline = switch (kind) {
             case DEPTH -> drawDepth;
             case SHADED -> this.draw;
             case IDS -> drawIds;
@@ -310,27 +307,37 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     }
 
     /** Selects view {@code view}'s draws into the draw list at {@code list}. */
-    private void select(VkCommandBuffer commands, int view, long list) {
+    private void select(VkCommandBuffer commands, RenderView view, long list) {
+        GpuScene scene = renderer.scene();
+        scene.upload(commands);
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, SELECT_PUSH);
-            memPutLong(push, renderer.viewAddress(view));
+            memPutLong(push, view.address());
             memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, renderer.instanceBuffer().deviceAddress());
+            memPutLong(push + 16, scene.instanceAddress());
             memPutLong(push + 24, meshes.deviceAddress());
             memPutLong(push + 32, levels.deviceAddress());
             memPutLong(push + 40, parts.deviceAddress());
             memPutLong(push + 48, list);
             memPutLong(push + 56, list + recordsOffset);
-            memPutInt(push + 64, renderer.instanceCount());
+            memPutInt(push + 64, scene.highWater());
             memPutInt(push + 68, maxDraws);
+            memPutLong(push + 72, scene.materialsAddress()); // each part's raster bin
             select.bind(commands);
             select.push(commands, push, SELECT_PUSH);
-            vkCmdDispatch(commands, (renderer.instanceCount() + 63) / 64, 1, 1);
+            vkCmdDispatch(commands, (scene.highWater() + 63) / 64, 1, 1);
         }
     }
 
-    /** Draws the list's draws of view {@code view} with {@code pipeline}, over the targets with {@code load}. */
-    private void record(PassContext ctx, Pipeline pipeline, int view, long colorView, long depthView, int width,
+    /** A graphics pipeline of raster bin {@code bin}: the opaque one culls back faces, the others nothing. */
+    private static Pipeline.Graphics raster(VulkanDevice device, int bin, ShaderModule vertexShader) {
+        Pipeline.Graphics graphics = Pipeline.graphics(device)
+            .stage(VK_SHADER_STAGE_VERTEX_BIT, vertexShader, "classicVertexMain").pushConstants(DRAW_PUSH);
+        return bin == MeshletRenderer.BIN_OPAQUE ? graphics : graphics.doubleSided();
+    }
+
+    /** Draws the list's draws of view {@code view}, each bin with its {@code pipeline}, over the targets. */
+    private void record(PassContext ctx, Pipeline[] pipeline, RenderView view, long colorView, long depthView, int width,
         int height, float[] clear, boolean load, long lights, Buffer list) {
         VkCommandBuffer commands = ctx.commands();
         long handle = ctx.buffer(list);
@@ -338,19 +345,22 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             MeshletRenderer.beginRendering(commands, stack, colorView, depthView, width, height, clear[0], clear[1],
                 clear[2], load);
             long push = stack.ncalloc(8, 1, DRAW_PUSH);
-            memPutLong(push, renderer.viewAddress(view));
+            memPutLong(push, view.address());
             memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, renderer.instanceBuffer().deviceAddress());
+            memPutLong(push + 16, renderer.scene().instanceAddress());
             memPutLong(push + 24, pool.positions().deviceAddress());
             memPutLong(push + 32, pool.attributes().deviceAddress());
             memPutLong(push + 40, ctx.address(list) + recordsOffset);
-            memPutLong(push + 80, renderer.materialsAddress());
+            memPutLong(push + 80, renderer.scene().materialsAddress());
             memPutLong(push + 88, lights);
-            pipeline.bind(commands);
             MeshletRenderer.setViewport(commands, stack, width, height);
-            pipeline.push(commands, push, DRAW_PUSH);
             vkCmdBindIndexBuffer(commands, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexedIndirectCount(commands, handle, 16, handle, 0, maxDraws, COMMAND_BYTES);
+            for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {
+                pipeline[bin].bind(commands);
+                pipeline[bin].push(commands, push, DRAW_PUSH);
+                vkCmdDrawIndexedIndirectCount(commands, handle, 16 + (long) COMMAND_BYTES * maxDraws * bin, handle,
+                    4L * bin, maxDraws, COMMAND_BYTES);
+            }
             vkCmdEndRendering(commands);
         }
     }
@@ -360,10 +370,14 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         if (!closed) {
             closed = true;
             select.close();
-            draw.close();
-            drawDepth.close();
+            for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {
+                draw[bin].close();
+                drawDepth[bin].close();
+            }
             if (drawIds != null) {
-                drawIds.close();
+                for (Pipeline pipeline : drawIds) {
+                    pipeline.close();
+                }
             }
             indices.close();
             meshes.close();

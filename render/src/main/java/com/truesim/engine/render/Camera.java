@@ -3,10 +3,21 @@ package com.truesim.engine.render;
 import com.truesim.common.math.Maths;
 
 /**
- * A camera at the origin, as the renderer draws: instances are camera-relative, so precision does not depend on where
- * in a large world the camera is. Builds the view-projection matrix (reverse depth with an infinite far plane: depth 1
- * at the near plane, falling towards 0 far away), the frustum planes and the projection scale for screen-space error.
- * Matrices are column-major float arrays, as shaders read them.
+ * A camera: its world {@link #position position}, in doubles, and its matrices from positions relative to it, in
+ * floats. The renderer draws instances relative to the position of each view's camera (on the GPU, from world
+ * positions kept in two floats per axis), so precision does not depend on where in a large world a camera is, and
+ * moving a camera rewrites nothing but its view. Builds the view-projection matrix (reverse depth with an infinite far
+ * plane: depth 1 at the near plane, falling towards 0 far away), the frustum planes and the projection scale for
+ * screen-space error. Matrices are column-major float arrays, as shaders read them.
+ *
+ * <pre>{@code
+ * camera.position(playerX, playerY, playerZ).set(fx, fy, fz, 0, 1, 0, Math.PI / 3, width, height, 0.1);
+ * }</pre>
+ *
+ * <p>A view may look from an eye off its position, e.g. a light's shadow map, sharing the position of the camera it
+ * shadows ({@link #setOrthographic}, {@link #set(double, double, double, double, double, double, double, double,
+ * double, double, int, int, double)}): the shadow lookup then works in that camera's positions directly. Allocates
+ * nothing.
  */
 public final class Camera {
 
@@ -17,6 +28,26 @@ public final class Camera {
     private final double[] inverted = new double[16];
     private float projectionScale;
     private boolean orthographic;
+    private final double[] position = new double[3];
+    private final double[] eye = new double[3];
+
+    /** Puts the camera at world position ({@code x}, {@code y}, {@code z}); its matrices are relative to it. */
+    public Camera position(double x, double y, double z) {
+        position[0] = x;
+        position[1] = y;
+        position[2] = z;
+        return this;
+    }
+
+    /** The camera's world position along {@code axis} (0 x, 1 y, 2 z). */
+    public double position(int axis) {
+        return position[axis];
+    }
+
+    /** Where the view looks from along {@code axis}, relative to the {@link #position}: 0 but for an eye set off it. */
+    public double eye(int axis) {
+        return eye[axis];
+    }
 
     /**
      * Looks along ({@code fx}, {@code fy}, {@code fz}) with ({@code ux}, {@code uy}, {@code uz}) roughly up, with a
@@ -25,6 +56,16 @@ public final class Camera {
      */
     public Camera set(double fx, double fy, double fz, double ux, double uy, double uz, double fovY, int width,
         int height, double near) {
+        return set(0, 0, 0, fx, fy, fz, ux, uy, uz, fovY, width, height, near);
+    }
+
+    /**
+     * Like {@link #set(double, double, double, double, double, double, double, int, int, double)}, looking from
+     * ({@code ex}, {@code ey}, {@code ez}) relative to the {@link #position}: e.g. a spot light's shadow map, at the
+     * position of the camera it shadows. Allocates nothing.
+     */
+    public Camera set(double ex, double ey, double ez, double fx, double fy, double fz, double ux, double uy,
+        double uz, double fovY, int width, int height, double near) {
         // View: rows are right, up and back (the camera looks down -Z).
         double fl = Math.sqrt(fx * fx + fy * fy + fz * fz);
         double bx = -fx / fl;
@@ -45,11 +86,17 @@ public final class Camera {
         double f = 1 / Maths.tan(fovY / 2);
         double sx = f * height / width;
         double sy = -f;
-        // viewProjection = P * V, column-major: element (row, column) at column * 4 + row.
-        set(0, sx * rx, sx * ry, sx * rz, 0);
-        set(1, sy * tx, sy * ty, sy * tz, 0);
+        // viewProjection = P * V, column-major: element (row, column) at column * 4 + row. V moves the eye to 0.
+        double re = rx * ex + ry * ey + rz * ez;
+        double te = tx * ex + ty * ey + tz * ez;
+        double be = bx * ex + by * ey + bz * ez;
+        set(0, sx * rx, sx * ry, sx * rz, -sx * re);
+        set(1, sy * tx, sy * ty, sy * tz, -sy * te);
         set(2, 0, 0, 0, near);
-        set(3, -bx, -by, -bz, 0);
+        set(3, -bx, -by, -bz, be);
+        eye[0] = ex;
+        eye[1] = ey;
+        eye[2] = ez;
         projectionScale = (float) (height * f / 2);
         // Frustum planes from the rows (Gribb and Hartmann): left, right, top, bottom from w +- x, w +- y; near from z
         // (depth <= 1 means w >= near); no far plane.
@@ -65,7 +112,7 @@ public final class Camera {
 
     /**
      * An orthographic view, e.g. a directional light's for a shadow map: from ({@code ex}, {@code ey}, {@code ez})
-     * (camera-relative, like instances) along ({@code fx}, {@code fy}, {@code fz}), ({@code ux}, {@code uy},
+     * (relative to the {@link #position}) along ({@code fx}, {@code fy}, {@code fz}), ({@code ux}, {@code uy},
      * {@code uz}) roughly up, seeing {@code halfWidth} and {@code halfHeight} to each side and {@code depth} ahead, on
      * a {@code width} by {@code height} viewport. Reverse depth: 1 at the eye, 0 at {@code depth}. Projected errors
      * do not shrink with distance: the scale is pixels per unit. Allocates nothing.
@@ -89,6 +136,9 @@ public final class Camera {
         double re = rx * ex + ry * ey + rz * ez;
         double te = tx * ex + ty * ey + tz * ez;
         double be = bx * ex + by * ey + bz * ez;
+        eye[0] = ex;
+        eye[1] = ey;
+        eye[2] = ez;
         // x and y over the half extents (y flipped), depth 1 + (back . (p - eye)) / depth, w 1.
         set(0, rx / halfWidth, ry / halfWidth, rz / halfWidth, -re / halfWidth);
         set(1, -tx / halfHeight, -ty / halfHeight, -tz / halfHeight, te / halfHeight);

@@ -1,8 +1,14 @@
 // The visibility buffer's shading: one thread per pixel reads which triangle the pixel shows, rebuilds it (its three
 // vertices through the same vertex stage as drawing), finds where the pixel's ray meets it, interpolates there, and
 // shades once with the same surface shading as forward. Texture gradients come from the rays of the neighboring
-// pixels (ray differentials), as the hardware's would from the triangle's screen-space derivatives. The entry points
-// (shade.slang, and shadeTraced.slang with inline ray shadows) choose how shadow rays are traced.
+// pixels (ray differentials), as the hardware's would from the triangle's screen-space derivatives.
+//
+// By material type and features: classify.slang sorts the screen's 8x8 tiles into a list per bin (type and feature
+// combination) present in them (a tile of several goes into each), and each bin's pass shades its tiles' pixels of
+// its bin, with its type's IMaterial and only its features' code (FEATURES, a specialization constant). Pixels
+// showing nothing count as type 0, metallic-roughness, which writes the clear color there. Each type's entry points,
+// calling shadeTiles with NoRays() or (with inline ray shadows) QueryRays(), are generated from its
+// [MaterialType] struct by the build (materials.slang).
 module resolve;
 
 __exported import bindless;
@@ -22,11 +28,23 @@ public struct ShadePush
     LightListHeader* lights;   // the frame's light list; null: the sun
     uint ids;                  // storage slot of the IDs (uint2)
     uint color;                // storage slot of the color
-    uint width;
-    uint height;
+    uint size;                 // width in the low 16 bits, height in the high
+    uint types;                // how many material types there are: higher type ids shade as type 0 (its bins)
     float3 clear;              // the color behind everything
+    uint bin;                  // the bin this pass shades: type * VARIANTS + FEATURES
     uint* classicIndices;      // the classic LOD path's indices, as the pool's triangles lie (null: no such path)
+    uint* tiles;               // classification: the first bin's tile list; shading: this pass's bin's
 };
+
+/** The features a variant of a shading pass shows (FEATURE_*): set when its pipeline is made. */
+[vk::constant_id(0)]
+const uint FEATURES = 0;
+
+/** Shading bins, by type and features: type * VARIANTS + features. */
+static const uint VARIANTS = 1u << FEATURE_BITS;
+
+/** Tiles per row before the next row of groups: an indirect dispatch's groups are (min(count, this), rows, 1). */
+static const uint TILE_ROW = 1024;
 
 [[vk::push_constant]]
 public ConstantBuffer<ShadePush> push;
@@ -37,10 +55,20 @@ uint triangleByte(uint i)
     return (push.meshletTriangles[i >> 2] >> ((i & 3) * 8)) & 0xff;
 }
 
+uint width()
+{
+    return push.size & 0xffff;
+}
+
+uint height()
+{
+    return push.size >> 16;
+}
+
 /** The direction (from the camera, at the origin) through pixel coordinates `p` (pixel centers at + 0.5). */
 float3 ray(float4x4 toWorld, float2 p)
 {
-    float2 ndc = p / float2(push.width, push.height) * 2 - 1;
+    float2 ndc = p / float2(width(), height()) * 2 - 1;
     float4 world = mul(toWorld, float4(ndc, 1, 1));
     return world.xyz / world.w;
 }
@@ -54,13 +82,88 @@ float3 barycentrics(float3 direction, float3 a, float3 b, float3 c, float3 n, fl
     return float3(1 - wb - wc, wb, wc);
 }
 
-/** Shades pixel `id`, shadow rays traced by `rays`. */
-public void shadePixel<R : IShadowRays>(R rays, uint3 id)
+/**
+ * The shading bin of the pixel showing `ids`: its material's type (0 for nothing, or for a type of no pass) and
+ * features.
+ */
+public uint pixelBin(uint2 ids)
 {
-    if (id.x >= push.width || id.y >= push.height)
+    if (ids.x == 0)
+    {
+        return 0;
+    }
+    Instance instance = push.instances[ids.x - 1];
+    uint submesh = (ids.y & CLASSIC_TRIANGLE) != 0 ? (ids.y >> 24) & 0x7f : meshletSubmesh(push.meshlets, ids.y >> 7);
+    Material m = push.materials[instance.materialBase + submesh];
+    uint type = materialType(m);
+    return (type < push.types ? type : 0) * VARIANTS + materialFeatures(m);
+}
+
+/** Each bin's tile list: (groups x, y, z, count), then the tiles, x | y << 16; tiles x * tiles y of room. */
+uint* tileList(uint bin)
+{
+    uint tiles = ((width() + 7) / 8) * ((height() + 7) / 8);
+    return push.tiles + bin * (4 + tiles);
+}
+
+static const uint MAX_BINS = 256 * VARIANTS;
+groupshared uint present[MAX_BINS / 32]; // the bins the tile shows, a bit each
+
+/** Puts tile `group` into the list of each bin it shows: one group of 8x8 threads per tile. */
+public void classifyTile(uint3 group, uint3 thread)
+{
+    uint index = thread.y * 8 + thread.x;
+    if (index < MAX_BINS / 32)
+    {
+        present[index] = 0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint2 pixel = group.xy * 8 + thread.xy;
+    if (pixel.x < width() && pixel.y < height())
+    {
+        uint bin = pixelBin(uintImages[push.ids][pixel]);
+        InterlockedOr(present[bin >> 5], 1u << (bin & 31));
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (index < MAX_BINS / 32)
+    {
+        uint bits = present[index];
+        while (bits != 0)
+        {
+            uint* list = tileList(index * 32 + firstbitlow(bits));
+            bits &= bits - 1;
+            uint slot;
+            InterlockedAdd(list[3], 1, slot);
+            InterlockedMax(list[0], min(slot + 1, TILE_ROW));
+            InterlockedMax(list[1], slot / TILE_ROW + 1);
+            list[2] = 1;
+            list[4 + slot] = group.x | group.y << 16;
+        }
+    }
+}
+
+/**
+ * Shades the pixels of material type M with features FEATURES (bin push.bin) in this pass's tiles: one group of 8x8
+ * threads per tile, the groups as the tile list's indirect dispatch has them. Shadow rays are traced by `rays`.
+ */
+public void shadeTiles<M : IMaterial, R : IShadowRays>(R rays, uint3 group, uint3 thread)
+{
+    uint index = group.y * TILE_ROW + group.x;
+    if (index >= push.tiles[3])
     {
         return;
     }
+    uint tile = push.tiles[4 + index];
+    uint3 id = uint3((tile & 0xffff) * 8 + thread.x, (tile >> 16) * 8 + thread.y, 0);
+    if (id.x < width() && id.y < height() && pixelBin(uintImages[push.ids][id.xy]) == push.bin)
+    {
+        shadePixel<M, R>(rays, id);
+    }
+}
+
+/** Shades pixel `id` with material type M, shadow rays traced by `rays`. */
+public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
+{
     uint2 ids = uintImages[push.ids][id.xy];
     if (ids.x == 0)
     {
@@ -68,7 +171,7 @@ public void shadePixel<R : IShadowRays>(R rays, uint3 id)
         return;
     }
     View view = push.view[0];
-    Instance instance = push.instances[ids.x - 1];
+    Instance instance = relative(push.instances[ids.x - 1], view);
     MeshEntry mesh = push.meshes[instance.mesh];
     VertexOut v[3];
     if ((ids.y & CLASSIC_TRIANGLE) != 0)
@@ -119,6 +222,6 @@ public void shadePixel<R : IShadowRays>(R rays, uint3 id)
     s.color = bary.x * v[0].color + bary.y * v[1].color + bary.z * v[2].color;
     float2 uvX = baryX.x * v[0].uv + baryX.y * v[1].uv + baryX.z * v[2].uv;
     float2 uvY = baryY.x * v[0].uv + baryY.y * v[1].uv + baryY.z * v[2].uv;
-    images[push.color][id.xy] = shadeSurface(rays, view, s, push.materials, uvX - s.uv, uvY - s.uv, push.lights,
-        id.xy);
+    images[push.color][id.xy] = shadeMaterial<M, R>(rays, view, s, push.materials, uvX - s.uv, uvY - s.uv,
+        push.lights, id.xy, FEATURES);
 }

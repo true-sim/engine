@@ -8,8 +8,9 @@ import java.util.List;
  *
  * <pre>{@code
  * SceneGeometry geometry = new SceneGeometry(new MeshletGeometry(renderer));
- * geometry.setView(0, camera, 1, MeshletRenderer.MODE_LIT);
- * graph.add(new ClusteredForwardShading(geometry, width, height, colorFormat, depthFormat));
+ * RenderView view = geometry.createView(ViewOptions.of(1 << 18, 1 << 22));
+ * geometry.setView(view, camera, 1, MeshletRenderer.MODE_LIT);
+ * graph.add(new ClusteredForwardShading(geometry, view, width, height, colorFormat, depthFormat));
  * }</pre>
  */
 public final class SceneGeometry {
@@ -32,12 +33,31 @@ public final class SceneGeometry {
         return providers;
     }
 
-    /** Sets view {@code index} on every provider; read when the frame runs. Allocates nothing. */
-    public SceneGeometry setView(int index, Camera camera, float errorPixels, int mode) {
-        for (int i = 0; i < providers.size(); i++) {
-            providers.get(i).setView(index, camera, errorPixels, mode);
-        }
+    /** Sets {@code view}'s camera ({@link RenderView#set}); read when the frame runs. Allocates nothing. */
+    public SceneGeometry setView(RenderView view, Camera camera, float errorPixels, int mode) {
+        view.set(camera, errorPixels, mode);
         return this;
+    }
+
+    /**
+     * A new view of the geometry's instances, with lists and history as {@code options} say: the renderer's of its
+     * meshlets ({@link MeshletRenderer#createView}), which every provider draws.
+     */
+    public RenderView createView(ViewOptions options) {
+        return renderer().createView(options);
+    }
+
+    /** The renderer whose scene and views the providers draw. */
+    public MeshletRenderer renderer() {
+        for (GeometryProvider provider : providers) {
+            if (provider instanceof MeshletGeometry meshlets) {
+                return meshlets.renderer();
+            }
+            if (provider instanceof ClassicLodGeometry classic) {
+                return classic.renderer();
+            }
+        }
+        throw new IllegalStateException("No provider of the geometry draws a renderer's views");
     }
 
     /** The provider of type {@code type}, e.g. for a technique needing what only it can give; null if none. */

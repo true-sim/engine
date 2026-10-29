@@ -19,6 +19,8 @@ struct MeshPush
     uint* attributes;
     Material* materials;     // at byte 80: the fragment shader in draw.slang reads it from both paths' blocks
     LightListHeader* lights; // at byte 88, likewise
+    uint bin;                // the raster bin drawn
+    uint late;               // 1: the late phase's meshlets
 };
 
 [[vk::push_constant]]
@@ -43,15 +45,16 @@ void meshMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertice
     out indices uint3 triangles[124], out primitives PrimitiveOut primitives[124])
 {
     View view = push.view[0];
-    uint slot = group.y * 65535 + group.x;
-    if (slot >= min(push.visibleCount[0], view.maxDraws))
+    uint index = group.y * 65535 + group.x;
+    if (index >= min(push.visibleCount[2 * push.bin + push.late], binDrawCapacity(view, push.bin)))
     {
         SetMeshOutputCounts(0, 0);
         return;
     }
+    uint slot = binFirstSlot(view, push.bin) + index;
     VisibleMeshlet v = push.visible[slot];
     uint m = v.meshlet;
-    Instance instance = push.instances[v.instance];
+    Instance instance = relative(push.instances[v.instance], view);
     MeshEntry mesh = push.meshes[instance.mesh];
     uint w = m * 8;
     uint vertexOffset = push.meshlets[w];

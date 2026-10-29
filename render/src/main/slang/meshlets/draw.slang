@@ -25,7 +25,7 @@ ConstantBuffer<DrawPush> push;
 VertexOut vertexMain(uint index : SV_VulkanVertexID)
 {
     VisibleMeshlet v = push.visible[index >> 8];
-    Instance instance = push.instances[v.instance];
+    Instance instance = relative(push.instances[v.instance], push.view[0]);
     MeshEntry mesh = push.meshes[instance.mesh];
     uint vertexOffset = push.meshlets[v.meshlet * 8];
     uint vertex = mesh.vertexBase + push.meshletVertices[mesh.meshletVertexBase + vertexOffset + (index & 0xff)];
@@ -41,4 +41,20 @@ float4 fragmentMain(VertexOut in) : SV_Target
 {
     return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(in.uv), ddy(in.uv), push.lights,
         uint2(in.position.xy));
+}
+
+/** The masked bin's: drawn without culling, so one-sided materials' back faces go here with the masked texels. */
+[shader("fragment")]
+float4 maskedMain(VertexOut in, bool front : SV_IsFrontFace) : SV_Target
+{
+    discardMasked(push.materials[in.material], in, front);
+    return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(in.uv), ddy(in.uv), push.lights,
+        uint2(in.position.xy));
+}
+
+/** The masked bin's depth only (shadow maps, depth prepasses): the same texels masked as the color pass's. */
+[shader("fragment")]
+void maskedDepthMain(VertexOut in, bool front : SV_IsFrontFace)
+{
+    discardMasked(push.materials[in.material], in, front);
 }

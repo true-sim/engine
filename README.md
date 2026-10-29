@@ -12,6 +12,7 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 | `engine-vulkan`   | `com.truesim.engine.vulkan`   | Vulkan 1.3, 1.4 where available: instance, GPUs, devices, swapchains, frames |
 | `engine-graph`    | `com.truesim.engine.graph`    | Frame graph: techniques plugged together by the results they provide and need |
 | `engine-render`   | `com.truesim.engine.render`   | GPU-driven meshlet rendering of scene's meshes: geometry pool, GPU culling and LOD; blur |
+| `engine-scene`    | `com.truesim.engine.scene`    | Draws scenes: scene's renderables and assets onto renderers, one view per scene and camera |
 
 ## Platform
 
@@ -104,6 +105,20 @@ try (VulkanInstance instance = VulkanInstance.builder().applicationName("game").
 - **Allocation-free:** `next`, `begin`, `end`, `submit`, `acquire`, `present` and `Images.transition` write
   their Vulkan structs straight into stack memory. LWJGL wraps native pointers in `MemorySegment`s, which the
   JIT removes once the code is compiled by C2.
+- **Per-frame data, per frame in flight:** a `FrameBuffer` (views, lights, materials) keeps a host-visible
+  copy per slot of its `FrameSlots`, plus a master copy in CPU memory. While a frame records, writes reach the master
+  and that frame's copy. Between frames they reach only the master, so frames in flight keep reading what they were
+  given; each copy takes the range it missed from the master when its slot opens. `FrameSlots.single()` is one copy
+  written straight through, for callers that wait for the GPU between frames.
+- **Records that change a few at a time:** a `RecordBuffer` is a device-local buffer of fixed-size records (any
+  multiple of 16 bytes: instances, particles, game data per object). Changing one writes its bytes once into a list of
+  changes (`claim`, then the bytes in `changes()`; a record at most once per upload, from any thread once claimed); the
+  frame's first commands copy the list into the frame slot's upload buffer (`GpuBuffer.hostWritten`: write-combined,
+  or BAR memory where the GPU has it) and a compute pass scatters it. The CPU pays per record changed, frames in flight
+  keep no copies (the queue orders the scatter after the frames before), and shaders read device-local memory.
+  `GpuScene`'s instances are one.
+- **Work at the frame's start:** `FrameSlots.register(FrameStart)` records commands before every frame's passes (the
+  frame graph calls `recordStart`); `FrameUploads` and `RecordBuffer` use it, and so may a game.
 
 ### Shaders and pipelines
 
@@ -127,32 +142,80 @@ try (ShaderModule shaders = ShaderModule.load(device, "shaders/meshlets.spv");
 }
 ```
 
+### Custom passes without Vulkan code
+
+A game's own passes need no Vulkan calls for the usual work. `Push` writes push constants field by field, aligned as
+Slang lays out a push struct (pointers and `float2` on 8 bytes, `float3`/`float4`/matrices on 16), and the pass
+context records the commands: `ctx.dispatch` and `dispatchIndirect`, `ctx.fill` and `ctx.copy` of buffers,
+`ctx.beginRendering` (the pass's color and depth images, viewport and scissor set) with `ctx.draw` and
+`drawIndirect`. The accesses a pass declares still decide every barrier. Raw Vulkan stays available through
+`ctx.commands()` for anything else.
+
+```java
+Push push = new Push();                                          // once, per pass
+g.pass("simulate").read(state, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
+    .record(ctx -> ctx.dispatch(simulate, push.clear().address(ctx.address(state)).address(ctx.address(next))
+        .u32(count).f32(dt), (count + 63) / 64));
+g.pass("draw").read(next, BufferAccess.DRAW_READ).write(color, Access.COLOR_ATTACHMENT).record(ctx -> {
+    ctx.beginRendering(color, null, true, 0, 0, 0, 1);
+    ctx.draw(particles, push.clear().address(ctx.address(next)), 6, count);
+    ctx.endRendering();
+});
+```
+
+Shaders import the modules of any dependency using `truesim.slang`: its sources ship in its jar under `slang/`, so a
+game's shader can `import meshlets.common;` and read the engine's `Instance`s (`GpuScene.instanceAddress()`) with the
+engine's own struct. Compiler arguments a library's modules need ship beside them (`slangc.arguments`). The engine's
+tests do this end to end: a compute pass reading the instances through the graph, a fill, a copy and a draw
+(`CustomPassTest`).
+
 Devices require what such shaders use: 64-bit integers for pointers, 8 and 16-bit storage for packed data (meshlet
 indices, quantized vertices) and draw parameters, on top of the Vulkan 1.3 baseline.
 
 ## GPU-driven rendering
 
 `engine-render` draws scene's meshes (`MeshData`: meshlets over quantized vertices with cluster LOD) GPU-driven: the
-CPU writes instances and a view, the GPU decides what to draw.
+CPU writes instances and views, the GPU decides what to draw. The world's instances are a `GpuScene`; a
+`MeshletRenderer` draws it from any number of `RenderView`s.
 
 ```java
+FrameSlots slots = graph.frameSlots();                              // a copy per frame in flight
 try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 22, 65_536, 1024));
-     MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000, 1 << 20, 65_535),
-         colorFormat, depthFormat)) {
-    int car = pool.add(carMesh);                                   // uploaded once
-    renderer.setInstance(0, car, x, y, z, qx, qy, qz, qw, 1, 1, 1); // camera-relative
-    renderer.setInstanceCount(1);
-    renderer.setView(camera.set(forward, up, fovY, width, height, near), 1.0f, MeshletRenderer.MODE_LIT);
-    renderer.record(commands, colorView, depthView, width, height, 0, 0, 0);
+     GpuScene scene = new GpuScene(device, pool, 100_000, slots);
+     MeshletRenderer renderer = new MeshletRenderer(device, scene, colorFormat, depthFormat, slots)) {
+    int car = pool.add(carMesh);                                     // uploaded once
+    int id = scene.add(car, 0, 1, true, x, y, z, qx, qy, qz, qw, 1, 1, 1); // world position, doubles: lowest free id
+    RenderView view = renderer.createView(ViewOptions.of(1 << 20, 1 << 24).withOcclusion(true));
+    view.set(camera.position(cx, cy, cz).set(forward, up, fovY, width, height, near), 1.0f,
+        MeshletRenderer.MODE_LIT);
+    renderer.record(commands, view, colorView, depthView, width, height, 0, 0, 0);
 }
 ```
 
 - **Geometry pool:** every mesh's streams in shared device-local buffers, reached by buffer device address, with a
   table entry per mesh; any number of meshes and instances draw in one pass.
+- **Meshes come and go:** `pool.remove(mesh)` frees a mesh's ranges and number for later meshes, first fit and
+  deterministic, once no frame in flight can draw it (given the graph's `frameSlots()`). `Materials.remove` and
+  `Textures.remove` do the same for material ids and bindless texture slots, so streamed content can be unloaded.
+  Classic LOD and ray tracing data per mesh don't follow removals yet.
+- **Uploads without waiting:** given the graph's `frameSlots()`, `pool.add` and `Textures.color`/`data` stage their
+  data at once and return; the copies (and a texture's mip chain) are recorded first thing in the next frame
+  (`FrameUploads`, through `FrameSlots.recordStart`, which the frame graph calls), so what was added draws from the
+  next frame on and the CPU never waits for the GPU. The benchmark's rock adds in 0.4 ms instead of 2.6-6.6 ms, its
+  49,062-meshlet terrain in 7 ms instead of about 100. Without frame slots, uploads wait as before.
 - **Culling on the GPU:** an instance pass tests instance bounds and splits each visible instance into chunks of 64
   meshlets; the chunk count is written straight into an indirect command, so only visible work is launched. Each
   meshlet is tested by the cluster LOD rule (its group's error projected on screen at most the allowed pixels, its
   parent's more), the frustum and its normal cone (whole meshlets facing away).
+- **Raster bins, by material:** a material says how it rasterizes in its header (`Material.alphaMask(cutoff)`,
+  `doubleSided(true)`; opaque and one-sided by default). The cull pass puts each meshlet in its view's list of its
+  material's bin, and each bin draws with a pipeline of its own: ordinary opaque meshlets keep the fastest (back faces
+  culled, no discard, early depth), double-sided ones draw without culling (their normal-cone test skipped, back faces
+  lit as the front), masked ones without culling and with a fragment variant discarding masked texels and one-sided
+  back faces. Every pass rasterizing them uses the same variants, so shadow maps, depth and the visibility buffer
+  mask what the camera does; classic LOD draws through the same bins. A view's extra bins have room for a quarter of
+  its opaque bin by default (`ViewOptions.withBins`); `RenderView.visibleMeshlets(bin)` counts each. Not yet followed
+  by ray tracing: its shadow rays see masked surfaces as opaque.
 - **Two paths, one set of shaders:** a compute pass culls each chunk and lists the visible meshlets. With mesh shaders
   (`VK_EXT_mesh_shader`, enabled where the GPU has it), a mesh workgroup per listed meshlet emits its vertices and
   triangles straight from the pool. Without, an expansion pass writes their triangles into one index buffer, and one
@@ -163,11 +226,29 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
 - **Instance-level LOD range:** before culling meshlets, the instance pass skips every level finer than the first one
   whose error, seen from the instance's nearest point, is within the allowed pixels: the rule could not pick anything
   there. A far instance costs a chunk or two, however detailed its mesh.
-- **Views culled together:** up to four views (the camera, a shadow map's sun, cascades) each have their own lists
-  (`Limits.views`). `cullViews` culls several at once: one instance pass with a row per view, and one cull pass over
-  all their chunks, each meshlet into its view's list; `drawView` then draws each. Through the frame graph, the
-  `MeshletCulling` request gathers every view the techniques draw (the scene's camera, `ShadowMapShadows`' sun) into
-  one culling pass.
+- **World positions, every view relative to its own camera:** instances keep their world position in two floats
+  per axis (about 48 bits: sub-millimetre thousands of kilometres out), written once and again only when they move.
+  Every view has a camera at a world position of its own (`Camera.position`, in doubles), and the GPU draws each
+  instance relative to it, subtracting the high parts and the rest apart. Everything after works in floats near the
+  camera, as precise anywhere in the world as at its origin (tested: the same image 7,000 km out; floats alone are
+  visibly off there). Moving a camera rewrites nothing but its view; a shadow camera stays where its light is, so its
+  map does not change as other cameras move.
+- **Stable instance ids, layers and shadows:** `GpuScene.add` takes the lowest free id and `remove` leaves a hole
+  the culling skips, so ids stay with their instances (whatever the GPU keeps per instance, such as occlusion history,
+  stays right; previous transforms and custom data per instance will be buffers by id). Each instance is on layers
+  (32 bits) and casts shadows or not; a view draws the layers of its `ViewOptions` (or `RenderView.filter`), shadow
+  views (`ViewOptions.shadow`) and shadow rays leave out what casts none. Several scenes may fill one `GpuScene`, told
+  apart by their layers (a world and an editor's gizmos), or each have one of their own.
+- **Views, as many as there are:** a `RenderView` is a handle: its camera, its filter, its lists sized by its
+  `ViewOptions` (a camera large, a shadow cascade or a mirror smaller) and, with occlusion, a visibility history of its
+  own, so every camera or mirror can cull occluded instances. A view's lists cost 16 bytes per meshlet of room; only
+  the indexed path adds an index buffer (12 bytes per triangle of room), made as it first draws the view and dropped
+  when the renderer switches to mesh shaders. `overflowed()` says whether the last frame wanted more than the lists
+  hold (meshlets, or triangles on the indexed path) and `resize(draws, triangles)` gives the view new lists, the old
+  ones freed once their frames are done; `bytes()` and `MeshletRenderer.viewBytes()` say what views cost. `cullViews` culls any number at once: one instance pass
+  with a row per view (in dispatches of up to 65,535 rows), and one cull pass over all their chunks, each meshlet into
+  its view's list; `drawView` then draws each. Through the frame graph, the `MeshletCulling` request gathers every
+  view the techniques draw (the scene's camera, `ShadowMapShadows`' sun, the cascades) into one culling pass.
 
 Measured with `MeshletBenchmark` (`TRUESIM_BENCHMARK=true`) on an AMD Radeon RX 9070 XT at 1920 x 1080 with 1 pixel
 of error allowed, GPU time of the whole frame (instance pass, culling, drawing), median per frame of batches of 32
@@ -207,8 +288,8 @@ error the cluster hierarchy draws fewer triangles than discrete LODs (30,000 roc
 triangles, against 17.6 M), since each cluster takes the detail its own distance needs. Both builds sum their
 simplification errors, which stay close to the real deviation from full detail.
 
-- **Reverse depth with an infinite far plane,** camera-relative instances: precise near and far, anywhere in a large
-  world.
+- **Reverse depth with an infinite far plane,** instances relative to each view's camera: precise near and far,
+  anywhere in a large world.
 - Tested on the GPU: coverage of a quad, culling (behind, outside, facing away), LOD cuts from full detail to a few
   meshlets that keep the covered area within 2 % (no holes), and both paths drawing the same image.
 
@@ -219,33 +300,87 @@ classic renderer would add a 32-bit index buffer per mesh and per discrete LOD; 
 
 ### Materials and textures
 
-Surfaces are physically based, metallic-roughness as in glTF: a base color, metalness, roughness, a tangent-space
-normal map, occlusion and emission, each a factor times an optional texture.
+A material is its **type** (how its parameters become a surface), the type's **parameters**, the **features** it
+shows, and how it rasterizes. Type 0 is metallic-roughness as in glTF: a base color, metalness, roughness, a
+tangent-space normal map, occlusion and emission, each a factor times an optional texture.
 
 ```java
 try (Textures textures = new Textures(device); Materials materials = new Materials(device, 1024)) {
     int albedo = textures.color(512, 512, rgba);       // sRGB, full mip chain made on the GPU
     int normals = textures.data(512, 512, xyz);         // linear
-    int rock = materials.add(new Material().baseColorTexture(albedo).normalTexture(normals, 1).roughness(0.9f));
-    renderer.setMaterials(materials);
-    renderer.setInstance(0, rockMesh, rock, x, y, z, qx, qy, qz, qw, 1, 1, 1); // submesh s takes material rock + s
+    int rock = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
+        .withBaseColorTexture(albedo).withNormalTexture(normals).withRoughness(0.9f)));
+    scene.setMaterials(materials);
+    scene.set(0, rockMesh, rock, x, y, z, qx, qy, qz, qw, 1, 1, 1); // submesh s takes material rock + s
 }
 ```
 
+- **One source of truth, in Slang.** A type's parameters are a Slang struct marked `[MaterialParameters]`; a feature's
+  one marked `[MaterialFeature]`; a type an `IMaterial` marked `[MaterialType("name")]`. The build (build-logic's
+  `truesim.slang`, `slang.javaPackage`) generates from them, before the Java compiles: a Java record per struct, with
+  the struct's initializers as `DEFAULTS`, `[Range]` checks, withers, the byte layout slangc itself gives the struct
+  (its reflection), a constant per field for writing one value in place (`materials.update(id,
+  CarPaintParameters.FLAKES, 0.8f)`), and `fromValues` for data by field name; and per type its visibility-buffer
+  entry points and a class holding its `MaterialType`. Structs of other projects are found through an index their jar
+  ships, so a game's parameters can nest the engine's:
+
+  ```slang
+  import materials.metallicRoughness;
+
+  [MaterialParameters(FEATURE_CLEARCOAT)]            // the features the type allows
+  public struct CarPaintParameters
+  {
+      public MetallicRoughnessParameters base;       // the engine's, nested by value
+      [Color] public float3 flakeColor = float3(1, 1, 1);
+      [Range(0, 1)] public float flakes = 0;
+  };
+
+  [MaterialType("carPaint")]
+  public struct CarPaint : IMaterial
+  {
+      public typealias Parameters = CarPaintParameters;
+      public static Surface surface(CarPaintParameters p, MaterialRef m, SurfaceInput in)
+      {
+          Surface s = evaluate(p.base, in);          // metallic-roughness, as the engine does it
+          s.albedo = lerp(s.albedo, p.flakeColor, p.flakes);
+          return s;
+      }
+  };
+  ```
+
+  ```java
+  materials.register(CarPaint.TYPE);
+  int red = materials.add(new Material(CarPaintParameters.DEFAULTS.withFlakes(0.4f))
+      .feature(ClearcoatParameters.DEFAULTS.withRoughness(0.05f)));
+  ```
+- **The table** is a 32-byte slot per material (header: type, double-sided, masked, features, cutoff; the mask's alpha
+  and texture; where its blocks lie), then the blocks: the type's parameters and a section per feature shown, each
+  material paying only for what it has. Passes that only rasterize (depth, shadows, IDs) read the slot alone, whatever
+  the type. Material 0 is metallic-roughness's defaults, so meshes draw before anything is set up. Instances name a
+  first material and each submesh of the mesh takes the next.
+- **Features are the engine's**, applied on any type allowing them: a clear coat (glTF's `KHR_materials_clearcoat`)
+  is laid over the type's surface where the material has a `ClearcoatParameters` section. The visibility buffer sorts
+  the screen's 8x8 tiles into a list per type and feature combination they show and shades each with one indirect
+  dispatch of its own variant (a specialization constant), holding only its features' code: a plain material never
+  pays for a coat. Forward shading branches on the material's features; it draws types other than metallic-roughness
+  as its defaults for now.
 - **Textures** live in the bindless set and are sampled by slot, trilinear and anisotropic (`Bindless.MATERIAL`, up to
   16x where the GPU allows).
-- **Materials** are a table of 64-byte records the shaders read by id. Material 0 is a light gray default, so meshes
-  draw before anything is set up. Instances name a first material and each submesh of the mesh takes the next, so one
-  mesh can be drawn with different materials.
-- **One shading module** (`shading.slang`): the material evaluation (with explicit texture gradients, so passes
-  without hardware derivatives can use it too) and the shading model: Lambert diffuse and a GGX specular lobe with
-  height-correlated Smith visibility and Schlick Fresnel. The vertex stage decodes normals, tangents, texture
-  coordinates and vertex colors from the pool's attributes.
+- **One shading model** (`shading.slang`): Lambert diffuse and a GGX specular lobe with height-correlated Smith
+  visibility and Schlick Fresnel, under an optional coat, with explicit texture gradients so passes without hardware
+  derivatives use it too. The vertex stage decodes normals, tangents, texture coordinates and vertex colors from the
+  pool's attributes.
+- **From scene data:** scene's `MaterialData` names its type and values by field name (`base.roughness` for nested
+  ones), and the bridge builds the type's record through its `fromValues`; equal data shared inline (`data.ref()`) is
+  one material.
 
 
 ### Lights and light lists
 
-`Lights` holds point, spot and directional lights, camera-relative like instances, and a shadow table. A **light
+`Lights` holds point, spot and directional lights at world positions (two floats per axis, like instances), and a
+shadow table whose entries each have a world position of their own: a shadow map's is its light camera's. A light
+list hands lights to shading relative to its camera and moves a surface into an entry's positions before the lookup,
+so one set of lights and shadow maps serves every view: the camera, another player's, a mirror's. A **light
 binning** technique turns them into the frame's light list, `Keys.LIGHT_LIST` (a buffer). Shading techniques use it
 if the graph has one, and otherwise light by the sun; `graph.replace` swaps one binning for another.
 
@@ -277,7 +412,7 @@ graph.add(new ClusteredLights(lights, camera, width, height));       // provides
 Drawing and shading are separate, and each is swappable:
 
 - **Geometry providers** draw one kind of geometry; skinned meshes and particles come later. A `SceneGeometry` holds
-  the providers of a frame and sets their views.
+  the providers of a frame, all drawing its renderer's views.
   - `MeshletGeometry`: a renderer's meshlets, with cluster LOD.
   - `ClassicLodGeometry`: the same instances drawn the classic way.
     - It takes discrete LODs (`MeshBuilder.buildDiscrete`) or flat meshes, added with `add(mesh, data)`.
@@ -298,17 +433,20 @@ Drawing and shading are separate, and each is swappable:
       Classic LOD matches the CPU-culled classic baseline (2.82 ms), since both draw the same 17.6 M triangles. It
       also frees the CPU.
 - **`SceneDraw`**, a shared request, draws every provider from one view into the targets a `SurfaceOutput` asks for:
-  depth only, shaded color, or visibility buffer IDs. It does two-phase occlusion culling for the camera. Shading
-  techniques ask for the camera's draw and shadow techniques for the light's; equal requests are drawn once, and the
+  depth only, shaded color, or visibility buffer IDs. It does two-phase occlusion culling for views made with it.
+  Shading techniques ask for the camera's draw and shadow techniques for the light's; equal requests are drawn once, and the
   renderer culls all its views in one pass.
 - **Shading techniques** provide `Keys.SCENE_COLOR` and `Keys.SCENE_DEPTH`; `graph.replace` swaps them:
 
 ```java
 SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-geometry.setView(0, camera, 1, MeshletRenderer.MODE_LIT);
-graph.add(new ClusteredForwardShading(geometry, width, height, colorFormat, depthFormat))
-    .add(new ClusteredLights(lights, camera, width, height));
-graph.replace(new VisibilityBufferShading(geometry, width, height, colorFormat, depthFormat));
+RenderView view = geometry.createView(ViewOptions.of(1 << 20, 1 << 24).withOcclusion(true));
+view.set(camera, 1, MeshletRenderer.MODE_LIT);
+graph.add(new ClusteredForwardShading(geometry, view, width, height, colorFormat, depthFormat))
+    .add(new ClusteredLights(lights, camera, width, height))
+    .add(new ShadowMapShadows(geometry, lights, 0, 0, sunCamera, 2048,
+        geometry.createView(ViewOptions.shadow(1 << 18, 1 << 22)), bias));
+graph.replace(new VisibilityBufferShading(geometry, view, width, height, colorFormat, depthFormat));
 ```
 
 - `ClusteredForwardShading` shades as the meshlets are drawn, so pixels covered later are shaded too.
@@ -424,6 +562,13 @@ that declare how they use each image. The graph does the rest:
   barriers come from those accesses like image barriers do, across queues as well: a buffer used by both is shared
   concurrently.
 - **Keys name buffers too:** `g.provide(key, buffer)` and `g.requireBuffer(key)`, e.g. a light list.
+- **External buffers:** `g.importBuffer(new ExternalBuffer(name, gpuBuffer))` brings a buffer the graph does not own
+  (a game's simulation state, a `RecordBuffer`, the engine's instances) into the graph: passes declare their accesses
+  and the graph orders them. Its contents outlive the frame, so passes writing it are kept, and the frame's first use
+  waits for whatever came before (uploads, earlier frames). Graphics-queue passes only.
+- **The engine's data for custom passes:** `GpuScene.instanceAddress()`/`instanceBuffer()` (records as
+  `meshlets/common.slang`'s `Instance`), `GpuScene.materialsAddress()`, and the `GeometryPool`'s buffers and per-mesh
+  bases, by device address, for a game's own passes and shaders.
 - **Modifiers:** a technique listing a key in `modifies()` takes it after its provider with `g.modify(key)` and
   writes it in place (transparency over the scene, decals) or provides a new version (a post effect). Modifiers of a
   key run in `stage()` order, so a chain such as exposure, bloom, tone mapping needs no rewiring when an effect is
@@ -478,10 +623,78 @@ swapchain.present(device.graphics(), image);
 - **Parallel recording:** each batch is cut into chunks of a few passes, and workers record them in parallel, each
   into its own command pools. Chunks are submitted in order, so the GPU sees the same commands on any number of
   threads. Pass bodies then run on worker threads and must not share what they change.
-- `record(commands)` still records everything into one command buffer, for simple uses.
+- **Frame slots:** `graph.frameSlots()` is what renderers, lights and materials given it keep a copy per. `beginFrame`
+  opens the frame's slot once the GPU has finished that slot's previous frame, and `submit` closes it, so instances
+  and lights may change every frame, before `beginFrame`, while recording, or after `submit`, without touching what a
+  frame in flight reads (tested with a quad moving every frame, two frames in flight).
+- **Shared slots:** graphs made with `new FrameGraph(device, slots)` share one `FrameSlots`, for several graphs
+  drawing from the same meshes and materials (several scenes, see below). They run in step; the caller opens the slot
+  once every graph has begun its frame and closes it once every graph has submitted.
+- `record(commands)` still records everything into one command buffer, for simple uses; its per-frame data is slot
+  0's, and the caller waits for the GPU between frames.
 
 The graph's tests run with synchronization validation, which checks every barrier and cross-queue wait. Dropping the
 waits makes it report races between the queues.
+
+## Drawing scenes
+
+`engine-scene` draws scene's `Renderables` (a mesh and per-submesh materials on a node, from `scene-render`) with the
+renderers above, following the scene's change logs and asset cache:
+
+- `SceneResources` is the GPU side of the assets, shared by every scene on a device: meshes in a `GeometryPool`,
+  materials in `Materials`, textures in `Textures`. It acquires what scenes use in the `AssetCache`, uploads each asset
+  once it loads, however many scenes and nodes use it, and removes it from the GPU (once no frame in flight reads it)
+  and releases it in the cache when nothing does. Materials draw as the default until they load, untextured where
+  their textures have not loaded (or failed to); a renderable's materials take a block of ids, one per submesh, shared
+  by every renderable with the same materials and mesh layout.
+- `SceneSync` keeps a scene on the GPU: its renderables as instances of a `GpuScene` at their world positions,
+  written once and again only where nodes moved or renderables changed. Given a `JobSystem`, many instances at once
+  (most nodes moved) are claimed in order and written on its threads: 30,000 moving rocks in 0.5 ms on 4 threads
+  against 1.0 ms on one, the same ids and image either way. Drawing is the renderers' business: cameras
+  are `RenderView`s, each at its own world position (moving one rewrites no instance), drawn by the frame graph's
+  techniques, so the rendering mode is the graph's: `ClusteredForwardShading`, `VisibilityBufferShading`, shadows,
+  swapped with `graph.replace`.
+
+```java
+FrameSlots slots = new FrameSlots(2);                 // shared by every graph drawing these resources
+SceneResources resources = new SceneResources(assets, new GeometryPool(device, capacity, slots),
+    new Materials(device, 4096, slots), new Textures(device, slots));
+
+GpuScene worldGpu = new GpuScene(device, resources.pool(), 100_000, slots);
+SceneSync world = new SceneSync(resources, worldRenderables, worldGpu);
+SceneSync gizmos = new SceneSync(resources, gizmoRenderables, worldGpu); // same table: its nodes on layer 1
+SceneGeometry geometry = SceneGeometry.meshlets(new MeshletRenderer(device, worldGpu, colorFormat, depthFormat, slots));
+RenderView view = geometry.createView(ViewOptions.of(1 << 20, 1 << 24).withOcclusion(true).withLayers(1));
+FrameGraph worldGraph = new FrameGraph(device, slots)
+    .add(new VisibilityBufferShading(geometry, view, width, height, colorFormat, depthFormat))
+    .output(Keys.SCENE_COLOR, swapchainTarget);
+SceneSync preview = ...;                              // another scene: its own GpuScene, renderer and graph
+
+// every frame
+int slot = worldGraph.beginFrame();
+previewGraph.beginFrame();
+slots.begin(slot);
+tasks.drainCompleted();                               // the frame boundary: loads arrive and upload
+scene.update(); worldRenderables.update();
+world.update(); gizmos.update();
+camera.position(cameraX, cameraY, cameraZ);           // the camera's world position, in doubles
+view.set(camera, 1, MeshletRenderer.MODE_LIT);
+...                                                   // the same for the preview
+worldGraph.submit(acquired[slot], presentReady);
+previewGraph.submit(0, 0);
+slots.end();
+```
+
+More cameras on a scene are more views, each with lists and occlusion history of its own. Scenes share a `GpuScene`
+told apart by layers, or each have their own with a renderer and graph (the graph's keys, such as the scene color and
+light list, are one per graph); either way they use the same resources, and a mesh several use is on the GPU once.
+The tests draw two scenes in step, one forward and one through a visibility buffer, and two scenes from one
+`GpuScene`, with validation on.
+
+Renderables keep their instance ids while drawn, are on their nodes' layers and cast shadows as they say; their
+materials' masked alpha and double-sidedness follow (blended alpha draws opaque until transparents come). Not
+followed yet: lights and cameras from the scene. Removed meshes are not yet followed by
+`ClassicLodGeometry` and ray tracing, so draw views with meshlets.
 
 ## Building
 

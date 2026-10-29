@@ -4,7 +4,6 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memPutAddress;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
-import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.VK_FILTER_LINEAR;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_SRGB;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
@@ -31,12 +30,16 @@ import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
 import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.vulkan.FrameSlots;
+import com.truesim.engine.vulkan.FrameUploads;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
 import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkBufferImageCopy;
 import org.lwjgl.vulkan.VkCommandBuffer;
@@ -59,19 +62,39 @@ import org.lwjgl.vulkan.VkImageSubresourceRange;
  * }
  * }</pre>
  *
- * <p>Uploads wait until they are done. Use it from one thread.
+ * <p>Given a frame graph's {@link FrameSlots}, adding a texture does not wait for the GPU: its slot is taken at once,
+ * its texels staged, and the image and its mip chain are made at the start of the next frame ({@link FrameUploads}),
+ * so it is sampled from the next frame recorded on. Without, adding waits until it is done. Use it from one thread, the
+ * one recording frames.
  */
 @AllowAllocation("created rarely; adding textures uploads them")
 public final class Textures implements AutoCloseable {
 
     private final VulkanDevice device;
-    private final List<GpuImage> images = new ArrayList<>();
-    private final List<Integer> slots = new ArrayList<>();
+    private final FrameSlots frames;
+    private final FrameUploads uploads;
+    // Live textures by bindless slot, and removed ones waiting for the frames that may sample them.
+    private final Map<Integer, GpuImage> images = new HashMap<>();
+    private final Map<Integer, Long> sizes = new HashMap<>();
+    // Per live texture whose upload may still wait for a frame: set once it is freed, so the upload is dropped.
+    private final Map<Integer, boolean[]> freed = new HashMap<>();
+    private final List<boolean[]> retiringFreed = new ArrayList<>();
+    private final List<Integer> retiring = new ArrayList<>();
+    private final List<GpuImage> retiringImages = new ArrayList<>();
+    private final List<Long> retireAt = new ArrayList<>();
     private long bytes;
     private boolean closed;
 
+    /** Textures for frames the caller waits for between removing one and adding another. */
     public Textures(VulkanDevice device) {
+        this(device, FrameSlots.single());
+    }
+
+    /** Textures whose removed images stay until no frame of {@code frames} (a frame graph's) can sample them. */
+    public Textures(VulkanDevice device, FrameSlots frames) {
         this.device = device;
+        this.frames = frames;
+        this.uploads = new FrameUploads(device, frames);
     }
 
     /** An sRGB color texture, {@code rgba} 4 bytes per texel; its sampled slot. */
@@ -95,17 +118,24 @@ public final class Textures implements AutoCloseable {
         int mips = GpuImage.fullMipCount(width, height);
         GpuImage image = GpuImage.mipmapped(device, width, height, format, VK_IMAGE_USAGE_SAMPLED_BIT
             | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, mips);
-        try (GpuBuffer staging = GpuBuffer.hostVisible(device, texels.byteSize(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
-            MemorySegment.copy(texels, 0, staging.memory(), 0, texels.byteSize());
-            device.submitAndWait(device.graphics(), commands -> upload(commands, staging, image, width, height, mips));
+        boolean[] gone = new boolean[1];
+        try {
+            uploads.record(texels, (commands, staging) -> {
+                if (!gone[0]) {
+                    upload(commands, staging, image, width, height, mips);
+                }
+            });
         } catch (RuntimeException e) {
             image.close();
             throw e;
         }
+        releaseRetired();
         int slot = device.bindless().addSampled(image.view());
-        images.add(image);
-        slots.add(slot);
-        bytes += 4L * width * height * 4 / 3;
+        long size = 4L * width * height * 4 / 3;
+        images.put(slot, image);
+        sizes.put(slot, size);
+        freed.put(slot, gone);
+        bytes += size;
         return slot;
     }
 
@@ -188,7 +218,42 @@ public final class Textures implements AutoCloseable {
         memPutInt(offsets + 20, 1);
     }
 
-    /** How many textures were added. */
+    /**
+     * Removes the texture in sampled slot {@code slot}: materials must no longer name it from the next frame on. Its
+     * image and slot are freed once no frame in flight can sample it, at the next add or remove.
+     */
+    public void remove(int slot) {
+        GpuImage image = images.remove(slot);
+        if (image == null) {
+            throw new IllegalArgumentException("No texture in slot " + slot);
+        }
+        bytes -= sizes.remove(slot);
+        retiring.add(slot);
+        retiringImages.add(image);
+        retiringFreed.add(freed.remove(slot));
+        retireAt.add(frames.retireAt());
+        releaseRetired();
+    }
+
+    /** Whether sampled slot {@code slot} holds one of these textures. */
+    public boolean contains(int slot) {
+        return images.containsKey(slot);
+    }
+
+    /**
+     * Frees removed textures no frame in flight can sample, oldest first: an upload of one still waiting for a frame
+     * (no frame was recorded since) is dropped.
+     */
+    private void releaseRetired() {
+        while (!retiring.isEmpty() && frames.isFinished(retireAt.getFirst())) {
+            retireAt.removeFirst();
+            retiringFreed.removeFirst()[0] = true;
+            device.bindless().removeSampled(retiring.removeFirst());
+            retiringImages.removeFirst().close();
+        }
+    }
+
+    /** How many textures there are. */
     public int count() {
         return images.size();
     }
@@ -203,9 +268,14 @@ public final class Textures implements AutoCloseable {
         if (!closed) {
             closed = true;
             device.waitIdle();
-            for (int i = 0; i < images.size(); i++) {
-                device.bindless().removeSampled(slots.get(i));
-                images.get(i).close();
+            uploads.close();
+            for (Map.Entry<Integer, GpuImage> entry : images.entrySet()) {
+                device.bindless().removeSampled(entry.getKey());
+                entry.getValue().close();
+            }
+            for (int i = 0; i < retiring.size(); i++) {
+                device.bindless().removeSampled(retiring.get(i));
+                retiringImages.get(i).close();
             }
         }
     }

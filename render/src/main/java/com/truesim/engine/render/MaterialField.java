@@ -1,0 +1,89 @@
+package com.truesim.engine.render;
+
+import java.util.Objects;
+
+/**
+ * One field of a generated material record, by its offset in the record's block: for {@link Materials#update}, which
+ * writes a value in place, allocating nothing (a value changing every frame). Generated records have a constant per
+ * field, nested ones by path: {@code CarPaintParameters.BASE_ROUGHNESS}.
+ */
+public final class MaterialField {
+
+    /** What the field holds. */
+    public enum Kind {
+        /** A float. */
+        F32,
+        /** A 32-bit integer, or a texture slot. */
+        I32,
+        /** A float2 to float4 (or a color). */
+        FLOATS
+    }
+
+    private final Class<?> owner;
+    private final String path;
+    private final int offset;
+    private final Kind kind;
+    private final int count;
+    private final float low;
+    private final float high;
+
+    private MaterialField(Class<?> owner, String path, int offset, Kind kind, int count, float low, float high) {
+        this.owner = Objects.requireNonNull(owner, "owner");
+        this.path = Objects.requireNonNull(path, "path");
+        this.offset = offset;
+        this.kind = kind;
+        this.count = count;
+        this.low = low;
+        this.high = high;
+    }
+
+    public static MaterialField f32(Class<?> owner, String path, int offset) {
+        return new MaterialField(owner, path, offset, Kind.F32, 1, Float.NEGATIVE_INFINITY, Float.POSITIVE_INFINITY);
+    }
+
+    public static MaterialField f32(Class<?> owner, String path, int offset, float low, float high) {
+        return new MaterialField(owner, path, offset, Kind.F32, 1, low, high);
+    }
+
+    public static MaterialField i32(Class<?> owner, String path, int offset) {
+        return new MaterialField(owner, path, offset, Kind.I32, 1, 0, 0);
+    }
+
+    public static MaterialField floats(Class<?> owner, String path, int offset, int count) {
+        return new MaterialField(owner, path, offset, Kind.FLOATS, count, 0, 0);
+    }
+
+    /** The record it is a field of. */
+    public Class<?> owner() {
+        return owner;
+    }
+
+    /** Its name, nested fields by path: {@code base.roughness}. */
+    public String path() {
+        return path;
+    }
+
+    /** Its byte offset in the record's block. */
+    public int offset() {
+        return offset;
+    }
+
+    public Kind kind() {
+        return kind;
+    }
+
+    /** How many floats a {@link Kind#FLOATS} field has. */
+    public int count() {
+        return count;
+    }
+
+    /** Whether {@code value} is in the field's range ({@code [Range]}); every value of fields without one. */
+    public boolean accepts(float value) {
+        return value >= low && value <= high;
+    }
+
+    @Override
+    public String toString() {
+        return owner.getSimpleName() + "." + path;
+    }
+}
