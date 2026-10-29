@@ -1460,11 +1460,18 @@ public final class FrameGraph implements AutoCloseable {
             execution.close(); // waits for the frames submitted
             execution = null;
         }
+        // A cached object that fails to close does not stop the rest: the first failure is thrown at the end.
+        IllegalStateException failure = null;
         for (AutoCloseable object : cache.values()) {
             try {
                 object.close();
             } catch (Exception e) {
-                throw new IllegalStateException("Could not close " + object, e);
+                IllegalStateException wrapped = new IllegalStateException("Could not close " + object, e);
+                if (failure == null) {
+                    failure = wrapped;
+                } else {
+                    failure.addSuppressed(wrapped);
+                }
             }
         }
         cache.clear();
@@ -1487,6 +1494,9 @@ public final class FrameGraph implements AutoCloseable {
         order = new PassInfo[0];
         barrierStart = new int[] {0, 0};
         dirty = true;
+        if (failure != null) {
+            throw failure;
+        }
     }
 
     /** A physical image the pool is to have: a size, a format and every usage of the images sharing it. */

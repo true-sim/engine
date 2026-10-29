@@ -19,6 +19,7 @@ import static org.lwjgl.vulkan.EXTDebugUtils.vkDestroyDebugUtilsMessengerEXT;
 import static org.lwjgl.vulkan.EXTHeadlessSurface.VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRPortabilityEnumeration.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 import static org.lwjgl.vulkan.KHRPortabilityEnumeration.VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+import static org.lwjgl.vulkan.VK10.VK_SUCCESS;
 import static org.lwjgl.vulkan.VK10.VK_FALSE;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_APPLICATION_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -164,12 +165,20 @@ public final class VulkanInstance implements AutoCloseable {
                 info.pNext(features.address());
             }
             PointerBuffer pointer = stack.mallocPointer(1);
-            Vulkan.check(vkCreateInstance(info, null, pointer), "Could not create the Vulkan instance");
+            int created = vkCreateInstance(info, null, pointer);
+            if (created != VK_SUCCESS && callback != null) {
+                callback.free(); // nothing made leaks when the instance fails
+            }
+            Vulkan.check(created, "Could not create the Vulkan instance");
             this.handle = new VkInstance(pointer.get(0), info);
             if (debug) {
                 LongBuffer messengerHandle = stack.mallocLong(1);
-                Vulkan.check(vkCreateDebugUtilsMessengerEXT(handle, messengerInfo, null, messengerHandle),
-                    "Could not create the debug messenger");
+                int made = vkCreateDebugUtilsMessengerEXT(handle, messengerInfo, null, messengerHandle);
+                if (made != VK_SUCCESS) {
+                    vkDestroyInstance(handle, null);
+                    callback.free();
+                }
+                Vulkan.check(made, "Could not create the debug messenger");
                 this.messenger = messengerHandle.get(0);
             } else {
                 this.messenger = 0;
