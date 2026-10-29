@@ -19,6 +19,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
+import com.truesim.engine.render.push.PyramidPush;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
@@ -40,7 +41,7 @@ import org.lwjgl.vulkan.VkMemoryBarrier2;
  */
 public record DepthPyramid(Image depth) implements Request<Image> {
 
-    private static final int PUSH_BYTES = 28;
+    private static final int PUSH_BYTES = PyramidPush.BYTES;
 
     public DepthPyramid {
         Objects.requireNonNull(depth, "depth");
@@ -88,13 +89,13 @@ public record DepthPyramid(Image depth) implements Request<Image> {
                     nvkCmdPipelineBarrier2(ctx.commands(), dependency);
                 }
                 long push = stack.nmalloc(8, PUSH_BYTES);
-                memPutInt(push, mip == 0 ? ctx.sampled(depth) : ctx.storage(pyramid, mip - 1));
-                memPutInt(push + 4, ctx.storage(pyramid, mip));
-                memPutInt(push + 8, sourceWidth);
-                memPutInt(push + 12, sourceHeight);
-                memPutInt(push + 16, width);
-                memPutInt(push + 20, height);
-                memPutInt(push + 24, mip == 0 ? 1 : 0);
+                memPutInt(push + PyramidPush.SOURCE, mip == 0 ? ctx.sampled(depth) : ctx.storage(pyramid, mip - 1));
+                memPutInt(push + PyramidPush.TARGET, ctx.storage(pyramid, mip));
+                memPutInt(push + PyramidPush.SOURCE_SIZE, sourceWidth);
+                memPutInt(push + PyramidPush.SOURCE_SIZE + 4, sourceHeight);
+                memPutInt(push + PyramidPush.TARGET_SIZE, width);
+                memPutInt(push + PyramidPush.TARGET_SIZE + 4, height);
+                memPutInt(push + PyramidPush.FROM_DEPTH, mip == 0 ? 1 : 0);
                 pipeline.push(ctx.commands(), push, PUSH_BYTES);
                 vkCmdDispatch(ctx.commands(), (width + 7) / 8, (height + 7) / 8, 1);
             }

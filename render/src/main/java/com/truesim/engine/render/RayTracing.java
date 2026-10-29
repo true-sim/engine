@@ -62,6 +62,7 @@ import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
 import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.render.push.InstancesPush;
 import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Pipeline;
@@ -112,7 +113,7 @@ import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
 public final class RayTracing implements AutoCloseable {
 
     private static final int AS_INSTANCE_BYTES = 64; // VkAccelerationStructureInstanceKHR
-    private static final int PUSH_BYTES = 40;
+    private static final int PUSH_BYTES = InstancesPush.BYTES;
 
     private final VulkanDevice device;
     private final GeometryPool pool;
@@ -335,11 +336,11 @@ public final class RayTracing implements AutoCloseable {
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, PUSH_BYTES);
-            memPutLong(push, scene.instanceAddress());
-            memPutLong(push + 8, bottomTable.deviceAddress());
-            memPutLong(push + 16, instancesAddress);
-            memPutInt(push + 24, count);
-            memPutLong(push + 32, view.address()); // relative to the camera shading the traced points
+            memPutLong(push + InstancesPush.INSTANCES, scene.instanceAddress());
+            memPutLong(push + InstancesPush.BOTTOM, bottomTable.deviceAddress());
+            memPutLong(push + InstancesPush.RECORDS, instancesAddress);
+            memPutInt(push + InstancesPush.COUNT, count);
+            memPutLong(push + InstancesPush.VIEW, view.address()); // relative to the camera shading the traced points
             instancePass.bind(commands);
             instancePass.push(commands, push, PUSH_BYTES);
             vkCmdDispatch(commands, (count + 63) / 64, 1, 1);

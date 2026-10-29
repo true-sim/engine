@@ -52,6 +52,11 @@ import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 import static org.lwjgl.vulkan.VK13.vkCmdEndRendering;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.render.push.CullPush;
+import com.truesim.engine.render.push.DrawPush;
+import com.truesim.engine.render.push.ExpandPush;
+import com.truesim.engine.render.push.InstancePush;
+import com.truesim.engine.render.push.MeshPush;
 import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
@@ -127,9 +132,6 @@ public final class MeshletRenderer implements AutoCloseable {
     public static final int MAX_CHUNKS = 65_535;
     /** VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT: the same bit as the 32-bit stage. */
     private static final long MESH_SHADER_STAGE = VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
-    private static final int INSTANCE_PUSH = 84;
-    private static final int CULL_PUSH = 72;
-    private static final int EXPAND_PUSH = 72;
     /** Raster bins, as meshlets/common.slang has them: opaque, double-sided, masked. */
     static final int BINS = 3;
     static final int BIN_OPAQUE = 0;
@@ -142,11 +144,12 @@ public final class MeshletRenderer implements AutoCloseable {
     private static final int MAX_ROWS = 65_535;
     /** Rows one buffer update writes: 8 bytes each, a few KiB of the stack. */
     private static final int ROWS_PER_UPDATE = 512;
-    /**
-     * Both draw paths' push blocks: the materials at byte 80 and the light list at 88, where the shared fragment
-     * shader reads them.
-     */
-    private static final int DRAW_PUSH = 104;
+    /** Both draw paths' pipelines take the larger push block: the mesh shaders', which the indexed one starts like. */
+    private static final int DRAW_PUSH = MeshPush.BYTES;
+    // The shaders' Occlusion struct, the same in the instance and cull pushes: its fields from its start.
+    private static final int OCCLUSION_WIDTH = InstancePush.OCCLUSION_DEPTH_WIDTH - InstancePush.OCCLUSION;
+    private static final int OCCLUSION_HEIGHT = InstancePush.OCCLUSION_DEPTH_HEIGHT - InstancePush.OCCLUSION;
+    private static final int OCCLUSION_MIPS = InstancePush.OCCLUSION_MIPS - InstancePush.OCCLUSION;
     /** The visibility buffer's IDs: instance + 1 (0: nothing), and meshlet << 7 | triangle. */
     public static final int ID_FORMAT = org.lwjgl.vulkan.VK10.VK_FORMAT_R32G32_UINT;
 
@@ -212,9 +215,9 @@ public final class MeshletRenderer implements AutoCloseable {
              ShaderModule cullShader = ShaderModule.load(device, "shaders/meshlets/cull.spv");
              ShaderModule expandShader = ShaderModule.load(device, "shaders/meshlets/expand.spv");
              ShaderModule drawShader = ShaderModule.load(device, "shaders/meshlets/draw.spv")) {
-            instancesPass = Pipeline.compute(device, instanceShader, "instancesMain", INSTANCE_PUSH);
-            cull = Pipeline.compute(device, cullShader, "cullMain", CULL_PUSH);
-            expand = Pipeline.compute(device, expandShader, "expandMain", EXPAND_PUSH);
+            instancesPass = Pipeline.compute(device, instanceShader, "instancesMain", InstancePush.BYTES);
+            cull = Pipeline.compute(device, cullShader, "cullMain", CullPush.BYTES);
+            expand = Pipeline.compute(device, expandShader, "expandMain", ExpandPush.BYTES);
             ShaderModule idsShader = device.primitiveIds() ? ShaderModule.load(device, "shaders/visibility/ids.spv")
                 : null;
             // A pipeline per raster bin and role: the opaque bin culls back faces and discards nothing; the
@@ -539,35 +542,35 @@ public final class MeshletRenderer implements AutoCloseable {
         long clusters, Pipeline indexed, Pipeline mesh) {
         if (path() == Path.MESH_SHADERS) {
             long push = stack.nmalloc(8, DRAW_PUSH);
-            memPutLong(push, v.address());
-            memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, scene.instanceAddress());
-            memPutLong(push + 24, v.visible().deviceAddress());
-            memPutLong(push + 32, count);
-            memPutLong(push + 40, pool.meshlets().deviceAddress());
-            memPutLong(push + 48, pool.meshletVertices().deviceAddress());
-            memPutLong(push + 56, pool.meshletTriangles().deviceAddress());
-            memPutLong(push + 64, pool.positions().deviceAddress());
-            memPutLong(push + 72, pool.attributes().deviceAddress());
-            memPutLong(push + 80, scene.materialsAddress());
-            memPutLong(push + 88, clusters);
-            memPutInt(push + 96, bin);
-            memPutInt(push + 100, late ? 1 : 0);
+            memPutLong(push + MeshPush.VIEW, v.address());
+            memPutLong(push + MeshPush.MESHES, pool.meshTable().deviceAddress());
+            memPutLong(push + MeshPush.INSTANCES, scene.instanceAddress());
+            memPutLong(push + MeshPush.VISIBLE, v.visible().deviceAddress());
+            memPutLong(push + MeshPush.VISIBLE_COUNT, count);
+            memPutLong(push + MeshPush.MESHLETS, pool.meshlets().deviceAddress());
+            memPutLong(push + MeshPush.MESHLET_VERTICES, pool.meshletVertices().deviceAddress());
+            memPutLong(push + MeshPush.MESHLET_TRIANGLES, pool.meshletTriangles().deviceAddress());
+            memPutLong(push + MeshPush.POSITIONS, pool.positions().deviceAddress());
+            memPutLong(push + MeshPush.ATTRIBUTES, pool.attributes().deviceAddress());
+            memPutLong(push + MeshPush.MATERIALS, scene.materialsAddress());
+            memPutLong(push + MeshPush.LIGHTS, clusters);
+            memPutInt(push + MeshPush.BIN, bin);
+            memPutInt(push + MeshPush.LATE, late ? 1 : 0);
             mesh.bind(commands);
             mesh.push(commands, push, DRAW_PUSH);
             vkCmdDrawMeshTasksIndirectEXT(commands, v.expandCommand().handle(), 16L * bin, 1, 12);
         } else {
             long push = stack.ncalloc(8, 1, DRAW_PUSH);
-            memPutLong(push, v.address());
-            memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, scene.instanceAddress());
-            memPutLong(push + 24, pool.positions().deviceAddress());
-            memPutLong(push + 32, pool.attributes().deviceAddress());
-            memPutLong(push + 40, v.visible().deviceAddress());
-            memPutLong(push + 48, pool.meshlets().deviceAddress());
-            memPutLong(push + 56, pool.meshletVertices().deviceAddress());
-            memPutLong(push + 80, scene.materialsAddress());
-            memPutLong(push + 88, clusters);
+            memPutLong(push + DrawPush.VIEW, v.address());
+            memPutLong(push + DrawPush.MESHES, pool.meshTable().deviceAddress());
+            memPutLong(push + DrawPush.INSTANCES, scene.instanceAddress());
+            memPutLong(push + DrawPush.POSITIONS, pool.positions().deviceAddress());
+            memPutLong(push + DrawPush.ATTRIBUTES, pool.attributes().deviceAddress());
+            memPutLong(push + DrawPush.VISIBLE, v.visible().deviceAddress());
+            memPutLong(push + DrawPush.MESHLETS, pool.meshlets().deviceAddress());
+            memPutLong(push + DrawPush.MESHLET_VERTICES, pool.meshletVertices().deviceAddress());
+            memPutLong(push + DrawPush.MATERIALS, scene.materialsAddress());
+            memPutLong(push + DrawPush.LIGHTS, clusters);
             indexed.bind(commands);
             indexed.push(commands, push, DRAW_PUSH);
             vkCmdBindIndexBuffer(commands, v.frameIndices().handle(), 0, VK_INDEX_TYPE_UINT32);
@@ -630,21 +633,21 @@ public final class MeshletRenderer implements AutoCloseable {
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT
                 | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         try (MemoryStack stack = stackPush()) {
-            long push = stack.nmalloc(8, INSTANCE_PUSH);
-            memPutLong(push, viewTable.deviceAddress());
-            memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, scene.instanceAddress());
-            memPutLong(push + 24, chunks.deviceAddress());
-            memPutLong(push + 32, chunkCommand.deviceAddress());
-            memPutLong(push + 40, pool.levels().deviceAddress());
-            memPutInt(push + 48, maxChunks);
-            occlusion(push + 52, pyramid, width, height, mips);
-            memPutLong(push + 72, rows.deviceAddress());
+            long push = stack.nmalloc(8, InstancePush.BYTES);
+            memPutLong(push + InstancePush.VIEWS, viewTable.deviceAddress());
+            memPutLong(push + InstancePush.MESHES, pool.meshTable().deviceAddress());
+            memPutLong(push + InstancePush.INSTANCES, scene.instanceAddress());
+            memPutLong(push + InstancePush.CHUNKS, chunks.deviceAddress());
+            memPutLong(push + InstancePush.CHUNK_COMMAND, chunkCommand.deviceAddress());
+            memPutLong(push + InstancePush.LEVELS, pool.levels().deviceAddress());
+            memPutInt(push + InstancePush.MAX_CHUNKS, maxChunks);
+            occlusion(push + InstancePush.OCCLUSION, pyramid, width, height, mips);
+            memPutLong(push + InstancePush.ROWS, rows.deviceAddress());
             instancesPass.bind(commands);
             // A row of workgroups per view, at most 65,535 rows a dispatch (the guaranteed size).
             for (int first = 0; first < count; first += MAX_ROWS) {
-                memPutInt(push + 80, first);
-                instancesPass.push(commands, push, INSTANCE_PUSH);
+                memPutInt(push + InstancePush.FIRST_ROW, first);
+                instancesPass.push(commands, push, InstancePush.BYTES);
                 vkCmdDispatch(commands, (instanceCount + 63) / 64, Math.min(MAX_ROWS, count - first), 1);
             }
         }
@@ -654,17 +657,17 @@ public final class MeshletRenderer implements AutoCloseable {
             VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT
                 | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         try (MemoryStack stack = stackPush()) {
-            long push = stack.nmalloc(8, CULL_PUSH);
-            memPutLong(push, viewTable.deviceAddress());
-            memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, scene.instanceAddress());
-            memPutLong(push + 24, chunks.deviceAddress());
-            memPutLong(push + 32, pool.meshlets().deviceAddress());
-            memPutLong(push + 40, pool.clusterLod().deviceAddress());
-            occlusion(push + 48, pyramid, width, height, mips);
-            memPutLong(push + 64, scene.materialsAddress()); // each meshlet's raster bin
+            long push = stack.nmalloc(8, CullPush.BYTES);
+            memPutLong(push + CullPush.VIEWS, viewTable.deviceAddress());
+            memPutLong(push + CullPush.MESHES, pool.meshTable().deviceAddress());
+            memPutLong(push + CullPush.INSTANCES, scene.instanceAddress());
+            memPutLong(push + CullPush.CHUNKS, chunks.deviceAddress());
+            memPutLong(push + CullPush.MESHLETS, pool.meshlets().deviceAddress());
+            memPutLong(push + CullPush.CLUSTER_LOD, pool.clusterLod().deviceAddress());
+            occlusion(push + CullPush.OCCLUSION, pyramid, width, height, mips);
+            memPutLong(push + CullPush.MATERIALS, scene.materialsAddress()); // each meshlet's raster bin
             cull.bind(commands);
-            cull.push(commands, push, CULL_PUSH);
+            cull.push(commands, push, CullPush.BYTES);
             vkCmdDispatchIndirect(commands, chunkCommand.handle(), 0);
         }
         if (meshShading) { // the lists and their dispatches feed the mesh shaders
@@ -681,18 +684,18 @@ public final class MeshletRenderer implements AutoCloseable {
             RenderView v = views[i];
             for (int bin = 0; bin < BINS; bin++) {
                 try (MemoryStack stack = stackPush()) {
-                    long push = stack.nmalloc(8, EXPAND_PUSH);
-                    memPutLong(push, v.address());
-                    memPutLong(push + 8, v.visible().deviceAddress());
-                    memPutLong(push + 16, v.drawCount().deviceAddress());
-                    memPutLong(push + 24, pool.meshlets().deviceAddress());
-                    memPutLong(push + 32, pool.meshTable().deviceAddress());
-                    memPutLong(push + 40, scene.instanceAddress());
-                    memPutLong(push + 48, pool.meshletTriangles().deviceAddress());
-                    memPutLong(push + 56, v.frameIndices().deviceAddress());
-                    memPutInt(push + 64, bin);
-                    memPutInt(push + 68, early == null ? 1 : 0);
-                    expand.push(commands, push, EXPAND_PUSH);
+                    long push = stack.nmalloc(8, ExpandPush.BYTES);
+                    memPutLong(push + ExpandPush.VIEW, v.address());
+                    memPutLong(push + ExpandPush.VISIBLE, v.visible().deviceAddress());
+                    memPutLong(push + ExpandPush.VISIBLE_COUNT, v.drawCount().deviceAddress());
+                    memPutLong(push + ExpandPush.MESHLETS, pool.meshlets().deviceAddress());
+                    memPutLong(push + ExpandPush.MESHES, pool.meshTable().deviceAddress());
+                    memPutLong(push + ExpandPush.INSTANCES, scene.instanceAddress());
+                    memPutLong(push + ExpandPush.MESHLET_TRIANGLES, pool.meshletTriangles().deviceAddress());
+                    memPutLong(push + ExpandPush.INDICES, v.frameIndices().deviceAddress());
+                    memPutInt(push + ExpandPush.BIN, bin);
+                    memPutInt(push + ExpandPush.LATE, early == null ? 1 : 0);
+                    expand.push(commands, push, ExpandPush.BYTES);
                     vkCmdDispatchIndirect(commands, v.expandCommand().handle(), 16L * bin);
                 }
             }
@@ -750,9 +753,9 @@ public final class MeshletRenderer implements AutoCloseable {
     /** The shaders' Occlusion struct at {@code address}: pyramid slot, depth size, pyramid levels. */
     private static void occlusion(long address, int pyramid, int width, int height, int mips) {
         memPutInt(address, pyramid);
-        memPutInt(address + 4, width);
-        memPutInt(address + 8, height);
-        memPutInt(address + 12, mips);
+        memPutInt(address + OCCLUSION_WIDTH, width);
+        memPutInt(address + OCCLUSION_HEIGHT, height);
+        memPutInt(address + OCCLUSION_MIPS, mips);
     }
 
     /**

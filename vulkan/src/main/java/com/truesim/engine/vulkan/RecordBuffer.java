@@ -19,6 +19,7 @@ import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
 import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.vulkan.push.ScatterPush;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -51,7 +52,7 @@ import org.lwjgl.vulkan.VkMemoryBarrier2;
 @AllowAllocation("created rarely")
 public final class RecordBuffer implements AutoCloseable {
 
-    private static final int SCATTER_PUSH = 36;
+    private static final int SCATTER_PUSH = ScatterPush.BYTES;
     private static final int MAX_GROUPS = 65_535;
 
     private final int recordBytes;
@@ -214,14 +215,14 @@ public final class RecordBuffer implements AutoCloseable {
         long threads = (long) pending * words;
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, SCATTER_PUSH);
-            memPutLong(push, target.deviceAddress() + 4L * at);
-            memPutLong(push + 8, target.deviceAddress() + changesAt);
-            memPutLong(push + 16, records.deviceAddress());
-            memPutInt(push + 24, pending);
-            memPutInt(push + 28, words);
+            memPutLong(push + ScatterPush.INDICES, target.deviceAddress() + 4L * at);
+            memPutLong(push + ScatterPush.CHANGES, target.deviceAddress() + changesAt);
+            memPutLong(push + ScatterPush.RECORDS, records.deviceAddress());
+            memPutInt(push + ScatterPush.COUNT, pending);
+            memPutInt(push + ScatterPush.WORDS, words);
             scatter.bind(commands);
             for (long first = 0; first < threads; first += 64L * MAX_GROUPS) {
-                memPutInt(push + 32, (int) first);
+                memPutInt(push + ScatterPush.FIRST, (int) first);
                 scatter.push(commands, push, SCATTER_PUSH);
                 vkCmdDispatch(commands, (int) Math.min(MAX_GROUPS, (threads - first + 63) / 64), 1, 1);
             }

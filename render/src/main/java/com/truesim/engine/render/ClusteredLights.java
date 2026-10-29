@@ -24,6 +24,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.render.push.ClusterPush;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import java.util.List;
@@ -51,7 +52,7 @@ import org.lwjgl.vulkan.VkMemoryBarrier2;
 public final class ClusteredLights implements Technique {
 
     static final int HEADER_BYTES = 112;
-    private static final int PUSH_BYTES = 88;
+    private static final int PUSH_BYTES = ClusterPush.BYTES;
     private static final int CLUSTERS = 1; // lights.slang's layout
 
     private final Lights lights;
@@ -172,13 +173,13 @@ public final class ClusteredLights implements Technique {
             long push = stack.nmalloc(16, PUSH_BYTES);
             float[] viewProjection = camera.viewProjection();
             for (int i = 0; i < 16; i++) {
-                memPutFloat(push + 4L * i, viewProjection[i]);
+                memPutFloat(push + ClusterPush.VIEW_PROJECTION + 4L * i, viewProjection[i]);
             }
-            memPutLong(push + 64, header);
-            memPutInt(push + 72, width);
-            memPutInt(push + 76, height);
-            memPutFloat(push + 80, far);
-            memPutInt(push + 84, lights.count());
+            memPutLong(push + ClusterPush.HEADER, header);
+            memPutInt(push + ClusterPush.WIDTH, width);
+            memPutInt(push + ClusterPush.HEIGHT, height);
+            memPutFloat(push + ClusterPush.FAR, far);
+            memPutInt(push + ClusterPush.LIGHT_COUNT, lights.count());
             pipeline.bind(ctx.commands());
             pipeline.push(ctx.commands(), push, PUSH_BYTES);
             vkCmdDispatch(ctx.commands(), (clusters() + 63) / 64, 1, 1);

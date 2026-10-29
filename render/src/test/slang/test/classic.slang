@@ -2,7 +2,7 @@
 // (the draw's vertex offset makes the index a pool vertex, its first instance is the instance). No meshlets.
 import meshlets.common;
 
-struct ClassicPush
+struct BaselinePush
 {
     View* view;
     MeshEntry* meshes;
@@ -13,7 +13,7 @@ struct ClassicPush
 };
 
 [[vk::push_constant]]
-ConstantBuffer<ClassicPush> push;
+ConstantBuffer<BaselinePush> push;
 
 [shader("vertex")]
 VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint instanceIndex : SV_VulkanInstanceID)
