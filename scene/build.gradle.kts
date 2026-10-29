@@ -10,3 +10,11 @@ dependencies {
     api("com.truesim.scene:scene-render:0.18.0")
     testImplementation("com.truesim.scene:scene-meshbuild:0.17.2")
 }
+
+// The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.
+tasks.test {
+    if (providers.environmentVariable("TRUESIM_BENCHMARK").orNull == "true") {
+        maxHeapSize = "4g"
+        extensions.configure<JacocoTaskExtension> { isEnabled = false } // measure the code, not its coverage probes
+    }
+}
