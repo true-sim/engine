@@ -26,7 +26,7 @@ import static org.lwjgl.vulkan.VK10.vkDestroyFence;
 import static org.lwjgl.vulkan.VK10.vkDestroySemaphore;
 import static org.lwjgl.vulkan.VK10.vkEndCommandBuffer;
 import static org.lwjgl.vulkan.VK10.vkResetCommandPool;
-import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
@@ -239,7 +239,9 @@ public final class Frames implements AutoCloseable {
             long info = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 1, VkSemaphoreSubmitInfo.SIZEOF);
             memPutInt(info + VkSemaphoreSubmitInfo.STYPE, VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO);
             memPutLong(info + VkSemaphoreSubmitInfo.SEMAPHORE, semaphore);
-            memPutLong(info + VkSemaphoreSubmitInfo.STAGEMASK, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
+            // All commands: the swapchain image may be written by transfers too (a blit, a clear), not only as an
+            // attachment, so waiting and signalling at the attachment stage alone would let those race the present.
+            memPutLong(info + VkSemaphoreSubmitInfo.STAGEMASK, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
             return info;
         }
 

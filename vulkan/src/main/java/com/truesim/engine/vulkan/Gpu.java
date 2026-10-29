@@ -74,9 +74,11 @@ public final class Gpu {
             }
             this.queueFamilies = List.copyOf(list);
 
-            vkEnumerateDeviceExtensionProperties(handle, (String) null, count, null);
+            Vulkan.checkList(vkEnumerateDeviceExtensionProperties(handle, (String) null, count, null),
+                "Could not list the device's extensions");
             VkExtensionProperties.Buffer properties2 = VkExtensionProperties.malloc(count.get(0), stack);
-            vkEnumerateDeviceExtensionProperties(handle, (String) null, count, properties2);
+            Vulkan.checkList(vkEnumerateDeviceExtensionProperties(handle, (String) null, count, properties2),
+                "Could not list the device's extensions");
             Set<String> names = new HashSet<>();
             properties2.forEach(property -> names.add(property.extensionNameString()));
             this.extensions = Set.copyOf(names);
@@ -138,7 +140,8 @@ public final class Gpu {
     public boolean canPresent(Surface surface, int family) {
         try (MemoryStack stack = stackPush()) {
             IntBuffer supported = stack.mallocInt(1);
-            vkGetPhysicalDeviceSurfaceSupportKHR(handle, family, surface.handle(), supported);
+            Vulkan.check(vkGetPhysicalDeviceSurfaceSupportKHR(handle, family, surface.handle(), supported),
+                "Could not ask whether the surface can present");
             return supported.get(0) == VK_TRUE;
         }
     }

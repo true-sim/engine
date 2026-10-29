@@ -184,6 +184,10 @@ public final class RecordBuffer implements AutoCloseable {
         if (pending == 0) {
             return;
         }
+        if (slots.current() < 0 && !slots.isSingle()) {
+            // Between frames any slot's upload buffer may still be read by a frame in flight.
+            throw new IllegalStateException("Upload records within a frame (between beginFrame and submit)");
+        }
         int slot = Math.max(slots.current(), 0);
         GpuBuffer target = uploads[slot];
         long frame = slots.frames();

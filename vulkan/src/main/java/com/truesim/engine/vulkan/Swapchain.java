@@ -134,16 +134,19 @@ public final class Swapchain implements AutoCloseable {
                 .oldSwapchain(previous);
             info.imageExtent().set(w, h);
             LongBuffer swapchain = stack.mallocLong(1);
-            Vulkan.check(vkCreateSwapchainKHR(device.handle(), info, null, swapchain), "Could not create the swapchain");
+            Vulkan.check(vkCreateSwapchainKHR(device.handle(), info, null, swapchain),
+                "Could not create the swapchain");
             if (previous != 0) {
                 vkDestroySwapchainKHR(device.handle(), previous, null);
             }
             this.handle = swapchain.get(0);
 
             IntBuffer imageCount = stack.mallocInt(1);
-            vkGetSwapchainImagesKHR(device.handle(), handle, imageCount, null);
+            Vulkan.checkList(vkGetSwapchainImagesKHR(device.handle(), handle, imageCount, null),
+                "Could not list the swapchain's images");
             LongBuffer imageHandles = stack.mallocLong(imageCount.get(0));
-            vkGetSwapchainImagesKHR(device.handle(), handle, imageCount, imageHandles);
+            Vulkan.checkList(vkGetSwapchainImagesKHR(device.handle(), handle, imageCount, imageHandles),
+                "Could not list the swapchain's images");
             images = new long[imageCount.get(0)];
             views = new long[images.length];
             presentReady = new long[images.length];
@@ -163,9 +166,11 @@ public final class Swapchain implements AutoCloseable {
     /** An sRGB format, so shaders write linear colors and the display shows them right; else the first offered. */
     private VkSurfaceFormatKHR chooseFormat(MemoryStack stack) {
         IntBuffer count = stack.mallocInt(1);
-        vkGetPhysicalDeviceSurfaceFormatsKHR(device.gpu().handle(), surface.handle(), count, null);
+        Vulkan.checkList(vkGetPhysicalDeviceSurfaceFormatsKHR(device.gpu().handle(), surface.handle(), count, null),
+            "Could not list the surface's formats");
         VkSurfaceFormatKHR.Buffer formats = VkSurfaceFormatKHR.malloc(count.get(0), stack);
-        vkGetPhysicalDeviceSurfaceFormatsKHR(device.gpu().handle(), surface.handle(), count, formats);
+        Vulkan.checkList(vkGetPhysicalDeviceSurfaceFormatsKHR(device.gpu().handle(), surface.handle(), count, formats),
+            "Could not list the surface's formats");
         return formats.get(chooseFormat(formats));
     }
 
@@ -186,9 +191,11 @@ public final class Swapchain implements AutoCloseable {
     public List<PresentMode> supportedPresentModes() {
         try (MemoryStack stack = stackPush()) {
             IntBuffer count = stack.mallocInt(1);
-            vkGetPhysicalDeviceSurfacePresentModesKHR(device.gpu().handle(), surface.handle(), count, null);
+            Vulkan.checkList(vkGetPhysicalDeviceSurfacePresentModesKHR(device.gpu().handle(), surface.handle(), count,
+                null), "Could not list the surface's present modes");
             IntBuffer modes = stack.mallocInt(count.get(0));
-            vkGetPhysicalDeviceSurfacePresentModesKHR(device.gpu().handle(), surface.handle(), count, modes);
+            Vulkan.checkList(vkGetPhysicalDeviceSurfacePresentModesKHR(device.gpu().handle(), surface.handle(), count,
+                modes), "Could not list the surface's present modes");
             List<PresentMode> supported = new ArrayList<>();
             for (PresentMode mode : PresentMode.values()) {
                 for (int i = 0; i < modes.remaining(); i++) {
