@@ -489,9 +489,18 @@ class SceneSyncTest {
         MaterialData outOfRange = MaterialData.builder(MR).set("roughness", 7f).build();
         MaterialData unknownFeature = MaterialData.builder(MR).set("roughness", 0.25f)
             .feature("sparkles", sparkles -> sparkles.set("density", 1f)).build();
+        MaterialData typos = MaterialData.builder(MR).set("roughnes", 0.5f).set("metallic", 0.5f)
+            .feature("clearcoat", coat -> coat.set("strenght", 1f)).build();
+        List<String> problems = new ArrayList<>();
+        resources.diagnostics(new SceneResources.Diagnostics() {
+            @Override
+            public void materialProblem(AssetRef<MaterialData> material, String problem) {
+                problems.add(problem);
+            }
+        });
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        SceneSync sync = closing(new SceneSync(resources, renderables, closing(new GpuScene(device, pool, 8, slots))));
         List<FrameGraph> graphs = List.of(graph(sync, false, new GpuBuffer[] {readback(), readback()}));
         int before = materials.count();
         renderables.set(facing(scene, -1, 0, -4), SQUARE, List.of(green.ref()));
@@ -499,13 +508,20 @@ class SceneSyncTest {
         renderables.set(facing(scene, 0, 1, -4), SQUARE, List.of(unknown.ref()));
         renderables.set(facing(scene, 0, -1, -4), SQUARE, List.of(outOfRange.ref()));
         renderables.set(facing(scene, 2, 0, -4), SQUARE, List.of(unknownFeature.ref()));
+        renderables.set(facing(scene, -2, 0, -4), SQUARE, List.of(typos.ref()));
         frame(graphs, List.of(sync), camera);
         load();
         for (int frame = 0; frame < 3; frame++) {
             frame(graphs, List.of(sync), camera);
         }
         device.waitIdle();
-        assertThat(materials.count()).as("one for the equal data, one each for the rest").isEqualTo(before + 4);
+        assertThat(materials.count()).as("one for the equal data, one each for the rest").isEqualTo(before + 5);
+        // What could not be used is reported: the unknown type, the value out of range, the unknown feature, typos.
+        assertThat(problems).anyMatch(p -> p.startsWith("no material type marble"))
+            .anyMatch(p -> p.contains("roughness") && p.endsWith("it draws as the default"))
+            .anyMatch(p -> p.startsWith("no material feature sparkles"))
+            .contains("no field roughnes in its type: ignored", "clearcoat: no field strenght in its type: ignored")
+            .hasSize(5);
         List<Material> made = new ArrayList<>();
         for (int id = 1; id < 64; id++) {
             if (materials.contains(id)) {
@@ -757,6 +773,13 @@ class SceneSyncTest {
             (glow, seed) -> MaterialData.builder(MR).texture("baseColorTexture", missing).build(), new Glow(0, 0.5f, 0), 3);
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Renderables renderables = new Renderables(scene);
+        List<AssetRef<?>> failed = new ArrayList<>();
+        resources.diagnostics(new SceneResources.Diagnostics() {
+            @Override
+            public void assetFailed(AssetRef<?> asset, Throwable cause) {
+                failed.add(asset);
+            }
+        });
         SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
         long rock = facing(scene, 0, 0, -3);
         long bush = facing(scene, 1, 0, -3);
@@ -769,6 +792,7 @@ class SceneSyncTest {
         update(scene, renderables, sync);
         assertThat(sync.instanceCount()).isEqualTo(2);
         assertThat(assets.state(missing)).isEqualTo(AssetState.FAILED);
+        assertThat(failed).as("reported").containsExactly(missing);
         assertThat(resources.textureCount()).isEqualTo(2);
         assertThat(textures.count()).as("the one that loaded").isEqualTo(1);
         // Gone, and back: what the cache still has draws at once.
