@@ -149,6 +149,13 @@ public final class Pipeline implements AutoCloseable {
         vkCmdBindPipeline(commands, bindPoint, handle);
     }
 
+    /** Sets the push constants to {@code push}'s fields. Allocates nothing. */
+    public void push(VkCommandBuffer commands, Push push) {
+        if (push.size() > 0) {
+            push(commands, push.address(), push.size());
+        }
+    }
+
     /** Sets the push constants from {@code size} bytes at native address {@code data}. Allocates nothing. */
     public void push(VkCommandBuffer commands, long data, int size) {
         if (size > pushBytes) {

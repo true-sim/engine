@@ -1,6 +1,7 @@
 plugins {
     id("truesim.java-library-conventions")
     id("truesim.allocation-free")
+    id("truesim.slang") // test shaders only: a custom pass importing engine-render's modules, as a game's would
 }
 
 description = "Engine scene bridge for true-sim: draws scene's renderables, following its changes and asset cache."

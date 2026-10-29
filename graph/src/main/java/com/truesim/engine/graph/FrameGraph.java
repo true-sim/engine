@@ -759,7 +759,15 @@ public final class FrameGraph implements AutoCloseable {
 
     long bufferAddress(int buffer) {
         int target = bufferTargetOf[buffer];
-        return target >= 0 ? physicalBuffers[target].buffer.deviceAddress() : externalBuffers[~target].address;
+        if (target >= 0) {
+            return physicalBuffers[target].buffer.deviceAddress();
+        }
+        ExternalBuffer external = externalBuffers[~target];
+        if (external.address == 0) {
+            throw new IllegalStateException("The external buffer " + external.name + " has no device address: made "
+                + "without SHADER_DEVICE_ADDRESS usage");
+        }
+        return external.address;
     }
 
     long handleOf(int image) {

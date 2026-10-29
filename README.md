@@ -142,6 +142,33 @@ try (ShaderModule shaders = ShaderModule.load(device, "shaders/meshlets.spv");
 }
 ```
 
+### Custom passes without Vulkan code
+
+A game's own passes need no Vulkan calls for the usual work. `Push` writes push constants field by field, aligned as
+Slang lays out a push struct (pointers and `float2` on 8 bytes, `float3`/`float4`/matrices on 16), and the pass
+context records the commands: `ctx.dispatch` and `dispatchIndirect`, `ctx.fill` and `ctx.copy` of buffers,
+`ctx.beginRendering` (the pass's color and depth images, viewport and scissor set) with `ctx.draw` and
+`drawIndirect`. The accesses a pass declares still decide every barrier. Raw Vulkan stays available through
+`ctx.commands()` for anything else.
+
+```java
+Push push = new Push();                                          // once, per pass
+g.pass("simulate").read(state, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
+    .record(ctx -> ctx.dispatch(simulate, push.clear().address(ctx.address(state)).address(ctx.address(next))
+        .u32(count).f32(dt), (count + 63) / 64));
+g.pass("draw").read(next, BufferAccess.DRAW_READ).write(color, Access.COLOR_ATTACHMENT).record(ctx -> {
+    ctx.beginRendering(color, null, true, 0, 0, 0, 1);
+    ctx.draw(particles, push.clear().address(ctx.address(next)), 6, count);
+    ctx.endRendering();
+});
+```
+
+Shaders import the modules of any dependency using `truesim.slang`: its sources ship in its jar under `slang/`, so a
+game's shader can `import meshlets.common;` and read the engine's `Instance`s (`GpuScene.instanceAddress()`) with the
+engine's own struct. Compiler arguments a library's modules need ship beside them (`slangc.arguments`). The engine's
+tests do this end to end: a compute pass reading the instances through the graph, a fill, a copy and a draw
+(`CustomPassTest`).
+
 Devices require what such shaders use: 64-bit integers for pointers, 8 and 16-bit storage for packed data (meshlet
 indices, quantized vertices) and draw parameters, on top of the Vulkan 1.3 baseline.
 

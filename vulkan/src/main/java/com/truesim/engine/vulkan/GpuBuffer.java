@@ -174,6 +174,11 @@ public final class GpuBuffer implements AutoCloseable {
         return deviceAddress;
     }
 
+    /** Whether the buffer has a device address: made with {@code VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT}. */
+    public boolean hasDeviceAddress() {
+        return deviceAddress != 0;
+    }
+
     public long size() {
         return size;
     }

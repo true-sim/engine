@@ -31,7 +31,7 @@ public final class ExternalBuffer {
             version++;
         }
         handle = buffer.handle();
-        address = buffer.deviceAddress();
+        address = buffer.hasDeviceAddress() ? buffer.deviceAddress() : 0; // e.g. a readback: copied into, not read
         return this;
     }
 
