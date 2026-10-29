@@ -1,8 +1,16 @@
 package com.truesim.engine.scene;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.common.math.Vec2;
+import com.truesim.common.math.Vec3;
+import com.truesim.common.math.Vec4;
+import com.truesim.common.math.color.Color;
 import com.truesim.engine.render.GeometryPool;
 import com.truesim.engine.render.Material;
+import com.truesim.engine.render.MaterialFeature;
+import com.truesim.engine.render.MaterialFeatures;
+import com.truesim.engine.render.MaterialType;
+import com.truesim.engine.render.MaterialValues;
 import com.truesim.engine.render.Materials;
 import com.truesim.engine.render.Textures;
 import com.truesim.scene.assets.AssetCache;
@@ -16,6 +24,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The GPU side of scene assets, shared by every {@link SceneSync} on a device: meshes in a {@link GeometryPool},
@@ -40,6 +50,7 @@ import java.util.Objects;
 public final class SceneResources implements AutoCloseable {
 
     static final int NONE = -1;
+    private static final Logger LOG = LoggerFactory.getLogger(SceneResources.class);
 
     private final AssetCache assets;
     private final GeometryPool pool;
@@ -458,28 +469,107 @@ public final class SceneResources implements AutoCloseable {
     }
 
     /**
-     * The renderer's material for {@code entry}: the default until it loads, untextured where textures are missing.
-     * Masked alpha, double-sidedness and a clear coat follow; blended alpha draws opaque until transparents come.
+     * The renderer's material for {@code entry}: the default until it loads, untextured where textures are missing. Its
+     * type by name, its parameters and features by field name (what the data lacks keeps the defaults); masked alpha
+     * and double-sidedness follow; blended alpha draws opaque until transparents come. Data the renderer cannot use
+     * (a type not registered, values out of range) draws as the default, with a warning.
      */
     @AllowAllocation("materials change rarely")
     private Material convert(MaterialEntry entry) {
         MaterialData d = entry == null || entry.data == null ? MaterialData.DEFAULT : entry.data;
-        Material material = new Material().baseColor(d.baseColor(0), d.baseColor(1), d.baseColor(2))
-            .alpha(d.baseColor(3)).doubleSided(d.doubleSided());
-        if (d.alphaMode() == MaterialData.AlphaMode.MASK) {
-            material.alphaMask(d.alphaCutoff());
+        MaterialType type = materials.type(d.type());
+        if (type == null) {
+            LOG.warn("No material type {} is registered: {} draws as the default", d.type(), entry.ref);
+            return Material.DEFAULT;
         }
-        return material
-            .emissive(d.emissive(0), d.emissive(1), d.emissive(2))
-            .roughness(d.roughness()).metallic(d.metallic())
-            .baseColorTexture(slot(d.baseColorTexture()))
-            .normalTexture(slot(d.normalTexture()), d.normalScale())
-            .ormTexture(slot(d.ormTexture()), d.occlusionStrength())
-            .emissiveTexture(slot(d.emissiveTexture()))
-            .clearcoat(d.clearcoat(), d.clearcoatRoughness())
-            .clearcoatTexture(slot(d.clearcoatTexture()))
-            .clearcoatRoughnessTexture(slot(d.clearcoatRoughnessTexture()))
-            .clearcoatNormalTexture(slot(d.clearcoatNormalTexture()), d.clearcoatNormalScale());
+        try {
+            Material material = new Material(type, type.fromValues().apply(new DataValues(d.values(), "")))
+                .doubleSided(d.doubleSided());
+            if (d.alphaMode() == MaterialData.AlphaMode.MASK) {
+                material = material.alphaMask(d.alphaCutoff());
+            }
+            for (String name : d.features()) {
+                MaterialFeature feature = MaterialFeatures.fromValues(name, new DataValues(d.feature(name), ""));
+                if (feature == null) {
+                    LOG.warn("No material feature {}: {} shows it not", name, entry.ref);
+                } else if ((type.allowedFeatures() & feature.feature()) == 0) {
+                    LOG.warn("Material type {} allows no {}: {} shows it not", type.name(), name, entry.ref);
+                } else {
+                    material = material.feature(feature);
+                }
+            }
+            return material;
+        } catch (IllegalArgumentException e) {
+            LOG.warn("{} draws as the default: {}", entry.ref, e.getMessage());
+            return Material.DEFAULT;
+        }
+    }
+
+    /** Material data's values as a generated record reads them: textures as the slots they have, nested by path. */
+    @AllowAllocation("materials change rarely")
+    private final class DataValues implements MaterialValues {
+        private final MaterialData.Values values;
+        private final String prefix;
+
+        DataValues(MaterialData.Values values, String prefix) {
+            this.values = values;
+            this.prefix = prefix;
+        }
+
+        @Override
+        public float f32(String name, float fallback) {
+            return values.f32(prefix + name, fallback);
+        }
+
+        @Override
+        public int i32(String name, int fallback) {
+            return values.i32(prefix + name, fallback);
+        }
+
+        @Override
+        public Vec2 vec2(String name, Vec2 fallback) {
+            float[] v = floats(name, 2, 2);
+            return v == null ? fallback : new Vec2(v[0], v[1]);
+        }
+
+        @Override
+        public Vec3 vec3(String name, Vec3 fallback) {
+            float[] v = floats(name, 3, 3);
+            return v == null ? fallback : new Vec3(v[0], v[1], v[2]);
+        }
+
+        @Override
+        public Vec4 vec4(String name, Vec4 fallback) {
+            float[] v = floats(name, 4, 4);
+            return v == null ? fallback : new Vec4(v[0], v[1], v[2], v[3]);
+        }
+
+        /** A color as rgb (alpha as the fallback's) or rgba. */
+        @Override
+        public Color color(String name, Color fallback) {
+            float[] v = floats(name, 3, 4);
+            return v == null ? fallback : new Color(v[0], v[1], v[2], v.length == 4 ? v[3] : fallback.a());
+        }
+
+        private float[] floats(String name, int min, int max) {
+            float[] v = values.floats(prefix + name);
+            if (v != null && (v.length < min || v.length > max)) {
+                throw new IllegalArgumentException(prefix + name + " is " + min + (max > min ? " to " + max : "")
+                    + " floats, not " + v.length);
+            }
+            return v;
+        }
+
+        @Override
+        public int texture(String name, boolean srgb, int fallback) {
+            AssetRef<TextureData> ref = values.texture(prefix + name);
+            return ref == null ? fallback : slot(ref); // its color space is the texture data's own
+        }
+
+        @Override
+        public MaterialValues nested(String name) {
+            return new DataValues(values, prefix + name + ".");
+        }
     }
 
     private int slot(AssetRef<TextureData> ref) {

@@ -22,6 +22,7 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.nvkCmdCopyBufferToImage;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
+import com.truesim.common.math.color.Color;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
@@ -33,6 +34,13 @@ import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import com.truesim.engine.render.blocks.Blur;
 import com.truesim.engine.render.blocks.DepthPyramid;
+import com.truesim.engine.render.materials.CarPaint;
+import com.truesim.engine.render.materials.CarPaintParameters;
+import com.truesim.engine.render.materials.ClearcoatParameters;
+import com.truesim.engine.render.materials.Glow;
+import com.truesim.engine.render.materials.GlowParameters;
+import com.truesim.engine.render.materials.MetallicRoughnessMaterial;
+import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -58,6 +66,7 @@ import org.lwjgl.vulkan.VkImageSubresourceLayers;
 class GraphTechniquesTest {
 
     private static final int SIZE = 64;
+    private static final MetallicRoughnessParameters MR = MetallicRoughnessParameters.DEFAULTS;
     private static final float HALF = (float) Math.sqrt(0.5);
     private static final Key EDGE = Key.of("edge");
 
@@ -496,18 +505,20 @@ class GraphTechniquesTest {
     @Test
     void theVisibilityBufferShadesEachMaterialTypeWithItsOwnShader() {
         assumeThat(device.primitiveIds()).as("primitive IDs in fragment shaders").isTrue();
-        // The lit floor, standard, and a quad standing on it, of the type under test.
+        // The lit floor, metallic-roughness, and a quad standing on it, of the type under test.
         scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
         scene.removeFrom(2);
         Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
         view.set(camera, 1, MeshletRenderer.MODE_LIT);
         try (Materials materials = new Materials(device, 4)) {
-            int standard = materials.add(new Material().baseColor(1, 0, 1));
+            int quadMaterial = materials.add(new Material(MR.withBaseColor(new Color(1, 0, 1, 1))));
             scene.setMaterials(materials);
-            scene.set(1, quad, standard, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
-            int glow = materials.register(new MaterialType("glow", "shaders/test/glow.spv", "glowMain"));
-            assertThat(glow).isEqualTo(1);
-            assertThat(materials.types()).containsExactly(MaterialType.STANDARD, materials.types().get(1));
+            scene.set(1, quad, quadMaterial, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+            assertThatIllegalArgumentException().as("no type takes it yet")
+                .isThrownBy(() -> materials.set(quadMaterial, new Material(GlowParameters.DEFAULTS)));
+            assertThat(materials.register(Glow.TYPE)).isEqualTo(1);
+            assertThat(materials.types()).containsExactly(MetallicRoughnessMaterial.TYPE, Glow.TYPE);
+            assertThat(materials.type("glow")).isSameAs(Glow.TYPE);
             graph.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), view, SIZE, SIZE,
                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f))
                 .output(Keys.SCENE_COLOR, output);
@@ -516,23 +527,73 @@ class GraphTechniquesTest {
             assertThat(graph.passes()).containsSubsequence("material tiles reset", "material classification",
                 "visibility shading");
             int[] before = pixels.memory().toArray(ValueLayout.JAVA_INT);
-            assertThat(glowing(before)).as("the standard quad is lit, not glowing").isZero();
-            materials.set(standard, new Material().baseColor(1, 0, 1).type(glow));
+            assertThat(glowing(before)).as("the metallic-roughness quad is lit, not glowing").isZero();
+            materials.set(quadMaterial, new Material(GlowParameters.DEFAULTS));
             frame();
             int[] after = pixels.memory().toArray(ValueLayout.JAVA_INT);
             assertThat(glowing(after)).as("the quad's pixels").isGreaterThan(SIZE * SIZE / 40);
             for (int i = 0; i < after.length; i++) {
                 if (!glowing(after[i])) {
-                    assertThat(after[i]).as("pixel %d, standard as before", i).isEqualTo(before[i]);
+                    assertThat(after[i]).as("pixel %d, metallic-roughness as before", i).isEqualTo(before[i]);
                 }
             }
-            // A type the table does not name shades as the standard one.
-            materials.set(standard, new Material().baseColor(1, 0, 1).type(7));
+            // Its parameters, read by its shader: dimmed in place, then back by the record.
+            materials.update(quadMaterial, GlowParameters.STRENGTH, 0.5f);
             frame();
-            assertThat(pixels.memory().toArray(ValueLayout.JAVA_INT)).isEqualTo(before);
-            assertThatIllegalArgumentException().isThrownBy(() -> materials.register(MaterialType.STANDARD));
-            assertThatIllegalArgumentException().isThrownBy(() -> new Material().type(256));
-            assertThatIllegalArgumentException().isThrownBy(() -> new MaterialType("half", "a.spv", "a", "b.spv", null));
+            assertThat(glowing(pixels.memory().toArray(ValueLayout.JAVA_INT))).isZero();
+            materials.set(quadMaterial, new Material(GlowParameters.DEFAULTS.withStrength(1)));
+            frame();
+            assertThat(pixels.memory().toArray(ValueLayout.JAVA_INT)).isEqualTo(after);
+            assertThatIllegalArgumentException().as("out of its range")
+                .isThrownBy(() -> materials.update(quadMaterial, GlowParameters.STRENGTH, 17f));
+            assertThatIllegalArgumentException().isThrownBy(() -> new GlowParameters(new Color(1, 1, 1, 1), -1));
+            assertThatIllegalArgumentException().as("glow allows no features").isThrownBy(() -> materials.set(
+                quadMaterial, new Material(GlowParameters.DEFAULTS).feature(ClearcoatParameters.DEFAULTS)));
+            assertThatIllegalArgumentException().as("not its field")
+                .isThrownBy(() -> materials.update(quadMaterial, MetallicRoughnessParameters.ROUGHNESS, 0.5f));
+            assertThatIllegalArgumentException().isThrownBy(() -> materials.register(Glow.TYPE));
+            assertThatIllegalArgumentException().isThrownBy(() -> new MaterialType("half", GlowParameters.class,
+                GlowParameters::fromValues, 0, "a.spv", "a", "b.spv", null));
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
+    void typesBuildOnMetallicRoughnessByNestingItsParameters() {
+        assumeThat(device.primitiveIds()).as("primitive IDs in fragment shaders").isTrue();
+        scene.removeFrom(1);
+        Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        try (Materials materials = new Materials(device, 4)) {
+            materials.register(CarPaint.TYPE);
+            MetallicRoughnessParameters red = MR.withBaseColor(new Color(0.6, 0.05, 0.05, 1)).withRoughness(0.4f);
+            int floor = materials.add(new Material(red));
+            scene.setMaterials(materials);
+            scene.set(0, quad, floor, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+            graph.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), view, SIZE, SIZE,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)).output(Keys.SCENE_COLOR, output);
+            frame();
+            frame();
+            int[] plain = pixels.memory().toArray(ValueLayout.JAVA_INT);
+            // Car paint without flakes is its nested metallic-roughness, to the bit: the layouts agree.
+            CarPaintParameters paint = CarPaintParameters.DEFAULTS.withBase(red);
+            assertThat(paint.maskAlpha()).as("masked by its base's alpha").isEqualTo(1);
+            materials.set(floor, new Material(paint));
+            frame();
+            assertThat(pixels.memory().toArray(ValueLayout.JAVA_INT)).isEqualTo(plain);
+            // Its own field, and its base's by path, in place.
+            materials.update(floor, CarPaintParameters.FLAKES, 1f);
+            frame();
+            int[] flakes = pixels.memory().toArray(ValueLayout.JAVA_INT);
+            assertThat(brightest(flakes)).as("white flakes").isGreaterThan(brightest(plain) + 100);
+            materials.update(floor, CarPaintParameters.BASE_ROUGHNESS, 0.9f);
+            frame();
+            assertThat(pixels.memory().toArray(ValueLayout.JAVA_INT)).isNotEqualTo(flakes);
+            // Its type allows a clear coat: the engine lays it over car paint as over metallic-roughness.
+            materials.set(floor, new Material(paint).feature(ClearcoatParameters.DEFAULTS.withRoughness(0.1f)));
+            assertThat(materials.features(floor)).isEqualTo(Material.FEATURE_CLEARCOAT);
+            frame();
+            assertThat(pixels.memory().toArray(ValueLayout.JAVA_INT)).isNotEqualTo(plain);
             scene.setMaterials(null);
         }
     }
@@ -546,10 +607,11 @@ class GraphTechniquesTest {
         view.set(camera, 1, MeshletRenderer.MODE_LIT);
         try (Lights lights = new Lights(device, 4, 1); Materials materials = new Materials(device, 4)) {
             lights.point(0, 0, -0.5f, -3, 6, 4, 4, 4).setCount(1);
-            Material base = new Material().baseColor(0.1f, 0.1f, 0.1f).roughness(1);
+            Material base = new Material(MR.withBaseColor(new Color(0.1, 0.1, 0.1, 1)).withRoughness(1));
             int rough = materials.add(base);
-            int coated = materials.add(new Material().baseColor(0.1f, 0.1f, 0.1f).roughness(1).clearcoat(1, 0.1f));
-            assertThat(base.features()).isZero();
+            int coated = materials.add(base.feature(ClearcoatParameters.DEFAULTS.withRoughness(0.1f)));
+            assertThat(base.featureMask()).isZero();
+            assertThat(materials.features(coated)).isEqualTo(Material.FEATURE_CLEARCOAT);
             assertThat(materials.contains(coated)).isTrue();
             scene.setMaterials(materials);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
@@ -1024,9 +1086,9 @@ class GraphTechniquesTest {
         try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8);
              ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
                  VK_FORMAT_D32_SFLOAT, 16)) {
-            Material checkered = new Material().baseColorTexture(textures.color(8, 8, texels)).alphaMask(0.5f);
+            Material checkered = new Material(MR.withBaseColorTexture(textures.color(8, 8, texels))).alphaMask(0.5f);
             int masked = materials.addAll(List.of(checkered, checkered));
-            Material twoSided = new Material().baseColor(0.9f, 0.5f, 0.2f).doubleSided(true);
+            Material twoSided = new Material(MR.withBaseColor(new Color(0.9, 0.5, 0.2, 1))).doubleSided(true);
             int doubleSided = materials.addAll(List.of(twoSided, twoSided));
             scene.setMaterials(materials);
             classic.add(textured, texturedMesh);

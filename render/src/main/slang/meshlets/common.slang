@@ -3,7 +3,8 @@
 module common;
 
 import bindless;
-__exported import shading;
+__exported import materials.metallicRoughness;
+__exported import materials.clearcoat;
 __exported import lights;
 
 /** One mesh in the geometry pool: where its data lies in the pool's buffers, and its quantization box. 96 bytes. */
@@ -480,9 +481,28 @@ public void discardMasked(Material m, VertexOut in, bool front)
 public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Material* materials, float2 dx,
     float2 dy, LightListHeader* lights, uint2 pixel)
 {
-    return shadeMaterial<StandardMaterial, R>(rays, view, in, materials, dx, dy, lights, pixel,
-        materialFeatures(materials[in.material]));
+    Material m = materials[in.material];
+    if (materialType(m) != 0)
+    {
+        // Forward shading draws only metallic-roughness for now: other types as its defaults.
+        return shadeMaterial<DefaultSurface, R>(rays, view, in, materials, dx, dy, lights, pixel,
+            materialFeatures(m));
+    }
+    return shadeMaterial<MetallicRoughnessMaterial, R>(rays, view, in, materials, dx, dy, lights, pixel,
+        materialFeatures(m));
 }
+
+/** Metallic-roughness's defaults, whatever the material's parameters: for types a pass cannot shade yet. */
+struct DefaultSurface : IMaterial
+{
+    typealias Parameters = NoParameters;
+
+    static Surface surface(NoParameters p, MaterialRef m, SurfaceInput in)
+    {
+        MetallicRoughnessParameters defaults = {};
+        return evaluate(defaults, in);
+    }
+};
 
 /**
  * shadeSurface with the surface from material type M, showing the features of `features` (FEATURE_*; where it is a
@@ -495,12 +515,8 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
     {
         return float4(1, 1, 1, 1);
     }
-    Material m = materials[in.material];
-    if (view.mode == 1)
-    {
-        m.baseColor = float4(meshletColor(in.meshlet), 1);
-        m.baseColorTexture = -1;
-    }
+    MaterialRef ref = { materials, in.material };
+    Material m = ref.slot();
     float3 toViewer = normalize(view.eye - in.world);
     float3 normal = in.normal;
     float4 tangent = in.tangent;
@@ -519,14 +535,17 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
     input.dy = dy;
     input.color = in.color;
     input.features = features;
-    Surface s = M.surface(m, input);
-    float3 emissive = s.emissive;
-    if ((features & FEATURE_CLEARCOAT) == 0)
+    Surface s = M.surface(materialParameters<M.Parameters>(ref), ref, input);
+    if (view.mode == 1)
     {
-        s.clearcoat = 0; // whatever the type left there
+        s.albedo = meshletColor(in.meshlet) * in.color.rgb;
     }
-    else
+    // The features, the engine's: on any type's surface.
+    s.clearcoat = 0;
+    float3 emissive = s.emissive;
+    if ((features & FEATURE_CLEARCOAT) != 0)
     {
+        applyClearcoat(s, materialFeature<ClearcoatParameters>(ref, FEATURE_CLEARCOAT), input);
         emissive *= 1 - s.clearcoat * coatFresnel(dot(s.clearcoatNormal, toViewer)); // seen through the coat
     }
     float3 color = ambient(s, SKY_IRRADIANCE) + emissive;

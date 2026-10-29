@@ -12,6 +12,11 @@ dependencies {
     testImplementation("com.truesim.scene:scene-meshbuild:0.17.2")
 }
 
+// The test shaders' material records (a game's own type, as in a project of its own), as Java.
+slang {
+    javaPackage = "com.truesim.engine.scene.materials"
+}
+
 // The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.
 tasks.test {
     if (providers.environmentVariable("TRUESIM_BENCHMARK").orNull == "true") {

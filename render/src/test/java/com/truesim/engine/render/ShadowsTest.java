@@ -15,8 +15,10 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
+import com.truesim.common.math.color.Color;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
+import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.render.shadows.RayTracedShadows;
 import com.truesim.engine.render.shadows.ShadowMapShadows;
 import com.truesim.engine.render.shadows.CascadedShadowMaps;
@@ -308,8 +310,9 @@ class ShadowsTest {
         double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
         double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
         try (Lights lights = new Lights(device, 4, 4); Materials materials = new Materials(device, 4)) {
-            int solid = materials.add(new Material().alphaMask(0.5f));
-            int clear = materials.add(new Material().alpha(0).alphaMask(0.5f));
+            int solid = materials.add(Material.DEFAULT.alphaMask(0.5f));
+            int clear = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS.withBaseColor(new Color(0.8, 0.8, 0.8, 0)))
+                .alphaMask(0.5f));
             scene.setMaterials(materials);
             lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
             scene.set(1, quad, solid, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);

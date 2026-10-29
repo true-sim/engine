@@ -17,7 +17,9 @@ import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.Technique;
+import com.truesim.common.math.color.Color;
 import com.truesim.engine.render.Camera;
+import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.render.ClusteredForwardShading;
 import com.truesim.engine.render.GeometryPool;
 import com.truesim.engine.render.Keys;
@@ -152,8 +154,10 @@ class SceneDrawnCheck {
                 }
                 scene.update();
                 // The scene's materials: granite and grass, as SceneResources makes them.
-                int granite = materials.add(new Material().baseColor(0.5f, 0.5f, 0.52f).roughness(0.8f));
-                int grass = materials.add(new Material().baseColor(0.3f, 0.5f, 0.2f).roughness(0.8f));
+                int granite = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
+                    .withBaseColor(new Color(0.5, 0.5, 0.52, 1)).withRoughness(0.8f)));
+                int grass = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
+                    .withBaseColor(new Color(0.3, 0.5, 0.2, 1)).withRoughness(0.8f)));
                 gpu.setMaterials(materials);
                 gpu.set(0, groundMesh, grass, 0, -12, 0, 0, 0, 0, 1, 1, 1, 1);
                 var world = scene.worldTransforms();

@@ -1,21 +1,14 @@
 // The visibility buffer's shading: one thread per pixel reads which triangle the pixel shows, rebuilds it (its three
 // vertices through the same vertex stage as drawing), finds where the pixel's ray meets it, interpolates there, and
 // shades once with the same surface shading as forward. Texture gradients come from the rays of the neighboring
-// pixels (ray differentials), as the hardware's would from the triangle's screen-space derivatives. The entry points
-// (shade.slang, and shadeTraced.slang with inline ray shadows) choose how shadow rays are traced.
+// pixels (ray differentials), as the hardware's would from the triangle's screen-space derivatives.
 //
 // By material type and features: classify.slang sorts the screen's 8x8 tiles into a list per bin (type and feature
 // combination) present in them (a tile of several goes into each), and each bin's pass shades its tiles' pixels of
 // its bin, with its type's IMaterial and only its features' code (FEATURES, a specialization constant). Pixels
-// showing nothing count as type 0, the standard type, which writes the clear color there. A game's type is
-// a compute entry point of its own, of 8x8 threads (as shade.slang's):
-//
-//     import visibility.resolve;
-//     struct Water : IMaterial { static Surface surface(Material m, SurfaceInput in) { ... } };
-//     void waterMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
-//     {
-//         shadeTiles<Water>(NoRays(), group, thread);
-//     }
+// showing nothing count as type 0, metallic-roughness, which writes the clear color there. Each type's entry points,
+// calling shadeTiles with NoRays() or (with inline ray shadows) QueryRays(), are generated from its
+// [MaterialType] struct by the build (materials.slang).
 module resolve;
 
 __exported import bindless;

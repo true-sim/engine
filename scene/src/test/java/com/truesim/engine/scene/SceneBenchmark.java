@@ -85,8 +85,8 @@ class SceneBenchmark {
 
     static final Generator<Rock, MeshData> ROCK_MESHES = (rock, seed) -> rock(rock.subdivisions());
     static final Generator<Terrain, MeshData> TERRAINS = (terrain, seed) -> terrain(terrain.size());
-    static final Generator<Stone, MaterialData> STONES = (stone, seed) -> MaterialData.builder()
-        .baseColor(stone.r(), stone.g(), stone.b(), 1).roughness(0.8f).build();
+    static final Generator<Stone, MaterialData> STONES = (stone, seed) -> MaterialData.builder(MaterialData.METALLIC_ROUGHNESS)
+        .set("baseColor", stone.r(), stone.g(), stone.b(), 1f).set("roughness", 0.8f).build();
     static final AssetRef<MeshData> ROCK = AssetRef.generated(RenderAssets.MESH, ROCK_MESHES, new Rock(6), 1);
     static final AssetRef<MeshData> GROUND = AssetRef.generated(RenderAssets.MESH, TERRAINS, new Terrain(1024), 1);
     static final AssetRef<MaterialData> GRANITE =

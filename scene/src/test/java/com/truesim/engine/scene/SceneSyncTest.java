@@ -30,7 +30,12 @@ import com.truesim.engine.render.ClusteredForwardShading;
 import com.truesim.engine.render.GeometryPool;
 import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.Keys;
+import com.truesim.common.math.color.Color;
 import com.truesim.engine.render.Material;
+import com.truesim.engine.render.materials.ClearcoatParameters;
+import com.truesim.engine.render.materials.MetallicRoughnessParameters;
+import com.truesim.engine.scene.materials.Tinted;
+import com.truesim.engine.scene.materials.TintedParameters;
 import com.truesim.engine.render.Materials;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RenderView;
@@ -75,6 +80,8 @@ import org.lwjgl.vulkan.VkBufferImageCopy;
  */
 class SceneSyncTest {
 
+    private static final String MR = MaterialData.METALLIC_ROUGHNESS;
+
     private static final int SIZE = 64;
     private static final float HALF = (float) Math.sqrt(0.5);
     private static final int INSTANCES = 4;
@@ -94,8 +101,8 @@ class SceneSyncTest {
     static final Generator<Square, MeshData> SQUARES = (square, seed) -> square(square.size());
     /** Squares side by side, one submesh each: a mesh of {@code count} submeshes. */
     static final Generator<Integer, MeshData> STRIPS = (count, seed) -> strips(count);
-    static final Generator<Glow, MaterialData> GLOWS = (glow, seed) -> MaterialData.builder()
-        .baseColor(0, 0, 0, 1).emissive(glow.r(), glow.g(), glow.b()).build();
+    static final Generator<Glow, MaterialData> GLOWS = (glow, seed) -> MaterialData.builder(MR)
+        .set("baseColor", 0f, 0f, 0f, 1f).set("emissive", glow.r(), glow.g(), glow.b()).build();
     static final Generator<Plain, TextureData> PLAINS = (plain, seed) -> {
         MemorySegment texels = Arena.ofAuto().allocate(4 * 4);
         for (int i = 0; i < 4; i++) {
@@ -438,12 +445,12 @@ class SceneSyncTest {
         // A scene's materials say how they rasterize, as glTF's do: one masked, one double-sided, one blended (opaque
         // until transparents come): each renderable draws in its raster bin.
         AssetRef<MaterialData> masked = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
-            (glow, seed) -> MaterialData.builder().baseColor(1, 1, 1, 1)
+            (glow, seed) -> MaterialData.builder(MR).set("baseColor", 1f, 1f, 1f, 1f)
                 .alpha(MaterialData.AlphaMode.MASK, 0.5f).build(), new Glow(1, 1, 1), 4);
         AssetRef<MaterialData> twoSided = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
-            (glow, seed) -> MaterialData.builder().doubleSided(true).build(), new Glow(1, 1, 1), 5);
+            (glow, seed) -> MaterialData.builder(MR).doubleSided(true).build(), new Glow(1, 1, 1), 5);
         AssetRef<MaterialData> blended = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
-            (glow, seed) -> MaterialData.builder().alpha(MaterialData.AlphaMode.BLEND, 0.5f).build(),
+            (glow, seed) -> MaterialData.builder(MR).alpha(MaterialData.AlphaMode.BLEND, 0.5f).build(),
             new Glow(1, 1, 1), 6);
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Renderables renderables = new Renderables(scene);
@@ -465,9 +472,62 @@ class SceneSyncTest {
     }
 
     @Test
+    void materialDataNamesItsTypeAndItsValuesByField() throws InterruptedException {
+        // A game's type, from a project of its own: its data by field name, its nested base's by path. Two
+        // renderables given equal data inline share one material; data the renderer cannot use draws as the default.
+        materials.register(Tinted.TYPE);
+        MaterialData green = MaterialData.builder("tinted").set("base.baseColor", 1f, 1f, 1f, 1f)
+            .set("base.roughness", 0.3f).set("tint", 0f, 1f, 0f)
+            .feature("clearcoat", coat -> coat.set("roughness", 0.2f)).build();
+        MaterialData same = MaterialData.builder("tinted").set("base.baseColor", 1f, 1f, 1f, 1f)
+            .set("base.roughness", 0.3f).set("tint", 0f, 1f, 0f)
+            .feature("clearcoat", coat -> coat.set("roughness", 0.2f)).build();
+        MaterialData unknown = MaterialData.builder("marble").build();
+        MaterialData outOfRange = MaterialData.builder(MR).set("roughness", 7f).build();
+        MaterialData unknownFeature = MaterialData.builder(MR).set("roughness", 0.25f)
+            .feature("sparkles", sparkles -> sparkles.set("density", 1f)).build();
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        List<FrameGraph> graphs = List.of(graph(sync, false, new GpuBuffer[] {readback(), readback()}));
+        int before = materials.count();
+        renderables.set(facing(scene, -1, 0, -4), SQUARE, List.of(green.ref()));
+        renderables.set(facing(scene, 1, 0, -4), SQUARE, List.of(same.ref()));
+        renderables.set(facing(scene, 0, 1, -4), SQUARE, List.of(unknown.ref()));
+        renderables.set(facing(scene, 0, -1, -4), SQUARE, List.of(outOfRange.ref()));
+        renderables.set(facing(scene, 2, 0, -4), SQUARE, List.of(unknownFeature.ref()));
+        frame(graphs, List.of(sync), camera);
+        load();
+        for (int frame = 0; frame < 3; frame++) {
+            frame(graphs, List.of(sync), camera);
+        }
+        device.waitIdle();
+        assertThat(materials.count()).as("one for the equal data, one each for the rest").isEqualTo(before + 4);
+        List<Material> made = new ArrayList<>();
+        for (int id = 1; id < 64; id++) {
+            if (materials.contains(id)) {
+                made.add(materials.material(id));
+            }
+        }
+        Material tinted = made.stream().filter(m -> m.parameters() instanceof TintedParameters).findFirst()
+            .orElseThrow();
+        TintedParameters p = (TintedParameters) tinted.parameters();
+        assertThat(p.tint()).isEqualTo(new Color(0, 1, 0, 1));
+        assertThat(p.base().baseColor()).isEqualTo(new Color(1, 1, 1, 1));
+        assertThat(p.base().roughness()).isEqualTo(0.3f);
+        assertThat(p.base().metallic()).as("not in the data: the default").isZero();
+        assertThat(tinted.features()).containsExactly(ClearcoatParameters.DEFAULTS.withRoughness(0.2f));
+        assertThat(made.stream().filter(m -> m.equals(Material.DEFAULT)).count())
+            .as("the unknown type and the value out of range").isEqualTo(2);
+        assertThat(made).anyMatch(m -> m.parameters() instanceof MetallicRoughnessParameters mr
+            && mr.roughness() == 0.25f && m.features().isEmpty());
+    }
+
+    @Test
     void aClearCoatInTheDataTurnsTheFeatureOn() throws InterruptedException {
         AssetRef<MaterialData> coated = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
-            (glow, seed) -> MaterialData.builder().clearcoat(1, 0.1f).build(), new Glow(1, 1, 1), 7);
+            (glow, seed) -> MaterialData.builder(MR)
+                .feature("clearcoat", coat -> coat.set("roughness", 0.1f)).build(), new Glow(1, 1, 1), 7);
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Renderables renderables = new Renderables(scene);
         SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
@@ -589,7 +649,7 @@ class SceneSyncTest {
     void submeshesTakeTheirMaterialsAndTexturesArriveLater() throws InterruptedException {
         AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 1);
         AssetRef<MaterialData> textured = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
-            (glow, seed) -> MaterialData.builder().baseColorTexture(white).build(), new Glow(1, 1, 1), 2);
+            (glow, seed) -> MaterialData.builder(MR).texture("baseColorTexture", white).build(), new Glow(1, 1, 1), 2);
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Renderables renderables = new Renderables(scene);
         SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
@@ -687,10 +747,11 @@ class SceneSyncTest {
                 return new TextureData(1, 1, TextureData.ColorSpace.LINEAR, texels);
             }, new Plain(0xff00ff00), 1);
         AssetRef<MaterialData> stone = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
-            (glow, seed) -> MaterialData.builder().baseColorTexture(missing).ormTexture(rough, 1).build(),
+            (glow, seed) -> MaterialData.builder(MR).texture("baseColorTexture", missing)
+                .texture("ormTexture", rough).set("occlusion", 1f).build(),
             new Glow(0.5f, 0.5f, 0.5f), 3);
         AssetRef<MaterialData> moss = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
-            (glow, seed) -> MaterialData.builder().baseColorTexture(missing).build(), new Glow(0, 0.5f, 0), 3);
+            (glow, seed) -> MaterialData.builder(MR).texture("baseColorTexture", missing).build(), new Glow(0, 0.5f, 0), 3);
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Renderables renderables = new Renderables(scene);
         SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
@@ -892,8 +953,8 @@ class SceneSyncTest {
         // Meshes of three submeshes: one material for all (the last one fills the rest), and a list naming a material
         // twice; the materials share a texture. Removing them lets go of each material and texture once.
         AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 1);
-        Generator<Glow, MaterialData> textured = (glow, seed) -> MaterialData.builder()
-            .baseColor(glow.r(), glow.g(), glow.b(), 1).baseColorTexture(white).build();
+        Generator<Glow, MaterialData> textured = (glow, seed) -> MaterialData.builder(MR)
+            .set("baseColor", glow.r(), glow.g(), glow.b(), 1f).texture("baseColorTexture", white).build();
         AssetRef<MaterialData> a = AssetRef.generated(RenderAssets.MATERIAL, textured, new Glow(1, 0, 0), 5);
         AssetRef<MaterialData> b = AssetRef.generated(RenderAssets.MATERIAL, textured, new Glow(0, 1, 0), 5);
         AssetRef<MeshData> strips = AssetRef.generated(RenderAssets.MESH, STRIPS, 3, 1);

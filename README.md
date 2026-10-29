@@ -300,40 +300,79 @@ classic renderer would add a 32-bit index buffer per mesh and per discrete LOD; 
 
 ### Materials and textures
 
-Surfaces are physically based, metallic-roughness as in glTF: a base color, metalness, roughness, a tangent-space
-normal map, occlusion and emission, each a factor times an optional texture.
+A material is its **type** (how its parameters become a surface), the type's **parameters**, the **features** it
+shows, and how it rasterizes. Type 0 is metallic-roughness as in glTF: a base color, metalness, roughness, a
+tangent-space normal map, occlusion and emission, each a factor times an optional texture.
 
 ```java
 try (Textures textures = new Textures(device); Materials materials = new Materials(device, 1024)) {
     int albedo = textures.color(512, 512, rgba);       // sRGB, full mip chain made on the GPU
     int normals = textures.data(512, 512, xyz);         // linear
-    int rock = materials.add(new Material().baseColorTexture(albedo).normalTexture(normals, 1).roughness(0.9f));
+    int rock = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
+        .withBaseColorTexture(albedo).withNormalTexture(normals).withRoughness(0.9f)));
     scene.setMaterials(materials);
     scene.set(0, rockMesh, rock, x, y, z, qx, qy, qz, qw, 1, 1, 1); // submesh s takes material rock + s
 }
 ```
 
+- **One source of truth, in Slang.** A type's parameters are a Slang struct marked `[MaterialParameters]`; a feature's
+  one marked `[MaterialFeature]`; a type an `IMaterial` marked `[MaterialType("name")]`. The build (build-logic's
+  `truesim.slang`, `slang.javaPackage`) generates from them, before the Java compiles: a Java record per struct, with
+  the struct's initializers as `DEFAULTS`, `[Range]` checks, withers, the byte layout slangc itself gives the struct
+  (its reflection), a constant per field for writing one value in place (`materials.update(id,
+  CarPaintParameters.FLAKES, 0.8f)`), and `fromValues` for data by field name; and per type its visibility-buffer
+  entry points and a class holding its `MaterialType`. Structs of other projects are found through an index their jar
+  ships, so a game's parameters can nest the engine's:
+
+  ```slang
+  import materials.metallicRoughness;
+
+  [MaterialParameters(FEATURE_CLEARCOAT)]            // the features the type allows
+  public struct CarPaintParameters
+  {
+      public MetallicRoughnessParameters base;       // the engine's, nested by value
+      [Color] public float3 flakeColor = float3(1, 1, 1);
+      [Range(0, 1)] public float flakes = 0;
+  };
+
+  [MaterialType("carPaint")]
+  public struct CarPaint : IMaterial
+  {
+      public typealias Parameters = CarPaintParameters;
+      public static Surface surface(CarPaintParameters p, MaterialRef m, SurfaceInput in)
+      {
+          Surface s = evaluate(p.base, in);          // metallic-roughness, as the engine does it
+          s.albedo = lerp(s.albedo, p.flakeColor, p.flakes);
+          return s;
+      }
+  };
+  ```
+
+  ```java
+  materials.register(CarPaint.TYPE);
+  int red = materials.add(new Material(CarPaintParameters.DEFAULTS.withFlakes(0.4f))
+      .feature(ClearcoatParameters.DEFAULTS.withRoughness(0.05f)));
+  ```
+- **The table** is a 32-byte slot per material (header: type, double-sided, masked, features, cutoff; the mask's alpha
+  and texture; where its blocks lie), then the blocks: the type's parameters and a section per feature shown, each
+  material paying only for what it has. Passes that only rasterize (depth, shadows, IDs) read the slot alone, whatever
+  the type. Material 0 is metallic-roughness's defaults, so meshes draw before anything is set up. Instances name a
+  first material and each submesh of the mesh takes the next.
+- **Features are the engine's**, applied on any type allowing them: a clear coat (glTF's `KHR_materials_clearcoat`)
+  is laid over the type's surface where the material has a `ClearcoatParameters` section. The visibility buffer sorts
+  the screen's 8x8 tiles into a list per type and feature combination they show and shades each with one indirect
+  dispatch of its own variant (a specialization constant), holding only its features' code: a plain material never
+  pays for a coat. Forward shading branches on the material's features; it draws types other than metallic-roughness
+  as its defaults for now.
 - **Textures** live in the bindless set and are sampled by slot, trilinear and anisotropic (`Bindless.MATERIAL`, up to
   16x where the GPU allows).
-- **Materials** are a table of 96-byte records the shaders read by id. Material 0 is a light gray default, so meshes
-  draw before anything is set up. Instances name a first material and each submesh of the mesh takes the next, so one
-  mesh can be drawn with different materials.
-- **One shading module** (`shading.slang`): the material evaluation (with explicit texture gradients, so passes
-  without hardware derivatives can use it too) and the shading model: Lambert diffuse and a GGX specular lobe with
-  height-correlated Smith visibility and Schlick Fresnel. The vertex stage decodes normals, tangents, texture
-  coordinates and vertex colors from the pool's attributes.
-- **Material types:** a type is a Slang `IMaterial` (`surface(Material, SurfaceInput)`: what the surface is at a
-  point); lighting stays the engine's. Type 0 is the standard metallic-roughness one. A game registers its own with
-  `materials.register(new MaterialType("water", "shaders/water.spv", "waterMain"))` and sets `Material.type(id)`;
-  its entry point calls `visibility.resolve`'s `shadeTiles<Water>`. The visibility buffer sorts the screen's 8x8 tiles
-  into a list per type they show and shades each type with one indirect dispatch. Forward shading draws every type as
-  the standard one, for now.
-- **Features from the data:** optional parts of the shading turn on where a material's data has them, with no
-  separate material to pick: a clear coat (`Material.clearcoat(strength, roughness)`, glTF's
-  `KHR_materials_clearcoat`, from `MaterialData` through the scene bridge) shows where its strength is above 0. The
-  visibility buffer bins by type and feature combination, each bin a pipeline variant (a specialization constant)
-  holding only its features' code, so a plain material never pays for a coat. Forward shading branches on the
-  material's features.
+- **One shading model** (`shading.slang`): Lambert diffuse and a GGX specular lobe with height-correlated Smith
+  visibility and Schlick Fresnel, under an optional coat, with explicit texture gradients so passes without hardware
+  derivatives use it too. The vertex stage decodes normals, tangents, texture coordinates and vertex colors from the
+  pool's attributes.
+- **From scene data:** scene's `MaterialData` names its type and values by field name (`base.roughness` for nested
+  ones), and the bridge builds the type's record through its `fromValues`; equal data shared inline (`data.ref()`) is
+  one material.
 
 
 ### Lights and light lists

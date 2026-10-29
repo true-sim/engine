@@ -4,20 +4,29 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.render.materials.MetallicRoughnessMaterial;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.VulkanDevice;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
- * The material table shaders read, by id: 96 bytes per {@link Material}, as engine-render's {@code shading.slang}
- * lays it out. Material 0 is a light gray default, so meshes draw before anything is set up. Instances name a first
- * material ({@link GpuScene#set(int, int, int, float, float, float, float, float, float, float, float, float,
+ * The material table shaders read, by id, as engine-render's {@code materials.slang} lays it out: a 32-byte slot per
+ * {@link Material} (how it rasterizes, where its blocks lie), then the blocks, its type's parameters and a section per
+ * feature it shows. Material 0 is {@link Material#DEFAULT}, so meshes draw before anything is set up. Instances name a
+ * first material ({@link GpuScene#set(int, int, int, float, float, float, float, float, float, float, float, float,
  * float)}); each submesh of the mesh takes the next.
  *
- * <p>The table also names the {@link MaterialType material types} its materials may have ({@link Material#type}):
- * {@link MaterialType#STANDARD} as type 0, and those {@link #register registered}.
+ * <p>The table also names the {@link MaterialType material types} its materials may have: metallic-roughness as type
+ * 0, and those {@link #register registered}.
  *
  * <p>Materials are read when the frame's commands run. Given a frame graph's {@link FrameSlots}, the table keeps a copy
  * per frame in flight; otherwise change a material only once the frames using it have finished.
@@ -25,24 +34,42 @@ import java.util.List;
 @AllowAllocation("created rarely")
 public final class Materials implements AutoCloseable {
 
-    static final int BYTES = 96;
+    /** A material's slot. */
+    static final int SLOT_BYTES = 32;
     /** Material types a table may name: their ids fill a header's 8 bits. */
     public static final int MAX_TYPES = 256;
+    /** Room for blocks per material by default: metallic-roughness and a clear coat take 96. */
+    public static final int BLOCK_BYTES_PER_MATERIAL = 128;
+    /** Blocks start at multiples of this. */
+    private static final int ALIGNMENT = 16;
+    /** Feature sections a slot has room for. */
+    private static final int MAX_FEATURE_SECTIONS = 3;
 
     private final FrameBuffer table;
     private final int capacity;
+    private final long heapStart;
     /** Ids in contiguous blocks: an add takes one, {@link #addAll} as many as materials. */
     private final RangeAllocator ids;
-    /** Per id: the length of the block starting there (0: not a block's start), and whether it is in use. */
+    /** The blocks, in units of {@link #ALIGNMENT} bytes. */
+    private final RangeAllocator heap;
+    /** Per id: the length of the block of ids starting there (0: not a block's start), and whether it is in use. */
     private final int[] blockLength;
     private final boolean[] used;
-    private final int[] features;
+    /** Per id: its material, and its blocks (units of the heap; -1: none). */
+    private final Material[] materials;
+    private final long[] heapUnit;
+    private final int[] heapUnits;
     private int live;
-    // Removed blocks waiting for the frames that may read them: their first ids and when they are free.
+    // Removed ids waiting for the frames that may read them: their first ids and when they are free.
     private final int[] retiring;
     private final long[] retireAt;
     private int retiringCount;
-    private final List<MaterialType> types = new ArrayList<>(List.of(MaterialType.STANDARD));
+    private final List<MaterialType> types = new ArrayList<>();
+    /** The type of each parameters' record, where one type takes it. */
+    private final Map<Class<?>, MaterialType> byRecord = new HashMap<>();
+    private final Set<Class<?>> ambiguous = new HashSet<>();
+    private final Arena arena = Arena.ofShared();
+    private MemorySegment scratch;
 
     /**
      * A table of up to {@code capacity} materials, the default one included, in one copy: for frames the caller waits
@@ -54,26 +81,108 @@ public final class Materials implements AutoCloseable {
 
     /**
      * A table of up to {@code capacity} materials, the default one included, a copy per frame of {@code slots} (a frame
-     * graph's), so materials may change while earlier frames are drawn.
+     * graph's), so materials may change while earlier frames are drawn. Room for {@link #BLOCK_BYTES_PER_MATERIAL}
+     * bytes of blocks per material.
      */
     public Materials(VulkanDevice device, int capacity, FrameSlots slots) {
+        this(device, capacity, (long) BLOCK_BYTES_PER_MATERIAL * capacity, slots);
+    }
+
+    /** Like {@link #Materials(VulkanDevice, int, FrameSlots)}, with {@code blockBytes} for all the materials' blocks. */
+    public Materials(VulkanDevice device, int capacity, long blockBytes, FrameSlots slots) {
         if (capacity < 1) {
             throw new IllegalArgumentException("At least the default material: " + capacity);
         }
+        if (blockBytes < ALIGNMENT) {
+            throw new IllegalArgumentException("Room for blocks: " + blockBytes);
+        }
         this.capacity = capacity;
         ids = new RangeAllocator(capacity);
+        heapStart = (long) SLOT_BYTES * capacity;
+        long units = blockBytes / ALIGNMENT;
+        heap = new RangeAllocator(units);
         blockLength = new int[capacity];
         used = new boolean[capacity];
-        features = new int[capacity];
+        materials = new Material[capacity];
+        heapUnit = new long[capacity];
+        heapUnits = new int[capacity];
+        Arrays.fill(heapUnit, -1);
         retiring = new int[capacity];
         retireAt = new long[capacity];
-        table = FrameBuffer.create(device, (long) BYTES * capacity,
+        scratch = arena.allocate(1024, ALIGNMENT);
+        table = FrameBuffer.create(device, heapStart + units * ALIGNMENT,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, slots);
-        add(new Material());
+        register(MetallicRoughnessMaterial.TYPE);
+        add(Material.DEFAULT);
     }
 
+    // ---------------------------------------------------------------------------------------------- types
+
     /**
-     * Adds {@code material} (copied) and returns its id: the lowest free one, ids of removed materials once no frame in
+     * Registers material type {@code type} and returns its id, the next one: metallic-roughness is 0. Renderers
+     * shading by type take the types when their graph builds: register them first, or
+     * {@link com.truesim.engine.graph.FrameGraph#invalidate} the graph.
+     */
+    public int register(MaterialType type) {
+        if (type(type.name()) != null) {
+            throw new IllegalArgumentException("Material type " + type.name() + " is registered already");
+        }
+        if (types.size() == MAX_TYPES) {
+            throw new IllegalStateException("A table names at most " + MAX_TYPES + " material types");
+        }
+        types.add(type);
+        if (byRecord.putIfAbsent(type.parameters(), type) != null) {
+            ambiguous.add(type.parameters());
+        }
+        return types.size() - 1;
+    }
+
+    /** The material types, by id: metallic-roughness first. */
+    public List<MaterialType> types() {
+        return List.copyOf(types);
+    }
+
+    /** The registered type called {@code name}, or null. */
+    public MaterialType type(String name) {
+        for (MaterialType type : types) {
+            if (type.name().equals(name)) {
+                return type;
+            }
+        }
+        return null;
+    }
+
+    /** {@code material}'s type id: its own type's, or the one type registered for its parameters' record. */
+    private int typeId(Material material) {
+        MaterialType type = material.type();
+        if (type == null) {
+            Class<?> record = material.parameters().getClass();
+            if (ambiguous.contains(record)) {
+                throw new IllegalArgumentException("Several material types take " + record.getSimpleName()
+                    + ": name one, new Material(type, parameters)");
+            }
+            type = byRecord.get(record);
+            if (type == null) {
+                throw new IllegalArgumentException("No material type takes " + record.getSimpleName()
+                    + ": register its type first");
+            }
+        }
+        int id = types.indexOf(type);
+        if (id < 0) {
+            throw new IllegalArgumentException("Material type " + type.name() + " is not registered");
+        }
+        int shown = material.featureMask();
+        if ((shown & ~type.allowedFeatures()) != 0) {
+            throw new IllegalArgumentException("Material type " + type.name() + " does not allow features "
+                + (shown & ~type.allowedFeatures()));
+        }
+        return id;
+    }
+
+    // ---------------------------------------------------------------------------------------------- materials
+
+    /**
+     * Adds {@code material} and returns its id: the lowest free one, ids of removed materials once no frame in
      * flight reads them.
      */
     public int add(Material material) {
@@ -81,40 +190,49 @@ public final class Materials implements AutoCloseable {
         if (id < 0) {
             throw new IllegalStateException("The material table holds " + capacity + " materials: no room");
         }
-        write(id, material);
+        if (!write(id, material)) {
+            release(id);
+            throw new IllegalStateException("The material table has no room for the blocks of " + material);
+        }
         return id;
     }
 
     /**
-     * Adds {@code materials} (copied) under consecutive ids and returns the first, e.g. one per submesh of a mesh, which
-     * an instance names by the first: submesh s takes the first id plus s. {@link #remove} of the first removes them all.
+     * Adds {@code materials} under consecutive ids and returns the first, e.g. one per submesh of a mesh, which an
+     * instance names by the first: submesh s takes the first id plus s. {@link #remove} of the first removes them all.
      */
     public int addAll(List<Material> materials) {
         int first = tryAddAll(materials);
         if (first < 0) {
             throw new IllegalStateException("The material table holds " + capacity + " materials: no room for "
-                + materials.size() + " more in a row");
+                + materials.size() + " more in a row, with their blocks");
         }
         return first;
     }
 
     /**
-     * Like {@link #addAll}, or returns -1 if the table has no room for them in a row now: room may come back as removed
-     * blocks leave the frames in flight. Allocates nothing when there is no room.
+     * Like {@link #addAll}, or returns -1 if the table has no room for them in a row now, with their blocks: room may
+     * come back as removed ids leave the frames in flight. Allocates nothing when there is no room.
      */
     public int tryAddAll(List<Material> materials) {
         if (materials.isEmpty()) {
             throw new IllegalArgumentException("No materials to add");
         }
         int first = take(materials.size());
-        for (int i = 0; first >= 0 && i < materials.size(); i++) {
-            write(first + i, materials.get(i));
+        if (first < 0) {
+            return -1;
+        }
+        for (int i = 0; i < materials.size(); i++) {
+            if (!write(first + i, materials.get(i))) {
+                release(first);
+                return -1;
+            }
         }
         return first;
     }
 
     /**
-     * Whether {@link #tryAddAll} would find {@code length} ids in a row now, counting removed blocks no frame in flight
+     * Whether {@link #tryAddAll} would find {@code length} ids in a row now, counting removed ids no frame in flight
      * reads any more. Allocates nothing.
      */
     public boolean hasRoom(int length) {
@@ -138,12 +256,81 @@ public final class Materials implements AutoCloseable {
         return id;
     }
 
-    /** Replaces material {@code id} with {@code material} (copied); any id of a block. */
+    /** Gives back the ids taken at {@code id} at once, with their blocks: never drawn. */
+    private void release(int id) {
+        int length = blockLength[id];
+        for (int i = id; i < id + length; i++) {
+            used[i] = false;
+            freeBlocks(i);
+        }
+        live -= length;
+        ids.release(id, length);
+        blockLength[id] = 0;
+    }
+
+    /** Replaces material {@code id} with {@code material}; any id of a block. */
     public void set(int id, Material material) {
         if (!contains(id)) {
             throw new IllegalArgumentException("No material " + id);
         }
-        write(id, material);
+        if (!write(id, material)) {
+            throw new IllegalStateException("The material table has no room for the blocks of " + material);
+        }
+    }
+
+    /**
+     * Sets field {@code field} of material {@code id}'s parameters, or of one of its features' (a generated record's
+     * constant, e.g. {@code CarPaintParameters.FLAKE_DENSITY}), to {@code value}, in place: for a value changing every
+     * frame. {@link #material} keeps the material as it was set. Allocates nothing.
+     */
+    public void update(int id, MaterialField field, float value) {
+        if (field.kind() != MaterialField.Kind.F32) {
+            throw new IllegalArgumentException(field + " holds no float");
+        }
+        if (!field.accepts(value)) {
+            throw new IllegalArgumentException(field + " is out of its range: " + value);
+        }
+        table.putFloat(fieldOffset(id, field), value);
+    }
+
+    /** {@link #update(int, MaterialField, float)} for an integer field, or a texture slot. */
+    public void update(int id, MaterialField field, int value) {
+        if (field.kind() != MaterialField.Kind.I32) {
+            throw new IllegalArgumentException(field + " holds no integer");
+        }
+        table.putInt(fieldOffset(id, field), value);
+    }
+
+    /** {@link #update(int, MaterialField, float)} for a vector or color field: its first {@code count()} values. */
+    public void update(int id, MaterialField field, float x, float y, float z, float w) {
+        if (field.kind() != MaterialField.Kind.FLOATS) {
+            throw new IllegalArgumentException(field + " holds no vector");
+        }
+        long offset = fieldOffset(id, field);
+        table.putFloat(offset, x);
+        table.putFloat(offset + 4, y);
+        if (field.count() > 2) {
+            table.putFloat(offset + 8, z);
+        }
+        if (field.count() > 3) {
+            table.putFloat(offset + 12, w);
+        }
+    }
+
+    private long fieldOffset(int id, MaterialField field) {
+        Material material = material(id);
+        long offset = heapStart + heapUnit[id] * ALIGNMENT;
+        if (field.owner() == material.parameters().getClass()) {
+            return offset + field.offset();
+        }
+        offset += align(material.parameters().bytes());
+        for (MaterialFeature feature : material.features()) {
+            if (field.owner() == feature.getClass()) {
+                return offset + field.offset();
+            }
+            offset += align(feature.bytes());
+        }
+        throw new IllegalArgumentException("Material " + id + " has no " + field);
     }
 
     /**
@@ -158,18 +345,12 @@ public final class Materials implements AutoCloseable {
         int length = blockLength[id];
         for (int i = id; i < id + length; i++) {
             used[i] = false;
+            // The frames in flight read their own copies of the table, which keep the blocks till their slot opens.
+            freeBlocks(i);
         }
         live -= length;
         retiring[retiringCount] = id;
         retireAt[retiringCount++] = table.slots().retireAt();
-    }
-
-    /** The features ({@code Material.FEATURE_*} bits) material {@code id} shows, from its data. Allocates nothing. */
-    public int features(int id) {
-        if (!contains(id)) {
-            throw new IllegalArgumentException("No material " + id);
-        }
-        return features[id];
     }
 
     /** Whether {@code id} is a material of the table, added and not removed. */
@@ -177,7 +358,20 @@ public final class Materials implements AutoCloseable {
         return id >= 0 && id < capacity && used[id];
     }
 
-    /** Gives removed blocks no frame in flight reads back, oldest first. */
+    /** Material {@code id}, as it was added or set. */
+    public Material material(int id) {
+        if (!contains(id)) {
+            throw new IllegalArgumentException("No material " + id);
+        }
+        return materials[id];
+    }
+
+    /** The features ({@code Material.FEATURE_*} bits) material {@code id} shows. Allocates nothing. */
+    public int features(int id) {
+        return material(id).featureMask();
+    }
+
+    /** Gives removed ids no frame in flight reads back, oldest first. */
     private void releaseRetired() {
         int kept = 0;
         for (int i = 0; i < retiringCount; i++) {
@@ -193,54 +387,66 @@ public final class Materials implements AutoCloseable {
         retiringCount = kept;
     }
 
-    private void write(int id, Material material) {
-        features[id] = material.features();
-        long o = (long) BYTES * id;
-        table.putFloat(o, material.r);
-        table.putFloat(o + 4, material.g);
-        table.putFloat(o + 8, material.b);
-        table.putFloat(o + 12, material.a);
-        table.putFloat(o + 16, material.er);
-        table.putFloat(o + 20, material.eg);
-        table.putFloat(o + 24, material.eb);
-        table.putFloat(o + 28, material.roughness);
-        table.putFloat(o + 32, material.metallic);
-        table.putFloat(o + 36, material.normalScale);
-        table.putFloat(o + 40, material.occlusion);
-        table.putInt(o + 44, material.header());
-        table.putInt(o + 48, material.baseColorTexture);
-        table.putInt(o + 52, material.normalTexture);
-        table.putInt(o + 56, material.ormTexture);
-        table.putInt(o + 60, material.emissiveTexture);
-        table.putFloat(o + 64, material.clearcoat);
-        table.putFloat(o + 68, material.clearcoatRoughness);
-        table.putInt(o + 72, material.clearcoatTexture);
-        table.putInt(o + 76, material.clearcoatRoughnessTexture);
-        table.putInt(o + 80, material.clearcoatNormalTexture);
-        table.putFloat(o + 84, material.clearcoatNormalScale);
-        table.putInt(o + 88, 0);
-        table.putInt(o + 92, 0);
+    private void freeBlocks(int id) {
+        if (heapUnit[id] >= 0) {
+            heap.release(heapUnit[id], heapUnits[id]);
+            heapUnit[id] = -1;
+            heapUnits[id] = 0;
+        }
+        materials[id] = null;
     }
 
-    /**
-     * Registers material type {@code type} and returns its id, for {@link Material#type}: the next one, from 1.
-     * Renderers shading by type take the types when their graph builds: register them first, or
-     * {@link com.truesim.engine.graph.FrameGraph#invalidate} the graph.
-     */
-    public int register(MaterialType type) {
-        if (types.contains(type)) {
-            throw new IllegalArgumentException("Material type " + type.name() + " is registered already");
-        }
-        if (types.size() == MAX_TYPES) {
-            throw new IllegalStateException("A table names at most " + MAX_TYPES + " material types");
-        }
-        types.add(type);
-        return types.size() - 1;
+    private static long align(long bytes) {
+        return (bytes + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT;
     }
 
-    /** The material types, by id: the standard one first. */
-    public List<MaterialType> types() {
-        return List.copyOf(types);
+    /** Writes {@code material}'s blocks and slot under {@code id}; false (and nothing changed) without heap room. */
+    private boolean write(int id, Material material) {
+        int typeId = typeId(material);
+        if (material.features().size() > MAX_FEATURE_SECTIONS) {
+            throw new IllegalArgumentException("A material shows at most " + MAX_FEATURE_SECTIONS + " features");
+        }
+        long bytes = align(material.parameters().bytes());
+        for (MaterialFeature feature : material.features()) {
+            bytes += align(feature.bytes());
+        }
+        int units = (int) (bytes / ALIGNMENT);
+        long unit = heapUnit[id];
+        if (unit < 0 || heapUnits[id] != units) {
+            long fresh = heap.allocate(units, 1);
+            if (fresh < 0) {
+                return false;
+            }
+            if (unit >= 0) {
+                heap.release(unit, heapUnits[id]);
+            }
+            unit = fresh;
+            heapUnit[id] = unit;
+            heapUnits[id] = units;
+        }
+        if (scratch.byteSize() < bytes) {
+            scratch = arena.allocate(bytes, ALIGNMENT);
+        }
+        long block = heapStart + unit * ALIGNMENT;
+        material.parameters().write(scratch, 0);
+        long slot = (long) SLOT_BYTES * id;
+        for (int s = 0; s < MAX_FEATURE_SECTIONS; s++) {
+            table.putInt(slot + 20 + 4L * s, 0);
+        }
+        long o = align(material.parameters().bytes());
+        for (MaterialFeature feature : material.features()) {
+            feature.write(scratch, o);
+            table.putInt(slot + 20 + 4L * Integer.numberOfTrailingZeros(feature.feature()), (int) (block + o));
+            o += align(feature.bytes());
+        }
+        table.put(block, scratch, 0, bytes);
+        table.putInt(slot, material.header(typeId));
+        table.putInt(slot + 4, (int) block);
+        table.putInt(slot + 8, material.parameters().maskTexture());
+        table.putFloat(slot + 12, material.parameters().maskAlpha());
+        table.putInt(slot + 16, 0);
+        materials[id] = material;
+        return true;
     }
 
     /** How many materials the table holds, the default one included. */
@@ -249,7 +455,8 @@ public final class Materials implements AutoCloseable {
     }
 
     /**
-     * The table's device address, for shaders: material i's {@code BYTES} at {@code i * 96}, as shading.slang reads it.
+     * The table's device address, for shaders: material i's slot at {@code i * 32}, its blocks at the offsets the slot
+     * gives, as materials.slang reads them.
      */
     public long deviceAddress() {
         return table.deviceAddress();
@@ -258,5 +465,6 @@ public final class Materials implements AutoCloseable {
     @Override
     public void close() {
         table.close();
+        arena.close();
     }
 }

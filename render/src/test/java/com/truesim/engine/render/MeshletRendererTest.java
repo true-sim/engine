@@ -28,6 +28,8 @@ import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 
+import com.truesim.common.math.color.Color;
+import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Images;
@@ -51,6 +53,9 @@ import org.lwjgl.vulkan.VkBufferImageCopy;
 class MeshletRendererTest {
 
     private static final int SIZE = 128;
+    private static final MetallicRoughnessParameters MR = MetallicRoughnessParameters.DEFAULTS;
+    private static final MetallicRoughnessParameters GREEN =
+        MR.withBaseColor(new Color(0.1, 0.8, 0.1, 1)).withRoughness(1);
     private static final int WHITE = 0xffffffff;
     private static final float HALF = (float) Math.sqrt(0.5);
 
@@ -395,14 +400,14 @@ class MeshletRendererTest {
             int checker = textures.color(8, 8, texels(8, (x, y) -> ((x / 2 + y / 2) % 2 == 0) ? 0xffffffff
                 : 0x00ffffff));
             // The textured quad has two submeshes: each material twice, one per half.
-            int plain = materials.addAll(java.util.List.of(new Material(), new Material()));
-            Material doubleSided = new Material().doubleSided(true);
+            int plain = materials.addAll(java.util.List.of(Material.DEFAULT, Material.DEFAULT));
+            Material doubleSided = Material.DEFAULT.doubleSided(true);
             int twoSided = materials.addAll(java.util.List.of(doubleSided, doubleSided));
-            Material checkered = new Material().baseColorTexture(checker).alphaMask(0.5f);
+            Material checkered = new Material(MR.withBaseColorTexture(checker)).alphaMask(0.5f);
             int masked = materials.addAll(java.util.List.of(checkered, checkered));
-            Material checkeredTwoSided = new Material().baseColorTexture(checker).alphaMask(0.5f).doubleSided(true);
+            Material checkeredTwoSided = new Material(MR.withBaseColorTexture(checker)).alphaMask(0.5f).doubleSided(true);
             int maskedTwoSided = materials.addAll(java.util.List.of(checkeredTwoSided, checkeredTwoSided));
-            assertThat(new Material().masked()).isFalse();
+            assertThat(Material.DEFAULT.masked()).isFalse();
             int textured = pool.add(texturedQuad());
             scene.setMaterials(materials);
             lookForward(1, MeshletRenderer.MODE_WHITE);
@@ -449,9 +454,9 @@ class MeshletRendererTest {
             renderer.setPath(MeshletRenderer.Path.AUTO);
             scene.setMaterials(null);
         }
-        assertThatIllegalArgumentException().isThrownBy(() -> new Material().alphaMask(1.5f));
-        assertThat(new Material().alphaMask(0.3f).opaque().masked()).isFalse();
-        assertThat(new Material().doubleSided(true).isDoubleSided()).isTrue();
+        assertThatIllegalArgumentException().isThrownBy(() -> Material.DEFAULT.alphaMask(1.5f));
+        assertThat(Material.DEFAULT.alphaMask(0.3f).opaque().masked()).isFalse();
+        assertThat(Material.DEFAULT.doubleSided(true).doubleSided()).isTrue();
         assertThatIllegalArgumentException().isThrownBy(() -> ViewOptions.of(1, 1).withBins(0, 1));
     }
 
@@ -724,10 +729,11 @@ class MeshletRendererTest {
             int tilted = textures.data(4, 4, texels(4, (x, y) -> 0xffd9d980)); // (0, 0.7, 0.7)
             assertThat(textures.count()).isEqualTo(2);
             assertThat(textures.bytes()).isGreaterThan(4 * 64);
-            int first = materials.add(new Material().baseColor(1, 1, 1).baseColorTexture(checker).roughness(1));
-            materials.add(new Material().baseColor(0.1f, 0.8f, 0.1f).roughness(1));
-            materials.add(new Material().baseColor(0.1f, 0.8f, 0.1f).roughness(1));
-            materials.add(new Material().baseColor(0.1f, 0.8f, 0.1f).roughness(1).normalTexture(tilted, 1));
+            int first = materials.add(new Material(MR.withBaseColor(new Color(1, 1, 1, 1)).withBaseColorTexture(checker)
+                .withRoughness(1)));
+            materials.add(new Material(GREEN));
+            materials.add(new Material(GREEN));
+            materials.add(new Material(GREEN.withNormalTexture(tilted).withNormalScale(1)));
             assertThat(materials.count()).isEqualTo(5);
             scene.setMaterials(materials);
             scene.set(0, quadMesh, first, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1);
@@ -751,18 +757,18 @@ class MeshletRendererTest {
             double bent = channel(8, SIZE / 2 + 3, SIZE / 2 + 18);
             assertThat(bent).isGreaterThan(flat * 1.3);
             // Changed in place: the right half is plain again.
-            materials.set(first + 3, new Material().baseColor(0.1f, 0.8f, 0.1f).roughness(1));
+            materials.set(first + 3, new Material(GREEN));
             render();
             assertThat(channel(8, SIZE / 2 + 3, SIZE / 2 + 18))
                 .isCloseTo(flat, org.assertj.core.data.Offset.offset(2.0));
             scene.setMaterials(null);
-            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(5, new Material()));
-            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(-1, new Material()));
+            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(5, Material.DEFAULT));
+            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(-1, Material.DEFAULT));
             for (int i = materials.count(); i < 8; i++) {
-                materials.add(new Material().metallic(1).emissive(1, 0, 0).emissiveTexture(checker)
-                    .ormTexture(tilted, 1));
+                materials.add(new Material(MR.withMetallic(1).withEmissive(new Color(1, 0, 0, 1))
+                    .withEmissiveTexture(checker).withOrmTexture(tilted).withOcclusion(1)));
             }
-            assertThatIllegalStateException().isThrownBy(() -> materials.add(new Material()));
+            assertThatIllegalStateException().isThrownBy(() -> materials.add(Material.DEFAULT));
             assertThatIllegalArgumentException().isThrownBy(() -> textures.color(4, 4, texels(2, (x, y) -> 0)));
             assertThatIllegalArgumentException().isThrownBy(() -> textures.data(0, 4, texels(2, (x, y) -> 0)));
             assertThatIllegalArgumentException().isThrownBy(() -> scene.set(0, quadMesh, -1, 0, 0, 0, 0,
@@ -866,17 +872,17 @@ class MeshletRendererTest {
         com.truesim.engine.vulkan.FrameSlots slots = new com.truesim.engine.vulkan.FrameSlots(2);
         try (Materials materials = new Materials(device, 3, slots); Textures textures = new Textures(device, slots);
              Arena arena = Arena.ofConfined()) {
-            int a = materials.add(new Material().roughness(0.1f));
-            int b = materials.add(new Material().roughness(0.2f));
+            int a = materials.add(new Material(MR.withRoughness(0.1f)));
+            int b = materials.add(new Material(MR.withRoughness(0.2f)));
             assertThat(materials.count()).isEqualTo(3);
-            assertThatIllegalStateException().isThrownBy(() -> materials.add(new Material()));
+            assertThatIllegalStateException().isThrownBy(() -> materials.add(Material.DEFAULT));
             materials.remove(a);
             assertThat(materials.contains(a)).isFalse();
             assertThat(materials.count()).isEqualTo(2);
-            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(a, new Material()));
+            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(a, Material.DEFAULT));
             assertThatIllegalArgumentException().isThrownBy(() -> materials.remove(a));
             assertThatIllegalArgumentException().isThrownBy(() -> materials.remove(0)); // the default stays
-            assertThatIllegalStateException().isThrownBy(() -> materials.add(new Material())); // still in flight
+            assertThatIllegalStateException().isThrownBy(() -> materials.add(Material.DEFAULT)); // still in flight
             MemorySegment texels = arena.allocate(4 * 4 * 4);
             int slot = textures.color(4, 4, texels);
             int inUse = device.bindless().slotsInUse();
@@ -892,7 +898,7 @@ class MeshletRendererTest {
                 slots.begin(frame);
                 slots.end();
             }
-            assertThat(materials.add(new Material())).isEqualTo(a);
+            assertThat(materials.add(Material.DEFAULT)).isEqualTo(a);
             assertThat(materials.contains(b)).isTrue();
             int again = textures.data(4, 4, texels); // frees the removed one first, then takes a slot
             assertThat(device.bindless().slotsInUse()).isEqualTo(inUse);

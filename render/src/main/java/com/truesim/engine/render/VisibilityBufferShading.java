@@ -26,7 +26,7 @@ import java.util.Objects;
  * <p>Shading is by {@link MaterialType} and features: a pass sorts the screen's 8x8 tiles into a list per bin (a type
  * and a combination of {@link Material#features features}) they show, and each bin of the scene's {@link Materials}'
  * types (as they are when the graph builds) shades its tiles' pixels with its type's shader, by an indirect dispatch:
- * a variant compiled with only its features' code.
+ * a variant compiled with only its features' code, for each combination of the features the type allows.
  *
  * <p>The color format must allow storage images (not sRGB). Needs
  * {@link com.truesim.engine.vulkan.VulkanDevice#primitiveIds()}, and one provider whose triangles the shading pass can
@@ -105,9 +105,13 @@ public final class VisibilityBufferShading implements Technique {
         Pipeline[] shade = new Pipeline[types.size() * variants];
         for (int bin = 0; bin < shade.length; bin++) {
             MaterialType type = types.get(bin / variants);
+            int features = bin % variants;
+            if ((features & ~type.allowedFeatures()) != 0) {
+                continue; // no material of the type shows them: no variant, and no pixels of the bin
+            }
             boolean rays = traced && type.tracedShader() != null;
             shade[bin] = compute(g, rays ? type.tracedShader() : type.shader(), rays ? type.tracedEntry() : type.entry(),
-                bin % variants);
+                features);
         }
         Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain", 0);
         Image ids = targets.color();
@@ -139,6 +143,9 @@ public final class VisibilityBufferShading implements Technique {
                 shadows.prepare(ctx);
             }
             for (int bin = 0; bin < shade.length; bin++) {
+                if (shade[bin] == null) {
+                    continue;
+                }
                 long list = listBytes * bin;
                 ctx.dispatchIndirect(shade[bin], push(ctx, ids, color, lights, types.size(), bin,
                     ctx.address(tiles) + list), tiles, list);
