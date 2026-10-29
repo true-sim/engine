@@ -639,6 +639,24 @@ class FrameGraphTest {
     }
 
     @Test
+    void closingGoesOnPastACachedObjectThatFails() {
+        boolean[] closed = {false};
+        graph.add(new Lambda(List.of(OUT), g -> {
+            g.cached("fails", d -> (AutoCloseable) () -> {
+                throw new java.io.IOException("stuck");
+            });
+            g.cached("closes", d -> (AutoCloseable) () -> closed[0] = true);
+            Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("clear").write(image, Access.TRANSFER_DST).record(ctx -> clear(ctx, image, 1, 0, 0, 1));
+            g.provide(OUT, image);
+        })).output(OUT, output);
+        frame();
+        assertThatIllegalStateException().isThrownBy(graph::close).withMessageStartingWith("Could not close")
+            .withCauseInstanceOf(java.io.IOException.class);
+        assertThat(closed[0]).as("the other cached object").isTrue();
+    }
+
+    @Test
     void passesRecordInParallelChunksSubmittedInOrder() {
         Key copied = Key.of("copied");
         graph.add(new Fill(A, SIZE, 1, 0, 0, 1))

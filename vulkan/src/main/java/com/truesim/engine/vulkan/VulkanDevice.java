@@ -12,6 +12,7 @@ import static org.lwjgl.vulkan.KHRRayQuery.VK_KHR_RAY_QUERY_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRRayQuery.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
 import static org.lwjgl.vulkan.EXTMeshShader.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+import static org.lwjgl.vulkan.VK10.VK_SUCCESS;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -261,11 +262,21 @@ public final class VulkanDevice implements AutoCloseable {
                 .vulkanApiVersion(VulkanInstance.MIN_API_VERSION) // all VMA needs
                 .pVulkanFunctions(VmaVulkanFunctions.calloc(stack).set(gpu.instance().handle(), handle));
             PointerBuffer pointer = stack.mallocPointer(1);
-            Vulkan.check(vmaCreateAllocator(allocatorInfo, pointer), "Could not create the memory allocator");
+            int created = vmaCreateAllocator(allocatorInfo, pointer);
+            if (created != VK_SUCCESS) {
+                vkDestroyDevice(handle, null); // nothing made on a device that failed to set up leaks
+                Vulkan.check(created, "Could not create the memory allocator");
+            }
             this.allocator = pointer.get(0);
         }
-        this.bindless = new Bindless(this);
-        this.direct = new DirectCalls(handle);
+        try {
+            this.bindless = new Bindless(this);
+            this.direct = new DirectCalls(handle);
+        } catch (RuntimeException | Error e) {
+            vmaDestroyAllocator(allocator);
+            vkDestroyDevice(handle, null);
+            throw e;
+        }
         LOG.info("Device on {}: Vulkan {}, queues graphics {}, compute {}, transfer {}", gpu, Vulkan.version(apiVersion),
             graphics.family(), compute.family(), transfer.family());
     }

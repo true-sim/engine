@@ -57,8 +57,9 @@ public final class RecordBuffer implements AutoCloseable {
     private final int recordBytes;
     private final int capacity;
     private final FrameSlots slots;
-    private final GpuBuffer records;
-    private final Pipeline scatter;
+    // Set once while constructing; null until made, so a constructor that fails frees what it made.
+    private GpuBuffer records;
+    private Pipeline scatter;
     private final FrameSlots.FrameStart start = this::upload;
     // The changes since the last upload: entry e is record indices[e], its bytes at e * recordBytes of changes.
     private final Arena arena = Arena.ofShared();
@@ -87,21 +88,26 @@ public final class RecordBuffer implements AutoCloseable {
         this.capacity = capacity;
         this.slots = Objects.requireNonNull(slots, "slots");
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-        records = GpuBuffer.deviceLocal(device, (long) recordBytes * capacity, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT
-            | VK_BUFFER_USAGE_TRANSFER_SRC_BIT); // copied from too: readbacks, history
-        device.submitAndWait(device.graphics(), commands -> vkCmdFillBuffer(commands, records.handle(), 0,
-            records.size(), 0));
-        try (ShaderModule shader = ShaderModule.load(device, "shaders/records/scatter.spv")) {
-            scatter = Pipeline.compute(device, shader, "scatterMain", SCATTER_PUSH);
+        uploads = new GpuBuffer[slots.count()];
+        try {
+            records = GpuBuffer.deviceLocal(device, (long) recordBytes * capacity, storage
+                | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT); // copied from: readbacks
+            device.submitAndWait(device.graphics(), commands -> vkCmdFillBuffer(commands, records.handle(), 0,
+                records.size(), 0));
+            try (ShaderModule shader = ShaderModule.load(device, "shaders/records/scatter.spv")) {
+                scatter = Pipeline.compute(device, shader, "scatterMain", SCATTER_PUSH);
+            }
+            for (int s = 0; s < uploads.length; s++) {
+                uploads[s] = GpuBuffer.hostWritten(device, changesOffset() + (long) recordBytes * capacity, storage);
+            }
+        } catch (RuntimeException e) {
+            free(); // what was made leaks nothing
+            throw e;
         }
         indices = arena.allocate(4L * capacity, 64);
         changes = arena.allocate((long) recordBytes * capacity, 64);
         entryOf = new int[capacity];
         Arrays.fill(entryOf, -1);
-        uploads = new GpuBuffer[slots.count()];
-        for (int s = 0; s < uploads.length; s++) {
-            uploads[s] = GpuBuffer.hostWritten(device, changesOffset() + (long) recordBytes * capacity, storage);
-        }
         uploadFrame = new long[uploads.length];
         Arrays.fill(uploadFrame, -1);
         uploadAt = new int[uploads.length];
@@ -252,12 +258,23 @@ public final class RecordBuffer implements AutoCloseable {
         if (!closed) {
             closed = true;
             slots.unregister(start);
+            free();
+        }
+    }
+
+    /** Frees the buffers, pipeline and memory made. */
+    private void free() {
+        if (records != null) {
             records.close();
+        }
+        if (scatter != null) {
             scatter.close();
-            for (GpuBuffer upload : uploads) {
+        }
+        for (GpuBuffer upload : uploads) {
+            if (upload != null) {
                 upload.close();
             }
-            arena.close();
         }
+        arena.close();
     }
 }

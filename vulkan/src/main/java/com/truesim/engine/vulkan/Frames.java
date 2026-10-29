@@ -68,6 +68,7 @@ public final class Frames implements AutoCloseable {
     private final VulkanDevice device;
     private final Frame[] frames;
     private int current = -1;
+    private boolean closed;
 
     /** {@code inFlight} frames (2 or 3 is typical) with command buffers for {@code workers} recording threads. */
     @AllowAllocation("set up once")
@@ -78,7 +79,14 @@ public final class Frames implements AutoCloseable {
         this.device = device;
         this.frames = new Frame[inFlight];
         for (int i = 0; i < inFlight; i++) {
-            frames[i] = new Frame(i, queue.family(), workers);
+            try {
+                frames[i] = new Frame(i, queue.family(), workers);
+            } catch (RuntimeException e) {
+                for (int made = 0; made < i; made++) {
+                    frames[made].destroy(); // the frames made before leak nothing
+                }
+                throw e;
+            }
         }
     }
 
@@ -98,8 +106,9 @@ public final class Frames implements AutoCloseable {
     public final class Frame {
 
         private final int index;
-        private final long fence;
-        private final long imageAvailable;
+        // 0 until made, so a frame that fails to set up frees what it made (destroying 0 is a no-op).
+        private long fence;
+        private long imageAvailable;
         private final long[] pools;
         private final VkCommandBuffer[] commands;
         private final boolean[] recorded;
@@ -110,6 +119,15 @@ public final class Frames implements AutoCloseable {
             this.pools = new long[workers];
             this.commands = new VkCommandBuffer[workers];
             this.recorded = new boolean[workers];
+            try {
+                create(family, workers);
+            } catch (RuntimeException e) {
+                destroy();
+                throw e;
+            }
+        }
+
+        private void create(int family, int workers) {
             try (MemoryStack stack = stackPush()) {
                 LongBuffer handle = stack.mallocLong(1);
                 Vulkan.check(vkCreateFence(device.handle(), VkFenceCreateInfo.calloc(stack)
@@ -236,6 +254,10 @@ public final class Frames implements AutoCloseable {
 
     @Override
     public void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
         device.waitIdle();
         for (Frame frame : frames) {
             frame.destroy();

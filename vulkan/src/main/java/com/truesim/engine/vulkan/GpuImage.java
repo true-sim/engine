@@ -110,11 +110,18 @@ public final class GpuImage implements AutoCloseable {
             this.handle = image.get(0);
             this.allocation = allocated.get(0);
             // Views are for shaders and attachments; an image only copied to and from has none.
-            this.view = (usage & VIEW_USAGES) != 0 ? Images.createView(device, handle, format, aspect, 0, mips) : 0;
             this.mipViews = new long[mips > 1 && (usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 ? mips : 0];
-            for (int mip = 0; mip < mipViews.length; mip++) {
-                mipViews[mip] = Images.createView(device, handle, format, aspect, mip, 1);
+            long whole = 0;
+            try {
+                whole = (usage & VIEW_USAGES) != 0 ? Images.createView(device, handle, format, aspect, 0, mips) : 0;
+                for (int mip = 0; mip < mipViews.length; mip++) {
+                    mipViews[mip] = Images.createView(device, handle, format, aspect, mip, 1);
+                }
+            } catch (RuntimeException e) {
+                destroy(device, whole, mipViews, handle, allocation); // nothing made leaks
+                throw e;
             }
+            this.view = whole;
         }
     }
 
@@ -152,13 +159,20 @@ public final class GpuImage implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
-            if (view != 0) {
-                vkDestroyImageView(device.handle(), view, null);
-            }
-            for (long mipView : mipViews) {
+            destroy(device, view, mipViews, handle, allocation);
+        }
+    }
+
+    /** Destroys the views made (0s are skipped) and the image. */
+    private static void destroy(VulkanDevice device, long view, long[] mipViews, long image, long allocation) {
+        if (view != 0) {
+            vkDestroyImageView(device.handle(), view, null);
+        }
+        for (long mipView : mipViews) {
+            if (mipView != 0) {
                 vkDestroyImageView(device.handle(), mipView, null);
             }
-            vmaDestroyImage(device.allocator(), handle, allocation);
         }
+        vmaDestroyImage(device.allocator(), image, allocation);
     }
 }

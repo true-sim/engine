@@ -97,10 +97,12 @@ public final class Bindless implements AutoCloseable {
 
     private final VulkanDevice device;
     private final long[] samplers = new long[4];
-    private final long setLayout;
-    private final long pipelineLayout;
-    private final long pool;
-    private final long set;
+    // Set once while constructing; 0 until made, so a constructor that fails frees what it made (destroying 0 is a
+    // no-op).
+    private long setLayout;
+    private long pipelineLayout;
+    private long pool;
+    private long set;
     private final Slots sampled = new Slots(SAMPLED_SLOTS);
     private final Slots storage = new Slots(STORAGE_SLOTS);
     private final Slots structures = new Slots(STRUCTURE_SLOTS);
@@ -108,6 +110,15 @@ public final class Bindless implements AutoCloseable {
 
     Bindless(VulkanDevice device) {
         this.device = device;
+        try {
+            create();
+        } catch (RuntimeException e) {
+            close();
+            throw e;
+        }
+    }
+
+    private void create() {
         try (MemoryStack stack = stackPush()) {
             samplers[LINEAR_CLAMP] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
             samplers[NEAREST_CLAMP] = sampler(stack, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
