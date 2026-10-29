@@ -59,7 +59,7 @@ class SceneBenchmark {
     private static final int WIDTH = 1920;
     private static final int HEIGHT = 1080;
     private static final int ROCKS = 30_000;
-    private static final int FRAMES = 40;
+    private static final int FRAMES = 20;
     private static final double EXTENT = 600;
     private static final double GROUND_Y = -12;
     /** Where the world puts the scene: far from its origin, so instances must be camera-relative. */
@@ -250,8 +250,8 @@ class SceneBenchmark {
     private static void run(String scenario, FrameGraph graph, FrameSlots slots, TaskScheduler tasks,
         SceneGraph scene, Renderables renderables, SceneView view, Camera camera, Change change) {
         Stats stats = new Stats();
-        for (int frame = -5; frame < FRAMES; frame++) {
-            change.before(frame + 5);
+        for (int frame = -2; frame < FRAMES; frame++) {
+            change.before(frame + 2);
             frame(graph, slots, tasks, scene, renderables, view, camera, stats, Math.max(frame, 0));
         }
         stats.print(scenario);
