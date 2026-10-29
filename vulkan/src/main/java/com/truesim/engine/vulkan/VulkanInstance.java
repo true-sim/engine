@@ -262,9 +262,11 @@ public final class VulkanInstance implements AutoCloseable {
     private static Set<String> instanceExtensions() {
         try (MemoryStack stack = stackPush()) {
             IntBuffer count = stack.mallocInt(1);
-            vkEnumerateInstanceExtensionProperties((String) null, count, null);
+            Vulkan.checkList(vkEnumerateInstanceExtensionProperties((String) null, count, null),
+                "Could not list the instance extensions");
             VkExtensionProperties.Buffer properties = VkExtensionProperties.malloc(count.get(0), stack);
-            vkEnumerateInstanceExtensionProperties((String) null, count, properties);
+            Vulkan.checkList(vkEnumerateInstanceExtensionProperties((String) null, count, properties),
+                "Could not list the instance extensions");
             Set<String> names = new HashSet<>();
             properties.forEach(property -> names.add(property.extensionNameString()));
             return names;
@@ -274,9 +276,10 @@ public final class VulkanInstance implements AutoCloseable {
     private static Set<String> layers() {
         try (MemoryStack stack = stackPush()) {
             IntBuffer count = stack.mallocInt(1);
-            vkEnumerateInstanceLayerProperties(count, null);
+            Vulkan.checkList(vkEnumerateInstanceLayerProperties(count, null), "Could not list the instance layers");
             VkLayerProperties.Buffer properties = VkLayerProperties.malloc(count.get(0), stack);
-            vkEnumerateInstanceLayerProperties(count, properties);
+            Vulkan.checkList(vkEnumerateInstanceLayerProperties(count, properties),
+                "Could not list the instance layers");
             Set<String> names = new HashSet<>();
             properties.forEach(property -> names.add(property.layerNameString()));
             return names;

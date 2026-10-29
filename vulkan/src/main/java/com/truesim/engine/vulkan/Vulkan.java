@@ -11,6 +11,7 @@ import static org.lwjgl.vulkan.VK10.VK_ERROR_INITIALIZATION_FAILED;
 import static org.lwjgl.vulkan.VK10.VK_ERROR_LAYER_NOT_PRESENT;
 import static org.lwjgl.vulkan.VK10.VK_ERROR_OUT_OF_DEVICE_MEMORY;
 import static org.lwjgl.vulkan.VK10.VK_ERROR_OUT_OF_HOST_MEMORY;
+import static org.lwjgl.vulkan.VK10.VK_INCOMPLETE;
 import static org.lwjgl.vulkan.VK10.VK_NOT_READY;
 import static org.lwjgl.vulkan.VK10.VK_SUCCESS;
 import static org.lwjgl.vulkan.VK10.VK_TIMEOUT;
@@ -23,10 +24,20 @@ public final class Vulkan {
     private Vulkan() {
     }
 
-    /** Throws a {@link VulkanException} unless {@code result} is {@code VK_SUCCESS}. */
+    /**
+     * Throws a {@link VulkanException} unless {@code result} is {@code VK_SUCCESS}: a {@link DeviceLostException} for
+     * {@code VK_ERROR_DEVICE_LOST}, after which nothing more runs on the device.
+     */
     public static void check(int result, String what) {
         if (result != VK_SUCCESS) {
-            throw new VulkanException(what, result);
+            throw result == VK_ERROR_DEVICE_LOST ? new DeviceLostException(what) : new VulkanException(what, result);
+        }
+    }
+
+    /** Like {@link #check}, for calls listing things, which also return {@code VK_INCOMPLETE} when the list grew. */
+    public static void checkList(int result, String what) {
+        if (result != VK_INCOMPLETE) {
+            check(result, what);
         }
     }
 

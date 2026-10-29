@@ -76,6 +76,8 @@ import org.lwjgl.vulkan.VkWriteDescriptorSetAccelerationStructureKHR;
  *
  * <p>Slots may be written while command buffers using the set are pending (update after bind), as long as those
  * command buffers do not use the slot: free a slot only once the frames that used it have finished.
+ *
+ * <p>Adding and removing slots may happen on any thread: they lock, as descriptor updates must not overlap.
  */
 @AllowAllocation("set up once")
 public final class Bindless implements AutoCloseable {
@@ -205,14 +207,14 @@ public final class Bindless implements AutoCloseable {
     }
 
     /** Puts {@code view} (in the shader-read-only layout) in a free sampled slot and returns the slot. */
-    public int addSampled(long view) {
+    public synchronized int addSampled(long view) {
         int slot = sampled.take("sampled");
         write(0, slot, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE);
         return slot;
     }
 
     /** Puts {@code view} (in the general layout) in a free storage slot and returns the slot. */
-    public int addStorage(long view) {
+    public synchronized int addStorage(long view) {
         int slot = storage.take("storage");
         write(2, slot, view, VK_IMAGE_LAYOUT_GENERAL, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         return slot;
@@ -222,7 +224,7 @@ public final class Bindless implements AutoCloseable {
      * Puts acceleration structure {@code structure} (a top-level one, to trace rays into) in a free slot of binding 3
      * and returns the slot; on devices with {@link VulkanDevice#rayTracing()} only.
      */
-    public int addAccelerationStructure(long structure) {
+    public synchronized int addAccelerationStructure(long structure) {
         if (!device.rayTracing()) {
             throw new IllegalStateException("The device has no ray tracing");
         }
@@ -249,7 +251,7 @@ public final class Bindless implements AutoCloseable {
      * command buffer may still use it: the device idles, or its owner closes (a top-level structure lives as long as
      * its owner).
      */
-    public void removeAccelerationStructure(int slot) {
+    public synchronized void removeAccelerationStructure(int slot) {
         structures.free(slot);
     }
 
@@ -257,7 +259,7 @@ public final class Bindless implements AutoCloseable {
      * Frees a sampled slot at once, for the lowest-first reuse of the next add: only when no pending command buffer may
      * still use it (the device idles, say). Else {@link #removeSampled(int, Retiring)}.
      */
-    public void removeSampled(int slot) {
+    public synchronized void removeSampled(int slot) {
         sampled.free(slot);
     }
 
@@ -265,7 +267,7 @@ public final class Bindless implements AutoCloseable {
      * Frees a storage slot at once, for the lowest-first reuse of the next add: only when no pending command buffer may
      * still use it (the device idles, say). Else {@link #removeStorage(int, Retiring)}.
      */
-    public void removeStorage(int slot) {
+    public synchronized void removeStorage(int slot) {
         storage.free(slot);
     }
 
@@ -274,16 +276,16 @@ public final class Bindless implements AutoCloseable {
      * after bind, a slot reused earlier would be rewritten under a frame still reading it.
      */
     @AllowAllocation("removing, rarely")
-    public void removeSampled(int slot, Retiring retiring) {
+    public synchronized void removeSampled(int slot, Retiring retiring) {
         sampled.check(slot);
-        retiring.add(() -> sampled.free(slot));
+        retiring.add(() -> removeSampled(slot)); // locks when it runs
     }
 
     /** Frees a storage slot once no frame in flight of {@code retiring}'s slots can use it. */
     @AllowAllocation("removing, rarely")
-    public void removeStorage(int slot, Retiring retiring) {
+    public synchronized void removeStorage(int slot, Retiring retiring) {
         storage.check(slot);
-        retiring.add(() -> storage.free(slot));
+        retiring.add(() -> removeStorage(slot));
     }
 
     /** How many sampled and storage slots are taken. */

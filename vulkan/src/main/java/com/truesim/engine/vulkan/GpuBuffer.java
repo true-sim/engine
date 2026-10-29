@@ -8,6 +8,7 @@ import static org.lwjgl.util.vma.Vma.VMA_MEMORY_USAGE_AUTO;
 import static org.lwjgl.util.vma.Vma.vmaCreateBuffer;
 import static org.lwjgl.util.vma.Vma.vmaDestroyBuffer;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+import static org.lwjgl.vulkan.VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_CONCURRENT;
 import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_EXCLUSIVE;
@@ -70,7 +71,9 @@ public final class GpuBuffer implements AutoCloseable {
             }
             VmaAllocationCreateInfo allocationInfo = VmaAllocationCreateInfo.calloc(stack)
                 .usage(VMA_MEMORY_USAGE_AUTO)
-                .flags(hostVisible ? hostAccess | VMA_ALLOCATION_CREATE_MAPPED_BIT : 0);
+                .flags(hostVisible ? hostAccess | VMA_ALLOCATION_CREATE_MAPPED_BIT : 0)
+                // Coherent, as nothing flushes or invalidates: writes reach the GPU and its writes the CPU without.
+                .requiredFlags(hostVisible ? VK_MEMORY_PROPERTY_HOST_COHERENT_BIT : 0);
             LongBuffer buffer = stack.mallocLong(1);
             PointerBuffer allocated = stack.mallocPointer(1);
             VmaAllocationInfo result = VmaAllocationInfo.calloc(stack);

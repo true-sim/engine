@@ -4,7 +4,7 @@ import com.truesim.annotations.AllowAllocation;
 
 /** A Vulkan call failed. {@link #result()} is the {@code VkResult}. */
 @AllowAllocation("failures")
-public final class VulkanException extends RuntimeException {
+public class VulkanException extends RuntimeException {
 
     private static final long serialVersionUID = 1;
 

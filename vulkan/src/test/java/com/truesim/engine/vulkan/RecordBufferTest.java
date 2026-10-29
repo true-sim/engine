@@ -65,6 +65,8 @@ class RecordBufferTest {
                 fill(records, 2, 200); // again: the same entry, the last write wins
                 assertThat(records.pendingCount()).isEqualTo(2);
                 assertThat(read(device, records)).as("zeros until the frame").containsOnly(0);
+                assertThatIllegalStateException().as("between frames").isThrownBy(() -> device.submitAndWait(
+                    device.graphics(), records::upload)).withMessageContaining("within a frame");
                 slots.begin(0);
                 device.submitAndWait(device.graphics(), slots::recordStart);
                 slots.end();

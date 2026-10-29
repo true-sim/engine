@@ -377,6 +377,11 @@ class VulkanTest {
             // A failing submission reports its VkResult.
             assertThatThrownBy(() -> Vulkan.check(-4, "Lost it")).isInstanceOf(VulkanException.class)
                 .hasMessage("Lost it: VK_ERROR_DEVICE_LOST").extracting(e -> ((VulkanException) e).result()).isEqualTo(-4);
+            assertThatThrownBy(() -> Vulkan.check(-4, "Lost it")).as("typed").isInstanceOf(DeviceLostException.class);
+            assertThatThrownBy(() -> Vulkan.check(-1, "Short")).isNotInstanceOf(DeviceLostException.class);
+            Vulkan.checkList(5, "A list that grew"); // VK_INCOMPLETE is fine for lists
+            Vulkan.checkList(0, "A list");
+            assertThatThrownBy(() -> Vulkan.checkList(-1, "A list")).isInstanceOf(VulkanException.class);
             assertThat(new VulkanException("plain").result()).isZero();
             assertThat(Vulkan.version(VulkanInstance.MIN_API_VERSION)).isEqualTo("1.3.0");
             for (int result : new int[] {0, 1, 2, 1000001003, -1, -2, -3, -4, -6, -7, -8, -9, 1000000000 * -1, -1000001004, 12345}) {
