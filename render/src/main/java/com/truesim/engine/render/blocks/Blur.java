@@ -11,6 +11,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
+import com.truesim.engine.render.push.BlurPush;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import java.util.Objects;
@@ -46,7 +47,7 @@ public record Blur(Image source, int radius, double scale) implements Request<Im
     public Image build(GraphBuilder g) {
         Pipeline pipeline = g.cached(Blur.class, device -> {
             try (ShaderModule shader = ShaderModule.load(device, "shaders/blocks/blur.spv")) {
-                return Pipeline.compute(device, shader, "blurMain", 28);
+                return Pipeline.compute(device, shader, "blurMain", BlurPush.BYTES);
             }
         });
         String name = "blur " + radius + " of " + source.name();
@@ -70,16 +71,16 @@ public record Blur(Image source, int radius, double scale) implements Request<Im
     private static void dispatch(PassContext ctx, Pipeline pipeline, Image from, Image to, float stepX, float stepY,
         int radius) {
         try (MemoryStack stack = stackPush()) {
-            long push = stack.nmalloc(8, 28);
-            memPutInt(push, ctx.sampled(from));
-            memPutInt(push + 4, ctx.storage(to));
-            memPutInt(push + 8, to.width());
-            memPutInt(push + 12, to.height());
-            memPutFloat(push + 16, stepX);
-            memPutFloat(push + 20, stepY);
-            memPutInt(push + 24, radius);
+            long push = stack.nmalloc(8, BlurPush.BYTES);
+            memPutInt(push + BlurPush.SOURCE, ctx.sampled(from));
+            memPutInt(push + BlurPush.TARGET, ctx.storage(to));
+            memPutInt(push + BlurPush.SIZE, to.width());
+            memPutInt(push + BlurPush.SIZE + 4, to.height());
+            memPutFloat(push + BlurPush.STEP, stepX);
+            memPutFloat(push + BlurPush.STEP + 4, stepY);
+            memPutInt(push + BlurPush.RADIUS, radius);
             pipeline.bind(ctx.commands());
-            pipeline.push(ctx.commands(), push, 28);
+            pipeline.push(ctx.commands(), push, BlurPush.BYTES);
             vkCmdDispatch(ctx.commands(), (to.width() + 7) / 8, (to.height() + 7) / 8, 1);
         }
     }

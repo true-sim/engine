@@ -14,7 +14,7 @@ pluginManagement {
 }
 
 plugins {
-    id("truesim.settings") version "0.6.0"
+    id("truesim.settings") version "0.7.0"
 }
 
 rootProject.name = "engine"

@@ -22,6 +22,8 @@ import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.PassContext;
+import com.truesim.engine.render.push.ClassicPush;
+import com.truesim.engine.render.push.SelectPush;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
@@ -60,8 +62,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     static final int CLASSIC_TRIANGLE = 0x80000000;
     private static final int MAX_TRIANGLES = 1 << 24;
     private static final int MAX_SUBMESHES = 128;
-    private static final int SELECT_PUSH = 80;
-    private static final int DRAW_PUSH = 96;
+    private static final int SELECT_PUSH = SelectPush.BYTES;
+    private static final int DRAW_PUSH = ClassicPush.BYTES;
     private static final int COMMAND_BYTES = 20;
     private static final int RECORD_BYTES = 16;
     private static final float[] NO_COLOR = new float[3]; // depth and IDs: cleared to 0
@@ -312,17 +314,17 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         scene.upload(commands);
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, SELECT_PUSH);
-            memPutLong(push, view.address());
-            memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, scene.instanceAddress());
-            memPutLong(push + 24, meshes.deviceAddress());
-            memPutLong(push + 32, levels.deviceAddress());
-            memPutLong(push + 40, parts.deviceAddress());
-            memPutLong(push + 48, list);
-            memPutLong(push + 56, list + recordsOffset);
-            memPutInt(push + 64, scene.highWater());
-            memPutInt(push + 68, maxDraws);
-            memPutLong(push + 72, scene.materialsAddress()); // each part's raster bin
+            memPutLong(push + SelectPush.VIEW, view.address());
+            memPutLong(push + SelectPush.MESHES, pool.meshTable().deviceAddress());
+            memPutLong(push + SelectPush.INSTANCES, scene.instanceAddress());
+            memPutLong(push + SelectPush.CLASSIC_MESHES, meshes.deviceAddress());
+            memPutLong(push + SelectPush.LEVELS, levels.deviceAddress());
+            memPutLong(push + SelectPush.PARTS, parts.deviceAddress());
+            memPutLong(push + SelectPush.DRAWS, list);
+            memPutLong(push + SelectPush.RECORDS, list + recordsOffset);
+            memPutInt(push + SelectPush.INSTANCE_COUNT, scene.highWater());
+            memPutInt(push + SelectPush.MAX_DRAWS, maxDraws);
+            memPutLong(push + SelectPush.MATERIALS, scene.materialsAddress()); // each part's raster bin
             select.bind(commands);
             select.push(commands, push, SELECT_PUSH);
             vkCmdDispatch(commands, (scene.highWater() + 63) / 64, 1, 1);
@@ -345,14 +347,14 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             MeshletRenderer.beginRendering(commands, stack, colorView, depthView, width, height, clear[0], clear[1],
                 clear[2], load);
             long push = stack.ncalloc(8, 1, DRAW_PUSH);
-            memPutLong(push, view.address());
-            memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, renderer.scene().instanceAddress());
-            memPutLong(push + 24, pool.positions().deviceAddress());
-            memPutLong(push + 32, pool.attributes().deviceAddress());
-            memPutLong(push + 40, ctx.address(list) + recordsOffset);
-            memPutLong(push + 80, renderer.scene().materialsAddress());
-            memPutLong(push + 88, lights);
+            memPutLong(push + ClassicPush.VIEW, view.address());
+            memPutLong(push + ClassicPush.MESHES, pool.meshTable().deviceAddress());
+            memPutLong(push + ClassicPush.INSTANCES, renderer.scene().instanceAddress());
+            memPutLong(push + ClassicPush.POSITIONS, pool.positions().deviceAddress());
+            memPutLong(push + ClassicPush.ATTRIBUTES, pool.attributes().deviceAddress());
+            memPutLong(push + ClassicPush.RECORDS, ctx.address(list) + recordsOffset);
+            memPutLong(push + ClassicPush.MATERIALS, renderer.scene().materialsAddress());
+            memPutLong(push + ClassicPush.LIGHTS, lights);
             MeshletRenderer.setViewport(commands, stack, width, height);
             vkCmdBindIndexBuffer(commands, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
             for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {

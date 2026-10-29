@@ -9,6 +9,7 @@ import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.render.push.ShadePush;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.Push;
 import com.truesim.engine.vulkan.ShaderModule;
@@ -34,7 +35,7 @@ import java.util.Objects;
  */
 public final class VisibilityBufferShading implements Technique {
 
-    private static final int PUSH_BYTES = 128;
+    private static final int PUSH_BYTES = ShadePush.BYTES;
     private static final int TILE = 8;
 
     private final SceneGeometry geometry;
@@ -174,7 +175,7 @@ public final class VisibilityBufferShading implements Technique {
     private Push push(Push push, PassContext ctx, Image ids, Image color, Buffer lights, int types, int bin,
         long tiles) {
         GeometryPool pool = renderer.pool();
-        return push.clear()
+        push.clear()
             .address(view.address())
             .address(pool.meshTable().deviceAddress())
             .address(renderer.scene().instanceAddress())
@@ -193,5 +194,9 @@ public final class VisibilityBufferShading implements Technique {
             .u32(bin)
             .address(classic == null ? 0 : classic.indicesAddress())
             .address(tiles);
+        if (push.size() != ShadePush.BYTES) { // written in order: the last field must end where slangc says
+            throw new IllegalStateException("ShadePush is " + ShadePush.BYTES + " bytes, " + push.size() + " written");
+        }
+        return push;
     }
 }

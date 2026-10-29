@@ -24,6 +24,7 @@ import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.ShadowInputs;
+import com.truesim.engine.render.push.TracedPush;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import java.util.List;
@@ -39,7 +40,7 @@ import org.lwjgl.system.MemoryStack;
  */
 public final class RayTracedShadows implements Technique {
 
-    private static final int PUSH_BYTES = 124;
+    private static final int PUSH_BYTES = TracedPush.BYTES;
 
     private final RayTracing rayTracing;
     private final Lights lights;
@@ -111,22 +112,22 @@ public final class RayTracedShadows implements Technique {
             long push = stack.nmalloc(16, PUSH_BYTES);
             float[] inverse = camera.inverseViewProjection();
             for (int i = 0; i < 16; i++) {
-                memPutFloat(push + 4L * i, inverse[i]);
+                memPutFloat(push + TracedPush.INVERSE_VIEW_PROJECTION + 4L * i, inverse[i]);
             }
-            memPutInt(push + 64, ctx.sampled(depth));
-            memPutInt(push + 68, ctx.storage(mask));
-            memPutInt(push + 72, rayTracing.slot());
-            memPutInt(push + 76, mask.width());
-            memPutInt(push + 80, mask.height());
-            memPutFloat(push + 84, offset);
-            memPutLong(push + 88, lights.lightsAddress());
-            memPutInt(push + 96, light);
+            memPutInt(push + TracedPush.DEPTH, ctx.sampled(depth));
+            memPutInt(push + TracedPush.MASK, ctx.storage(mask));
+            memPutInt(push + TracedPush.SCENE, rayTracing.slot());
+            memPutInt(push + TracedPush.WIDTH, mask.width());
+            memPutInt(push + TracedPush.HEIGHT, mask.height());
+            memPutFloat(push + TracedPush.OFFSET, offset);
+            memPutLong(push + TracedPush.LIGHTS, lights.lightsAddress());
+            memPutInt(push + TracedPush.LIGHT, light);
             // The way from the camera's positions into the top level's (built relative to the depth source's view),
             // and the light relative to the camera: differences of world positions, small enough for floats.
             for (int axis = 0; axis < 3; axis++) {
                 double p = camera.position(axis);
-                memPutFloat(push + 100 + 4L * axis, (float) (p - depthSource.view().position(axis)));
-                memPutFloat(push + 112 + 4L * axis, (float) (lights.position(light, axis) - p));
+                memPutFloat(push + TracedPush.TO_TOP_LEVEL_X + 4L * axis, (float) (p - depthSource.view().position(axis)));
+                memPutFloat(push + TracedPush.LIGHT_X + 4L * axis, (float) (lights.position(light, axis) - p));
             }
             pipeline.bind(ctx.commands());
             pipeline.push(ctx.commands(), push, PUSH_BYTES);

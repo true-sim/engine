@@ -6,6 +6,10 @@ plugins {
 
 description = "Engine Vulkan layer for true-sim: instances, GPUs, devices, memory, surfaces and swapchains."
 
+slang {
+    pushPackage = "com.truesim.engine.vulkan.push"
+}
+
 val lwjglVersion: String by rootProject.extra
 val lwjglNatives: List<String> by rootProject.extra
 
