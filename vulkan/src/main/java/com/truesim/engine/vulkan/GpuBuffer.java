@@ -18,6 +18,7 @@ import static org.lwjgl.vulkan.VK12.vkGetBufferDeviceAddress;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 
 import com.truesim.annotations.AllowAllocation;
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.LongBuffer;
 import org.lwjgl.PointerBuffer;
@@ -31,7 +32,8 @@ import org.lwjgl.vulkan.VkBufferDeviceAddressInfo;
 /**
  * A buffer in GPU memory, allocated by VMA. A host-visible buffer stays mapped: {@link #memory()} is a
  * {@link MemorySegment} over it, so data can be written in place, e.g. by common-math's {@code ElementBuffer.wrap}.
- * Device-local buffers are filled by copies from host-visible ones.
+ * Device-local buffers are filled by copies from host-visible ones. Once closed, its memory, handle and device address
+ * are no longer handed out, and segments over the memory throw.
  */
 @AllowAllocation("created rarely")
 public final class GpuBuffer implements AutoCloseable {
@@ -40,6 +42,7 @@ public final class GpuBuffer implements AutoCloseable {
     private final long handle;
     private final long allocation;
     private final long size;
+    private final Arena mapping; // closed with the buffer, so the mapped memory cannot be used after it
     private final MemorySegment memory;
     private final long deviceAddress;
     private boolean closed;
@@ -75,7 +78,9 @@ public final class GpuBuffer implements AutoCloseable {
                 "Could not allocate a buffer of " + size + " bytes");
             this.handle = buffer.get(0);
             this.allocation = allocated.get(0);
-            this.memory = hostVisible ? MemorySegment.ofAddress(result.pMappedData()).reinterpret(size) : null;
+            this.mapping = hostVisible ? Arena.ofShared() : null;
+            this.memory = hostVisible ? MemorySegment.ofAddress(result.pMappedData()).reinterpret(size, mapping, null)
+                : null;
             this.deviceAddress = (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) == 0 ? 0
                 : vkGetBufferDeviceAddress(device.handle(), VkBufferDeviceAddressInfo.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO)
@@ -160,6 +165,7 @@ public final class GpuBuffer implements AutoCloseable {
     }
 
     public long handle() {
+        checkOpen();
         return handle;
     }
 
@@ -168,6 +174,7 @@ public final class GpuBuffer implements AutoCloseable {
      * {@code VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT}.
      */
     public long deviceAddress() {
+        checkOpen();
         if (deviceAddress == 0) {
             throw new IllegalStateException("The buffer was made without SHADER_DEVICE_ADDRESS usage");
         }
@@ -183,8 +190,9 @@ public final class GpuBuffer implements AutoCloseable {
         return size;
     }
 
-    /** The mapped memory of a host-visible buffer. */
+    /** The mapped memory of a host-visible buffer, usable until the buffer closes. */
     public MemorySegment memory() {
+        checkOpen();
         if (memory == null) {
             throw new IllegalStateException("A device-local buffer is not mapped");
         }
@@ -199,7 +207,16 @@ public final class GpuBuffer implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
+            if (mapping != null) {
+                mapping.close(); // segments over the mapping throw from now on
+            }
             vmaDestroyBuffer(device.allocator(), handle, allocation);
+        }
+    }
+
+    private void checkOpen() {
+        if (closed) {
+            throw new IllegalStateException("The buffer is closed");
         }
     }
 }

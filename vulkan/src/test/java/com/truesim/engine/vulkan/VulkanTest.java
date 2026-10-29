@@ -354,6 +354,15 @@ class VulkanTest {
                 compute, graphics)) {
                 assertThat(shared.handle()).isNotZero();
             }
+            // Closed: no memory, handle or address handed out, and memory taken before throws.
+            GpuBuffer closed = GpuBuffer.hostVisible(device, 16,
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT | org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            java.lang.foreign.MemorySegment kept = closed.memory();
+            closed.close();
+            assertThatIllegalStateException().isThrownBy(() -> kept.get(ValueLayout.JAVA_INT, 0));
+            assertThatIllegalStateException().isThrownBy(closed::memory).withMessage("The buffer is closed");
+            assertThatIllegalStateException().isThrownBy(closed::handle);
+            assertThatIllegalStateException().isThrownBy(closed::deviceAddress);
             assertThatIllegalArgumentException().isThrownBy(() -> GpuBuffer.hostVisible(device, 0, 0));
             assertThatIllegalArgumentException().isThrownBy(() -> new GpuImage(device, 0, 4, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT));
