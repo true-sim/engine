@@ -291,7 +291,7 @@ class SceneViewTest {
         // Far from the world origin, left of a camera there too: floats relative to the camera keep it precise.
         long node = facing(scene, 1e7 - 1, 0, -3);
         renderables.set(node, SQUARE, List.of(RED));
-        view.setOrigin(1e7, 0, 0);
+        camera.position(1e7, 0, 0);
         frame(List.of(graph), List.of(view), camera);
         assertThat(view.renderableCount()).isEqualTo(1);
         assertThat(view.instanceCount()).as("waiting for the mesh").isZero();
@@ -319,7 +319,7 @@ class SceneViewTest {
         }
         device.waitIdle();
         assertThat(litColumn(readbacks[0], 0)).as("moved right").isGreaterThan(SIZE / 2.0 + 4);
-        view.setOrigin(1e7 + 2, 0, 0);
+        camera.position(1e7 + 2, 0, 0);
         for (int frame = 0; frame < 2; frame++) {
             frame(List.of(graph), List.of(view), camera);
         }
@@ -618,7 +618,6 @@ class SceneViewTest {
         // Shadows are not followed yet: nothing changes. Nor do nodes without renderables.
         renderables.setCastsShadows(b, false);
         scene.setTranslation(bare, 5, 5, 5);
-        view.setOrigin(0, 0, 0); // where it is
         update(scene, renderables, view);
         assertThat(view.slotOf(b)).isEqualTo(slot);
         // More moves than the scene keeps: every instance is written again.
@@ -658,7 +657,7 @@ class SceneViewTest {
         int[] frame = {0};
         com.truesim.testing.AllocationAssertions.assertAllocationFree(() -> {
             scene.setTranslation(nodes[0], -1, 0.01 * (frame[0]++ % 8), -3);
-            view.setOrigin(0, 0, 0.001 * (frame[0] % 4));
+            camera.position(0, 0, 0.001 * (frame[0] % 4));
             frame(graphs, views, camera);
         }, 3000, 300, 5);
     }

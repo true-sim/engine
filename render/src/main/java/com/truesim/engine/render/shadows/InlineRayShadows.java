@@ -59,7 +59,8 @@ public final class InlineRayShadows implements Technique {
         g.modifyBuffer(Keys.LIGHT_LIST);
         Buffer topLevel = g.request(new TopLevel(rayTracing, renderer));
         g.request(new ShadowInputs()).after(topLevel).rays().setup(ctx -> {
-            lights.shadowRay(entry, rayTracing.slot(), offset);
+            lights.shadowRay(entry, rayTracing.slot(), offset, renderer.viewPosition(0, 0), renderer.viewPosition(0, 1),
+                renderer.viewPosition(0, 2)); // the top level is relative to the renderer's first view
             lights.shadows(light, entry, 1);
         });
     }

@@ -38,7 +38,7 @@ import org.lwjgl.system.MemoryStack;
  */
 public final class RayTracedShadows implements Technique {
 
-    private static final int PUSH_BYTES = 104;
+    private static final int PUSH_BYTES = 124;
 
     private final RayTracing rayTracing;
     private final MeshletRenderer renderer;
@@ -122,6 +122,13 @@ public final class RayTracedShadows implements Technique {
             memPutFloat(push + 84, offset);
             memPutLong(push + 88, lights.lightsAddress());
             memPutInt(push + 96, light);
+            // The way from the camera's positions into the top level's (built relative to the renderer's first view),
+            // and the light relative to the camera: differences of world positions, small enough for floats.
+            for (int axis = 0; axis < 3; axis++) {
+                double p = camera.position(axis);
+                memPutFloat(push + 100 + 4L * axis, (float) (p - renderer.viewPosition(0, axis)));
+                memPutFloat(push + 112 + 4L * axis, (float) (lights.position(light, axis) - p));
+            }
             pipeline.bind(ctx.commands());
             pipeline.push(ctx.commands(), push, PUSH_BYTES);
             vkCmdDispatch(ctx.commands(), (mask.width() + 7) / 8, (mask.height() + 7) / 8, 1);

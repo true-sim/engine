@@ -20,7 +20,8 @@ import java.util.Objects;
 
 /**
  * A light's shadows the classic way, by one shadow map: the scene's depth drawn from {@code light}'s camera (an
- * orthographic one along a directional light, a perspective one for a spot light) as the geometry's view
+ * orthographic one along a directional light, a perspective one for a spot light, each at its own world position: the
+ * map does not change as other cameras move, and serves every view that shades the light) as the geometry's view
  * {@code view}, culled with the camera in one pass, then filtered in shading (3 x 3 PCF) through the light's shadow
  * table entry {@code entry}. Cheap, with the classic trade-offs: the map's resolution over its area, a bias between
  * acne and shadows that come loose from their casters, and nothing outside the map.
@@ -73,7 +74,7 @@ public final class ShadowMapShadows implements Technique {
         Image map = g.request(new SceneDraw(geometry, view, camera, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT,
             size, size, false)).depth();
         g.request(new ShadowInputs()).sample(map).setup(ctx -> {
-            lights.shadowMap(entry, camera.viewProjection(), ctx.sampled(map), size, bias, Float.MAX_VALUE);
+            lights.shadowMap(entry, camera, ctx.sampled(map), size, bias, Float.MAX_VALUE);
             lights.shadows(light, entry, 1);
         });
     }

@@ -146,9 +146,10 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
      MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000, 1 << 20, 65_535),
          colorFormat, depthFormat, graph.frameSlots())) {      // instances and views: a copy per frame in flight
     int car = pool.add(carMesh);                                   // uploaded once
-    renderer.setInstance(0, car, x, y, z, qx, qy, qz, qw, 1, 1, 1); // camera-relative
+    renderer.setInstance(0, car, 0, x, y, z, qx, qy, qz, qw, 1, 1, 1); // world position, doubles
     renderer.setInstanceCount(1);
-    renderer.setView(camera.set(forward, up, fovY, width, height, near), 1.0f, MeshletRenderer.MODE_LIT);
+    renderer.setView(camera.position(cx, cy, cz).set(forward, up, fovY, width, height, near), 1.0f,
+        MeshletRenderer.MODE_LIT);
     renderer.record(commands, colorView, depthView, width, height, 0, 0, 0);
 }
 ```
@@ -173,7 +174,14 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
 - **Instance-level LOD range:** before culling meshlets, the instance pass skips every level finer than the first one
   whose error, seen from the instance's nearest point, is within the allowed pixels: the rule could not pick anything
   there. A far instance costs a chunk or two, however detailed its mesh.
-- **Views culled together:** up to four views (the camera, a shadow map's sun, cascades) each have their own lists
+- **World positions, every view relative to its own camera:** instances keep their world position in two floats
+  per axis (about 48 bits: sub-millimetre thousands of kilometres out), written once and again only when they move.
+  Every view has a camera at a world position of its own (`Camera.position`, in doubles), and the GPU draws each
+  instance relative to it, subtracting the high parts and the rest apart. Everything after works in floats near the
+  camera, as precise anywhere in the world as at its origin (tested: the same image 7,000 km out; floats alone are
+  visibly off there). Moving a camera rewrites nothing but its view; a shadow camera stays where its light is, so its
+  map does not change as other cameras move.
+- **Views culled together:** up to 32 views (cameras, shadow maps, cascades, mirrors) each have their own lists
   (`Limits.views`). `cullViews` culls several at once: one instance pass with a row per view, and one cull pass over
   all their chunks, each meshlet into its view's list; `drawView` then draws each. Through the frame graph, the
   `MeshletCulling` request gathers every view the techniques draw (the scene's camera, `ShadowMapShadows`' sun) into
@@ -217,8 +225,8 @@ error the cluster hierarchy draws fewer triangles than discrete LODs (30,000 roc
 triangles, against 17.6 M), since each cluster takes the detail its own distance needs. Both builds sum their
 simplification errors, which stay close to the real deviation from full detail.
 
-- **Reverse depth with an infinite far plane,** camera-relative instances: precise near and far, anywhere in a large
-  world.
+- **Reverse depth with an infinite far plane,** instances relative to each view's camera: precise near and far,
+  anywhere in a large world.
 - Tested on the GPU: coverage of a quad, culling (behind, outside, facing away), LOD cuts from full detail to a few
   meshlets that keep the covered area within 2 % (no holes), and both paths drawing the same image.
 
@@ -255,7 +263,10 @@ try (Textures textures = new Textures(device); Materials materials = new Materia
 
 ### Lights and light lists
 
-`Lights` holds point, spot and directional lights, camera-relative like instances, and a shadow table. A **light
+`Lights` holds point, spot and directional lights at world positions (two floats per axis, like instances), and a
+shadow table whose entries each have a world position of their own: a shadow map's is its light camera's. A light
+list hands lights to shading relative to its camera and moves a surface into an entry's positions before the lookup,
+so one set of lights and shadow maps serves every view: the camera, another player's, a mirror's. A **light
 binning** technique turns them into the frame's light list, `Keys.LIGHT_LIST` (a buffer). Shading techniques use it
 if the graph has one, and otherwise light by the sun; `graph.replace` swaps one binning for another.
 
@@ -512,9 +523,9 @@ renderers above, following the scene's change logs and asset cache:
   and releases it in the cache when nothing does. Materials draw as the default until they load, untextured where
   their textures have not loaded (or failed to); a renderable's materials take a block of ids, one per submesh, shared
   by every renderable with the same materials and mesh layout.
-- `SceneView` is one camera's view of one scene: a `MeshletRenderer` whose instances it keeps up to date, written
-  relative to the camera's world position (precise far from the world origin) and rewritten only where nodes moved
-  or renderables changed. `view.geometry()` is what the frame graph's techniques draw, so the rendering mode is the
+- `SceneView` is a scene drawn by a `MeshletRenderer`: its renderables as instances at their world positions,
+  written once and again only where nodes moved or renderables changed. Cameras are the renderer's views, each at its
+  own world position: moving one rewrites no instance. `view.geometry()` is what the frame graph's techniques draw, so the rendering mode is the
   graph's: `ClusteredForwardShading`, `VisibilityBufferShading`, shadows, swapped with `graph.replace`.
 
 ```java
@@ -535,8 +546,8 @@ previewGraph.beginFrame();
 slots.begin(slot);
 tasks.drainCompleted();                               // the frame boundary: loads arrive and upload
 scene.update(); worldRenderables.update();
-world.setOrigin(cameraX, cameraY, cameraZ);
 world.update();
+camera.position(cameraX, cameraY, cameraZ);           // the camera's world position, in doubles
 world.geometry().setView(0, camera, 1, MeshletRenderer.MODE_LIT);
 ...                                                   // the same for the preview
 worldGraph.submit(acquired[slot], presentReady);
@@ -544,7 +555,8 @@ previewGraph.submit(0, 0);
 slots.end();
 ```
 
-One scene is one view and one graph. Two scenes are two views from the same resources, each with its own graph (the
+One scene is one view and one graph; more cameras on it are more of the renderer's views. Two scenes are two views
+from the same resources, each with its own graph (the
 graph's keys, such as the scene color and light list, are one per graph); a mesh both use is on the GPU once. The
 tests draw two scenes in step, one forward and one through a visibility buffer, with validation on.
 

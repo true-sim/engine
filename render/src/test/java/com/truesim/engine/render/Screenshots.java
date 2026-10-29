@@ -163,7 +163,7 @@ class Screenshots {
                 com.truesim.engine.render.shadows.CascadedShadowMaps cascades =
                     new com.truesim.engine.render.shadows.CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, size, 1,
                         150);
-                cascades.update(0, 0, 0);
+                cascades.update();
                 graph.remove(map).add(cascades);
                 capture(device, graph, target, pixels);
                 cascaded = capture(device, graph, target, pixels);

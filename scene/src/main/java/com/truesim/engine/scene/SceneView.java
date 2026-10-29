@@ -21,10 +21,12 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * One camera's view of a scene: draws its {@link Renderables} with a {@link MeshletRenderer} from shared
- * {@link SceneResources}, following the scene's and the renderables' change logs, and writes the instances relative to
- * the camera every frame. Its {@link #geometry()} is what the frame graph's techniques draw, whichever rendering mode
- * the graph runs.
+ * A scene drawn by a {@link MeshletRenderer}: its {@link Renderables} as the renderer's instances, at their world
+ * positions, from shared {@link SceneResources}, following the scene's and the renderables' change logs. Cameras are
+ * the renderer's views, each at its own world position ({@link com.truesim.engine.render.Camera#position}): the GPU
+ * draws the instances relative to each, so moving a camera rewrites no instance, and every view (the camera, shadow
+ * maps, mirrors, more cameras) is culled in one pass. Its {@link #geometry()} is what the frame graph's techniques
+ * draw, whichever rendering mode the graph runs.
  *
  * <pre>{@code
  * MeshletRenderer renderer = new MeshletRenderer(device, resources.pool(), limits, colorFormat, depthFormat, slots);
@@ -33,15 +35,14 @@ import java.util.Objects;
  * // a rendering mode is a technique: graph.replace(Keys.SCENE_COLOR, new VisibilityBufferShading(view.geometry(), ...))
  *
  * // every frame, after the frame boundary (tasks.drainCompleted()), scene.update() and renderables.update():
- * view.setOrigin(cameraX, cameraY, cameraZ);   // the camera's world position: instances are relative to it
- * view.update();                               // renderer.setInstanceCount and the instances it draws
- * view.geometry().setView(0, camera, 1, MeshletRenderer.MODE_LIT);   // the camera, at the origin
+ * view.update();                               // renderer.setInstanceCount and the instances that changed
+ * camera.position(cameraX, cameraY, cameraZ);  // the camera's world position, in doubles
+ * view.geometry().setView(0, camera, 1, MeshletRenderer.MODE_LIT);
  * }</pre>
  *
  * <p>Several scenes draw as several views, each with its own renderer and frame graph, all from one
- * {@link SceneResources}: a mesh or material used by several views is on the GPU once. Two cameras on one scene are two
- * views of the same renderables (their own origins, their own instances), or one view drawing several of the
- * renderer's views when they are close enough to share an origin.
+ * {@link SceneResources}: a mesh or material used by several views is on the GPU once. Several cameras on one scene
+ * are several of the renderer's views (up to {@link MeshletRenderer#VIEWS}), each drawn by a graph of its own.
  *
  * <ul>
  *   <li><b>Assets by reference:</b> a renderable draws once its mesh is on the GPU; materials draw untextured until
@@ -49,8 +50,7 @@ import java.util.Objects;
  *   <li><b>Materials per submesh:</b> a renderable's materials take consecutive ids in the material table, one per
  *       submesh of its mesh, shared by every renderable of every view with the same materials and mesh layout.</li>
  *   <li><b>Changes, not the whole scene:</b> renderables added, changed or removed, and nodes moved, are found in the
- *       change logs. A frame where the origin moves, or most nodes moved, rewrites every instance; otherwise only
- *       moved ones.</li>
+ *       change logs. Only moved instances are written, or every one when most nodes moved.</li>
  *   <li><b>Deterministic:</b> the same changes give the same instances, slots and ids.</li>
  * </ul>
  *
@@ -94,10 +94,7 @@ public final class SceneView implements AutoCloseable {
     private int[] waiting = new int[64];
     private int waitingCount;
 
-    private double originX;
-    private double originY;
-    private double originZ;
-    private boolean originMoved = true;
+    private boolean rewriteAll = true;
 
     private final Map<AssetRef<MeshData>, ViewMesh> meshes = new HashMap<>();
 
@@ -157,19 +154,9 @@ public final class SceneView implements AutoCloseable {
         return resources;
     }
 
-    /** The camera's world position: instances are written relative to it, in floats, precise near the camera. */
-    public void setOrigin(double x, double y, double z) {
-        if (x != originX || y != originY || z != originZ) {
-            originX = x;
-            originY = y;
-            originZ = z;
-            originMoved = true;
-        }
-    }
-
     /**
-     * Brings the renderer up to date: renderables added, changed or removed since the last update, nodes moved, and
-     * every instance when the origin moved. Call after the frame boundary, {@code scene.update()} and
+     * Brings the renderer up to date: renderables added, changed or removed since the last update, and nodes moved.
+     * Call after the frame boundary, {@code scene.update()} and
      * {@code renderables.update()}, before the frame graph records. Allocates nothing once warm when only transforms
      * changed.
      */
@@ -181,22 +168,22 @@ public final class SceneView implements AutoCloseable {
             started = true;
             rebuild(); // the first update, or fell behind the renderables' log
         }
-        if (!originMoved) {
+        if (!rewriteAll) {
             // More changed nodes than half the instances (or more than the scene's log kept): rewriting every
             // instance, in slot order, costs less than following the changes.
             int changed = scene.changeCountSince(since);
             if (changed < 0 || changed > instanceCount / 2) {
-                originMoved = true;
+                rewriteAll = true;
             } else {
                 scene.changesSince(since, onSceneChange);
             }
         }
         resources.flush();
-        if (originMoved) {
+        if (rewriteAll) {
             for (int slot = 0; slot < instanceCount; slot++) {
                 writeInstance(slotItem[slot]);
             }
-            originMoved = false;
+            rewriteAll = false;
         } else {
             for (int i = 0; i < movedCount; i++) {
                 int item = movedItems[i];
@@ -262,7 +249,7 @@ public final class SceneView implements AutoCloseable {
     private void rebuild() {
         destroyAll();
         renderables.forEach(this::reconcile);
-        originMoved = true;
+        rewriteAll = true;
     }
 
     private void destroyAll() {
@@ -431,14 +418,13 @@ public final class SceneView implements AutoCloseable {
         }
     }
 
-    /** Writes {@code item}'s instance: its node's world transform relative to the origin, its mesh and materials. */
+    /** Writes {@code item}'s instance: its node's world transform, its mesh and materials. */
     private void writeInstance(int item) {
         TransformArray world = scene.worldTransforms();
         MemorySegment s = world.segment();
         long o = NodeHandle.index(itemNode[item]) * world.stride();
         renderer.setInstance(itemSlot[item], itemMesh[item].mesh.id, itemSet[item].first,
-            (float) (s.get(DOUBLE, o) - originX), (float) (s.get(DOUBLE, o + 8) - originY),
-            (float) (s.get(DOUBLE, o + 16) - originZ),
+            s.get(DOUBLE, o), s.get(DOUBLE, o + 8), s.get(DOUBLE, o + 16),
             (float) s.get(DOUBLE, o + 24), (float) s.get(DOUBLE, o + 32), (float) s.get(DOUBLE, o + 40),
             (float) s.get(DOUBLE, o + 48),
             (float) s.get(DOUBLE, o + 56), (float) s.get(DOUBLE, o + 64), (float) s.get(DOUBLE, o + 72));

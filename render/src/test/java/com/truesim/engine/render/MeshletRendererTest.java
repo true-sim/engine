@@ -334,7 +334,77 @@ class MeshletRendererTest {
             .withMessageContaining("has no lists");
         assertThatIllegalArgumentException().isThrownBy(() -> renderer.recordDepth(null, 0, 1, 1, 3));
         assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 1, 1, 0));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 1, 1, 5));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 1, 1, MeshletRenderer.VIEWS + 1));
+    }
+
+    @Test
+    void farFromTheOriginTheImageIsTheSame() {
+        // The terrain and a quad near the origin, then the same 7,000 km away with the camera there: positions are kept
+        // in two floats per axis and drawn relative to the camera, so the image does not change.
+        renderer.setInstance(0, terrain, 0, -3, -8, 0, 0, 0, 1, 1, 1, 1);
+        renderer.setInstance(1, quad, 1, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
+        renderer.setInstanceCount(2);
+        lookForward(1, MeshletRenderer.MODE_LIT);
+        render();
+        int[] near = image();
+        double wx = 3_123_456.789;
+        double wy = -45_678.9;
+        double wz = -7_000_123.456;
+        renderer.setInstance(0, terrain, 0, wx, wy - 3, wz - 8, 0, 0, 0, 1, 1, 1, 1);
+        renderer.setInstance(1, quad, 0, wx + 1, wy, wz - 5, HALF, 0, 0, HALF, 1, 1, 1);
+        camera.position(wx, wy, wz);
+        lookForward(1, MeshletRenderer.MODE_LIT);
+        render();
+        int[] far = image();
+        int differing = 0;
+        for (int i = 0; i < near.length; i++) {
+            differing += near[i] == far[i] ? 0 : 1;
+        }
+        assertThat(differing).as("pixels differing from the image near the origin").isLessThanOrEqualTo(SIZE / 8);
+        // Floats alone, as positions used to be kept, can only put the quad on a grid of quarter and half units
+        // there: drawn visibly off.
+        renderer.setInstance(1, quad, 0, wx + 1.3, wy + 0.1, wz - 5, HALF, 0, 0, HALF, 1, 1, 1);
+        render();
+        int[] exact = image();
+        renderer.setInstance(1, quad, 0, (float) (wx + 1.3), (float) (wy + 0.1), (float) (wz - 5), HALF, 0, 0, HALF,
+            1, 1, 1);
+        render();
+        int[] rounded = image();
+        int off = 0;
+        for (int i = 0; i < exact.length; i++) {
+            off += exact[i] == rounded[i] ? 0 : 1;
+        }
+        assertThat(off).as("pixels off with floats alone").isGreaterThan(SIZE);
+        camera.position(0, 0, 0);
+    }
+
+    @Test
+    void camerasAtTheirOwnPositionsAreCulledTogether() {
+        // Eight cameras, each 5 units in front of a quad of its own, the quads 1,000 units apart far from the origin:
+        // more views than four, culled in one pass, each seeing only its quad.
+        int views = 8;
+        renderer.close();
+        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 4096, 1024, 1 << 16, views),
+            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+        Camera[] cameras = new Camera[views];
+        for (int v = 0; v < views; v++) {
+            double x = 5e6 + 1000 * v;
+            renderer.setInstance(v, quad, 0, x, 2e4, -3e6, HALF, 0, 0, HALF, 1, 1, 1);
+            cameras[v] = new Camera().position(x, 2e4, -3e6 + 5).set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+            renderer.setView(v, cameras[v], 1, MeshletRenderer.MODE_WHITE);
+        }
+        renderer.setInstanceCount(views);
+        renderWith(commands -> {
+            renderer.cullViews(commands, (1 << views) - 1, 0);
+            renderer.drawView(commands, 5, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
+        });
+        for (int v = 0; v < views; v++) {
+            assertThat(renderer.visibleMeshlets(v)).as("view %d", v).isEqualTo(1);
+        }
+        // View 5 drew its quad where a camera 5 units in front of it sees it: the middle, 44 pixels across.
+        assertThat(pixel(SIZE / 2, SIZE / 2)).isEqualTo(WHITE);
+        assertThat(covered()).isCloseTo(44 * 44, org.assertj.core.data.Percentage.withPercentage(10));
+        assertThat(renderer.viewPosition(5, 0)).isEqualTo(5e6 + 5000);
     }
 
     /**

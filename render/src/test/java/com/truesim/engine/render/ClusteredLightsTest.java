@@ -96,9 +96,9 @@ class ClusteredLightsTest {
             .point(2, 30, 0, -10, 1, 10, 10, 10)           // off to the right: in no cluster
             .spot(3, -3, 1, -30, 5, 10, 10, 10, 0, 0, -1, 0.3, 0.5)
             .shadows(3, 0, 1)
-            .shadowMap(0, camera.viewProjection(), 0, 1024, 1e-3f, 0)
+            .shadowMap(0, camera, 0, 1024, 1e-3f, 0)
             .shadowMask(1, 0, 0)
-            .shadowRay(2, 0, 2e-3f)
+            .shadowRay(2, 0, 2e-3f, 0, 0, 0)
             .point(4, 0.2f, 0.1f, -3, 0.5f, 1, 1, 1);
         // Many small lights in one spot: more than a cluster holds.
         for (int i = 5; i < 16; i++) {
@@ -156,6 +156,29 @@ class ClusteredLightsTest {
         for (int c = 0; c < request.clusters(); c++) {
             assertThat(gpu[0][c]).isLessThanOrEqualTo(8);
         }
+    }
+
+    @Test
+    void lightsFarFromTheOriginBinAsNearIt() {
+        // The same lights around a camera near the origin and 7,000 km away: binned the same, as a light list hands
+        // them to shading relative to its camera.
+        int[][][] runs = new int[2][][];
+        double[][] at = {{0, 0, 0}, {3_123_456.5, -45_678.25, -7_000_123.75}};
+        for (int run = 0; run < 2; run++) {
+            double[] w = at[run];
+            Camera camera = new Camera().position(w[0], w[1], w[2])
+                .set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
+            renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+            lights.point(0, w[0], w[1], w[2] - 10, 2, 10, 10, 10)
+                .point(1, w[0] + 6, w[1] + 1, w[2] - 25, 3, 10, 10, 10)
+                .spot(2, w[0] - 3, w[1] + 1, w[2] - 30, 5, 10, 10, 10, 0, 0, -1, 0.3, 0.5)
+                .setCount(3);
+            assertThat(lights.position(1, 0)).isEqualTo(w[0] + 6);
+            runs[run] = run(new ClusteredLights(lights, camera, WIDTH, HEIGHT, 64, 8, 0.5f, 100, 8));
+        }
+        assertThat(runs[1][0]).isEqualTo(runs[0][0]);
+        assertThat(runs[1][1]).isEqualTo(runs[0][1]);
+        assertThat(java.util.Arrays.stream(runs[0][0]).sum()).as("lights binned").isPositive();
     }
 
     @Test

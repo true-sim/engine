@@ -86,11 +86,14 @@ import org.lwjgl.vulkan.VkViewport;
  * </ul>
  *
  * <pre>{@code
- * renderer.setInstance(0, car, x, y, z, qx, qy, qz, qw, 1, 1, 1);   // camera-relative position
+ * renderer.setInstance(0, car, 0, x, y, z, qx, qy, qz, qw, 1, 1, 1);         // world position, in doubles
  * renderer.setInstanceCount(1);
- * renderer.setView(camera.set(...), 1.0f, MeshletRenderer.MODE_LIT); // 1 pixel of error allowed
+ * renderer.setView(camera.position(cx, cy, cz).set(...), 1.0f, MeshletRenderer.MODE_LIT); // 1 pixel of error
  * renderer.record(commands, colorView, depthView, width, height, 0, 0, 0);
  * }</pre>
+ *
+ * <p>Instances keep world positions in two floats per axis; each view (up to {@link #VIEWS}, all culled in one pass)
+ * draws them relative to its camera's world position, so a moving camera rewrites only its view.
  *
  * <p>The CPU writes only instances and the view: its cost does not depend on how many meshlets there are. Instance and
  * view data are read when the commands run. Given a frame graph's {@link FrameSlots}, they keep a copy per frame in
@@ -143,9 +146,9 @@ public final class MeshletRenderer implements AutoCloseable {
 
     /** VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT: the same bit as the 32-bit stage. */
     private static final long MESH_SHADER_STAGE = VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
-    static final int INSTANCE_BYTES = 48;
-    private static final int INSTANCE_PUSH = 88;
-    private static final int CULL_PUSH = 80;
+    static final int INSTANCE_BYTES = 64;
+    private static final int INSTANCE_PUSH = 92;
+    private static final int CULL_PUSH = 84;
     private static final int LISTS_BYTES = 32;
     /**
      * Both draw paths' push blocks: the materials at byte 80 and the light list at 88, where the shared fragment
@@ -156,9 +159,9 @@ public final class MeshletRenderer implements AutoCloseable {
     public static final int ID_FORMAT = org.lwjgl.vulkan.VK10.VK_FORMAT_R32G32_UINT;
     private static final int PHASE_EARLY = 1;
     private static final int PHASE_LATE = 2;
-    private static final int VIEW_BYTES = 256;
+    private static final int VIEW_BYTES = 304;
     /** Views a renderer holds: e.g. the camera and a shadow map's light. */
-    public static final int VIEWS = 4;
+    public static final int VIEWS = 32;
     private static final ValueLayout.OfInt U32 = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfFloat F32 = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
@@ -187,6 +190,7 @@ public final class MeshletRenderer implements AutoCloseable {
     private final GpuBuffer drawCount;
     private final GpuBuffer visibility;
     private final int[] phaseOf = new int[VIEWS]; // each view's last culling phase
+    private final double[] viewPositions = new double[3 * VIEWS]; // each view's camera's world position
     private final Materials defaultMaterials;
     private Materials materials;
     private Path path = Path.AUTO;
@@ -329,8 +333,9 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /**
-     * Sets instance {@code index}: mesh {@code mesh} of the pool at camera-relative position ({@code x}, {@code y},
-     * {@code z}), rotated by quaternion ({@code qx}, {@code qy}, {@code qz}, {@code qw}) and scaled. Allocates nothing.
+     * Sets instance {@code index}: mesh {@code mesh} of the pool at world position ({@code x}, {@code y}, {@code z}),
+     * rotated by quaternion ({@code qx}, {@code qy}, {@code qz}, {@code qw}) and scaled. Each view draws it relative to
+     * its camera's {@link Camera#position position}, so it is written once, not as cameras move. Allocates nothing.
      */
     public void setInstance(int index, int mesh, float x, float y, float z, float qx, float qy, float qz, float qw,
         float sx, float sy, float sz) {
@@ -344,6 +349,16 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void setInstance(int index, int mesh, int material, float x, float y, float z, float qx, float qy, float qz,
         float qw, float sx, float sy, float sz) {
+        setInstance(index, mesh, material, (double) x, y, z, qx, qy, qz, qw, sx, sy, sz);
+    }
+
+    /**
+     * Like {@link #setInstance(int, int, int, float, float, float, float, float, float, float, float, float, float)}
+     * at a world position in doubles: kept as two floats per axis (about 48 bits), precise anywhere in a large world.
+     * Allocates nothing.
+     */
+    public void setInstance(int index, int mesh, int material, double x, double y, double z, float qx, float qy,
+        float qz, float qw, float sx, float sy, float sz) {
         if (index < 0 || index >= limits.instances() || !pool.contains(mesh) || material < 0) {
             throw new IllegalArgumentException("No instance " + index + ", mesh " + mesh + " or material " + material);
         }
@@ -353,14 +368,20 @@ public final class MeshletRenderer implements AutoCloseable {
         m.putFloat(o + 4, qy);
         m.putFloat(o + 8, qz);
         m.putFloat(o + 12, qw);
-        m.putFloat(o + 16, x);
-        m.putFloat(o + 20, y);
-        m.putFloat(o + 24, z);
+        float hx = (float) x;
+        float hy = (float) y;
+        float hz = (float) z;
+        m.putFloat(o + 16, hx);
+        m.putFloat(o + 20, hy);
+        m.putFloat(o + 24, hz);
         m.putInt(o + 28, mesh);
         m.putFloat(o + 32, sx);
         m.putFloat(o + 36, sy);
         m.putFloat(o + 40, sz);
         m.putInt(o + 44, material);
+        m.putFloat(o + 48, (float) (x - hx));
+        m.putFloat(o + 52, (float) (y - hy));
+        m.putFloat(o + 56, (float) (z - hz));
     }
 
     /** How many instances, from 0, are drawn. */
@@ -403,6 +424,15 @@ public final class MeshletRenderer implements AutoCloseable {
         float[] inverse = camera.inverseViewProjection();
         for (int i = 0; i < 16; i++) {
             m.putFloat(o + 192 + 4L * i, inverse[i]);
+        }
+        // The camera's world position, two floats per axis as instances keep theirs, and the eye off it.
+        for (int axis = 0; axis < 3; axis++) {
+            double p = camera.position(axis);
+            viewPositions[3 * index + axis] = p;
+            float high = (float) p;
+            m.putFloat(o + 256 + 4L * axis, high);
+            m.putFloat(o + 272 + 4L * axis, (float) (p - high));
+            m.putFloat(o + 288 + 4L * axis, (float) camera.eye(axis));
         }
     }
 
@@ -464,14 +494,14 @@ public final class MeshletRenderer implements AutoCloseable {
      * draw everything in view. Chunks ({@link Limits#chunks}) are shared by the views. Allocates nothing.
      */
     public void cullViews(VkCommandBuffer commands, int viewMask, int earlyMask) {
-        if (viewMask == 0 || viewMask >>> limits.views() != 0 || (earlyMask & ~viewMask) != 0
-            || Integer.bitCount(earlyMask) > 1) {
+        boolean beyond = limits.views() < VIEWS && viewMask >>> limits.views() != 0;
+        if (viewMask == 0 || beyond || (earlyMask & ~viewMask) != 0 || Integer.bitCount(earlyMask) > 1) {
             throw new IllegalArgumentException("Views to cull, of the " + limits.views() + " with lists, at most one "
                 + "of them early: " + viewMask + ", " + earlyMask);
         }
-        int phases = 0;
+        long phases = 0;
         for (int v = 0; v < VIEWS; v++) {
-            phases |= ((earlyMask >> v) & 1) * PHASE_EARLY << (2 * v);
+            phases |= (long) ((earlyMask >>> v) & 1) * PHASE_EARLY << (2 * v);
         }
         cull(commands, viewMask, phases, 0, 0, 0, 0);
     }
@@ -583,7 +613,7 @@ public final class MeshletRenderer implements AutoCloseable {
      * {@code pyramid}: resets their lists, then the instance pass (a row per view), the cull pass over all their chunks
      * and, on the indexed path, each view's expansion.
      */
-    private void cull(VkCommandBuffer commands, int viewMask, int phases, int pyramid, int width, int height,
+    private void cull(VkCommandBuffer commands, int viewMask, long phases, int pyramid, int width, int height,
         int mips) {
         boolean meshShading = path() == Path.MESH_SHADERS;
         bindless.bind(commands); // the late phase samples the depth pyramid through it
@@ -591,7 +621,6 @@ public final class MeshletRenderer implements AutoCloseable {
         barrier(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         int rows = 0;
-        int viewList = 0;
         try (MemoryStack stack = stackPush()) {
             long reset = stack.nmalloc(4, 16); // the chunk command: no chunks yet, a dispatch of x by 1 by 1
             memPutInt(reset, 0);
@@ -605,7 +634,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 if ((viewMask & 1 << v) == 0) {
                     continue;
                 }
-                int phase = (phases >> (2 * v)) & 3;
+                int phase = (int) (phases >>> (2 * v)) & 3;
                 phaseOf[v] = phase;
                 view.putInt((long) VIEW_BYTES * v + 168, instanceCount);
                 if (phase != PHASE_LATE) {
@@ -613,7 +642,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 }
                 nvkCmdUpdateBuffer(commands, expandCommand[v].handle(), 0, 16, reset); // no meshlets: x by 1 by 1
                 nvkCmdUpdateBuffer(commands, drawCommand[v].handle(), 0, 24, draw);
-                viewList |= v << (8 * rows++);
+                rows++;
             }
         }
         barrier(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -630,7 +659,7 @@ public final class MeshletRenderer implements AutoCloseable {
             memPutInt(push + 48, limits.chunks());
             memPutLong(push + 56, visibility.deviceAddress());
             occlusion(push + 64, phases, pyramid, width, height, mips);
-            memPutInt(push + 84, viewList);
+            memPutInt(push + 88, viewMask);
             instancesPass.bind(commands);
             instancesPass.push(commands, push, INSTANCE_PUSH);
             vkCmdDispatch(commands, (instanceCount + 63) / 64, rows, 1);
@@ -734,13 +763,17 @@ public final class MeshletRenderer implements AutoCloseable {
         memPutInt(info + VkRenderingAttachmentInfo.STOREOP, VK_ATTACHMENT_STORE_OP_STORE);
     }
 
-    /** The shaders' Occlusion struct at {@code address}: phases, pyramid slot, depth size, pyramid levels. */
-    private static void occlusion(long address, int phase, int pyramid, int width, int height, int mips) {
-        memPutInt(address, phase);
-        memPutInt(address + 4, pyramid);
-        memPutInt(address + 8, width);
-        memPutInt(address + 12, height);
-        memPutInt(address + 16, mips);
+    /**
+     * The shaders' Occlusion struct at {@code address}: phases (2 bits per view, in two words), pyramid slot, depth
+     * size, pyramid levels.
+     */
+    private static void occlusion(long address, long phases, int pyramid, int width, int height, int mips) {
+        memPutInt(address, (int) phases);
+        memPutInt(address + 4, (int) (phases >>> 32));
+        memPutInt(address + 8, pyramid);
+        memPutInt(address + 12, width);
+        memPutInt(address + 16, height);
+        memPutInt(address + 20, mips);
     }
 
     /** A global memory barrier: writes in {@code srcStage} are visible to {@code dstAccess} in {@code dstStage}. */
@@ -785,6 +818,11 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /** View {@code index}'s address in the view buffer. */
+    /** The world position along {@code axis} of view {@code index}'s camera, as last {@link #setView set}. */
+    public double viewPosition(int index, int axis) {
+        return viewPositions[3 * Objects.checkIndex(index, VIEWS) + Objects.checkIndex(axis, 3)];
+    }
+
     long viewAddress(int index) {
         return view.deviceAddress() + (long) VIEW_BYTES * Objects.checkIndex(index, VIEWS);
     }

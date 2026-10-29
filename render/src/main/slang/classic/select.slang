@@ -29,13 +29,13 @@ void selectMain(uint3 id : SV_DispatchThreadID)
     {
         return;
     }
-    Instance instance = push.instances[id.x];
+    View view = push.view[0];
+    Instance instance = relative(push.instances[id.x], view);
     ClassicMesh classic = push.classicMeshes[instance.mesh];
     if (classic.levelCount == 0)
     {
         return;
     }
-    View view = push.view[0];
     MeshEntry mesh = push.meshes[instance.mesh];
     float scale = maxScale(instance);
     float3 center = toWorld(instance, mesh.sphere.xyz);

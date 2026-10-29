@@ -68,7 +68,7 @@ public void shadePixel<R : IShadowRays>(R rays, uint3 id)
         return;
     }
     View view = push.view[0];
-    Instance instance = push.instances[ids.x - 1];
+    Instance instance = relative(push.instances[ids.x - 1], view);
     MeshEntry mesh = push.meshes[instance.mesh];
     VertexOut v[3];
     if ((ids.y & CLASSIC_TRIANGLE) != 0)

@@ -672,7 +672,7 @@ class MeshletBenchmark {
                 }
                 CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, cascadeLights, 0, 0, camera, 3, 2048, 1,
                     300);
-                cascades.update(0, 0, 0);
+                cascades.update();
                 time(device, color, depth, queries, period, scene + ", 3 cascades of 2048 x 2048 to 300 units", target,
                     shading, cascadeSun, cascades);
                 if (rayTracing != null) {

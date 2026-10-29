@@ -32,17 +32,27 @@ public struct Level
     public float error;
 };
 
-/** One drawn object: camera-relative position, rotation, scale and mesh. 48 bytes. */
+/**
+ * One drawn object: world position, rotation, scale and mesh. 64 bytes. The position is two floats per axis, a high
+ * part and the rest (position + positionLow), about 48 bits: precise anywhere in a large world. Loaded through
+ * relative(), which makes it relative to a view's camera; everything after works camera-relative, in floats.
+ */
 public struct Instance
 {
     public float4 rotation;        // quaternion x, y, z, w
-    public float3 position;
+    public float3 position;        // world position, high part; after relative(): camera-relative
     public uint mesh;
     public float3 scale;
     public uint materialBase;      // the material of submesh s is materialBase + s
+    public float3 positionLow;     // world position, the rest; after relative(): 0
+    public uint pad;
 };
 
-/** The frame's view. The camera sits at the origin: instances are camera-relative. */
+/**
+ * A view of the frame: a camera, with its world position (two floats per axis, as instances') and the matrices from
+ * positions relative to it. A view may look from an eye off that position (a light's shadow map from a camera's
+ * position): the cone test and level selection use the eye.
+ */
 public struct View
 {
     public float4x4 viewProjection;
@@ -54,8 +64,28 @@ public struct View
     public uint mode;              // 0 lit, 1 meshlet colors, 2 white
     public uint orthographic;      // 1: projectionScale is pixels per unit at any distance (e.g. a sun's shadow map)
     public uint2 pad;
-    public float4x4 inverseViewProjection; // clip space back to camera-relative positions; 256 bytes in all
+    public float4x4 inverseViewProjection; // clip space back to camera-relative positions
+    public float3 position;        // the camera's world position, high part
+    public uint pad1;
+    public float3 positionLow;     // and the rest
+    public uint pad2;
+    public float3 eye;             // where the view looks from, relative to its position (0 but for shadow views)
+    public uint pad3;              // 304 bytes in all
 };
+
+/**
+ * `instance` relative to `view`'s camera: its world position minus the camera's, the high parts and the rest apart,
+ * so the difference keeps what floats near the camera can hold.
+ */
+public Instance relative(Instance instance, View view)
+{
+    precise float3 high = instance.position - view.position;
+    precise float3 low = instance.positionLow - view.positionLow;
+    Instance r = instance;
+    r.position = high + low;
+    r.positionLow = float3(0);
+    return r;
+}
 
 public float3 rotate(float4 q, float3 v)
 {
@@ -144,7 +174,7 @@ public float projectedError(View view, float3 center, float radius, float error)
     {
         return error * view.projectionScale;
     }
-    float distance = length(center) - radius;
+    float distance = length(center - view.eye) - radius;
     return distance > 0 ? error * view.projectionScale / distance : 1.0 / 0.0;
 }
 
@@ -153,8 +183,9 @@ public float projectedError(View view, float3 center, float radius, float error)
 /** Which phase of two-phase occlusion culling each view runs, and the depth pyramid the late phase tests against. */
 public struct Occlusion
 {
-    public uint phases;       // 2 bits per view: 0 no occlusion culling; 1 early, last frame's visible; 2 late
-    // (against the pyramid)
+    public uint phases;       // 2 bits per view, views 0 to 15: 0 no occlusion culling; 1 early, last frame's
+    // visible; 2 late (against the pyramid)
+    public uint phasesHigh;   // views 16 to 31
     public uint pyramid;      // sampled slot of the depth pyramid (DepthPyramid: farthest depth, reverse)
     public uint depthWidth;   // the depth image's size: the pyramid's level 0 is half of it, rounded up
     public uint depthHeight;
@@ -168,7 +199,7 @@ public static const uint PHASE_LATE = 2;
 /** View {@code view}'s phase. */
 public uint phaseOf(Occlusion occlusion, uint view)
 {
-    return (occlusion.phases >> (2 * view)) & 3;
+    return view < 16 ? (occlusion.phases >> (2 * view)) & 3 : (occlusion.phasesHigh >> (2 * (view - 16))) & 3;
 }
 
 /**
@@ -221,7 +252,7 @@ public bool unoccluded(View view, Occlusion hzb, float3 center, float radius)
 public struct Chunk
 {
     public uint instance;
-    public uint firstMeshlet;  // the local meshlet, and the view in the top 2 bits
+    public uint firstMeshlet;  // the local meshlet, and the view in the top 5 bits
 };
 
 /** A meshlet the indexed path draws: its instance, pool meshlet and first index in the frame's index buffer. */
@@ -287,9 +318,10 @@ public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets,
         return false;
     }
     float4 cone = decodeSnorm8(meshlets[w + 7]);
-    // The cone test assumes a viewer at the origin; orthographic views (shadow maps) keep back faces.
+    // Back faces as seen from the eye; orthographic views (shadow maps) keep them.
+    float3 fromEye = center - view.eye;
     return view.orthographic != 0 || cone.w >= 1
-        || dot(center, rotate(instance.rotation, cone.xyz)) < cone.w * length(center) + radius;
+        || dot(fromEye, rotate(instance.rotation, cone.xyz)) < cone.w * length(fromEye) + radius;
 }
 
 /** The submesh of pool meshlet `m`: its material is the instance's material base plus this. */
@@ -377,7 +409,7 @@ public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Mat
         m.baseColorTexture = -1;
     }
     Surface s = evaluate(m, in.normal, in.tangent, in.uv, dx, dy, in.color);
-    float3 toViewer = normalize(-in.world);
+    float3 toViewer = normalize(view.eye - in.world);
     float3 color = ambient(s, SKY_IRRADIANCE) + s.emissive;
     if (lights == nullptr)
     {

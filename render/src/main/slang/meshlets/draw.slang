@@ -25,7 +25,7 @@ ConstantBuffer<DrawPush> push;
 VertexOut vertexMain(uint index : SV_VulkanVertexID)
 {
     VisibleMeshlet v = push.visible[index >> 8];
-    Instance instance = push.instances[v.instance];
+    Instance instance = relative(push.instances[v.instance], push.view[0]);
     MeshEntry mesh = push.meshes[instance.mesh];
     uint vertexOffset = push.meshlets[v.meshlet * 8];
     uint vertex = mesh.vertexBase + push.meshletVertices[mesh.meshletVertexBase + vertexOffset + (index & 0xff)];

@@ -235,6 +235,42 @@ class ShadowsTest {
     }
 
     @Test
+    void shadowMapsStayInTheWorldWhileTheCameraMoves() {
+        // The scene 7,000 km from the origin. The sun's camera sits at a world position of its own over the floor,
+        // not relative to the camera: its map does not change as the camera moves, and serves the camera wherever it
+        // is (as it would a mirror's view or another player's).
+        double wx = 3_123_456.5;
+        double wy = -45_678.25;
+        double wz = -7_000_123.75;
+        renderer.setInstance(0, quad, 0, wx, wy - 5, wz - 5, 0, 0, 0, 1, 10, 1, 10);
+        renderer.setInstance(1, quad, 0, wx, wy - 3, wz - 5, 0, 0, 0, 1, 1, 1, 1);
+        camera.position(wx, wy, wz);
+        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
+        Camera sunCamera = new Camera().position(wx, wy - 5, wz - 5).setOrthographic(-20 * sun[0], -20 * sun[1],
+            -20 * sun[2], sun[0], sun[1], sun[2], 1, 0, 0, 8, 8, 40, 1024, 1024);
+        float[] map = sunCamera.viewProjection().clone();
+        try (Lights lights = new Lights(device, 4, 4)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            ClusteredLights clustered = new ClusteredLights(lights, camera, SIZE, SIZE);
+            ShadowMapShadows mapped = new ShadowMapShadows(geometry, lights, 0, 0, sunCamera, 1024, 1, 1.5e-3f);
+            ClusteredForwardShading forward = new ClusteredForwardShading(geometry, SIZE, SIZE,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+            double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
+            expectShadow(forward, "far from the origin", shadow, clustered, mapped);
+            // The camera moves half a unit right and a quarter back: the shadow stays where it is in the world, so
+            // it is that much left and ahead of the camera now.
+            camera.position(wx + 0.5, wy, wz + 0.25);
+            renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+            expectShadow(forward, "the camera moved", new double[] {shadow[0] - 0.5, shadow[1] - 0.25}, clustered,
+                mapped);
+            assertThat(sunCamera.viewProjection()).as("the sun's camera").containsExactly(map);
+        }
+        camera.position(0, 0, 0);
+    }
+
+    @Test
     void cascadesShadowNearAndFar() {
         // A second quad, farther out on a longer floor: its shadow falls in a farther cascade.
         renderer.setInstance(0, quad, 0, -5, -10, 0, 0, 0, 1, 10, 1, 15);
@@ -245,7 +281,7 @@ class ShadowsTest {
         try (Lights lights = new Lights(device, 1, 4)) {
             lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
             CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, 1024, 1, 40);
-            cascades.update(0, 0, 0);
+            cascades.update();
             assertThat(cascades.split(0)).isLessThan(cascades.split(1)).isLessThan(cascades.split(2));
             assertThat(cascades.split(2)).isCloseTo(40, org.assertj.core.data.Offset.offset(1e-3f));
             double[] near = shadowOf(sun[0], sun[1], sun[2]);
@@ -266,11 +302,12 @@ class ShadowsTest {
             float[] last = cascades.camera(2).viewProjection();
             assertThat(Math.abs(first[0]) + Math.abs(first[4]) + Math.abs(first[8]))
                 .isGreaterThan(Math.abs(last[0]) + Math.abs(last[4]) + Math.abs(last[8]));
-            cascades.lambda(0).bias(2).casters(50).update(10.3, 0, 4.7);
+            camera.position(10.3, 0, 4.7);
+            cascades.lambda(0).bias(2).casters(50).update();
             assertThat(cascades.split(0)).isCloseTo((float) (0.1 + 39.9 / 3),
                 org.assertj.core.data.Offset.offset(1e-3f));
             assertThatIllegalArgumentException().isThrownBy(() -> new CascadedShadowMaps(geometry, lights, 0, 0, camera,
-                4, 1024, 1, 40));
+                MeshletRenderer.VIEWS, 1024, 1, 40)); // views 1 on have room for VIEWS - 1
             assertThatIllegalArgumentException().isThrownBy(() -> new CascadedShadowMaps(geometry, lights, 0, 0, camera,
                 1, 1024, 0, 40));
         }
@@ -298,7 +335,7 @@ class ShadowsTest {
                         1.5e-3f));
                 assertThat(graph.passes()).contains("classic depth, view 1");
                 CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, 1024, 1, 40);
-                cascades.update(0, 0, 0);
+                cascades.update();
                 expectShadow(shading, "classic, cascades", shadow, new ClusteredLights(lights, camera, SIZE, SIZE),
                     cascades);
                 assertThat(graph.passes()).contains("classic depth, view 1", "classic depth, view 2",

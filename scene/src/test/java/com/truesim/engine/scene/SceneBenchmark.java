@@ -154,7 +154,7 @@ class SceneBenchmark {
 
             Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
             SceneView view = new SceneView(resources, renderables, renderer);
-            view.setOrigin(FAR, 0, FAR);
+            camera.position(FAR, 0, FAR);
             ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
                 .set(shaded.handle(), 0);
@@ -182,8 +182,8 @@ class SceneBenchmark {
                 firstUpdate / 1e6, view.instanceCount(), uploadFrame / 1e6);
 
             run("still", graph, slots, tasks, scene, renderables, view, camera, frame -> { });
-            run("camera moving (all rewritten)", graph, slots, tasks, scene, renderables, view, camera,
-                frame -> view.setOrigin(FAR + 0.05 * frame, 0, FAR - 0.1 * frame));
+            run("camera moving", graph, slots, tasks, scene, renderables, view, camera,
+                frame -> camera.position(FAR + 0.05 * frame, 0, FAR - 0.1 * frame));
             run("1,000 rocks moving", graph, slots, tasks, scene, renderables, view, camera, frame -> {
                 for (int i = 0; i < 1000; i++) {
                     int r = (frame * 1000 + i) % ROCKS;
@@ -219,7 +219,7 @@ class SceneBenchmark {
                     VK_FORMAT_D32_SFLOAT));
                 run("still, visibility buffer", graph, slots, tasks, scene, renderables, view, camera, frame -> { });
                 run("camera moving, visibility buffer", graph, slots, tasks, scene, renderables, view, camera,
-                    frame -> view.setOrigin(FAR - 0.05 * frame, 0, FAR + 0.1 * frame));
+                    frame -> camera.position(FAR - 0.05 * frame, 0, FAR + 0.1 * frame));
             }
             System.out.printf(Locale.ROOT, "  %,d instances, %,d meshlets visible in the last frame, %d meshes, "
                 + "%d material blocks%n", view.instanceCount(), renderer.visibleMeshlets(), resources.meshCount(),

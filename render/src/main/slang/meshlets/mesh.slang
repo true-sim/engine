@@ -51,7 +51,7 @@ void meshMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertice
     }
     VisibleMeshlet v = push.visible[slot];
     uint m = v.meshlet;
-    Instance instance = push.instances[v.instance];
+    Instance instance = relative(push.instances[v.instance], view);
     MeshEntry mesh = push.meshes[instance.mesh];
     uint w = m * 8;
     uint vertexOffset = push.meshlets[w];

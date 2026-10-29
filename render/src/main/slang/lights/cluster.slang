@@ -19,7 +19,7 @@ ConstantBuffer<ClusterPush> push;
 
 groupshared float4 spheres[64]; // view-space center and radius; radius < 0: everywhere
 
-/** Row `r` of the view-projection matrix, without its last column (the camera sits at the origin). */
+/** Row `r` of the view-projection matrix, without its last column (lights are relative to the camera). */
 float3 row(float4x4 m, uint r)
 {
     return float3(mul(m, float4(1, 0, 0, 0))[r], mul(m, float4(0, 1, 0, 0))[r], mul(m, float4(0, 0, 1, 0))[r]);
@@ -63,7 +63,7 @@ void clusterMain(uint3 id : SV_DispatchThreadID, uint local : SV_GroupIndex)
         GroupMemoryBarrierWithGroupSync();
         if (first + local < push.lightCount)
         {
-            Light light = h.lights[first + local];
+            Light light = h.relativeTo(h.lights[first + local]);
             float3 p = light.position;
             spheres[local] = float4(dot(across, p), dot(down, p), dot(forward, p),
                 light.type == DIRECTIONAL ? -1.0 : light.range);

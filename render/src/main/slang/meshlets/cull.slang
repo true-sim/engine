@@ -26,11 +26,11 @@ ConstantBuffer<CullPush> push;
 void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     Chunk chunk = push.chunks[group.x];
-    uint v = chunk.firstMeshlet >> 30;
+    uint v = chunk.firstMeshlet >> 27;
     View view = push.views[v];
-    Instance instance = push.instances[chunk.instance];
+    Instance instance = relative(push.instances[chunk.instance], view);
     MeshEntry mesh = push.meshes[instance.mesh];
-    uint local = (chunk.firstMeshlet & 0x3fffffff) + thread.x;
+    uint local = (chunk.firstMeshlet & 0x07ffffff) + thread.x;
     if (local >= mesh.meshletCount)
     {
         return;

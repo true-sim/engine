@@ -10,6 +10,7 @@ struct InstancesPush
     uint64_t* bottom;     // per pool mesh: its bottom level's address, or 0
     uint* records;        // 16 words per instance
     uint count;
+    View* view;           // the camera the top level is relative to: shading's
 };
 
 [[vk::push_constant]]
@@ -24,7 +25,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     {
         return;
     }
-    Instance instance = push.instances[i];
+    Instance instance = relative(push.instances[i], push.view[0]);
     float3 x = rotate(instance.rotation, float3(instance.scale.x, 0, 0));
     float3 y = rotate(instance.rotation, float3(0, instance.scale.y, 0));
     float3 z = rotate(instance.rotation, float3(0, 0, instance.scale.z));

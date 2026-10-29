@@ -24,7 +24,7 @@ ConstantBuffer<ClassicPush> push;
 VertexOut classicVertexMain(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
     ClassicDraw draw = push.records[slot];
-    Instance instance = push.instances[draw.instance];
+    Instance instance = relative(push.instances[draw.instance], push.view[0]);
     MeshEntry mesh = push.meshes[instance.mesh];
     VertexOut out = transformVertex(push.view[0], instance, mesh, vertex, push.positions, push.attributes,
         draw.meshlet, (draw.tag >> 24) & 0x7f);

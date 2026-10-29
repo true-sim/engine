@@ -50,7 +50,7 @@ import org.lwjgl.vulkan.VkMemoryBarrier2;
  */
 public final class ClusteredLights implements Technique {
 
-    static final int HEADER_BYTES = 80;
+    static final int HEADER_BYTES = 112;
     private static final int PUSH_BYTES = 88;
     private static final int CLUSTERS = 1; // lights.slang's layout
 
@@ -149,6 +149,13 @@ public final class ClusteredLights implements Technique {
             memPutFloat(data + 64, near);
             memPutFloat(data + 68, (float) (slices / Maths.log(far / near)));
             memPutInt(data + 72, maxPerCluster);
+            // The camera it shades for: lights and shadow entries are made relative to its world position.
+            for (int axis = 0; axis < 3; axis++) {
+                double p = camera.position(axis);
+                float high = (float) p;
+                memPutFloat(data + 80 + 4L * axis, high);
+                memPutFloat(data + 96 + 4L * axis, (float) (p - high));
+            }
             nvkCmdUpdateBuffer(ctx.commands(), ctx.buffer(list), 0, HEADER_BYTES, data);
             long barrier = stack.ncalloc(VkMemoryBarrier2.ALIGNOF, 1, VkMemoryBarrier2.SIZEOF);
             memPutInt(barrier + VkMemoryBarrier2.STYPE, VK_STRUCTURE_TYPE_MEMORY_BARRIER_2);

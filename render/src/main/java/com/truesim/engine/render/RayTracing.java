@@ -112,7 +112,7 @@ import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
 public final class RayTracing implements AutoCloseable {
 
     private static final int AS_INSTANCE_BYTES = 64; // VkAccelerationStructureInstanceKHR
-    private static final int PUSH_BYTES = 28;
+    private static final int PUSH_BYTES = 40;
 
     private final VulkanDevice device;
     private final GeometryPool pool;
@@ -335,6 +335,7 @@ public final class RayTracing implements AutoCloseable {
             memPutLong(push + 8, bottomTable.deviceAddress());
             memPutLong(push + 16, instancesAddress);
             memPutInt(push + 24, count);
+            memPutLong(push + 32, renderer.viewAddress(0)); // relative to the camera shading the traced points
             instancePass.bind(commands);
             instancePass.push(commands, push, PUSH_BYTES);
             vkCmdDispatch(commands, (count + 63) / 64, 1, 1);
