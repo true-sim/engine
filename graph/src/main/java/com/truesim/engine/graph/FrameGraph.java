@@ -135,6 +135,7 @@ public final class FrameGraph implements AutoCloseable {
     private final Bindless bindless;
     private final int framesInFlight;
     private final FrameSlots frameSlots;
+    private final boolean ownsSlots;
     private final List<Technique> techniques = new ArrayList<>();
     private final Map<Key, ExternalImage> outputs = new LinkedHashMap<>();
     private final Map<Class<?>, Implementation<?, ?>> implementations = new HashMap<>();
@@ -197,13 +198,37 @@ public final class FrameGraph implements AutoCloseable {
 
     /** A graph on {@code device} whose frames may be {@code framesInFlight} deep (images retire after that). */
     public FrameGraph(VulkanDevice device, int framesInFlight) {
+        this(device, framesInFlight, null);
+    }
+
+    /**
+     * A graph on {@code device} sharing {@code slots} with other graphs, frames as deep as it has slots: for several
+     * graphs drawing views of scenes whose data they share (meshes, materials, renderers' instances). The graphs run in
+     * step, each frame of each; the caller opens the frame's slot once every graph has begun its frame, and closes it
+     * once every graph has submitted:
+     *
+     * <pre>{@code
+     * int slot = world.beginFrame();
+     * minimap.beginFrame();              // the same slot: the graphs run in step
+     * slots.begin(slot);                 // no frame in flight reads the slot's copies now
+     * world.submit(...);
+     * minimap.submit(...);
+     * slots.end();
+     * }</pre>
+     */
+    public FrameGraph(VulkanDevice device, FrameSlots slots) {
+        this(device, Objects.requireNonNull(slots, "slots").count(), slots);
+    }
+
+    private FrameGraph(VulkanDevice device, int framesInFlight, FrameSlots shared) {
         if (framesInFlight < 1) {
             throw new IllegalArgumentException("At least one frame in flight: " + framesInFlight);
         }
         this.device = Objects.requireNonNull(device, "device");
         this.bindless = device.bindless();
         this.framesInFlight = framesInFlight;
-        this.frameSlots = new FrameSlots(framesInFlight);
+        this.ownsSlots = shared == null;
+        this.frameSlots = ownsSlots ? new FrameSlots(framesInFlight) : shared;
         this.graphicsQueue = device.graphics();
         this.computeQueue = device.compute();
         this.asyncCompute = graphicsQueue != computeQueue;
@@ -320,13 +345,16 @@ public final class FrameGraph implements AutoCloseable {
             execution = new Execution();
         }
         int slot = execution.begin();
-        frameSlots.begin(slot);
+        if (ownsSlots) {
+            frameSlots.begin(slot);
+        }
         return slot;
     }
 
     /**
-     * The frame slots this graph's per-frame data keeps a copy per ({@link com.truesim.engine.vulkan.FrameBuffer}s of renderers, lights, ...):
-     * {@link #beginFrame} opens the frame's slot, once the GPU has finished with it, and {@link #submit} closes it.
+     * The frame slots this graph's per-frame data keeps a copy per ({@link com.truesim.engine.vulkan.FrameBuffer}s of
+     * renderers, lights, ...): {@link #beginFrame} opens the frame's slot, once the GPU has finished with it, and
+     * {@link #submit} closes it; slots shared with other graphs are the caller's to open and close.
      */
     public FrameSlots frameSlots() {
         return frameSlots;
@@ -351,7 +379,9 @@ public final class FrameGraph implements AutoCloseable {
             recordChunks(0, chunkBatch.length, 0);
         }
         execution.submit(acquired, renderFinished);
-        frameSlots.end();
+        if (ownsSlots) {
+            frameSlots.end();
+        }
     }
 
     /**

@@ -651,6 +651,26 @@ class FrameGraphTest {
     }
 
     @Test
+    void graphsSharingSlotsLeaveThemToTheCaller() {
+        FrameSlots shared = new FrameSlots(2);
+        try (FrameGraph other = new FrameGraph(device, shared)) {
+            assertThat(other.frameSlots()).isSameAs(shared);
+            other.add(new Fill(A, SIZE, 0, 1, 0, 1)).output(A, output);
+            for (int frame = 0; frame < 3; frame++) {
+                int slot = other.beginFrame();
+                assertThat(slot).isEqualTo(frame % 2);
+                assertThat(shared.current()).isEqualTo(-1); // the caller opens it, once every graph has begun
+                shared.begin(slot);
+                other.submit(0, 0);
+                assertThat(shared.current()).isEqualTo(slot); // and closes it, once every graph has submitted
+                shared.end();
+            }
+            device.waitIdle();
+        }
+        assertThat(shared.frames()).isEqualTo(3);
+    }
+
+    @Test
     void recordingOutsideFramesUsesSlotZero() {
         int[] seen = {-2};
         graph.add(new Lambda(List.of(OUT), g -> {

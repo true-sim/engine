@@ -19,11 +19,12 @@ plugins {
 
 rootProject.name = "engine"
 
-include("engine-platform", "engine-vulkan", "engine-graph", "engine-render")
+include("engine-platform", "engine-vulkan", "engine-graph", "engine-render", "engine-scene")
 project(":engine-platform").projectDir = file("platform")
 project(":engine-vulkan").projectDir = file("vulkan")
 project(":engine-graph").projectDir = file("graph")
 project(":engine-render").projectDir = file("render")
+project(":engine-scene").projectDir = file("scene")
 
 val truesimRepos = listOf("build-logic", "common-math", "common-jobs", "scene")
 for (repo in truesimRepos) {

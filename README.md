@@ -12,6 +12,7 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 | `engine-vulkan`   | `com.truesim.engine.vulkan`   | Vulkan 1.3, 1.4 where available: instance, GPUs, devices, swapchains, frames |
 | `engine-graph`    | `com.truesim.engine.graph`    | Frame graph: techniques plugged together by the results they provide and need |
 | `engine-render`   | `com.truesim.engine.render`   | GPU-driven meshlet rendering of scene's meshes: geometry pool, GPU culling and LOD; blur |
+| `engine-scene`    | `com.truesim.engine.scene`    | Draws scenes: scene's renderables and assets onto renderers, one view per scene and camera |
 
 ## Platform
 
@@ -491,11 +492,65 @@ swapchain.present(device.graphics(), image);
   opens the frame's slot once the GPU has finished that slot's previous frame, and `submit` closes it, so instances
   and lights may change every frame, before `beginFrame`, while recording, or after `submit`, without touching what a
   frame in flight reads (tested with a quad moving every frame, two frames in flight).
+- **Shared slots:** graphs made with `new FrameGraph(device, slots)` share one `FrameSlots`, for several graphs
+  drawing from the same meshes and materials (several scenes, see below). They run in step; the caller opens the slot
+  once every graph has begun its frame and closes it once every graph has submitted.
 - `record(commands)` still records everything into one command buffer, for simple uses; its per-frame data is slot
   0's, and the caller waits for the GPU between frames.
 
 The graph's tests run with synchronization validation, which checks every barrier and cross-queue wait. Dropping the
 waits makes it report races between the queues.
+
+## Drawing scenes
+
+`engine-scene` draws scene's `Renderables` (a mesh and per-submesh materials on a node, from `scene-render`) with the
+renderers above, following the scene's change logs and asset cache:
+
+- `SceneResources` is the GPU side of the assets, shared by every view on a device: meshes in a `GeometryPool`,
+  materials in `Materials`, textures in `Textures`. It acquires what views use in the `AssetCache`, uploads each asset
+  once it loads, however many scenes and nodes use it, and removes it from the GPU (once no frame in flight reads it)
+  and releases it in the cache when nothing does. Materials draw as the default until they load, untextured where
+  their textures have not loaded (or failed to); a renderable's materials take a block of ids, one per submesh, shared
+  by every renderable with the same materials and mesh layout.
+- `SceneView` is one camera's view of one scene: a `MeshletRenderer` whose instances it keeps up to date, written
+  relative to the camera's world position (precise far from the world origin) and rewritten only where nodes moved
+  or renderables changed. `view.geometry()` is what the frame graph's techniques draw, so the rendering mode is the
+  graph's: `ClusteredForwardShading`, `VisibilityBufferShading`, shadows, swapped with `graph.replace`.
+
+```java
+FrameSlots slots = new FrameSlots(2);                 // shared by every graph drawing these resources
+SceneResources resources = new SceneResources(assets, new GeometryPool(device, capacity, slots),
+    new Materials(device, 4096, slots), new Textures(device, slots));
+
+SceneView world = new SceneView(resources, worldRenderables,
+    new MeshletRenderer(device, resources.pool(), limits, colorFormat, depthFormat, slots));
+FrameGraph worldGraph = new FrameGraph(device, slots)
+    .add(new VisibilityBufferShading(world.geometry(), width, height, colorFormat, depthFormat))
+    .output(Keys.SCENE_COLOR, swapchainTarget);
+SceneView preview = ...;                              // another scene, its own renderer and graph, forward shaded
+
+// every frame
+int slot = worldGraph.beginFrame();
+previewGraph.beginFrame();
+slots.begin(slot);
+tasks.drainCompleted();                               // the frame boundary: loads arrive and upload
+scene.update(); worldRenderables.update();
+world.setOrigin(cameraX, cameraY, cameraZ);
+world.update();
+world.geometry().setView(0, camera, 1, MeshletRenderer.MODE_LIT);
+...                                                   // the same for the preview
+worldGraph.submit(acquired[slot], presentReady);
+previewGraph.submit(0, 0);
+slots.end();
+```
+
+One scene is one view and one graph. Two scenes are two views from the same resources, each with its own graph (the
+graph's keys, such as the scene color and light list, are one per graph); a mesh both use is on the GPU once. The
+tests draw two scenes in step, one forward and one through a visibility buffer, with validation on.
+
+Not followed yet: shadow casting per renderable, alpha modes and double-sidedness (everything draws opaque and casts
+shadows), nodes' layers, and lights and cameras from the scene. Removed meshes are not yet followed by
+`ClassicLodGeometry` and ray tracing, so draw views with meshlets.
 
 ## Building
 

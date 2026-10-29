@@ -789,8 +789,8 @@ public final class MeshletRenderer implements AutoCloseable {
         return view.deviceAddress() + (long) VIEW_BYTES * Objects.checkIndex(index, VIEWS);
     }
 
-    /** The geometry pool, for other passes shading the same instances. */
-    GeometryPool pool() {
+    /** The geometry pool whose meshes it draws, also for other passes shading the same instances. */
+    public GeometryPool pool() {
         return pool;
     }
 

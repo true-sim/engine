@@ -7,6 +7,7 @@ import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.VulkanDevice;
+import java.util.List;
 
 /**
  * The material table shaders read, by id: 64 bytes per {@link Material}, as engine-render's {@code shading.slang}
@@ -24,12 +25,13 @@ public final class Materials implements AutoCloseable {
 
     private final FrameBuffer table;
     private final int capacity;
-    private int count; // ids handed out so far, from 0
+    /** Ids in contiguous blocks: an add takes one, {@link #addAll} as many as materials. */
+    private final RangeAllocator ids;
+    /** Per id: the length of the block starting there (0: not a block's start), and whether it is in use. */
+    private final int[] blockLength;
+    private final boolean[] used;
     private int live;
-    private final boolean[] removed;
-    private final int[] freeIds;
-    private int freeCount;
-    // Removed ids waiting for the frames that may read them.
+    // Removed blocks waiting for the frames that may read them: their first ids and when they are free.
     private final int[] retiring;
     private final long[] retireAt;
     private int retiringCount;
@@ -51,8 +53,9 @@ public final class Materials implements AutoCloseable {
             throw new IllegalArgumentException("At least the default material: " + capacity);
         }
         this.capacity = capacity;
-        removed = new boolean[capacity];
-        freeIds = new int[capacity];
+        ids = new RangeAllocator(capacity);
+        blockLength = new int[capacity];
+        used = new boolean[capacity];
         retiring = new int[capacity];
         retireAt = new long[capacity];
         table = FrameBuffer.create(device, (long) BYTES * capacity,
@@ -60,31 +63,48 @@ public final class Materials implements AutoCloseable {
         add(new Material());
     }
 
-    /** Adds {@code material} (copied) and returns its id: a removed one no frame in flight reads, lowest first. */
+    /**
+     * Adds {@code material} (copied) and returns its id: the lowest free one, ids of removed materials once no frame in
+     * flight reads them.
+     */
     public int add(Material material) {
-        releaseRetired();
-        int id;
-        if (freeCount > 0) {
-            int lowest = 0;
-            for (int i = 1; i < freeCount; i++) {
-                if (freeIds[i] < freeIds[lowest]) {
-                    lowest = i;
-                }
-            }
-            id = freeIds[lowest];
-            freeIds[lowest] = freeIds[--freeCount];
-            removed[id] = false;
-        } else if (count < capacity) {
-            id = count++;
-        } else {
-            throw new IllegalStateException("The material table holds " + capacity + " materials");
-        }
+        int id = take(1);
         write(id, material);
-        live++;
         return id;
     }
 
-    /** Replaces material {@code id} with {@code material} (copied). */
+    /**
+     * Adds {@code materials} (copied) under consecutive ids and returns the first, e.g. one per submesh of a mesh, which
+     * an instance names by the first: submesh s takes the first id plus s. {@link #remove} of the first removes them all.
+     */
+    public int addAll(List<Material> materials) {
+        if (materials.isEmpty()) {
+            throw new IllegalArgumentException("No materials to add");
+        }
+        int first = take(materials.size());
+        for (int i = 0; i < materials.size(); i++) {
+            write(first + i, materials.get(i));
+        }
+        return first;
+    }
+
+    private int take(int length) {
+        releaseRetired();
+        long first = ids.allocate(length, 1);
+        if (first < 0) {
+            throw new IllegalStateException("The material table holds " + capacity + " materials: no room for "
+                + length + " more in a row");
+        }
+        int id = (int) first;
+        blockLength[id] = length;
+        for (int i = id; i < id + length; i++) {
+            used[i] = true;
+        }
+        live += length;
+        return id;
+    }
+
+    /** Replaces material {@code id} with {@code material} (copied); any id of a block. */
     public void set(int id, Material material) {
         if (!contains(id)) {
             throw new IllegalArgumentException("No material " + id);
@@ -93,31 +113,38 @@ public final class Materials implements AutoCloseable {
     }
 
     /**
-     * Removes material {@code id} (not the default, 0): instances must no longer use it from the next frame on. Its id
-     * is reused once no frame in flight can read it. Allocates nothing.
+     * Removes material {@code id} (not the default, 0), or the block {@link #addAll} returned {@code id} for: instances
+     * must no longer use them from the next frame on. The ids are reused once no frame in flight can read them.
+     * Allocates nothing.
      */
     public void remove(int id) {
-        if (id == 0 || !contains(id)) {
-            throw new IllegalArgumentException("No material " + id + " to remove");
+        if (id <= 0 || id >= capacity || blockLength[id] == 0 || !used[id]) {
+            throw new IllegalArgumentException("No material " + id + " to remove, or not the first of its block");
         }
-        removed[id] = true;
-        live--;
+        int length = blockLength[id];
+        for (int i = id; i < id + length; i++) {
+            used[i] = false;
+        }
+        live -= length;
         retiring[retiringCount] = id;
         retireAt[retiringCount++] = table.slots().retireAt();
     }
 
     /** Whether {@code id} is a material of the table, added and not removed. */
     public boolean contains(int id) {
-        return id >= 0 && id < count && !removed[id];
+        return id >= 0 && id < capacity && used[id];
     }
 
+    /** Gives removed blocks no frame in flight reads back, oldest first. */
     private void releaseRetired() {
         int kept = 0;
         for (int i = 0; i < retiringCount; i++) {
+            int id = retiring[i];
             if (table.slots().isFinished(retireAt[i])) {
-                freeIds[freeCount++] = retiring[i];
+                ids.release(id, blockLength[id]);
+                blockLength[id] = 0;
             } else {
-                retiring[kept] = retiring[i];
+                retiring[kept] = id;
                 retireAt[kept++] = retireAt[i];
             }
         }
