@@ -192,16 +192,38 @@ public final class GpuScene implements AutoCloseable {
      */
     public void set(int id, int mesh, int material, int layers, boolean castsShadows, double x, double y, double z,
         float qx, float qy, float qz, float qw, float sx, float sy, float sz) {
-        if (id < 0 || id >= capacity || !pool.contains(mesh) || mesh > MESH_BITS || material < 0) {
-            throw new IllegalArgumentException("No instance " + id + ", mesh " + mesh + " or material " + material);
+        if (id < 0 || id >= capacity) {
+            throw new IllegalArgumentException("No instance " + id);
         }
+        check(mesh, material);
+        write(claim(id), mesh, material, layers, castsShadows, x, y, z, qx, qy, qz, qw, sx, sy, sz);
+    }
+
+    /**
+     * Takes instance {@code id} (if free) and returns its entry in the changes of this frame, for {@link #write}: the
+     * first half of {@link #set}, so that many instances can be claimed on one thread and written on several. Claim on
+     * the thread changing the scene; write before the next upload. Allocates nothing.
+     */
+    public int claim(int id) {
+        Objects.checkIndex(id, capacity);
         if (!contains(id)) {
             used[id >>> 6] |= 1L << id;
             count++;
             highWater = Math.max(highWater, id + 1);
         }
+        return entry(id);
+    }
+
+    /**
+     * Writes the instance of entry {@code entry} ({@link #claim}), as {@link #set} does. Safe from any thread for
+     * distinct entries, while nothing claims, removes or uploads. Allocates nothing.
+     */
+    public void write(int entry, int mesh, int material, int layers, boolean castsShadows, double x, double y,
+        double z, float qx, float qy, float qz, float qw, float sx, float sy, float sz) {
+        Objects.checkIndex(entry, pending);
+        check(mesh, material);
         MemorySegment m = records;
-        long o = (long) INSTANCE_BYTES * entry(id);
+        long o = (long) INSTANCE_BYTES * entry;
         m.set(FLOAT, o, qx);
         m.set(FLOAT, o + 4, qy);
         m.set(FLOAT, o + 8, qz);
@@ -221,6 +243,12 @@ public final class GpuScene implements AutoCloseable {
         m.set(FLOAT, o + 52, (float) (y - hy));
         m.set(FLOAT, o + 56, (float) (z - hz));
         m.set(INT, o + 60, layers);
+    }
+
+    private void check(int mesh, int material) {
+        if (!pool.contains(mesh) || mesh > MESH_BITS || material < 0) {
+            throw new IllegalArgumentException("No mesh " + mesh + " or material " + material);
+        }
     }
 
     /** {@code id}'s entry in the list of changes, made if it has none yet. */

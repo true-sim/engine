@@ -386,6 +386,53 @@ class SceneSyncTest {
     }
 
     @Test
+    void instancesWrittenOnManyThreadsAreTheSame() throws InterruptedException {
+        // 5,000 small squares, followed twice: by a sync writing on the calling thread and one writing on four. All
+        // move each frame: every instance is rewritten, in parallel in the second, and both draw the same image.
+        SceneGraph scene = new SceneGraph(new ChangeClock(), 6000, SceneGraph.DEFAULT_LOG_CAPACITY);
+        Renderables renderables = new Renderables(scene);
+        long[] nodes = new long[5000];
+        for (int i = 0; i < nodes.length; i++) {
+            nodes[i] = facing(scene, (i % 100 - 49.5) * 0.05, (i / 100 - 24.5) * 0.05, -3);
+            scene.setScale(nodes[i], 0.01, 0.01, 0.01);
+            renderables.set(nodes[i], SQUARE, List.of(RED));
+        }
+        try (com.truesim.common.jobs.JobSystem jobs = new com.truesim.common.jobs.JobSystem(4)) {
+            SceneSync serial = closing(new SceneSync(resources, renderables, closing(new GpuScene(device, pool, 5000,
+                slots))));
+            SceneSync parallel = closing(new SceneSync(resources, renderables, closing(new GpuScene(device, pool,
+                5000, slots)), jobs));
+            GpuBuffer[] serialReadbacks = {readback(), readback()};
+            GpuBuffer[] parallelReadbacks = {readback(), readback()};
+            ViewOptions room = ViewOptions.of(8192, 1 << 16).withOcclusion(true); // every square's meshlet listed
+            List<FrameGraph> graphs = List.of(graph(serial, false, serialReadbacks, room),
+                graph(parallel, false, parallelReadbacks, room));
+            List<SceneSync> syncs = List.of(serial, parallel);
+            frame(graphs, syncs, camera);
+            load();
+            for (int frame = 0; frame < 4; frame++) {
+                for (int i = 0; i < nodes.length; i++) {
+                    scene.setTranslation(nodes[i], (i % 100 - 49.5) * 0.05 + 0.01 * frame, (i / 100 - 24.5) * 0.05,
+                        -3);
+                }
+                frame(graphs, syncs, camera);
+            }
+            device.waitIdle();
+            assertThat(parallel.instanceCount()).isEqualTo(5000);
+            assertThat(cameraViews.get(1).visibleMeshlets()).isEqualTo(cameraViews.get(0).visibleMeshlets())
+                .isPositive();
+            for (int slot = 0; slot < 2; slot++) {
+                for (int p = 0; p < SIZE * SIZE; p++) {
+                    assertThat(parallelReadbacks[slot].memory().getAtIndex(ValueLayout.JAVA_INT, p))
+                        .as("pixel %d of slot %d", p, slot)
+                        .isEqualTo(serialReadbacks[slot].memory().getAtIndex(ValueLayout.JAVA_INT, p));
+                }
+            }
+            assertThat(litColumn(parallelReadbacks[0], 0)).as("drawn").isNotNaN();
+        }
+    }
+
+    @Test
     void scenesShareOneGpuSceneToldApartByLayers() throws InterruptedException {
         // A world and an editor's gizmos, two scenes in one GPU scene: their instances take ids from the one table,
         // and each graph's view draws one of them by its layers (the gizmos' nodes on layer 1).

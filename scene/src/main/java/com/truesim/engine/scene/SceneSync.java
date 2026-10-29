@@ -1,6 +1,7 @@
 package com.truesim.engine.scene;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.common.jobs.JobSystem;
 import com.truesim.common.math.TransformArray;
 import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.render.GpuScene;
@@ -65,12 +66,17 @@ public final class SceneSync implements AutoCloseable {
 
     private static final ValueLayout.OfDouble DOUBLE = ValueLayout.JAVA_DOUBLE_UNALIGNED;
     private static final int NONE = SceneResources.NONE;
+    /** Instances written per task, and from how many on the writes run on the job system's threads. */
+    private static final int GRAIN = 1024;
+    private static final int PARALLEL = 4 * GRAIN;
 
     private final SceneResources resources;
     private final Renderables renderables;
     private final SceneGraph scene;
     private final ChangeClock clock;
     private final GpuScene gpu;
+    private final JobSystem jobs; // or null: the instances are written on the calling thread
+    private final JobSystem.RangeTask fill = this::fill;
     private final Renderables.Visitor onRenderableChange = (node, changes) -> reconcile(node);
     private final NodeChange.Visitor onSceneChange = this::sceneChanged;
     private long seen;
@@ -87,6 +93,9 @@ public final class SceneSync implements AutoCloseable {
     private boolean[] moved = new boolean[64];
     private int[] movedItems = new int[64];
     private int movedCount;
+    // The instances written this update: items and their entries in the GPU scene's changes.
+    private int[] fillItems = new int[64];
+    private int[] fillEntries = new int[64];
     private int itemCount;
 
     // Instance ids (itemSlot) are the GpuScene's, stable while drawn, the lowest free one taken: what the GPU keeps per
@@ -122,8 +131,18 @@ public final class SceneSync implements AutoCloseable {
      * Keeps {@code renderables} as instances of {@code gpu}, which holds meshes of {@code resources}' pool and is given
      * its material table (scenes sharing a {@link GpuScene} share their resources too).
      */
-    @AllowAllocation("created rarely")
     public SceneSync(SceneResources resources, Renderables renderables, GpuScene gpu) {
+        this(resources, renderables, gpu, null);
+    }
+
+    /**
+     * Like {@link #SceneSync(SceneResources, Renderables, GpuScene)}, writing many instances at once (most nodes moved,
+     * say) on {@code jobs}' threads: each instance is claimed in order on the calling thread and its record written
+     * on any, so the ids and the result do not depend on the threads.
+     */
+    @AllowAllocation("created rarely")
+    public SceneSync(SceneResources resources, Renderables renderables, GpuScene gpu, JobSystem jobs) {
+        this.jobs = jobs;
         this.resources = Objects.requireNonNull(resources, "resources");
         this.renderables = Objects.requireNonNull(renderables, "renderables");
         this.gpu = Objects.requireNonNull(gpu, "gpu");
@@ -181,10 +200,11 @@ public final class SceneSync implements AutoCloseable {
         }
         resources.flush();
         drawWaiting();
+        int count = 0;
         if (rewriteAll) {
             for (int item = 0; item < itemNode.length; item++) {
                 if (itemSlot[item] != NONE) {
-                    writeInstance(item);
+                    fillItems[count++] = item;
                 }
             }
             rewriteAll = false;
@@ -192,9 +212,17 @@ public final class SceneSync implements AutoCloseable {
             for (int i = 0; i < movedCount; i++) {
                 int item = movedItems[i];
                 if (itemSlot[item] != NONE) {
-                    writeInstance(item);
+                    fillItems[count++] = item;
                 }
             }
+        }
+        for (int i = 0; i < count; i++) {
+            fillEntries[i] = gpu.claim(itemSlot[fillItems[i]]);
+        }
+        if (jobs != null && count >= PARALLEL) {
+            jobs.parallelFor(count, GRAIN, fill);
+        } else {
+            fill(0, count, 0);
         }
         for (int i = 0; i < movedCount; i++) {
             moved[movedItems[i]] = false;
@@ -377,6 +405,8 @@ public final class SceneSync implements AutoCloseable {
         moved = Arrays.copyOf(moved, length);
         isWaiting = Arrays.copyOf(isWaiting, length);
         movedItems = Arrays.copyOf(movedItems, length);
+        fillItems = new int[length];
+        fillEntries = new int[length];
         Arrays.fill(itemSlot, old, length, NONE);
         Arrays.fill(itemNext, old, length, NONE);
         Arrays.fill(itemPrevious, old, length, NONE);
@@ -406,7 +436,7 @@ public final class SceneSync implements AutoCloseable {
         itemSet[item] = set;
         instanceCount++;
         itemSlot[item] = slot;
-        writeInstance(item); // takes the id
+        write(gpu.claim(slot), item); // takes the id
         return true;
     }
 
@@ -465,13 +495,23 @@ public final class SceneSync implements AutoCloseable {
         }
     }
 
-    /** Writes {@code item}'s instance: its node's world transform and layers, its mesh, materials and shadows. */
-    private void writeInstance(int item) {
+    /** Writes the instances of {@code fillItems[from]} to {@code fillItems[to - 1]}, on any thread. */
+    private void fill(int from, int to, int worker) {
+        for (int i = from; i < to; i++) {
+            write(fillEntries[i], fillItems[i]);
+        }
+    }
+
+    /**
+     * Writes {@code item}'s instance into entry {@code entry} of the GPU scene's changes: its node's world transform
+     * and layers, its mesh, materials and shadows. Reads only, so items write on several threads at once.
+     */
+    private void write(int entry, int item) {
         TransformArray world = scene.worldTransforms();
         MemorySegment s = world.segment();
         long o = NodeHandle.index(itemNode[item]) * world.stride();
         long node = itemNode[item];
-        gpu.set(itemSlot[item], itemMesh[item].mesh.id, itemSet[item].first, scene.layers(node),
+        gpu.write(entry, itemMesh[item].mesh.id, itemSet[item].first, scene.layers(node),
             renderables.castsShadows(node), s.get(DOUBLE, o), s.get(DOUBLE, o + 8), s.get(DOUBLE, o + 16),
             (float) s.get(DOUBLE, o + 24), (float) s.get(DOUBLE, o + 32), (float) s.get(DOUBLE, o + 40),
             (float) s.get(DOUBLE, o + 48),

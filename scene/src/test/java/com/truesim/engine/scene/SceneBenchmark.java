@@ -66,6 +66,9 @@ class SceneBenchmark {
     private static final int FRAMES = 20;
     /** Runs only the scenarios whose names contain it (TRUESIM_BENCHMARK_SCENARIO), e.g. "30,000 rocks moving". */
     private static final String SCENARIO = System.getenv().getOrDefault("TRUESIM_BENCHMARK_SCENARIO", "");
+    /** The threads writing instances (TRUESIM_BENCHMARK_THREADS, every processor by default; 1: the caller alone). */
+    private static final int WRITERS = Integer.parseInt(System.getenv().getOrDefault("TRUESIM_BENCHMARK_THREADS",
+        String.valueOf(Runtime.getRuntime().availableProcessors())));
     private static final double EXTENT = 600;
     private static final double GROUND_Y = -12;
     /** Where the world puts the scene: far from its origin, so instances must be camera-relative. */
@@ -130,6 +133,7 @@ class SceneBenchmark {
              Materials materials = new Materials(device, 64, slots);
              Textures textures = new Textures(device, slots);
              TaskScheduler tasks = new TaskScheduler();
+             com.truesim.common.jobs.JobSystem jobs = new com.truesim.common.jobs.JobSystem(WRITERS);
              AssetCache assets = new AssetCache(tasks);
              SceneResources resources = new SceneResources(assets, pool, materials, textures);
              GpuScene gpu = new GpuScene(device, pool, 40_000, slots);
@@ -139,7 +143,7 @@ class SceneBenchmark {
                  VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
              FrameGraph graph = new FrameGraph(device, slots)) {
             System.out.printf(Locale.ROOT, "Scene benchmark on %s, %d x %d, %,d rocks on the terrain, 2 frames in "
-                + "flight:%n", device.gpu().name(), WIDTH, HEIGHT, ROCKS);
+                + "flight, instances written on %d thread(s):%n", device.gpu().name(), WIDTH, HEIGHT, ROCKS, WRITERS);
             // The scene: the terrain and the rocks resting on it, far from the world's origin.
             ChangeClock clock = new ChangeClock();
             SceneGraph scene = new SceneGraph(clock, ROCKS + 1024, SceneGraph.DEFAULT_LOG_CAPACITY);
@@ -159,7 +163,7 @@ class SceneBenchmark {
             System.out.printf(Locale.ROOT, "  building the scene: %.1f ms%n", (System.nanoTime() - start) / 1e6);
 
             Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-            SceneSync sync = new SceneSync(resources, renderables, gpu);
+            SceneSync sync = new SceneSync(resources, renderables, gpu, WRITERS > 1 ? jobs : null);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
             RenderView cameraView = geometry.createView(ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
             camera.position(FAR, 0, FAR);
