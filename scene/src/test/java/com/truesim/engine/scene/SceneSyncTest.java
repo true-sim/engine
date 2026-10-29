@@ -380,9 +380,12 @@ class SceneSyncTest {
         }
         device.waitIdle();
         assertThat(litColumn(readbacks[0], 0)).as("the camera moved past it").isLessThan(SIZE / 2.0 - 4);
-        // A material change draws in the new one.
+        // A material change draws in the new one, keeping the mesh on the GPU and the instance id.
+        int mesh = sync.meshOf(node);
         renderables.setMaterials(node, List.of(GREEN));
         frame(List.of(graph), List.of(sync), camera);
+        assertThat(sync.meshOf(node)).as("the same mesh, not uploaded again").isEqualTo(mesh);
+        assertThat(sync.slotOf(node)).isZero();
         load();
         for (int frame = 0; frame < 2; frame++) {
             frame(List.of(graph), List.of(sync), camera);
@@ -1105,6 +1108,25 @@ class SceneSyncTest {
         }
         update(scene, renderables, sync);
         assertThat(sync.waitingCount()).isZero();
+        assertThat(sync.instanceCount()).isEqualTo(15);
+        // A drawn one changes its material with the table full: it waits for room too, keeping its mesh.
+        long changing = NodeHandle.NONE;
+        for (long node : nodes) {
+            changing = sync.slotOf(node) >= 0 ? node : changing;
+        }
+        int mesh = sync.meshOf(changing);
+        renderables.setMaterials(changing,
+            List.of(AssetRef.generated(RenderAssets.MATERIAL, GLOWS, new Glow(99, 0, 0), 9)));
+        update(scene, renderables, sync);
+        assertThat(sync.slotOf(changing)).isEqualTo(-1);
+        assertThat(sync.waitingCount()).isEqualTo(1);
+        assertThat(sync.meshOf(changing)).isEqualTo(mesh);
+        for (int frame = 0; frame < slots.count(); frame++) {
+            slots.begin(frame);
+            slots.end();
+        }
+        update(scene, renderables, sync);
+        assertThat(sync.slotOf(changing)).isNotNegative();
         assertThat(sync.instanceCount()).isEqualTo(15);
     }
 

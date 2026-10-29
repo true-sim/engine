@@ -334,9 +334,10 @@ public final class SceneSync implements AutoCloseable {
         AssetRef<MeshData> ref = renderables.mesh(node);
         List<AssetRef<MaterialData>> list = renderables.materials(node);
         if (itemNode[item] == node) {
-            if (itemMesh[item].mesh.ref.equals(ref)
-                && (itemSet[item] == null || SceneResources.sameMaterials(itemSet[item].key.materials(), list))) {
-                if (itemSlot[item] != NONE) {
+            if (itemMesh[item].mesh.ref.equals(ref)) {
+                if (itemSet[item] != null && !SceneResources.sameMaterials(itemSet[item].key.materials(), list)) {
+                    swapMaterials(item, list); // the mesh and the instance id stay
+                } else if (itemSlot[item] != NONE) {
                     markMoved(item); // whether it casts shadows, written with the instance
                 }
                 return;
@@ -357,6 +358,22 @@ public final class SceneSync implements AutoCloseable {
         if (entry.mesh.uploaded()) {
             show(item);
         }
+    }
+
+    /**
+     * Draws {@code item}, drawn now, with {@code materials} instead: the new set is taken before the old one goes, so
+     * materials both use stay on the GPU. With no room in the material table it stops drawing until there is.
+     */
+    private void swapMaterials(int item, List<AssetRef<MaterialData>> materials) {
+        SceneResources.MaterialSet set = resources.acquireSet(materials, itemMesh[item].mesh.data.materialSlots());
+        if (set == null) {
+            hide(item);
+            queue(item);
+            return;
+        }
+        resources.releaseSet(itemSet[item]);
+        itemSet[item] = set;
+        markMoved(item);
     }
 
     private void sceneChanged(long node, int changes) {
