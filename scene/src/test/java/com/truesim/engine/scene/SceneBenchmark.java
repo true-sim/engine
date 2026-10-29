@@ -235,8 +235,9 @@ class SceneBenchmark {
             }
             device.waitIdle(); // the counts are the last frame's once it has finished
             System.out.printf(Locale.ROOT, "  %,d instances, %,d meshlets visible in the last frame, %d meshes, "
-                + "%d material blocks%n", sync.instanceCount(), cameraView.visibleMeshlets(), resources.meshCount(),
-                resources.materialSetCount());
+                + "%d material blocks; the views' lists %,d bytes (%s path)%n", sync.instanceCount(),
+                cameraView.visibleMeshlets(), resources.meshCount(), resources.materialSetCount(), renderer.viewBytes(),
+                renderer.path() == MeshletRenderer.Path.MESH_SHADERS ? "mesh shaders" : "indexed");
             sync.close();
         }
     }

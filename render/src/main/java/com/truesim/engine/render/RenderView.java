@@ -34,10 +34,10 @@ public final class RenderView implements AutoCloseable {
     private static final ValueLayout.OfInt U32 = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
     private final MeshletRenderer renderer;
-    private final ViewOptions options;
+    private ViewOptions options;
     private final int index;
     private final FrameBuffer view;
-    private final GpuBuffer visible;
+    private GpuBuffer visible;
     private final GpuBuffer expandCommand;
     private final GpuBuffer drawCommand;
     private final GpuBuffer drawCount; // the early (or only) phase's, then the late one's
@@ -60,7 +60,7 @@ public final class RenderView implements AutoCloseable {
         visible = GpuBuffer.deviceLocal(device, 16L * options.draws(), storage);
         expandCommand = GpuBuffer.deviceLocal(device, 16, commandUsage);
         drawCommand = GpuBuffer.deviceLocal(device, 24, commandUsage);
-        drawCount = GpuBuffer.hostVisible(device, 8, commandUsage);
+        drawCount = GpuBuffer.hostVisible(device, 16, commandUsage); // early, late, the most indices a phase wanted
         int instances = renderer.scene().capacity();
         visibility = options.occlusion()
             ? GpuBuffer.deviceLocal(device, 4L * instances, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT) : null;
@@ -125,11 +125,61 @@ public final class RenderView implements AutoCloseable {
     }
 
     /**
-     * How many meshlets the view found visible in the last finished frame (on the indexed path, more than the draw
-     * limit means some were dropped). Read it once the frame's commands have completed.
+     * How many meshlets the view found visible in the last finished frame, both phases of occlusion culling together.
+     * Read it once the frame's commands have completed.
      */
     public int visibleMeshlets() {
         return drawCount.memory().get(U32, 0) + drawCount.memory().get(U32, 4);
+    }
+
+    /**
+     * The most triangles one phase of the last finished frame wanted to draw: on the indexed path, more than
+     * {@link ViewOptions#triangles()} were dropped.
+     */
+    public long wantedTriangles() {
+        return Integer.toUnsignedLong(drawCount.memory().get(U32, 8)) / 3;
+    }
+
+    /**
+     * Whether the last finished frame wanted more than the view's lists hold: more meshlets in a phase than
+     * {@link ViewOptions#draws()}, or on the indexed path more triangles than {@link ViewOptions#triangles()}. What did
+     * not fit was not drawn; {@link #resize} the view.
+     */
+    public boolean overflowed() {
+        int most = Math.max(drawCount.memory().get(U32, 0), drawCount.memory().get(U32, 4));
+        return most > options.draws() || frameIndices != null && wantedTriangles() > options.triangles();
+    }
+
+    /**
+     * Gives the view lists for {@code draws} meshlets and {@code triangles} triangles (as {@link ViewOptions}), e.g.
+     * once it {@link #overflowed}: the old lists go once no frame in flight uses them. Allocates (rarely).
+     */
+    @AllowAllocation("resizing, rarely")
+    public RenderView resize(int draws, int triangles) {
+        checkOpen();
+        ViewOptions resized = new ViewOptions(draws, triangles, options.occlusion(), options.layers(),
+            options.castersOnly());
+        if (resized.draws() != options.draws()) {
+            renderer.retire(visible);
+            visible = GpuBuffer.deviceLocal(device, 16L * draws,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            view.putLong(304, visible.deviceAddress());
+            view.putInt(172, draws);
+        }
+        boolean indexed = frameIndices != null;
+        options = resized;
+        if (indexed && frameIndices.size() != 12L * triangles) {
+            dropIndices();
+            frameIndices();
+        }
+        return this;
+    }
+
+    /** The GPU memory the view's lists, commands and history take, in bytes. */
+    public long bytes() {
+        return view.size() * view.slots().count() + visible.size() + expandCommand.size() + drawCommand.size()
+            + drawCount.size() + (visibility == null ? 0 : visibility.size())
+            + (frameIndices == null ? 0 : frameIndices.size());
     }
 
     /** The world position along {@code axis} of the view's camera, as last {@link #set}. */
@@ -173,6 +223,19 @@ public final class RenderView implements AutoCloseable {
 
     GpuBuffer drawCount() {
         return drawCount;
+    }
+
+    /** Lets the indexed path's index buffer go, once no frame in flight reads it: the path is mesh shaders now. */
+    void dropIndices() {
+        if (frameIndices != null) {
+            renderer.retire(frameIndices);
+            frameIndices = null;
+        }
+    }
+
+    /** Whether the view holds an index buffer: it was drawn on the indexed path. */
+    boolean hasIndices() {
+        return frameIndices != null;
     }
 
     /** The indexed path's index buffer, made the first time it is needed (rarely: the path changed). */

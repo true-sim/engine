@@ -56,6 +56,7 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     uint indices = ((push.meshlets[m * 8 + 2] >> 8) & 0xff) * 3;
     uint first;
     InterlockedAdd(lists.drawCommand[5], indices, first); // word 5: indices reserved so far
+    InterlockedMax(lists.visibleCount[2], first + indices); // the most any phase wanted, for the CPU to read
     if (slot >= view.maxDraws)
     {
         return; // over the view's capacity: dropped, and counted

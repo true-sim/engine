@@ -297,7 +297,7 @@ public struct ViewLists
     public VisibleMeshlet* visible;
     public uint* expandCommand;  // VkDispatchIndirectCommand
     public uint* drawCommand;    // VkDrawIndexedIndirectCommand: its index count grows here
-    public uint* visibleCount;   // the early (or only) phase, then the late one
+    public uint* visibleCount;   // the early (or only) phase, the late one, then the most indices a phase wanted
 };
 
 /**

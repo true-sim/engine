@@ -275,8 +275,8 @@ public final class MeshletRenderer implements AutoCloseable {
             grow(2 * (index + 1));
         }
         RenderView view = new RenderView(device, this, options, index, slots);
-        if (!device.meshShaders()) {
-            view.frameIndices(); // the indexed path draws it
+        if (path() == Path.INDEXED) {
+            view.frameIndices(); // the indexed path draws it; on mesh shaders no view has one
         }
         views.add(view);
         viewTable.putLong(8L * index, view.address());
@@ -295,7 +295,8 @@ public final class MeshletRenderer implements AutoCloseable {
         rows = GpuBuffer.deviceLocal(device, 8L * capacity, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     }
 
-    private void retire(AutoCloseable resource) {
+    /** Has {@code resource} freed once no frame in flight reads it. */
+    void retire(AutoCloseable resource) {
         retiring.add(resource);
         retireAt.add(slots.retireAt());
     }
@@ -323,12 +324,29 @@ public final class MeshletRenderer implements AutoCloseable {
         return java.util.Collections.unmodifiableList(views);
     }
 
-    /** Chooses how meshlets are drawn; {@link Path#AUTO} by default. */
+    /**
+     * Chooses how meshlets are drawn; {@link Path#AUTO} by default. On mesh shaders the views' index buffers go (once
+     * no frame reads them): only the indexed path has them, made as it first draws a view.
+     */
     public void setPath(Path requested) {
         if (requested == Path.MESH_SHADERS && meshDraw == null) {
             throw new IllegalStateException("The device has no mesh shaders");
         }
         this.path = Objects.requireNonNull(requested, "path");
+        if (path() == Path.MESH_SHADERS) {
+            for (RenderView view : views) {
+                view.dropIndices();
+            }
+        }
+    }
+
+    /** The GPU memory of all views ({@link RenderView#bytes}), in bytes. */
+    public long viewBytes() {
+        long bytes = 0;
+        for (RenderView view : views) {
+            bytes += view.bytes();
+        }
+        return bytes;
     }
 
     /** The path the next frame takes. */
@@ -566,7 +584,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 // mesh shaders read no index buffer: every listed meshlet fits
                 view.putInt(184, meshShading ? -1 : (int) Math.min(Integer.MAX_VALUE, 3L * v.options().triangles()));
                 if (v.phase != PHASE_LATE) {
-                    vkCmdFillBuffer(commands, v.drawCount().handle(), 0, 8, 0);
+                    vkCmdFillBuffer(commands, v.drawCount().handle(), 0, 16, 0); // the counts, the indices wanted
                 }
                 nvkCmdUpdateBuffer(commands, v.expandCommand().handle(), 0, 16, reset); // no meshlets: x by 1 by 1
                 nvkCmdUpdateBuffer(commands, v.drawCommand().handle(), 0, 24, draw);

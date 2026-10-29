@@ -205,7 +205,11 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
   apart by their layers (a world and an editor's gizmos), or each have one of their own.
 - **Views, as many as there are:** a `RenderView` is a handle: its camera, its filter, its lists sized by its
   `ViewOptions` (a camera large, a shadow cascade or a mirror smaller) and, with occlusion, a visibility history of its
-  own, so every camera or mirror can cull occluded instances. `cullViews` culls any number at once: one instance pass
+  own, so every camera or mirror can cull occluded instances. A view's lists cost 16 bytes per meshlet of room; only
+  the indexed path adds an index buffer (12 bytes per triangle of room), made as it first draws the view and dropped
+  when the renderer switches to mesh shaders. `overflowed()` says whether the last frame wanted more than the lists
+  hold (meshlets, or triangles on the indexed path) and `resize(draws, triangles)` gives the view new lists, the old
+  ones freed once their frames are done; `bytes()` and `MeshletRenderer.viewBytes()` say what views cost. `cullViews` culls any number at once: one instance pass
   with a row per view (in dispatches of up to 65,535 rows), and one cull pass over all their chunks, each meshlet into
   its view's list; `drawView` then draws each. Through the frame graph, the `MeshletCulling` request gathers every
   view the techniques draw (the scene's camera, `ShadowMapShadows`' sun, the cascades) into one culling pass.

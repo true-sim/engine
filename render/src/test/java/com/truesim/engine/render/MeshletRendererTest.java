@@ -389,6 +389,47 @@ class MeshletRendererTest {
     }
 
     @Test
+    void viewsReportWhatDidNotFitAndResize() {
+        // Three quads, a meshlet and 2 triangles each, into a view with room for two meshlets.
+        for (int i = 0; i < 3; i++) {
+            scene.set(i, quad, 0, 2 * i - 2, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
+        }
+        lookForward(1, MeshletRenderer.MODE_WHITE);
+        RenderView small = renderer.createView(ViewOptions.of(2, 1 << 12)).set(camera, 1, MeshletRenderer.MODE_WHITE);
+        renderWith(commands -> renderer.record(commands, small, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
+        assertThat(small.visibleMeshlets()).as("found, if not all drawn").isEqualTo(3);
+        assertThat(small.overflowed()).isTrue();
+        int two = covered();
+        long bytes = small.bytes();
+        small.resize(8, 1 << 12);
+        assertThat(small.options().draws()).isEqualTo(8);
+        assertThat(small.bytes()).isGreaterThan(bytes);
+        renderWith(commands -> renderer.record(commands, small, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
+        assertThat(small.overflowed()).isFalse();
+        assertThat(covered()).as("the third quad drawn too").isGreaterThan(two);
+        assertThat(small.wantedTriangles()).isEqualTo(6);
+        // The indexed path: an index buffer per view, its triangles the limit.
+        renderer.setPath(MeshletRenderer.Path.INDEXED);
+        small.resize(8, 4);
+        renderWith(commands -> renderer.record(commands, small, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
+        assertThat(small.hasIndices()).isTrue();
+        assertThat(small.wantedTriangles()).isEqualTo(6);
+        assertThat(small.overflowed()).as("6 triangles wanted, room for 4").isTrue();
+        small.resize(8, 6);
+        renderWith(commands -> renderer.record(commands, small, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
+        assertThat(small.overflowed()).isFalse();
+        assertThat(renderer.viewBytes()).isEqualTo(view.bytes() + small.bytes());
+        if (device.meshShaders()) {
+            long indexed = small.bytes();
+            renderer.setPath(MeshletRenderer.Path.MESH_SHADERS);
+            assertThat(small.hasIndices()).as("mesh shaders need none").isFalse();
+            assertThat(small.bytes()).isEqualTo(indexed - 12L * 6);
+            assertThat(renderer.createView(ViewOptions.of(8, 1 << 20)).hasIndices()).isFalse();
+        }
+        assertThatIllegalArgumentException().isThrownBy(() -> small.resize(0, 1));
+    }
+
+    @Test
     void instancesTakeTheLowestFreeId() {
         try (GpuScene small = new GpuScene(device, pool, 3)) {
             assertThat(small.pool()).isSameAs(pool);
