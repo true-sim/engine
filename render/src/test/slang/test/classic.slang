@@ -18,7 +18,7 @@ ConstantBuffer<ClassicPush> push;
 [shader("vertex")]
 VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint instanceIndex : SV_VulkanInstanceID)
 {
-    Instance instance = push.instances[instanceIndex];
+    Instance instance = relative(push.instances[instanceIndex], push.view[0]);
     return transformVertex(push.view[0], instance, push.meshes[instance.mesh], vertex, push.positions,
         push.attributes, 0, 0);
 }
