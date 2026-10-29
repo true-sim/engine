@@ -105,11 +105,16 @@ try (VulkanInstance instance = VulkanInstance.builder().applicationName("game").
 - **Allocation-free:** `next`, `begin`, `end`, `submit`, `acquire`, `present` and `Images.transition` write
   their Vulkan structs straight into stack memory. LWJGL wraps native pointers in `MemorySegment`s, which the
   JIT removes once the code is compiled by C2.
-- **Per-frame data, per frame in flight:** a `FrameBuffer` (instances, views, lights, materials) keeps a host-visible
+- **Per-frame data, per frame in flight:** a `FrameBuffer` (views, lights, materials) keeps a host-visible
   copy per slot of its `FrameSlots`, plus a master copy in CPU memory. While a frame records, writes reach the master
   and that frame's copy. Between frames they reach only the master, so frames in flight keep reading what they were
   given; each copy takes the range it missed from the master when its slot opens. `FrameSlots.single()` is one copy
   written straight through, for callers that wait for the GPU between frames.
+- **Instances, the GPU's alone:** a `GpuScene` keeps its instances in one device-local buffer. Setting one writes its
+  64-byte record once into a list of what changed (an id at most once a frame); the first pass reading instances
+  copies the list into the frame slot's upload buffer (`GpuBuffer.hostWritten`: write-combined, or BAR memory where the
+  GPU has it) and a compute pass scatters it. The CPU pays per instance changed, frames in flight keep no copies (the
+  queue orders the scatter after the frames before), and every pass reads instances from device-local memory.
 
 ### Shaders and pipelines
 

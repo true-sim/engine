@@ -543,6 +543,7 @@ public final class MeshletRenderer implements AutoCloseable {
     private void cull(VkCommandBuffer commands, RenderView[] views, int count, int pyramid, int width, int height,
         int mips) {
         releaseRetired();
+        scene.upload(commands);
         boolean meshShading = path() == Path.MESH_SHADERS;
         int instanceCount = scene.highWater();
         bindless.bind(commands); // the late phase samples the depth pyramid through it
@@ -716,7 +717,7 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /** A global memory barrier: writes in {@code srcStage} are visible to {@code dstAccess} in {@code dstStage}. */
-    private static void barrier(VkCommandBuffer commands, long srcStage, long srcAccess, long dstStage,
+    static void barrier(VkCommandBuffer commands, long srcStage, long srcAccess, long dstStage,
         long dstAccess) {
         try (MemoryStack stack = stackPush()) {
             long barrier = stack.ncalloc(VkMemoryBarrier2.ALIGNOF, 1, VkMemoryBarrier2.SIZEOF);

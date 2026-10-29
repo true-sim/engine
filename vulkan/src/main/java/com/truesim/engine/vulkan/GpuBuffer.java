@@ -2,6 +2,7 @@ package com.truesim.engine.vulkan;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.util.vma.Vma.VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+import static org.lwjgl.util.vma.Vma.VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
 import static org.lwjgl.util.vma.Vma.VMA_ALLOCATION_CREATE_MAPPED_BIT;
 import static org.lwjgl.util.vma.Vma.VMA_MEMORY_USAGE_AUTO;
 import static org.lwjgl.util.vma.Vma.vmaCreateBuffer;
@@ -43,8 +44,13 @@ public final class GpuBuffer implements AutoCloseable {
     private final long deviceAddress;
     private boolean closed;
 
-    @SuppressWarnings("restricted") // wraps the mapped memory VMA returned, of exactly this size
     private GpuBuffer(VulkanDevice device, long size, int usage, boolean hostVisible, int... families) {
+        this(device, size, usage, hostVisible ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT : 0, families);
+    }
+
+    @SuppressWarnings("restricted") // wraps the mapped memory VMA returned, of exactly this size
+    private GpuBuffer(VulkanDevice device, long size, int usage, int hostAccess, int... families) {
+        boolean hostVisible = hostAccess != 0;
         if (size <= 0) {
             throw new IllegalArgumentException("Buffer size must be positive: " + size);
         }
@@ -61,7 +67,7 @@ public final class GpuBuffer implements AutoCloseable {
             }
             VmaAllocationCreateInfo allocationInfo = VmaAllocationCreateInfo.calloc(stack)
                 .usage(VMA_MEMORY_USAGE_AUTO)
-                .flags(hostVisible ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT : 0);
+                .flags(hostVisible ? hostAccess | VMA_ALLOCATION_CREATE_MAPPED_BIT : 0);
             LongBuffer buffer = stack.mallocLong(1);
             PointerBuffer allocated = stack.mallocPointer(1);
             VmaAllocationInfo result = VmaAllocationInfo.calloc(stack);
@@ -80,6 +86,14 @@ public final class GpuBuffer implements AutoCloseable {
     /** A buffer the CPU writes and reads directly, e.g. for uploads, readbacks and per-frame data. */
     public static GpuBuffer hostVisible(VulkanDevice device, long size, int usage) {
         return new GpuBuffer(device, size, usage, true);
+    }
+
+    /**
+     * A buffer the CPU only writes, in order (e.g. with {@code MemorySegment.copy}), and the GPU reads: write-combined
+     * memory, or device-local memory the CPU can reach where the GPU has it (resizable BAR). Not for reading back.
+     */
+    public static GpuBuffer hostWritten(VulkanDevice device, long size, int usage) {
+        return new GpuBuffer(device, size, usage, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
     }
 
     /** A buffer in fast GPU memory, filled by transfers. */

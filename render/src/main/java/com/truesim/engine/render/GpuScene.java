@@ -1,13 +1,31 @@
 package com.truesim.engine.render;
 
+import static org.lwjgl.system.MemoryStack.stackPush;
+import static org.lwjgl.system.MemoryUtil.memPutInt;
+import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
+import static org.lwjgl.vulkan.VK10.vkCmdFillBuffer;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
 
 import com.truesim.annotations.AllowAllocation;
-import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
+import com.truesim.engine.vulkan.GpuBuffer;
+import com.truesim.engine.vulkan.Pipeline;
+import com.truesim.engine.vulkan.ShaderModule;
 import com.truesim.engine.vulkan.VulkanDevice;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
+import java.util.Arrays;
 import java.util.Objects;
+import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
  * The instances of a world, as the GPU draws them: a table of instances by id, each a {@link GeometryPool} mesh at a
@@ -26,14 +44,24 @@ import java.util.Objects;
  *
  * <p>Ids are stable: removing an instance leaves a hole the culling skips, and ids are taken lowest first, so whatever
  * the GPU keeps per instance (occlusion history; previous transforms and custom data, as buffers by id) stays with its
- * instance. Instances are read when the frame's commands run: given a frame graph's {@link FrameSlots}, they keep a
- * copy per frame in flight and may change every frame; otherwise change them only once the frames using them have
- * finished. Allocates nothing once created.
+ * instance.
+ *
+ * <p>The instances live in one device-local buffer, the GPU's alone. Setting or removing one writes its 64-byte record
+ * once into a list of what changed (an id at most once: setting it again overwrites its entry), and the first pass
+ * reading the instances in a frame ({@link #upload}) copies the list into the frame slot's upload buffer in one go and
+ * scatters it with a compute pass. So the CPU pays per instance changed, in one sequential write, and frames in flight
+ * keep no copies: the queue orders the scatter after the frames before. Given a frame graph's {@link FrameSlots}
+ * instances may change every frame; otherwise change them only once the frames using them have finished. Allocates
+ * nothing once created.
  */
 @AllowAllocation("created rarely")
 public final class GpuScene implements AutoCloseable {
 
     static final int INSTANCE_BYTES = 64;
+    private static final int SCATTER_PUSH = 28;
+    private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+    private static final ValueLayout.OfFloat FLOAT =
+        ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     /** Instance flags above the mesh id, as meshlets/common.slang has them. */
     private static final int LIVE = 1 << 24;
     private static final int CASTS_SHADOWS = 1 << 25;
@@ -43,7 +71,20 @@ public final class GpuScene implements AutoCloseable {
 
     private final GeometryPool pool;
     private final int capacity;
-    private final FrameBuffer instances;
+    private final FrameSlots slots;
+    private final GpuBuffer instances;  // the GPU's, device-local
+    private final Pipeline scatter;
+    // What changed since the last upload: entry e is id ids[e] with record e of records; entryOf[id] is its entry or -1.
+    private final Arena arena = Arena.ofShared();
+    private final MemorySegment ids;
+    private final MemorySegment records;
+    private final int[] entryOf;
+    private int pending;
+    // Per frame slot, the upload buffer (ids, then records) and where in it the next upload goes: frames upload once
+    // or a few times each, the next frame of the slot starting over (or, with one slot, where the last one ended).
+    private final GpuBuffer[] uploads;
+    private final long[] uploadFrame;
+    private final int[] uploadAt;
     private final long[] used;
     private final Materials defaultMaterials;
     private Materials materials;
@@ -63,8 +104,27 @@ public final class GpuScene implements AutoCloseable {
         }
         this.pool = Objects.requireNonNull(pool, "pool");
         this.capacity = capacity;
-        instances = FrameBuffer.create(device, (long) INSTANCE_BYTES * capacity,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, slots);
+        this.slots = Objects.requireNonNull(slots, "slots");
+        int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        instances = GpuBuffer.deviceLocal(device, (long) INSTANCE_BYTES * capacity,
+            storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        device.submitAndWait(device.graphics(), commands -> vkCmdFillBuffer(commands, instances.handle(), 0,
+            instances.size(), 0)); // every id a hole
+        try (ShaderModule shader = ShaderModule.load(device, "shaders/meshlets/scatter.spv")) {
+            scatter = Pipeline.compute(device, shader, "scatterMain", SCATTER_PUSH);
+        }
+        ids = arena.allocate(4L * capacity, 64);
+        records = arena.allocate((long) INSTANCE_BYTES * capacity, 64);
+        entryOf = new int[capacity];
+        Arrays.fill(entryOf, -1);
+        uploads = new GpuBuffer[slots.count()];
+        for (int s = 0; s < uploads.length; s++) {
+            uploads[s] = GpuBuffer.hostWritten(device, uploadOffset(capacity) + (long) INSTANCE_BYTES * capacity,
+                storage);
+        }
+        uploadFrame = new long[uploads.length];
+        Arrays.fill(uploadFrame, -1);
+        uploadAt = new int[uploads.length];
         used = new long[(capacity + 63) / 64];
         defaultMaterials = new Materials(device, 1);
         materials = defaultMaterials;
@@ -140,27 +200,38 @@ public final class GpuScene implements AutoCloseable {
             count++;
             highWater = Math.max(highWater, id + 1);
         }
-        FrameBuffer m = instances;
-        long o = (long) INSTANCE_BYTES * id;
-        m.putFloat(o, qx);
-        m.putFloat(o + 4, qy);
-        m.putFloat(o + 8, qz);
-        m.putFloat(o + 12, qw);
+        MemorySegment m = records;
+        long o = (long) INSTANCE_BYTES * entry(id);
+        m.set(FLOAT, o, qx);
+        m.set(FLOAT, o + 4, qy);
+        m.set(FLOAT, o + 8, qz);
+        m.set(FLOAT, o + 12, qw);
         float hx = (float) x;
         float hy = (float) y;
         float hz = (float) z;
-        m.putFloat(o + 16, hx);
-        m.putFloat(o + 20, hy);
-        m.putFloat(o + 24, hz);
-        m.putInt(o + 28, mesh | LIVE | (castsShadows ? CASTS_SHADOWS : 0));
-        m.putFloat(o + 32, sx);
-        m.putFloat(o + 36, sy);
-        m.putFloat(o + 40, sz);
-        m.putInt(o + 44, material);
-        m.putFloat(o + 48, (float) (x - hx));
-        m.putFloat(o + 52, (float) (y - hy));
-        m.putFloat(o + 56, (float) (z - hz));
-        m.putInt(o + 60, layers);
+        m.set(FLOAT, o + 16, hx);
+        m.set(FLOAT, o + 20, hy);
+        m.set(FLOAT, o + 24, hz);
+        m.set(INT, o + 28, mesh | LIVE | (castsShadows ? CASTS_SHADOWS : 0));
+        m.set(FLOAT, o + 32, sx);
+        m.set(FLOAT, o + 36, sy);
+        m.set(FLOAT, o + 40, sz);
+        m.set(INT, o + 44, material);
+        m.set(FLOAT, o + 48, (float) (x - hx));
+        m.set(FLOAT, o + 52, (float) (y - hy));
+        m.set(FLOAT, o + 56, (float) (z - hz));
+        m.set(INT, o + 60, layers);
+    }
+
+    /** {@code id}'s entry in the list of changes, made if it has none yet. */
+    private int entry(int id) {
+        int entry = entryOf[id];
+        if (entry < 0) {
+            entry = pending++;
+            entryOf[id] = entry;
+            ids.setAtIndex(ValueLayout.JAVA_INT, entry, id);
+        }
+        return entry;
     }
 
     /**
@@ -172,7 +243,10 @@ public final class GpuScene implements AutoCloseable {
         if (!contains(id)) {
             return;
         }
-        instances.putInt((long) INSTANCE_BYTES * id + 28, 0);
+        long o = (long) INSTANCE_BYTES * entry(id);
+        for (int word = 0; word < INSTANCE_BYTES; word += 8) {
+            records.set(ValueLayout.JAVA_LONG_UNALIGNED, o + word, 0); // a hole
+        }
         used[id >>> 6] &= ~(1L << id);
         count--;
         while (highWater > 0 && !contains(highWater - 1)) {
@@ -218,8 +292,69 @@ public final class GpuScene implements AutoCloseable {
         return -1;
     }
 
-    /** The instance buffer, for passes drawing the instances. */
-    FrameBuffer instanceBuffer() {
+    /** How many instances changed since the last upload: what the next one scatters. */
+    public int pendingCount() {
+        return pending;
+    }
+
+    /**
+     * Brings the GPU's instances up to date, for passes reading them next in {@code commands}: the changes since the
+     * last upload are copied into the open frame slot's upload buffer and scattered by a compute pass, ordered after
+     * whatever read the instances before (earlier frames too: the queue's order) and before what reads them after.
+     * Nothing without changes, so every pass reading instances calls it first: the first in a frame uploads. Allocates
+     * nothing.
+     */
+    public synchronized void upload(VkCommandBuffer commands) {
+        if (pending == 0) {
+            return;
+        }
+        int slot = Math.max(slots.current(), 0);
+        GpuBuffer target = uploads[slot];
+        long frame = slots.frames();
+        int at = uploadAt[slot];
+        if (uploadFrame[slot] != frame) {
+            at = 0; // the slot's last frame has finished
+        } else if (at + pending > capacity) {
+            if (!slots.isFinished(slots.retireAt())) {
+                throw new IllegalStateException("More instances changed in one frame than the scene holds: change "
+                    + "each at most once between the passes of a frame");
+            }
+            at = 0; // one copy: the caller waited for the frames before
+        }
+        uploadFrame[slot] = frame;
+        uploadAt[slot] = at + pending;
+        MemorySegment memory = target.memory();
+        long recordsAt = uploadOffset(capacity);
+        MemorySegment.copy(ids, 0, memory, 4L * at, 4L * pending);
+        MemorySegment.copy(records, 0, memory, recordsAt + (long) INSTANCE_BYTES * at, (long) INSTANCE_BYTES * pending);
+        // Whatever read the instances before, in this frame or those before, has read them.
+        MeshletRenderer.barrier(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        try (org.lwjgl.system.MemoryStack stack = stackPush()) {
+            long push = stack.nmalloc(8, SCATTER_PUSH);
+            memPutLong(push, target.deviceAddress() + 4L * at);
+            memPutLong(push + 8, target.deviceAddress() + recordsAt + (long) INSTANCE_BYTES * at);
+            memPutLong(push + 16, instances.deviceAddress());
+            memPutInt(push + 24, pending);
+            scatter.bind(commands);
+            scatter.push(commands, push, SCATTER_PUSH);
+            vkCmdDispatch(commands, (pending + 63) / 64, 1, 1);
+        }
+        MeshletRenderer.barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
+        for (int e = 0; e < pending; e++) {
+            entryOf[ids.getAtIndex(ValueLayout.JAVA_INT, e)] = -1;
+        }
+        pending = 0;
+    }
+
+    /** Where an upload buffer's records start: after an id per instance, aligned for the records. */
+    private static long uploadOffset(int capacity) {
+        return (4L * capacity + 63) & ~63L;
+    }
+
+    /** The instance buffer, for passes drawing the instances (after {@link #upload}). */
+    GpuBuffer instanceBuffer() {
         return instances;
     }
 
@@ -233,6 +368,11 @@ public final class GpuScene implements AutoCloseable {
         if (!closed) {
             closed = true;
             instances.close();
+            scatter.close();
+            for (GpuBuffer upload : uploads) {
+                upload.close();
+            }
+            arena.close();
             defaultMaterials.close();
         }
     }

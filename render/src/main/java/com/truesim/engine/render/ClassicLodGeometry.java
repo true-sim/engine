@@ -309,6 +309,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     /** Selects view {@code view}'s draws into the draw list at {@code list}. */
     private void select(VkCommandBuffer commands, RenderView view, long list) {
         GpuScene scene = renderer.scene();
+        scene.upload(commands);
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, SELECT_PUSH);
             memPutLong(push, view.address());

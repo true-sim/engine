@@ -335,10 +335,13 @@ class VulkanTest {
             // Writes: straight into host-visible memory, through staging into device-local memory.
             try (java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofConfined();
                  GpuBuffer host = GpuBuffer.hostVisible(device, 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                 GpuBuffer written = GpuBuffer.hostWritten(device, 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
                  GpuBuffer local = GpuBuffer.deviceLocal(device, 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
                 java.lang.foreign.MemorySegment data = arena.allocateFrom(ValueLayout.JAVA_INT, 1, 2, 3);
                 host.write(4, data);
                 assertThat(host.memory().getAtIndex(ValueLayout.JAVA_INT, 3)).isEqualTo(3);
+                written.write(0, data); // written in order, mapped
+                assertThat(written.memory().byteSize()).isEqualTo(16);
                 local.write(4, data);
                 local.write(16, data.asSlice(0, 0)); // nothing, at the end
                 assertThatIllegalArgumentException().isThrownBy(() -> local.write(8, data));

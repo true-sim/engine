@@ -426,6 +426,48 @@ class MeshletRendererTest {
     }
 
     @Test
+    void changesUploadOncePerIdAndScatterOnTheGpu() {
+        com.truesim.engine.vulkan.FrameSlots slots = new com.truesim.engine.vulkan.FrameSlots(2);
+        try (GpuScene small = new GpuScene(device, pool, 3, slots);
+             MeshletRenderer drawing = new MeshletRenderer(device, small, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, slots)) {
+            RenderView ahead = drawing.createView(ViewOptions.of(64, 1 << 12));
+            for (int i = 0; i < 3; i++) {
+                small.set(i, quad, 0, (i - 1) * 2.5f, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
+            }
+            small.set(1, quad, 0, 0, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f); // again: the same entry
+            assertThat(small.pendingCount()).isEqualTo(3);
+            slots.begin(0);
+            lookForward(1, MeshletRenderer.MODE_WHITE);
+            ahead.set(camera, 1, MeshletRenderer.MODE_WHITE);
+            renderWith(commands -> drawing.record(commands, ahead, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
+            slots.end();
+            assertThat(small.pendingCount()).as("scattered").isZero();
+            assertThat(ahead.visibleMeshlets()).isEqualTo(3);
+            // A frame changing every instance twice between its passes changes more than the upload holds.
+            slots.begin(1);
+            device.submitAndWait(device.graphics(), commands -> {
+                small.upload(commands); // nothing changed: nothing to do
+                for (int i = 0; i < 3; i++) {
+                    small.set(i, quad, 0, i, 0, -8, HALF, 0, 0, HALF, 1, 1, 1);
+                }
+                small.upload(commands);
+                small.remove(0);
+                small.remove(1);
+                small.remove(2);
+                assertThatIllegalStateException().isThrownBy(() -> small.upload(commands))
+                    .withMessageContaining("in one frame");
+            });
+            slots.end();
+            // The next frame of the slot starts over.
+            slots.begin(0);
+            renderWith(commands -> drawing.record(commands, ahead, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
+            slots.end();
+            assertThat(ahead.visibleMeshlets()).as("all removed").isZero();
+        }
+    }
+
+    @Test
     void farFromTheOriginTheImageIsTheSame() {
         // The terrain and a quad near the origin, then the same 7,000 km away with the camera there: positions are kept
         // in two floats per axis and drawn relative to the camera, so the image does not change.
