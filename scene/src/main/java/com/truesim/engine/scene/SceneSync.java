@@ -3,8 +3,7 @@ package com.truesim.engine.scene;
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.math.TransformArray;
 import com.truesim.common.state.ChangeClock;
-import com.truesim.engine.render.MeshletRenderer;
-import com.truesim.engine.render.SceneGeometry;
+import com.truesim.engine.render.GpuScene;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.core.NodeChange;
@@ -21,48 +20,48 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * A scene drawn by a {@link MeshletRenderer}: its {@link Renderables} as the renderer's instances, at their world
- * positions, from shared {@link SceneResources}, following the scene's and the renderables' change logs. Cameras are
- * the renderer's views, each at its own world position ({@link com.truesim.engine.render.Camera#position}): the GPU
- * draws the instances relative to each, so moving a camera rewrites no instance, and every view (the camera, shadow
- * maps, mirrors, more cameras) is culled in one pass. Its {@link #geometry()} is what the frame graph's techniques
- * draw, whichever rendering mode the graph runs.
+ * A scene kept on the GPU: its {@link Renderables} as instances of a {@link GpuScene}, at their world positions, from
+ * shared {@link SceneResources}, following the scene's and the renderables' change logs. What draws the instances is
+ * the renderers' business: any number of {@link com.truesim.engine.render.RenderView}s (cameras, shadow maps,
+ * mirrors), each at its own world position, all culled in one pass; moving a camera rewrites no instance.
  *
  * <pre>{@code
- * MeshletRenderer renderer = new MeshletRenderer(device, resources.pool(), limits, colorFormat, depthFormat, slots);
- * SceneView view = new SceneView(resources, renderables, renderer);
- * graph.add(new ClusteredForwardShading(view.geometry(), width, height, colorFormat, depthFormat));
- * // a rendering mode is a technique: graph.replace(Keys.SCENE_COLOR, new VisibilityBufferShading(view.geometry(), ...))
+ * GpuScene gpu = new GpuScene(device, resources.pool(), 100_000, slots);
+ * SceneSync sync = new SceneSync(resources, renderables, gpu);
+ * MeshletRenderer renderer = new MeshletRenderer(device, gpu, colorFormat, depthFormat, slots);
+ * SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+ * RenderView view = geometry.createView(ViewOptions.of(1 << 18, 1 << 22).withOcclusion(true));
+ * graph.add(new ClusteredForwardShading(geometry, view, width, height, colorFormat, depthFormat));
  *
  * // every frame, after the frame boundary (tasks.drainCompleted()), scene.update() and renderables.update():
- * view.update();                               // renderer.setInstanceCount and the instances that changed
- * camera.position(cameraX, cameraY, cameraZ);  // the camera's world position, in doubles
- * view.geometry().setView(0, camera, 1, MeshletRenderer.MODE_LIT);
+ * sync.update();                               // the instances that changed
+ * view.set(camera.position(cameraX, cameraY, cameraZ), 1, MeshletRenderer.MODE_LIT);
  * }</pre>
  *
- * <p>Several scenes draw as several views, each with its own renderer and frame graph, all from one
- * {@link SceneResources}: a mesh or material used by several views is on the GPU once. Several cameras on one scene
- * are several of the renderer's views (as many as its limits give), each drawn by a graph of its own.
+ * <p>Several scenes may fill one {@link GpuScene} (a world and an editor's gizmos), each with a sync of its own and the
+ * same resources: their instances take ids from the one table, and views tell them apart by their layers
+ * ({@code SceneGraph.setLayers}, {@link com.truesim.engine.render.ViewOptions#withLayers}). Or each scene has a
+ * {@link GpuScene} and a renderer of its own; either way a mesh or material used by several is on the GPU once.
  *
  * <ul>
  *   <li><b>Assets by reference:</b> a renderable draws once its mesh is on the GPU; materials draw untextured until
  *       their textures arrive, and as the default until they load (see {@link SceneResources}).</li>
  *   <li><b>Materials per submesh:</b> a renderable's materials take consecutive ids in the material table, one per
- *       submesh of its mesh, shared by every renderable of every view with the same materials and mesh layout.</li>
+ *       submesh of its mesh, shared by every renderable of every scene with the same materials and mesh layout.</li>
  *   <li><b>Changes, not the whole scene:</b> renderables added, changed or removed, and nodes moved, are found in the
  *       change logs. Only moved instances are written, or every one when most nodes moved.</li>
  *   <li><b>Stable ids:</b> a renderable keeps its instance id while drawn; a removed one leaves a hole the next takes
  *       (the lowest free id), so what the GPU keeps per instance stays with it. Deterministic: the same changes give the
  *       same ids.</li>
  *   <li><b>Layers and shadows:</b> instances are on their nodes' layers ({@code SceneGraph.setLayers}), drawn in views
- *       of any of them ({@code renderer.setViewFilter}), and cast shadows as their renderables say: shadow maps and
- *       shadow rays leave out those that do not.</li>
+ *       of any of them ({@link com.truesim.engine.render.RenderView#filter}), and cast shadows as their renderables
+ *       say: shadow maps and shadow rays leave out those that do not.</li>
  * </ul>
  *
  * <p>Not yet followed: alpha modes and double-sidedness (the renderer draws everything opaque). Updating allocates
  * nothing once warm when nothing but transforms changed. Use it on the main thread, the asset cache's.
  */
-public final class SceneView implements AutoCloseable {
+public final class SceneSync implements AutoCloseable {
 
     private static final ValueLayout.OfDouble DOUBLE = ValueLayout.JAVA_DOUBLE_UNALIGNED;
     private static final int NONE = SceneResources.NONE;
@@ -71,8 +70,7 @@ public final class SceneView implements AutoCloseable {
     private final Renderables renderables;
     private final SceneGraph scene;
     private final ChangeClock clock;
-    private final MeshletRenderer renderer;
-    private final SceneGeometry geometry;
+    private final GpuScene gpu;
     private final Renderables.Visitor onRenderableChange = (node, changes) -> reconcile(node);
     private final NodeChange.Visitor onSceneChange = this::sceneChanged;
     private long seen;
@@ -91,14 +89,12 @@ public final class SceneView implements AutoCloseable {
     private int movedCount;
     private int itemCount;
 
-    // Instances: id (the renderer's index) to item, NONE for a hole. Ids are stable while drawn, the lowest free one
-    // taken: what the GPU keeps per instance (occlusion history, later previous transforms) stays with its instance.
-    private final int[] slotItem;
-    private final long[] usedIds;
+    // Instance ids (itemSlot) are the GpuScene's, stable while drawn, the lowest free one taken: what the GPU keeps per
+    // instance (occlusion history, later previous transforms) stays with its instance.
     private int instanceCount;          // drawn
-    private int highWater;              // ids from 0 up to here, holes included, are the renderer's
     // Items to draw at the end of the update, oldest first: their meshes arrived (maybe before the changes of the
-    // frame were followed), or the renderer or the material table had no room. Checked again then: they may be gone.
+    // frame were followed), or the instance table or the material table had no room. Checked again then: they may be
+    // gone.
     private int[] waiting = new int[64];
     private int waitingCount;
     private boolean[] isWaiting = new boolean[64];
@@ -107,7 +103,7 @@ public final class SceneView implements AutoCloseable {
 
     private final Map<AssetRef<MeshData>, ViewMesh> meshes = new HashMap<>();
 
-    /** A mesh this view's renderables use: the shared upload, and the list of this view's items using it. */
+    /** A mesh this scene's renderables use: the shared upload, and the list of this scene's items using it. */
     private final class ViewMesh implements SceneResources.MeshUser {
         SceneResources.Mesh mesh;
         int holders;
@@ -123,23 +119,21 @@ public final class SceneView implements AutoCloseable {
     }
 
     /**
-     * A view drawing {@code renderables} with {@code renderer}, which draws the meshes of {@code resources}' pool and is
-     * given its material table.
+     * Keeps {@code renderables} as instances of {@code gpu}, which holds meshes of {@code resources}' pool and is given
+     * its material table (scenes sharing a {@link GpuScene} share their resources too).
      */
     @AllowAllocation("created rarely")
-    public SceneView(SceneResources resources, Renderables renderables, MeshletRenderer renderer) {
+    public SceneSync(SceneResources resources, Renderables renderables, GpuScene gpu) {
         this.resources = Objects.requireNonNull(resources, "resources");
         this.renderables = Objects.requireNonNull(renderables, "renderables");
-        this.renderer = Objects.requireNonNull(renderer, "renderer");
-        if (renderer.pool() != resources.pool()) {
-            throw new IllegalArgumentException("The renderer draws another geometry pool than the resources fill");
+        this.gpu = Objects.requireNonNull(gpu, "gpu");
+        if (gpu.pool() != resources.pool()) {
+            throw new IllegalArgumentException("The GPU scene holds another geometry pool's meshes than the resources "
+                + "fill");
         }
         this.scene = renderables.scene();
         this.clock = scene.clock();
-        this.geometry = SceneGeometry.meshlets(renderer);
-        slotItem = filled(renderer.limits().instances());
-        usedIds = new long[(renderer.limits().instances() + 63) / 64];
-        renderer.setMaterials(resources.materials());
+        gpu.setMaterials(resources.materials());
     }
 
     private static int[] filled(int length) {
@@ -148,13 +142,9 @@ public final class SceneView implements AutoCloseable {
         return array;
     }
 
-    /** What the frame graph's techniques draw for this view: its renderer's meshlets. */
-    public SceneGeometry geometry() {
-        return geometry;
-    }
-
-    public MeshletRenderer renderer() {
-        return renderer;
+    /** The instances this scene is kept as. */
+    public GpuScene gpu() {
+        return gpu;
     }
 
     public Renderables renderables() {
@@ -166,7 +156,7 @@ public final class SceneView implements AutoCloseable {
     }
 
     /**
-     * Brings the renderer up to date: renderables added, changed or removed since the last update, and nodes moved.
+     * Brings the instances up to date: renderables added, changed or removed since the last update, and nodes moved.
      * Call after the frame boundary, {@code scene.update()} and
      * {@code renderables.update()}, before the frame graph records. Allocates nothing once warm when only transforms
      * changed.
@@ -181,7 +171,7 @@ public final class SceneView implements AutoCloseable {
         }
         if (!rewriteAll) {
             // More changed nodes than half the instances (or more than the scene's log kept): rewriting every
-            // instance, in slot order, costs less than following the changes.
+            // instance costs less than following the changes.
             int changed = scene.changeCountSince(since);
             if (changed < 0 || changed > instanceCount / 2) {
                 rewriteAll = true;
@@ -192,9 +182,9 @@ public final class SceneView implements AutoCloseable {
         resources.flush();
         drawWaiting();
         if (rewriteAll) {
-            for (int slot = 0; slot < highWater; slot++) {
-                if (slotItem[slot] != NONE) {
-                    writeInstance(slotItem[slot]);
+            for (int item = 0; item < itemNode.length; item++) {
+                if (itemSlot[item] != NONE) {
+                    writeInstance(item);
                 }
             }
             rewriteAll = false;
@@ -210,7 +200,6 @@ public final class SceneView implements AutoCloseable {
             moved[movedItems[i]] = false;
         }
         movedCount = 0;
-        renderer.setInstanceCount(highWater);
     }
 
     /** How many renderables are drawn now: those whose meshes are on the GPU. */
@@ -218,12 +207,12 @@ public final class SceneView implements AutoCloseable {
         return instanceCount;
     }
 
-    /** How many renderables this view follows, drawn or waiting for their meshes. */
+    /** How many renderables this scene has, drawn or waiting for their meshes. */
     public int renderableCount() {
         return itemCount;
     }
 
-    /** How many distinct meshes this view's renderables use. */
+    /** How many distinct meshes this scene's renderables use. */
     public int meshCount() {
         return meshes.size();
     }
@@ -247,7 +236,7 @@ public final class SceneView implements AutoCloseable {
     }
 
     /**
-     * Renderables ready to draw that the renderer has no instance slot for, or the material table no room for their
+     * Renderables ready to draw that the instance table has no id for, or the material table no room for their
      * materials: they draw as room frees.
      */
     public int waitingCount() {
@@ -395,7 +384,7 @@ public final class SceneView implements AutoCloseable {
 
     // ---------------------------------------------------------------- instances
 
-    /** Draws {@code item}, or has it wait for room: in the renderer, or in the material table. */
+    /** Draws {@code item}, or has it wait for room: in the instance table, or in the material table. */
     private void show(int item) {
         if (!tryShow(item)) {
             queue(item);
@@ -404,8 +393,9 @@ public final class SceneView implements AutoCloseable {
 
     /** Draws {@code item}, a live renderable's whose mesh is on the GPU: the lowest free instance id, its materials. */
     private boolean tryShow(int item) {
-        if (instanceCount == slotItem.length) {
-            return false; // the renderer holds no more instances: drawn when a slot frees
+        int slot = gpu.freeId();
+        if (slot < 0) {
+            return false; // the instance table is full (maybe by other scenes'): drawn when an id frees
         }
         SceneResources.Mesh mesh = itemMesh[item].mesh;
         SceneResources.MaterialSet set = resources.acquireSet(renderables.materials(itemNode[item]),
@@ -414,12 +404,9 @@ public final class SceneView implements AutoCloseable {
             return false; // the material table is full: drawn when ids free
         }
         itemSet[item] = set;
-        int slot = takeId();
         instanceCount++;
-        highWater = Math.max(highWater, slot + 1);
-        slotItem[slot] = item;
         itemSlot[item] = slot;
-        markMoved(item);
+        writeInstance(item); // takes the id
         return true;
     }
 
@@ -429,28 +416,11 @@ public final class SceneView implements AutoCloseable {
         if (slot == NONE) {
             return;
         }
-        renderer.removeInstance(slot);
-        slotItem[slot] = NONE;
-        usedIds[slot >>> 6] &= ~(1L << slot);
+        gpu.remove(slot);
         instanceCount--;
-        while (highWater > 0 && slotItem[highWater - 1] == NONE) {
-            highWater--;
-        }
         itemSlot[item] = NONE;
         resources.releaseSet(itemSet[item]);
         itemSet[item] = null;
-    }
-
-    /** The lowest free instance id, taken: there is one. */
-    private int takeId() {
-        for (int w = 0; ; w++) {
-            long free = ~usedIds[w];
-            if (free != 0) {
-                int id = (w << 6) + Long.numberOfTrailingZeros(free);
-                usedIds[w] |= 1L << id;
-                return id;
-            }
-        }
     }
 
     /** Has {@code item} drawn at the end of the update, once. */
@@ -501,7 +471,7 @@ public final class SceneView implements AutoCloseable {
         MemorySegment s = world.segment();
         long o = NodeHandle.index(itemNode[item]) * world.stride();
         long node = itemNode[item];
-        renderer.setInstance(itemSlot[item], itemMesh[item].mesh.id, itemSet[item].first, scene.layers(node),
+        gpu.set(itemSlot[item], itemMesh[item].mesh.id, itemSet[item].first, scene.layers(node),
             renderables.castsShadows(node), s.get(DOUBLE, o), s.get(DOUBLE, o + 8), s.get(DOUBLE, o + 16),
             (float) s.get(DOUBLE, o + 24), (float) s.get(DOUBLE, o + 32), (float) s.get(DOUBLE, o + 40),
             (float) s.get(DOUBLE, o + 48),
@@ -510,19 +480,18 @@ public final class SceneView implements AutoCloseable {
 
     private void checkOpen() {
         if (closed) {
-            throw new IllegalStateException("The scene view is closed");
+            throw new IllegalStateException("The scene sync is closed");
         }
     }
 
     /**
-     * Stops following the scene: every renderable stops drawing, and what only this view used leaves the GPU and is
-     * released in the asset cache. The resources and the renderer stay open.
+     * Stops following the scene: its instances leave the GPU scene, and what only this scene used leaves the GPU and is
+     * released in the asset cache. The resources and the GPU scene stay open.
      */
     @Override
     public void close() {
         if (!closed) {
             destroyAll();
-            renderer.setInstanceCount(0);
             closed = true;
         }
     }

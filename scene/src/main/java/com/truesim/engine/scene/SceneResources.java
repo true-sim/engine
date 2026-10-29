@@ -18,21 +18,22 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * The GPU side of scene assets, shared by every {@link SceneView} on a device: meshes in a {@link GeometryPool},
+ * The GPU side of scene assets, shared by every {@link SceneSync} on a device: meshes in a {@link GeometryPool},
  * materials in a {@link Materials} table and textures in {@link Textures}, uploaded from the asset cache once however
- * many views and renderables use them, and removed when none does. Several scenes, and several views of one scene,
- * draw from the same resources.
+ * many scenes and renderables use them, and removed when none does. Several scenes, in one GPU scene or several, draw
+ * from the same resources.
  *
  * <pre>{@code
  * FrameSlots slots = graph.frameSlots();          // or slots shared by several graphs
  * SceneResources resources = new SceneResources(assets, new GeometryPool(device, capacity, slots),
  *     new Materials(device, 4096, slots), new Textures(device, slots));
- * SceneView world = new SceneView(resources, worldRenderables, worldRenderer);
- * SceneView preview = new SceneView(resources, previewRenderables, previewRenderer);
+ * SceneSync world = new SceneSync(resources, worldRenderables, gpu);
+ * SceneSync gizmos = new SceneSync(resources, gizmoRenderables, gpu);  // same table, other layers
+ * SceneSync preview = new SceneSync(resources, previewRenderables, previewGpu);
  * }</pre>
  *
- * <p>An asset is acquired in the cache while some view uses it, uploaded once it has loaded, and freed on the GPU (once
- * no frame in flight draws it) and released in the cache when the last view lets go. Materials draw as the default until
+ * <p>An asset is acquired in the cache while some scene uses it, uploaded once it has loaded, and freed on the GPU (once
+ * no frame in flight draws it) and released in the cache when the last scene lets go. Materials draw as the default until
  * they load, and untextured where their textures have not loaded yet. Give the pool, materials and textures the frame
  * slots of every graph drawing them (shared slots for several graphs). Use it on the main thread, the asset cache's.
  */
@@ -129,7 +130,7 @@ public final class SceneResources implements AutoCloseable {
 
     private final MaterialKey lookup = new MaterialKey(List.of(), 0);
 
-    /** A block of material ids, one per submesh, shared by every renderable of every view with the same key. */
+    /** A block of material ids, one per submesh, shared by every renderable of every scene with the same key. */
     static final class MaterialSet {
         final MaterialKey key;
         final MaterialEntry[] entries; // per submesh; null: the default

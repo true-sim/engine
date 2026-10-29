@@ -78,14 +78,25 @@ public struct View
     public uint maxDraws;
     public uint mode;              // 0 lit, 1 meshlet colors, 2 white
     public uint orthographic;      // 1: projectionScale is pixels per unit at any distance (e.g. a sun's shadow map)
-    public uint2 pad;
+    public uint maxIndices;        // the indexed path's index buffer holds this many (-1: mesh shaders, no buffer)
+    public uint pad;
     public float4x4 inverseViewProjection; // clip space back to camera-relative positions
     public float3 position;        // the camera's world position, high part
     public uint pad1;
     public float3 positionLow;     // and the rest
     public uint layers;            // the layers it draws
     public float3 eye;             // where the view looks from, relative to its position (0 but for shadow views)
-    public uint flags;             // VIEW_*; 304 bytes in all
+    public uint flags;             // VIEW_*
+    public ViewLists lists;        // where culling lists what the view draws
+    public uint* visibility;       // per instance: 1 if the view saw it the last time its late phase looked; or null
+    public uint pad2;
+    public uint pad3;              // 352 bytes in all
+};
+
+/** A view's place in a renderer's table of views. */
+public struct ViewRef
+{
+    public View* view;
 };
 
 /**

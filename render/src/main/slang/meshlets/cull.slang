@@ -7,14 +7,12 @@ import meshlets.common;
 
 struct CullPush
 {
-    View* views;
+    ViewRef* views;        // the renderer's views, by index
     MeshEntry* meshes;
     Instance* instances;
     Chunk* chunks;
     uint* meshlets;        // 8 words per meshlet: scene's 32-byte records
     float* clusterLod;     // 10 floats per meshlet
-    ViewLists* lists;      // per view
-    uint maxIndices;
     Occlusion occlusion;
 };
 
@@ -27,7 +25,7 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     Chunk chunk = push.chunks[group.x];
     uint v = chunk.view;
-    View view = push.views[v];
+    View view = push.views[v].view[0];
     Instance instance = relative(push.instances[chunk.instance], view);
     MeshEntry mesh = push.meshes[instance.mesh];
     uint local = chunk.firstMeshlet + thread.x;
@@ -52,7 +50,7 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
             return;
         }
     }
-    ViewLists lists = push.lists[v];
+    ViewLists lists = view.lists;
     uint slot;
     InterlockedAdd(lists.visibleCount[late ? 1 : 0], 1, slot);
     uint indices = ((push.meshlets[m * 8 + 2] >> 8) & 0xff) * 3;
@@ -62,7 +60,7 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     {
         return; // over the view's capacity: dropped, and counted
     }
-    bool fits = first + indices <= push.maxIndices; // meshlets past the index capacity come last: no gaps
+    bool fits = first + indices <= view.maxIndices; // meshlets past the index capacity come last: no gaps
     lists.visible[slot] = VisibleMeshlet(fits ? chunk.instance : 0xffffffff, m, first, 0);
     if (fits)
     {

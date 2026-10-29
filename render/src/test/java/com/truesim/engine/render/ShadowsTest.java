@@ -47,7 +47,10 @@ class ShadowsTest {
     private VulkanInstance instance;
     private VulkanDevice device;
     private GeometryPool pool;
+    private GpuScene scene;
     private MeshletRenderer renderer;
+    private RenderView view;     // the camera's
+    private RenderView sunView;  // a shadow map's
     private RayTracing rayTracing;
     private FrameGraph graph;
     private GpuImage colorTarget;
@@ -70,14 +73,15 @@ class ShadowsTest {
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 12, 64, 4));
         quadMesh = MeshletRendererTest.grid(1, 2, false, VertexFormat.POSITIONS_ONLY);
         quad = pool.add(quadMesh);
-        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12, 4),
-            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+        scene = new GpuScene(device, pool, 16);
+        renderer = new MeshletRenderer(device, scene, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+        view = renderer.createView(ViewOptions.of(256, 1 << 12).withOcclusion(true));
+        sunView = renderer.createView(ViewOptions.shadow(256, 1 << 12));
         // The camera at the origin looks down at the floor (y = -5, around z = -5); the quad floats at y = -3.
-        renderer.setInstance(0, quad, 0, -5, -5, 0, 0, 0, 1, 10, 1, 10);
-        renderer.setInstance(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
-        renderer.setInstanceCount(2);
+        scene.set(0, quad, 0, -5, -5, 0, 0, 0, 1, 10, 1, 10);
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
         camera.set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
-        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
         graph = new FrameGraph(device, 2);
         int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         colorTarget = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -96,6 +100,7 @@ class ShadowsTest {
             pixels.close();
             colorTarget.close();
             renderer.close();
+            scene.close();
             pool.close();
             device.close();
             instance.close();
@@ -188,14 +193,14 @@ class ShadowsTest {
             ClusteredLights clustered = new ClusteredLights(lights, camera, SIZE, SIZE);
             double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
             ShadowMapShadows mapped = new ShadowMapShadows(geometry, lights, 0, 0, lightCamera(sun[0], sun[1], sun[2]),
-                1024, 1, 1.5e-3f);
-            ClusteredForwardShading forward = new ClusteredForwardShading(geometry, SIZE, SIZE,
+                1024, sunView, 1.5e-3f);
+            ClusteredForwardShading forward = new ClusteredForwardShading(geometry, view, SIZE, SIZE,
                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
-            VisibilityBufferShading visibility = new VisibilityBufferShading(geometry, SIZE, SIZE,
+            VisibilityBufferShading visibility = new VisibilityBufferShading(geometry, view, SIZE, SIZE,
                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
             expectShadow(forward, "forward, shadow map", shadow, clustered, mapped);
             assertThat(graph.passes()).contains("meshlet depth, view 1").containsOnlyOnce("meshlet culling");
-            assertThat(renderer.visibleMeshlets(1)).isEqualTo(2); // the sun's view drew both quads
+            assertThat(sunView.visibleMeshlets()).isEqualTo(2); // the sun's view drew both quads
             expectShadow(visibility, "visibility buffer, shadow map", shadow, clustered, mapped);
             if (!device.rayTracing()) {
                 return;
@@ -205,18 +210,18 @@ class ShadowsTest {
             assertThatIllegalStateException().isThrownBy(() -> rayTracing.add(quad, quadMesh, 0));
             // A mask needs the camera's depth before shading: for forward, a depth-only draw of the camera as a view of
             // its own; for the visibility buffer, the IDs' draw (the same as its own).
-            SceneDraw depthOnly = new SceneDraw(geometry, 2, camera, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, SIZE,
-                SIZE, false);
-            SceneDraw ids = new SceneDraw(geometry, 0, null, SurfaceOutput.ids(), VK_FORMAT_D32_SFLOAT, SIZE, SIZE,
+            SceneDraw depthOnly = new SceneDraw(geometry, geometry.createView(ViewOptions.of(256, 1 << 12)), camera,
+                SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, SIZE, SIZE, false);
+            SceneDraw ids = new SceneDraw(geometry, view, null, SurfaceOutput.ids(), VK_FORMAT_D32_SFLOAT, SIZE, SIZE,
                 true);
             byte[] masked = expectShadow(forward, "forward, ray-traced mask", shadow, clustered,
-                new RayTracedShadows(rayTracing, renderer, lights, 0, 0, depthOnly, camera));
+                new RayTracedShadows(rayTracing, lights, 0, 0, depthOnly, camera));
             assertThat(graph.passes()).contains("ray-traced shadows of light 0", "top level");
             expectShadow(visibility, "visibility buffer, ray-traced mask", shadow, clustered,
-                new RayTracedShadows(rayTracing, renderer, lights, 0, 0, ids, camera));
+                new RayTracedShadows(rayTracing, lights, 0, 0, ids, camera));
             assertThat(graph.passes()).containsOnlyOnce("meshlet ids early");
             byte[] inline = expectShadow(visibility, "visibility buffer, inline rays", shadow, clustered,
-                new InlineRayShadows(rayTracing, renderer, lights, 0, 0).offset(2e-3f));
+                new InlineRayShadows(rayTracing, view, lights, 0, 0).offset(2e-3f));
             assertThat(graph.passes()).doesNotContain("ray-traced shadows of light 0");
             int differ = 0;
             for (int i = 0; i < inline.length; i += 4) {
@@ -226,7 +231,7 @@ class ShadowsTest {
             // Forward shading cannot trace inline: the light shines unshadowed.
             graph.close();
             graph = new FrameGraph(device, 2).add(forward).add(clustered)
-                .add(new InlineRayShadows(rayTracing, renderer, lights, 0, 0))
+                .add(new InlineRayShadows(rayTracing, view, lights, 0, 0))
                 .output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
             frame(colorTarget, 4);
             byte[] color = frame(colorTarget, 4);
@@ -242,10 +247,10 @@ class ShadowsTest {
         double wx = 3_123_456.5;
         double wy = -45_678.25;
         double wz = -7_000_123.75;
-        renderer.setInstance(0, quad, 0, wx, wy - 5, wz - 5, 0, 0, 0, 1, 10, 1, 10);
-        renderer.setInstance(1, quad, 0, wx, wy - 3, wz - 5, 0, 0, 0, 1, 1, 1, 1);
+        scene.set(0, quad, 0, wx, wy - 5, wz - 5, 0, 0, 0, 1, 10, 1, 10);
+        scene.set(1, quad, 0, wx, wy - 3, wz - 5, 0, 0, 0, 1, 1, 1, 1);
         camera.position(wx, wy, wz);
-        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
         SceneGeometry geometry = SceneGeometry.meshlets(renderer);
         double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
         Camera sunCamera = new Camera().position(wx, wy - 5, wz - 5).setOrthographic(-20 * sun[0], -20 * sun[1],
@@ -254,15 +259,15 @@ class ShadowsTest {
         try (Lights lights = new Lights(device, 4, 4)) {
             lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
             ClusteredLights clustered = new ClusteredLights(lights, camera, SIZE, SIZE);
-            ShadowMapShadows mapped = new ShadowMapShadows(geometry, lights, 0, 0, sunCamera, 1024, 1, 1.5e-3f);
-            ClusteredForwardShading forward = new ClusteredForwardShading(geometry, SIZE, SIZE,
+            ShadowMapShadows mapped = new ShadowMapShadows(geometry, lights, 0, 0, sunCamera, 1024, sunView, 1.5e-3f);
+            ClusteredForwardShading forward = new ClusteredForwardShading(geometry, view, SIZE, SIZE,
                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
             double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
             expectShadow(forward, "far from the origin", shadow, clustered, mapped);
             // The camera moves half a unit right and a quarter back: the shadow stays where it is in the world, so
             // it is that much left and ahead of the camera now.
             camera.position(wx + 0.5, wy, wz + 0.25);
-            renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
             expectShadow(forward, "the camera moved", new double[] {shadow[0] - 0.5, shadow[1] - 0.25}, clustered,
                 mapped);
             assertThat(sunCamera.viewProjection()).as("the sun's camera").containsExactly(map);
@@ -273,16 +278,16 @@ class ShadowsTest {
     @Test
     void instancesCastingNoShadowCastNone() {
         // The floating quad casts no shadow: the shadow map's view leaves it out, the floor under it is lit.
-        renderer.setInstance(1, quad, 0, 1, false, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+        scene.set(1, quad, 0, 1, false, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
         SceneGeometry geometry = SceneGeometry.meshlets(renderer);
         double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
         try (Lights lights = new Lights(device, 4, 4)) {
             lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
             graph.close();
             graph = new FrameGraph(device, 2)
-                .add(new ClusteredForwardShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
+                .add(new ClusteredForwardShading(geometry, view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
                 .add(new ClusteredLights(lights, camera, SIZE, SIZE))
-                .add(new ShadowMapShadows(geometry, lights, 0, 0, lightCamera(sun[0], sun[1], sun[2]), 1024, 1,
+                .add(new ShadowMapShadows(geometry, lights, 0, 0, lightCamera(sun[0], sun[1], sun[2]), 1024, sunView,
                     1.5e-3f))
                 .output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
             frame(colorTarget, 4);
@@ -291,36 +296,37 @@ class ShadowsTest {
             int lit = floor(color, this, 3, -2);
             assertThat(floor(color, this, shadow[0], shadow[1])).as("where its shadow would fall")
                 .isGreaterThan((int) (lit * 0.9));
-            assertThat(renderer.visibleMeshlets(1)).as("the sun's view drew the floor alone").isEqualTo(1);
+            assertThat(sunView.visibleMeshlets()).as("the sun's view drew the floor alone").isEqualTo(1);
         }
     }
 
     @Test
     void cascadesShadowNearAndFar() {
         // A second quad, farther out on a longer floor: its shadow falls in a farther cascade.
-        renderer.setInstance(0, quad, 0, -5, -10, 0, 0, 0, 1, 10, 1, 15);
-        renderer.setInstance(2, quad, 0, -3, -14, 0, 0, 0, 1, 1, 1, 1);
-        renderer.setInstanceCount(3);
+        scene.set(0, quad, 0, -5, -10, 0, 0, 0, 1, 10, 1, 15);
+        scene.set(2, quad, 0, -3, -14, 0, 0, 0, 1, 1, 1, 1);
         SceneGeometry geometry = SceneGeometry.meshlets(renderer);
         double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
         try (Lights lights = new Lights(device, 1, 4)) {
             lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
-            CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, 1024, 1, 40);
+            CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, 1024,
+                ViewOptions.of(256, 1 << 12), 40);
             cascades.update();
+            assertThat(cascades.view(1).options().castersOnly()).as("cascades draw casters only").isTrue();
             assertThat(cascades.split(0)).isLessThan(cascades.split(1)).isLessThan(cascades.split(2));
             assertThat(cascades.split(2)).isCloseTo(40, org.assertj.core.data.Offset.offset(1e-3f));
             double[] near = shadowOf(sun[0], sun[1], sun[2]);
             double[] run = shadowOf(sun[0], sun[1], sun[2]);
             double[] far = {run[0], run[1] - 9}; // the far quad is 9 farther along z
             for (com.truesim.engine.graph.Technique shading : new com.truesim.engine.graph.Technique[] {
-                new ClusteredForwardShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT),
-                new VisibilityBufferShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)}) {
+                new ClusteredForwardShading(geometry, view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT),
+                new VisibilityBufferShading(geometry, view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)}) {
                 byte[] color = expectShadow(shading, "cascades, near", near,
                     new ClusteredLights(lights, camera, SIZE, SIZE), cascades);
                 int lit = floor(color, this, 3, -2);
                 assertThat(floor(color, this, far[0], far[1])).as("cascades, far").isLessThan(lit / 2);
-                assertThat(graph.passes()).contains("meshlet depth, view 1", "meshlet depth, view 2",
-                    "meshlet depth, view 3").containsOnlyOnce("meshlet culling");
+                assertThat(graph.passes()).contains("meshlet depth, view " + cascades.view(0).index(),
+                    "meshlet depth, view " + cascades.view(2).index()).containsOnlyOnce("meshlet culling");
             }
             // The cameras of the cascades grow with their slices.
             float[] first = cascades.camera(0).viewProjection();
@@ -332,7 +338,7 @@ class ShadowsTest {
             assertThat(cascades.split(0)).isCloseTo((float) (0.1 + 39.9 / 3),
                 org.assertj.core.data.Offset.offset(1e-3f));
             assertThatIllegalArgumentException().isThrownBy(() -> new CascadedShadowMaps(geometry, lights, 0, 0, camera,
-                1, 1024, 0, 40));
+                0, 1024, ViewOptions.of(256, 1 << 12), 40));
         }
     }
 
@@ -348,21 +354,22 @@ class ShadowsTest {
             double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
             com.truesim.engine.graph.Technique[] shadings = device.primitiveIds()
                 ? new com.truesim.engine.graph.Technique[] {
-                    new ClusteredForwardShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT),
-                    new VisibilityBufferShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)}
+                    new ClusteredForwardShading(geometry, view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT),
+                    new VisibilityBufferShading(geometry, view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)}
                 : new com.truesim.engine.graph.Technique[] {
-                    new ClusteredForwardShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)};
+                    new ClusteredForwardShading(geometry, view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)};
+            CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, 1024,
+                ViewOptions.shadow(256, 1 << 12), 40);
             for (com.truesim.engine.graph.Technique shading : shadings) {
                 expectShadow(shading, "classic, one map", shadow, new ClusteredLights(lights, camera, SIZE, SIZE),
-                    new ShadowMapShadows(geometry, lights, 0, 0, lightCamera(sun[0], sun[1], sun[2]), 1024, 1,
+                    new ShadowMapShadows(geometry, lights, 0, 0, lightCamera(sun[0], sun[1], sun[2]), 1024, sunView,
                         1.5e-3f));
                 assertThat(graph.passes()).contains("classic depth, view 1");
-                CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, 1024, 1, 40);
                 cascades.update();
                 expectShadow(shading, "classic, cascades", shadow, new ClusteredLights(lights, camera, SIZE, SIZE),
                     cascades);
-                assertThat(graph.passes()).contains("classic depth, view 1", "classic depth, view 2",
-                    "classic depth, view 3");
+                assertThat(graph.passes()).contains("classic depth, view 2", "classic depth, view 3",
+                    "classic depth, view 4");
             }
         }
     }
@@ -381,11 +388,11 @@ class ShadowsTest {
                 .directional(1, (float) other[0], (float) other[1], (float) other[2], 1, 1, 1).setCount(2);
             shadowRatio = 0.8; // a shadow of one light is still lit by the other
             // The first light by a shadow map, the second by inline rays: two shadows, each lit by the other light.
-            byte[] color = expectShadow(new VisibilityBufferShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+            byte[] color = expectShadow(new VisibilityBufferShading(geometry, view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_FORMAT_D32_SFLOAT), "two lights, first", shadowOf(sun[0], sun[1], sun[2]),
                 new ClusteredLights(lights, camera, SIZE, SIZE),
-                new ShadowMapShadows(geometry, lights, 0, 0, lightCamera(sun[0], sun[1], sun[2]), 1024, 1, 1.5e-3f),
-                new InlineRayShadows(rayTracing, renderer, lights, 1, 1));
+                new ShadowMapShadows(geometry, lights, 0, 0, lightCamera(sun[0], sun[1], sun[2]), 1024, sunView, 1.5e-3f),
+                new InlineRayShadows(rayTracing, view, lights, 1, 1));
             double[] second = shadowOf(other[0], other[1], other[2]);
             int lit = floor(color, this, 3, -2);
             assertThat(floor(color, this, second[0], second[1])).as("the second light's shadow")

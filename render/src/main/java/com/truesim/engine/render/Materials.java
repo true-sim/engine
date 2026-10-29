@@ -12,8 +12,8 @@ import java.util.List;
 /**
  * The material table shaders read, by id: 64 bytes per {@link Material}, as engine-render's {@code shading.slang}
  * lays it out. Material 0 is a light gray default, so meshes draw before anything is set up. Instances name a first
- * material ({@link MeshletRenderer#setInstance(int, int, int, float, float, float, float, float, float, float,
- * float, float, float)}); each submesh of the mesh takes the next.
+ * material ({@link GpuScene#set(int, int, int, float, float, float, float, float, float, float, float, float,
+ * float)}); each submesh of the mesh takes the next.
  *
  * <p>Materials are read when the frame's commands run. Given a frame graph's {@link FrameSlots}, the table keeps a copy
  * per frame in flight; otherwise change a material only once the frames using it have finished.

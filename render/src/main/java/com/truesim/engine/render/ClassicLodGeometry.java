@@ -253,26 +253,16 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     }
 
     @Override
-    public void setView(int index, Camera camera, float errorPixels, int mode) {
-        renderer.setView(index, camera, errorPixels, mode);
-    }
-
-    @Override
-    public void setViewFilter(int index, int layers, boolean castersOnly) {
-        renderer.setViewFilter(index, layers, castersOnly);
-    }
-
-    @Override
     @AllowAllocation("building the graph, when it changes")
     public void drawFirst(GraphBuilder g, SceneDraw draw, SceneDraw.Targets targets, boolean load) {
         SurfaceOutput.Kind kind = draw.output().kind();
         if (kind == SurfaceOutput.Kind.IDS && drawIds == null) {
             throw new IllegalStateException("The device has no primitive IDs in fragment shaders (geometryShader)");
         }
-        int view = draw.view();
+        RenderView view = draw.view();
         Camera camera = draw.camera();
         String name = switch (kind) {
-            case DEPTH -> "classic depth, view " + view;
+            case DEPTH -> "classic depth, view " + view.index();
             case SHADED -> "classic LOD";
             case IDS -> "classic LOD ids";
         };
@@ -281,7 +271,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(list), 0, 16, 0));
         g.pass(name + " selection").write(list, BufferAccess.STORAGE_WRITE).record(ctx -> {
             if (camera != null) {
-                renderer.setView(view, camera, 1, MeshletRenderer.MODE_LIT);
+                view.set(camera, 1, MeshletRenderer.MODE_LIT);
             }
             select(ctx.commands(), view, ctx.address(list));
         });
@@ -317,27 +307,28 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     }
 
     /** Selects view {@code view}'s draws into the draw list at {@code list}. */
-    private void select(VkCommandBuffer commands, int view, long list) {
+    private void select(VkCommandBuffer commands, RenderView view, long list) {
+        GpuScene scene = renderer.scene();
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, SELECT_PUSH);
-            memPutLong(push, renderer.viewAddress(view));
+            memPutLong(push, view.address());
             memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, renderer.instanceBuffer().deviceAddress());
+            memPutLong(push + 16, scene.instanceBuffer().deviceAddress());
             memPutLong(push + 24, meshes.deviceAddress());
             memPutLong(push + 32, levels.deviceAddress());
             memPutLong(push + 40, parts.deviceAddress());
             memPutLong(push + 48, list);
             memPutLong(push + 56, list + recordsOffset);
-            memPutInt(push + 64, renderer.instanceCount());
+            memPutInt(push + 64, scene.highWater());
             memPutInt(push + 68, maxDraws);
             select.bind(commands);
             select.push(commands, push, SELECT_PUSH);
-            vkCmdDispatch(commands, (renderer.instanceCount() + 63) / 64, 1, 1);
+            vkCmdDispatch(commands, (scene.highWater() + 63) / 64, 1, 1);
         }
     }
 
     /** Draws the list's draws of view {@code view} with {@code pipeline}, over the targets with {@code load}. */
-    private void record(PassContext ctx, Pipeline pipeline, int view, long colorView, long depthView, int width,
+    private void record(PassContext ctx, Pipeline pipeline, RenderView view, long colorView, long depthView, int width,
         int height, float[] clear, boolean load, long lights, Buffer list) {
         VkCommandBuffer commands = ctx.commands();
         long handle = ctx.buffer(list);
@@ -345,13 +336,13 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             MeshletRenderer.beginRendering(commands, stack, colorView, depthView, width, height, clear[0], clear[1],
                 clear[2], load);
             long push = stack.ncalloc(8, 1, DRAW_PUSH);
-            memPutLong(push, renderer.viewAddress(view));
+            memPutLong(push, view.address());
             memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, renderer.instanceBuffer().deviceAddress());
+            memPutLong(push + 16, renderer.scene().instanceBuffer().deviceAddress());
             memPutLong(push + 24, pool.positions().deviceAddress());
             memPutLong(push + 32, pool.attributes().deviceAddress());
             memPutLong(push + 40, ctx.address(list) + recordsOffset);
-            memPutLong(push + 80, renderer.materialsAddress());
+            memPutLong(push + 80, renderer.scene().materialsAddress());
             memPutLong(push + 88, lights);
             pipeline.bind(commands);
             MeshletRenderer.setViewport(commands, stack, width, height);

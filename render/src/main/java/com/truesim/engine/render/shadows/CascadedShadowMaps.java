@@ -11,10 +11,12 @@ import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.Lights;
+import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.SceneGeometry;
 import com.truesim.engine.render.ShadowInputs;
 import com.truesim.engine.render.SurfaceOutput;
+import com.truesim.engine.render.ViewOptions;
 import java.util.List;
 import java.util.Objects;
 
@@ -26,11 +28,13 @@ import java.util.Objects;
  * shimmers as the camera turns and moves. Shading picks a pixel's cascade by its view depth and filters it like any
  * shadow map (the entries' filter: PCF today).
  *
- * <p>Each cascade is a {@link SceneDraw} of its own view ({@code firstView} on), culled with the camera's in one pass.
+ * <p>Each cascade is a {@link SceneDraw} of a view of its own, made with the technique and drawing the casters only,
+ * culled with the camera's in one pass.
  * Call {@link #update} every frame once the camera is set, before the frame records: it fits the cascades.
  *
  * <pre>{@code
- * CascadedShadowMaps sunShadows = new CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, 2048, 1, 300);
+ * CascadedShadowMaps sunShadows = new CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, 2048,
+ *     ViewOptions.shadow(1 << 16, 1 << 20), 300);
  * graph.add(sunShadows);
  * // per frame
  * sunShadows.update();                           // from the camera's world position: cascades snap in world space
@@ -45,7 +49,7 @@ public final class CascadedShadowMaps implements Technique {
     private final Camera camera;
     private final int cascades;
     private final int size;
-    private final int firstView;
+    private final RenderView[] views;
     private final float maxDistance;
     private final Camera[] cameras;
     private final float[] splits;
@@ -61,23 +65,27 @@ public final class CascadedShadowMaps implements Technique {
     /**
      * Shadows of directional light {@code light} of {@code lights} in shadow table entries {@code firstEntry} on, for
      * the view of {@code camera} up to {@code maxDistance}: {@code cascades} maps of {@code size} x {@code size},
-     * drawn as {@code geometry}'s views {@code firstView} on.
+     * drawn as views of {@code geometry} made with {@code options} (casters only, whatever the options say).
      */
+    @AllowAllocation("created rarely")
     public CascadedShadowMaps(SceneGeometry geometry, Lights lights, int light, int firstEntry, Camera camera,
-        int cascades, int size, int firstView, float maxDistance) {
+        int cascades, int size, ViewOptions options, float maxDistance) {
         this.geometry = Objects.requireNonNull(geometry, "geometry");
         this.lights = Objects.requireNonNull(lights, "lights");
         this.camera = Objects.requireNonNull(camera, "camera");
-        if (cascades < 1 || firstView < 1 || size < 1 || !(maxDistance > 0)) {
-            throw new IllegalArgumentException("Cascades need views of their own (from view 1 on: the renderer needs as "
-                + "many), a size and a distance: " + cascades + " from view " + firstView + ", " + size + ", "
-                + maxDistance);
+        Objects.requireNonNull(options, "options");
+        if (cascades < 1 || size < 1 || !(maxDistance > 0)) {
+            throw new IllegalArgumentException("Cascades need a count, a size and a distance: " + cascades + ", "
+                + size + ", " + maxDistance);
         }
         this.light = light;
         this.firstEntry = firstEntry;
         this.cascades = cascades;
         this.size = size;
-        this.firstView = firstView;
+        this.views = new RenderView[cascades];
+        for (int i = 0; i < cascades; i++) {
+            views[i] = geometry.createView(options.withCastersOnly(true));
+        }
         this.maxDistance = maxDistance;
         this.cameras = new Camera[cascades];
         for (int i = 0; i < cascades; i++) {
@@ -112,6 +120,11 @@ public final class CascadedShadowMaps implements Technique {
     /** Where cascade {@code i} ends, in view depth (cascade 0 starts at the camera's near plane). */
     public float split(int i) {
         return splits[Objects.checkIndex(i, cascades) + 1];
+    }
+
+    /** The view cascade {@code i} is drawn as. */
+    public RenderView view(int i) {
+        return views[Objects.checkIndex(i, cascades)];
     }
 
     /** The light camera of cascade {@code i}, as last fitted. */
@@ -226,8 +239,7 @@ public final class CascadedShadowMaps implements Technique {
         ShadowInputs.Set inputs = g.request(new ShadowInputs());
         Image[] maps = new Image[cascades];
         for (int i = 0; i < cascades; i++) {
-            geometry.setViewFilter(firstView + i, -1, true); // the maps hold the casters only
-            maps[i] = g.request(new SceneDraw(geometry, firstView + i, cameras[i], SurfaceOutput.depth(),
+            maps[i] = g.request(new SceneDraw(geometry, views[i], cameras[i], SurfaceOutput.depth(),
                 VK_FORMAT_D32_SFLOAT, size, size, false)).depth();
             inputs.sample(maps[i]);
         }

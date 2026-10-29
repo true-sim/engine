@@ -11,15 +11,6 @@ import com.truesim.engine.graph.Image;
  */
 public interface GeometryProvider {
 
-    /** Sets view {@code index} (the camera is view 0): its matrices, the error allowed on screen in pixels, the mode. */
-    void setView(int index, Camera camera, float errorPixels, int mode);
-
-    /**
-     * Which instances view {@code index} draws: those on any layer of {@code layers}, and with {@code castersOnly}
-     * only those casting shadows (a shadow map's view). Kept until set again.
-     */
-    void setViewFilter(int index, int layers, boolean castersOnly);
-
     /**
      * Adds the passes drawing this geometry for {@code draw} into {@code targets}: all of it, or with occlusion culling
      * the first phase (what was visible last frame). {@code load}: the targets hold what providers before drew.

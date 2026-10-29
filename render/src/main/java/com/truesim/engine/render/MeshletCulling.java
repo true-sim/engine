@@ -16,9 +16,9 @@ import java.util.Objects;
  *
  * <pre>{@code
  * MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)); // the same for every technique
- * culling.add(1, false, () -> renderer.setView(1, light, 1, MeshletRenderer.MODE_WHITE));
+ * culling.add(sunView, false, () -> sunView.set(light, 1, MeshletRenderer.MODE_WHITE));
  * g.pass("shadow map").read(culling.culled(), BufferAccess.INDIRECT).write(map, Access.DEPTH_ATTACHMENT)
- *     .record(ctx -> renderer.drawView(ctx.commands(), 1, 0, ctx.view(map), size, size, 0, 0, 0));
+ *     .record(ctx -> renderer.drawView(ctx.commands(), sunView, 0, ctx.view(map), size, size, 0, 0, 0));
  * }</pre>
  */
 public record MeshletCulling(MeshletRenderer renderer) implements Request<MeshletCulling.Views> {
@@ -42,8 +42,8 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
     public static final class Views {
         private final MeshletRenderer renderer;
         private final Buffer culled;
-        private int[] views = new int[0];
-        private int early = -1;
+        private RenderView[] views = new RenderView[0];
+        private boolean[] early = new boolean[0];
         private Runnable[] before = new Runnable[0];
 
         Views(MeshletRenderer renderer, Buffer culled) {
@@ -52,25 +52,23 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
         }
 
         /**
-         * Culls view {@code index} too, in the early phase of occlusion culling with {@code early} (the camera of a
-         * {@link MeshletGeometry}'s camera), after running {@code before} (null: nothing), e.g. to set the view when
-         * recording.
+         * Culls {@code view} too, in the early phase of occlusion culling with {@code early} (a view made with
+         * occlusion; each has its own history), after running {@code before} (null: nothing), e.g. to set the view
+         * when recording.
          */
-        public Views add(int index, boolean early, Runnable before) {
-            Objects.checkIndex(index, renderer.limits().views());
-            for (int view : views) {
-                if (view == index) {
-                    throw new IllegalStateException("View " + index + " is culled already");
+        public Views add(RenderView view, boolean early, Runnable before) {
+            if (view.renderer() != renderer) {
+                throw new IllegalArgumentException("A view of another renderer");
+            }
+            for (RenderView culled : views) {
+                if (culled == view) {
+                    throw new IllegalStateException("View " + view.index() + " is culled already");
                 }
             }
             views = Arrays.copyOf(views, views.length + 1);
-            views[views.length - 1] = index;
-            if (early) {
-                if (this.early >= 0) {
-                    throw new IllegalStateException("View " + this.early + " culls early already: one view may");
-                }
-                this.early = index;
-            }
+            views[views.length - 1] = view;
+            this.early = Arrays.copyOf(this.early, this.early.length + 1);
+            this.early[this.early.length - 1] = early;
             if (before != null) {
                 this.before = Arrays.copyOf(this.before, this.before.length + 1);
                 this.before[this.before.length - 1] = before;
@@ -87,7 +85,7 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
             for (Runnable runnable : before) {
                 runnable.run();
             }
-            renderer.cullViews(commands, views, views.length, early);
+            renderer.cullViews(commands, views, early, views.length);
         }
     }
 }

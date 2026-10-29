@@ -27,25 +27,15 @@ public final class MeshletGeometry implements GeometryProvider {
     }
 
     @Override
-    public void setView(int index, Camera camera, float errorPixels, int mode) {
-        renderer.setView(index, camera, errorPixels, mode);
-    }
-
-    @Override
-    public void setViewFilter(int index, int layers, boolean castersOnly) {
-        renderer.setViewFilter(index, layers, castersOnly);
-    }
-
-    @Override
     @AllowAllocation("building the graph, when it changes")
     public void drawFirst(GraphBuilder g, SceneDraw draw, SceneDraw.Targets targets, boolean load) {
         if (load) {
             throw new IllegalStateException("Meshlets are drawn first, before other geometry");
         }
-        int view = draw.view();
+        RenderView view = draw.view();
         Camera camera = draw.camera();
         MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)).add(view, draw.occlusion(),
-            camera == null ? null : () -> renderer.setView(view, camera, 1, MeshletRenderer.MODE_LIT));
+            camera == null ? null : () -> view.set(camera, 1, MeshletRenderer.MODE_LIT));
         GraphBuilder.PassBuilder pass = g.pass(name(draw, draw.occlusion() ? " early" : ""))
             .read(culling.culled(), BufferAccess.INDIRECT);
         record(draw, targets, pass, false, null);
@@ -61,7 +51,7 @@ public final class MeshletGeometry implements GeometryProvider {
     @AllowAllocation("building the graph, when it changes")
     private static String name(SceneDraw draw, String phase) {
         return switch (draw.output().kind()) {
-            case DEPTH -> "meshlet depth, view " + draw.view() + phase;
+            case DEPTH -> "meshlet depth, view " + draw.view().index() + phase;
             case SHADED -> "meshlets" + phase;
             case IDS -> "meshlet ids" + phase;
         };
@@ -85,15 +75,15 @@ public final class MeshletGeometry implements GeometryProvider {
         if (shadows != null) {
             shadows.readBy(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
         }
-        int view = draw.view();
+        RenderView view = draw.view();
         int width = draw.width();
         int height = draw.height();
         float[] clear = draw.output().clear();
         switch (draw.output().kind()) {
             case DEPTH -> pass.record(ctx -> {
                 if (late) {
-                    renderer.recordLate(ctx.commands(), 0, ctx.view(depth), width, height, ctx.sampled(pyramid),
-                        pyramid.mips());
+                    renderer.recordLate(ctx.commands(), view, 0, ctx.view(depth), width, height,
+                        ctx.sampled(pyramid), pyramid.mips());
                 } else {
                     renderer.drawView(ctx.commands(), view, 0, ctx.view(depth), width, height, 0, 0, 0);
                 }
@@ -103,7 +93,7 @@ public final class MeshletGeometry implements GeometryProvider {
                     shadows.prepare(ctx);
                 }
                 if (late) {
-                    renderer.recordLate(ctx.commands(), ctx.view(color), ctx.view(depth), width, height,
+                    renderer.recordLate(ctx.commands(), view, ctx.view(color), ctx.view(depth), width, height,
                         ctx.sampled(pyramid), pyramid.mips(), address(ctx, lights));
                 } else {
                     renderer.drawView(ctx.commands(), view, ctx.view(color), ctx.view(depth), width, height, clear[0],
@@ -112,7 +102,7 @@ public final class MeshletGeometry implements GeometryProvider {
             });
             case IDS -> pass.record(ctx -> {
                 if (late) {
-                    renderer.recordLateIds(ctx.commands(), ctx.view(color), ctx.view(depth), width, height,
+                    renderer.recordLateIds(ctx.commands(), view, ctx.view(color), ctx.view(depth), width, height,
                         ctx.sampled(pyramid), pyramid.mips());
                 } else {
                     renderer.drawIds(ctx.commands(), view, ctx.view(color), ctx.view(depth), width, height);

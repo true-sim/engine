@@ -7,14 +7,13 @@ import meshlets.common;
 
 struct InstancePush
 {
-    View* views;
+    ViewRef* views;        // the renderer's views, by index
     MeshEntry* meshes;
     Instance* instances;
     Chunk* chunks;
     uint* chunkCommand;
     Level* levels;
     uint maxChunks;
-    uint* visibility;      // per instance: 1 if it was visible the last time the late phase looked
     Occlusion occlusion;
     CulledView* rows;      // the views of the rows, and their phases
     uint firstRow;         // the row of this dispatch's first (dispatches have at most 65,535 rows)
@@ -29,7 +28,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
 {
     CulledView row = push.rows[push.firstRow + id.y];
     uint v = row.view;
-    View view = push.views[v];
+    View view = push.views[v].view[0];
     if (id.x >= view.instanceCount)
     {
         return;
@@ -45,7 +44,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     float radius = mesh.sphere.w * maxScale(instance);
     uint phase = row.phase;
     bool inView = inFrustum(view, center, radius);
-    if (phase == PHASE_EARLY && (!inView || push.visibility[id.x] == 0))
+    if (phase == PHASE_EARLY && (!inView || view.visibility[id.x] == 0))
     {
         return; // the early phase draws what was visible last frame
     }
@@ -53,9 +52,9 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     {
         // Every instance in view is tested against the pyramid of what the early phase drew; the late phase draws
         // those now visible that the early phase did not.
-        bool drawnEarly = push.visibility[id.x] != 0;
+        bool drawnEarly = view.visibility[id.x] != 0;
         bool visible = inView && unoccluded(view, push.occlusion, center, radius);
-        push.visibility[id.x] = visible ? 1 : 0;
+        view.visibility[id.x] = visible ? 1 : 0;
         if (!visible || drawnEarly)
         {
             return;

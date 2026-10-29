@@ -101,7 +101,7 @@ import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
  *   <li>a bottom-level acceleration structure per mesh ({@link #add}), built once from one of its detail levels,
  *       straight from the pool's quantized positions (the mesh's box as the build transform) where the GPU
  *       takes that vertex format, from decoded positions where not, then compacted;</li>
- *   <li>a top-level one, rebuilt on the GPU every frame ({@link #buildTopLevel}) from the renderer's instance buffer
+ *   <li>a top-level one, rebuilt on the GPU every frame ({@link #buildTopLevel}) from a scene's instance buffer
  *       by a compute pass: no work per instance on the CPU.</li>
  * </ul>
  *
@@ -320,22 +320,24 @@ public final class RayTracing implements AutoCloseable {
     }
 
     /**
-     * Records the top level's build from {@code renderer}'s instances: a compute pass writes the instance records
+     * Records the top level's build from {@code view}'s scene's instances, relative to the view's camera (where the
+     * traced points are): a compute pass writes the instance records
      * (transform, mesh's bottom level), then the top level is built, ready for ray queries after this. Allocates
      * nothing.
      */
-    public void buildTopLevel(VkCommandBuffer commands, MeshletRenderer renderer) {
-        int count = Math.min(renderer.instanceCount(), maxInstances);
+    public void buildTopLevel(VkCommandBuffer commands, RenderView view) {
+        GpuScene scene = view.renderer().scene();
+        int count = Math.min(scene.highWater(), maxInstances);
         // Whatever traced the top level before (the last frame) is done with it before it is rebuilt.
         barrier(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, PUSH_BYTES);
-            memPutLong(push, renderer.instanceBuffer().deviceAddress());
+            memPutLong(push, scene.instanceBuffer().deviceAddress());
             memPutLong(push + 8, bottomTable.deviceAddress());
             memPutLong(push + 16, instancesAddress);
             memPutInt(push + 24, count);
-            memPutLong(push + 32, renderer.viewAddress(0)); // relative to the camera shading the traced points
+            memPutLong(push + 32, view.address()); // relative to the camera shading the traced points
             instancePass.bind(commands);
             instancePass.push(commands, push, PUSH_BYTES);
             vkCmdDispatch(commands, (count + 63) / 64, 1, 1);

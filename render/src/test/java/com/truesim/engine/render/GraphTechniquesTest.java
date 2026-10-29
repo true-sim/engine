@@ -64,7 +64,9 @@ class GraphTechniquesTest {
     private VulkanInstance instance;
     private VulkanDevice device;
     private GeometryPool pool;
+    private GpuScene scene;
     private MeshletRenderer renderer;
+    private RenderView view;
     private FrameGraph graph;
     private GpuImage target;
     private ExternalImage output;
@@ -92,8 +94,9 @@ class GraphTechniquesTest {
         hillMesh = MeshletRendererTest.grid(16, 0.1f, true, VertexFormat.POSITIONS_ONLY); // a cluster hierarchy
         hill = pool.add(hillMesh);
         assertThat(hillMesh.levels()).as("the hill's levels").hasSizeGreaterThan(1);
-        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12),
-            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+        scene = new GpuScene(device, pool, 16);
+        renderer = new MeshletRenderer(device, scene, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+        view = renderer.createView(ViewOptions.of(256, 1 << 12).withOcclusion(true));
         graph = new FrameGraph(device, 2);
         int usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
             | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -120,6 +123,7 @@ class GraphTechniquesTest {
             pixels.close();
             target.close();
             renderer.close();
+            scene.close();
             pool.close();
             device.close();
             instance.close();
@@ -283,23 +287,24 @@ class GraphTechniquesTest {
         // instance data has a copy per frame slot.
         GpuBuffer[] readbacks = {GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT),
             GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)};
-        try (MeshletRenderer moving = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12),
-            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, graph.frameSlots())) {
-            SceneGeometry geometry = SceneGeometry.meshlets(moving);
+        try (GpuScene moving = new GpuScene(device, pool, 16, graph.frameSlots());
+             MeshletRenderer drawing = new MeshletRenderer(device, moving, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots())) {
+            SceneGeometry geometry = SceneGeometry.meshlets(drawing);
+            RenderView movingView = geometry.createView(ViewOptions.of(256, 1 << 12).withOcclusion(true));
             Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
-            graph.add(new ClusteredForwardShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
-                    .clearColor(0, 0, 0))
+            graph.add(new ClusteredForwardShading(geometry, movingView, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0))
                 .add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
-            moving.setInstanceCount(1);
             for (int frame = 0; frame < 6; frame++) {
                 int slot = graph.beginFrame();
                 assertThat(slot).isEqualTo(frame % 2);
                 // Facing the camera, a quarter of the view wide, left on even frames and right on odd ones.
-                moving.setInstance(0, quad, frame % 2 == 0 ? -1 : 1, 0, -3, HALF, 0, 0, HALF, 0.5f, 0.5f, 0.5f);
-                geometry.setView(0, camera, 1, MeshletRenderer.MODE_WHITE);
+                moving.set(0, quad, frame % 2 == 0 ? -1 : 1, 0, -3, HALF, 0, 0, HALF, 0.5f, 0.5f, 0.5f);
+                geometry.setView(movingView, camera, 1, MeshletRenderer.MODE_WHITE);
                 graph.submit(0, 0);
                 // Changing the instance while both frames are in flight does not reach them.
-                moving.setInstance(0, quad, 0, 0, -3, HALF, 0, 0, HALF, 0.5f, 0.5f, 0.5f);
+                moving.set(0, quad, 0, 0, -3, HALF, 0, 0, HALF, 0.5f, 0.5f, 0.5f);
             }
             device.waitIdle();
             assertThat(litColumn(readbacks[0])).as("the last even frame").isLessThan(SIZE / 2.0 - 4);
@@ -315,14 +320,14 @@ class GraphTechniquesTest {
     @Test
     void clusteredForwardShadingLightsEachPixelByTheLightsNearIt() {
         // A floor below the camera, a red light over its left side and a blue one over its right.
-        renderer.setInstance(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
-        renderer.setInstanceCount(1);
+        scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+        scene.removeFrom(1);
         Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
-        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
         try (Lights lights = new Lights(device, 4, 1)) {
             lights.point(0, -1, -0.5f, -1.5f, 3, 6, 0, 0).point(1, 1, -0.5f, -1.5f, 3, 0, 0, 6).setCount(2);
             ClusteredLights clustered = new ClusteredLights(lights, camera, SIZE, SIZE);
-            graph.add(MeshletBenchmark.forward(renderer, SIZE, SIZE)).add(clustered)
+            graph.add(MeshletBenchmark.forward(view, SIZE, SIZE)).add(clustered)
                 .output(Keys.SCENE_COLOR, output);
             frame();
             assertThat(graph.passes()).containsOnlyOnce("light clusters");
@@ -349,18 +354,18 @@ class GraphTechniquesTest {
     void bothShadingsDrawTheSameImage() {
         assumeThat(device.primitiveIds()).as("primitive IDs in fragment shaders").isTrue();
         // The lit floor, and a quad standing on it hiding part of it.
-        renderer.setInstance(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
-        renderer.setInstance(1, quad, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
-        renderer.setInstanceCount(2);
+        scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+        scene.set(1, quad, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+        scene.removeFrom(2);
         Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
-        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
         try (Lights lights = new Lights(device, 4, 1)) {
             lights.point(0, -1, -0.5f, -1.5f, 3, 6, 0, 0).point(1, 1, -0.5f, -1.5f, 3, 0, 0, 6)
                 .directional(2, -0.4f, -0.8f, -0.3f, 1, 1, 1).setCount(3);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-            ClusteredForwardShading forwardShading = new ClusteredForwardShading(geometry, SIZE, SIZE,
+            ClusteredForwardShading forwardShading = new ClusteredForwardShading(geometry, view, SIZE, SIZE,
                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f);
-            VisibilityBufferShading visibilityShading = new VisibilityBufferShading(geometry, SIZE, SIZE,
+            VisibilityBufferShading visibilityShading = new VisibilityBufferShading(geometry, view, SIZE, SIZE,
                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f);
             graph.add(forwardShading).add(new ClusteredLights(lights, camera, SIZE, SIZE))
                 .output(Keys.SCENE_COLOR, output);
@@ -403,25 +408,17 @@ class GraphTechniquesTest {
         assertThat(geometry.provider(GeometryProvider.class)).isNotNull();
         assertThat(new SceneGeometry(new GeometryProvider() {
             @Override
-            public void setView(int index, Camera camera, float errorPixels, int mode) {
-            }
-
-            @Override
-            public void setViewFilter(int index, int layers, boolean castersOnly) {
-            }
-
-            @Override
             public void drawFirst(GraphBuilder g, SceneDraw draw, SceneDraw.Targets targets, boolean load) {
             }
         }).provider(MeshletGeometry.class)).isNull();
-        renderer.setInstance(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
-        renderer.setInstanceCount(1);
+        scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
+        scene.removeFrom(1);
         Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
-        geometry.setView(0, camera, 1, MeshletRenderer.MODE_WHITE);
+        geometry.setView(view, camera, 1, MeshletRenderer.MODE_WHITE);
         // Two techniques asking for the same depth-only draw of the camera, with occlusion culling: drawn once.
         Key first = Key.of("first");
         Key second = Key.of("second");
-        SceneDraw draw = new SceneDraw(geometry, 0, null, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, SIZE, SIZE,
+        SceneDraw draw = new SceneDraw(geometry, view, null, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, SIZE, SIZE,
             true);
         graph.add(new DepthCopy(first, draw)).add(new DepthCopy(second, draw))
             .add(new Halves(EDGE, first, second)).output(EDGE, output);
@@ -432,17 +429,18 @@ class GraphTechniquesTest {
         assertThat(red(SIZE / 2, SIZE / 2)).isCloseTo(0.02, org.assertj.core.data.Offset.offset(0.005));
         assertThat(red(2, 2)).isZero();
         assertThatIllegalArgumentException().isThrownBy(() -> new SceneGeometry());
-        assertThatIllegalArgumentException().isThrownBy(() -> new SceneDraw(geometry, 1, null, SurfaceOutput.ids(),
-            VK_FORMAT_D32_SFLOAT, 1, 1, true));
-        assertThatIllegalArgumentException().isThrownBy(() -> new SceneDraw(geometry, 0, null, SurfaceOutput.ids(),
+        RenderView plain = geometry.createView(ViewOptions.of(16, 64));
+        assertThatIllegalArgumentException().as("occlusion in a view without").isThrownBy(() -> new SceneDraw(
+            geometry, plain, null, SurfaceOutput.ids(), VK_FORMAT_D32_SFLOAT, 1, 1, true));
+        assertThatIllegalArgumentException().isThrownBy(() -> new SceneDraw(geometry, view, null, SurfaceOutput.ids(),
             VK_FORMAT_D32_SFLOAT, 0, 1, false));
         assertThatIllegalArgumentException().isThrownBy(() -> new VisibilityBufferShading(new SceneGeometry(
-            new MeshletGeometry(renderer), new MeshletGeometry(renderer)), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+            new MeshletGeometry(renderer), new MeshletGeometry(renderer)), view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
             VK_FORMAT_D32_SFLOAT));
         // Meshlets come first: another provider before them is not supported yet.
         graph.close();
         graph = new FrameGraph(device, 2).add(new ClusteredForwardShading(new SceneGeometry(
-            new MeshletGeometry(renderer), new MeshletGeometry(renderer)), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+            new MeshletGeometry(renderer), new MeshletGeometry(renderer)), view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
             VK_FORMAT_D32_SFLOAT)).output(Keys.SCENE_COLOR, output);
         assertThatIllegalStateException().isThrownBy(this::frame).withMessageContaining("Meshlets are drawn first");
     }
@@ -595,11 +593,11 @@ class GraphTechniquesTest {
 
     @Test
     void theForwardShadedSceneDrawsStraightIntoTheTarget() {
-        renderer.setInstance(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
-        renderer.setInstanceCount(1);
-        renderer.setView(new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
+        scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
+        scene.removeFrom(1);
+        view.set(new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
             MeshletRenderer.MODE_WHITE);
-        graph.add(MeshletBenchmark.forward(renderer, SIZE, SIZE)
+        graph.add(MeshletBenchmark.forward(view, SIZE, SIZE)
                 .clearColor(0, 0, 1))
             .output(Keys.SCENE_COLOR, output);
         frame();
@@ -608,10 +606,10 @@ class GraphTechniquesTest {
         assertThat(graph.pooledImages()).isEqualTo(2); // depth and its pyramid: the color is the target
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
         assertThat(red(1, 1)).isZero(); // blue clear color
-        assertThat(renderer.visibleMeshlets()).isEqualTo(1);
+        assertThat(view.visibleMeshlets()).isEqualTo(1);
         // Without occlusion culling: one pass.
         graph.close();
-        graph = new FrameGraph(device, 2).add(MeshletBenchmark.forward(renderer, SIZE, SIZE).occlusion(false))
+        graph = new FrameGraph(device, 2).add(MeshletBenchmark.forward(view, SIZE, SIZE).occlusion(false))
             .output(Keys.SCENE_COLOR, output);
         frame();
         assertThat(graph.passes()).containsExactly("meshlet culling", "meshlets");
@@ -636,32 +634,76 @@ class GraphTechniquesTest {
             : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED}) {
             renderer.setPath(path);
             // A wall filling the view 5 units ahead, and 8 quads behind it, 10 units ahead.
-            renderer.setInstance(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);
+            scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);
             for (int i = 1; i <= 8; i++) {
-                renderer.setInstance(i, quad, (i % 4 - 1.5f) * 2.5f, i <= 4 ? -1.5f : 1.5f, -10, HALF, 0, 0, HALF,
+                scene.set(i, quad, (i % 4 - 1.5f) * 2.5f, i <= 4 ? -1.5f : 1.5f, -10, HALF, 0, 0, HALF,
                     0.5f, 0.5f, 0.5f);
             }
-            renderer.setInstanceCount(9);
-            renderer.setView(new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
+            scene.removeFrom(9);
+            view.set(new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
                 MeshletRenderer.MODE_WHITE);
             graph.close();
-            graph = new FrameGraph(device, 2).add(MeshletBenchmark.forward(renderer, SIZE, SIZE).clearColor(0, 0, 1))
+            graph = new FrameGraph(device, 2).add(MeshletBenchmark.forward(view, SIZE, SIZE).clearColor(0, 0, 1))
                 .output(Keys.SCENE_COLOR, output);
             frame(); // nothing known yet: the late phase draws all
-            assertThat(renderer.visibleMeshlets()).as("first frame, %s", path).isEqualTo(9);
+            assertThat(view.visibleMeshlets()).as("first frame, %s", path).isEqualTo(9);
             frame(); // all drawn early; the late phase finds the 8 behind the wall hidden
-            assertThat(renderer.visibleMeshlets()).isEqualTo(9);
+            assertThat(view.visibleMeshlets()).isEqualTo(9);
             frame(); // only the wall now
-            assertThat(renderer.visibleMeshlets()).as("hidden, %s", path).isEqualTo(1);
+            assertThat(view.visibleMeshlets()).as("hidden, %s", path).isEqualTo(1);
             assertThat(covered()).isEqualTo(SIZE * SIZE);
             // The wall moves out of view: the quads behind it are drawn the same frame.
-            renderer.setInstance(0, quad, 100, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);
+            scene.set(0, quad, 100, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);
             frame();
-            assertThat(renderer.visibleMeshlets()).as("shown, %s", path).isEqualTo(8);
+            assertThat(view.visibleMeshlets()).as("shown, %s", path).isEqualTo(8);
             assertThat(covered()).isPositive().isLessThan(SIZE * SIZE / 2);
             frame();
-            assertThat(renderer.visibleMeshlets()).isEqualTo(8); // drawn early now
+            assertThat(view.visibleMeshlets()).isEqualTo(8); // drawn early now
         }
+    }
+
+    @Test
+    void viewsCullOccludedInstancesEachByItsOwnHistory() {
+        // The wall and the 8 quads behind it, seen by the camera and by a second camera behind the quads looking back:
+        // the wall hides the quads from the first, while the second sees them (and the wall's back, culled). Both
+        // views cull occlusion in one pass, each from what it saw itself the frame before.
+        scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);
+        for (int i = 1; i <= 8; i++) {
+            scene.set(i, quad, (i % 4 - 1.5f) * 2.5f, i <= 4 ? -1.5f : 1.5f, -10, -HALF, 0, 0, HALF, 0.5f, 0.5f,
+                0.5f); // facing -z, the second camera
+        }
+        view.set(new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1, MeshletRenderer.MODE_WHITE);
+        RenderView back = renderer.createView(ViewOptions.of(256, 1 << 12).withOcclusion(true));
+        back.set(new Camera().position(0, 0, -20).set(0, 0, 1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
+            MeshletRenderer.MODE_WHITE);
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        Key first = Key.of("first");
+        Key second = Key.of("second");
+        graph.add(new DepthCopy(first, new SceneDraw(geometry, view, null, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT,
+                SIZE, SIZE, true)))
+            .add(new DepthCopy(second, new SceneDraw(geometry, back, null, SurfaceOutput.depth(),
+                VK_FORMAT_D32_SFLOAT, SIZE, SIZE, true)))
+            .add(new Halves(EDGE, first, second)).output(EDGE, output);
+        for (int frame = 0; frame < 3; frame++) {
+            frame();
+        }
+        assertThat(graph.passes()).containsOnlyOnce("meshlet culling");
+        // Each drew what it sees early, from its own history, and found nothing new late.
+        assertThat(early(view)).as("the camera, early").isEqualTo(1);
+        assertThat(view.visibleMeshlets()).as("the camera").isEqualTo(1);
+        assertThat(early(back)).as("the second camera, early").isEqualTo(8);
+        assertThat(back.visibleMeshlets()).as("the second camera").isEqualTo(8);
+        // The wall moves away: the camera finds the quads late the same frame, the second camera sees no change.
+        scene.set(0, quad, 100, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);
+        scene.set(1, quad, -1.25f, -1.5f, -10, HALF, 0, 0, HALF, 0.5f, 0.5f, 0.5f); // turned to the camera
+        frame();
+        assertThat(view.visibleMeshlets()).as("the camera, the wall gone").isEqualTo(1);
+        assertThat(early(back)).as("the second camera, early").isEqualTo(7);
+    }
+
+    /** The meshlets {@code view} drew in the early phase of the last frame. */
+    private static int early(RenderView view) {
+        return view.drawCount().memory().get(ValueLayout.JAVA_INT, 0);
     }
 
     @Test
@@ -762,21 +804,21 @@ class GraphTechniquesTest {
     @Test
     void classicLodDrawsWhatMeshletsDraw() {
         // The lit floor, and a quad standing on it hiding part of it.
-        renderer.setInstance(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
-        renderer.setInstance(1, quad, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
-        renderer.setInstanceCount(2);
+        scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+        scene.set(1, quad, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+        scene.removeFrom(2);
         Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
-        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
         try (ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
             VK_FORMAT_D32_SFLOAT, 64)) {
             assertThat(classic.add(quad, quadMesh).renderer()).isSameAs(renderer);
             SceneGeometry geometry = new SceneGeometry(classic);
-            ClusteredForwardShading meshlets = MeshletBenchmark.forward(renderer, SIZE, SIZE).clearColor(0, 0, 0.5f);
+            ClusteredForwardShading meshlets = MeshletBenchmark.forward(view, SIZE, SIZE).clearColor(0, 0, 0.5f);
             graph.add(meshlets).output(Keys.SCENE_COLOR, output);
             frame();
             frame();
             int[] expected = image();
-            ClusteredForwardShading forward = new ClusteredForwardShading(geometry, SIZE, SIZE,
+            ClusteredForwardShading forward = new ClusteredForwardShading(geometry, view, SIZE, SIZE,
                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f);
             graph.replace(forward);
             frame();
@@ -784,7 +826,7 @@ class GraphTechniquesTest {
                 .doesNotContain("meshlet culling");
             assertThat(differing(expected)).as("classic forward against meshlets").isZero();
             if (device.primitiveIds()) {
-                graph.replace(new VisibilityBufferShading(geometry, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+                graph.replace(new VisibilityBufferShading(geometry, view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
                     VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f));
                 frame();
                 assertThat(graph.passes()).contains("classic LOD ids", "visibility shading");
@@ -793,10 +835,10 @@ class GraphTechniquesTest {
                 graph.replace(forward);
             }
             // Instances of meshes not added are not drawn: the floor is all that is left.
-            renderer.setInstance(1, hill, 0, -0.5f, -2.5f, 0, 0, 0, 1, 1, 1, 1);
+            scene.set(1, hill, 0, -0.5f, -2.5f, 0, 0, 0, 1, 1, 1, 1);
             frame();
-            renderer.setInstance(1, quad, 0, -0.5f, -2.5f, 0, 0, 0, 1, 1, 1, 1);
-            renderer.setInstanceCount(1);
+            scene.set(1, quad, 0, -0.5f, -2.5f, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(1);
             int[] floorOnly = image();
             frame();
             assertThat(differing(floorOnly)).as("the hill is not drawn").isZero();
@@ -810,7 +852,7 @@ class GraphTechniquesTest {
         }
         GeometryProvider meshlets = SceneGeometry.meshlets(renderer).providers().getFirst();
         assertThatIllegalArgumentException().isThrownBy(() -> new VisibilityBufferShading(
-            new SceneGeometry(meshlets, meshlets), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT));
+            new SceneGeometry(meshlets, meshlets), view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT));
         assertThatIllegalArgumentException().isThrownBy(() -> new ClassicLodGeometry(device, renderer,
             VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, 0));
     }
@@ -821,19 +863,19 @@ class GraphTechniquesTest {
         assertThat(lods.levels()).as("levels").hasSizeGreaterThan(2);
         int mesh = pool.add(lods);
         Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
-        renderer.setView(camera, 1, MeshletRenderer.MODE_MESHLETS); // a color per meshlet: per level here
+        view.set(camera, 1, MeshletRenderer.MODE_MESHLETS); // a color per meshlet: per level here
         try (ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
             VK_FORMAT_D32_SFLOAT, 64)) {
             classic.add(mesh, lods);
-            ClusteredForwardShading meshlets = MeshletBenchmark.forward(renderer, SIZE, SIZE);
-            ClusteredForwardShading classicForward = new ClusteredForwardShading(new SceneGeometry(classic), SIZE,
-                SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+            ClusteredForwardShading meshlets = MeshletBenchmark.forward(view, SIZE, SIZE);
+            ClusteredForwardShading classicForward = new ClusteredForwardShading(new SceneGeometry(classic), view,
+                SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
             graph.add(meshlets).output(Keys.SCENE_COLOR, output);
             java.util.Set<Integer> colors = new java.util.HashSet<>();
             for (float distance : new float[] {1.2f, 3, 7, 16, 36}) {
                 // Facing the camera, a little off the middle so the middle pixel is not on an edge.
-                renderer.setInstance(0, mesh, 0.05f, 0.03f, -distance, HALF, 0, 0, HALF, 1, 1, 1);
-                renderer.setInstanceCount(1);
+                scene.set(0, mesh, 0.05f, 0.03f, -distance, HALF, 0, 0, HALF, 1, 1, 1);
+                scene.removeFrom(1);
                 graph.replace(meshlets);
                 frame();
                 frame();

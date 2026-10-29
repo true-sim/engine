@@ -57,7 +57,9 @@ class MeshletRendererTest {
     private VulkanInstance instance;
     private VulkanDevice device;
     private GeometryPool pool;
+    private GpuScene scene;
     private MeshletRenderer renderer;
+    private RenderView view;
     private GpuImage color;
     private GpuImage depth;
     private GpuBuffer pixels;
@@ -81,8 +83,9 @@ class MeshletRendererTest {
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 16, 1024, 8));
         quad = pool.add(grid(1, 2, false, VertexFormat.POSITIONS_ONLY));
         terrain = pool.add(grid(64, 1, true, VertexFormat.of(VertexAttribute.NORMAL)));
-        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(256, 8192, 1024, 1 << 20),
-            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+        scene = new GpuScene(device, pool, 256);
+        renderer = new MeshletRenderer(device, scene, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+        view = renderer.createView(ViewOptions.of(8192, 1 << 20));
         color = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
         depth = new GpuImage(device, SIZE, SIZE, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
@@ -98,6 +101,7 @@ class MeshletRendererTest {
             depth.close();
             color.close();
             renderer.close();
+            scene.close();
             pool.close();
             device.close();
             instance.close();
@@ -143,8 +147,8 @@ class MeshletRendererTest {
 
     /** Renders a frame and reads it back; returns the visible meshlets. */
     private int render() {
-        renderWith(commands -> renderer.record(commands, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
-        return renderer.visibleMeshlets();
+        renderWith(commands -> renderer.record(commands, view, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
+        return view.visibleMeshlets();
     }
 
     /** Records {@code draw} into the color and depth images and reads the color back. */
@@ -189,14 +193,14 @@ class MeshletRendererTest {
 
     /** Looks down -Z with a 60 degree field of view. */
     private void lookForward(float errorPixels, int mode) {
-        renderer.setView(camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), errorPixels, mode);
+        view.set(camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), errorPixels, mode);
     }
 
     @Test
     void aQuadFacingTheCameraCoversWhereItShould() {
         // The quad faces +y; rotated 90 degrees about x it faces +z, the camera, 5 units ahead.
-        renderer.setInstance(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
-        renderer.setInstanceCount(1);
+        scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
+        scene.removeFrom(1);
         lookForward(1, MeshletRenderer.MODE_WHITE);
         assertThat(render()).isEqualTo(1);
         // 2 units across at distance 5 with a 60 degree view: 128 / (2 * 5 * tan 30) * 2 = 44 pixels across.
@@ -209,27 +213,27 @@ class MeshletRendererTest {
 
     @Test
     void meshletsOutsideTheViewOrFacingAwayAreNotDrawn() {
-        renderer.setInstance(0, quad, 0, 0, 5, HALF, 0, 0, HALF, 1, 1, 1);       // behind the camera
-        renderer.setInstance(1, quad, 40, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);     // far to the right
-        renderer.setInstance(2, quad, 0, 0, -5, -HALF, 0, 0, HALF, 1, 1, 1);     // facing away
-        renderer.setInstanceCount(3);
+        scene.set(0, quad, 0, 0, 5, HALF, 0, 0, HALF, 1, 1, 1);       // behind the camera
+        scene.set(1, quad, 40, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);     // far to the right
+        scene.set(2, quad, 0, 0, -5, -HALF, 0, 0, HALF, 1, 1, 1);     // facing away
+        scene.removeFrom(3);
         lookForward(1, MeshletRenderer.MODE_WHITE);
         assertThat(render()).isZero();
         assertThat(covered()).isZero();
-        renderer.setInstanceCount(0);
+        scene.removeFrom(0);
         assertThat(render()).isZero();
     }
 
     @Test
     void detailFollowsTheAllowedErrorWithoutHoles() {
         // The bumpy terrain, 64 x 64 units, seen from 40 units above and in front, looking down at 45 degrees.
-        renderer.setInstance(0, terrain, 0, -40, -40, 0, 0, 0, 1, 1, 1, 1);
-        renderer.setInstanceCount(1);
+        scene.set(0, terrain, 0, -40, -40, 0, 0, 0, 1, 1, 1, 1);
+        scene.removeFrom(1);
         int previous = Integer.MAX_VALUE;
         int full = -1;
         int fullCoverage = -1;
         for (float error : new float[] {0, 0.5f, 2, 8, 32, 1e6f}) {
-            renderer.setView(camera.set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), error,
+            view.set(camera.set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), error,
                 MeshletRenderer.MODE_WHITE);
             int meshlets = render();
             assertThat(meshlets).as("meshlets at %s pixels", error).isLessThanOrEqualTo(previous).isPositive();
@@ -244,9 +248,9 @@ class MeshletRendererTest {
                 .isLessThan(0.02);
         }
         assertThat(previous).isLessThan(full / 4); // the coarsest cut: a few meshlets
-        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
         assertThat(render()).isPositive();
-        renderer.setView(camera, 1, MeshletRenderer.MODE_MESHLETS);
+        view.set(camera, 1, MeshletRenderer.MODE_MESHLETS);
         assertThat(render()).isPositive();
     }
 
@@ -255,26 +259,26 @@ class MeshletRendererTest {
         int n = 0;
         for (int x = -7; x <= 7; x++) {
             for (int y = -7; y <= 7; y++) {
-                renderer.setInstance(n++, quad, x * 3, y * 3, -60, HALF, 0, 0, HALF, 1, 1, 1);
+                scene.set(n++, quad, x * 3, y * 3, -60, HALF, 0, 0, HALF, 1, 1, 1);
             }
         }
-        renderer.setInstanceCount(n);
+        scene.removeFrom(n);
         lookForward(1, MeshletRenderer.MODE_WHITE);
         assertThat(render()).isEqualTo(n); // all 225 in view at 60 units
-        assertThat(renderer.limits().draws()).isEqualTo(8192);
+        assertThat(view.options().draws()).isEqualTo(8192);
     }
 
     @Test
     void bothPathsDrawTheSameImage() {
         assumeThat(device.meshShaders()).as("no mesh shaders").isTrue();
         assertThat(renderer.path()).isEqualTo(MeshletRenderer.Path.MESH_SHADERS); // chosen where available
-        renderer.setInstance(0, terrain, 0, -40, -40, 0, 0, 0, 1, 1, 1, 1);
+        scene.set(0, terrain, 0, -40, -40, 0, 0, 0, 1, 1, 1, 1);
         int n = 1;
         for (int i = 0; i < 20; i++) {
-            renderer.setInstance(n++, quad, (i % 5 - 2) * 4, (i / 5 - 2) * 3, -15 - i, HALF, 0, 0, HALF, 1, 1, 1);
+            scene.set(n++, quad, (i % 5 - 2) * 4, (i / 5 - 2) * 3, -15 - i, HALF, 0, 0, HALF, 1, 1, 1);
         }
-        renderer.setInstanceCount(n);
-        renderer.setView(camera.set(0, -0.3, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
+        scene.removeFrom(n);
+        view.set(camera.set(0, -0.3, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
             MeshletRenderer.MODE_MESHLETS);
         renderer.setPath(MeshletRenderer.Path.INDEXED);
         assertThat(renderer.path()).isEqualTo(MeshletRenderer.Path.INDEXED);
@@ -299,93 +303,143 @@ class MeshletRendererTest {
 
     @Test
     void viewsCulledTogetherDrawWhatEachSees() {
-        renderer.close();
-        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(256, 8192, 1024, 1 << 20, 2),
-            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
-        renderer.setInstance(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1); // ahead, facing the camera
-        renderer.setInstance(1, quad, 0, 0, 5, -HALF, 0, 0, HALF, 1, 1, 1); // behind, facing it
-        renderer.setInstanceCount(2);
+        scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1); // ahead, facing the camera
+        scene.set(1, quad, 0, 0, 5, -HALF, 0, 0, HALF, 1, 1, 1); // behind, facing it
         lookForward(1, MeshletRenderer.MODE_WHITE);
-        renderer.setView(1, new Camera().set(0, 0, 1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
-            MeshletRenderer.MODE_WHITE);
+        RenderView back = renderer.createView(ViewOptions.of(64, 1 << 12))
+            .set(new Camera().set(0, 0, 1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1, MeshletRenderer.MODE_WHITE);
+        RenderView[] both = {view, back};
+        boolean[] notEarly = {false, false};
         assertThat(render()).isEqualTo(1);
         int alone = covered();
         for (MeshletRenderer.Path path : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED,
             MeshletRenderer.Path.AUTO}) {
             renderer.setPath(path);
             renderWith(commands -> {
-                renderer.cullViews(commands, new int[] {0, 1}, 2, -1);
-                renderer.drawView(commands, 0, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
+                renderer.cullViews(commands, both, notEarly, 2);
+                renderer.drawView(commands, view, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
             });
             assertThat(covered()).isEqualTo(alone);
-            assertThat(renderer.visibleMeshlets(0)).isEqualTo(1);
-            assertThat(renderer.visibleMeshlets(1)).isEqualTo(1); // each its own quad
+            assertThat(view.visibleMeshlets()).isEqualTo(1);
+            assertThat(back.visibleMeshlets()).isEqualTo(1); // each its own quad
             renderWith(commands -> {
-                renderer.cullViews(commands, new int[] {0, 1}, 2, -1);
-                renderer.drawView(commands, 1, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
+                renderer.cullViews(commands, both, notEarly, 2);
+                renderer.drawView(commands, back, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
             });
             assertThat(covered()).isEqualTo(alone); // the other quad, from the other side
         }
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, new int[0], 0, -1));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, new int[] {2}, 1, -1)); // none
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, new int[] {-1}, 1, -1));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, new int[] {0}, 2, -1));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, new int[] {0}, 1, 1));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, new int[] {0, 0}, 2, -1));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.setView(2, camera, 1, 0));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.drawView(null, 2, 0, 0, 1, 1, 0, 0, 0))
-            .withMessageContaining("has no lists");
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.recordDepth(null, 0, 1, 1, 3));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 1, 1, 0));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, both, notEarly, 0));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, both, notEarly, 3));
+        assertThatIllegalArgumentException().isThrownBy(() -> renderer.cullViews(null, both, new boolean[1], 2));
+        assertThatIllegalArgumentException().as("the early phase without occlusion")
+            .isThrownBy(() -> renderer.cullViews(null, both, new boolean[] {true, false}, 2));
+        assertThatIllegalArgumentException().as("culled twice")
+            .isThrownBy(() -> renderer.cullViews(null, new RenderView[] {back, back}, notEarly, 2));
+        assertThatIllegalArgumentException().as("the late phase without occlusion")
+            .isThrownBy(() -> renderer.recordLate(null, view, 0, 0, 1, 1, 0, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> ViewOptions.of(0, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> ViewOptions.of((1 << 22) + 1, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> ViewOptions.of(1, 0));
+        try (GpuScene other = new GpuScene(device, pool, 4);
+             MeshletRenderer elsewhere = new MeshletRenderer(device, other, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT)) {
+            RenderView theirs = elsewhere.createView(ViewOptions.of(16, 64));
+            assertThat(elsewhere.scene()).isSameAs(other);
+            assertThat(elsewhere.views()).containsExactly(theirs);
+            assertThatIllegalArgumentException().as("another renderer's view")
+                .isThrownBy(() -> renderer.drawView(null, theirs, 0, 0, 1, 1, 0, 0, 0));
+            assertThatIllegalArgumentException().as("another renderer's view")
+                .isThrownBy(() -> renderer.cullViews(null, new RenderView[] {theirs}, notEarly, 1));
+            elsewhere.close();
+            assertThatIllegalStateException().as("closed with its renderer")
+                .isThrownBy(() -> theirs.set(camera, 1, 0));
+            assertThatIllegalStateException().isThrownBy(() -> theirs.filter(-1, false));
+        }
     }
 
     @Test
     void holesLayersAndCastersDecideWhatAViewDraws() {
         // Three quads side by side, facing the camera, one meshlet each.
         for (int i = 0; i < 3; i++) {
-            renderer.setInstance(i, quad, 0, 2 * i - 2, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
+            scene.set(i, quad, 0, 2 * i - 2, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
         }
-        renderer.setInstanceCount(3);
+        scene.removeFrom(3);
         lookForward(1, MeshletRenderer.MODE_WHITE);
         assertThat(render()).isEqualTo(3);
         // A removed instance is a hole: skipped, the others keep their ids.
-        renderer.removeInstance(1);
+        scene.remove(1);
         assertThat(render()).isEqualTo(2);
-        renderer.setInstance(1, quad, 0, 0, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
+        scene.set(1, quad, 0, 0, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
         assertThat(render()).isEqualTo(3);
         // Layers: the right quad on layer 3 only, the left one casting no shadow.
-        renderer.setInstance(2, quad, 0, 1 << 3, true, 2, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
-        renderer.setInstance(0, quad, 0, 1, false, -2, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
+        scene.set(2, quad, 0, 1 << 3, true, 2, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
+        scene.set(0, quad, 0, 1, false, -2, 0, -8, HALF, 0, 0, HALF, 0.8f, 0.8f, 0.8f);
         assertThat(render()).as("every layer, by default").isEqualTo(3);
-        renderer.setViewFilter(0, 1, false);
+        view.filter(1, false);
         assertThat(render()).as("layer 0").isEqualTo(2);
-        renderer.setViewFilter(0, 1 << 3 | 1 << 7, false);
+        view.filter(1 << 3 | 1 << 7, false);
         assertThat(render()).as("layers 3 and 7").isEqualTo(1);
         assertThat(pixel(SIZE / 2 + 30, SIZE / 2)).isEqualTo(WHITE); // the right one
-        renderer.setViewFilter(0, -1, true);
+        view.filter(-1, true);
         assertThat(render()).as("casters only").isEqualTo(2);
         assertThat(pixel(SIZE / 2 - 30, SIZE / 2) & 0xffffff).isZero(); // not the left one
-        renderer.setViewFilter(0, -1, false);
+        view.filter(-1, false);
         org.assertj.core.api.Assertions.assertThatIndexOutOfBoundsException()
-            .isThrownBy(() -> renderer.removeInstance(-1));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.setViewFilter(1, -1, false));
+            .isThrownBy(() -> scene.remove(-1));
+    }
+
+    @Test
+    void instancesTakeTheLowestFreeId() {
+        try (GpuScene small = new GpuScene(device, pool, 3)) {
+            assertThat(small.pool()).isSameAs(pool);
+            assertThat(small.capacity()).isEqualTo(3);
+            assertThat(small.materials()).isNotNull();
+            for (int i = 0; i < 3; i++) {
+                assertThat(small.freeId()).isEqualTo(i);
+                assertThat(small.add(quad, 0, 1, true, i, 0, -5, 0, 0, 0, 1, 1, 1, 1)).isEqualTo(i);
+            }
+            assertThat(small.add(quad, 0, 1, true, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1)).as("full").isEqualTo(-1);
+            assertThat(small.freeId()).isEqualTo(-1);
+            assertThat(small.count()).isEqualTo(3);
+            assertThat(small.highWater()).isEqualTo(3);
+            small.remove(1);
+            small.remove(1); // already a hole
+            assertThat(small.contains(1)).isFalse();
+            assertThat(small.contains(-1)).isFalse();
+            assertThat(small.contains(3)).isFalse();
+            assertThat(small.highWater()).as("a hole below the highest").isEqualTo(3);
+            assertThat(small.add(quad, 0, 1, true, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1)).as("the hole").isEqualTo(1);
+            small.set(1, quad, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1); // set again: still one instance
+            assertThat(small.count()).isEqualTo(3);
+            small.removeFrom(1);
+            assertThat(small.count()).isEqualTo(1);
+            assertThat(small.highWater()).isEqualTo(1);
+            small.remove(0);
+            assertThat(small.highWater()).isZero();
+            assertThatIllegalArgumentException().isThrownBy(() -> small.set(0, 99, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1));
+            assertThatIllegalArgumentException().isThrownBy(() -> small.set(0, quad, -1, 0f, 0, 0, 0, 0, 0, 1, 1, 1,
+                1));
+            assertThatIllegalArgumentException().isThrownBy(() -> small.set(3, quad, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1));
+            small.close();
+            small.close();
+        }
     }
 
     @Test
     void farFromTheOriginTheImageIsTheSame() {
         // The terrain and a quad near the origin, then the same 7,000 km away with the camera there: positions are kept
         // in two floats per axis and drawn relative to the camera, so the image does not change.
-        renderer.setInstance(0, terrain, 0, -3, -8, 0, 0, 0, 1, 1, 1, 1);
-        renderer.setInstance(1, quad, 1, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
-        renderer.setInstanceCount(2);
+        scene.set(0, terrain, 0, -3, -8, 0, 0, 0, 1, 1, 1, 1);
+        scene.set(1, quad, 1, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
+        scene.removeFrom(2);
         lookForward(1, MeshletRenderer.MODE_LIT);
         render();
         int[] near = image();
         double wx = 3_123_456.789;
         double wy = -45_678.9;
         double wz = -7_000_123.456;
-        renderer.setInstance(0, terrain, 0, wx, wy - 3, wz - 8, 0, 0, 0, 1, 1, 1, 1);
-        renderer.setInstance(1, quad, 0, wx + 1, wy, wz - 5, HALF, 0, 0, HALF, 1, 1, 1);
+        scene.set(0, terrain, 0, wx, wy - 3, wz - 8, 0, 0, 0, 1, 1, 1, 1);
+        scene.set(1, quad, 0, wx + 1, wy, wz - 5, HALF, 0, 0, HALF, 1, 1, 1);
         camera.position(wx, wy, wz);
         lookForward(1, MeshletRenderer.MODE_LIT);
         render();
@@ -397,10 +451,10 @@ class MeshletRendererTest {
         assertThat(differing).as("pixels differing from the image near the origin").isLessThanOrEqualTo(SIZE / 8);
         // Floats alone, as positions used to be kept, can only put the quad on a grid of quarter and half units
         // there: drawn visibly off.
-        renderer.setInstance(1, quad, 0, wx + 1.3, wy + 0.1, wz - 5, HALF, 0, 0, HALF, 1, 1, 1);
+        scene.set(1, quad, 0, wx + 1.3, wy + 0.1, wz - 5, HALF, 0, 0, HALF, 1, 1, 1);
         render();
         int[] exact = image();
-        renderer.setInstance(1, quad, 0, (float) (wx + 1.3), (float) (wy + 0.1), (float) (wz - 5), HALF, 0, 0, HALF,
+        scene.set(1, quad, 0, (float) (wx + 1.3), (float) (wy + 0.1), (float) (wz - 5), HALF, 0, 0, HALF,
             1, 1, 1);
         render();
         int[] rounded = image();
@@ -417,32 +471,28 @@ class MeshletRendererTest {
         // Forty cameras, each 5 units in front of a quad of its own, the quads 1,000 units apart far from the origin:
         // views as many as there are, culled in one pass, each seeing only its quad.
         int views = 40;
-        renderer.close();
-        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(views, 1024, 1024, 1 << 12, views),
-            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
         Camera[] cameras = new Camera[views];
+        RenderView[] all = new RenderView[views];
         for (int v = 0; v < views; v++) {
             double x = 5e6 + 1000 * v;
-            renderer.setInstance(v, quad, 0, x, 2e4, -3e6, HALF, 0, 0, HALF, 1, 1, 1);
+            scene.set(v, quad, 0, x, 2e4, -3e6, HALF, 0, 0, HALF, 1, 1, 1);
             cameras[v] = new Camera().position(x, 2e4, -3e6 + 5).set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
-            renderer.setView(v, cameras[v], 1, MeshletRenderer.MODE_WHITE);
-        }
-        renderer.setInstanceCount(views);
-        int[] all = new int[views];
-        for (int v = 0; v < views; v++) {
-            all[v] = v;
+            all[v] = v == 0 ? view : renderer.createView(ViewOptions.of(1024, 1 << 12));
+            all[v].set(cameras[v], 1, MeshletRenderer.MODE_WHITE);
         }
         renderWith(commands -> {
-            renderer.cullViews(commands, all, views, -1);
-            renderer.drawView(commands, 37, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
+            renderer.cullViews(commands, all, new boolean[views], views);
+            renderer.drawView(commands, all[37], color.view(), depth.view(), SIZE, SIZE, 0, 0, 0);
         });
         for (int v = 0; v < views; v++) {
-            assertThat(renderer.visibleMeshlets(v)).as("view %d", v).isEqualTo(1);
+            assertThat(all[v].visibleMeshlets()).as("view %d", v).isEqualTo(1);
         }
         // View 37 drew its quad where a camera 5 units in front of it sees it: the middle, 44 pixels across.
         assertThat(pixel(SIZE / 2, SIZE / 2)).isEqualTo(WHITE);
         assertThat(covered()).isCloseTo(44 * 44, org.assertj.core.data.Percentage.withPercentage(10));
-        assertThat(renderer.viewPosition(37, 0)).isEqualTo(5e6 + 37_000);
+        assertThat(all[37].position(0)).isEqualTo(5e6 + 37_000);
+        assertThat(all[37].index()).isEqualTo(37);
+        assertThat(renderer.views()).hasSize(views);
     }
 
     /**
@@ -528,9 +578,9 @@ class MeshletRendererTest {
             materials.add(new Material().baseColor(0.1f, 0.8f, 0.1f).roughness(1));
             materials.add(new Material().baseColor(0.1f, 0.8f, 0.1f).roughness(1).normalTexture(tilted, 1));
             assertThat(materials.count()).isEqualTo(5);
-            renderer.setMaterials(materials);
-            renderer.setInstance(0, quadMesh, first, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1);
-            renderer.setInstanceCount(1);
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, first, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(1);
             lookForward(1, MeshletRenderer.MODE_LIT);
             render();
             // The left half shows the checker: red and blue texels; the right half is green.
@@ -544,7 +594,7 @@ class MeshletRendererTest {
             assertThat(channel(8, SIZE / 2 + 3, SIZE / 2 + 18))
                 .isGreaterThan(3 * channel(0, SIZE / 2 + 3, SIZE / 2 + 18));
             // From the next material on: green both sides, the right one with the normal map facing the sun more.
-            renderer.setInstance(0, quadMesh, first + 2, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1);
+            scene.set(0, quadMesh, first + 2, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1);
             render();
             double flat = channel(8, SIZE / 2 - 18, SIZE / 2 - 3);
             double bent = channel(8, SIZE / 2 + 3, SIZE / 2 + 18);
@@ -554,7 +604,7 @@ class MeshletRendererTest {
             render();
             assertThat(channel(8, SIZE / 2 + 3, SIZE / 2 + 18))
                 .isCloseTo(flat, org.assertj.core.data.Offset.offset(2.0));
-            renderer.setMaterials(null);
+            scene.setMaterials(null);
             assertThatIllegalArgumentException().isThrownBy(() -> materials.set(5, new Material()));
             assertThatIllegalArgumentException().isThrownBy(() -> materials.set(-1, new Material()));
             for (int i = materials.count(); i < 8; i++) {
@@ -564,7 +614,7 @@ class MeshletRendererTest {
             assertThatIllegalStateException().isThrownBy(() -> materials.add(new Material()));
             assertThatIllegalArgumentException().isThrownBy(() -> textures.color(4, 4, texels(2, (x, y) -> 0)));
             assertThatIllegalArgumentException().isThrownBy(() -> textures.data(0, 4, texels(2, (x, y) -> 0)));
-            assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstance(0, quadMesh, -1, 0, 0, 0, 0,
+            assertThatIllegalArgumentException().isThrownBy(() -> scene.set(0, quadMesh, -1, 0, 0, 0, 0,
                 0, 0, 1, 1, 1, 1));
         }
         assertThatIllegalArgumentException().isThrownBy(() -> new Materials(device, 0));
@@ -600,16 +650,16 @@ class MeshletRendererTest {
         MeshData hill = grid(16, 0.2f, true, VertexFormat.of(VertexAttribute.NORMAL));
         MeshData square = grid(1, 2, false, VertexFormat.POSITIONS_ONLY);
         lookForward(1, MeshletRenderer.MODE_LIT);
-        renderer.setInstanceCount(1);
         // The hill, in a fresh pool of its own.
         int[] fresh;
         try (GeometryPool own = new GeometryPool(device, GeometryPool.Capacity.of(1 << 12, 64, 4));
-             MeshletRenderer drawing = new MeshletRenderer(device, own, new MeshletRenderer.Limits(4, 1024, 64, 1 << 16),
-                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)) {
-            drawing.setInstance(0, own.add(hill), 0, -1, -3, 0.3f, 0, 0, 0.954f, 1, 1, 1);
-            drawing.setInstanceCount(1);
-            drawing.setView(camera, 1, MeshletRenderer.MODE_LIT);
-            renderWith(commands -> drawing.record(commands, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
+             GpuScene ownScene = new GpuScene(device, own, 4);
+             MeshletRenderer drawing = new MeshletRenderer(device, ownScene, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT)) {
+            ownScene.set(0, own.add(hill), 0, -1, -3, 0.3f, 0, 0, 0.954f, 1, 1, 1);
+            RenderView ownView = drawing.createView(ViewOptions.of(1024, 1 << 16)).set(camera, 1,
+                MeshletRenderer.MODE_LIT);
+            renderWith(commands -> drawing.record(commands, ownView, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
             fresh = image();
         }
         assertThat(java.util.Arrays.stream(fresh).filter(c -> (c & 0xffffff) != 0).count()).isPositive();
@@ -619,7 +669,7 @@ class MeshletRendererTest {
         assertThat(pool.contains(terrain)).isFalse();
         assertThat(pool.meshCount()).isEqualTo(1);
         assertThat(pool.vertexCount()).isEqualTo(vertices - 65 * 65);
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstance(0, terrain, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+        assertThatIllegalArgumentException().isThrownBy(() -> scene.set(0, terrain, 0, 0, 0, 0, 0, 0, 1, 1, 1,
             1));
         assertThatIllegalArgumentException().isThrownBy(() -> pool.remove(terrain));
         assertThatIllegalArgumentException().isThrownBy(() -> pool.remove(99));
@@ -628,12 +678,12 @@ class MeshletRendererTest {
         int hillId = pool.add(hill);
         assertThat(hillId).isEqualTo(2);
         assertThat(pool.meshSlots()).isEqualTo(3);
-        renderer.setInstance(0, hillId, 0, -1, -3, 0.3f, 0, 0, 0.954f, 1, 1, 1);
+        scene.set(0, hillId, 0, -1, -3, 0.3f, 0, 0, 0.954f, 1, 1, 1);
         render();
         assertThat(image()).isEqualTo(fresh);
         // And the square in the terrain's place draws as the quad does.
-        renderer.setInstance(0, squareId, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
-        renderer.setView(camera, 1, MeshletRenderer.MODE_WHITE);
+        scene.set(0, squareId, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
+        view.set(camera, 1, MeshletRenderer.MODE_WHITE);
         render();
         assertThat(covered()).isCloseTo(44 * 44, org.assertj.core.data.Percentage.withPercentage(10));
     }
@@ -702,25 +752,23 @@ class MeshletRendererTest {
 
     @Test
     void misuseIsChecked() {
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstance(256, quad, 0, 0, 0, 0, 0, 0, 1, 1,
+        assertThatIllegalArgumentException().isThrownBy(() -> scene.set(256, quad, 0, 0, 0, 0, 0, 0, 1, 1,
             1, 1));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstance(0, 5, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+        assertThatIllegalArgumentException().isThrownBy(() -> scene.set(0, 5, 0, 0, 0, 0, 0, 0, 1, 1, 1,
             1));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstanceCount(257));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(0, 1, 1, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> new GpuScene(device, pool, 0));
         assertThatIllegalArgumentException().isThrownBy(() -> GeometryPool.Capacity.of(0, 1, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> GeometryPool.Capacity.of(1, 0, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> new GeometryPool.Capacity(1, 1, 0, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> GeometryPool.Capacity.of(1, 1, 0));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstance(-1, quad, 0, 0, 0, 0, 0, 0, 1, 1,
+        assertThatIllegalArgumentException().isThrownBy(() -> scene.set(-1, quad, 0, 0, 0, 0, 0, 0, 1, 1,
             1, 1));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstance(0, -1, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+        assertThatIllegalArgumentException().isThrownBy(() -> scene.set(0, -1, 0, 0, 0, 0, 0, 0, 1, 1, 1,
             1));
-        assertThatIllegalArgumentException().isThrownBy(() -> renderer.setInstanceCount(-1));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 0, 1, 1));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, (1 << 22) + 1, 1, 1));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 0, 1));
-        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer.Limits(1, 1, 65_536, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer(device, scene,
+            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, com.truesim.engine.vulkan.FrameSlots.single(), 0));
+        assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer(device, scene,
+            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, com.truesim.engine.vulkan.FrameSlots.single(), 65_536));
         // Each limit of the pool: meshes, meshlets, triangles, meshlet vertices, attributes.
         MeshData small = grid(2, 1, false, VertexFormat.of(VertexAttribute.NORMAL));
         for (GeometryPool.Capacity limit : new GeometryPool.Capacity[] {

@@ -6,7 +6,6 @@ import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-import static org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -50,8 +49,6 @@ class ClusteredLightsTest {
 
     private VulkanInstance instance;
     private VulkanDevice device;
-    private GeometryPool pool;
-    private MeshletRenderer renderer;
     private Lights lights;
 
     @BeforeEach
@@ -65,9 +62,6 @@ class ClusteredLightsTest {
         }
         assumeThat(instance.gpus()).as("no Vulkan 1.3 GPU").isNotEmpty();
         device = VulkanDevice.createHeadless(instance.bestGpu());
-        pool = new GeometryPool(device, GeometryPool.Capacity.of(1024, 16, 2));
-        renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(16, 256, 64, 1 << 12),
-            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
         lights = new Lights(device, 64, 4);
     }
 
@@ -77,8 +71,6 @@ class ClusteredLightsTest {
             device.waitIdle();
             int errors = instance.validationErrors();
             lights.close();
-            renderer.close();
-            pool.close();
             device.close();
             instance.close();
             assertThat(errors).as("validation errors").isZero();
@@ -90,7 +82,6 @@ class ClusteredLightsTest {
     @Test
     void lightsGoWhereTheyReach() {
         Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-        renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
         lights.directional(0, -0.4f, -0.8f, -0.3f, 3, 3, 3)
             .point(1, 0, 0, -10, 2, 10, 10, 10)
             .point(2, 30, 0, -10, 1, 10, 10, 10)           // off to the right: in no cluster
@@ -168,8 +159,7 @@ class ClusteredLightsTest {
             double[] w = at[run];
             Camera camera = new Camera().position(w[0], w[1], w[2])
                 .set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-            renderer.setView(camera, 1, MeshletRenderer.MODE_LIT);
-            lights.point(0, w[0], w[1], w[2] - 10, 2, 10, 10, 10)
+                lights.point(0, w[0], w[1], w[2] - 10, 2, 10, 10, 10)
                 .point(1, w[0] + 6, w[1] + 1, w[2] - 25, 3, 10, 10, 10)
                 .spot(2, w[0] - 3, w[1] + 1, w[2] - 30, 5, 10, 10, 10, 0, 0, -1, 0.3, 0.5)
                 .setCount(3);

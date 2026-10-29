@@ -45,10 +45,14 @@ public final class VisibilityBufferShading implements Technique {
     private final int colorFormat;
     private final int depthFormat;
     private final float[] clear = new float[3];
+    private final RenderView view;
     private boolean occlusion = true;
 
-    public VisibilityBufferShading(SceneGeometry geometry, int width, int height, int colorFormat, int depthFormat) {
+    /** {@code geometry} shaded as {@code view} sees it. */
+    public VisibilityBufferShading(SceneGeometry geometry, RenderView view, int width, int height, int colorFormat,
+        int depthFormat) {
         this.geometry = Objects.requireNonNull(geometry, "geometry");
+        this.view = Objects.requireNonNull(view, "view");
         MeshletGeometry meshlets = geometry.provider(MeshletGeometry.class);
         this.classic = geometry.provider(ClassicLodGeometry.class);
         if (geometry.providers().size() != 1 || meshlets == null && classic == null) {
@@ -70,7 +74,9 @@ public final class VisibilityBufferShading implements Technique {
         return this;
     }
 
-    /** Two-phase occlusion culling, on by default; the graph rebuilds when it changes. */
+    /**
+     * Two-phase occlusion culling, on by default where the view was made with it; the graph rebuilds when it changes.
+     */
     public VisibilityBufferShading occlusion(boolean on) {
         this.occlusion = on;
         return this;
@@ -84,8 +90,8 @@ public final class VisibilityBufferShading implements Technique {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
-        SceneDraw.Targets targets = g.request(new SceneDraw(geometry, 0, null, SurfaceOutput.ids(), depthFormat,
-            width, height, occlusion));
+        SceneDraw.Targets targets = g.request(new SceneDraw(geometry, view, null, SurfaceOutput.ids(), depthFormat,
+            width, height, occlusion && view.options().occlusion()));
         Buffer lights = g.optionalBuffer(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs());
         // With inline ray shadows, the variant tracing them, where the device can.
@@ -121,15 +127,15 @@ public final class VisibilityBufferShading implements Technique {
         GeometryPool pool = renderer.pool();
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(16, PUSH_BYTES);
-            memPutLong(push, renderer.viewBuffer().deviceAddress());
+            memPutLong(push, view.address());
             memPutLong(push + 8, pool.meshTable().deviceAddress());
-            memPutLong(push + 16, renderer.instanceBuffer().deviceAddress());
+            memPutLong(push + 16, renderer.scene().instanceBuffer().deviceAddress());
             memPutLong(push + 24, pool.positions().deviceAddress());
             memPutLong(push + 32, pool.attributes().deviceAddress());
             memPutLong(push + 40, pool.meshlets().deviceAddress());
             memPutLong(push + 48, pool.meshletVertices().deviceAddress());
             memPutLong(push + 56, pool.meshletTriangles().deviceAddress());
-            memPutLong(push + 64, renderer.materialsAddress());
+            memPutLong(push + 64, renderer.scene().materialsAddress());
             memPutLong(push + 72, lights == null ? 0 : ctx.address(lights));
             memPutInt(push + 80, ctx.storage(ids));
             memPutInt(push + 84, ctx.storage(color));

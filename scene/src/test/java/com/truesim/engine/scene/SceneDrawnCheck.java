@@ -23,8 +23,11 @@ import com.truesim.engine.render.GeometryPool;
 import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.Material;
 import com.truesim.engine.render.Materials;
+import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.MeshletRenderer;
+import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.SceneGeometry;
+import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.VisibilityBufferShading;
 import com.truesim.engine.vulkan.FrameSlots;
@@ -51,7 +54,7 @@ import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkBufferImageCopy;
 
 /**
- * The benchmark's 30,000 rocks on the terrain, checked to be drawn whole: through the scene (SceneView) near the
+ * The benchmark's 30,000 rocks on the terrain, checked to be drawn whole: through the scene (SceneSync) near the
  * origin and 1,000 km out, and straight through the renderer near the origin as the reference, in both shadings.
  * Compares the images and the meshlets drawn once the frames have finished, and saves the images. Run with
  * {@code TRUESIM_SCREENSHOTS=true ./gradlew :engine-scene:test --tests '*SceneDrawnCheck'} (PNGs in
@@ -113,8 +116,8 @@ class SceneDrawnCheck {
              TaskScheduler tasks = new TaskScheduler();
              AssetCache assets = new AssetCache(tasks);
              SceneResources resources = new SceneResources(assets, pool, materials, textures);
-             MeshletRenderer renderer = new MeshletRenderer(device, pool,
-                 new MeshletRenderer.Limits(40_000, 1 << 20, 65_535, 80_000_000), VK_FORMAT_R8G8B8A8_UNORM,
+             GpuScene gpu = new GpuScene(device, pool, 40_000, slots);
+             MeshletRenderer renderer = new MeshletRenderer(device, gpu, VK_FORMAT_R8G8B8A8_UNORM,
                  VK_FORMAT_D32_SFLOAT, slots);
              GpuImage target = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage,
                  VK_IMAGE_ASPECT_COLOR_BIT);
@@ -122,10 +125,11 @@ class SceneDrawnCheck {
              FrameGraph graph = new FrameGraph(device, slots)) {
             Camera camera = new Camera().position(far, 0, far)
                 .set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-            SceneGeometry geometry;
+            SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+            RenderView cameraView = geometry.createView(ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
             SceneGraph scene = new SceneGraph(new ChangeClock(), ROCKS + 64, SceneGraph.DEFAULT_LOG_CAPACITY);
             Renderables renderables = new Renderables(scene);
-            SceneView view = null;
+            SceneSync sync = null;
             double[] placed = new double[3 * ROCKS];
             SplittableRandom random = new SplittableRandom(11);
             if (throughScene) {
@@ -137,8 +141,7 @@ class SceneDrawnCheck {
                     SceneBenchmark.place(scene, node, random, placed, i, far);
                     renderables.set(node, SceneBenchmark.ROCK, List.of(SceneBenchmark.GRANITE));
                 }
-                view = new SceneView(resources, renderables, renderer);
-                geometry = view.geometry();
+                sync = new SceneSync(resources, renderables, gpu);
             } else {
                 // The reference: the meshes added and the instances set straight, as the renderer's tests do.
                 int rockMesh = pool.add(rock);
@@ -151,23 +154,23 @@ class SceneDrawnCheck {
                 // The scene's materials: granite and grass, as SceneResources makes them.
                 int granite = materials.add(new Material().baseColor(0.5f, 0.5f, 0.52f).roughness(0.8f));
                 int grass = materials.add(new Material().baseColor(0.3f, 0.5f, 0.2f).roughness(0.8f));
-                renderer.setMaterials(materials);
-                renderer.setInstance(0, groundMesh, grass, 0, -12, 0, 0, 0, 0, 1, 1, 1, 1);
+                gpu.setMaterials(materials);
+                gpu.set(0, groundMesh, grass, 0, -12, 0, 0, 0, 0, 1, 1, 1, 1);
                 var world = scene.worldTransforms();
                 for (int i = 0; i < ROCKS; i++) {
                     long o = (long) i * world.stride();
                     var s = world.segment();
-                    renderer.setInstance(i + 1, rockMesh, granite, (float) s.get(D, o), (float) s.get(D, o + 8),
+                    gpu.set(i + 1, rockMesh, granite, (float) s.get(D, o), (float) s.get(D, o + 8),
                         (float) s.get(D, o + 16), (float) s.get(D, o + 24), (float) s.get(D, o + 32),
                         (float) s.get(D, o + 40), (float) s.get(D, o + 48), (float) s.get(D, o + 56),
                         (float) s.get(D, o + 64), (float) s.get(D, o + 72));
                 }
-                renderer.setInstanceCount(ROCKS + 1);
-                geometry = SceneGeometry.meshlets(renderer);
             }
             Technique shading = visibility
-                ? new VisibilityBufferShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
-                : new ClusteredForwardShading(geometry, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+                ? new VisibilityBufferShading(geometry, cameraView, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT)
+                : new ClusteredForwardShading(geometry, cameraView, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT);
             ExternalImage output = new ExternalImage("target", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
             graph.add(shading).output(Keys.SCENE_COLOR, output);
@@ -177,24 +180,24 @@ class SceneDrawnCheck {
                 int slot = graph.beginFrame();
                 slots.begin(slot);
                 tasks.drainCompleted();
-                if (view != null) {
+                if (sync != null) {
                     scene.update();
                     renderables.update();
-                    view.update();
+                    sync.update();
                     settled += resources.uploadedMeshCount() == 2 ? 1 : 0;
                 } else {
                     settled++;
                 }
-                geometry.setView(0, camera, 1, MeshletRenderer.MODE_LIT);
+                cameraView.set(camera, 1, MeshletRenderer.MODE_LIT);
                 graph.submit(0, 0);
                 slots.end();
                 assertThat(System.nanoTime()).as("meshes loading").isLessThan(deadline);
-                if (view != null && resources.uploadedMeshCount() < 2) {
+                if (sync != null && resources.uploadedMeshCount() < 2) {
                     Thread.sleep(5);
                 }
             }
             device.waitIdle();
-            int meshlets = renderer.visibleMeshlets();
+            int meshlets = cameraView.visibleMeshlets();
             device.submitAndWait(device.graphics(), commands -> {
                 try (MemoryStack stack = stackPush()) {
                     VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
@@ -208,8 +211,8 @@ class SceneDrawnCheck {
             for (int i = 0; i < image.length; i++) {
                 image[i] = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, i);
             }
-            if (view != null) {
-                view.close();
+            if (sync != null) {
+                sync.close();
             }
             device.waitIdle();
             return new Drawn(image, meshlets);

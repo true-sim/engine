@@ -15,25 +15,26 @@ import java.util.Objects;
  * camera's, a shadow technique the light's); equal requests share one.
  *
  * @param geometry what is drawn
- * @param view the providers' view index (0: the camera)
+ * @param view the view drawn (made by the geometry's renderer)
  * @param camera set on that view when the frame runs (e.g. a light's); null: the view as set
  * @param output what is written besides depth
  * @param depthFormat the depth format
  * @param width the targets' size
  * @param height the targets' size
- * @param occlusion two-phase occlusion culling (the camera only)
+ * @param occlusion two-phase occlusion culling (a view made with occlusion)
  */
-public record SceneDraw(SceneGeometry geometry, int view, Camera camera, SurfaceOutput output, int depthFormat,
+public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, SurfaceOutput output, int depthFormat,
     int width, int height, boolean occlusion) implements Request<SceneDraw.Targets> {
 
     public SceneDraw {
         Objects.requireNonNull(geometry, "geometry");
         Objects.requireNonNull(output, "output");
+        Objects.requireNonNull(view, "view");
         if (width < 1 || height < 1) {
             throw new IllegalArgumentException("Targets have a size: " + width + " x " + height);
         }
-        if (occlusion && view != 0) {
-            throw new IllegalArgumentException("Occlusion culling is for the camera, view 0: " + view);
+        if (occlusion && !view.options().occlusion()) {
+            throw new IllegalArgumentException("View " + view.index() + " was made without occlusion culling");
         }
     }
 
@@ -48,7 +49,7 @@ public record SceneDraw(SceneGeometry geometry, int view, Camera camera, Surface
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Targets build(GraphBuilder g) {
-        String name = view == 0 ? "scene" : "view " + view;
+        String name = view.index() == 0 ? "scene" : "view " + view.index();
         Image depth = g.create(name + " depth", width, height, depthFormat);
         Image color = switch (output.kind()) {
             case DEPTH -> null;

@@ -26,11 +26,17 @@ public final class ClusteredForwardShading implements Technique {
     private final int colorFormat;
     private final int depthFormat;
     private final float[] clear = new float[3];
+    private final RenderView view;
     private boolean occlusion = true;
 
-    /** The providers' pipelines must have been made for {@code colorFormat} and {@code depthFormat}. */
-    public ClusteredForwardShading(SceneGeometry geometry, int width, int height, int colorFormat, int depthFormat) {
+    /**
+     * {@code geometry} shaded as {@code view} sees it. The providers' pipelines must have been made for
+     * {@code colorFormat} and {@code depthFormat}.
+     */
+    public ClusteredForwardShading(SceneGeometry geometry, RenderView view, int width, int height, int colorFormat,
+        int depthFormat) {
         this.geometry = Objects.requireNonNull(geometry, "geometry");
+        this.view = Objects.requireNonNull(view, "view");
         this.width = width;
         this.height = height;
         this.colorFormat = colorFormat;
@@ -45,7 +51,9 @@ public final class ClusteredForwardShading implements Technique {
         return this;
     }
 
-    /** Two-phase occlusion culling, on by default; the graph rebuilds when it changes. */
+    /**
+     * Two-phase occlusion culling, on by default where the view was made with it; the graph rebuilds when it changes.
+     */
     public ClusteredForwardShading occlusion(boolean on) {
         this.occlusion = on;
         return this;
@@ -59,8 +67,9 @@ public final class ClusteredForwardShading implements Technique {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
-        SceneDraw.Targets targets = g.request(new SceneDraw(geometry, 0, null,
-            SurfaceOutput.shaded(colorFormat, clear), depthFormat, width, height, occlusion));
+        SceneDraw.Targets targets = g.request(new SceneDraw(geometry, view, null,
+            SurfaceOutput.shaded(colorFormat, clear), depthFormat, width, height,
+            occlusion && view.options().occlusion()));
         g.provide(Keys.SCENE_COLOR, targets.color());
         g.provide(Keys.SCENE_DEPTH, targets.depth());
     }

@@ -21,6 +21,7 @@ import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.Lights;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RayTracing;
+import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.ShadowInputs;
 import com.truesim.engine.vulkan.Pipeline;
@@ -41,7 +42,6 @@ public final class RayTracedShadows implements Technique {
     private static final int PUSH_BYTES = 124;
 
     private final RayTracing rayTracing;
-    private final MeshletRenderer renderer;
     private final Lights lights;
     private final int light;
     private final int entry;
@@ -50,13 +50,12 @@ public final class RayTracedShadows implements Technique {
     private float offset = 2.0e-3f;
 
     /**
-     * Shadows of light {@code light} of {@code lights}, traced into {@code renderer}'s instances, for the pixels of
-     * {@code depthSource} (drawn from {@code camera}), in shadow table entry {@code entry}.
+     * Shadows of light {@code light} of {@code lights}, traced into a top level of the depth source's view's scene, for
+     * the pixels of {@code depthSource} (drawn from {@code camera}), in shadow table entry {@code entry}.
      */
-    public RayTracedShadows(RayTracing rayTracing, MeshletRenderer renderer, Lights lights, int light, int entry,
-        SceneDraw depthSource, Camera camera) {
+    public RayTracedShadows(RayTracing rayTracing, Lights lights, int light, int entry, SceneDraw depthSource,
+        Camera camera) {
         this.rayTracing = Objects.requireNonNull(rayTracing, "rayTracing");
-        this.renderer = Objects.requireNonNull(renderer, "renderer");
         this.lights = Objects.requireNonNull(lights, "lights");
         this.light = light;
         this.entry = entry;
@@ -93,7 +92,7 @@ public final class RayTracedShadows implements Technique {
             }
         });
         Image depth = g.request(depthSource).depth();
-        Buffer topLevel = g.request(new TopLevel(rayTracing, renderer));
+        Buffer topLevel = g.request(new TopLevel(rayTracing, depthSource.view()));
         Image mask = g.createLike("shadow mask of light " + light, depth, 1, VK_FORMAT_R8_UNORM);
         g.pass("ray-traced shadows of light " + light)
             .read(depth, Access.SAMPLED_COMPUTE)
@@ -122,11 +121,11 @@ public final class RayTracedShadows implements Technique {
             memPutFloat(push + 84, offset);
             memPutLong(push + 88, lights.lightsAddress());
             memPutInt(push + 96, light);
-            // The way from the camera's positions into the top level's (built relative to the renderer's first view),
+            // The way from the camera's positions into the top level's (built relative to the depth source's view),
             // and the light relative to the camera: differences of world positions, small enough for floats.
             for (int axis = 0; axis < 3; axis++) {
                 double p = camera.position(axis);
-                memPutFloat(push + 100 + 4L * axis, (float) (p - renderer.viewPosition(0, axis)));
+                memPutFloat(push + 100 + 4L * axis, (float) (p - depthSource.view().position(axis)));
                 memPutFloat(push + 112 + 4L * axis, (float) (lights.position(light, axis) - p));
             }
             pipeline.bind(ctx.commands());

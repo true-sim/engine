@@ -16,7 +16,11 @@ import com.truesim.engine.render.ClusteredForwardShading;
 import com.truesim.engine.render.GeometryPool;
 import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.Materials;
+import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.MeshletRenderer;
+import com.truesim.engine.render.RenderView;
+import com.truesim.engine.render.SceneGeometry;
+import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.VisibilityBufferShading;
 import com.truesim.engine.vulkan.FrameSlots;
@@ -47,9 +51,9 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 /**
  * The meshlet benchmark's 30,000 rocks on the terrain, through the whole scene path: the rock and terrain meshes
- * generated in the asset cache, 30,001 scene nodes with renderables, a {@link SceneView} on shared
+ * generated in the asset cache, 30,001 scene nodes with renderables, a {@link SceneSync} on shared
  * {@link SceneResources}, drawn by a frame graph with two frames in flight at 1920 x 1080. Prints the time to load
- * and upload, and per frame the time of each stage (scene, renderables, view, the graph's recording and submission),
+ * and upload, and per frame the time of each stage (scene, renderables, sync, the graph's recording and submission),
  * the whole frame and what the main thread allocated, for a still scene, a moving camera, moving rocks and rocks
  * coming and going. Run with {@code TRUESIM_BENCHMARK=true ./gradlew :engine-scene:test --tests '*SceneBenchmark'}.
  */
@@ -90,11 +94,11 @@ class SceneBenchmark {
 
     /** Per-frame timings of one scenario, in nanoseconds, and bytes allocated. */
     private static final class Stats {
-        final long[][] stages = new long[6][FRAMES]; // drain, scene, renderables, view, graph, frame
+        final long[][] stages = new long[6][FRAMES]; // drain, scene, renderables, sync, graph, frame
         final long[] allocated = new long[FRAMES];
 
         void print(String scenario) {
-            String[] names = {"drain", "scene", "renderables", "view", "graph", "frame"};
+            String[] names = {"drain", "scene", "renderables", "sync", "graph", "frame"};
             StringBuilder line = new StringBuilder(String.format(Locale.ROOT, "  %-34s", scenario));
             for (int s = 0; s < names.length; s++) {
                 long[] sorted = stages[s].clone();
@@ -126,8 +130,8 @@ class SceneBenchmark {
              TaskScheduler tasks = new TaskScheduler();
              AssetCache assets = new AssetCache(tasks);
              SceneResources resources = new SceneResources(assets, pool, materials, textures);
-             MeshletRenderer renderer = new MeshletRenderer(device, pool,
-                 new MeshletRenderer.Limits(40_000, 1 << 20, 65_535, 80_000_000, 4), VK_FORMAT_R8G8B8A8_UNORM,
+             GpuScene gpu = new GpuScene(device, pool, 40_000, slots);
+             MeshletRenderer renderer = new MeshletRenderer(device, gpu, VK_FORMAT_R8G8B8A8_UNORM,
                  VK_FORMAT_D32_SFLOAT, slots);
              GpuImage shaded = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                  VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -153,52 +157,54 @@ class SceneBenchmark {
             System.out.printf(Locale.ROOT, "  building the scene: %.1f ms%n", (System.nanoTime() - start) / 1e6);
 
             Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-            SceneView view = new SceneView(resources, renderables, renderer);
+            SceneSync sync = new SceneSync(resources, renderables, gpu);
+            SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+            RenderView cameraView = geometry.createView(ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
             camera.position(FAR, 0, FAR);
             ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
                 .set(shaded.handle(), 0);
-            ClusteredForwardShading forward = new ClusteredForwardShading(view.geometry(), WIDTH, HEIGHT,
+            ClusteredForwardShading forward = new ClusteredForwardShading(geometry, cameraView, WIDTH, HEIGHT,
                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
             graph.add(forward).output(Keys.SCENE_COLOR, target);
             Stats unused = new Stats();
 
             // Loading: the meshes are generated in the background, uploaded as they arrive at frame boundaries.
             start = System.nanoTime();
-            frame(graph, slots, tasks, scene, renderables, view, camera, unused, 0);
+            frame(graph, slots, tasks, scene, renderables, sync, cameraView, camera, unused, 0);
             long firstUpdate = unused.stages[3][0];
             int frames = 1;
             while (resources.uploadedMeshCount() < 2) {
                 Thread.sleep(1);
-                frame(graph, slots, tasks, scene, renderables, view, camera, unused, 0);
+                frame(graph, slots, tasks, scene, renderables, sync, cameraView, camera, unused, 0);
                 frames++;
             }
             long loaded = System.nanoTime() - start;
             long uploadFrame = unused.stages[0][0] + unused.stages[3][0]; // uploads and shows land in the drain
             System.out.printf(Locale.ROOT, "  loading: %.1f ms over %d frames to generate and upload the rock "
-                + "(%,d meshlets) and the terrain (%,d meshlets); first view update (%,d renderables waiting) %.3f ms,"
+                + "(%,d meshlets) and the terrain (%,d meshlets); first sync update (%,d renderables waiting) %.3f ms,"
                 + " the frame they arrived (uploads, %,d shown and written) %.1f ms%n", loaded / 1e6, frames,
-                assets.get(ROCK).meshletCount(), assets.get(GROUND).meshletCount(), view.renderableCount(),
-                firstUpdate / 1e6, view.instanceCount(), uploadFrame / 1e6);
+                assets.get(ROCK).meshletCount(), assets.get(GROUND).meshletCount(), sync.renderableCount(),
+                firstUpdate / 1e6, sync.instanceCount(), uploadFrame / 1e6);
 
-            run("still", graph, slots, tasks, scene, renderables, view, camera, frame -> { });
-            run("camera moving", graph, slots, tasks, scene, renderables, view, camera,
+            run("still", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> { });
+            run("camera moving", graph, slots, tasks, scene, renderables, sync, cameraView, camera,
                 frame -> camera.position(FAR + 0.05 * frame, 0, FAR - 0.1 * frame));
-            run("1,000 rocks moving", graph, slots, tasks, scene, renderables, view, camera, frame -> {
+            run("1,000 rocks moving", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> {
                 for (int i = 0; i < 1000; i++) {
                     int r = (frame * 1000 + i) % ROCKS;
                     scene.setTranslation(rocks[r], placed[3 * r], placed[3 * r + 1] + 0.01 * (frame % 7),
                         placed[3 * r + 2]);
                 }
             });
-            run("30,000 rocks moving", graph, slots, tasks, scene, renderables, view, camera, frame -> {
+            run("30,000 rocks moving", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> {
                 for (int r = 0; r < ROCKS; r++) {
                     scene.setTranslation(rocks[r], placed[3 * r], placed[3 * r + 1] + 0.01 * (frame % 7),
                         placed[3 * r + 2]);
                 }
             });
             SplittableRandom churn = new SplittableRandom(3);
-            run("100 rocks removed, 100 added", graph, slots, tasks, scene, renderables, view, camera, frame -> {
+            run("100 rocks removed, 100 added", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> {
                 for (int i = 0; i < 100; i++) {
                     int r = churn.nextInt(ROCKS);
                     scene.remove(rocks[r]);
@@ -207,7 +213,7 @@ class SceneBenchmark {
                     renderables.set(rocks[r], ROCK, List.of(GRANITE));
                 }
             });
-            run("100 rocks changing material", graph, slots, tasks, scene, renderables, view, camera, frame -> {
+            run("100 rocks changing material", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> {
                 for (int i = 0; i < 100; i++) {
                     int r = churn.nextInt(ROCKS);
                     renderables.setMaterials(rocks[r],
@@ -215,17 +221,17 @@ class SceneBenchmark {
                 }
             });
             if (device.primitiveIds()) {
-                graph.replace(new VisibilityBufferShading(view.geometry(), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
-                    VK_FORMAT_D32_SFLOAT));
-                run("still, visibility buffer", graph, slots, tasks, scene, renderables, view, camera, frame -> { });
-                run("camera moving, visibility buffer", graph, slots, tasks, scene, renderables, view, camera,
+                graph.replace(new VisibilityBufferShading(geometry, cameraView, WIDTH, HEIGHT,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT));
+                run("still, visibility buffer", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> { });
+                run("camera moving, visibility buffer", graph, slots, tasks, scene, renderables, sync, cameraView, camera,
                     frame -> camera.position(FAR - 0.05 * frame, 0, FAR + 0.1 * frame));
             }
             device.waitIdle(); // the counts are the last frame's once it has finished
             System.out.printf(Locale.ROOT, "  %,d instances, %,d meshlets visible in the last frame, %d meshes, "
-                + "%d material blocks%n", view.instanceCount(), renderer.visibleMeshlets(), resources.meshCount(),
+                + "%d material blocks%n", sync.instanceCount(), cameraView.visibleMeshlets(), resources.meshCount(),
                 resources.materialSetCount());
-            view.close();
+            sync.close();
         }
     }
 
@@ -253,18 +259,18 @@ class SceneBenchmark {
     }
 
     private static void run(String scenario, FrameGraph graph, FrameSlots slots, TaskScheduler tasks,
-        SceneGraph scene, Renderables renderables, SceneView view, Camera camera, Change change) {
+        SceneGraph scene, Renderables renderables, SceneSync sync, RenderView cameraView, Camera camera, Change change) {
         Stats stats = new Stats();
         for (int frame = -2; frame < FRAMES; frame++) {
             change.before(frame + 2);
-            frame(graph, slots, tasks, scene, renderables, view, camera, stats, Math.max(frame, 0));
+            frame(graph, slots, tasks, scene, renderables, sync, cameraView, camera, stats, Math.max(frame, 0));
         }
         stats.print(scenario);
     }
 
     /** One frame as an application runs it, timed by stage into {@code stats} at {@code index}. */
     private static void frame(FrameGraph graph, FrameSlots slots, TaskScheduler tasks, SceneGraph scene,
-        Renderables renderables, SceneView view, Camera camera, Stats stats, int index) {
+        Renderables renderables, SceneSync sync, RenderView cameraView, Camera camera, Stats stats, int index) {
         long allocated = THREADS.getCurrentThreadAllocatedBytes();
         long t0 = System.nanoTime();
         int slot = graph.beginFrame();
@@ -276,8 +282,8 @@ class SceneBenchmark {
         long t2 = System.nanoTime();
         renderables.update();
         long t3 = System.nanoTime();
-        view.update();
-        view.geometry().setView(0, camera, 1, MeshletRenderer.MODE_LIT);
+        sync.update();
+        cameraView.set(camera, 1, MeshletRenderer.MODE_LIT);
         long t4 = System.nanoTime();
         graph.submit(0, 0);
         slots.end();

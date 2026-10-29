@@ -139,18 +139,20 @@ indices, quantized vertices) and draw parameters, on top of the Vulkan 1.3 basel
 ## GPU-driven rendering
 
 `engine-render` draws scene's meshes (`MeshData`: meshlets over quantized vertices with cluster LOD) GPU-driven: the
-CPU writes instances and a view, the GPU decides what to draw.
+CPU writes instances and views, the GPU decides what to draw. The world's instances are a `GpuScene`; a
+`MeshletRenderer` draws it from any number of `RenderView`s.
 
 ```java
+FrameSlots slots = graph.frameSlots();                              // a copy per frame in flight
 try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 22, 65_536, 1024));
-     MeshletRenderer renderer = new MeshletRenderer(device, pool, new MeshletRenderer.Limits(100_000, 1 << 20, 65_535),
-         colorFormat, depthFormat, graph.frameSlots())) {      // instances and views: a copy per frame in flight
-    int car = pool.add(carMesh);                                   // uploaded once
-    renderer.setInstance(0, car, 0, x, y, z, qx, qy, qz, qw, 1, 1, 1); // world position, doubles
-    renderer.setInstanceCount(1);
-    renderer.setView(camera.position(cx, cy, cz).set(forward, up, fovY, width, height, near), 1.0f,
+     GpuScene scene = new GpuScene(device, pool, 100_000, slots);
+     MeshletRenderer renderer = new MeshletRenderer(device, scene, colorFormat, depthFormat, slots)) {
+    int car = pool.add(carMesh);                                     // uploaded once
+    int id = scene.add(car, 0, 1, true, x, y, z, qx, qy, qz, qw, 1, 1, 1); // world position, doubles: lowest free id
+    RenderView view = renderer.createView(ViewOptions.of(1 << 20, 1 << 24).withOcclusion(true));
+    view.set(camera.position(cx, cy, cz).set(forward, up, fovY, width, height, near), 1.0f,
         MeshletRenderer.MODE_LIT);
-    renderer.record(commands, colorView, depthView, width, height, 0, 0, 0);
+    renderer.record(commands, view, colorView, depthView, width, height, 0, 0, 0);
 }
 ```
 
@@ -181,17 +183,18 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
   camera, as precise anywhere in the world as at its origin (tested: the same image 7,000 km out; floats alone are
   visibly off there). Moving a camera rewrites nothing but its view; a shadow camera stays where its light is, so its
   map does not change as other cameras move.
-- **Stable instance ids, layers and shadows:** `removeInstance` leaves a hole the culling skips, so ids stay with
-  their instances (whatever the GPU keeps per instance, such as occlusion history, stays right; previous transforms
-  and custom data per instance will be buffers by id). Each instance is on layers (32 bits) and casts shadows or
-  not; `setViewFilter` makes a view draw some layers only, and shadow views (set by the shadow techniques) and shadow
-  rays leave out what casts none.
-- **Views culled together:** as many views as the frame has (cameras, shadow maps, cascades, mirrors; `Limits.views`)
-  each have their own lists. `cullViews` culls any number at once: one instance pass with a row per view (in
-  dispatches of up to 65,535 rows), and one cull pass over all their chunks, each meshlet into its view's list;
-  `drawView` then draws each. Each view's lists are as big as `Limits.draws` and `Limits.triangles`. Through the
-  frame graph, the `MeshletCulling` request gathers every view the techniques draw (the scene's camera,
-  `ShadowMapShadows`' sun) into one culling pass.
+- **Stable instance ids, layers and shadows:** `GpuScene.add` takes the lowest free id and `remove` leaves a hole
+  the culling skips, so ids stay with their instances (whatever the GPU keeps per instance, such as occlusion history,
+  stays right; previous transforms and custom data per instance will be buffers by id). Each instance is on layers
+  (32 bits) and casts shadows or not; a view draws the layers of its `ViewOptions` (or `RenderView.filter`), shadow
+  views (`ViewOptions.shadow`) and shadow rays leave out what casts none. Several scenes may fill one `GpuScene`, told
+  apart by their layers (a world and an editor's gizmos), or each have one of their own.
+- **Views, as many as there are:** a `RenderView` is a handle: its camera, its filter, its lists sized by its
+  `ViewOptions` (a camera large, a shadow cascade or a mirror smaller) and, with occlusion, a visibility history of its
+  own, so every camera or mirror can cull occluded instances. `cullViews` culls any number at once: one instance pass
+  with a row per view (in dispatches of up to 65,535 rows), and one cull pass over all their chunks, each meshlet into
+  its view's list; `drawView` then draws each. Through the frame graph, the `MeshletCulling` request gathers every
+  view the techniques draw (the scene's camera, `ShadowMapShadows`' sun, the cascades) into one culling pass.
 
 Measured with `MeshletBenchmark` (`TRUESIM_BENCHMARK=true`) on an AMD Radeon RX 9070 XT at 1920 x 1080 with 1 pixel
 of error allowed, GPU time of the whole frame (instance pass, culling, drawing), median per frame of batches of 32
@@ -251,8 +254,8 @@ try (Textures textures = new Textures(device); Materials materials = new Materia
     int albedo = textures.color(512, 512, rgba);       // sRGB, full mip chain made on the GPU
     int normals = textures.data(512, 512, xyz);         // linear
     int rock = materials.add(new Material().baseColorTexture(albedo).normalTexture(normals, 1).roughness(0.9f));
-    renderer.setMaterials(materials);
-    renderer.setInstance(0, rockMesh, rock, x, y, z, qx, qy, qz, qw, 1, 1, 1); // submesh s takes material rock + s
+    scene.setMaterials(materials);
+    scene.set(0, rockMesh, rock, x, y, z, qx, qy, qz, qw, 1, 1, 1); // submesh s takes material rock + s
 }
 ```
 
@@ -304,7 +307,7 @@ graph.add(new ClusteredLights(lights, camera, width, height));       // provides
 Drawing and shading are separate, and each is swappable:
 
 - **Geometry providers** draw one kind of geometry; skinned meshes and particles come later. A `SceneGeometry` holds
-  the providers of a frame and sets their views.
+  the providers of a frame, all drawing its renderer's views.
   - `MeshletGeometry`: a renderer's meshlets, with cluster LOD.
   - `ClassicLodGeometry`: the same instances drawn the classic way.
     - It takes discrete LODs (`MeshBuilder.buildDiscrete`) or flat meshes, added with `add(mesh, data)`.
@@ -325,17 +328,20 @@ Drawing and shading are separate, and each is swappable:
       Classic LOD matches the CPU-culled classic baseline (2.82 ms), since both draw the same 17.6 M triangles. It
       also frees the CPU.
 - **`SceneDraw`**, a shared request, draws every provider from one view into the targets a `SurfaceOutput` asks for:
-  depth only, shaded color, or visibility buffer IDs. It does two-phase occlusion culling for the camera. Shading
-  techniques ask for the camera's draw and shadow techniques for the light's; equal requests are drawn once, and the
+  depth only, shaded color, or visibility buffer IDs. It does two-phase occlusion culling for views made with it.
+  Shading techniques ask for the camera's draw and shadow techniques for the light's; equal requests are drawn once, and the
   renderer culls all its views in one pass.
 - **Shading techniques** provide `Keys.SCENE_COLOR` and `Keys.SCENE_DEPTH`; `graph.replace` swaps them:
 
 ```java
 SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-geometry.setView(0, camera, 1, MeshletRenderer.MODE_LIT);
-graph.add(new ClusteredForwardShading(geometry, width, height, colorFormat, depthFormat))
-    .add(new ClusteredLights(lights, camera, width, height));
-graph.replace(new VisibilityBufferShading(geometry, width, height, colorFormat, depthFormat));
+RenderView view = geometry.createView(ViewOptions.of(1 << 20, 1 << 24).withOcclusion(true));
+view.set(camera, 1, MeshletRenderer.MODE_LIT);
+graph.add(new ClusteredForwardShading(geometry, view, width, height, colorFormat, depthFormat))
+    .add(new ClusteredLights(lights, camera, width, height))
+    .add(new ShadowMapShadows(geometry, lights, 0, 0, sunCamera, 2048,
+        geometry.createView(ViewOptions.shadow(1 << 18, 1 << 22)), bias));
+graph.replace(new VisibilityBufferShading(geometry, view, width, height, colorFormat, depthFormat));
 ```
 
 - `ClusteredForwardShading` shades as the meshlets are drawn, so pixels covered later are shaded too.
@@ -523,28 +529,32 @@ waits makes it report races between the queues.
 `engine-scene` draws scene's `Renderables` (a mesh and per-submesh materials on a node, from `scene-render`) with the
 renderers above, following the scene's change logs and asset cache:
 
-- `SceneResources` is the GPU side of the assets, shared by every view on a device: meshes in a `GeometryPool`,
-  materials in `Materials`, textures in `Textures`. It acquires what views use in the `AssetCache`, uploads each asset
+- `SceneResources` is the GPU side of the assets, shared by every scene on a device: meshes in a `GeometryPool`,
+  materials in `Materials`, textures in `Textures`. It acquires what scenes use in the `AssetCache`, uploads each asset
   once it loads, however many scenes and nodes use it, and removes it from the GPU (once no frame in flight reads it)
   and releases it in the cache when nothing does. Materials draw as the default until they load, untextured where
   their textures have not loaded (or failed to); a renderable's materials take a block of ids, one per submesh, shared
   by every renderable with the same materials and mesh layout.
-- `SceneView` is a scene drawn by a `MeshletRenderer`: its renderables as instances at their world positions,
-  written once and again only where nodes moved or renderables changed. Cameras are the renderer's views, each at its
-  own world position: moving one rewrites no instance. `view.geometry()` is what the frame graph's techniques draw, so the rendering mode is the
-  graph's: `ClusteredForwardShading`, `VisibilityBufferShading`, shadows, swapped with `graph.replace`.
+- `SceneSync` keeps a scene on the GPU: its renderables as instances of a `GpuScene` at their world positions,
+  written once and again only where nodes moved or renderables changed. Drawing is the renderers' business: cameras
+  are `RenderView`s, each at its own world position (moving one rewrites no instance), drawn by the frame graph's
+  techniques, so the rendering mode is the graph's: `ClusteredForwardShading`, `VisibilityBufferShading`, shadows,
+  swapped with `graph.replace`.
 
 ```java
 FrameSlots slots = new FrameSlots(2);                 // shared by every graph drawing these resources
 SceneResources resources = new SceneResources(assets, new GeometryPool(device, capacity, slots),
     new Materials(device, 4096, slots), new Textures(device, slots));
 
-SceneView world = new SceneView(resources, worldRenderables,
-    new MeshletRenderer(device, resources.pool(), limits, colorFormat, depthFormat, slots));
+GpuScene worldGpu = new GpuScene(device, resources.pool(), 100_000, slots);
+SceneSync world = new SceneSync(resources, worldRenderables, worldGpu);
+SceneSync gizmos = new SceneSync(resources, gizmoRenderables, worldGpu); // same table: its nodes on layer 1
+SceneGeometry geometry = SceneGeometry.meshlets(new MeshletRenderer(device, worldGpu, colorFormat, depthFormat, slots));
+RenderView view = geometry.createView(ViewOptions.of(1 << 20, 1 << 24).withOcclusion(true).withLayers(1));
 FrameGraph worldGraph = new FrameGraph(device, slots)
-    .add(new VisibilityBufferShading(world.geometry(), width, height, colorFormat, depthFormat))
+    .add(new VisibilityBufferShading(geometry, view, width, height, colorFormat, depthFormat))
     .output(Keys.SCENE_COLOR, swapchainTarget);
-SceneView preview = ...;                              // another scene, its own renderer and graph, forward shaded
+SceneSync preview = ...;                              // another scene: its own GpuScene, renderer and graph
 
 // every frame
 int slot = worldGraph.beginFrame();
@@ -552,19 +562,20 @@ previewGraph.beginFrame();
 slots.begin(slot);
 tasks.drainCompleted();                               // the frame boundary: loads arrive and upload
 scene.update(); worldRenderables.update();
-world.update();
+world.update(); gizmos.update();
 camera.position(cameraX, cameraY, cameraZ);           // the camera's world position, in doubles
-world.geometry().setView(0, camera, 1, MeshletRenderer.MODE_LIT);
+view.set(camera, 1, MeshletRenderer.MODE_LIT);
 ...                                                   // the same for the preview
 worldGraph.submit(acquired[slot], presentReady);
 previewGraph.submit(0, 0);
 slots.end();
 ```
 
-One scene is one view and one graph; more cameras on it are more of the renderer's views. Two scenes are two views
-from the same resources, each with its own graph (the
-graph's keys, such as the scene color and light list, are one per graph); a mesh both use is on the GPU once. The
-tests draw two scenes in step, one forward and one through a visibility buffer, with validation on.
+More cameras on a scene are more views, each with lists and occlusion history of its own. Scenes share a `GpuScene`
+told apart by layers, or each have their own with a renderer and graph (the graph's keys, such as the scene color and
+light list, are one per graph); either way they use the same resources, and a mesh several use is on the GPU once.
+The tests draw two scenes in step, one forward and one through a visibility buffer, and two scenes from one
+`GpuScene`, with validation on.
 
 Renderables keep their instance ids while drawn, are on their nodes' layers and cast shadows as they say. Not
 followed yet: alpha modes and double-sidedness (everything draws opaque), and lights and cameras from the scene. Removed meshes are not yet followed by
