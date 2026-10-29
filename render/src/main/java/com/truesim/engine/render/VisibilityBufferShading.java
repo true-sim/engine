@@ -23,9 +23,10 @@ import java.util.Objects;
  * longer grows with overdraw; triangles are read twice.
  * {@code graph.replace} swaps the two.
  *
- * <p>Shading is by {@link MaterialType}: a pass sorts the screen's 8x8 tiles into a list per type they show, and each
- * type of the scene's {@link Materials} (as they are when the graph builds) shades its tiles' pixels with its own
- * shader, by an indirect dispatch.
+ * <p>Shading is by {@link MaterialType} and features: a pass sorts the screen's 8x8 tiles into a list per bin (a type
+ * and a combination of {@link Material#features features}) they show, and each bin of the scene's {@link Materials}'
+ * types (as they are when the graph builds) shades its tiles' pixels with its type's shader, by an indirect dispatch:
+ * a variant compiled with only its features' code.
  *
  * <p>The color format must allow storage images (not sRGB). Needs
  * {@link com.truesim.engine.vulkan.VulkanDevice#primitiveIds()}, and one provider whose triangles the shading pass can
@@ -100,20 +101,22 @@ public final class VisibilityBufferShading implements Technique {
         // With inline ray shadows, the variant tracing them, where the device can.
         boolean traced = shadows != null && shadows.traced() && g.device().rayTracing();
         List<MaterialType> types = renderer.scene().materials().types();
-        Pipeline[] shade = new Pipeline[types.size()];
-        for (int t = 0; t < shade.length; t++) {
-            MaterialType type = types.get(t);
+        int variants = 1 << Material.FEATURE_BITS;
+        Pipeline[] shade = new Pipeline[types.size() * variants];
+        for (int bin = 0; bin < shade.length; bin++) {
+            MaterialType type = types.get(bin / variants);
             boolean rays = traced && type.tracedShader() != null;
-            shade[t] = compute(g, rays ? type.tracedShader() : type.shader(), rays ? type.tracedEntry() : type.entry());
+            shade[bin] = compute(g, rays ? type.tracedShader() : type.shader(), rays ? type.tracedEntry() : type.entry(),
+                bin % variants);
         }
-        Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain");
+        Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain", 0);
         Image ids = targets.color();
         Image color = g.create("scene color", width, height, colorFormat);
         int tilesX = (width + TILE - 1) / TILE;
         int tilesY = (height + TILE - 1) / TILE;
-        // Per type: its indirect dispatch (x, y, z), its tile count, then its tiles.
+        // Per bin: its indirect dispatch (x, y, z), its tile count, then its tiles.
         long listBytes = 4L * (4 + (long) tilesX * tilesY);
-        Buffer tiles = g.createBuffer("material tiles", listBytes * types.size());
+        Buffer tiles = g.createBuffer("material tiles", listBytes * shade.length);
         g.pass("material tiles reset").write(tiles, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(tiles, 0));
         g.pass("material classification")
             .read(ids, Access.STORAGE_READ)
@@ -135,10 +138,10 @@ public final class VisibilityBufferShading implements Technique {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            for (int t = 0; t < shade.length; t++) {
-                long list = listBytes * t;
-                ctx.dispatchIndirect(shade[t], push(ctx, ids, color, lights, shade.length, t, ctx.address(tiles) + list),
-                    tiles, list);
+            for (int bin = 0; bin < shade.length; bin++) {
+                long list = listBytes * bin;
+                ctx.dispatchIndirect(shade[bin], push(ctx, ids, color, lights, types.size(), bin,
+                    ctx.address(tiles) + list), tiles, list);
             }
         });
         g.provide(Keys.SCENE_COLOR, color);
@@ -146,16 +149,17 @@ public final class VisibilityBufferShading implements Technique {
     }
 
     @AllowAllocation("building the graph, when it changes")
-    private static Pipeline compute(GraphBuilder g, String shader, String entry) {
-        return g.cached("visibility shading: " + shader + " " + entry, device -> {
+    /** {@code entry} of {@code shader}, with resolve.slang's FEATURES {@code features}. */
+    private static Pipeline compute(GraphBuilder g, String shader, String entry, int features) {
+        return g.cached("visibility shading: " + shader + " " + entry + " " + features, device -> {
             try (ShaderModule module = ShaderModule.load(device, shader)) {
-                return Pipeline.compute(device, module, entry, PUSH_BYTES);
+                return Pipeline.compute(device, module, entry, PUSH_BYTES, features);
             }
         });
     }
 
-    /** resolve.slang's ShadePush: for {@code types} types, shading type {@code type}'s tiles at {@code tiles}. */
-    private Push push(PassContext ctx, Image ids, Image color, Buffer lights, int types, int type, long tiles) {
+    /** resolve.slang's ShadePush: for {@code types} types, shading bin {@code bin}'s tiles at {@code tiles}. */
+    private Push push(PassContext ctx, Image ids, Image color, Buffer lights, int types, int bin, long tiles) {
         GeometryPool pool = renderer.pool();
         return push.clear()
             .address(view.address())
@@ -173,7 +177,7 @@ public final class VisibilityBufferShading implements Technique {
             .u32(width | height << 16)
             .u32(types)
             .vec3(clear[0], clear[1], clear[2])
-            .u32(type)
+            .u32(bin)
             .address(classic == null ? 0 : classic.indicesAddress())
             .address(tiles);
     }

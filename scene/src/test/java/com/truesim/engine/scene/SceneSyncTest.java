@@ -30,6 +30,7 @@ import com.truesim.engine.render.ClusteredForwardShading;
 import com.truesim.engine.render.GeometryPool;
 import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.Keys;
+import com.truesim.engine.render.Material;
 import com.truesim.engine.render.Materials;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RenderView;
@@ -461,6 +462,31 @@ class SceneSyncTest {
         assertThat(cameraView.visibleMeshlets(0)).as("the blended one, opaque").isEqualTo(1);
         assertThat(cameraView.visibleMeshlets(1)).as("the double-sided one").isEqualTo(1);
         assertThat(cameraView.visibleMeshlets(2)).as("the masked one").isEqualTo(1);
+    }
+
+    @Test
+    void aClearCoatInTheDataTurnsTheFeatureOn() throws InterruptedException {
+        AssetRef<MaterialData> coated = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
+            (glow, seed) -> MaterialData.builder().clearcoat(1, 0.1f).build(), new Glow(1, 1, 1), 7);
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        List<FrameGraph> graphs = List.of(graph(sync, false, new GpuBuffer[] {readback(), readback()}));
+        renderables.set(facing(scene, 0, 0, -4), SQUARE, List.of(coated));
+        frame(graphs, List.of(sync), camera);
+        load();
+        for (int frame = 0; frame < 3; frame++) {
+            frame(graphs, List.of(sync), camera);
+        }
+        device.waitIdle();
+        Materials materials = resources.materials();
+        int found = 0;
+        for (int id = 0; id < 64; id++) {
+            if (materials.contains(id) && materials.features(id) == Material.FEATURE_CLEARCOAT) {
+                found++;
+            }
+        }
+        assertThat(found).isEqualTo(1);
     }
 
     @Test

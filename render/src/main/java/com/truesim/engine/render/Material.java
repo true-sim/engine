@@ -16,8 +16,17 @@ package com.truesim.engine.render;
  * drawn, in every pass: shadows too); {@link #doubleSided double-sided} (back faces drawn and lit as the front). The
  * renderer draws each kind in a raster bin of its own; ordinary opaque materials keep the fastest one. And its
  * {@link #type type}: {@link MaterialType#STANDARD standard} by default, or one registered with {@link Materials}.
+ *
+ * <p>Features, optional parts of the shading, follow from the data: a {@link #clearcoat clear coat} shows where its
+ * strength is above 0. Materials without a feature never pay for it: the visibility buffer shades each combination of
+ * features with a variant of its own.
  */
 public final class Material {
+
+    /** A clear coat: a glossy dielectric layer over the base, as car paint or varnish. */
+    public static final int FEATURE_CLEARCOAT = 1;
+    /** How many feature bits there are: combinations are {@code 1 << FEATURE_BITS}, as shading.slang has them. */
+    static final int FEATURE_BITS = 1;
 
     float r = 0.8f;
     float g = 0.8f;
@@ -37,6 +46,12 @@ public final class Material {
     float alphaCutoff = -1; // below 0: opaque
     boolean doubleSided;
     int type;
+    float clearcoat;
+    float clearcoatRoughness;
+    int clearcoatTexture = -1;
+    int clearcoatRoughnessTexture = -1;
+    int clearcoatNormalTexture = -1;
+    float clearcoatNormalScale = 1;
 
     /** The base color, linear: diffuse color, or a metal's reflectance. Light gray by default. */
     public Material baseColor(float r, float g, float b) {
@@ -141,13 +156,51 @@ public final class Material {
         return doubleSided;
     }
 
-    /** The header word shaders read: type (0, standard) in bits 0-7, double-sided bit 8, masked bit 9, cutoff 16-31. */
+    /**
+     * The header word shaders read: type (0, standard) in bits 0-7, double-sided bit 8, masked bit 9, features 10-15,
+     * cutoff 16-31.
+     */
     int header() {
-        int header = type | (doubleSided ? 1 << 8 : 0);
+        int header = type | (doubleSided ? 1 << 8 : 0) | features() << 10;
         if (alphaCutoff >= 0) {
             header |= 1 << 9 | Math.round(alphaCutoff * 65_535) << 16;
         }
         return header;
+    }
+
+    /**
+     * A clear coat as glTF's {@code KHR_materials_clearcoat}: a dielectric layer of {@code strength} (0, none, the
+     * default, to 1) and perceptual {@code roughness} over the base, reflecting light before it reaches it. Following
+     * the geometry's normal, unless given {@link #clearcoatNormalTexture a normal map of its own}.
+     */
+    public Material clearcoat(float strength, float roughness) {
+        this.clearcoat = strength;
+        this.clearcoatRoughness = roughness;
+        return this;
+    }
+
+    /** A linear texture whose red times the clear coat's strength. */
+    public Material clearcoatTexture(int slot) {
+        this.clearcoatTexture = slot;
+        return this;
+    }
+
+    /** A linear texture whose green times the clear coat's roughness (often the same as {@link #clearcoatTexture}). */
+    public Material clearcoatRoughnessTexture(int slot) {
+        this.clearcoatRoughnessTexture = slot;
+        return this;
+    }
+
+    /** The clear coat's tangent-space normal map, bent by {@code scale}. Needs tangents on the mesh. */
+    public Material clearcoatNormalTexture(int slot, float scale) {
+        this.clearcoatNormalTexture = slot;
+        this.clearcoatNormalScale = scale;
+        return this;
+    }
+
+    /** The features it shows, {@code FEATURE_*} bits: from its data. */
+    public int features() {
+        return clearcoat > 0 ? FEATURE_CLEARCOAT : 0;
     }
 
     /** An sRGB emissive texture, times the emissive color. */

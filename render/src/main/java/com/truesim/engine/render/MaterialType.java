@@ -6,7 +6,7 @@ import java.util.Objects;
  * A kind of material, beyond the {@link #STANDARD standard} one: how its materials' data becomes a surface to light,
  * as a Slang {@code IMaterial} of the game's own, shaded through a compute entry point calling engine-render's
  * {@code visibility.resolve} {@code shadeTiles}. Lighting stays the engine's; the type's materials still use
- * {@link Material}'s 64 bytes, which its shader may read its own way.
+ * {@link Material}'s 96 bytes, which its shader may read its own way.
  *
  * <pre>{@code
  * // water.slang, compiled by the game's truesim.slang build:

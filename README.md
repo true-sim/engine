@@ -315,7 +315,7 @@ try (Textures textures = new Textures(device); Materials materials = new Materia
 
 - **Textures** live in the bindless set and are sampled by slot, trilinear and anisotropic (`Bindless.MATERIAL`, up to
   16x where the GPU allows).
-- **Materials** are a table of 64-byte records the shaders read by id. Material 0 is a light gray default, so meshes
+- **Materials** are a table of 96-byte records the shaders read by id. Material 0 is a light gray default, so meshes
   draw before anything is set up. Instances name a first material and each submesh of the mesh takes the next, so one
   mesh can be drawn with different materials.
 - **One shading module** (`shading.slang`): the material evaluation (with explicit texture gradients, so passes
@@ -328,6 +328,12 @@ try (Textures textures = new Textures(device); Materials materials = new Materia
   its entry point calls `visibility.resolve`'s `shadeTiles<Water>`. The visibility buffer sorts the screen's 8x8 tiles
   into a list per type they show and shades each type with one indirect dispatch. Forward shading draws every type as
   the standard one, for now.
+- **Features from the data:** optional parts of the shading turn on where a material's data has them, with no
+  separate material to pick: a clear coat (`Material.clearcoat(strength, roughness)`, glTF's
+  `KHR_materials_clearcoat`, from `MaterialData` through the scene bridge) shows where its strength is above 0. The
+  visibility buffer bins by type and feature combination, each bin a pipeline variant (a specialization constant)
+  holding only its features' code, so a plain material never pays for a coat. Forward shading branches on the
+  material's features.
 
 
 ### Lights and light lists

@@ -11,7 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The material table shaders read, by id: 64 bytes per {@link Material}, as engine-render's {@code shading.slang}
+ * The material table shaders read, by id: 96 bytes per {@link Material}, as engine-render's {@code shading.slang}
  * lays it out. Material 0 is a light gray default, so meshes draw before anything is set up. Instances name a first
  * material ({@link GpuScene#set(int, int, int, float, float, float, float, float, float, float, float, float,
  * float)}); each submesh of the mesh takes the next.
@@ -25,7 +25,7 @@ import java.util.List;
 @AllowAllocation("created rarely")
 public final class Materials implements AutoCloseable {
 
-    static final int BYTES = 64;
+    static final int BYTES = 96;
     /** Material types a table may name: their ids fill a header's 8 bits. */
     public static final int MAX_TYPES = 256;
 
@@ -36,6 +36,7 @@ public final class Materials implements AutoCloseable {
     /** Per id: the length of the block starting there (0: not a block's start), and whether it is in use. */
     private final int[] blockLength;
     private final boolean[] used;
+    private final int[] features;
     private int live;
     // Removed blocks waiting for the frames that may read them: their first ids and when they are free.
     private final int[] retiring;
@@ -63,6 +64,7 @@ public final class Materials implements AutoCloseable {
         ids = new RangeAllocator(capacity);
         blockLength = new int[capacity];
         used = new boolean[capacity];
+        features = new int[capacity];
         retiring = new int[capacity];
         retireAt = new long[capacity];
         table = FrameBuffer.create(device, (long) BYTES * capacity,
@@ -162,6 +164,14 @@ public final class Materials implements AutoCloseable {
         retireAt[retiringCount++] = table.slots().retireAt();
     }
 
+    /** The features ({@code Material.FEATURE_*} bits) material {@code id} shows, from its data. Allocates nothing. */
+    public int features(int id) {
+        if (!contains(id)) {
+            throw new IllegalArgumentException("No material " + id);
+        }
+        return features[id];
+    }
+
     /** Whether {@code id} is a material of the table, added and not removed. */
     public boolean contains(int id) {
         return id >= 0 && id < capacity && used[id];
@@ -184,6 +194,7 @@ public final class Materials implements AutoCloseable {
     }
 
     private void write(int id, Material material) {
+        features[id] = material.features();
         long o = (long) BYTES * id;
         table.putFloat(o, material.r);
         table.putFloat(o + 4, material.g);
@@ -201,6 +212,14 @@ public final class Materials implements AutoCloseable {
         table.putInt(o + 52, material.normalTexture);
         table.putInt(o + 56, material.ormTexture);
         table.putInt(o + 60, material.emissiveTexture);
+        table.putFloat(o + 64, material.clearcoat);
+        table.putFloat(o + 68, material.clearcoatRoughness);
+        table.putInt(o + 72, material.clearcoatTexture);
+        table.putInt(o + 76, material.clearcoatRoughnessTexture);
+        table.putInt(o + 80, material.clearcoatNormalTexture);
+        table.putFloat(o + 84, material.clearcoatNormalScale);
+        table.putInt(o + 88, 0);
+        table.putInt(o + 92, 0);
     }
 
     /**
@@ -230,7 +249,7 @@ public final class Materials implements AutoCloseable {
     }
 
     /**
-     * The table's device address, for shaders: material i's {@code BYTES} at {@code i * 64}, as shading.slang reads it.
+     * The table's device address, for shaders: material i's {@code BYTES} at {@code i * 96}, as shading.slang reads it.
      */
     public long deviceAddress() {
         return table.deviceAddress();

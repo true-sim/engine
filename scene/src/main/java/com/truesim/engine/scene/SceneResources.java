@@ -459,7 +459,7 @@ public final class SceneResources implements AutoCloseable {
 
     /**
      * The renderer's material for {@code entry}: the default until it loads, untextured where textures are missing.
-     * Masked alpha and double-sidedness follow; blended alpha draws opaque until transparents come.
+     * Masked alpha, double-sidedness and a clear coat follow; blended alpha draws opaque until transparents come.
      */
     @AllowAllocation("materials change rarely")
     private Material convert(MaterialEntry entry) {
@@ -475,7 +475,11 @@ public final class SceneResources implements AutoCloseable {
             .baseColorTexture(slot(d.baseColorTexture()))
             .normalTexture(slot(d.normalTexture()), d.normalScale())
             .ormTexture(slot(d.ormTexture()), d.occlusionStrength())
-            .emissiveTexture(slot(d.emissiveTexture()));
+            .emissiveTexture(slot(d.emissiveTexture()))
+            .clearcoat(d.clearcoat(), d.clearcoatRoughness())
+            .clearcoatTexture(slot(d.clearcoatTexture()))
+            .clearcoatRoughnessTexture(slot(d.clearcoatRoughnessTexture()))
+            .clearcoatNormalTexture(slot(d.clearcoatNormalTexture()), d.clearcoatNormalScale());
     }
 
     private int slot(AssetRef<TextureData> ref) {

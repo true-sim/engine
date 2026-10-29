@@ -537,6 +537,66 @@ class GraphTechniquesTest {
         }
     }
 
+    @Test
+    void clearCoatsShineAlikeInBothShadings() {
+        assumeThat(device.primitiveIds()).as("primitive IDs in fragment shaders").isTrue();
+        // A dark, rough floor, a light over it in front of the camera: its mirror image shows only in a glossy coat.
+        scene.removeFrom(1);
+        Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        try (Lights lights = new Lights(device, 4, 1); Materials materials = new Materials(device, 4)) {
+            lights.point(0, 0, -0.5f, -3, 6, 4, 4, 4).setCount(1);
+            Material base = new Material().baseColor(0.1f, 0.1f, 0.1f).roughness(1);
+            int rough = materials.add(base);
+            int coated = materials.add(new Material().baseColor(0.1f, 0.1f, 0.1f).roughness(1).clearcoat(1, 0.1f));
+            assertThat(base.features()).isZero();
+            assertThat(materials.contains(coated)).isTrue();
+            scene.setMaterials(materials);
+            SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+            ClusteredForwardShading forwardShading = new ClusteredForwardShading(geometry, view, SIZE, SIZE,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+            VisibilityBufferShading visibilityShading = new VisibilityBufferShading(geometry, view, SIZE, SIZE,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+            graph.add(forwardShading).add(new ClusteredLights(lights, camera, SIZE, SIZE))
+                .output(Keys.SCENE_COLOR, output);
+            int[][] images = new int[4][];
+            int i = 0;
+            for (int material : new int[] {rough, coated}) {
+                scene.set(0, quad, material, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+                for (Technique shading : new Technique[] {forwardShading, visibilityShading}) {
+                    graph.replace(shading);
+                    frame();
+                    frame();
+                    images[i++] = pixels.memory().toArray(ValueLayout.JAVA_INT);
+                }
+            }
+            assertThat(brightest(images[2])).as("forward, coated").isGreaterThan(brightest(images[0]) + 60);
+            assertThat(brightest(images[3])).as("visibility, coated").isGreaterThan(brightest(images[1]) + 60);
+            assertThat(meanDifference(images[0], images[1])).as("both shadings, rough").isLessThan(0.5);
+            assertThat(meanDifference(images[2], images[3])).as("both shadings, coated").isLessThan(0.5);
+            scene.setMaterials(null);
+        }
+    }
+
+    /** The brightest pixel's red + green + blue. */
+    private static int brightest(int[] image) {
+        int best = 0;
+        for (int p : image) {
+            best = Math.max(best, (p & 0xff) + (p >> 8 & 0xff) + (p >> 16 & 0xff));
+        }
+        return best;
+    }
+
+    private static double meanDifference(int[] a, int[] b) {
+        double total = 0;
+        for (int i = 0; i < a.length; i++) {
+            for (int shift = 0; shift < 24; shift += 8) {
+                total += Math.abs((a[i] >> shift & 0xff) - (b[i] >> shift & 0xff));
+            }
+        }
+        return total / (3.0 * a.length);
+    }
+
     private static boolean glowing(int pixel) {
         return (pixel & 0xff) >= 250 && (pixel >> 8 & 0xff) <= 5 && (pixel >> 16 & 0xff) >= 250;
     }

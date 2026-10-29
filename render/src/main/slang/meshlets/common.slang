@@ -480,12 +480,16 @@ public void discardMasked(Material m, VertexOut in, bool front)
 public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Material* materials, float2 dx,
     float2 dy, LightListHeader* lights, uint2 pixel)
 {
-    return shadeMaterial<StandardMaterial, R>(rays, view, in, materials, dx, dy, lights, pixel);
+    return shadeMaterial<StandardMaterial, R>(rays, view, in, materials, dx, dy, lights, pixel,
+        materialFeatures(materials[in.material]));
 }
 
-/** shadeSurface with the surface from material type M: the lighting is the same for every type. */
+/**
+ * shadeSurface with the surface from material type M, showing the features of `features` (FEATURE_*; where it is a
+ * constant, the code of the others is left out): the lighting is the same for every type.
+ */
 public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
-    float2 dx, float2 dy, LightListHeader* lights, uint2 pixel)
+    float2 dx, float2 dy, LightListHeader* lights, uint2 pixel, uint features)
 {
     if (view.mode == 2)
     {
@@ -514,8 +518,18 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
     input.dx = dx;
     input.dy = dy;
     input.color = in.color;
+    input.features = features;
     Surface s = M.surface(m, input);
-    float3 color = ambient(s, SKY_IRRADIANCE) + s.emissive;
+    float3 emissive = s.emissive;
+    if ((features & FEATURE_CLEARCOAT) == 0)
+    {
+        s.clearcoat = 0; // whatever the type left there
+    }
+    else
+    {
+        emissive *= 1 - s.clearcoat * coatFresnel(dot(s.clearcoatNormal, toViewer)); // seen through the coat
+    }
+    float3 color = ambient(s, SKY_IRRADIANCE) + emissive;
     if (lights == nullptr)
     {
         color += reflected(s, toViewer, SUN, SUN_IRRADIANCE);
