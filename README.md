@@ -207,6 +207,15 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
   meshlets; the chunk count is written straight into an indirect command, so only visible work is launched. Each
   meshlet is tested by the cluster LOD rule (its group's error projected on screen at most the allowed pixels, its
   parent's more), the frustum and its normal cone (whole meshlets facing away).
+- **Raster bins, by material:** a material says how it rasterizes in its header (`Material.alphaMask(cutoff)`,
+  `doubleSided(true)`; opaque and one-sided by default). The cull pass puts each meshlet in its view's list of its
+  material's bin, and each bin draws with a pipeline of its own: ordinary opaque meshlets keep the fastest (back faces
+  culled, no discard, early depth), double-sided ones draw without culling (their normal-cone test skipped, back faces
+  lit as the front), masked ones without culling and with a fragment variant discarding masked texels and one-sided
+  back faces. Every pass rasterizing them uses the same variants, so shadow maps, depth and the visibility buffer
+  mask what the camera does; classic LOD draws through the same bins. A view's extra bins have room for a quarter of
+  its opaque bin by default (`ViewOptions.withBins`); `RenderView.visibleMeshlets(bin)` counts each. Not yet followed
+  by ray tracing: its shadow rays see masked surfaces as opaque.
 - **Two paths, one set of shaders:** a compute pass culls each chunk and lists the visible meshlets. With mesh shaders
   (`VK_EXT_mesh_shader`, enabled where the GPU has it), a mesh workgroup per listed meshlet emits its vertices and
   triangles straight from the pool. Without, an expansion pass writes their triangles into one index buffer, and one
@@ -631,8 +640,9 @@ light list, are one per graph); either way they use the same resources, and a me
 The tests draw two scenes in step, one forward and one through a visibility buffer, and two scenes from one
 `GpuScene`, with validation on.
 
-Renderables keep their instance ids while drawn, are on their nodes' layers and cast shadows as they say. Not
-followed yet: alpha modes and double-sidedness (everything draws opaque), and lights and cameras from the scene. Removed meshes are not yet followed by
+Renderables keep their instance ids while drawn, are on their nodes' layers and cast shadows as they say; their
+materials' masked alpha and double-sidedness follow (blended alpha draws opaque until transparents come). Not
+followed yet: lights and cameras from the scene. Removed meshes are not yet followed by
 `ClassicLodGeometry` and ray tracing, so draw views with meshlets.
 
 ## Building

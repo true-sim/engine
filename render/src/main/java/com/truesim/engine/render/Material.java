@@ -8,8 +8,13 @@ package com.truesim.engine.render;
  * <pre>{@code
  * Material rock = new Material().baseColor(0.5f, 0.45f, 0.4f).roughness(0.9f)
  *     .baseColorTexture(albedo).normalTexture(normals);
+ * Material leaves = new Material().baseColorTexture(leafAlbedo).alphaMask(0.5f).doubleSided(true);
  * int id = materials.add(rock);
  * }</pre>
+ *
+ * <p>How it rasterizes, its header: opaque by default; {@link #alphaMask alpha-masked} (texels below the cutoff are not
+ * drawn, in every pass: shadows too); {@link #doubleSided double-sided} (back faces drawn and lit as the front). The
+ * renderer draws each kind in a raster bin of its own; ordinary opaque materials keep the fastest one.
  */
 public final class Material {
 
@@ -28,6 +33,8 @@ public final class Material {
     int normalTexture = -1;
     int ormTexture = -1;
     int emissiveTexture = -1;
+    float alphaCutoff = -1; // below 0: opaque
+    boolean doubleSided;
 
     /** The base color, linear: diffuse color, or a metal's reflectance. Light gray by default. */
     public Material baseColor(float r, float g, float b) {
@@ -75,6 +82,54 @@ public final class Material {
         this.ormTexture = slot;
         this.occlusion = strength;
         return this;
+    }
+
+    /** The base color's alpha, times the texture's: what {@link #alphaMask} compares. 1 by default. */
+    public Material alpha(float alpha) {
+        this.a = alpha;
+        return this;
+    }
+
+    /**
+     * Alpha-masked: where the base color's alpha (factor times texture times vertex color) is below {@code cutoff},
+     * nothing is drawn, the rest is opaque, as glTF's {@code MASK}: foliage, fences. Masked in every pass, shadow maps
+     * included.
+     */
+    public Material alphaMask(float cutoff) {
+        if (!(cutoff >= 0 && cutoff <= 1)) {
+            throw new IllegalArgumentException("A cutoff of 0 to 1: " + cutoff);
+        }
+        this.alphaCutoff = cutoff;
+        return this;
+    }
+
+    /** Opaque again: alpha is not compared. */
+    public Material opaque() {
+        this.alphaCutoff = -1;
+        return this;
+    }
+
+    /** Whether back faces show too, lit as the front: leaves, cloth, thin walls. Not by default. */
+    public Material doubleSided(boolean twoSided) {
+        this.doubleSided = twoSided;
+        return this;
+    }
+
+    public boolean masked() {
+        return alphaCutoff >= 0;
+    }
+
+    public boolean isDoubleSided() {
+        return doubleSided;
+    }
+
+    /** The header word shaders read: type (0, standard) in bits 0-7, double-sided bit 8, masked bit 9, cutoff 16-31. */
+    int header() {
+        int header = doubleSided ? 1 << 8 : 0;
+        if (alphaCutoff >= 0) {
+            header |= 1 << 9 | Math.round(alphaCutoff * 65_535) << 16;
+        }
+        return header;
     }
 
     /** An sRGB emissive texture, times the emissive color. */

@@ -301,6 +301,35 @@ class ShadowsTest {
     }
 
     @Test
+    void maskedTexelsCastNoShadow() {
+        // The floating quad, alpha-masked: with its alpha above the cutoff it casts its shadow (drawn in the shadow
+        // map's masked bin); with all of it masked it casts none, in the shadow map as for the camera.
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
+        double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
+        try (Lights lights = new Lights(device, 4, 4); Materials materials = new Materials(device, 4)) {
+            int solid = materials.add(new Material().alphaMask(0.5f));
+            int clear = materials.add(new Material().alpha(0).alphaMask(0.5f));
+            scene.setMaterials(materials);
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            scene.set(1, quad, solid, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            expectShadow(new ClusteredForwardShading(geometry, view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT), "masked, alpha above the cutoff", shadow,
+                new ClusteredLights(lights, camera, SIZE, SIZE),
+                new ShadowMapShadows(geometry, lights, 0, 0, lightCamera(sun[0], sun[1], sun[2]), 1024, sunView,
+                    1.5e-3f));
+            assertThat(sunView.visibleMeshlets(2)).as("the masked quad, in the sun's masked bin").isEqualTo(1);
+            scene.set(1, quad, clear, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            frame(colorTarget, 4);
+            byte[] color = frame(colorTarget, 4);
+            int lit = floor(color, this, 3, -2);
+            assertThat(floor(color, this, shadow[0], shadow[1])).as("where its shadow would fall")
+                .isGreaterThan((int) (lit * 0.9));
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
     void cascadesShadowNearAndFar() {
         // A second quad, farther out on a longer floor: its shadow falls in a farther cascade.
         scene.set(0, quad, 0, -5, -10, 0, 0, 0, 1, 10, 1, 15);

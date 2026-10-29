@@ -59,8 +59,8 @@ import java.util.Objects;
  *       say: shadow maps and shadow rays leave out those that do not.</li>
  * </ul>
  *
- * <p>Not yet followed: alpha modes and double-sidedness (the renderer draws everything opaque). Updating allocates
- * nothing once warm when nothing but transforms changed. Use it on the main thread, the asset cache's.
+ * <p>Materials' masked alpha and double-sidedness follow their data (blended alpha draws opaque, for now). Updating
+ * allocates nothing once warm when nothing but transforms changed. Use it on the main thread, the asset cache's.
  */
 public final class SceneSync implements AutoCloseable {
 

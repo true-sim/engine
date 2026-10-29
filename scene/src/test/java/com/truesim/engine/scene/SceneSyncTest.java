@@ -433,6 +433,37 @@ class SceneSyncTest {
     }
 
     @Test
+    void maskedAndDoubleSidedMaterialsFollowTheirData() throws InterruptedException {
+        // A scene's materials say how they rasterize, as glTF's do: one masked, one double-sided, one blended (opaque
+        // until transparents come): each renderable draws in its raster bin.
+        AssetRef<MaterialData> masked = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
+            (glow, seed) -> MaterialData.builder().baseColor(1, 1, 1, 1)
+                .alpha(MaterialData.AlphaMode.MASK, 0.5f).build(), new Glow(1, 1, 1), 4);
+        AssetRef<MaterialData> twoSided = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
+            (glow, seed) -> MaterialData.builder().doubleSided(true).build(), new Glow(1, 1, 1), 5);
+        AssetRef<MaterialData> blended = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
+            (glow, seed) -> MaterialData.builder().alpha(MaterialData.AlphaMode.BLEND, 0.5f).build(),
+            new Glow(1, 1, 1), 6);
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        List<FrameGraph> graphs = List.of(graph(sync, false, new GpuBuffer[] {readback(), readback()}));
+        RenderView cameraView = cameraViews.getLast();
+        renderables.set(facing(scene, -1.5, 0, -4), SQUARE, List.of(masked));
+        renderables.set(facing(scene, 0, 0, -4), SQUARE, List.of(twoSided));
+        renderables.set(facing(scene, 1.5, 0, -4), SQUARE, List.of(blended));
+        frame(graphs, List.of(sync), camera);
+        load();
+        for (int frame = 0; frame < 3; frame++) {
+            frame(graphs, List.of(sync), camera);
+        }
+        device.waitIdle();
+        assertThat(cameraView.visibleMeshlets(0)).as("the blended one, opaque").isEqualTo(1);
+        assertThat(cameraView.visibleMeshlets(1)).as("the double-sided one").isEqualTo(1);
+        assertThat(cameraView.visibleMeshlets(2)).as("the masked one").isEqualTo(1);
+    }
+
+    @Test
     void scenesShareOneGpuSceneToldApartByLayers() throws InterruptedException {
         // A world and an editor's gizmos, two scenes in one GPU scene: their instances take ids from the one table,
         // and each graph's view draws one of them by its layers (the gizmos' nodes on layer 1).

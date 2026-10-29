@@ -27,6 +27,7 @@ import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
 import static org.lwjgl.vulkan.VK10.vkCmdDispatchIndirect;
 import static org.lwjgl.vulkan.VK10.vkCmdDrawIndexedIndirect;
 import static org.lwjgl.vulkan.VK10.vkCmdFillBuffer;
+import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_INDEX_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
@@ -126,7 +127,13 @@ public final class MeshletRenderer implements AutoCloseable {
     /** VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT: the same bit as the 32-bit stage. */
     private static final long MESH_SHADER_STAGE = VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
     private static final int INSTANCE_PUSH = 84;
-    private static final int CULL_PUSH = 64;
+    private static final int CULL_PUSH = 72;
+    private static final int EXPAND_PUSH = 72;
+    /** Raster bins, as meshlets/common.slang has them: opaque, double-sided, masked. */
+    static final int BINS = 3;
+    static final int BIN_OPAQUE = 0;
+    static final int BIN_DOUBLE_SIDED = 1;
+    static final int BIN_MASKED = 2;
     private static final int PHASE_ALL = 0;
     private static final int PHASE_EARLY = 1;
     private static final int PHASE_LATE = 2;
@@ -138,7 +145,7 @@ public final class MeshletRenderer implements AutoCloseable {
      * Both draw paths' push blocks: the materials at byte 80 and the light list at 88, where the shared fragment
      * shader reads them.
      */
-    private static final int DRAW_PUSH = 96;
+    private static final int DRAW_PUSH = 104;
     /** The visibility buffer's IDs: instance + 1 (0: nothing), and meshlet << 7 | triangle. */
     public static final int ID_FORMAT = org.lwjgl.vulkan.VK10.VK_FORMAT_R32G32_UINT;
 
@@ -151,12 +158,14 @@ public final class MeshletRenderer implements AutoCloseable {
     private final Pipeline instancesPass;
     private final Pipeline cull;
     private final Pipeline expand;
-    private final Pipeline draw;
-    private final Pipeline meshDraw;
-    private final Pipeline drawDepth;
-    private final Pipeline meshDepth;
-    private final Pipeline idsDraw; // the visibility buffer's: IDs, no shading (null without primitive IDs)
-    private final Pipeline idsMesh;
+    // Per raster bin (BIN_*), the draws: shaded, depth only, the visibility buffer's IDs (null without primitive
+    // IDs), on the indexed path and on mesh shaders (null without).
+    private final Pipeline[] draw;
+    private final Pipeline[] meshDraw;
+    private final Pipeline[] drawDepth;
+    private final Pipeline[] meshDepth;
+    private final Pipeline[] idsDraw;
+    private final Pipeline[] idsMesh;
     private final GpuBuffer chunks;
     private final GpuBuffer chunkCommand;
     private final List<RenderView> views = new ArrayList<>();
@@ -203,49 +212,32 @@ public final class MeshletRenderer implements AutoCloseable {
              ShaderModule drawShader = ShaderModule.load(device, "shaders/meshlets/draw.spv")) {
             instancesPass = Pipeline.compute(device, instanceShader, "instancesMain", INSTANCE_PUSH);
             cull = Pipeline.compute(device, cullShader, "cullMain", CULL_PUSH);
-            expand = Pipeline.compute(device, expandShader, "expandMain", 64);
-            draw = Pipeline.graphics(device)
-                .stage(VK_SHADER_STAGE_VERTEX_BIT, drawShader, "vertexMain")
-                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "fragmentMain")
-                .color(colorFormat)
-                .depth(depthFormat)
-                .pushConstants(DRAW_PUSH)
-                .build();
-            drawDepth = Pipeline.graphics(device) // depth only: shadow maps
-                .stage(VK_SHADER_STAGE_VERTEX_BIT, drawShader, "vertexMain")
-                .depth(depthFormat)
-                .pushConstants(DRAW_PUSH)
-                .build();
+            expand = Pipeline.compute(device, expandShader, "expandMain", EXPAND_PUSH);
             ShaderModule idsShader = device.primitiveIds() ? ShaderModule.load(device, "shaders/visibility/ids.spv")
                 : null;
-            idsDraw = idsShader == null ? null : Pipeline.graphics(device)
-                .stage(VK_SHADER_STAGE_VERTEX_BIT, drawShader, "vertexMain")
-                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader, "idsMain")
-                .color(ID_FORMAT)
-                .depth(depthFormat)
-                .pushConstants(DRAW_PUSH)
-                .build();
+            // A pipeline per raster bin and role: the opaque bin culls back faces and discards nothing; the
+            // double-sided one culls nothing; the masked one culls nothing and discards (masked texels, one-sided
+            // materials' back faces), depth only too, so shadow maps mask what the camera does.
+            draw = bins(bin -> raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain")
+                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, bin == BIN_MASKED ? "maskedMain" : "fragmentMain")
+                .color(colorFormat).depth(depthFormat).build());
+            drawDepth = bins(bin -> depthOnly(raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain"), bin,
+                drawShader).depth(depthFormat).build());
+            idsDraw = idsShader == null ? null : bins(bin -> raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT,
+                "vertexMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader, bin == BIN_MASKED ? "maskedIdsMain"
+                : "idsMain").color(ID_FORMAT).depth(depthFormat).build());
             if (device.meshShaders()) {
                 try (ShaderModule meshShader = ShaderModule.load(device, "shaders/meshlets/mesh.spv")) {
-                    meshDraw = Pipeline.graphics(device)
-                        .stage(VK_SHADER_STAGE_MESH_BIT_EXT, meshShader, "meshMain")
-                        .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "fragmentMain") // the same shading
-                        .color(colorFormat)
-                        .depth(depthFormat)
-                        .pushConstants(DRAW_PUSH)
-                        .build();
-                    meshDepth = Pipeline.graphics(device)
-                        .stage(VK_SHADER_STAGE_MESH_BIT_EXT, meshShader, "meshMain")
-                        .depth(depthFormat)
-                        .pushConstants(DRAW_PUSH)
-                        .build();
-                    idsMesh = idsShader == null ? null : Pipeline.graphics(device)
-                        .stage(VK_SHADER_STAGE_MESH_BIT_EXT, meshShader, "meshMain")
-                        .stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader, "idsMain")
-                        .color(ID_FORMAT)
-                        .depth(depthFormat)
-                        .pushConstants(DRAW_PUSH)
-                        .build();
+                    meshDraw = bins(bin -> raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain")
+                        .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, bin == BIN_MASKED ? "maskedMain"
+                            : "fragmentMain") // the same shading
+                        .color(colorFormat).depth(depthFormat).build());
+                    meshDepth = bins(bin -> depthOnly(raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT,
+                        "meshMain"), bin, drawShader).depth(depthFormat).build());
+                    idsMesh = idsShader == null ? null : bins(bin -> raster(bin, meshShader,
+                        VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader,
+                            bin == BIN_MASKED ? "maskedIdsMain" : "idsMain").color(ID_FORMAT).depth(depthFormat)
+                        .build());
                 }
             } else {
                 meshDraw = null;
@@ -507,49 +499,79 @@ public final class MeshletRenderer implements AutoCloseable {
         drawIds(commands, view, idView, depthView, width, height);
     }
 
+    /** A graphics pipeline of raster bin {@code bin} drawing with {@code entry} of {@code shader}'s {@code stage}. */
+    private Pipeline.Graphics raster(int bin, ShaderModule shader, int stage, String entry) {
+        Pipeline.Graphics graphics = Pipeline.graphics(device).stage(stage, shader, entry).pushConstants(DRAW_PUSH);
+        return bin == BIN_OPAQUE ? graphics : graphics.doubleSided(); // the masked bin culls one-sided back faces itself
+    }
+
+    /** Depth only: no fragment stage but the masked bin's, which discards what it masks. */
+    private static Pipeline.Graphics depthOnly(Pipeline.Graphics graphics, int bin, ShaderModule drawShader) {
+        return bin == BIN_MASKED ? graphics.stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "maskedDepthMain")
+            : graphics;
+    }
+
+    /** A pipeline per raster bin, made by {@code make}. */
+    private static Pipeline[] bins(java.util.function.IntFunction<Pipeline> make) {
+        Pipeline[] pipelines = new Pipeline[BINS];
+        for (int bin = 0; bin < BINS; bin++) {
+            pipelines[bin] = make.apply(bin);
+        }
+        return pipelines;
+    }
+
+    /** Draws {@code v}'s raster bins, each with its pipeline of {@code indexed} or {@code mesh}. */
     private void draw(VkCommandBuffer commands, RenderView v, long colorView, long depthView, int width, int height,
-        float r, float g, float b, long clusters, Pipeline indexed, Pipeline mesh) {
+        float r, float g, float b, long clusters, Pipeline[] indexed, Pipeline[] mesh) {
         boolean late = v.phase == PHASE_LATE;
-        long count = v.drawCount().deviceAddress() + (late ? 4 : 0);
+        long count = v.drawCount().deviceAddress();
         try (MemoryStack stack = stackPush()) {
             beginRendering(commands, stack, colorView, depthView, width, height, r, g, b, late);
-            if (path() == Path.MESH_SHADERS) {
-                long push = stack.nmalloc(8, DRAW_PUSH);
-                memPutLong(push, v.address());
-                memPutLong(push + 8, pool.meshTable().deviceAddress());
-                memPutLong(push + 16, scene.instanceAddress());
-                memPutLong(push + 24, v.visible().deviceAddress());
-                memPutLong(push + 32, count);
-                memPutLong(push + 40, pool.meshlets().deviceAddress());
-                memPutLong(push + 48, pool.meshletVertices().deviceAddress());
-                memPutLong(push + 56, pool.meshletTriangles().deviceAddress());
-                memPutLong(push + 64, pool.positions().deviceAddress());
-                memPutLong(push + 72, pool.attributes().deviceAddress());
-                memPutLong(push + 80, scene.materialsAddress());
-                memPutLong(push + 88, clusters);
-                mesh.bind(commands);
-                setViewport(commands, stack, width, height);
-                mesh.push(commands, push, DRAW_PUSH);
-                vkCmdDrawMeshTasksIndirectEXT(commands, v.expandCommand().handle(), 0, 1, 12);
-            } else {
-                long push = stack.ncalloc(8, 1, DRAW_PUSH);
-                memPutLong(push, v.address());
-                memPutLong(push + 8, pool.meshTable().deviceAddress());
-                memPutLong(push + 16, scene.instanceAddress());
-                memPutLong(push + 24, pool.positions().deviceAddress());
-                memPutLong(push + 32, pool.attributes().deviceAddress());
-                memPutLong(push + 40, v.visible().deviceAddress());
-                memPutLong(push + 48, pool.meshlets().deviceAddress());
-                memPutLong(push + 56, pool.meshletVertices().deviceAddress());
-                memPutLong(push + 80, scene.materialsAddress());
-                memPutLong(push + 88, clusters);
-                indexed.bind(commands);
-                setViewport(commands, stack, width, height);
-                indexed.push(commands, push, DRAW_PUSH);
-                vkCmdBindIndexBuffer(commands, v.frameIndices().handle(), 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexedIndirect(commands, v.drawCommand().handle(), 0, 1, 20);
+            setViewport(commands, stack, width, height);
+            for (int bin = 0; bin < BINS; bin++) {
+                drawBin(commands, stack, v, bin, late, count, clusters, indexed[bin], mesh == null ? null : mesh[bin]);
             }
             vkCmdEndRendering(commands);
+        }
+    }
+
+    private void drawBin(VkCommandBuffer commands, MemoryStack stack, RenderView v, int bin, boolean late, long count,
+        long clusters, Pipeline indexed, Pipeline mesh) {
+        if (path() == Path.MESH_SHADERS) {
+            long push = stack.nmalloc(8, DRAW_PUSH);
+            memPutLong(push, v.address());
+            memPutLong(push + 8, pool.meshTable().deviceAddress());
+            memPutLong(push + 16, scene.instanceAddress());
+            memPutLong(push + 24, v.visible().deviceAddress());
+            memPutLong(push + 32, count);
+            memPutLong(push + 40, pool.meshlets().deviceAddress());
+            memPutLong(push + 48, pool.meshletVertices().deviceAddress());
+            memPutLong(push + 56, pool.meshletTriangles().deviceAddress());
+            memPutLong(push + 64, pool.positions().deviceAddress());
+            memPutLong(push + 72, pool.attributes().deviceAddress());
+            memPutLong(push + 80, scene.materialsAddress());
+            memPutLong(push + 88, clusters);
+            memPutInt(push + 96, bin);
+            memPutInt(push + 100, late ? 1 : 0);
+            mesh.bind(commands);
+            mesh.push(commands, push, DRAW_PUSH);
+            vkCmdDrawMeshTasksIndirectEXT(commands, v.expandCommand().handle(), 16L * bin, 1, 12);
+        } else {
+            long push = stack.ncalloc(8, 1, DRAW_PUSH);
+            memPutLong(push, v.address());
+            memPutLong(push + 8, pool.meshTable().deviceAddress());
+            memPutLong(push + 16, scene.instanceAddress());
+            memPutLong(push + 24, pool.positions().deviceAddress());
+            memPutLong(push + 32, pool.attributes().deviceAddress());
+            memPutLong(push + 40, v.visible().deviceAddress());
+            memPutLong(push + 48, pool.meshlets().deviceAddress());
+            memPutLong(push + 56, pool.meshletVertices().deviceAddress());
+            memPutLong(push + 80, scene.materialsAddress());
+            memPutLong(push + 88, clusters);
+            indexed.bind(commands);
+            indexed.push(commands, push, DRAW_PUSH);
+            vkCmdBindIndexBuffer(commands, v.frameIndices().handle(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexedIndirect(commands, v.drawCommand().handle(), 24L * bin, 1, 20);
         }
     }
 
@@ -575,19 +597,32 @@ public final class MeshletRenderer implements AutoCloseable {
             memPutInt(reset + 8, 1);
             memPutInt(reset + 12, 0);
             nvkCmdUpdateBuffer(commands, chunkCommand.handle(), 0, 16, reset);
-            long draw = stack.ncalloc(4, 6, 4); // no indices, one instance; word 5 counts reserved indices
-            memPutInt(draw + 4, 1);
+            long dispatches = stack.nmalloc(4, 16 * BINS); // per raster bin: no meshlets, a dispatch of x by 1 by 1
+            long draws = stack.ncalloc(4, 6 * BINS, 4); // per bin: no indices, one instance, from the bin's first
+            for (int bin = 0; bin < BINS; bin++) {
+                memPutInt(dispatches + 16L * bin, 0);
+                memPutInt(dispatches + 16L * bin + 4, 1);
+                memPutInt(dispatches + 16L * bin + 8, 1);
+                memPutInt(dispatches + 16L * bin + 12, 0);
+                memPutInt(draws + 24L * bin + 4, 1);
+            }
             for (int i = 0; i < count; i++) {
                 RenderView v = views[i];
                 FrameBuffer view = v.viewBuffer();
                 view.putInt(168, instanceCount);
                 // mesh shaders read no index buffer: every listed meshlet fits
-                view.putInt(184, meshShading ? -1 : (int) Math.min(Integer.MAX_VALUE, 3L * v.options().triangles()));
-                if (v.phase != PHASE_LATE) {
-                    vkCmdFillBuffer(commands, v.drawCount().handle(), 0, 16, 0); // the counts, the indices wanted
+                long indices = 3L * v.options().triangles();
+                long binIndices = 3L * v.options().binTriangles();
+                view.putInt(184, meshShading ? -1 : (int) indices);
+                view.putInt(344, meshShading ? -1 : (int) binIndices);
+                for (int bin = 1; bin < BINS; bin++) {
+                    memPutInt(draws + 24L * bin + 8, (int) (indices + (bin - 1) * binIndices)); // the bin's first index
                 }
-                nvkCmdUpdateBuffer(commands, v.expandCommand().handle(), 0, 16, reset); // no meshlets: x by 1 by 1
-                nvkCmdUpdateBuffer(commands, v.drawCommand().handle(), 0, 24, draw);
+                if (v.phase != PHASE_LATE) {
+                    vkCmdFillBuffer(commands, v.drawCount().handle(), 0, VK_WHOLE_SIZE, 0); // counts, indices wanted
+                }
+                nvkCmdUpdateBuffer(commands, v.expandCommand().handle(), 0, 16 * BINS, dispatches);
+                nvkCmdUpdateBuffer(commands, v.drawCommand().handle(), 0, 24 * BINS, draws);
             }
         }
         writeRows(commands, views, count);
@@ -627,6 +662,7 @@ public final class MeshletRenderer implements AutoCloseable {
             memPutLong(push + 32, pool.meshlets().deviceAddress());
             memPutLong(push + 40, pool.clusterLod().deviceAddress());
             occlusion(push + 48, pyramid, width, height, mips);
+            memPutLong(push + 64, scene.materialsAddress()); // each meshlet's raster bin
             cull.bind(commands);
             cull.push(commands, push, CULL_PUSH);
             vkCmdDispatchIndirect(commands, chunkCommand.handle(), 0);
@@ -643,18 +679,22 @@ public final class MeshletRenderer implements AutoCloseable {
         expand.bind(commands);
         for (int i = 0; i < count; i++) {
             RenderView v = views[i];
-            try (MemoryStack stack = stackPush()) {
-                long push = stack.nmalloc(8, 64);
-                memPutLong(push, v.address());
-                memPutLong(push + 8, v.visible().deviceAddress());
-                memPutLong(push + 16, v.drawCount().deviceAddress() + (v.phase == PHASE_LATE ? 4 : 0));
-                memPutLong(push + 24, pool.meshlets().deviceAddress());
-                memPutLong(push + 32, pool.meshTable().deviceAddress());
-                memPutLong(push + 40, scene.instanceAddress());
-                memPutLong(push + 48, pool.meshletTriangles().deviceAddress());
-                memPutLong(push + 56, v.frameIndices().deviceAddress());
-                expand.push(commands, push, 64);
-                vkCmdDispatchIndirect(commands, v.expandCommand().handle(), 0);
+            for (int bin = 0; bin < BINS; bin++) {
+                try (MemoryStack stack = stackPush()) {
+                    long push = stack.nmalloc(8, EXPAND_PUSH);
+                    memPutLong(push, v.address());
+                    memPutLong(push + 8, v.visible().deviceAddress());
+                    memPutLong(push + 16, v.drawCount().deviceAddress());
+                    memPutLong(push + 24, pool.meshlets().deviceAddress());
+                    memPutLong(push + 32, pool.meshTable().deviceAddress());
+                    memPutLong(push + 40, scene.instanceAddress());
+                    memPutLong(push + 48, pool.meshletTriangles().deviceAddress());
+                    memPutLong(push + 56, v.frameIndices().deviceAddress());
+                    memPutInt(push + 64, bin);
+                    memPutInt(push + 68, v.phase == PHASE_LATE ? 1 : 0);
+                    expand.push(commands, push, EXPAND_PUSH);
+                    vkCmdDispatchIndirect(commands, v.expandCommand().handle(), 16L * bin);
+                }
             }
         }
         barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
@@ -776,17 +816,12 @@ public final class MeshletRenderer implements AutoCloseable {
             instancesPass.close();
             cull.close();
             expand.close();
-            draw.close();
-            drawDepth.close();
-            if (meshDraw != null) {
-                meshDraw.close();
-                meshDepth.close();
-            }
-            if (idsDraw != null) {
-                idsDraw.close();
-            }
-            if (idsMesh != null) {
-                idsMesh.close();
+            for (Pipeline[] pipelines : new Pipeline[][] {draw, drawDepth, meshDraw, meshDepth, idsDraw, idsMesh}) {
+                if (pipelines != null) {
+                    for (Pipeline pipeline : pipelines) {
+                        pipeline.close();
+                    }
+                }
             }
             for (RenderView view : views) {
                 view.close();

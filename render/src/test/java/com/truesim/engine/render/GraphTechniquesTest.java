@@ -894,6 +894,58 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void classicLodFollowsMaskedAndDoubleSidedMaterialsAsMeshletsDo() {
+        // A masked checker quad facing the camera on the left, a double-sided quad facing away on the right: classic
+        // LOD draws them through the same raster bins, the same image as meshlets.
+        MeshData texturedMesh = MeshletRendererTest.texturedQuad();
+        int textured = pool.add(texturedMesh);
+        java.lang.foreign.MemorySegment texels = java.lang.foreign.Arena.ofAuto().allocate(4 * 8 * 8, 4);
+        for (int y = 0; y < 8; y++) {
+            for (int x = 0; x < 8; x++) {
+                texels.setAtIndex(ValueLayout.JAVA_INT, y * 8 + x, (x / 2 + y / 2) % 2 == 0 ? 0xff40c0ff : 0x0040c0ff);
+            }
+        }
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            Material checkered = new Material().baseColorTexture(textures.color(8, 8, texels)).alphaMask(0.5f);
+            int masked = materials.addAll(List.of(checkered, checkered));
+            Material twoSided = new Material().baseColor(0.9f, 0.5f, 0.2f).doubleSided(true);
+            int doubleSided = materials.addAll(List.of(twoSided, twoSided));
+            scene.setMaterials(materials);
+            classic.add(textured, texturedMesh);
+            scene.set(0, textured, masked, -1.2, 0, -4, 0, 0, 0, 1, 1, 1, 1);
+            scene.set(1, textured, doubleSided, 1.2, 0, -4, 0, 1, 0, 0, 1, 1, 1); // facing away
+            scene.removeFrom(2);
+            view.set(new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1), 1, MeshletRenderer.MODE_LIT);
+            graph.add(MeshletBenchmark.forward(view, SIZE, SIZE).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            frame();
+            int[] expected = image();
+            assertThat(view.visibleMeshlets(1)).as("meshlets: the double-sided quad").isPositive();
+            assertThat(view.visibleMeshlets(2)).as("meshlets: the masked one").isPositive();
+            int drawn = 0;
+            for (int pixel : expected) {
+                drawn += (pixel & 0xffffff) != 0 ? 1 : 0;
+            }
+            assertThat(drawn).as("pixels drawn").isPositive();
+            SceneGeometry geometry = new SceneGeometry(classic);
+            graph.replace(new ClusteredForwardShading(geometry, view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            frame();
+            assertThat(differing(expected)).as("classic forward against meshlets").isLessThan(SIZE * SIZE / 200);
+            if (device.primitiveIds()) {
+                graph.replace(new VisibilityBufferShading(geometry, view, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                frame();
+                assertThat(differing(expected)).as("classic visibility buffer against meshlets")
+                    .isLessThan(SIZE * SIZE / 50);
+            }
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
     void classicLodDrawsWhatMeshletsDraw() {
         // The lit floor, and a quad standing on it hiding part of it.
         scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);

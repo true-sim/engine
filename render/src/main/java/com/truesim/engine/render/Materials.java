@@ -189,7 +189,7 @@ public final class Materials implements AutoCloseable {
         table.putFloat(o + 32, material.metallic);
         table.putFloat(o + 36, material.normalScale);
         table.putFloat(o + 40, material.occlusion);
-        table.putFloat(o + 44, 0);
+        table.putInt(o + 44, material.header());
         table.putInt(o + 48, material.baseColorTexture);
         table.putInt(o + 52, material.normalTexture);
         table.putInt(o + 56, material.ormTexture);

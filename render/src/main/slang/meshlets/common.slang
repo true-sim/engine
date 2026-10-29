@@ -79,7 +79,7 @@ public struct View
     public uint mode;              // 0 lit, 1 meshlet colors, 2 white
     public uint orthographic;      // 1: projectionScale is pixels per unit at any distance (e.g. a sun's shadow map)
     public uint maxIndices;        // the indexed path's index buffer holds this many (-1: mesh shaders, no buffer)
-    public uint pad;
+    public uint binDraws;          // room for this many meshlets in each raster bin but the first (BIN_*)
     public float4x4 inverseViewProjection; // clip space back to camera-relative positions
     public float3 position;        // the camera's world position, high part
     public uint pad1;
@@ -89,9 +89,49 @@ public struct View
     public uint flags;             // VIEW_*
     public ViewLists lists;        // where culling lists what the view draws
     public uint* visibility;       // per instance: 1 if the view saw it the last time its late phase looked; or null
-    public uint pad2;
+    public uint binIndices;        // the indexed path's room in each raster bin but the first, after maxIndices
     public uint pad3;              // 352 bytes in all
 };
+
+/**
+ * Raster bins: how meshlets rasterize, by their material. Each has its own lists and draw: the first is ordinary
+ * opaque and one-sided (back faces culled, no discard: the fastest), then double-sided opaque (no culling), then
+ * alpha-masked (no culling; back faces of one-sided masked materials discarded with the masked texels).
+ */
+public static const uint BINS = 3;
+public static const uint BIN_OPAQUE = 0;
+public static const uint BIN_DOUBLE_SIDED = 1;
+public static const uint BIN_MASKED = 2;
+
+/** The raster bin of a meshlet of material `m`. */
+public uint rasterBin(Material m)
+{
+    return materialMasked(m) ? BIN_MASKED : materialDoubleSided(m) ? BIN_DOUBLE_SIDED : BIN_OPAQUE;
+}
+
+/** The first slot of `bin` in `view`'s visible list. */
+public uint binFirstSlot(View view, uint bin)
+{
+    return bin == 0 ? 0 : view.maxDraws + (bin - 1) * view.binDraws;
+}
+
+/** How many meshlets `bin` has room for in `view`'s visible list. */
+public uint binDrawCapacity(View view, uint bin)
+{
+    return bin == 0 ? view.maxDraws : view.binDraws;
+}
+
+/** The first index of `bin` in `view`'s index buffer (the indexed path's). */
+public uint binFirstIndex(View view, uint bin)
+{
+    return bin == 0 ? 0 : view.maxIndices + (bin - 1) * view.binIndices;
+}
+
+/** How many indices `bin` has room for (-1: mesh shaders, no index buffer). */
+public uint binIndexCapacity(View view, uint bin)
+{
+    return bin == 0 ? view.maxIndices : view.binIndices;
+}
 
 /** A view's place in a renderer's table of views. */
 public struct ViewRef
@@ -295,9 +335,11 @@ public struct VisibleMeshlet
 public struct ViewLists
 {
     public VisibleMeshlet* visible;
-    public uint* expandCommand;  // VkDispatchIndirectCommand
-    public uint* drawCommand;    // VkDrawIndexedIndirectCommand: its index count grows here
-    public uint* visibleCount;   // the early (or only) phase, the late one, then the most indices a phase wanted
+    public uint* expandCommand;  // per raster bin, 4 words: VkDispatchIndirectCommand (the mesh dispatch too)
+    public uint* drawCommand;    // per bin, 6 words: VkDrawIndexedIndirectCommand, its index count growing; word 5
+                                 // counts the indices reserved
+    public uint* visibleCount;   // per bin the early (or only) phase, then the late one (words 2 * bin + phase); then
+                                 // per bin the most indices a phase wanted (words 6 + bin)
 };
 
 /**
@@ -325,7 +367,8 @@ public struct VertexOut
  * Whether meshlet m (a pool meshlet) of an instance is drawn: its detail level is the right one for its distance
  * (own group's error at most the allowed pixels, parent's more), it is in the frustum and does not face away.
  */
-public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets, float* clusterLod)
+public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets, float* clusterLod,
+    bool doubleSided)
 {
     float scale = maxScale(instance);
     uint l = m * 10;
@@ -347,7 +390,7 @@ public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets,
     float4 cone = decodeSnorm8(meshlets[w + 7]);
     // Back faces as seen from the eye; orthographic views (shadow maps) keep them.
     float3 fromEye = center - view.eye;
-    return view.orthographic != 0 || cone.w >= 1
+    return doubleSided || view.orthographic != 0 || cone.w >= 1
         || dot(fromEye, rotate(instance.rotation, cone.xyz)) < cone.w * length(fromEye) + radius;
 }
 
@@ -422,6 +465,18 @@ public static const float3 SKY_IRRADIANCE = float3(0.78539816 / 1.02);
  * paths, and of anything shading the same surfaces. Lit by the lights `lights` gives it (the frame's light list) and
  * the sky or, without a light list (null), by the sun and the sky. Shadow rays are traced by `rays` (NoRays: none).
  */
+/**
+ * Discards what a masked material does not draw at this fragment: its masked texels, and back faces unless it is
+ * double-sided (the masked bin draws without culling). Every pass rasterizing the masked bin calls it, shadows too.
+ */
+public void discardMasked(Material m, VertexOut in, bool front)
+{
+    if ((!front && !materialDoubleSided(m)) || alphaClipped(m, in.uv, ddx(in.uv), ddy(in.uv), in.color))
+    {
+        discard;
+    }
+}
+
 public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Material* materials, float2 dx,
     float2 dy, LightListHeader* lights, uint2 pixel)
 {
@@ -435,8 +490,15 @@ public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Mat
         m.baseColor = float4(meshletColor(in.meshlet), 1);
         m.baseColorTexture = -1;
     }
-    Surface s = evaluate(m, in.normal, in.tangent, in.uv, dx, dy, in.color);
     float3 toViewer = normalize(view.eye - in.world);
+    float3 normal = in.normal;
+    float4 tangent = in.tangent;
+    if (materialDoubleSided(m) && dot(normal, toViewer) < 0)
+    {
+        normal = -normal; // a back face: lit as the front
+        tangent.w = -tangent.w;
+    }
+    Surface s = evaluate(m, normal, tangent, in.uv, dx, dy, in.color);
     float3 color = ambient(s, SKY_IRRADIANCE) + s.emissive;
     if (lights == nullptr)
     {

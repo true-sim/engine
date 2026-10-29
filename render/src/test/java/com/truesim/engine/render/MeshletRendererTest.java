@@ -389,6 +389,73 @@ class MeshletRendererTest {
     }
 
     @Test
+    void maskedAndDoubleSidedMaterialsDrawInBinsOfTheirOwn() {
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 16)) {
+            // A checker of opaque and see-through texels, 2 x 2 each.
+            int checker = textures.color(8, 8, texels(8, (x, y) -> ((x / 2 + y / 2) % 2 == 0) ? 0xffffffff
+                : 0x00ffffff));
+            // The textured quad has two submeshes: each material twice, one per half.
+            int plain = materials.addAll(java.util.List.of(new Material(), new Material()));
+            Material doubleSided = new Material().doubleSided(true);
+            int twoSided = materials.addAll(java.util.List.of(doubleSided, doubleSided));
+            Material checkered = new Material().baseColorTexture(checker).alphaMask(0.5f);
+            int masked = materials.addAll(java.util.List.of(checkered, checkered));
+            Material checkeredTwoSided = new Material().baseColorTexture(checker).alphaMask(0.5f).doubleSided(true);
+            int maskedTwoSided = materials.addAll(java.util.List.of(checkeredTwoSided, checkeredTwoSided));
+            assertThat(new Material().masked()).isFalse();
+            int textured = pool.add(texturedQuad());
+            scene.setMaterials(materials);
+            lookForward(1, MeshletRenderer.MODE_WHITE);
+            for (MeshletRenderer.Path path : device.meshShaders()
+                ? new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED, MeshletRenderer.Path.MESH_SHADERS}
+                : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED}) {
+                renderer.setPath(path);
+                // One quad at a time in front of the camera, 5 units ahead: facing it, or facing away.
+                scene.set(0, textured, plain, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1); // facing +z: the camera
+                int front = render() > 0 ? covered() : 0;
+                assertThat(front).as("the front, %s", path).isCloseTo(44 * 44,
+                    org.assertj.core.data.Percentage.withPercentage(10));
+                assertThat(view.visibleMeshlets(0)).isPositive();
+                scene.set(0, textured, plain, 0, 0, -5, 0, 1, 0, 0, 1, 1, 1); // turned about y: facing away
+                render();
+                assertThat(covered()).as("one-sided, facing away: culled, %s", path).isZero();
+                scene.set(0, textured, twoSided, 0, 0, -5, 0, 1, 0, 0, 1, 1, 1);
+                render();
+                assertThat(view.visibleMeshlets(1)).as("double-sided, facing away: drawn, %s", path).isPositive();
+                assertThat(covered()).isEqualTo(front);
+                // Lit as the front: the back face's normal turned to the viewer.
+                lookForward(1, MeshletRenderer.MODE_LIT);
+                render();
+                int back = pixel(SIZE / 2 - 8, SIZE / 2);
+                scene.set(0, textured, twoSided, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1);
+                render();
+                int lit = pixel(SIZE / 2 + 8, SIZE / 2); // the same point of the surface, seen from the front
+                assertThat(back & 0xff).as("the back face's red, against the front's %d, %s", lit & 0xff, path)
+                    .isCloseTo(lit & 0xff, org.assertj.core.data.Offset.offset(8));
+                lookForward(1, MeshletRenderer.MODE_WHITE);
+                scene.set(0, textured, masked, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1);
+                render();
+                assertThat(view.visibleMeshlets(2)).as("masked, %s", path).isPositive();
+                assertThat((double) covered() / front).as("half the texels masked, %s", path)
+                    .isCloseTo(0.5, org.assertj.core.data.Offset.offset(0.1));
+                scene.set(0, textured, masked, 0, 0, -5, 0, 1, 0, 0, 1, 1, 1);
+                render();
+                assertThat(covered()).as("masked one-sided back faces: not drawn, %s", path).isZero();
+                scene.set(0, textured, maskedTwoSided, 0, 0, -5, 0, 1, 0, 0, 1, 1, 1);
+                render();
+                assertThat((double) covered() / front).as("masked double-sided, facing away, %s", path)
+                    .isCloseTo(0.5, org.assertj.core.data.Offset.offset(0.1));
+            }
+            renderer.setPath(MeshletRenderer.Path.AUTO);
+            scene.setMaterials(null);
+        }
+        assertThatIllegalArgumentException().isThrownBy(() -> new Material().alphaMask(1.5f));
+        assertThat(new Material().alphaMask(0.3f).opaque().masked()).isFalse();
+        assertThat(new Material().doubleSided(true).isDoubleSided()).isTrue();
+        assertThatIllegalArgumentException().isThrownBy(() -> ViewOptions.of(1, 1).withBins(0, 1));
+    }
+
+    @Test
     void viewsReportWhatDidNotFitAndResize() {
         // Three quads, a meshlet and 2 triangles each, into a view with room for two meshlets.
         for (int i = 0; i < 3; i++) {
@@ -423,7 +490,8 @@ class MeshletRendererTest {
             long indexed = small.bytes();
             renderer.setPath(MeshletRenderer.Path.MESH_SHADERS);
             assertThat(small.hasIndices()).as("mesh shaders need none").isFalse();
-            assertThat(small.bytes()).isEqualTo(indexed - 12L * 6);
+            assertThat(small.bytes()).as("the index buffer, every bin's").isEqualTo(indexed
+                - 12L * small.options().allTriangles());
             assertThat(renderer.createView(ViewOptions.of(8, 1 << 20)).hasIndices()).isFalse();
         }
         assertThatIllegalArgumentException().isThrownBy(() -> small.resize(0, 1));

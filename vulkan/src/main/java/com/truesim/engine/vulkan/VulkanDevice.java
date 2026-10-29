@@ -194,7 +194,8 @@ public final class VulkanDevice implements AutoCloseable {
                 .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES)
                 .dynamicRendering(true)
                 .synchronization2(true)
-                .maintenance4(true);
+                .maintenance4(true)
+                .shaderDemoteToHelperInvocation(true); // Slang's discard: masked materials
             if (supported14 != null) {
                 features13.pNext(supported14.address());
             }
@@ -348,6 +349,7 @@ public final class VulkanDevice implements AutoCloseable {
         check(missing, features13.dynamicRendering(), "dynamicRendering");
         check(missing, features13.synchronization2(), "synchronization2");
         check(missing, features13.maintenance4(), "maintenance4");
+        check(missing, features13.shaderDemoteToHelperInvocation(), "shaderDemoteToHelperInvocation");
         check(missing, features12.timelineSemaphore(), "timelineSemaphore");
         check(missing, features12.bufferDeviceAddress(), "bufferDeviceAddress");
         check(missing, features12.descriptorIndexing(), "descriptorIndexing");

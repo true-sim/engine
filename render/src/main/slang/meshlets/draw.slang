@@ -42,3 +42,19 @@ float4 fragmentMain(VertexOut in) : SV_Target
     return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(in.uv), ddy(in.uv), push.lights,
         uint2(in.position.xy));
 }
+
+/** The masked bin's: drawn without culling, so one-sided materials' back faces go here with the masked texels. */
+[shader("fragment")]
+float4 maskedMain(VertexOut in, bool front : SV_IsFrontFace) : SV_Target
+{
+    discardMasked(push.materials[in.material], in, front);
+    return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(in.uv), ddy(in.uv), push.lights,
+        uint2(in.position.xy));
+}
+
+/** The masked bin's depth only (shadow maps, depth prepasses): the same texels masked as the color pass's. */
+[shader("fragment")]
+void maskedDepthMain(VertexOut in, bool front : SV_IsFrontFace)
+{
+    discardMasked(push.materials[in.material], in, front);
+}

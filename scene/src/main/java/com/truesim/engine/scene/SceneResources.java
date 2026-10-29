@@ -457,11 +457,19 @@ public final class SceneResources implements AutoCloseable {
         }
     }
 
-    /** The renderer's material for {@code entry}: the default until it loads, untextured where textures are missing. */
+    /**
+     * The renderer's material for {@code entry}: the default until it loads, untextured where textures are missing.
+     * Masked alpha and double-sidedness follow; blended alpha draws opaque until transparents come.
+     */
     @AllowAllocation("materials change rarely")
     private Material convert(MaterialEntry entry) {
         MaterialData d = entry == null || entry.data == null ? MaterialData.DEFAULT : entry.data;
-        return new Material().baseColor(d.baseColor(0), d.baseColor(1), d.baseColor(2))
+        Material material = new Material().baseColor(d.baseColor(0), d.baseColor(1), d.baseColor(2))
+            .alpha(d.baseColor(3)).doubleSided(d.doubleSided());
+        if (d.alphaMode() == MaterialData.AlphaMode.MASK) {
+            material.alphaMask(d.alphaCutoff());
+        }
+        return material
             .emissive(d.emissive(0), d.emissive(1), d.emissive(2))
             .roughness(d.roughness()).metallic(d.metallic())
             .baseColorTexture(slot(d.baseColorTexture()))

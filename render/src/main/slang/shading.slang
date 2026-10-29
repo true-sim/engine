@@ -15,12 +15,42 @@ public struct Material
     public float metallic;         // times the texture's blue
     public float normalScale;      // how strongly the normal map bends the normal
     public float occlusion;        // how strongly the texture's red darkens ambient light
-    public float pad;
+    public uint header;            // type bits 0-7 (0: standard), double-sided bit 8, masked bit 9, cutoff bits 16-31
     public int baseColorTexture;   // sRGB
     public int normalTexture;      // tangent space, xyz in rgb
     public int ormTexture;         // occlusion, roughness, metalness in rgb
     public int emissiveTexture;    // sRGB
 };
+
+/** Whether `m`'s back faces show, lit as the front. */
+public bool materialDoubleSided(Material m)
+{
+    return (m.header & (1u << 8)) != 0;
+}
+
+/** Whether `m` is alpha-masked: texels whose alpha is below its cutoff are not drawn. */
+public bool materialMasked(Material m)
+{
+    return (m.header & (1u << 9)) != 0;
+}
+
+/**
+ * Whether `m` masks this point out: alpha (factor, times the base color texture's, times the vertex color's) below
+ * the cutoff. Opaque materials mask nothing.
+ */
+public bool alphaClipped(Material m, float2 uv, float2 dx, float2 dy, float4 color)
+{
+    if (!materialMasked(m))
+    {
+        return false;
+    }
+    float alpha = m.baseColor.a * color.a;
+    if (m.baseColorTexture >= 0)
+    {
+        alpha *= sampleTexture(m.baseColorTexture, uv, dx, dy).a;
+    }
+    return alpha < float(m.header >> 16) / 65535.0;
+}
 
 /** A surface ready to light: what the material says at one point. */
 public struct Surface
