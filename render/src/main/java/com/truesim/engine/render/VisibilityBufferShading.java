@@ -47,7 +47,9 @@ public final class VisibilityBufferShading implements Technique {
     private final float[] clear = new float[3];
     private final RenderView view;
     private boolean occlusion = true;
-    private final Push push = new Push();
+    // One per pass: a frame graph may record the classification and the shading on two threads at once.
+    private final Push classifyPush = new Push();
+    private final Push shadePush = new Push();
 
     /** {@code geometry} shaded as {@code view} sees it. */
     public VisibilityBufferShading(SceneGeometry geometry, RenderView view, int width, int height, int colorFormat,
@@ -125,8 +127,8 @@ public final class VisibilityBufferShading implements Technique {
         g.pass("material classification")
             .read(ids, Access.STORAGE_READ)
             .write(tiles, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> ctx.dispatch(classify, push(ctx, ids, null, lights, types.size(), 0, ctx.address(tiles)),
-                tilesX, tilesY, 1));
+            .record(ctx -> ctx.dispatch(classify, push(classifyPush, ctx, ids, null, lights, types.size(), 0,
+                ctx.address(tiles)), tilesX, tilesY, 1));
         GraphBuilder.PassBuilder pass = g.pass("visibility shading")
             .read(ids, Access.STORAGE_READ)
             .read(tiles, BufferAccess.INDIRECT)
@@ -147,7 +149,7 @@ public final class VisibilityBufferShading implements Technique {
                     continue;
                 }
                 long list = listBytes * bin;
-                ctx.dispatchIndirect(shade[bin], push(ctx, ids, color, lights, types.size(), bin,
+                ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, ids, color, lights, types.size(), bin,
                     ctx.address(tiles) + list), tiles, list);
             }
         });
@@ -165,8 +167,12 @@ public final class VisibilityBufferShading implements Technique {
         });
     }
 
-    /** resolve.slang's ShadePush: for {@code types} types, shading bin {@code bin}'s tiles at {@code tiles}. */
-    private Push push(PassContext ctx, Image ids, Image color, Buffer lights, int types, int bin, long tiles) {
+    /**
+     * resolve.slang's ShadePush, into {@code push}: for {@code types} types, shading bin {@code bin}'s tiles at
+     * {@code tiles}.
+     */
+    private Push push(Push push, PassContext ctx, Image ids, Image color, Buffer lights, int types, int bin,
+        long tiles) {
         GeometryPool pool = renderer.pool();
         return push.clear()
             .address(view.address())

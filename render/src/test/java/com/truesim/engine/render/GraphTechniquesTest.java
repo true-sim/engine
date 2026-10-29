@@ -419,6 +419,67 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void recordingOnSeveralThreadsDrawsWhatOneThreadDraws() {
+        // Both shadings, occlusion culled, a quad moving every frame, recorded on the calling thread and then a pass
+        // per chunk on four threads: the same images, as pass bodies share nothing they change and the frame start
+        // (the instances' upload) is recorded before any of them.
+        GpuBuffer[] readbacks = {GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+            GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)};
+        try (GpuScene moving = new GpuScene(device, pool, 16, graph.frameSlots());
+             MeshletRenderer drawing = new MeshletRenderer(device, moving, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots());
+             Lights lights = new Lights(device, 4, 1, graph.frameSlots());
+             com.truesim.common.jobs.JobSystem jobs = new com.truesim.common.jobs.JobSystem(4)) {
+            SceneGeometry geometry = SceneGeometry.meshlets(drawing);
+            RenderView movingView = geometry.createView(ViewOptions.of(256, 1 << 12).withOcclusion(true));
+            Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            lights.point(0, -1, -0.5f, -1.5f, 3, 6, 0, 0).point(1, 1, -0.5f, -1.5f, 3, 0, 0, 6)
+                .directional(2, -0.4f, -0.8f, -0.3f, 1, 1, 1).setCount(3);
+            moving.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+            Technique[] shadings = {
+                new ClusteredForwardShading(geometry, movingView, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f),
+                new VisibilityBufferShading(geometry, movingView, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f)};
+            graph.add(shadings[0]).add(new ClusteredLights(lights, camera, SIZE, SIZE))
+                .add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+            for (Technique shading : shadings) {
+                if (shading instanceof VisibilityBufferShading && !device.primitiveIds()) {
+                    continue;
+                }
+                graph.replace(shading);
+                int[][] images = new int[2][];
+                for (int run = 0; run < 2; run++) {
+                    graph.parallel(run == 0 ? null : jobs, 1);
+                    for (int frame = 0; frame < 6; frame++) {
+                        graph.beginFrame();
+                        // A quad standing on the floor, moving left and right: the instances change every frame.
+                        moving.set(1, quad, frame % 2 == 0 ? -0.5f : 0.5f, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f,
+                            0.4f, 0.4f);
+                        geometry.setView(movingView, camera, 1, MeshletRenderer.MODE_LIT);
+                        graph.submit(0, 0);
+                    }
+                    device.waitIdle();
+                    images[run] = new int[SIZE * SIZE];
+                    for (int i = 0; i < SIZE * SIZE; i++) {
+                        images[run][i] = readbacks[1].memory().getAtIndex(ValueLayout.JAVA_INT, i);
+                    }
+                }
+                assertThat(graph.chunks()).as("a chunk per pass").isGreaterThan(4);
+                assertThat(images[1]).as("%s on four threads", shading.getClass().getSimpleName())
+                    .isEqualTo(images[0]);
+                assertThat(java.util.Arrays.stream(images[1]).distinct().count()).as("something drawn")
+                    .isGreaterThan(2);
+            }
+        } finally {
+            device.waitIdle();
+            for (GpuBuffer readback : readbacks) {
+                readback.close();
+            }
+        }
+    }
+
+    @Test
     void clusteredForwardShadingLightsEachPixelByTheLightsNearIt() {
         // A floor below the camera, a red light over its left side and a blue one over its right.
         scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);

@@ -175,9 +175,9 @@ public final class MeshletRenderer implements AutoCloseable {
     private GpuBuffer rows;
     private final List<AutoCloseable> retiring = new ArrayList<>();
     private final List<Long> retireAt = new ArrayList<>();
-    private final RenderView[] one = new RenderView[1];
-    private final boolean[] notEarly = new boolean[1];
-    private final boolean[] early = {true};
+    // Read only: a frame graph may record passes on several threads at once, so recording changes no field.
+    private static final boolean[] NOT_EARLY = {false};
+    private static final boolean[] EARLY = {true};
     private Path path = Path.AUTO;
     private boolean closed;
 
@@ -288,13 +288,13 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /** Has {@code resource} freed once no frame in flight reads it. */
-    void retire(AutoCloseable resource) {
+    synchronized void retire(AutoCloseable resource) {
         retiring.add(resource);
         retireAt.add(slots.retireAt());
     }
 
-    /** Frees what was retired once no frame in flight reads it. */
-    private void releaseRetired() {
+    /** Frees what was retired once no frame in flight reads it; culls of one frame may run on several threads. */
+    private synchronized void releaseRetired() {
         for (int i = retiring.size() - 1; i >= 0; i--) {
             if (slots.isFinished(retireAt.get(i))) {
                 close(retiring.remove(i));
@@ -362,8 +362,7 @@ public final class MeshletRenderer implements AutoCloseable {
 
     /** Culls {@code view} alone, in the early phase of occlusion culling or not. */
     private void cullView(VkCommandBuffer commands, RenderView view, boolean earlyPhase) {
-        one[0] = view;
-        cullViews(commands, one, earlyPhase ? early : notEarly, 1);
+        cullViews(commands, own(view).alone, earlyPhase ? EARLY : NOT_EARLY, 1);
     }
 
     /**
@@ -402,16 +401,16 @@ public final class MeshletRenderer implements AutoCloseable {
     public void recordLate(VkCommandBuffer commands, RenderView view, long colorView, long depthView, int width,
         int height, int pyramid, int mips, long clusters) {
         cullLate(commands, view, pyramid, width, height, mips);
-        drawView(commands, view, colorView, depthView, width, height, 0, 0, 0, clusters);
+        boolean depthOnly = colorView == 0;
+        draw(commands, view, true, colorView, depthView, width, height, 0, 0, 0, clusters,
+            depthOnly ? drawDepth : draw, depthOnly ? meshDepth : meshDraw);
     }
 
     private void cullLate(VkCommandBuffer commands, RenderView view, int pyramid, int width, int height, int mips) {
-        if (!view.hasHistory()) {
+        if (!own(view).hasHistory()) {
             throw new IllegalArgumentException("View " + view.index() + " culls no occlusion: made without it");
         }
-        own(view).phase = PHASE_LATE;
-        one[0] = view;
-        cull(commands, one, 1, pyramid, width, height, mips);
+        cull(commands, view.alone, null, 1, pyramid, width, height, mips);
     }
 
     /**
@@ -440,10 +439,12 @@ public final class MeshletRenderer implements AutoCloseable {
                 views[i].marked = false;
             }
         }
-        for (int i = 0; i < count; i++) {
-            views[i].phase = early[i] ? PHASE_EARLY : PHASE_ALL;
-        }
-        cull(commands, views, count, 0, 0, 0, 0);
+        cull(commands, views, early, count, 0, 0, 0, 0);
+    }
+
+    /** View {@code i}'s phase in a cull: late without {@code early}, else early or all. */
+    private static int phase(boolean[] early, int i) {
+        return early == null ? PHASE_LATE : early[i] ? PHASE_EARLY : PHASE_ALL;
     }
 
     private RenderView own(RenderView view) {
@@ -454,10 +455,10 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /**
-     * Draws {@code view}, as culled last, into {@code colorView} and {@code depthView} ({@code width} by
-     * {@code height}, in the attachment layouts): cleared to ({@code r}, {@code g}, {@code b}) and depth 0, or after
-     * the late phase drawn over them. With {@code colorView} 0, depth only (no shading): a shadow map, say. Allocates
-     * nothing.
+     * Draws {@code view}, as its early (or only) phase culled it, into {@code colorView} and {@code depthView}
+     * ({@code width} by {@code height}, in the attachment layouts), cleared to ({@code r}, {@code g}, {@code b}) and
+     * depth 0. The late phase draws itself ({@link #recordLate}). With {@code colorView} 0, depth only (no shading): a
+     * shadow map, say. Allocates nothing.
      */
     public void drawView(VkCommandBuffer commands, RenderView view, long colorView, long depthView, int width,
         int height, float r, float g, float b) {
@@ -472,13 +473,13 @@ public final class MeshletRenderer implements AutoCloseable {
     public void drawView(VkCommandBuffer commands, RenderView view, long colorView, long depthView, int width,
         int height, float r, float g, float b, long clusters) {
         boolean depthOnly = colorView == 0;
-        draw(commands, own(view), colorView, depthView, width, height, r, g, b, clusters, depthOnly ? drawDepth : draw,
-            depthOnly ? meshDepth : meshDraw);
+        draw(commands, own(view), false, colorView, depthView, width, height, r, g, b, clusters,
+            depthOnly ? drawDepth : draw, depthOnly ? meshDepth : meshDraw);
     }
 
     /**
-     * Draws {@code view}, as culled last, into a visibility buffer: {@code idView} ({@link #ID_FORMAT}) gets what each
-     * pixel shows, cleared to 0 (nothing), and {@code depthView} its depth; after the late phase, drawn over them. A
+     * Draws {@code view}, as its early (or only) phase culled it, into a visibility buffer: {@code idView}
+     * ({@link #ID_FORMAT}) gets what each pixel shows, cleared to 0 (nothing), and {@code depthView} its depth. A
      * shading pass then shades each pixel once. Needs {@link VulkanDevice#primitiveIds()}. Allocates nothing.
      */
     public void drawIds(VkCommandBuffer commands, RenderView view, long idView, long depthView, int width,
@@ -486,7 +487,7 @@ public final class MeshletRenderer implements AutoCloseable {
         if (idsDraw == null) {
             throw new IllegalStateException("The device has no primitive IDs in fragment shaders (geometryShader)");
         }
-        draw(commands, own(view), idView, depthView, width, height, 0, 0, 0, 0, idsDraw, idsMesh);
+        draw(commands, own(view), false, idView, depthView, width, height, 0, 0, 0, 0, idsDraw, idsMesh);
     }
 
     /** The late phase ({@link #recordLate}) into a visibility buffer ({@link #drawIds}). */
@@ -496,7 +497,7 @@ public final class MeshletRenderer implements AutoCloseable {
             throw new IllegalStateException("The device has no primitive IDs in fragment shaders (geometryShader)");
         }
         cullLate(commands, view, pyramid, width, height, mips);
-        drawIds(commands, view, idView, depthView, width, height);
+        draw(commands, view, true, idView, depthView, width, height, 0, 0, 0, 0, idsDraw, idsMesh);
     }
 
     /** A graphics pipeline of raster bin {@code bin} drawing with {@code entry} of {@code shader}'s {@code stage}. */
@@ -520,10 +521,12 @@ public final class MeshletRenderer implements AutoCloseable {
         return pipelines;
     }
 
-    /** Draws {@code v}'s raster bins, each with its pipeline of {@code indexed} or {@code mesh}. */
-    private void draw(VkCommandBuffer commands, RenderView v, long colorView, long depthView, int width, int height,
-        float r, float g, float b, long clusters, Pipeline[] indexed, Pipeline[] mesh) {
-        boolean late = v.phase == PHASE_LATE;
+    /**
+     * Draws {@code v}'s raster bins, each with its pipeline of {@code indexed} or {@code mesh}: the late phase's lists
+     * over the attachments with {@code late}, else the early (or only) phase's into cleared ones.
+     */
+    private void draw(VkCommandBuffer commands, RenderView v, boolean late, long colorView, long depthView, int width,
+        int height, float r, float g, float b, long clusters, Pipeline[] indexed, Pipeline[] mesh) {
         long count = v.drawCount().deviceAddress();
         try (MemoryStack stack = stackPush()) {
             beginRendering(commands, stack, colorView, depthView, width, height, r, g, b, late);
@@ -576,12 +579,12 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /**
-     * Culls {@code views[0]} to {@code views[count - 1]}, each in its phase (the late one against {@code pyramid}):
-     * resets their lists, then the instance pass (a row per view), the cull pass over all their chunks and, on the
-     * indexed path, each view's expansion.
+     * Culls {@code views[0]} to {@code views[count - 1]}, each in its phase ({@link #phase}; without {@code early} the
+     * late one, against {@code pyramid}): resets their lists, then the instance pass (a row per view), the cull pass
+     * over all their chunks and, on the indexed path, each view's expansion.
      */
-    private void cull(VkCommandBuffer commands, RenderView[] views, int count, int pyramid, int width, int height,
-        int mips) {
+    private void cull(VkCommandBuffer commands, RenderView[] views, boolean[] early, int count, int pyramid, int width,
+        int height, int mips) {
         releaseRetired();
         scene.upload(commands);
         boolean meshShading = path() == Path.MESH_SHADERS;
@@ -618,14 +621,14 @@ public final class MeshletRenderer implements AutoCloseable {
                 for (int bin = 1; bin < BINS; bin++) {
                     memPutInt(draws + 24L * bin + 8, (int) (indices + (bin - 1) * binIndices)); // the bin's first index
                 }
-                if (v.phase != PHASE_LATE) {
+                if (early != null) {
                     vkCmdFillBuffer(commands, v.drawCount().handle(), 0, VK_WHOLE_SIZE, 0); // counts, indices wanted
                 }
                 nvkCmdUpdateBuffer(commands, v.expandCommand().handle(), 0, 16 * BINS, dispatches);
                 nvkCmdUpdateBuffer(commands, v.drawCommand().handle(), 0, 24 * BINS, draws);
             }
         }
-        writeRows(commands, views, count);
+        writeRows(commands, views, early, count);
         barrier(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT
                 | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
@@ -691,7 +694,7 @@ public final class MeshletRenderer implements AutoCloseable {
                     memPutLong(push + 48, pool.meshletTriangles().deviceAddress());
                     memPutLong(push + 56, v.frameIndices().deviceAddress());
                     memPutInt(push + 64, bin);
-                    memPutInt(push + 68, v.phase == PHASE_LATE ? 1 : 0);
+                    memPutInt(push + 68, early == null ? 1 : 0);
                     expand.push(commands, push, EXPAND_PUSH);
                     vkCmdDispatchIndirect(commands, v.expandCommand().handle(), 16L * bin);
                 }
@@ -759,7 +762,7 @@ public final class MeshletRenderer implements AutoCloseable {
      * Writes the instance pass's rows: each view culled (its index) and its phase ({@code CulledView}), as commands, so
      * each cull of a frame reads its own. At most 64 KiB per update, as Vulkan allows.
      */
-    private void writeRows(VkCommandBuffer commands, RenderView[] views, int count) {
+    private void writeRows(VkCommandBuffer commands, RenderView[] views, boolean[] early, int count) {
         for (int first = 0; first < count; first += ROWS_PER_UPDATE) {
             int n = Math.min(ROWS_PER_UPDATE, count - first);
             try (MemoryStack stack = stackPush()) {
@@ -767,7 +770,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 for (int i = 0; i < n; i++) {
                     RenderView v = views[first + i];
                     memPutInt(data + 8L * i, v.index());
-                    memPutInt(data + 8L * i + 4, v.phase);
+                    memPutInt(data + 8L * i + 4, phase(early, first + i));
                 }
                 nvkCmdUpdateBuffer(commands, rows.handle(), 8L * first, 8L * n, data);
             }
