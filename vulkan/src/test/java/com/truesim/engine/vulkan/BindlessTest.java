@@ -66,6 +66,24 @@ class BindlessTest {
                 assertThat(bindless.addStorage(image.view())).isZero();
                 bindless.removeSampled(0);
                 assertThat(bindless.addSampled(image.view())).isZero(); // the lowest free slot again
+                // Removed while frames may sample it: taken until they finish.
+                FrameSlots slots = new FrameSlots(2);
+                try (Retiring retiring = new Retiring(slots)) {
+                    slots.begin(0);
+                    bindless.removeSampled(0, retiring);
+                    bindless.removeStorage(0, retiring);
+                    assertThatIllegalArgumentException().isThrownBy(() -> bindless.removeSampled(9, retiring));
+                    slots.end();
+                    assertThat(bindless.addSampled(image.view())).as("still in flight").isEqualTo(2);
+                    slots.begin(1);
+                    slots.end();
+                    slots.begin(0);
+                    retiring.release();
+                    slots.end();
+                    assertThat(bindless.addSampled(image.view())).as("free once its frames finished").isZero();
+                    bindless.removeSampled(2);
+                    assertThat(bindless.addStorage(image.view())).isZero();
+                }
                 assertThat(bindless.slotsInUse()).isEqualTo(3);
                 assertThatIllegalArgumentException().isThrownBy(() -> bindless.removeStorage(5));
                 assertThatIllegalArgumentException().isThrownBy(() -> bindless.removeStorage(-1));

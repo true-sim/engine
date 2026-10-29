@@ -233,19 +233,46 @@ public final class Bindless implements AutoCloseable {
         return slot;
     }
 
-    /** Frees an acceleration structure slot; no pending command buffer may still use it. */
+    /**
+     * Frees an acceleration structure slot at once, for the lowest-first reuse of the next add: only when no pending
+     * command buffer may still use it: the device idles, or its owner closes (a top-level structure lives as long as
+     * its owner).
+     */
     public void removeAccelerationStructure(int slot) {
         structures.free(slot);
     }
 
-    /** Frees a sampled slot; no pending command buffer may still use it. */
+    /**
+     * Frees a sampled slot at once, for the lowest-first reuse of the next add: only when no pending command buffer may
+     * still use it (the device idles, say). Else {@link #removeSampled(int, Retiring)}.
+     */
     public void removeSampled(int slot) {
         sampled.free(slot);
     }
 
-    /** Frees a storage slot; no pending command buffer may still use it. */
+    /**
+     * Frees a storage slot at once, for the lowest-first reuse of the next add: only when no pending command buffer may
+     * still use it (the device idles, say). Else {@link #removeStorage(int, Retiring)}.
+     */
     public void removeStorage(int slot) {
         storage.free(slot);
+    }
+
+    /**
+     * Frees a sampled slot once no frame in flight of {@code retiring}'s slots can sample it: as descriptors update
+     * after bind, a slot reused earlier would be rewritten under a frame still reading it.
+     */
+    @AllowAllocation("removing, rarely")
+    public void removeSampled(int slot, Retiring retiring) {
+        sampled.check(slot);
+        retiring.add(() -> sampled.free(slot));
+    }
+
+    /** Frees a storage slot once no frame in flight of {@code retiring}'s slots can use it. */
+    @AllowAllocation("removing, rarely")
+    public void removeStorage(int slot, Retiring retiring) {
+        storage.check(slot);
+        retiring.add(() -> storage.free(slot));
     }
 
     /** How many sampled and storage slots are taken. */
@@ -322,10 +349,14 @@ public final class Bindless implements AutoCloseable {
             return slot;
         }
 
-        void free(int slot) {
+        void check(int slot) {
             if (slot < 0 || slot >= capacity || !taken.get(slot)) {
                 throw new IllegalArgumentException("Slot " + slot + " is not taken");
             }
+        }
+
+        void free(int slot) {
+            check(slot);
             taken.clear(slot);
             used--;
         }
