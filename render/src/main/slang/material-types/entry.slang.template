@@ -1,0 +1,10 @@
+// The material type's shading of the visibility buffer.
+import visibility.resolve;
+import {module};
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void {name}Main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
+{
+    shadeTiles<{struct}>(NoRays(), group, thread);
+}

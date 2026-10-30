@@ -422,7 +422,7 @@ class MeshletBenchmark {
             long at = 0;
             for (int i = 0; i < meshes.length; i++) {
                 indexBases.put(meshes[i], (int) at);
-                java.lang.foreign.MemorySegment indexes = data[i].expandIndices();
+                java.lang.foreign.MemorySegment indexes = data[i].expandIndices(java.lang.foreign.Arena.ofAuto());
                 java.lang.foreign.MemorySegment.copy(indexes, 0, all, 4 * at, indexes.byteSize());
                 at += indexes.byteSize() / 4;
             }

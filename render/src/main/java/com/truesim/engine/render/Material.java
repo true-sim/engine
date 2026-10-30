@@ -1,6 +1,7 @@
 package com.truesim.engine.render;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.render.layout.MaterialsConstants;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import java.util.ArrayList;
 import java.util.List;
@@ -37,9 +38,9 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
     boolean doubleSided, float alphaCutoff) {
 
     /** A clear coat: a glossy dielectric layer over the base, as car paint or varnish. */
-    public static final int FEATURE_CLEARCOAT = 1;
+    public static final int FEATURE_CLEARCOAT = MaterialsConstants.FEATURE_CLEARCOAT;
     /** How many feature bits there are, as materials.slang has them. */
-    static final int FEATURE_BITS = 1;
+    static final int FEATURE_BITS = MaterialsConstants.FEATURE_BITS;
     /** Every feature bit. */
     static final int FEATURES = (1 << FEATURE_BITS) - 1;
 

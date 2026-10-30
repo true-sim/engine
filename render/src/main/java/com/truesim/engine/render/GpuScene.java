@@ -1,6 +1,7 @@
 package com.truesim.engine.render;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.InstanceLayout;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -49,8 +50,8 @@ public final class GpuScene implements AutoCloseable {
     private static final ValueLayout.OfFloat FLOAT =
         ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     /** Instance flags above the mesh id, as meshlets/common.slang has them. */
-    private static final int LIVE = 1 << 24;
-    private static final int CASTS_SHADOWS = 1 << 25;
+    private static final int LIVE = CommonConstants.INSTANCE_LIVE;
+    private static final int CASTS_SHADOWS = CommonConstants.INSTANCE_CASTS_SHADOWS;
     private static final int MESH_BITS = (1 << 24) - 1;
     /** Layer 0: where instances are unless set otherwise. */
     private static final int DEFAULT_LAYERS = 1;
