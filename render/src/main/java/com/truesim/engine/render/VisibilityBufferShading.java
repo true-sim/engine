@@ -13,8 +13,6 @@ import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.layout.ShadePush;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
-import com.truesim.engine.vulkan.Push;
-import com.truesim.engine.vulkan.ShaderModule;
 import java.util.List;
 import java.util.Objects;
 
@@ -51,8 +49,8 @@ public final class VisibilityBufferShading implements Technique {
     private final RenderView view;
     private boolean occlusion = true;
     // One per pass: a frame graph may record the classification and the shading on two threads at once.
-    private final Push classifyPush = new Push();
-    private final Push shadePush = new Push();
+    private final ShadePush classifyPush = new ShadePush(); // one per pass: passes may record at once
+    private final ShadePush shadePush = new ShadePush();
 
     /** {@code geometry} shaded as {@code view} sees it. */
     public VisibilityBufferShading(SceneGeometry geometry, RenderView view, int width, int height, int colorFormat,
@@ -170,31 +168,26 @@ public final class VisibilityBufferShading implements Technique {
      * resolve.slang's ShadePush, into {@code push}: for {@code types} types, shading bin {@code bin}'s tiles at
      * {@code tiles}.
      */
-    private Push push(Push push, PassContext ctx, Image ids, Image color, Buffer lights, int types, int bin,
+    private ShadePush push(ShadePush push, PassContext ctx, Image ids, Image color, Buffer lights, int types, int bin,
         long tiles) {
         GeometryPool pool = renderer.pool();
-        push.clear()
-            .address(view.address())
-            .address(pool.meshTable().deviceAddress())
-            .address(renderer.scene().instanceAddress())
-            .address(pool.positions().deviceAddress())
-            .address(pool.attributes().deviceAddress())
-            .address(pool.meshlets().deviceAddress())
-            .address(pool.meshletVertices().deviceAddress())
-            .address(pool.meshletTriangles().deviceAddress())
-            .address(renderer.scene().materialsAddress())
-            .address(lights == null ? 0 : ctx.address(lights))
-            .u32(ctx.storage(ids))
-            .u32(color == null ? 0 : ctx.storage(color))
-            .u32(width | height << 16)
-            .u32(types)
-            .vec3(clear[0], clear[1], clear[2])
-            .u32(bin)
-            .address(classic == null ? 0 : classic.indicesAddress())
-            .address(tiles);
-        if (push.size() != ShadePush.BYTES) { // written in order: the last field must end where slangc says
-            throw new IllegalStateException("ShadePush is " + ShadePush.BYTES + " bytes, " + push.size() + " written");
-        }
-        return push;
+        return push.view(view.address())
+            .meshes(pool.meshTable().deviceAddress())
+            .instances(renderer.scene().instanceAddress())
+            .positions(pool.positions().deviceAddress())
+            .attributes(pool.attributes().deviceAddress())
+            .meshlets(pool.meshlets().deviceAddress())
+            .meshletVertices(pool.meshletVertices().deviceAddress())
+            .meshletTriangles(pool.meshletTriangles().deviceAddress())
+            .materials(renderer.scene().materialsAddress())
+            .lights(lights == null ? 0 : ctx.address(lights))
+            .ids(ctx.storage(ids))
+            .color(color == null ? 0 : ctx.storage(color))
+            .size(width | height << 16)
+            .types(types)
+            .clear(clear[0], clear[1], clear[2])
+            .bin(bin)
+            .classicIndices(classic == null ? 0 : classic.indicesAddress())
+            .tiles(tiles);
     }
 }

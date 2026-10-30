@@ -15,6 +15,7 @@ dependencies {
 // The test shaders' material records (a game's own type, as in a project of its own), as Java.
 slang {
     javaPackage = "com.truesim.engine.scene.materials"
+    pushBase = "com.truesim.engine.vulkan.PushConstants" // push layouts are writers too
 }
 
 // The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.

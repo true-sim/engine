@@ -1,9 +1,5 @@
 package com.truesim.engine.render.shadows;
 
-import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.memPutFloat;
-import static org.lwjgl.system.MemoryUtil.memPutInt;
-import static org.lwjgl.system.MemoryUtil.memPutLong;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
@@ -18,18 +14,16 @@ import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.Keys;
+import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.Lights;
 import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.ShadowInputs;
 import com.truesim.engine.render.layout.TracedPush;
-import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
-import com.truesim.engine.vulkan.ShaderModule;
 import java.util.List;
 import java.util.Objects;
-import org.lwjgl.system.MemoryStack;
 
 /**
  * A light's shadows by hardware ray tracing, as a screen-space mask: every pixel of {@code depthSource}'s depth traces
@@ -40,7 +34,6 @@ import org.lwjgl.system.MemoryStack;
  */
 public final class RayTracedShadows implements Technique {
 
-    private static final int PUSH_BYTES = TracedPush.BYTES;
 
     private final RayTracing rayTracing;
     private final Lights lights;
@@ -87,47 +80,36 @@ public final class RayTracedShadows implements Technique {
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
         g.modify(Keys.LIGHT_LIST);
-        Pipeline pipeline = g.computeProgram("shaders/shadows/traced.spv", "tracedMain", PUSH_BYTES);
+        Pipeline pipeline = g.computeProgram("shaders/shadows/traced.spv", "tracedMain", TracedPush.BYTES);
         Image depth = g.request(depthSource).depth();
         Buffer topLevel = g.request(new TopLevel(rayTracing, depthSource.view()));
         Image mask = g.create("shadow mask of light " + light, ImageDesc.like(depth, Ratio.ONE).format(Format.R8_UNORM));
+        TracedPush push = new TracedPush().width(mask.width()).height(mask.height()).offset(offset).light(light);
         g.pass("ray-traced shadows of light " + light)
             .read(depth, Access.SAMPLED_COMPUTE)
             .read(topLevel, BufferAccess.STORAGE_READ)
             .write(mask, Access.STORAGE_WRITE)
             .async()
-            .record(ctx -> trace(ctx, pipeline, depth, mask));
+            .record(ctx -> trace(ctx, pipeline, depth, mask, push));
         g.request(new ShadowInputs()).sample(mask).setup(ctx -> {
             lights.shadowMask(entry, ctx.sampled(mask), 0);
             lights.shadows(light, entry, 1);
         });
     }
 
-    private void trace(PassContext ctx, Pipeline pipeline, Image depth, Image mask) {
-        try (MemoryStack stack = stackPush()) {
-            long push = stack.nmalloc(16, PUSH_BYTES);
-            float[] inverse = camera.inverseViewProjection();
-            for (int i = 0; i < 16; i++) {
-                memPutFloat(push + TracedPush.INVERSE_VIEW_PROJECTION + 4L * i, inverse[i]);
-            }
-            memPutInt(push + TracedPush.DEPTH, ctx.sampled(depth));
-            memPutInt(push + TracedPush.MASK, ctx.storage(mask));
-            memPutInt(push + TracedPush.SCENE, rayTracing.slot());
-            memPutInt(push + TracedPush.WIDTH, mask.width());
-            memPutInt(push + TracedPush.HEIGHT, mask.height());
-            memPutFloat(push + TracedPush.OFFSET, offset);
-            memPutLong(push + TracedPush.LIGHTS, lights.lightsAddress());
-            memPutInt(push + TracedPush.LIGHT, light);
-            // The way from the camera's positions into the top level's (built relative to the depth source's view),
-            // and the light relative to the camera: differences of world positions, small enough for floats.
-            for (int axis = 0; axis < 3; axis++) {
-                double p = camera.position(axis);
-                memPutFloat(push + TracedPush.TO_TOP_LEVEL_X + 4L * axis, (float) (p - depthSource.view().position(axis)));
-                memPutFloat(push + TracedPush.LIGHT_X + 4L * axis, (float) (lights.position(light, axis) - p));
-            }
-            pipeline.bind(ctx.unsafe().commands());
-            pipeline.push(ctx.unsafe().commands(), push, PUSH_BYTES);
-            Commands.dispatch(ctx.unsafe().commands(), (mask.width() + 7) / 8, (mask.height() + 7) / 8, 1);
-        }
+    private void trace(PassContext ctx, Pipeline pipeline, Image depth, Image mask, TracedPush push) {
+        push.inverseViewProjection(camera.inverseViewProjection()).depth(ctx.sampled(depth)).mask(ctx.storage(mask))
+            .scene(rayTracing.slot()).lights(lights.lightsAddress());
+        // The way from the camera's positions into the top level's (built relative to the depth source's view), and
+        // the light relative to the camera: differences of world positions, small enough for floats.
+        double x = camera.position(0);
+        double y = camera.position(1);
+        double z = camera.position(2);
+        RenderView view = depthSource.view();
+        push.toTopLevelX((float) (x - view.position(0))).toTopLevelY((float) (y - view.position(1)))
+            .toTopLevelZ((float) (z - view.position(2)));
+        push.lightX((float) (lights.position(light, 0) - x)).lightY((float) (lights.position(light, 1) - y))
+            .lightZ((float) (lights.position(light, 2) - z));
+        ctx.dispatch(pipeline, push, (mask.width() + 7) / 8, (mask.height() + 7) / 8, 1);
     }
 }
