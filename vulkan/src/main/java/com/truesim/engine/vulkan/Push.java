@@ -1,10 +1,6 @@
 package com.truesim.engine.vulkan;
 
 import com.truesim.annotations.AllowAllocation;
-import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
-import java.nio.ByteOrder;
 
 /**
  * Push constants written field by field in the order a shader's push struct declares them, aligned as Slang lays them
@@ -23,17 +19,8 @@ import java.nio.ByteOrder;
  * {@value #MAX_BYTES} bytes, the most push constants every device takes. Use it from one thread at a time.
  */
 @AllowAllocation("made once")
-public final class Push {
+public final class Push extends PushConstants {
 
-    /** The push constant bytes every Vulkan device takes. */
-    public static final int MAX_BYTES = 128;
-
-    private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
-    private static final ValueLayout.OfFloat FLOAT =
-        ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
-    private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
-
-    private final MemorySegment memory = Arena.ofAuto().allocate(MAX_BYTES, 16);
     private int size;
 
     /** Empties it for the next fields. Allocates nothing. */
@@ -44,19 +31,19 @@ public final class Push {
 
     /** A 32-bit unsigned (or signed) integer: {@code uint}, {@code int}. */
     public Push u32(int value) {
-        memory.set(INT, at(4, 4), value);
+        putInt(at(4, 4), value);
         return this;
     }
 
     /** A 32-bit float. */
     public Push f32(float value) {
-        memory.set(FLOAT, at(4, 4), value);
+        putFloat(at(4, 4), value);
         return this;
     }
 
     /** A 64-bit integer: {@code uint64_t}. */
     public Push u64(long value) {
-        memory.set(LONG, at(8, 8), value);
+        putLong(at(8, 8), value);
         return this;
     }
 
@@ -68,35 +55,35 @@ public final class Push {
     /** A {@code float2}. */
     public Push vec2(float x, float y) {
         long o = at(8, 8);
-        memory.set(FLOAT, o, x);
-        memory.set(FLOAT, o + 4, y);
+        putFloat(o, x);
+        putFloat(o + 4, y);
         return this;
     }
 
     /** A {@code float3}: 12 bytes on 16; a 4-byte field may follow in its last 4. */
     public Push vec3(float x, float y, float z) {
         long o = at(16, 12);
-        memory.set(FLOAT, o, x);
-        memory.set(FLOAT, o + 4, y);
-        memory.set(FLOAT, o + 8, z);
+        putFloat(o, x);
+        putFloat(o + 4, y);
+        putFloat(o + 8, z);
         return this;
     }
 
     /** A {@code float4}. */
     public Push vec4(float x, float y, float z, float w) {
         long o = at(16, 16);
-        memory.set(FLOAT, o, x);
-        memory.set(FLOAT, o + 4, y);
-        memory.set(FLOAT, o + 8, z);
-        memory.set(FLOAT, o + 12, w);
+        putFloat(o, x);
+        putFloat(o + 4, y);
+        putFloat(o + 8, z);
+        putFloat(o + 12, w);
         return this;
     }
 
     /** A {@code uint2}. */
     public Push uvec2(int x, int y) {
         long o = at(8, 8);
-        memory.set(INT, o, x);
-        memory.set(INT, o + 4, y);
+        putInt(o, x);
+        putInt(o + 4, y);
         return this;
     }
 
@@ -107,7 +94,7 @@ public final class Push {
         }
         long o = at(16, 64);
         for (int i = 0; i < 16; i++) {
-            memory.set(FLOAT, o + 4L * i, columnMajor[i]);
+            putFloat(o + 4L * i, columnMajor[i]);
         }
         return this;
     }
@@ -122,18 +109,9 @@ public final class Push {
     }
 
     /** The bytes written, the last field's end. */
+    @Override
     public int size() {
         return size;
-    }
-
-    /** The native address of the bytes, for {@code vkCmdPushConstants}. */
-    public long address() {
-        return memory.address();
-    }
-
-    /** The bytes, e.g. to inspect. */
-    public MemorySegment memory() {
-        return memory.asSlice(0, size);
     }
 
     /** Where the next field of {@code bytes}, aligned to {@code alignment}, goes; it is taken. */

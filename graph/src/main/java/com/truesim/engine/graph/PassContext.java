@@ -21,6 +21,7 @@ import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.Push;
+import com.truesim.engine.vulkan.PushConstants;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkBlitImageInfo2;
 import org.lwjgl.vulkan.VkBufferCopy;
@@ -172,7 +173,7 @@ public final class PassContext {
     // ---------------------------------------------------------------- commands
 
     /** Binds {@code pipeline} (a compute one), sets {@code push} and dispatches {@code groupsX} workgroups. */
-    public void dispatch(Pipeline pipeline, Push push, int groupsX) {
+    public void dispatch(Pipeline pipeline, PushConstants push, int groupsX) {
         dispatch(pipeline, push, groupsX, 1, 1);
     }
 
@@ -180,7 +181,7 @@ public final class PassContext {
      * Binds {@code pipeline} (a compute one), sets {@code push} and dispatches {@code x} by {@code y} by {@code z}
      * workgroups: none if any is 0, at most {@link #MAX_GROUPS} each.
      */
-    public void dispatch(Pipeline pipeline, Push push, int x, int y, int z) {
+    public void dispatch(Pipeline pipeline, PushConstants push, int x, int y, int z) {
         if (x < 0 || y < 0 || z < 0 || x > MAX_GROUPS || y > MAX_GROUPS || z > MAX_GROUPS) {
             throw new IllegalArgumentException("Workgroups are 0 to 65,535 per dimension: " + x + " x " + y + " x " + z);
         }
@@ -196,7 +197,7 @@ public final class PassContext {
      * Binds {@code pipeline} (a compute one), sets {@code push} and dispatches as the {@code VkDispatchIndirectCommand}
      * at {@code offset} of {@code buffer} says (read as {@link BufferAccess#INDIRECT}).
      */
-    public void dispatchIndirect(Pipeline pipeline, Push push, Buffer buffer, long offset) {
+    public void dispatchIndirect(Pipeline pipeline, PushConstants push, Buffer buffer, long offset) {
         pipeline.bind(commands);
         pipeline.push(commands, push);
         Commands.dispatchIndirect(commands, buffer(buffer), offset);
@@ -379,7 +380,7 @@ public final class PassContext {
      * Binds {@code pipeline} (a graphics one), sets {@code push} and draws {@code vertices} vertices of
      * {@code instances} instances: the shaders pull their data by device address, so there are no vertex buffers.
      */
-    public void draw(Pipeline pipeline, Push push, int vertices, int instances) {
+    public void draw(Pipeline pipeline, PushConstants push, int vertices, int instances) {
         pipeline.bind(commands);
         pipeline.push(commands, push);
         Commands.draw(commands, vertices, instances, 0, 0);
@@ -389,7 +390,7 @@ public final class PassContext {
      * Binds {@code pipeline}, sets {@code push} and draws as the {@code draws} {@code VkDrawIndirectCommand}s from
      * {@code offset} of {@code buffer} say (read as {@link BufferAccess#INDIRECT}).
      */
-    public void drawIndirect(Pipeline pipeline, Push push, Buffer buffer, long offset, int draws) {
+    public void drawIndirect(Pipeline pipeline, PushConstants push, Buffer buffer, long offset, int draws) {
         pipeline.bind(commands);
         pipeline.push(commands, push);
         Commands.drawIndirect(commands, buffer(buffer), offset, draws, 16);
@@ -404,7 +405,7 @@ public final class PassContext {
      * Binds {@code pipeline}, sets {@code push} and draws as the {@code draws} {@code VkDrawIndexedIndirectCommand}s
      * from {@code offset} of {@code buffer} say, with the {@link #indices} bound.
      */
-    public void drawIndexedIndirect(Pipeline pipeline, Push push, Buffer buffer, long offset, int draws) {
+    public void drawIndexedIndirect(Pipeline pipeline, PushConstants push, Buffer buffer, long offset, int draws) {
         pipeline.bind(commands);
         pipeline.push(commands, push);
         Commands.drawIndexedIndirect(commands, buffer(buffer), offset, draws, 20);
@@ -415,7 +416,7 @@ public final class PassContext {
      * {@code offset} of {@code buffer} say: as many as the 32-bit count at {@code countOffset} of {@code count}, at most
      * {@code maxDraws}.
      */
-    public void drawIndexedIndirectCount(Pipeline pipeline, Push push, Buffer buffer, long offset, Buffer count,
+    public void drawIndexedIndirectCount(Pipeline pipeline, PushConstants push, Buffer buffer, long offset, Buffer count,
         long countOffset, int maxDraws) {
         pipeline.bind(commands);
         pipeline.push(commands, push);
@@ -426,7 +427,7 @@ public final class PassContext {
      * Binds {@code pipeline} (a mesh one), sets {@code push} and draws as the {@code draws}
      * {@code VkDrawMeshTasksIndirectCommandEXT}s from {@code offset} of {@code buffer} say.
      */
-    public void drawMeshTasksIndirect(Pipeline pipeline, Push push, Buffer buffer, long offset, int draws) {
+    public void drawMeshTasksIndirect(Pipeline pipeline, PushConstants push, Buffer buffer, long offset, int draws) {
         pipeline.bind(commands);
         pipeline.push(commands, push);
         Commands.drawMeshTasksIndirect(commands, buffer(buffer), offset, draws, 12);

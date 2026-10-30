@@ -101,6 +101,7 @@ public final class VulkanDevice implements AutoCloseable {
     private final Queue transfer;
     private final long allocator;
     private final Bindless bindless;
+    private final PipelineCache pipelineCache;
     private final DirectCalls direct;
     private final int apiVersion;
     private final Vulkan14Features features14;
@@ -277,6 +278,7 @@ public final class VulkanDevice implements AutoCloseable {
         }
         try {
             this.bindless = new Bindless(this);
+            this.pipelineCache = new PipelineCache(this);
             this.direct = new DirectCalls(handle);
         } catch (RuntimeException | Error e) {
             vmaDestroyAllocator(allocator);
@@ -396,6 +398,11 @@ public final class VulkanDevice implements AutoCloseable {
         if (!supported) {
             missing.add(feature);
         }
+    }
+
+    /** The cache every pipeline is made through; {@link PipelineCache#persist} keeps it across runs. */
+    public PipelineCache pipelineCache() {
+        return pipelineCache;
     }
 
     public Gpu gpu() {
@@ -578,6 +585,7 @@ public final class VulkanDevice implements AutoCloseable {
                 }
             }
         }
+        pipelineCache.close();
         bindless.close();
         closed = true;
         vmaDestroyAllocator(allocator);

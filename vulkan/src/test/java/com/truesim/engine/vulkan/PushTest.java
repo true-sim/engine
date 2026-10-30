@@ -48,4 +48,30 @@ class PushTest {
         Push push = new Push();
         assertAllocationFree(() -> push.clear().address(42).u32(3).vec3(1, 2, 3).f32(0.5f), 10_000, 1_000, 5);
     }
+
+    /** A writer as build-logic generates them: each field at its offset, in any order. */
+    private static final class Fixed extends PushConstants {
+        Fixed set(int count, float scale, long address) {
+            putLong(8, address);
+            putInt(0, count);
+            putFloat(4, scale);
+            return this;
+        }
+
+        @Override
+        public int size() {
+            return 16;
+        }
+    }
+
+    @Test
+    void writersPutFieldsAtTheirOffsets() {
+        Fixed fixed = new Fixed().set(7, 0.5f, 0x1234_5678_9abcL);
+        assertThat(fixed.memory().byteSize()).isEqualTo(16);
+        assertThat(fixed.memory().get(java.lang.foreign.ValueLayout.JAVA_INT_UNALIGNED, 0)).isEqualTo(7);
+        assertThat(fixed.memory().get(java.lang.foreign.ValueLayout.JAVA_FLOAT_UNALIGNED, 4)).isEqualTo(0.5f);
+        assertThat(fixed.memory().get(java.lang.foreign.ValueLayout.JAVA_LONG_UNALIGNED, 8)).isEqualTo(0x1234_5678_9abcL);
+        assertThat(fixed.address()).isNotZero();
+        assertAllocationFree(() -> fixed.set(1, 2, 3), 10_000, 1_000, 5);
+    }
 }

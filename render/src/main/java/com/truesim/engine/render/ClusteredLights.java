@@ -112,11 +112,7 @@ public final class ClusteredLights implements Technique {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
-        Pipeline pipeline = g.cached(ClusteredLights.class, device -> {
-            try (ShaderModule shader = ShaderModule.load(device, "shaders/lights/cluster.spv")) {
-                return Pipeline.compute(device, shader, "clusterMain", PUSH_BYTES);
-            }
-        });
+        Pipeline pipeline = g.computeProgram("shaders/lights/cluster.spv", "clusterMain", PUSH_BYTES);
         Buffer list = g.createBuffer("light clusters", HEADER_BYTES + 4L * clusters() * (1 + maxPerCluster));
         g.pass("light clusters")
             .write(list, BufferAccess.TRANSFER_DST)

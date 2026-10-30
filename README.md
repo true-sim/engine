@@ -127,6 +127,13 @@ a pinned compiler. Buffers reach shaders through device addresses passed in push
 the device's one bindless descriptor set (`Bindless`: sampled images, samplers, storage images). Every pipeline shares
 one layout, so the set is bound once per command buffer. There is no vertex input: shaders pull what they need.
 
+Every pipeline is made through the device's `PipelineCache`; `device.pipelineCache().persist(path)` loads it at start (only
+what this GPU and driver saved) and saves it when the device closes, so pipelines compile once, not every run. Frame
+graph techniques ask for programs instead of making pipelines: `g.computeProgram(shader, entry, pushBytes,
+constants...)` and `g.graphicsProgram(GraphicsProgram.of(pushBytes).vertex(...).fragment(...).color(format))` build each
+once and share it between techniques asking for the same; they live as long as the graph. What the device can do
+(`g.capabilities()`) picks variants.
+
 ```java
 try (ShaderModule shaders = ShaderModule.load(device, "shaders/meshlets.spv");
      Pipeline cull = Pipeline.compute(device, shaders, "cullMain", 32);

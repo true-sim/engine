@@ -41,11 +41,7 @@ public record DepthPyramid(Image depth) implements Request<Image> {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Image build(GraphBuilder g) {
-        Pipeline pipeline = g.cached(DepthPyramid.class, device -> {
-            try (ShaderModule shader = ShaderModule.load(device, "shaders/blocks/pyramid.spv")) {
-                return Pipeline.compute(device, shader, "pyramidMain", PUSH_BYTES);
-            }
-        });
+        Pipeline pipeline = g.computeProgram("shaders/blocks/pyramid.spv", "pyramidMain", PUSH_BYTES);
         int width = (depth.width() + 1) / 2;
         int height = (depth.height() + 1) / 2;
         Image pyramid = g.create("depth pyramid of " + depth.name(),

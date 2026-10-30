@@ -10,8 +10,6 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_FRAGMENT_BIT;
-import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_VERTEX_BIT;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
 import com.truesim.engine.graph.ImageDesc;
@@ -23,6 +21,7 @@ import com.truesim.engine.graph.ExternalBuffer;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.GraphBuilder;
+import com.truesim.engine.graph.GraphicsProgram;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
@@ -33,7 +32,6 @@ import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.Push;
-import com.truesim.engine.vulkan.ShaderModule;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanException;
 import com.truesim.engine.vulkan.VulkanInstance;
@@ -58,8 +56,8 @@ class CustomPassTest {
     private static final Key<Image> OUT = Key.image("test.tinted");
 
     /** Reads the instances' positions with a compute pass, then draws the target tinted by one of them. */
-    private record Tint(GpuScene scene, ExternalBuffer instances, ExternalBuffer readback, Pipeline positions,
-        Pipeline tint, Push push) implements Technique {
+    private record Tint(GpuScene scene, ExternalBuffer instances, ExternalBuffer readback, Push push)
+        implements Technique {
 
         @Override
         public List<Key<?>> provides() {
@@ -68,6 +66,9 @@ class CustomPassTest {
 
         @Override
         public void build(GraphBuilder g) {
+            Pipeline positions = g.computeProgram("shaders/custom/positions.spv", "positionsMain", 20);
+            Pipeline tint = g.graphicsProgram(GraphicsProgram.of(8).vertex("shaders/custom/tint.spv", "coverMain")
+                .fragment("shaders/custom/tint.spv", "tintMain").color(Format.R8G8B8A8_UNORM).drawBackFaces());
             int count = scene.capacity();
             Buffer stored = g.importBuffer(instances);
             Buffer out = g.importBuffer(readback);
@@ -111,19 +112,13 @@ class CustomPassTest {
                  GpuBuffer readback = GpuBuffer.hostVisible(device, 16L * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
                  GpuBuffer pixels = GpuBuffer.hostVisible(device, 4L * SIZE * SIZE, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
                  GpuImage target = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage,
-                     VK_IMAGE_ASPECT_COLOR_BIT);
-                 ShaderModule positionsShader = ShaderModule.load(device, "shaders/custom/positions.spv");
-                 ShaderModule tintShader = ShaderModule.load(device, "shaders/custom/tint.spv");
-                 Pipeline positions = Pipeline.compute(device, positionsShader, "positionsMain", 20);
-                 Pipeline tint = Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, tintShader, "coverMain")
-                     .stage(VK_SHADER_STAGE_FRAGMENT_BIT, tintShader, "tintMain").color(VK_FORMAT_R8G8B8A8_UNORM)
-                     .pushConstants(8).doubleSided().build()) {
+                     VK_IMAGE_ASPECT_COLOR_BIT)) {
                 int mesh = pool.add(square());
                 scene.set(1, mesh, 0, 1, true, 2.0, 4.0, 6.0, 0, 0, 0, 1, 1, 1, 1);
                 ExternalImage output = new ExternalImage("target", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage,
                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
                 graph.add(new Tint(scene, new ExternalBuffer("instances", scene.instanceBuffer()),
-                    new ExternalBuffer("readback", readback), positions, tint, new Push())).output(OUT, output);
+                    new ExternalBuffer("readback", readback), new Push())).output(OUT, output);
                 graph.beginFrame();
                 graph.submit(0, 0);
                 device.waitIdle();
