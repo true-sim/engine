@@ -325,6 +325,32 @@ class PlatformTest {
     // ---------------------------------------------------------------- windows
 
     @Test
+    void windowsCloseWhatLivesOnThemFirst() {
+        Window window = platform.createWindow(WindowOptions.of("host", 64, 64).withHidden(true).withVulkan(false));
+        List<String> closed = new java.util.ArrayList<>();
+        AutoCloseable first = () -> closed.add("first");
+        AutoCloseable gone = () -> closed.add("gone");
+        AutoCloseable failing = () -> {
+            closed.add("failing");
+            throw new IllegalStateException("broken");
+        };
+        window.attach(first);
+        window.attach(gone);
+        window.attach(failing);
+        window.detach(gone); // closed on its own
+        assertThatThrownBy(window::close).isInstanceOf(PlatformException.class)
+            .hasMessage("Could not close what lived on " + window).hasSuppressedException(new IllegalStateException("broken"));
+        assertThat(closed).containsExactly("failing", "first"); // newest first, the window still closed
+        assertThat(window.isClosed()).isTrue();
+        assertThatIllegalStateException().isThrownBy(() -> window.attach(first));
+        window.close(); // twice is fine
+        Window plain = platform.createWindow(WindowOptions.of("plain", 64, 64).withHidden(true).withVulkan(false));
+        plain.attach(() -> closed.add("plain"));
+        platform.close(); // closes windows, and what lives on them
+        assertThat(closed).endsWith("plain");
+    }
+
+    @Test
     void windowsChangeAtRuntime() {
         Window window = platform.createWindow(WindowOptions.of("first", 640, 480).withHidden(true).withVulkan(false));
         Window second = platform.createWindow(WindowOptions.of("second", 320, 200).withHidden(true).withVulkan(false)

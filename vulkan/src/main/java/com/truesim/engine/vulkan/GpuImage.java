@@ -123,6 +123,7 @@ public final class GpuImage implements AutoCloseable {
             }
             this.view = whole;
         }
+        device.track(this);
     }
 
     public long handle() {
@@ -160,7 +161,13 @@ public final class GpuImage implements AutoCloseable {
         if (!closed) {
             closed = true;
             destroy(device, view, mipViews, handle, allocation);
+            device.untrack(this);
         }
+    }
+
+    @Override
+    public String toString() {
+        return "GpuImage " + width + " x " + height + ", format " + format;
     }
 
     /** Destroys the views made (0s are skipped) and the image. */

@@ -34,6 +34,8 @@ import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_VULKAN;
 
 import com.truesim.annotations.AllowAllocation;
 import java.nio.IntBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import org.lwjgl.sdl.SDL_DisplayMode;
 import org.lwjgl.system.MemoryStack;
 
@@ -49,6 +51,8 @@ public final class Window implements AutoCloseable {
 
     private final Platform platform;
     private final int id;
+    /** What lives on this window, such as Vulkan surfaces, closed before it. */
+    private final List<AutoCloseable> dependents = new ArrayList<>();
     private long handle;
 
     @AllowAllocation("opening a window")
@@ -282,14 +286,47 @@ public final class Window implements AutoCloseable {
 
     /** Closes the window. */
     @Override
+    @AllowAllocation("closing")
     public void close() {
         if (handle == 0) {
             return;
         }
         platform.checkThread();
+        RuntimeException failure = null;
+        for (AutoCloseable dependent : List.copyOf(dependents).reversed()) {
+            try {
+                dependent.close();
+            } catch (Exception e) {
+                if (failure == null) {
+                    failure = new PlatformException("Could not close what lived on " + this);
+                }
+                failure.addSuppressed(e);
+            }
+        }
+        dependents.clear();
         SDL_DestroyWindow(handle);
         handle = 0;
         platform.closed(this);
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    /**
+     * Ties {@code dependent}, such as a Vulkan surface, to this window: closing the window (or the platform) closes it
+     * first, newest first. A dependent closed on its own {@linkplain #detach(AutoCloseable) detaches}.
+     */
+    @AllowAllocation("attaching once")
+    public void attach(AutoCloseable dependent) {
+        if (handle == 0) {
+            throw new IllegalStateException(this + " is closed");
+        }
+        dependents.add(dependent);
+    }
+
+    /** Unties {@code dependent}, closed on its own. */
+    public void detach(AutoCloseable dependent) {
+        dependents.remove(dependent);
     }
 
     @Override
