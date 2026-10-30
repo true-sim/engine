@@ -910,7 +910,7 @@ class GraphTechniquesTest {
                 }
             }).output(EDGE, output);
             frame();
-            assertThat(graph.passes()).contains("depth pyramid of depth", "read back");
+            assertThat(graph.passes()).contains("read back").anyMatch(p -> p.startsWith("depth pyramid of depth"));
             long offset = 0;
             for (int mip = 0; mip < mips; mip++) {
                 float[] expected = levels.get(mip);
@@ -935,8 +935,10 @@ class GraphTechniquesTest {
                 .clearColor(0, 0, 1))
             .output(Keys.SCENE_COLOR, output);
         frame();
-        assertThat(graph.passes()).containsExactly("meshlet culling", "meshlets early", "depth pyramid of scene depth",
-            "meshlets late");
+        java.util.List<String> passes = graph.passes();
+        assertThat(passes).startsWith("meshlet culling", "meshlets early", "depth pyramid of scene depth, level 0")
+            .endsWith("meshlets late"); // a pass per pyramid level between
+        assertThat(passes.subList(2, passes.size() - 1)).allMatch(p -> p.startsWith("depth pyramid of scene depth, level "));
         assertThat(graph.pooledImages()).isEqualTo(2); // depth and its pyramid: the color is the target
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
         assertThat(red(1, 1)).isZero(); // blue clear color

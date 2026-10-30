@@ -3,7 +3,6 @@ package com.truesim.engine.vulkan;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-import static org.lwjgl.vulkan.VK10.nvkCmdCopyBuffer;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -212,7 +211,7 @@ public final class FrameUploads implements AutoCloseable {
             memPutLong(region + VkBufferCopy.SRCOFFSET, from);
             memPutLong(region + VkBufferCopy.DSTOFFSET, offset);
             memPutLong(region + VkBufferCopy.SIZE, bytes);
-            nvkCmdCopyBuffer(commands, staging.handle(), target.handle(), 1, region);
+            Commands.copyBuffer(commands, staging.handle(), target.handle(), 1, region);
         }
     }
 

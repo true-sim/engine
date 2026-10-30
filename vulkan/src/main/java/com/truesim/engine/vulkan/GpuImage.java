@@ -47,6 +47,7 @@ public final class GpuImage implements AutoCloseable {
     private final long allocation;
     private final long view;
     private final long[] mipViews;
+    private final long[] layerViews; // a 2D view of each layer's first level, for rendering into one layer
     private final int mips;
     private final int width;
     private final int height;
@@ -156,7 +157,10 @@ public final class GpuImage implements AutoCloseable {
             this.handle = image.get(0);
             this.allocation = allocated.get(0);
             // Views are for shaders and attachments; an image only copied to and from has none.
-            this.mipViews = new long[mips > 1 && (usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 ? mips : 0];
+            int levelUsages = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            int attachments = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+            this.mipViews = new long[mips > 1 && (usage & levelUsages) != 0 ? mips : 0];
+            this.layerViews = new long[layers > 1 && (usage & attachments) != 0 ? layers : 0];
             long whole = 0;
             try {
                 whole = (usage & VIEW_USAGES) != 0
@@ -164,8 +168,11 @@ public final class GpuImage implements AutoCloseable {
                 for (int mip = 0; mip < mipViews.length; mip++) {
                     mipViews[mip] = Images.createView(device, handle, format, aspect, viewType, mip, 1, layers);
                 }
+                for (int layer = 0; layer < layerViews.length; layer++) {
+                    layerViews[layer] = Images.createLayerView(device, handle, format, aspect, layer);
+                }
             } catch (RuntimeException e) {
-                destroy(device, whole, mipViews, handle, allocation); // nothing made leaks
+                destroy(device, whole, mipViews, layerViews, handle, allocation); // nothing made leaks
                 throw e;
             }
             this.view = whole;
@@ -182,9 +189,17 @@ public final class GpuImage implements AutoCloseable {
         return view;
     }
 
-    /** A view of mip level {@code mip} alone (of a mipmapped storage image), or the view of a one-level image. */
+    /**
+     * A view of mip level {@code mip} alone (of a mipmapped sampled or storage image, every layer), or the view of a
+     * one-level image.
+     */
     public long view(int mip) {
         return mips == 1 ? view : mipViews[mip];
+    }
+
+    /** A 2D view of layer {@code layer}'s first mip level (of a layered attachment), or the view of a one-layer image. */
+    public long layerView(int layer) {
+        return layers == 1 ? view : layerViews[layer];
     }
 
     public int mips() {
@@ -222,7 +237,7 @@ public final class GpuImage implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
-            destroy(device, view, mipViews, handle, allocation);
+            destroy(device, view, mipViews, layerViews, handle, allocation);
             device.untrack(this);
         }
     }
@@ -233,13 +248,16 @@ public final class GpuImage implements AutoCloseable {
     }
 
     /** Destroys the views made (0s are skipped) and the image. */
-    private static void destroy(VulkanDevice device, long view, long[] mipViews, long image, long allocation) {
+    private static void destroy(VulkanDevice device, long view, long[] mipViews, long[] layerViews, long image,
+        long allocation) {
         if (view != 0) {
             vkDestroyImageView(device.handle(), view, null);
         }
-        for (long mipView : mipViews) {
-            if (mipView != 0) {
-                vkDestroyImageView(device.handle(), mipView, null);
+        for (long[] views : new long[][] {mipViews, layerViews}) {
+            for (long each : views) {
+                if (each != 0) {
+                    vkDestroyImageView(device.handle(), each, null);
+                }
             }
         }
         vmaDestroyImage(device.allocator(), image, allocation);

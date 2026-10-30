@@ -581,6 +581,10 @@ that declare how they use each image. The graph does the rest:
 - **Images:** `g.create(name, ImageDesc.of(Format.R16G16B16A16_SFLOAT, w, h))` with `.fullMips()`, `.layers(n)`,
   `.cube()`, `.volume(depth)` or `.samples(n)`, or `ImageDesc.like(image, Ratio.of(1, 2))`; formats are the engine's
   `Format` enum, and usage follows from the declared accesses.
+- **Parts of images:** passes declare accesses to `image.mip(i)`, `image.mips(from, n)`, `image.layer(l)` or
+  `image.face(cube, f)`; barriers are derived per mip level and layer, so a pass reads one level while writing the
+  next, with no barriers by hand. `ctx.sampled(part)`, `ctx.storage(part)` and `ctx.view(part)` address one level or
+  one layer.
 - **History:** `g.history(name, desc)` keeps an image from frame to frame: this frame writes
   `current()`, and `previous()` holds what the frame before wrote (`ctx.historyValid(history)` says whether there
   was one). The graph swaps the two images' roles every frame and carries their state across the frame boundary.

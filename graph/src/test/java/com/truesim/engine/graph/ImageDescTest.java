@@ -66,6 +66,42 @@ class ImageDescTest {
     }
 
     @Test
+    void partsOfImagesAreChecked() {
+        Image chain = new Image(0, "chain", ImageDesc.of(Format.R16G16B16A16_SFLOAT, 64, 64).mips(4).layers(2));
+        assertThat(chain.whole().whole()).isTrue();
+        assertThat(chain.whole()).hasToString("chain");
+        Subresource mip = chain.mip(2);
+        assertThat(mip.oneMip()).isTrue();
+        assertThat(mip.oneLayer()).isFalse();
+        assertThat(mip.whole()).isFalse();
+        assertThat(mip).hasToString("chain mips 2-2 layers 0-1");
+        assertThat(chain.mips(1, 3).mipCount()).isEqualTo(3);
+        assertThat(chain.layer(1).oneLayer()).isTrue();
+        assertThat(chain.layers(0, 2).whole()).isTrue();
+        assertThatIllegalArgumentException().isThrownBy(() -> chain.mip(4)).withMessageContaining("are not all in");
+        assertThatIllegalArgumentException().isThrownBy(() -> chain.mip(-1));
+        assertThatIllegalArgumentException().isThrownBy(() -> chain.mips(0, 0));
+        assertThatIllegalArgumentException().isThrownBy(() -> chain.layer(2));
+        assertThatIllegalArgumentException().isThrownBy(() -> chain.layers(-1, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> chain.layers(0, 0));
+        assertThatIllegalArgumentException().isThrownBy(() -> chain.face(0, 0)).withMessageContaining("not a cube map");
+        Image sky = new Image(1, "sky", ImageDesc.of(Format.R16G16B16A16_SFLOAT, 32, 32).cubes(2));
+        assertThat(sky.face(1, 3).baseLayer()).isEqualTo(9);
+        assertThatIllegalArgumentException().isThrownBy(() -> sky.face(0, 6)).withMessageContaining("faces are 0 to 5");
+        assertThatIllegalArgumentException().isThrownBy(() -> sky.face(0, -1));
+        // Pass bodies take parts they can address: one mip level of every layer, or one layer.
+        PassContext ctx = new PassContext(null);
+        assertThatIllegalArgumentException().isThrownBy(() -> ctx.sampled(chain.mips(0, 2)))
+            .withMessageContaining("one mip level of every layer");
+        assertThatIllegalArgumentException().isThrownBy(() -> ctx.sampled(new Subresource(chain, 1, 1, 0, 1)));
+        assertThatIllegalArgumentException().isThrownBy(() -> ctx.storage(chain.layer(0)))
+            .withMessageContaining("one mip level of every layer");
+        assertThatIllegalArgumentException().isThrownBy(() -> ctx.storage(new Subresource(chain, 1, 1, 1, 1)));
+        assertThatIllegalArgumentException().isThrownBy(() -> ctx.view(chain.mip(1))).withMessageContaining("one layer");
+        assertThatIllegalArgumentException().isThrownBy(() -> ctx.view(new Subresource(chain, 1, 1, 0, 1)));
+    }
+
+    @Test
     void ratiosRoundUp() {
         assertThat(Ratio.of(1, 2).apply(1081)).isEqualTo(541);
         assertThat(Ratio.of(1, 4).apply(1)).isEqualTo(1);

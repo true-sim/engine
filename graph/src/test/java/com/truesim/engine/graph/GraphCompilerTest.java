@@ -3,8 +3,6 @@ package com.truesim.engine.graph;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-import static org.lwjgl.vulkan.VK10.VK_FORMAT_R16G16B16A16_SFLOAT;
-import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -206,6 +204,36 @@ class GraphCompilerTest {
         assertThatIllegalStateException().isThrownBy(() -> compile(outputs, false, base,
             new Modifier(grade, Order.NONE, OUT), new Modifier(grade, Order.NONE, OUT)))
             .withMessageStartingWith("Two techniques have the id test.grade");
+    }
+
+    @Test
+    void mipLevelsHaveBarriersOfTheirOwn() {
+        Technique chain = new Lambda(List.of(OUT), g -> {
+            Image pyramid = g.create("pyramid", ImageDesc.of(com.truesim.engine.vulkan.Format.R16G16B16A16_SFLOAT, 8, 8).mips(3));
+            g.pass("level 0").write(pyramid.mip(0), Access.STORAGE_WRITE).record(ctx -> { });
+            g.pass("level 1").read(pyramid.mip(0), Access.STORAGE_READ).write(pyramid.mip(1), Access.STORAGE_WRITE)
+                .record(ctx -> { });
+            g.pass("level 2").read(pyramid.mip(1), Access.STORAGE_READ).write(pyramid.mip(2), Access.STORAGE_WRITE)
+                .record(ctx -> { });
+            Image out = g.create("out", ImageDesc.of(com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, 64, 64));
+            g.pass("use").read(pyramid, Access.SAMPLED_COMPUTE).write(out, Access.STORAGE_WRITE).record(ctx -> { });
+            g.provide(OUT, out);
+        });
+        CompiledGraph c = compile(Map.of(OUT, swapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT)), false, chain);
+        CompiledGraph.BarrierList b = c.barriers();
+        // Level 1 waits for level 0's write of mip 0 (same layout: a memory barrier) and starts mip 1 alone.
+        int level1 = b.start()[1];
+        assertThat(b.start()[2] - level1).isEqualTo(2);
+        assertThat(b.baseMip()[level1]).isZero();
+        assertThat(b.oldLayout()[level1]).isEqualTo(b.newLayout()[level1]); // GENERAL: visibility only
+        assertThat(b.baseMip()[level1 + 1]).isEqualTo(1);
+        assertThat(b.oldLayout()[level1 + 1]).isEqualTo(VK_IMAGE_LAYOUT_UNDEFINED);
+        assertThat(b.mipCount()[level1 + 1]).isEqualTo(1);
+        // Sampling the whole pyramid after: one barrier for its three levels, alike.
+        int use = b.start()[3];
+        assertThat(b.baseMip()[use]).isZero();
+        assertThat(b.mipCount()[use]).isEqualTo(3);
+        assertThat(b.newLayout()[use]).isEqualTo(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
     @Test

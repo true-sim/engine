@@ -44,7 +44,6 @@ import static org.lwjgl.vulkan.VK10.VK_INDEX_TYPE_UINT32;
 import static org.lwjgl.vulkan.VK10.VK_QUERY_RESULT_64_BIT;
 import static org.lwjgl.vulkan.VK10.VK_QUERY_RESULT_WAIT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
 import static org.lwjgl.vulkan.VK10.vkCmdResetQueryPool;
 import static org.lwjgl.vulkan.VK10.vkCreateQueryPool;
 import static org.lwjgl.vulkan.VK10.vkDestroyQueryPool;
@@ -60,6 +59,7 @@ import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.render.layout.InstancesPush;
+import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -342,7 +342,7 @@ public final class RayTracing implements AutoCloseable {
             memPutLong(push + InstancesPush.VIEW, view.address()); // relative to the camera shading the traced points
             instancePass.bind(commands);
             instancePass.push(commands, push, PUSH_BYTES);
-            vkCmdDispatch(commands, (count + 63) / 64, 1, 1);
+            Commands.dispatch(commands, (count + 63) / 64, 1, 1);
         }
         Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_SHADER_READ_BIT

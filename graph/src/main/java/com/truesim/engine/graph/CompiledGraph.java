@@ -28,10 +28,12 @@ record CompiledGraph(PassInfo[] order, int[] queues, int builtPasses, int[] targ
     /**
      * The barriers, barrier {@code b} of {@code target} (a physical or, as {@code ~index}, external image or buffer, by
      * {@code kind}) with its layouts, stages and accesses: before pass {@code i}, those from {@code start[i]} to
-     * {@code start[i + 1]}; the last range is after all passes (the outputs' final layouts).
+     * {@code start[i + 1]}; the last range is after all passes (the outputs' final layouts). Each covers mip levels
+     * {@code baseMip} to {@code baseMip + mipCount - 1} of layers {@code baseLayer} on ({@code -1} counts: the rest).
      */
     record BarrierList(int[] start, int[] target, int[] kind, int[] aspect, int[] oldLayout, int[] newLayout,
-        long[] srcStage, long[] srcAccess, long[] dstStage, long[] dstAccess) {
+        long[] srcStage, long[] srcAccess, long[] dstStage, long[] dstAccess, int[] baseMip, int[] mipCount,
+        int[] baseLayer, int[] layerCount) {
 
         int size() {
             return target.length;

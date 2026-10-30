@@ -6,8 +6,6 @@ import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
-import static org.lwjgl.vulkan.VK10.vkCmdFillBuffer;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
@@ -96,7 +94,7 @@ public final class RecordBuffer implements AutoCloseable {
         try {
             records = GpuBuffer.deviceLocal(device, (long) recordBytes * capacity, storage
                 | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT); // copied from: readbacks
-            device.submitAndWait(device.graphics(), commands -> vkCmdFillBuffer(commands, records.handle(), 0,
+            device.submitAndWait(device.graphics(), commands -> Commands.fillBuffer(commands, records.handle(), 0,
                 records.size(), 0));
             try (ShaderModule shader = ShaderModule.load(device, "shaders/records/scatter.spv")) {
                 scatter = Pipeline.compute(device, shader, "scatterMain", SCATTER_PUSH);
@@ -231,7 +229,7 @@ public final class RecordBuffer implements AutoCloseable {
             for (long first = 0; first < threads; first += 64L * MAX_GROUPS) {
                 memPutInt(push + ScatterPush.FIRST, (int) first);
                 scatter.push(commands, push, SCATTER_PUSH);
-                vkCmdDispatch(commands, (int) Math.min(MAX_GROUPS, (threads - first + 63) / 64), 1, 1);
+                Commands.dispatch(commands, (int) Math.min(MAX_GROUPS, (threads - first + 63) / 64), 1, 1);
             }
         }
         Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,

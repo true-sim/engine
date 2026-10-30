@@ -9,12 +9,8 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_INDEX_TYPE_UINT32;
 import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_FRAGMENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_VERTEX_BIT;
-import static org.lwjgl.vulkan.VK10.vkCmdBindIndexBuffer;
-import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
-import static org.lwjgl.vulkan.VK10.vkCmdFillBuffer;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK12.vkCmdDrawIndexedIndirectCount;
-import static org.lwjgl.vulkan.VK13.vkCmdEndRendering;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
@@ -25,6 +21,7 @@ import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.render.layout.ClassicPush;
 import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.SelectPush;
+import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
@@ -274,7 +271,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         Buffer list = g.createBuffer(name + " draws", recordsOffset + (long) RECORD_BYTES * maxDraws
             * MeshletRenderer.BINS);
         g.pass(name + " reset").write(list, BufferAccess.TRANSFER_DST)
-            .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(list), 0, 16, 0));
+            .record(ctx -> Commands.fillBuffer(ctx.commands(), ctx.buffer(list), 0, 16, 0));
         g.pass(name + " selection").write(list, BufferAccess.STORAGE_WRITE).record(ctx -> {
             if (camera != null) {
                 view.set(camera, 1, MeshletRenderer.MODE_LIT);
@@ -331,7 +328,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             memPutLong(push + SelectPush.MATERIALS, scene.materialsAddress()); // each part's raster bin
             select.bind(commands);
             select.push(commands, push, SELECT_PUSH);
-            vkCmdDispatch(commands, (scene.highWater() + 63) / 64, 1, 1);
+            Commands.dispatch(commands, (scene.highWater() + 63) / 64, 1, 1);
         }
     }
 
@@ -360,14 +357,14 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             memPutLong(push + ClassicPush.MATERIALS, renderer.scene().materialsAddress());
             memPutLong(push + ClassicPush.LIGHTS, lights);
             MeshletRenderer.setViewport(commands, stack, width, height);
-            vkCmdBindIndexBuffer(commands, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
+            Commands.bindIndexBuffer(commands, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
             for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {
                 pipeline[bin].bind(commands);
                 pipeline[bin].push(commands, push, DRAW_PUSH);
-                vkCmdDrawIndexedIndirectCount(commands, handle, 16 + (long) COMMAND_BYTES * maxDraws * bin, handle,
+                Commands.drawIndexedIndirectCount(commands, handle, 16 + (long) COMMAND_BYTES * maxDraws * bin, handle,
                     4L * bin, maxDraws, COMMAND_BYTES);
             }
-            vkCmdEndRendering(commands);
+            Commands.endRendering(commands);
         }
     }
 
