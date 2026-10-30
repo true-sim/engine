@@ -651,7 +651,7 @@ public final class FrameGraph implements AutoCloseable {
                 memPutInt(info + VkSemaphoreWaitInfo.SEMAPHORECOUNT, 2);
                 memPutAddress(info + VkSemaphoreWaitInfo.PSEMAPHORES, semaphores);
                 memPutAddress(info + VkSemaphoreWaitInfo.PVALUES, values);
-                Vulkan.check(device.direct().waitSemaphores(info, Long.MAX_VALUE), "Could not wait for a frame");
+                device.check(device.direct().waitSemaphores(info, Long.MAX_VALUE), "Could not wait for a frame");
             }
         }
 

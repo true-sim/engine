@@ -152,7 +152,7 @@ public final class Frames implements AutoCloseable {
             try (MemoryStack stack = stackPush()) {
                 long fences = stack.nmalloc(Long.BYTES, Long.BYTES);
                 memPutLong(fences, fence);
-                Vulkan.check(Commands.waitForFences(device.handle(), 1, fences, true, Long.MAX_VALUE),
+                device.check(Commands.waitForFences(device.handle(), 1, fences, true, Long.MAX_VALUE),
                     "Could not wait for a frame");
             }
             for (int w = 0; w < pools.length; w++) {

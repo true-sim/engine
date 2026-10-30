@@ -9,6 +9,8 @@ import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+import static org.lwjgl.vulkan.VK10.VK_ERROR_OUT_OF_DEVICE_MEMORY;
+import static org.lwjgl.vulkan.VK10.VK_SUCCESS;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_LOAD_OP_CLEAR;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_STORE_OP_STORE;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -331,6 +333,41 @@ class VulkanTest {
             for (VulkanDevice device : devices) {
                 device.close();
                 device.close(); // twice is fine
+            }
+            assertThat(instance.validationErrors()).isZero();
+        }
+    }
+
+    @Test
+    void lostDevicesSayWhatTheDriverSaw() {
+        try (VulkanInstance instance = headless();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
+            device.check(VK_SUCCESS, "Fine");
+            assertThatThrownBy(() -> device.check(VK_ERROR_OUT_OF_DEVICE_MEMORY, "Could not allocate"))
+                .isExactlyInstanceOf(VulkanException.class).hasMessageStartingWith("Could not allocate");
+            // The driver may be asked only once the device is lost (VUID-vkGetDeviceFaultInfoEXT-device-07336): a
+            // healthy one has nothing to report, and the layer finds nothing wrong.
+            assertThat(device.faultReport()).isNull();
+            assertThat(instance.validationErrors()).isZero();
+        }
+    }
+
+    @Test
+    void gpuAssistedValidationRunsWork() {
+        VulkanInstance instance;
+        try {
+            instance = validated(VulkanInstance.builder().applicationName("tests").validation(true)
+                .gpuAssistedValidation(true).surfaces(false).build());
+        } catch (VulkanException | UnsatisfiedLinkError e) {
+            assumeThat(e).as("no Vulkan available").isNull();
+            throw e;
+        }
+        try (instance) {
+            assumeThat(instance.gpus()).as("no Vulkan 1.3 GPU").isNotEmpty();
+            try (VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+                 GpuBuffer buffer = GpuBuffer.deviceLocal(device, 64, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+                device.submitAndWait(device.graphics(),
+                    commands -> Commands.fillBuffer(commands, buffer.handle(), 0, 64, 7));
             }
             assertThat(instance.validationErrors()).isZero();
         }
