@@ -607,6 +607,11 @@ that declare how they use each image. The graph does the rest:
 - **Tooling:** every pass records inside a debug label of its name where the instance has debug utils (validation),
   so captures and validation messages name it. `graph.timings(true)` times each pass on the GPU; `graph.timings()`
   has the last finished frame's milliseconds per pass, read without allocating.
+- **Purity:** a technique's `build` returns what it makes (images, buffers, programs, writers) and its pass bodies,
+  which capture it, only record. Neither stores into fields, static fields or arrays it did not make; `check` enforces
+  this on the bytecode (build-logic's `checkPurity`), and `@AllowImpure` marks a deliberate exception. Per-frame
+  values come in through what bodies read when they record (the camera, a writer's setters), not through state the
+  build left behind.
 
 ```java
 graph.add(new ClusteredForwardShading(geometry, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT))

@@ -823,6 +823,11 @@ is released.
 
 - **Phase 1 goes first.** Every later phase changes the compiler, and the seams are what rebuilds, switches, views and
   background builds rely on.
+- **Phase 2 status (2026-10-30):** landed in engine 0.34 to 0.42 (typed keys and ids, `ImageDesc` and `Format`,
+  subresources, attachments and graph-owned scopes, `PassContext` v2, programs, the pipeline cache on disk, generated
+  push writers, labels, timings, readbacks, the view constants array, the purity contract and its check). Left for
+  later phases: typed addresses, open `Access` and queue capabilities, and a graph-level `ctx.viewConstants()` (with
+  views in phase 4).
 - **Phase 2 is large.** It lands as several PRs that are released once. Its design decisions (graph-owned scopes, view
   constants as an array, open `Access`, the purity contract) are the ones that would be expensive to change later.
 - **After phase 4,** phases 5 to 10 can be reordered by need.
