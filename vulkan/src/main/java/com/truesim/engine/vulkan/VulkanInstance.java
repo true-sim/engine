@@ -367,7 +367,7 @@ public final class VulkanInstance implements AutoCloseable {
 
     // ---------------------------------------------------------------- surfaces
 
-    /** A surface to present to {@code window}; close it before the window. */
+    /** A surface to present to {@code window}; closing the window closes it too. */
     public Surface createSurface(Window window) {
         if (!surfaces) {
             throw new IllegalStateException("This instance was built without surfaces");

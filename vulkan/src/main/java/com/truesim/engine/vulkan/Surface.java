@@ -4,7 +4,10 @@ import static org.lwjgl.vulkan.KHRSurface.vkDestroySurfaceKHR;
 
 import com.truesim.engine.platform.Window;
 
-/** A window's Vulkan surface, which swapchains present to. Close it before its window and instance. */
+/**
+ * A window's Vulkan surface, which swapchains present to. Close it before its instance; closing its window closes it
+ * too, so a surface never outlives the window it presents to.
+ */
 public final class Surface implements AutoCloseable {
 
     private final VulkanInstance instance;
@@ -15,6 +18,7 @@ public final class Surface implements AutoCloseable {
         this.instance = instance;
         this.window = window;
         this.handle = handle;
+        window.attach(this);
     }
 
     public long handle() {
@@ -34,6 +38,7 @@ public final class Surface implements AutoCloseable {
         if (handle != 0) {
             vkDestroySurfaceKHR(instance.handle(), handle, null);
             handle = 0;
+            window.detach(this);
         }
     }
 }

@@ -324,6 +324,33 @@ class VulkanTest {
     }
 
     @Test
+    void devicesTrackWhatIsMadeOnThem() {
+        GpuBuffer leaked;
+        try (VulkanInstance instance = headless()) {
+            VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+            int before = device.openChildren(); // the device's own bindless buffers, when tracked
+            GpuImage image = new GpuImage(device, 4, 4, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT);
+            leaked = GpuBuffer.deviceLocal(device, 64, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+            assertThat(leaked.toString()).isEqualTo("GpuBuffer of 64 bytes");
+            assertThat(image.toString()).startsWith("GpuImage 4 x 4");
+            if (instance.validationEnabled()) {
+                assertThat(device.openChildren()).isEqualTo(before + 2);
+                image.close();
+                assertThat(device.openChildren()).isEqualTo(before + 1);
+            } else {
+                assertThat(device.openChildren()).isEqualTo(-1);
+                image.close();
+            }
+            device.close(); // reports the buffer left open
+            device.close(); // twice is fine
+            assertThatIllegalStateException().isThrownBy(device::allocator).withMessageContaining("device is closed");
+        }
+        // Closing a buffer after its device throws instead of calling into a destroyed allocator.
+        assertThatIllegalStateException().isThrownBy(leaked::close);
+    }
+
+    @Test
     void resourcesValidate() {
         try (VulkanInstance instance = headless(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
             try (GpuBuffer local = GpuBuffer.deviceLocal(device, 256, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {

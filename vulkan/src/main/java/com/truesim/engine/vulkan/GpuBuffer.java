@@ -89,6 +89,7 @@ public final class GpuBuffer implements AutoCloseable {
                     .sType(VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO)
                     .buffer(handle));
         }
+        device.track(this);
     }
 
     /** A buffer the CPU writes and reads directly, e.g. for uploads, readbacks and per-frame data. */
@@ -214,7 +215,13 @@ public final class GpuBuffer implements AutoCloseable {
                 mapping.close(); // segments over the mapping throw from now on
             }
             vmaDestroyBuffer(device.allocator(), handle, allocation);
+            device.untrack(this);
         }
+    }
+
+    @Override
+    public String toString() {
+        return "GpuBuffer of " + size + " bytes";
     }
 
     private void checkOpen() {

@@ -49,6 +49,7 @@ import static org.lwjgl.vulkan.VK14.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4
 import com.truesim.annotations.AllowAllocation;
 import java.nio.LongBuffer;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -109,11 +110,14 @@ public final class VulkanDevice implements AutoCloseable {
     private final boolean primitiveIds;
     private final float maxAnisotropy;
     private final boolean swapchains;
-    private boolean closed;
+    /** With validation on, the buffers and images made on the device and not closed, with where each was made. */
+    private final Map<Object, Throwable> children;
+    private volatile boolean closed;
 
     private VulkanDevice(Gpu gpu, boolean swapchains) {
         this.gpu = gpu;
         this.swapchains = swapchains;
+        this.children = gpu.instance().validationEnabled() ? new IdentityHashMap<>() : null;
         QueueFamily[] chosen = chooseQueueFamilies(gpu.name(), gpu.queueFamilies());
         QueueFamily graphicsFamily = chosen[0];
         QueueFamily computeFamily = chosen[1];
@@ -441,9 +445,40 @@ public final class VulkanDevice implements AutoCloseable {
         return features14;
     }
 
-    /** The VMA allocator, for buffers and images. */
+    /** The VMA allocator, for buffers and images; throws once the device is closed, where VMA would crash. */
     public long allocator() {
+        if (closed) {
+            throw new IllegalStateException("The device is closed: close what was made on it first");
+        }
         return allocator;
+    }
+
+    /** Notes {@code child}, made on this device, so closing the device reports it if still open (validation only). */
+    void track(Object child) {
+        if (children != null) {
+            synchronized (children) {
+                children.put(child, new Throwable("made here"));
+            }
+        }
+    }
+
+    /** Notes that {@code child} was closed. */
+    void untrack(Object child) {
+        if (children != null) {
+            synchronized (children) {
+                children.remove(child);
+            }
+        }
+    }
+
+    /** The buffers and images made on this device and not closed yet; -1 without validation, which tracks them. */
+    public int openChildren() {
+        if (children == null) {
+            return -1;
+        }
+        synchronized (children) {
+            return children.size();
+        }
     }
 
     /** The device's bindless descriptor set and the pipeline layout all pipelines share. */
@@ -527,9 +562,17 @@ public final class VulkanDevice implements AutoCloseable {
         if (closed) {
             return;
         }
-        closed = true;
         waitIdle();
+        if (children != null) {
+            synchronized (children) {
+                if (!children.isEmpty()) {
+                    LOG.warn("{} buffers and images were not closed before their device", children.size());
+                    children.forEach((child, made) -> LOG.warn("Not closed: {}", child, made));
+                }
+            }
+        }
         bindless.close();
+        closed = true;
         vmaDestroyAllocator(allocator);
         vkDestroyDevice(handle, null);
     }
