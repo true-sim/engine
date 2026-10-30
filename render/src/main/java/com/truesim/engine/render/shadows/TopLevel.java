@@ -7,6 +7,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.RenderView;
+import com.truesim.engine.render.SceneData;
 import java.util.Objects;
 
 /**
@@ -26,7 +27,8 @@ public record TopLevel(RayTracing rayTracing, RenderView view) implements Reques
     @AllowAllocation("building the graph, when it changes")
     public Buffer build(GraphBuilder g) {
         Buffer built = g.createBuffer("top level", 16);
-        g.pass("top level").write(built, BufferAccess.STORAGE_WRITE)
+        SceneData.Buffers scene = g.request(new SceneData(view.renderer()));
+        g.pass("top level").read(scene.instances(), BufferAccess.STORAGE_READ).write(built, BufferAccess.STORAGE_WRITE)
             .record(ctx -> rayTracing.buildTopLevel(ctx.unsafe().commands(), view));
         return built;
     }
