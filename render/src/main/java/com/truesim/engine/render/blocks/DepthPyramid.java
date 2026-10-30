@@ -1,17 +1,12 @@
 package com.truesim.engine.render.blocks;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.memPutAddress;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
-import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R32_SFLOAT;
 import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
@@ -20,13 +15,12 @@ import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.layout.PyramidPush;
+import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
-import org.lwjgl.vulkan.VkDependencyInfo;
-import org.lwjgl.vulkan.VkMemoryBarrier2;
 
 /**
  * The farthest-depth pyramid of a (reverse) depth image: a {@code R32_SFLOAT} image half its size (rounded up) with a
@@ -76,17 +70,9 @@ public record DepthPyramid(Image depth) implements Request<Image> {
             try (MemoryStack stack = stackPush()) {
                 if (mip > 0) {
                     // The level below was written by the previous dispatch.
-                    long barrier = stack.ncalloc(VkMemoryBarrier2.ALIGNOF, 1, VkMemoryBarrier2.SIZEOF);
-                    memPutInt(barrier + VkMemoryBarrier2.STYPE, VK_STRUCTURE_TYPE_MEMORY_BARRIER_2);
-                    memPutLong(barrier + VkMemoryBarrier2.SRCSTAGEMASK, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-                    memPutLong(barrier + VkMemoryBarrier2.SRCACCESSMASK, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-                    memPutLong(barrier + VkMemoryBarrier2.DSTSTAGEMASK, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-                    memPutLong(barrier + VkMemoryBarrier2.DSTACCESSMASK, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-                    long dependency = stack.ncalloc(VkDependencyInfo.ALIGNOF, 1, VkDependencyInfo.SIZEOF);
-                    memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
-                    memPutInt(dependency + VkDependencyInfo.MEMORYBARRIERCOUNT, 1);
-                    memPutAddress(dependency + VkDependencyInfo.PMEMORYBARRIERS, barrier);
-                    nvkCmdPipelineBarrier2(ctx.commands(), dependency);
+                    Barriers.memory(ctx.commands(), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
                 }
                 long push = stack.nmalloc(8, PUSH_BYTES);
                 memPutInt(push + PyramidPush.SOURCE, mip == 0 ? ctx.sampled(depth) : ctx.storage(pyramid, mip - 1));

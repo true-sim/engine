@@ -57,12 +57,10 @@ import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.render.layout.InstancesPush;
+import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Pipeline;
@@ -87,9 +85,7 @@ import org.lwjgl.vulkan.VkAccelerationStructureGeometryInstancesDataKHR;
 import org.lwjgl.vulkan.VkAccelerationStructureGeometryKHR;
 import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkCopyAccelerationStructureInfoKHR;
-import org.lwjgl.vulkan.VkDependencyInfo;
 import org.lwjgl.vulkan.VkFormatProperties;
-import org.lwjgl.vulkan.VkMemoryBarrier2;
 import org.lwjgl.vulkan.VkPhysicalDeviceAccelerationStructurePropertiesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceProperties2;
 import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
@@ -290,7 +286,7 @@ public final class RayTracing implements AutoCloseable {
                     pool.uploads().flush(commands); // the mesh's positions, if added since the last frame
                     vkCmdResetQueryPool(commands, queryPool.get(0), 0, 1);
                     vkCmdBuildAccelerationStructuresKHR(commands, info, ranges);
-                    barrier(commands, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                    Barriers.memory(commands, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                         VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                         VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
@@ -335,7 +331,7 @@ public final class RayTracing implements AutoCloseable {
         int count = Math.min(scene.highWater(), maxInstances);
         scene.upload(commands);
         // Whatever traced the top level before (the last frame) is done with it before it is rebuilt.
-        barrier(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+        Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, PUSH_BYTES);
@@ -348,7 +344,7 @@ public final class RayTracing implements AutoCloseable {
             instancePass.push(commands, push, PUSH_BYTES);
             vkCmdDispatch(commands, (count + 63) / 64, 1, 1);
         }
-        barrier(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+        Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_SHADER_READ_BIT
                 | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
         try (MemoryStack stack = stackPush()) {
@@ -385,7 +381,7 @@ public final class RayTracing implements AutoCloseable {
             memPutAddress(ranges, range);
             nvkCmdBuildAccelerationStructuresKHR(commands, 1, info, ranges);
         }
-        barrier(commands, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        Barriers.memory(commands, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
             VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
     }
@@ -455,24 +451,6 @@ public final class RayTracing implements AutoCloseable {
     private void destroy(Structure structure) {
         vkDestroyAccelerationStructureKHR(device.handle(), structure.handle(), null);
         structure.buffer().close();
-    }
-
-    /** A global memory barrier. */
-    private static void barrier(VkCommandBuffer commands, long srcStage, long srcAccess, long dstStage,
-        long dstAccess) {
-        try (MemoryStack stack = stackPush()) {
-            long barrier = stack.ncalloc(VkMemoryBarrier2.ALIGNOF, 1, VkMemoryBarrier2.SIZEOF);
-            memPutInt(barrier + VkMemoryBarrier2.STYPE, VK_STRUCTURE_TYPE_MEMORY_BARRIER_2);
-            memPutLong(barrier + VkMemoryBarrier2.SRCSTAGEMASK, srcStage);
-            memPutLong(barrier + VkMemoryBarrier2.SRCACCESSMASK, srcAccess);
-            memPutLong(barrier + VkMemoryBarrier2.DSTSTAGEMASK, dstStage);
-            memPutLong(barrier + VkMemoryBarrier2.DSTACCESSMASK, dstAccess);
-            long dependency = stack.ncalloc(VkDependencyInfo.ALIGNOF, 1, VkDependencyInfo.SIZEOF);
-            memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
-            memPutInt(dependency + VkDependencyInfo.MEMORYBARRIERCOUNT, 1);
-            memPutAddress(dependency + VkDependencyInfo.PMEMORYBARRIERS, barrier);
-            nvkCmdPipelineBarrier2(commands, dependency);
-        }
     }
 
     /** Destroys the acceleration structures; the device must be done with them. */

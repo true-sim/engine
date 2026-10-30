@@ -1,7 +1,6 @@
 package com.truesim.engine.render;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.memPutAddress;
 import static org.lwjgl.system.MemoryUtil.memPutFloat;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
@@ -12,9 +11,6 @@ import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.math.Maths;
@@ -26,13 +22,12 @@ import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.layout.ClusterPush;
 import com.truesim.engine.render.layout.LightsConstants;
+import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import java.util.List;
 import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
-import org.lwjgl.vulkan.VkDependencyInfo;
-import org.lwjgl.vulkan.VkMemoryBarrier2;
 
 /**
  * Light binning by clusters: provides {@link Keys#LIGHT_LIST}, the {@link Lights} binned per cluster of the camera's
@@ -159,18 +154,9 @@ public final class ClusteredLights implements Technique {
                 memPutFloat(data + 96 + 4L * axis, (float) (p - high));
             }
             nvkCmdUpdateBuffer(ctx.commands(), ctx.buffer(list), 0, HEADER_BYTES, data);
-            long barrier = stack.ncalloc(VkMemoryBarrier2.ALIGNOF, 1, VkMemoryBarrier2.SIZEOF);
-            memPutInt(barrier + VkMemoryBarrier2.STYPE, VK_STRUCTURE_TYPE_MEMORY_BARRIER_2);
-            memPutLong(barrier + VkMemoryBarrier2.SRCSTAGEMASK, VK_PIPELINE_STAGE_2_TRANSFER_BIT);
-            memPutLong(barrier + VkMemoryBarrier2.SRCACCESSMASK, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-            memPutLong(barrier + VkMemoryBarrier2.DSTSTAGEMASK, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-            memPutLong(barrier + VkMemoryBarrier2.DSTACCESSMASK, VK_ACCESS_2_SHADER_STORAGE_READ_BIT
-                | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-            long dependency = stack.ncalloc(VkDependencyInfo.ALIGNOF, 1, VkDependencyInfo.SIZEOF);
-            memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
-            memPutInt(dependency + VkDependencyInfo.MEMORYBARRIERCOUNT, 1);
-            memPutAddress(dependency + VkDependencyInfo.PMEMORYBARRIERS, barrier);
-            nvkCmdPipelineBarrier2(ctx.commands(), dependency);
+            Barriers.memory(ctx.commands(), VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
             long push = stack.nmalloc(16, PUSH_BYTES);
             float[] viewProjection = camera.viewProjection();
             for (int i = 0; i < 16; i++) {
