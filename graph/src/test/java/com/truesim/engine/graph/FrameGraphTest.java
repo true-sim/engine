@@ -365,6 +365,39 @@ class FrameGraphTest {
     // ---------------------------------------------------------------- tests
 
     @Test
+    void passesRenderIntoColorAndDepthAndCopyBuffers() {
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Image color = g.create("color", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image depth = g.create("depth", SIZE, SIZE, org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT);
+            g.pass("clear both").write(color, Access.COLOR_ATTACHMENT).write(depth, Access.DEPTH_ATTACHMENT)
+                .record(ctx -> {
+                    ctx.beginRendering(color, depth, true, 0, 0, 1, 1);
+                    ctx.endRendering();
+                });
+            g.pass("keep color").write(color, Access.COLOR_ATTACHMENT).record(ctx -> {
+                ctx.beginRendering(color, null, false, 0, 0, 0, 0); // loads: stays blue
+                ctx.endRendering();
+            });
+            g.pass("keep depth").write(depth, Access.DEPTH_ATTACHMENT).sideEffects().record(ctx -> {
+                ctx.beginRendering(null, depth, false, 0, 0, 0, 0);
+                ctx.endRendering();
+            });
+            Buffer a = g.createBuffer("a", 64);
+            Buffer b = g.createBuffer("b", 64);
+            g.pass("fill a").write(a, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(a, 7));
+            g.pass("copy a to b").read(a, BufferAccess.TRANSFER_SRC).write(b, BufferAccess.TRANSFER_DST).sideEffects()
+                .record(ctx -> {
+                    ctx.copy(a, b, 32);
+                    ctx.copy(a, 32, b, 32, 32);
+                    ctx.dispatch(null, null, 0); // no workgroups: nothing
+                });
+            g.provide(OUT, color);
+        })).output(OUT, output);
+        int[] texels = frame();
+        assertThat(texels).containsOnly(BLUE);
+    }
+
+    @Test
     void techniquesAreResolvedByKeyAndBuiltOnlyWhenNeeded() {
         // Added consumer first: order of adding does not matter.
         graph.add(new Halves(OUT, A, B))
