@@ -27,7 +27,7 @@ public record TopLevel(RayTracing rayTracing, RenderView view) implements Reques
     public Buffer build(GraphBuilder g) {
         Buffer built = g.createBuffer("top level", 16);
         g.pass("top level").write(built, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> rayTracing.buildTopLevel(ctx.commands(), view));
+            .record(ctx -> rayTracing.buildTopLevel(ctx.unsafe().commands(), view));
         return built;
     }
 }

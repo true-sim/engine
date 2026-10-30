@@ -16,6 +16,7 @@ public final class Image {
     final int height;
     final Format format;
     final int mips;
+    private final Subresource whole;
 
     Image(int id, String name, ImageDesc desc) {
         this.id = id;
@@ -25,6 +26,7 @@ public final class Image {
         this.height = desc.height();
         this.format = desc.format();
         this.mips = desc.mips();
+        this.whole = new Subresource(this, 0, mips, 0, desc.layers());
     }
 
     public String name() {
@@ -55,7 +57,7 @@ public final class Image {
 
     /** All of it. */
     public Subresource whole() {
-        return new Subresource(this, 0, mips, 0, desc.layers());
+        return whole;
     }
 
     /** Mip level {@code level} of every layer. */

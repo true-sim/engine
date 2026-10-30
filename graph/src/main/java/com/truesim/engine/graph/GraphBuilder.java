@@ -60,6 +60,14 @@ public final class GraphBuilder {
     }
 
     /**
+     * An attachment of a pass's rendering scope: {@code target} (one mip level of one layer), loaded and stored as
+     * said, cleared to {@code clear}; a depth attachment with {@code depth}; a multisampled color one resolved into
+     * {@code resolve} (or null).
+     */
+    record Attachment(Subresource target, Load load, Store store, Clear clear, boolean depth, Subresource resolve) {
+    }
+
+    /**
      * One pass of the build: its accesses (image id and access, in pairs, with each access's mip and layer range: base
      * mip, mip count, base layer, layer count, four per access) and body.
      */
@@ -69,19 +77,24 @@ public final class GraphBuilder {
         final int[] images;
         final Access[] accesses;
         final int[] ranges;
+        final boolean[] discards; // per image access: its contents are not needed (an attachment cleared or not loaded)
+        final Attachment[] attachments; // the rendering scope the graph opens around the body; none: no scope
         final int[] buffers;
         final BufferAccess[] bufferAccesses;
         final boolean sideEffects;
         final boolean async;
         final PassBody body;
 
-        PassInfo(String name, String owner, int[] images, Access[] accesses, int[] ranges, int[] buffers,
-            BufferAccess[] bufferAccesses, boolean sideEffects, boolean async, PassBody body) {
+        PassInfo(String name, String owner, int[] images, Access[] accesses, int[] ranges, boolean[] discards,
+            Attachment[] attachments, int[] buffers, BufferAccess[] bufferAccesses, boolean sideEffects, boolean async,
+            PassBody body) {
             this.name = name;
             this.owner = owner;
             this.images = images;
             this.accesses = accesses;
             this.ranges = ranges;
+            this.discards = discards;
+            this.attachments = attachments;
             this.buffers = buffers;
             this.bufferAccesses = bufferAccesses;
             this.sideEffects = sideEffects;
@@ -364,6 +377,8 @@ public final class GraphBuilder {
     public final class PassBuilder {
         private final String name;
         private final List<Subresource> used = new ArrayList<>();
+        private final List<Boolean> discarded = new ArrayList<>();
+        private final List<Attachment> attachments = new ArrayList<>();
         private final List<Access> accesses = new ArrayList<>();
         private final List<Buffer> usedBuffers = new ArrayList<>();
         private final List<BufferAccess> bufferAccesses = new ArrayList<>();
@@ -394,10 +409,16 @@ public final class GraphBuilder {
 
         /** The pass writes part of an image its technique or request made: some of its mip levels or layers. */
         public PassBuilder write(Subresource part, Access access) {
-            Image image = part.image();
             if (!access.writes) {
                 throw new IllegalArgumentException(name + ": " + access + " only reads; declare it with read()");
             }
+            checkWritable(part);
+            return use(part, access);
+        }
+
+        /** Throws unless the pass may write {@code part}: its technique or request made it, or it is external. */
+        private void checkWritable(Subresource part) {
+            Image image = part.image();
             ImageInfo info = images.get(image(image).id);
             if (info.previous) {
                 throw new IllegalStateException(name + " writes " + image.name + ": last frame's image is read only");
@@ -406,7 +427,90 @@ public final class GraphBuilder {
                 throw new IllegalStateException(name + " writes " + image.name + ", a result of " + name(info.owner)
                     + ": results are written only by whoever makes them");
             }
-            return use(part, access);
+        }
+
+        /**
+         * Renders into {@code target}, a color attachment of the scope the graph opens around the pass: loaded and
+         * stored as said. Attachments render in the order attached (location 0 first) and are all of one size.
+         */
+        public PassBuilder attach(Image target, Load load, Store store) {
+            return attach(image(target).whole(), load, store, null);
+        }
+
+        /** Renders into {@code target}, cleared to {@code clear} and stored. */
+        public PassBuilder attach(Image target, Clear clear) {
+            return attach(image(target).whole(), Load.CLEAR, Store.STORE, clear);
+        }
+
+        /**
+         * Renders into part of an image: one mip level of one layer (a cascade of a shadow map array, a face of a cube
+         * map), loaded and stored as said, cleared to {@code clear} with {@link Load#CLEAR}.
+         */
+        public PassBuilder attach(Subresource target, Load load, Store store, Clear clear) {
+            return attachment(target, load, store, clear, false);
+        }
+
+        /** Renders depth into {@code target}, loaded and stored as said. */
+        public PassBuilder attachDepth(Image target, Load load, Store store) {
+            return attachDepth(image(target).whole(), load, store, null);
+        }
+
+        /** Renders depth into {@code target}, cleared to {@code clear} and stored. */
+        public PassBuilder attachDepth(Image target, Clear clear) {
+            return attachDepth(image(target).whole(), Load.CLEAR, Store.STORE, clear);
+        }
+
+        /** Renders depth into part of an image, as {@link #attach(Subresource, Load, Store, Clear)} color. */
+        public PassBuilder attachDepth(Subresource target, Load load, Store store, Clear clear) {
+            return attachment(target, load, store, clear, true);
+        }
+
+        /**
+         * Resolves the last color attachment, multisampled, into {@code target} (one sample, its size and format) when
+         * the pass stops rendering.
+         */
+        public PassBuilder resolve(Image target) {
+            Attachment last = attachments.isEmpty() ? null : attachments.getLast();
+            if (last == null || last.depth() || last.target().image().desc().samples() == 1 || last.resolve() != null) {
+                throw new IllegalStateException(name + ": resolve follows a multisampled color attachment");
+            }
+            Subresource into = image(target).whole();
+            if (target.desc().samples() != 1 || target.width != last.target().image().width
+                || target.height != last.target().image().height || target.format != last.target().image().format) {
+                throw new IllegalArgumentException(name + ": " + target + " cannot take the resolve of "
+                    + last.target() + ": one sample, its size and format");
+            }
+            attachments.set(attachments.size() - 1, new Attachment(last.target(), last.load(), last.store(),
+                last.clear(), false, into));
+            checkWritable(into);
+            return use(into, Access.COLOR_ATTACHMENT, true);
+        }
+
+        private PassBuilder attachment(Subresource target, Load load, Store store, Clear clear, boolean depth) {
+            Objects.requireNonNull(load, "load");
+            Objects.requireNonNull(store, "store");
+            if ((load == Load.CLEAR) != (clear != null) || clear != null && clear.depth != depth) {
+                throw new IllegalArgumentException(name + ": " + target + " is cleared with a " + (depth ? "depth"
+                    : "color") + " clear value exactly when it loads with CLEAR");
+            }
+            if (target.image().mips != 1 || !target.oneLayer()) {
+                throw new IllegalArgumentException(name + ": an attachment is one layer of an image of one mip level: "
+                    + target);
+            }
+            Image first = attachments.isEmpty() ? null : attachments.getFirst().target().image();
+            if (first != null && (first.width != target.image().width || first.height != target.image().height)) {
+                throw new IllegalArgumentException(name + ": attachments are of one size: " + target + " and " + first);
+            }
+            if (depth && attachments.stream().anyMatch(Attachment::depth)) {
+                throw new IllegalStateException(name + " has a depth attachment already");
+            }
+            if (depth != target.image().format.depth()) {
+                throw new IllegalArgumentException(name + ": " + target + " is " + (depth ? "not " : "")
+                    + "a depth format");
+            }
+            checkWritable(target);
+            attachments.add(new Attachment(target, load, store, clear, depth, null));
+            return use(target, depth ? Access.DEPTH_ATTACHMENT : Access.COLOR_ATTACHMENT, load != Load.LOAD);
         }
 
         /** The pass reads {@code buffer}. */
@@ -438,7 +542,12 @@ public final class GraphBuilder {
         }
 
         private PassBuilder use(Subresource part, Access access) {
+            return use(part, access, false);
+        }
+
+        private PassBuilder use(Subresource part, Access access, boolean discard) {
             used.add(part);
+            discarded.add(discard);
             accesses.add(Objects.requireNonNull(access, "access"));
             images.get(image(part.image()).id).usage |= access.usage;
             return this;
@@ -465,6 +574,7 @@ public final class GraphBuilder {
         public void record(PassBody body) {
             int[] ids = new int[used.size()];
             int[] ranges = new int[4 * used.size()];
+            boolean[] discards = new boolean[used.size()];
             for (int i = 0; i < ids.length; i++) {
                 Subresource part = used.get(i);
                 ids[i] = part.image().id;
@@ -472,13 +582,14 @@ public final class GraphBuilder {
                 ranges[4 * i + 1] = part.mipCount();
                 ranges[4 * i + 2] = part.baseLayer();
                 ranges[4 * i + 3] = part.layerCount();
+                discards[i] = discarded.get(i);
             }
             int[] bufferIds = new int[usedBuffers.size()];
             for (int i = 0; i < bufferIds.length; i++) {
                 bufferIds[i] = usedBuffers.get(i).id;
             }
             passes.add(new PassInfo(name, scope() == null ? "the graph" : name(scope()), ids,
-                accesses.toArray(new Access[0]), ranges, bufferIds, bufferAccesses.toArray(new BufferAccess[0]), sideEffects,
+                accesses.toArray(new Access[0]), ranges, discards, attachments.toArray(new Attachment[0]), bufferIds, bufferAccesses.toArray(new BufferAccess[0]), sideEffects,
                 async, Objects.requireNonNull(body, "body")));
         }
     }

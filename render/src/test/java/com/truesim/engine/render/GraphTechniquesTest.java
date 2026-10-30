@@ -164,7 +164,7 @@ class GraphTechniquesTest {
                     memPutInt(region + VkBufferImageCopy.IMAGEEXTENT, SIZE);
                     memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 4, SIZE);
                     memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 8, 1);
-                    nvkCmdCopyBufferToImage(ctx.commands(), pattern.handle(), ctx.image(image),
+                    nvkCmdCopyBufferToImage(ctx.unsafe().commands(), pattern.handle(), ctx.unsafe().image(image),
                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, region);
                 }
             });
@@ -199,8 +199,8 @@ class GraphTechniquesTest {
             Image image = g.create("halves", ImageDesc.like(l, Ratio.ONE));
             g.pass("halves").read(l, Access.TRANSFER_SRC).read(r, Access.TRANSFER_SRC)
                 .write(image, Access.TRANSFER_DST).record(ctx -> {
-                    copy(ctx.commands(), ctx.image(l), ctx.image(image), 0);
-                    copy(ctx.commands(), ctx.image(r), ctx.image(image), SIZE / 2);
+                    copy(ctx.unsafe().commands(), ctx.unsafe().image(l), ctx.unsafe().image(image), 0);
+                    copy(ctx.unsafe().commands(), ctx.unsafe().image(r), ctx.unsafe().image(image), SIZE / 2);
                 });
             g.provide(out, image);
         }
@@ -269,7 +269,7 @@ class GraphTechniquesTest {
                     VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
                     region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
                     region.imageExtent().set(SIZE, SIZE, 1);
-                    vkCmdCopyImageToBuffer(ctx.commands(), ctx.image(color), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    vkCmdCopyImageToBuffer(ctx.unsafe().commands(), ctx.unsafe().image(color), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                         readbacks[graph.frameSlots().current()].handle(), region);
                 }
             });
@@ -321,8 +321,8 @@ class GraphTechniquesTest {
                                 VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
                                 region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
                                 region.imageExtent().set(SIZE, SIZE, 1);
-                                org.lwjgl.vulkan.VK10.vkCmdCopyBufferToImage(ctx.commands(), ctx.buffer(buffer),
-                                    ctx.image(image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+                                org.lwjgl.vulkan.VK10.vkCmdCopyBufferToImage(ctx.unsafe().commands(), ctx.unsafe().buffer(buffer),
+                                    ctx.unsafe().image(image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
                             }
                         });
                     g.provide(EDGE, image);
@@ -801,9 +801,9 @@ class GraphTechniquesTest {
                         long push = stack.nmalloc(4, 8);
                         memPutInt(push, ctx.sampled(depth));
                         memPutInt(push + 4, ctx.storage(image));
-                        pipeline.bind(ctx.commands());
-                        pipeline.push(ctx.commands(), push, 8);
-                        org.lwjgl.vulkan.VK10.vkCmdDispatch(ctx.commands(), SIZE / 8, SIZE / 8, 1);
+                        pipeline.bind(ctx.unsafe().commands());
+                        pipeline.push(ctx.unsafe().commands(), push, 8);
+                        org.lwjgl.vulkan.VK10.vkCmdDispatch(ctx.unsafe().commands(), SIZE / 8, SIZE / 8, 1);
                     }
                 });
             g.provide(key, image);
@@ -873,8 +873,8 @@ class GraphTechniquesTest {
                             VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
                             region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_DEPTH_BIT).layerCount(1);
                             region.imageExtent().set(w, h, 1);
-                            org.lwjgl.vulkan.VK10.vkCmdCopyBufferToImage(ctx.commands(), upload.handle(),
-                                ctx.image(image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
+                            org.lwjgl.vulkan.VK10.vkCmdCopyBufferToImage(ctx.unsafe().commands(), upload.handle(),
+                                ctx.unsafe().image(image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
                         }
                     });
                     g.provide(depthKey, image);
@@ -900,7 +900,7 @@ class GraphTechniquesTest {
                                 regions.get(mip).imageExtent().set(sizes.get(mip)[0], sizes.get(mip)[1], 1);
                                 offset += 4L * sizes.get(mip)[0] * sizes.get(mip)[1];
                             }
-                            vkCmdCopyImageToBuffer(ctx.commands(), ctx.image(pyramid),
+                            vkCmdCopyImageToBuffer(ctx.unsafe().commands(), ctx.unsafe().image(pyramid),
                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.handle(), regions);
                         }
                     });
@@ -937,8 +937,8 @@ class GraphTechniquesTest {
         frame();
         java.util.List<String> passes = graph.passes();
         assertThat(passes).startsWith("meshlet culling", "meshlets early", "depth pyramid of scene depth, level 0")
-            .endsWith("meshlets late"); // a pass per pyramid level between
-        assertThat(passes.subList(2, passes.size() - 1)).allMatch(p -> p.startsWith("depth pyramid of scene depth, level "));
+            .endsWith("meshlets late culling", "meshlets late"); // a pass per pyramid level between
+        assertThat(passes.subList(2, passes.size() - 2)).allMatch(p -> p.startsWith("depth pyramid of scene depth, level "));
         assertThat(graph.pooledImages()).isEqualTo(2); // depth and its pyramid: the color is the target
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
         assertThat(red(1, 1)).isZero(); // blue clear color

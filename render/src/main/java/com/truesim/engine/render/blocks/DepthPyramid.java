@@ -85,9 +85,9 @@ public record DepthPyramid(Image depth) implements Request<Image> {
             memPutInt(push + PyramidPush.TARGET_SIZE, sizes[2]);
             memPutInt(push + PyramidPush.TARGET_SIZE + 4, sizes[3]);
             memPutInt(push + PyramidPush.FROM_DEPTH, below == null ? 1 : 0);
-            pipeline.bind(ctx.commands());
-            pipeline.push(ctx.commands(), push, PUSH_BYTES);
-            Commands.dispatch(ctx.commands(), (sizes[2] + 7) / 8, (sizes[3] + 7) / 8, 1);
+            pipeline.bind(ctx.unsafe().commands());
+            pipeline.push(ctx.unsafe().commands(), push, PUSH_BYTES);
+            Commands.dispatch(ctx.unsafe().commands(), (sizes[2] + 7) / 8, (sizes[3] + 7) / 8, 1);
         }
     }
 }

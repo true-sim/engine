@@ -146,21 +146,23 @@ try (ShaderModule shaders = ShaderModule.load(device, "shaders/meshlets.spv");
 
 A game's own passes need no Vulkan calls for the usual work. `Push` writes push constants field by field, aligned as
 Slang lays out a push struct (pointers and `float2` on 8 bytes, `float3`/`float4`/matrices on 16), and the pass
-context records the commands: `ctx.dispatch` and `dispatchIndirect`, `ctx.fill` and `ctx.copy` of buffers,
-`ctx.beginRendering` (the pass's color and depth images, viewport and scissor set) with `ctx.draw` and
-`drawIndirect`. The accesses a pass declares still decide every barrier. Raw Vulkan stays available through
-`ctx.commands()` for anything else.
+context records the commands: `ctx.dispatch` and `dispatchIndirect`; `ctx.fill`, `ctx.copy` (buffers, and between
+buffers and images), `ctx.blit` and `ctx.clear`; `ctx.draw`, `drawIndirect`, `drawIndexedIndirect(Count)` and
+`drawMeshTasksIndirect`; `ctx.viewport` and `ctx.scissor`. A pass renders by declaring attachments: `attach(color,
+Clear.color(...))` or `attach(color, Load.LOAD, Store.STORE)`, `attachDepth(depth, Clear.FAR)`, one layer of an array
+(`image.layer(l)`), and `resolve(target)` for a multisampled one. The graph opens the rendering scope around the body,
+viewport and scissor all of the attachments, and what is cleared or not loaded starts from an undefined layout, with
+no transition of old contents. The accesses a pass declares still decide every barrier; with validation on, a body
+that touches a resource its pass did not declare fails. Raw Vulkan stays available through `ctx.unsafe()` (the
+command buffer, image, view and buffer handles) for anything else.
 
 ```java
 Push push = new Push();                                          // once, per pass
 g.pass("simulate").read(state, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
     .record(ctx -> ctx.dispatch(simulate, push.clear().address(ctx.address(state)).address(ctx.address(next))
         .u32(count).f32(dt), (count + 63) / 64));
-g.pass("draw").read(next, BufferAccess.DRAW_READ).write(color, Access.COLOR_ATTACHMENT).record(ctx -> {
-    ctx.beginRendering(color, null, true, 0, 0, 0, 1);
-    ctx.draw(particles, push.clear().address(ctx.address(next)), 6, count);
-    ctx.endRendering();
-});
+g.pass("draw").read(next, BufferAccess.DRAW_READ).attach(color, Clear.color(0, 0, 0, 1))
+    .record(ctx -> ctx.draw(particles, push.clear().address(ctx.address(next)), 6, count));
 ```
 
 Shaders import the modules of any dependency using `truesim.slang`: its sources ship in its jar under `slang/`, so a
@@ -583,8 +585,7 @@ that declare how they use each image. The graph does the rest:
   `Format` enum, and usage follows from the declared accesses.
 - **Parts of images:** passes declare accesses to `image.mip(i)`, `image.mips(from, n)`, `image.layer(l)` or
   `image.face(cube, f)`; barriers are derived per mip level and layer, so a pass reads one level while writing the
-  next, with no barriers by hand. `ctx.sampled(part)`, `ctx.storage(part)` and `ctx.view(part)` address one level or
-  one layer.
+  next, with no barriers by hand. `ctx.sampled(part)` and `ctx.storage(part)` address one level, and attachments one layer.
 - **History:** `g.history(name, desc)` keeps an image from frame to frame: this frame writes
   `current()`, and `previous()` holds what the frame before wrote (`ctx.historyValid(history)` says whether there
   was one). The graph swaps the two images' roles every frame and carries their state across the frame boundary.

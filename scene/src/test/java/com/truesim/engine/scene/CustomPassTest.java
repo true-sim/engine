@@ -16,6 +16,7 @@ import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
 import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.Access;
+import com.truesim.engine.graph.Clear;
 import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.ExternalBuffer;
@@ -78,15 +79,9 @@ class CustomPassTest {
                     .address(ctx.address(found)).u32(count), (count + 63) / 64));
             g.pass("read back").read(found, BufferAccess.TRANSFER_SRC).write(out, BufferAccess.TRANSFER_DST)
                 .record(ctx -> ctx.copy(found, out, 16L * count));
-            g.pass("tint").read(found, BufferAccess.DRAW_READ).write(target, Access.COLOR_ATTACHMENT)
-                .record(ctx -> draw(ctx, found, target));
+            g.pass("tint").read(found, BufferAccess.DRAW_READ).attach(target, Clear.color(0, 0, 0, 1))
+                .record(ctx -> ctx.draw(tint, push.clear().address(ctx.address(found)), 3, 1));
             g.provide(OUT, target);
-        }
-
-        private void draw(PassContext ctx, Buffer found, Image target) {
-            ctx.beginRendering(target, null, true, 0, 0, 0, 1);
-            ctx.draw(tint, push.clear().address(ctx.address(found)), 3, 1);
-            ctx.endRendering();
         }
     }
 

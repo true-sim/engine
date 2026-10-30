@@ -47,8 +47,12 @@ public final class Commands {
     private static final int DRAW_INDEXED_INDIRECT_COUNT = 17;
     private static final int DRAW_MESH_TASKS_INDIRECT = 18;
     private static final int SUBMIT = 19;
+    private static final int COPY_BUFFER_TO_IMAGE = 20;
+    private static final int COPY_IMAGE_TO_BUFFER = 21;
+    private static final int BLIT = 22;
+    private static final int CLEAR_COLOR = 23;
     // Immutable entries: a thread seeing an older one only wraps the address again.
-    private static final Fn[] FUNCTIONS = new Fn[20];
+    private static final Fn[] FUNCTIONS = new Fn[24];
 
     static {
         java.util.Arrays.fill(FUNCTIONS, NONE);
@@ -84,6 +88,8 @@ public final class Commands {
         handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT));
     private static final MethodHandle H_DRAW_INDIRECT_COUNT = handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG,
         JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT));
+    private static final MethodHandle H_CLEAR_COLOR = handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG,
+        JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
     private static final MethodHandle H_SUBMIT = LINKER.downcallHandle(
         FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_LONG));
 
@@ -299,6 +305,46 @@ public final class Commands {
         try {
             H_DRAW_INDIRECT.invokeExact(function(DRAW_MESH_TASKS_INDIRECT, of(commands).vkCmdDrawMeshTasksIndirectEXT),
                 commands.address(), buffer, offset, draws, stride);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkCmdCopyBufferToImage2} with the {@code VkCopyBufferToImageInfo2} at {@code info}. */
+    public static void copyBufferToImage2(VkCommandBuffer commands, long info) {
+        try {
+            H_ONE_POINTER.invokeExact(function(COPY_BUFFER_TO_IMAGE, of(commands).vkCmdCopyBufferToImage2),
+                commands.address(), info);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkCmdCopyImageToBuffer2} with the {@code VkCopyImageToBufferInfo2} at {@code info}. */
+    public static void copyImageToBuffer2(VkCommandBuffer commands, long info) {
+        try {
+            H_ONE_POINTER.invokeExact(function(COPY_IMAGE_TO_BUFFER, of(commands).vkCmdCopyImageToBuffer2),
+                commands.address(), info);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkCmdBlitImage2} with the {@code VkBlitImageInfo2} at {@code info}. */
+    public static void blitImage2(VkCommandBuffer commands, long info) {
+        try {
+            H_ONE_POINTER.invokeExact(function(BLIT, of(commands).vkCmdBlitImage2), commands.address(), info);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkCmdClearColorImage} with the {@code VkClearColorValue} at {@code color}. */
+    public static void clearColorImage(VkCommandBuffer commands, long image, int layout, long color, int rangeCount,
+        long ranges) {
+        try {
+            H_CLEAR_COLOR.invokeExact(function(CLEAR_COLOR, of(commands).vkCmdClearColorImage), commands.address(),
+                image, layout, color, rangeCount, ranges);
         } catch (Throwable e) {
             throw failed(e);
         }

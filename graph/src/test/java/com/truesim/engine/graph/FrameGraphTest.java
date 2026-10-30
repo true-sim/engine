@@ -4,6 +4,7 @@ import static com.truesim.testing.AllocationAssertions.assertAllocationFree;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assumptions.assumeThat;
@@ -258,8 +259,7 @@ class FrameGraphTest {
         public void build(GraphBuilder g) {
             Buffer buffer = g.createBuffer(label(key) + " texels", 4L * SIZE * SIZE);
             GraphBuilder.PassBuilder fill = g.pass("fill " + label(key) + " texels").write(buffer, BufferAccess.TRANSFER_DST);
-            (async ? fill.async() : fill).record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0,
-                VK_WHOLE_SIZE, rgba));
+            (async ? fill.async() : fill).record(ctx -> ctx.fill(buffer, rgba));
             Image image = g.create(label(key), ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("unpack " + label(key)).read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
                 .record(ctx -> unpack(ctx, buffer, image));
@@ -273,7 +273,7 @@ class FrameGraphTest {
         public Buffer build(GraphBuilder g) {
             Buffer buffer = g.createBuffer("filled", 64);
             g.pass("fill").write(buffer, BufferAccess.TRANSFER_DST)
-                .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0, VK_WHOLE_SIZE, value));
+                .record(ctx -> ctx.fill(buffer, value));
             return buffer;
         }
     }
@@ -283,23 +283,13 @@ class FrameGraphTest {
         try (MemoryStack stack = stackPush()) {
             long region = stack.ncalloc(8, 1, VkBufferCopy.SIZEOF);
             memPutLong(region + VkBufferCopy.SIZE, bytes);
-            nvkCmdCopyBuffer(ctx.commands(), ctx.buffer(from), ctx.buffer(to), 1, region);
+            nvkCmdCopyBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(from), ctx.unsafe().buffer(to), 1, region);
         }
     }
 
     /** Copies {@code buffer}'s first SIZE x SIZE texels into {@code image}. */
     static void unpack(PassContext ctx, Buffer buffer, Image image) {
-        try (MemoryStack stack = stackPush()) {
-            long region = stack.ncalloc(8, 1, VkBufferImageCopy.SIZEOF);
-            memPutInt(region + VkBufferImageCopy.IMAGESUBRESOURCE + VkImageSubresourceLayers.ASPECTMASK,
-                VK_IMAGE_ASPECT_COLOR_BIT);
-            memPutInt(region + VkBufferImageCopy.IMAGESUBRESOURCE + VkImageSubresourceLayers.LAYERCOUNT, 1);
-            memPutInt(region + VkBufferImageCopy.IMAGEEXTENT, SIZE);
-            memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 4, SIZE);
-            memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 8, 1);
-            nvkCmdCopyBufferToImage(ctx.commands(), ctx.buffer(buffer), ctx.image(image),
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, region);
-        }
+        ctx.copy(buffer, 0, image.whole());
     }
 
     /** A technique built from a lambda, for the misuse tests. */
@@ -310,20 +300,9 @@ class FrameGraphTest {
         }
     }
 
-    /** Clears {@code image} to {@code rgba}; written field by field, so recording allocates nothing. */
+    /** Clears {@code image} to {@code rgba}. */
     static void clear(PassContext ctx, Image image, float... rgba) {
-        try (MemoryStack stack = stackPush()) {
-            long color = stack.nmalloc(4, 16);
-            for (int i = 0; i < 4; i++) {
-                memPutFloat(color + 4L * i, rgba[i]);
-            }
-            long range = stack.ncalloc(4, 1, VkImageSubresourceRange.SIZEOF);
-            memPutInt(range + VkImageSubresourceRange.ASPECTMASK, VK_IMAGE_ASPECT_COLOR_BIT);
-            memPutInt(range + VkImageSubresourceRange.LEVELCOUNT, 1);
-            memPutInt(range + VkImageSubresourceRange.LAYERCOUNT, 1);
-            nvkCmdClearColorImage(ctx.commands(), ctx.image(image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color, 1,
-                range);
-        }
+        ctx.clear(image.whole(), rgba[0], rgba[1], rgba[2], rgba[3]);
     }
 
     /** Copies columns {@code x} to {@code x + width} of {@code from} into {@code to}. */
@@ -341,7 +320,7 @@ class FrameGraphTest {
             memPutInt(region + VkImageCopy.EXTENT, width);
             memPutInt(region + VkImageCopy.EXTENT + 4, SIZE);
             memPutInt(region + VkImageCopy.EXTENT + 8, 1);
-            nvkCmdCopyImage(ctx.commands(), ctx.image(from), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, ctx.image(to),
+            nvkCmdCopyImage(ctx.unsafe().commands(), ctx.unsafe().image(from), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, ctx.unsafe().image(to),
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, region);
         }
     }
@@ -376,19 +355,10 @@ class FrameGraphTest {
         graph.add(new Lambda(List.of(OUT), g -> {
             Image color = g.create("color", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             Image depth = g.create("depth", ImageDesc.of(Format.D32_SFLOAT, SIZE, SIZE));
-            g.pass("clear both").write(color, Access.COLOR_ATTACHMENT).write(depth, Access.DEPTH_ATTACHMENT)
-                .record(ctx -> {
-                    ctx.beginRendering(color, depth, true, 0, 0, 1, 1);
-                    ctx.endRendering();
-                });
-            g.pass("keep color").write(color, Access.COLOR_ATTACHMENT).record(ctx -> {
-                ctx.beginRendering(color, null, false, 0, 0, 0, 0); // loads: stays blue
-                ctx.endRendering();
-            });
-            g.pass("keep depth").write(depth, Access.DEPTH_ATTACHMENT).sideEffects().record(ctx -> {
-                ctx.beginRendering(null, depth, false, 0, 0, 0, 0);
-                ctx.endRendering();
-            });
+            g.pass("clear both").attach(color, Clear.color(0, 0, 1, 1)).attachDepth(depth, Clear.FAR)
+                .record(ctx -> { });
+            g.pass("keep color").attach(color, Load.LOAD, Store.STORE).record(ctx -> { }); // loads: stays blue
+            g.pass("keep depth").attachDepth(depth, Load.LOAD, Store.STORE).sideEffects().record(ctx -> { });
             Buffer a = g.createBuffer("a", 64);
             Buffer b = g.createBuffer("b", 64);
             g.pass("fill a").write(a, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(a, 7));
@@ -402,6 +372,51 @@ class FrameGraphTest {
         })).output(OUT, output);
         int[] texels = frame();
         assertThat(texels).containsOnly(BLUE);
+    }
+
+    @Test
+    void passesRenderIntoLayersAndBlitThem() {
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Image layers = g.create("layers", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE).layers(2));
+            g.pass("clear layer 0").attach(layers.layer(0), Load.CLEAR, Store.STORE, Clear.color(1, 0, 0, 1))
+                .record(ctx -> { });
+            g.pass("clear layer 1").attach(layers.layer(1), Load.CLEAR, Store.STORE, Clear.color(new float[] {0, 1, 0}))
+                .record(ctx -> ctx.viewport(0, 0, SIZE, SIZE));
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("blit layer 1").read(layers.layer(1), Access.TRANSFER_SRC).write(out, Access.TRANSFER_DST)
+                .record(ctx -> ctx.blit(layers.layer(1), out.whole(), false));
+            g.provide(OUT, out);
+        })).output(OUT, output);
+        assertThat(frame()).containsOnly(GREEN);
+    }
+
+    @Test
+    void imagesCopyToBuffersAndBack() {
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Image cleared = g.create("cleared", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("clear").write(cleared, Access.TRANSFER_DST).record(ctx -> ctx.clear(cleared.whole(), 0, 0, 1, 1));
+            Buffer texels = g.createBuffer("texels", 4L * SIZE * SIZE);
+            g.pass("pack").read(cleared, Access.TRANSFER_SRC).write(texels, BufferAccess.TRANSFER_DST)
+                .record(ctx -> ctx.copy(cleared.whole(), texels, 0));
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("unpack").read(texels, BufferAccess.TRANSFER_SRC).write(out, Access.TRANSFER_DST)
+                .record(ctx -> ctx.copy(texels, 0, out.whole()));
+            g.provide(OUT, out);
+        })).output(OUT, output);
+        assertThat(frame()).containsOnly(BLUE);
+    }
+
+    @Test
+    void bodiesUseOnlyWhatTheirPassDeclared() {
+        assumeTrue(instance.validationEnabled(), "the check runs with validation");
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Buffer other = g.createBuffer("other", 64);
+            g.pass("fill other").write(other, BufferAccess.TRANSFER_DST).sideEffects().record(ctx -> ctx.fill(other, 0));
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("peek").write(out, Access.TRANSFER_DST).record(ctx -> ctx.fill(other, 1));
+            g.provide(OUT, out);
+        })).output(OUT, output);
+        assertThatIllegalStateException().isThrownBy(this::frame).withMessage("peek uses other (64 bytes) without declaring it");
     }
 
     @Test
@@ -506,7 +521,7 @@ class FrameGraphTest {
                     .record(ctx -> unpack(ctx, buffer, image));
                 g.pass("write state").write(buffer, BufferAccess.TRANSFER_DST).record(ctx -> {
                     assertThat(ctx.address(buffer)).isEqualTo(state.address);
-                    vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0, VK_WHOLE_SIZE, fill[0]);
+                    ctx.fill(buffer, fill[0]);
                 });
                 g.provide(OUT, image);
             })).output(OUT, output);
@@ -552,12 +567,12 @@ class FrameGraphTest {
             Buffer c = g.createBuffer("c", 4 * half); // lives after a: shares it, grown to its size
             Buffer unused = g.createBuffer("unused", 16);
             g.pass("fill a").write(a, BufferAccess.TRANSFER_DST)
-                .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(a), 0, VK_WHOLE_SIZE, RED));
+                .record(ctx -> ctx.fill(a, RED));
             g.pass("fill unused").write(unused, BufferAccess.TRANSFER_DST).record(ctx -> { });
             g.pass("a to b").read(a, BufferAccess.TRANSFER_SRC).write(b, BufferAccess.TRANSFER_DST)
                 .record(ctx -> copy(ctx, a, b, 2 * half));
             g.pass("fill c").write(c, BufferAccess.TRANSFER_DST)
-                .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(c), 0, VK_WHOLE_SIZE, GREEN));
+                .record(ctx -> ctx.fill(c, GREEN));
             g.pass("b to c").read(b, BufferAccess.TRANSFER_SRC).write(c, BufferAccess.TRANSFER_DST)
                 .record(ctx -> copy(ctx, b, c, half));
             Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
@@ -965,7 +980,7 @@ class FrameGraphTest {
         public void build(GraphBuilder g) {
             Buffer buffer = g.createBuffer(label(key), 4L * SIZE * SIZE);
             g.pass("fill " + label(key)).write(buffer, BufferAccess.TRANSFER_DST)
-                .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0, VK_WHOLE_SIZE, rgba));
+                .record(ctx -> ctx.fill(buffer, rgba));
             g.provide(key, buffer);
         }
     }
@@ -996,7 +1011,7 @@ class FrameGraphTest {
         graph.add(new Mod(List.of(), List.of(texels), g -> {
             Buffer buffer = g.modify(texels);
             g.pass("paint texels").write(buffer, BufferAccess.TRANSFER_DST)
-                .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0, VK_WHOLE_SIZE, GREEN));
+                .record(ctx -> ctx.fill(buffer, GREEN));
         }));
         assertThat(frame()).containsOnly(GREEN);
         rejects(List.of(OUT), g -> g.provide(OUT, g.optional(Key.image("test.none"))), "Not an image of this build");

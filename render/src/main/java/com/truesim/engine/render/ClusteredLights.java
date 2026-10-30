@@ -152,8 +152,8 @@ public final class ClusteredLights implements Technique {
                 memPutFloat(data + 80 + 4L * axis, high);
                 memPutFloat(data + 96 + 4L * axis, (float) (p - high));
             }
-            Commands.updateBuffer(ctx.commands(), ctx.buffer(list), 0, HEADER_BYTES, data);
-            Barriers.memory(ctx.commands(), VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(list), 0, HEADER_BYTES, data);
+            Barriers.memory(ctx.unsafe().commands(), VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
             long push = stack.nmalloc(16, PUSH_BYTES);
@@ -166,9 +166,9 @@ public final class ClusteredLights implements Technique {
             memPutInt(push + ClusterPush.HEIGHT, height);
             memPutFloat(push + ClusterPush.FAR, far);
             memPutInt(push + ClusterPush.LIGHT_COUNT, lights.count());
-            pipeline.bind(ctx.commands());
-            pipeline.push(ctx.commands(), push, PUSH_BYTES);
-            Commands.dispatch(ctx.commands(), (clusters() + 63) / 64, 1, 1);
+            pipeline.bind(ctx.unsafe().commands());
+            pipeline.push(ctx.unsafe().commands(), push, PUSH_BYTES);
+            Commands.dispatch(ctx.unsafe().commands(), (clusters() + 63) / 64, 1, 1);
         }
     }
 }

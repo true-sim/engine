@@ -388,7 +388,12 @@ public final class MeshletRenderer implements AutoCloseable {
             depthOnly ? drawDepth : draw, depthOnly ? meshDepth : meshDraw);
     }
 
-    private void cullLate(VkCommandBuffer commands, RenderView view, int pyramid, int width, int height, int mips) {
+    /**
+     * The late phase's culling alone, for a graph drawing what it finds in a pass of its own ({@link #drawAttached}):
+     * tests every instance in {@code view}, and the meshlets of those newly visible, against the depth pyramid (sampled
+     * slot {@code pyramid}, {@code mips} levels, of the {@code width} by {@code height} depth). Allocates nothing.
+     */
+    public void cullLate(VkCommandBuffer commands, RenderView view, int pyramid, int width, int height, int mips) {
         if (!own(view).hasHistory()) {
             throw new IllegalArgumentException("View " + view.index() + " culls no occlusion: made without it");
         }
@@ -510,14 +515,40 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     private void draw(VkCommandBuffer commands, RenderView v, boolean late, long colorView, long depthView, int width,
         int height, float r, float g, float b, long clusters, Pipeline[] indexed, Pipeline[] mesh) {
-        long count = v.drawCount().deviceAddress();
         try (MemoryStack stack = stackPush()) {
             beginRendering(commands, stack, colorView, depthView, width, height, r, g, b, late);
             setViewport(commands, stack, width, height);
+        }
+        drawBins(commands, v, late, clusters, indexed, mesh);
+        Commands.endRendering(commands);
+    }
+
+    /**
+     * Draws {@code view} into the attachments of the rendering scope open on {@code commands}, as the graph opens one
+     * for a pass with attachments: as its early (or only) phase culled it, or with {@code late} what the late phase
+     * ({@link #cullLate}) found newly visible. With {@code depthOnly} no shading (a depth attachment alone), else shaded
+     * with the lights of {@code clusters} (0: the sun alone). Allocates nothing.
+     */
+    public void drawAttached(VkCommandBuffer commands, RenderView view, boolean late, boolean depthOnly,
+        long clusters) {
+        drawBins(commands, own(view), late, clusters, depthOnly ? drawDepth : draw, depthOnly ? meshDepth : meshDraw);
+    }
+
+    /** Like {@link #drawAttached}, into a visibility buffer ({@link #drawIds}) and its depth. */
+    public void drawIdsAttached(VkCommandBuffer commands, RenderView view, boolean late) {
+        if (idsDraw == null) {
+            throw new IllegalStateException("The device has no primitive IDs in fragment shaders (geometryShader)");
+        }
+        drawBins(commands, own(view), late, 0, idsDraw, idsMesh);
+    }
+
+    private void drawBins(VkCommandBuffer commands, RenderView v, boolean late, long clusters, Pipeline[] indexed,
+        Pipeline[] mesh) {
+        long count = v.drawCount().deviceAddress();
+        try (MemoryStack stack = stackPush()) {
             for (int bin = 0; bin < BINS; bin++) {
                 drawBin(commands, stack, v, bin, late, count, clusters, indexed[bin], mesh == null ? null : mesh[bin]);
             }
-            Commands.endRendering(commands);
         }
     }
 
