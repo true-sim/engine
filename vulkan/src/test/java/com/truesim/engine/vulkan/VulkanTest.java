@@ -9,6 +9,14 @@ import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+import static org.lwjgl.vulkan.VK10.VK_ERROR_DEVICE_LOST;
 import static org.lwjgl.vulkan.VK10.VK_ERROR_OUT_OF_DEVICE_MEMORY;
 import static org.lwjgl.vulkan.VK10.VK_SUCCESS;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -26,6 +34,7 @@ import static org.lwjgl.vulkan.VK10.VK_MAKE_API_VERSION;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_SUBMIT_INFO;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 import static org.lwjgl.vulkan.VK12.VK_API_VERSION_1_2;
+import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_NONE;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_READ_BIT;
@@ -348,7 +357,52 @@ class VulkanTest {
             // The driver may be asked only once the device is lost (VUID-vkGetDeviceFaultInfoEXT-device-07336): a
             // healthy one has nothing to report, and the layer finds nothing wrong.
             assertThat(device.faultReport()).isNull();
+            if (!device.reportsFaults()) { // asking a driver that can report about a healthy device is invalid
+                assertThatThrownBy(() -> device.check(VK_ERROR_DEVICE_LOST, "Could not submit"))
+                    .isInstanceOf(DeviceLostException.class).hasMessage("Could not submit");
+            }
             assertThat(instance.validationErrors()).isZero();
+        }
+    }
+
+    @Test
+    void faultReportsNameTheFaultAndTheBufferHit() {
+        try (VulkanInstance instance = headless();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             GpuBuffer first = GpuBuffer.deviceLocal(device, 256,
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+             GpuBuffer second = GpuBuffer.deviceLocal(device, 256,
+                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+             GpuBuffer plain = GpuBuffer.deviceLocal(device, 64, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+            assertThat(device.addressReport(VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT, 0, 0x1000))
+                .startsWith("invalid read at 0x0 (to 0x1000): ");
+            assertThat(device.addressReport(VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT, 5, 0))
+                .startsWith("invalid write at 0x5 (to 0x1): ");
+            assertThat(device.addressReport(VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT, 0, 1))
+                .startsWith("invalid execution");
+            assertThat(device.addressReport(VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT, 0, 1))
+                .startsWith("instruction pointer (unknown)");
+            assertThat(device.addressReport(VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT, 0, 1))
+                .startsWith("instruction pointer (invalid)");
+            assertThat(device.addressReport(VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT, 0, 1))
+                .startsWith("instruction pointer (fault)");
+            assertThat(device.addressReport(99, 0, 1)).startsWith("address type 99");
+            String inFirst = device.addressReport(VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT,
+                first.deviceAddress() + 100, 4);
+            if (instance.validationEnabled()) { // validation notes the buffers and where they were made
+                assertThat(inFirst).contains(String.format("GpuBuffer of 256 bytes at 0x%x, made at ",
+                    first.deviceAddress()));
+                assertThat(device.addressReport(VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT, 0, 1))
+                    .endsWith(": in no buffer of the device");
+                // A coarse address names every buffer it may fall in.
+                long span = Long.highestOneBit(Math.max(first.deviceAddress(), second.deviceAddress()) + 256) << 1;
+                assertThat(device.addressReport(VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT, first.deviceAddress(),
+                    span)) // from 0 past both
+                    .contains("GpuBuffer of 256 bytes at 0x" + Long.toHexString(first.deviceAddress()))
+                    .contains("GpuBuffer of 256 bytes at 0x" + Long.toHexString(second.deviceAddress()));
+            } else {
+                assertThat(inFirst).endsWith(": buffers unknown without validation");
+            }
         }
     }
 

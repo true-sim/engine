@@ -513,11 +513,8 @@ public final class VulkanDevice implements AutoCloseable {
             StringBuilder report = new StringBuilder(info.descriptionString());
             for (int i = 0; i < Math.min(addressCount, counts.addressInfoCount()); i++) {
                 var address = addresses.get(i);
-                // The address is known to a power-of-two precision: it lies in the aligned range of that size.
-                long precision = Math.max(1, address.addressPrecision());
-                long low = address.reportedAddress() & -precision;
-                report.append(String.format("; %s at 0x%x (to 0x%x): %s", faultKind(address.addressType()),
-                    address.reportedAddress(), precision, bufferAt(low, low + precision)));
+                report.append("; ").append(addressReport(address.addressType(), address.reportedAddress(),
+                    address.addressPrecision()));
             }
             for (int i = 0; i < Math.min(vendorCount, counts.vendorInfoCount()); i++) {
                 var vendor = vendors.get(i);
@@ -526,6 +523,23 @@ public final class VulkanDevice implements AutoCloseable {
             }
             return report.toString();
         }
+    }
+
+    /** Whether the driver can say what went wrong when the device is lost (VK_EXT_device_fault). */
+    boolean reportsFaults() {
+        return faults;
+    }
+
+    /**
+     * One address of a fault report: what was done there ({@code VK_DEVICE_FAULT_ADDRESS_TYPE_*}), the address, and the
+     * buffers it may fall in. The address is known to {@code precision}, a power of two: it lies in the aligned range of
+     * that size.
+     */
+    @AllowAllocation("failures")
+    String addressReport(int type, long address, long precision) {
+        long size = Math.max(1, precision);
+        long low = address & -size;
+        return String.format("%s at 0x%x (to 0x%x): %s", faultKind(type), address, size, bufferAt(low, low + size));
     }
 
     private static String faultKind(int type) {
