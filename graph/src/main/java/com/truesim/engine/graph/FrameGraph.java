@@ -146,6 +146,11 @@ public final class FrameGraph implements AutoCloseable {
     private final List<PhysicalBuffer> retiredBuffers = new ArrayList<>();
     private final Map<String, HistoryPair> histories = new HashMap<>();
     private HistoryPair[] activeHistories = new HistoryPair[0];
+    private static final Physical[] NO_PHYSICALS = new Physical[0];
+    // The seam: transitions joining the histories to a graph just built, recorded at the start of its first frame.
+    private Physical[] seamImages = NO_PHYSICALS;
+    private int[] seamFrom = new int[0];
+    private int[] seamTo = new int[0];
     private final Queue graphicsQueue;
     private final Queue computeQueue;
     private boolean asyncCompute;
@@ -382,6 +387,7 @@ public final class FrameGraph implements AutoCloseable {
         if (jobs != null && chunkBatch.length > 1) {
             frameStart = execution.commandBuffer(0, GRAPHICS);
             bindless.bind(frameStart, true);
+            recordSeam(frameStart);
             frameSlots.recordStart(frameStart);
             Vulkan.check(vkEndCommandBuffer(frameStart), "Could not finish recording");
             jobs.parallelFor(chunkBatch.length, 1, recordChunks);
@@ -409,6 +415,7 @@ public final class FrameGraph implements AutoCloseable {
         }
         prepare();
         bindless.bind(commands);
+        recordSeam(commands);
         frameSlots.recordStart(commands);
         recordPasses(commands, 0, order.length, true, contexts[0]);
         if (open) {
@@ -417,13 +424,13 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     private void prepare() {
+        // A new frame: last frame's current images are this frame's previous ones, also when the graph rebuilds (the
+        // pairs it keeps carry their contents over).
+        for (HistoryPair pair : activeHistories) {
+            pair.current.swap(pair.previous);
+        }
         if (dirty || externalsResized()) {
             build();
-        } else {
-            // A new frame: last frame's current images are this frame's previous ones.
-            for (HistoryPair pair : activeHistories) {
-                pair.current.swap(pair.previous);
-            }
         }
         frame++;
         if (!retired.isEmpty() || !retiredBuffers.isEmpty()) {
@@ -440,6 +447,7 @@ public final class FrameGraph implements AutoCloseable {
             bindless.bind(commands, graphics);
             boolean last = batch == lastGraphicsBatch && c == batchFirstChunk[batch + 1] - 1;
             if (c == firstGraphicsChunk && frameStart == null) {
+                recordSeam(commands); // a graph just built: its histories joined
                 frameSlots.recordStart(commands); // uploads and such, ahead of every pass on the graphics queue
             }
             recordPasses(commands, chunkFirstPass[c], chunkEndPass[c], last, contexts[worker]);
@@ -1090,12 +1098,10 @@ public final class FrameGraph implements AutoCloseable {
         int[] historyPrevious = new int[historyCount];
         int[] previousImages = new int[historyCount];
         HistoryPair[] pairs = new HistoryPair[historyCount];
+        boolean[] keptPair = new boolean[historyCount];
         List<Physical> all = new ArrayList<>(Arrays.asList(claimed));
         Map<String, HistoryPair> old = new HashMap<>(histories);
         histories.clear();
-        if (!old.isEmpty() || historyCount > 0) {
-            device.waitIdle(); // their contents start over, and replaced ones are closed
-        }
         for (int h = 0; h < historyCount; h++) {
             History history = g.histories.get(h);
             ImageInfo current = g.images.get(history.current.id);
@@ -1104,9 +1110,10 @@ public final class FrameGraph implements AutoCloseable {
             slot.usage = current.usage | previous.usage;
             slot.shared = (queueMask[current.image.id] | queueMask[previous.image.id]) == 3 && twoFamilies;
             HistoryPair pair = old.remove(history.name);
-            if (pair == null || !pair.fits(slot)) {
+            keptPair[h] = pair != null && pair.fits(slot); // kept: its contents carry over the rebuild
+            if (!keptPair[h]) {
                 if (pair != null) {
-                    pair.close();
+                    retire(pair);
                 }
                 pair = new HistoryPair(slot);
             }
@@ -1122,7 +1129,7 @@ public final class FrameGraph implements AutoCloseable {
             previousImages[h] = previous.image.id;
         }
         for (HistoryPair unused : old.values()) {
-            unused.close();
+            retire(unused);
         }
         Physical[] newPhysicals = all.toArray(new Physical[0]);
         // Where buffers live: in physical buffers, shared (sized for the largest) by buffers of one queue whose
@@ -1204,8 +1211,8 @@ public final class FrameGraph implements AutoCloseable {
             externalBufferVersions[i] = externalBuffers[i].version;
         }
         barriers.store();
-        startHistories(pairs, barriers);
         schedule(queues, barriers.waitPass, barriers.firstExternalPass);
+        startHistories(pairs, keptPair, barriers, historyCurrent);
         dirty = false;
         builds++;
         LOG.debug("Frame graph built: {} of {} passes in {} batches, {} images in {} pooled, {} buffers in {} pooled, "
@@ -1297,30 +1304,63 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     /**
-     * Puts each history's images in the layouts a frame starts with (their contents undefined: the first frame has no
-     * last frame), and notes that frame.
+     * Joins the histories to the graph just built, without waiting for the GPU: the seam. A pair the graph kept keeps
+     * its contents, its last frame image moving from the layout the graph before left it in to the one this graph
+     * starts with; a new pair starts with undefined contents (its first frame has no last frame). The transitions run
+     * at the start of the next frame's graphics commands (a frame starting on the compute queue has them submitted
+     * ahead). Each pair notes the layouts this graph leaves it in, for the next seam.
      */
     @AllowAllocation("building the graph, when it changes")
-    private void startHistories(HistoryPair[] pairs, Barriers barriers) {
+    private void startHistories(HistoryPair[] pairs, boolean[] kept, Barriers barriers, int[] current) {
         activeHistories = pairs;
-        if (pairs.length == 0) {
-            return;
-        }
-        device.submitAndWait(graphicsQueue, commands -> {
-            for (int h = 0; h < pairs.length; h++) {
-                start(commands, pairs[h].current, barriers.startCurrent[h]);
-                start(commands, pairs[h].previous, barriers.startPrevious[h]);
-                pairs[h].firstFrame = frame + 1;
+        int count = 0;
+        Physical[] images = new Physical[2 * pairs.length];
+        int[] from = new int[images.length];
+        int[] to = new int[images.length];
+        for (int h = 0; h < pairs.length; h++) {
+            HistoryPair pair = pairs[h];
+            // Last frame's current image is this frame's previous one: it holds what the graph before left in it.
+            int previousFrom = kept[h] ? pair.endCurrent : VK_IMAGE_LAYOUT_UNDEFINED;
+            if (previousFrom != barriers.startPrevious[h]) {
+                images[count] = pair.previous;
+                from[count] = previousFrom;
+                to[count++] = barriers.startPrevious[h];
             }
-        });
+            if (barriers.startCurrent[h] != VK_IMAGE_LAYOUT_UNDEFINED) { // about to be written: contents do not matter
+                images[count] = pair.current;
+                from[count] = VK_IMAGE_LAYOUT_UNDEFINED;
+                to[count++] = barriers.startCurrent[h];
+            }
+            if (!kept[h]) {
+                pair.firstFrame = frame + 1;
+            }
+            pair.endCurrent = barriers.layout[current[h]];
+        }
+        seamImages = Arrays.copyOf(images, count);
+        seamFrom = Arrays.copyOf(from, count);
+        seamTo = Arrays.copyOf(to, count);
+        if (count > 0 && batchQueue.length > 0 && batchQueue[0] != GRAPHICS) {
+            device.submitAndWait(graphicsQueue, this::recordSeam); // the frame starts on the compute queue
+        }
     }
 
-    private static void start(VkCommandBuffer commands, Physical physical, int layout) {
-        if (layout != VK_IMAGE_LAYOUT_UNDEFINED) {
-            com.truesim.engine.vulkan.Images.transition(commands, physical.image.handle(), aspect(physical.format),
-                VK_IMAGE_LAYOUT_UNDEFINED, layout, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0,
-                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    /** Records the seam's transitions, if the graph was just built, once. */
+    private void recordSeam(VkCommandBuffer commands) {
+        for (int i = 0; i < seamImages.length; i++) {
+            com.truesim.engine.vulkan.Images.transition(commands, seamImages[i].image.handle(),
+                aspect(seamImages[i].format), seamFrom[i], seamTo[i], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         }
+        seamImages = NO_PHYSICALS;
+    }
+
+    /** Destroys {@code pair}'s images once the frames in flight are done with them. */
+    private void retire(HistoryPair pair) {
+        pair.current.retireAt = frame + framesInFlight;
+        pair.previous.retireAt = frame + framesInFlight;
+        retired.add(pair.current);
+        retired.add(pair.previous);
     }
 
     /** Whether history {@code index}'s last frame image holds what that frame wrote. */
@@ -1334,6 +1374,7 @@ public final class FrameGraph implements AutoCloseable {
         final Physical current;
         final Physical previous;
         long firstFrame;
+        int endCurrent = VK_IMAGE_LAYOUT_UNDEFINED; // the layout the last graph left the current role in
 
         HistoryPair(Slot slot) {
             current = new Physical(slot);
