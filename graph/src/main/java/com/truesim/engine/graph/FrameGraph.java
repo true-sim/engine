@@ -54,6 +54,8 @@ import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
 import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.common.graph.NodeGraph;
+import com.truesim.common.graph.Schedule;
 import com.truesim.engine.graph.GraphBuilder.BufferInfo;
 import com.truesim.engine.graph.GraphBuilder.ImageInfo;
 import com.truesim.engine.graph.GraphBuilder.PassInfo;
@@ -926,42 +928,51 @@ public final class FrameGraph implements AutoCloseable {
         int imageCount = g.images.size();
         substitute = Arrays.copyOf(substitute, imageCount);
         needed = Arrays.copyOf(needed, imageCount);
-        // Culled: walking back from the outputs, a pass is needed if it writes an image or buffer needed after it.
+        // Culled and ordered by the graph core: walking back from the outputs, a pass is needed if it writes an image or
+        // buffer needed after it. Images are its resources 0 to imageCount - 1, buffers the ones after.
         List<PassInfo> passes = g.passes;
-        boolean[] neededBuffer = new boolean[g.buffers.size()];
-        for (int b = 0; b < neededBuffer.length; b++) {
-            neededBuffer[b] = g.buffers.get(b).external != null; // outlives the frame: its writes are kept
+        NodeGraph nodes = new NodeGraph();
+        for (int r = 0; r < imageCount + g.buffers.size(); r++) {
+            nodes.resource();
+        }
+        for (int image = 0; image < imageCount; image++) {
+            if (needed[image]) {
+                nodes.keep(image);
+            }
+        }
+        for (int b = 0; b < g.buffers.size(); b++) {
+            if (g.buffers.get(b).external != null) {
+                nodes.keep(imageCount + b); // outlives the frame: its writes are kept
+            }
         }
         for (History history : g.histories) {
-            needed[history.current.id] = true; // the next frame reads it
+            nodes.keep(history.current.id); // the next frame reads it
         }
-        boolean[] keep = new boolean[passes.size()];
-        for (int p = passes.size() - 1; p >= 0; p--) {
-            PassInfo pass = passes.get(p);
-            boolean writesNeeded = pass.sideEffects;
+        for (PassInfo pass : passes) {
+            int node = nodes.node();
+            if (pass.sideEffects) {
+                nodes.sideEffects(node);
+            }
             for (int a = 0; a < pass.images.length; a++) {
-                writesNeeded |= pass.accesses[a].writes && needed[pass.images[a]];
+                if (pass.accesses[a].writes) {
+                    nodes.write(node, pass.images[a]);
+                } else {
+                    nodes.read(node, pass.images[a]);
+                }
             }
             for (int a = 0; a < pass.buffers.length; a++) {
-                writesNeeded |= pass.bufferAccesses[a].writes && neededBuffer[pass.buffers[a]];
-            }
-            if (writesNeeded) {
-                keep[p] = true;
-                for (int image : pass.images) {
-                    needed[image] = true;
-                }
-                for (int buffer : pass.buffers) {
-                    neededBuffer[buffer] = true;
+                if (pass.bufferAccesses[a].writes) {
+                    nodes.write(node, imageCount + pass.buffers[a]);
+                } else {
+                    nodes.read(node, imageCount + pass.buffers[a]);
                 }
             }
         }
-        List<PassInfo> kept = new ArrayList<>();
-        for (int p = 0; p < passes.size(); p++) {
-            if (keep[p]) {
-                kept.add(passes.get(p));
-            }
+        Schedule schedule = nodes.compile();
+        PassInfo[] newOrder = new PassInfo[schedule.size()];
+        for (int p = 0; p < newOrder.length; p++) {
+            newOrder[p] = passes.get(schedule.node(p));
         }
-        PassInfo[] newOrder = kept.toArray(new PassInfo[0]);
         // The queue of each pass: async ones on the compute queue, when async compute is on.
         int[] queues = new int[newOrder.length];
         for (int p = 0; p < newOrder.length; p++) {
