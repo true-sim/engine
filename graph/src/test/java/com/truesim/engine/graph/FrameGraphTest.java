@@ -1045,6 +1045,7 @@ class FrameGraphTest {
     /** Keeps a color per frame in a history and outputs last frame's (white when there is none). */
     final class Remember implements Technique {
         int frames;
+        boolean sampled; // also samples the history: another usage, so other images
 
         @Override
         public List<Key> provides() {
@@ -1067,8 +1068,35 @@ class FrameGraphTest {
                 });
             g.pass("remember").write(history.current(), Access.TRANSFER_DST)
                 .record(ctx -> clear(ctx, history.current(), frames % 2, 0, 1 - frames++ % 2, 1));
+            if (sampled) {
+                g.pass("peek").read(history.previous(), Access.SAMPLED_COMPUTE).sideEffects().record(ctx -> { });
+            }
             g.provide(OUT, out);
         }
+    }
+
+    @Test
+    void historiesWrittenFirstOnTheComputeQueueAreJoinedAhead() {
+        int[] frames = {0};
+        graph.asyncCompute(true).add(new Lambda(List.of(OUT), g -> {
+            History history = g.history("async colors", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            // The frame's first pass, on the compute queue: the seam is submitted ahead of it.
+            g.pass("remember").write(history.current(), Access.TRANSFER_DST).async()
+                .record(ctx -> clear(ctx, history.current(), frames[0] % 2, 0, 1 - frames[0]++ % 2, 1));
+            Image out = g.create("recalled", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("recall").read(history.previous(), Access.TRANSFER_SRC).write(out, Access.TRANSFER_DST)
+                .record(ctx -> {
+                    if (ctx.historyValid(history)) {
+                        copy(ctx, history.previous(), out, 0, SIZE);
+                    } else {
+                        clear(ctx, out, 1, 1, 1, 1);
+                    }
+                });
+            g.provide(OUT, out);
+        })).output(OUT, output);
+        submitted(2);
+        graph.invalidate();
+        assertThat(submitted(2)[0]).isIn(RED, BLUE); // kept across the rebuild
     }
 
     @Test
@@ -1082,7 +1110,15 @@ class FrameGraphTest {
         // Submitted the graph's way, frames in flight, the roles still alternate.
         int[] last = submitted(5);
         assertThat(last[0]).isIn(RED, BLUE);
-        // Rebuilt: kept images, but the contents start over.
+        // Rebuilt: the same history keeps its images and contents, without waiting for the GPU (the seam).
+        graph.invalidate();
+        int afterRebuild = frame()[0];
+        assertThat(afterRebuild).isIn(RED, BLUE);
+        assertThat(frame()[0]).isIn(RED, BLUE).isNotEqualTo(afterRebuild);
+        graph.invalidate();
+        assertThat(submitted(3)[0]).isIn(RED, BLUE); // rebuilt between submitted frames too
+        // A history used differently gets other images: their contents start over.
+        remember.sampled = true;
         graph.invalidate();
         assertThat(frame()[0]).isEqualTo(0xffffffff);
         assertThat(frame()[0]).isIn(RED, BLUE);
