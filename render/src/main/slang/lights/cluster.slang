@@ -29,7 +29,7 @@ float3 row(float4x4 m, uint r)
 [numthreads(64, 1, 1)]
 void clusterMain(uint3 id : SV_DispatchThreadID, uint local : SV_GroupIndex)
 {
-    LightListHeader h = push.header[0];
+    LightListHeader h = loadHeader(push.header);
     uint4 dims = h.ints;
     uint tileSize = dims.w;
     float sliceNear = h.floats.x;

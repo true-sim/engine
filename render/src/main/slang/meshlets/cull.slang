@@ -54,7 +54,13 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
             return;
         }
     }
-    ViewLists lists = view.lists;
+    // The lists' pointers one load each: copied as one struct, the driver of an AMD Radeon(TM) Graphics read every
+    // pointer but the first as its low half twice (pitfalls.md).
+    ViewLists lists;
+    lists.visible = push.views[v].lists.visible;
+    lists.expandCommand = push.views[v].lists.expandCommand;
+    lists.drawCommand = push.views[v].lists.drawCommand;
+    lists.visibleCount = push.views[v].lists.visibleCount;
     uint index;
     InterlockedAdd(lists.visibleCount[2 * bin + (late ? 1 : 0)], 1, index);
     uint indices = ((push.meshlets[m * 8 + 2] >> 8) & 0xff) * 3;

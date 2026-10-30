@@ -25,6 +25,9 @@ Covering coverMain(uint vertex : SV_VertexID)
 [shader("fragment")]
 float4 tintMain(Covering in) : SV_Target
 {
-    float4 p = push.positions[1];
+    // Three 4-byte loads: as one float4, the driver of an AMD Radeon(TM) Graphics lost the device or read 0 here
+    // (pitfalls.md).
+    uint* words = (uint*) push.positions;
+    float4 p = float4(asfloat(words[4]), asfloat(words[5]), asfloat(words[6]), 1);
     return float4(p.xyz / 10, 1);
 }
