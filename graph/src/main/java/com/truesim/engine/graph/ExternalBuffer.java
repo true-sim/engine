@@ -8,7 +8,8 @@ import java.util.Objects;
  * instances: passes use it as any buffer ({@link GraphBuilder#importBuffer}), and the graph places the barriers between
  * them from what they declare. Its contents outlive the frame: a pass writing it is always kept, and the frame's first
  * use waits for whatever came before the frame (uploads, the frames before). Only graphics-queue passes use it (not
- * async ones). The buffer may change between frames ({@link #set}); a new size rebuilds the graph.
+ * async ones). The buffer may change between frames ({@link #set}); a new size rebuilds the graph. Every
+ * {@code ExternalBuffer} of one GPU buffer is the same buffer of a build, so set them alike.
  */
 public final class ExternalBuffer {
 
