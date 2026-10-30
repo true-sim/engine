@@ -578,6 +578,126 @@ class FrameGraphTest {
         }
     }
 
+    /** Copies {@code key}'s image into a new one, as the view's {@code out}: a view's technique reading a key. */
+    record Copies(Key<Image> key, Key<Image> out) implements Technique {
+        @Override
+        public List<Key<?>> provides() {
+            return List.of(out);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image from = g.require(key);
+            Image to = g.create("copy of " + label(key), ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("copy " + label(key) + " in " + g.view().name()).read(from, Access.TRANSFER_SRC)
+                .write(to, Access.TRANSFER_DST).record(ctx -> copy(ctx, from, to, 0, SIZE));
+            g.provide(out, to);
+        }
+    }
+
+    /** The first texel of {@code image}, a target in transfer-source layout after a frame. */
+    private int firstTexel(GpuImage image) {
+        device.submitAndWait(device.graphics(), commands -> {
+            try (MemoryStack stack = stackPush()) {
+                VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
+                region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
+                region.imageExtent().set(SIZE, SIZE, 1);
+                vkCmdCopyImageToBuffer(commands, image.handle(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    pixels.handle(), region);
+            }
+        });
+        return pixels.memory().getAtIndex(ValueLayout.JAVA_INT, 0);
+    }
+
+    @Test
+    void viewsHaveTheirOwnKeysAndOutputsAndShareTheFrames() {
+        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        try (GpuImage second = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage,
+            VK_IMAGE_ASPECT_COLOR_BIT)) {
+            ExternalImage mirror = new ExternalImage("mirror", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(second.handle(), second.view());
+            int[] builds = new int[1];
+            Fill blue = new Fill(A, SIZE, 0, 0, 1, 1);
+            // The frame's technique, built once for both views: work no camera changes.
+            graph.add(new Technique() {
+                @Override
+                public List<Key<?>> provides() {
+                    return blue.provides();
+                }
+
+                @Override
+                public void build(GraphBuilder g) {
+                    assertThat(g.view()).as("a frame technique").isNull();
+                    builds[0]++;
+                    blue.build(g);
+                }
+            });
+            // Each view provides the same key its own way: one from the frame's, one its own color.
+            ViewPort main = graph.addView("main").add(new Copies(A, OUT)).output(OUT, output);
+            ViewPort side = graph.addView("side").add(new Fill(OUT, SIZE, 1, 0, 0, 1)).output(OUT, mirror);
+            assertThat(graph.views()).containsExactly(main, side);
+            assertThat(main).hasToString("view main");
+            assertThatIllegalArgumentException().isThrownBy(() -> graph.addView("main"))
+                .withMessageContaining("named main already");
+            assertThat(frame()[0]).as("main: the frame's blue").isEqualTo(BLUE);
+            assertThat(firstTexel(second)).as("side: its own red").isEqualTo(RED);
+            assertThat(builds[0]).as("the frame's technique, once").isEqualTo(1);
+            assertThat(graph.passes()).contains("copy a in main");
+            // A view removed: its techniques and output go.
+            graph.removeView(side);
+            frame();
+            assertThat(graph.passes()).noneMatch(p -> p.contains("fill out"));
+        }
+    }
+
+    @Test
+    void theFrameReadsTheViewsResults() {
+        // A frame technique reading one view's result, and counting every view's: e.g. one pass for all the views.
+        ViewPort[] views = new ViewPort[2];
+        views[0] = graph.addView("left").add(new Fill(OUT, SIZE, 0, 1, 0, 1));
+        views[1] = graph.addView("right").add(new Fill(OUT, SIZE, 1, 0, 0, 1));
+        graph.add(new Lambda(List.of(B), g -> {
+            assertThat(g.requireAll(OUT)).hasSize(2);
+            assertThat(g.requireAll(A)).as("no view provides it").isEmpty();
+            Image right = g.require(views[1], OUT);
+            Image b = g.create("b", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("take right").read(right, Access.TRANSFER_SRC).write(b, Access.TRANSFER_DST)
+                .record(ctx -> copy(ctx, right, b, 0, SIZE));
+            g.provide(B, b);
+        })).output(B, output);
+        assertThat(frame()[0]).isEqualTo(RED);
+    }
+
+    @Test
+    void viewsMayHoldTheSameTechniqueAndHistoryNames() {
+        // The same kind of technique, with one id and one history name, in two views: each keeps its own.
+        com.truesim.common.graph.Id<Technique> id = com.truesim.common.graph.Id.of("test.remember", Technique.class);
+        java.util.function.Supplier<Technique> remembering = () -> {
+            Remember inner = new Remember();
+            return new Technique() {
+                @Override
+                public List<Key<?>> provides() {
+                    return inner.provides();
+                }
+
+                @Override
+                public void build(GraphBuilder g) {
+                    inner.build(g);
+                }
+
+                @Override
+                public com.truesim.common.graph.Id<Technique> id() {
+                    return id;
+                }
+            };
+        };
+        graph.addView("left").add(remembering.get()).output(OUT, output);
+        graph.addView("right").add(remembering.get());
+        frame();
+        frame();
+        assertThat(graph.passes()).contains("recall", "remember");
+    }
+
     @Test
     void aTechniqueThatWouldBuildDifferentlyRebuildsTheGraph() {
         long[] version = {1};

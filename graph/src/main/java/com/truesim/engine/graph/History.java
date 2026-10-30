@@ -15,12 +15,14 @@ package com.truesim.engine.graph;
 public final class History {
 
     final String name;
+    final String key; // unique in the build: the name, qualified by its view's for a view's history
     final Image current;
     final Image previous;
     int index; // among the build's histories
 
-    History(String name, Image current, Image previous) {
+    History(String name, String key, Image current, Image previous) {
         this.name = name;
+        this.key = key;
         this.current = current;
         this.previous = previous;
     }
