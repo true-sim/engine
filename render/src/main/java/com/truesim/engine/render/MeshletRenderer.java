@@ -37,6 +37,10 @@ import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_RENDERING_INFO;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.graph.Buffer;
+import com.truesim.engine.graph.BufferAccess;
+import com.truesim.engine.graph.ExternalBuffer;
+import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.CullPush;
 import com.truesim.engine.render.layout.DrawPush;
@@ -162,6 +166,10 @@ public final class MeshletRenderer implements AutoCloseable {
     // phase each). Both grow as views are made; the old ones go once no frame in flight reads them.
     private FrameBuffer viewConstants; // the views' Views, one after another, by index
     private GpuBuffer rows;
+    // The culling's buffers as imported buffers of the frame graph, which the culling passes declare.
+    private final ExternalBuffer chunksImport;
+    private final ExternalBuffer chunkCommandImport;
+    private final ExternalBuffer rowsImport;
     private final Retiring retiring; // the old tables, rows and view lists, until no frame reads them
     // Read only: a frame graph may record passes on several threads at once, so recording changes no field.
     private static final boolean[] NOT_EARLY = {false};
@@ -260,6 +268,9 @@ public final class MeshletRenderer implements AutoCloseable {
             storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         viewConstants = FrameBuffer.create(device, 4L * RenderView.BYTES, storage, slots);
         rows = GpuBuffer.deviceLocal(device, 8L * 4, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        chunksImport = new ExternalBuffer("meshlet chunks", this.chunks);
+        chunkCommandImport = new ExternalBuffer("chunk command", chunkCommand);
+        rowsImport = new ExternalBuffer("culled rows", rows);
     }
 
     /**
@@ -304,6 +315,9 @@ public final class MeshletRenderer implements AutoCloseable {
         viewConstants = FrameBuffer.create(device, (long) RenderView.BYTES * capacity, storage, slots);
         viewConstants.copyFrom(old);
         rows = GpuBuffer.deviceLocal(device, 8L * capacity, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        if (rowsImport != null) {
+            rowsImport.set(rows); // a new size: the graph rebuilds
+        }
     }
 
     /** Has {@code resource} freed once no frame in flight reads it. */
@@ -426,10 +440,36 @@ public final class MeshletRenderer implements AutoCloseable {
      * slot {@code pyramid}, {@code mips} levels, of the {@code width} by {@code height} depth). Allocates nothing.
      */
     public void cullLate(VkCommandBuffer commands, RenderView view, int pyramid, int width, int height, int mips) {
+        cullLate(commands, view, pyramid, width, height, mips, false);
+    }
+
+    /**
+     * Like {@link #cullLate(VkCommandBuffer, RenderView, int, int, int, int)}, in a frame graph pass that, with
+     * {@code declared}, declares the culling's buffers and the view's lists ({@link #declareCulling},
+     * {@link RenderView#declareCulling}): on the mesh shader path the graph orders them, not barriers of its own.
+     */
+    void cullLate(VkCommandBuffer commands, RenderView view, int pyramid, int width, int height, int mips,
+        boolean declared) {
         if (!own(view).hasHistory()) {
             throw new IllegalArgumentException("View " + view.index() + " culls no occlusion: made without it");
         }
-        cull(commands, view.alone, null, 1, pyramid, width, height, mips);
+        cull(commands, view.alone, null, 1, pyramid, width, height, mips, declared);
+    }
+
+    /**
+     * Declares that {@code pass} culls with this renderer: it writes the chunks and rows (transfers, then compute) and
+     * reads the chunk command it writes for its indirect dispatch. Each culled view declares its own lists
+     * ({@link RenderView#declareCulling}).
+     */
+    void declareCulling(GraphBuilder g, GraphBuilder.PassBuilder pass) {
+        Buffer command = g.importBuffer(chunkCommandImport);
+        Buffer culledRows = g.importBuffer(rowsImport);
+        pass.write(g.importBuffer(chunksImport), BufferAccess.STORAGE_WRITE)
+            .write(command, BufferAccess.TRANSFER_DST)
+            .write(command, BufferAccess.STORAGE_WRITE)
+            .read(command, BufferAccess.INDIRECT)
+            .write(culledRows, BufferAccess.TRANSFER_DST)
+            .read(culledRows, BufferAccess.STORAGE_READ);
     }
 
     /**
@@ -439,6 +479,11 @@ public final class MeshletRenderer implements AutoCloseable {
      * others draw everything in view. Chunks are shared by the views. Allocates nothing.
      */
     public void cullViews(VkCommandBuffer commands, RenderView[] views, boolean[] early, int count) {
+        cullViews(commands, views, early, count, false);
+    }
+
+    /** Like {@link #cullViews(VkCommandBuffer, RenderView[], boolean[], int)}, declared as {@link #cullLate} says. */
+    void cullViews(VkCommandBuffer commands, RenderView[] views, boolean[] early, int count, boolean declared) {
         if (count < 1 || count > views.length || count > early.length) {
             throw new IllegalArgumentException("Views to cull: 1 or more; " + count + " given");
         }
@@ -458,7 +503,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 views[i].marked = false;
             }
         }
-        cull(commands, views, early, count, 0, 0, 0, 0);
+        cull(commands, views, early, count, 0, 0, 0, 0, declared);
     }
 
     /** View {@code i}'s phase in a cull: late without {@code early}, else early or all. */
@@ -630,15 +675,18 @@ public final class MeshletRenderer implements AutoCloseable {
      * over all their chunks and, on the indexed path, each view's expansion.
      */
     private void cull(VkCommandBuffer commands, RenderView[] views, boolean[] early, int count, int pyramid, int width,
-        int height, int mips) {
+        int height, int mips, boolean declared) {
         retiring.release(); // culls of one frame may run on several threads: it locks
         scene.upload(commands);
         boolean meshShading = path() == Path.MESH_SHADERS;
         int instanceCount = scene.highWater();
         bindless.bind(commands); // the late phase samples the depth pyramid through it
-        // What came before (the early phase, the frame before) used the buffers this resets, and the visibility.
-        Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        // What came before (the early phase, the frame before) used the buffers this resets, and the visibility. A graph
+        // orders the declared ones; the indexed path's index buffer (made while recording) is not declared.
+        if (!declared || !meshShading) {
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        }
         try (MemoryStack stack = stackPush()) {
             long reset = stack.nmalloc(4, 16); // the chunk command: no chunks yet, a dispatch of x by 1 by 1
             memPutInt(reset, 0);
@@ -715,10 +763,12 @@ public final class MeshletRenderer implements AutoCloseable {
             cull.push(commands, push, CullPush.BYTES);
             Commands.dispatchIndirect(commands, chunkCommand.handle(), 0);
         }
-        if (meshShading) { // the lists and their dispatches feed the mesh shaders
-            Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | MESH_SHADER_STAGE,
-                VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        if (meshShading) { // the lists and their dispatches feed the mesh shaders: declared, the graph orders them
+            if (!declared) {
+                Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | MESH_SHADER_STAGE,
+                    VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+            }
             return;
         }
         Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,

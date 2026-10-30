@@ -7,6 +7,10 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.graph.Buffer;
+import com.truesim.engine.graph.BufferAccess;
+import com.truesim.engine.graph.ExternalBuffer;
+import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.render.layout.ViewLayout;
 import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.FrameBuffer;
@@ -48,6 +52,12 @@ public final class RenderView implements AutoCloseable {
     private final GpuBuffer visibility; // per instance, 1 if visible the last time the late phase looked; or null
     private final VulkanDevice device;
     private GpuBuffer frameIndices; // the indexed path's, made when it first draws
+    // The lists as imported buffers of the frame graph, which the culling and drawing passes declare.
+    private final ExternalBuffer visibleImport;
+    private final ExternalBuffer expandImport;
+    private final ExternalBuffer drawImport;
+    private final ExternalBuffer countImport;
+    private final ExternalBuffer visibilityImport; // or null, as the history
     private final double[] position = new double[3];
     private final float[] viewProjection = new float[16]; // as last set, to be the next frame's previous one
     private boolean wasSet;
@@ -77,6 +87,11 @@ public final class RenderView implements AutoCloseable {
             device.submitAndWait(device.graphics(), commands -> Commands.fillBuffer(commands, visibility.handle(), 0,
                 visibility.size(), 0)); // nothing visible yet: the first late phase finds out
         }
+        visibleImport = new ExternalBuffer("view " + index + " visible", visible);
+        expandImport = new ExternalBuffer("view " + index + " expand command", expandCommand);
+        drawImport = new ExternalBuffer("view " + index + " draw command", drawCommand);
+        countImport = new ExternalBuffer("view " + index + " draw count", drawCount);
+        visibilityImport = visibility == null ? null : new ExternalBuffer("view " + index + " visibility", visibility);
         FrameBuffer v = renderer.viewConstants();
         v.put(base, MemorySegment.ofArray(new byte[BYTES]), 0, BYTES); // an earlier view's entry, gone
         putInt(ViewLayout.MAX_DRAWS, options.draws());
@@ -262,6 +277,7 @@ public final class RenderView implements AutoCloseable {
             renderer.retire(visible);
             visible = GpuBuffer.deviceLocal(device, 16L * resized.allDraws(),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            visibleImport.set(visible); // a new size: the graph rebuilds
             putLong(ViewLayout.LISTS_VISIBLE, visible.deviceAddress());
         }
         putInt(ViewLayout.MAX_DRAWS, draws);
@@ -346,6 +362,31 @@ public final class RenderView implements AutoCloseable {
                     | VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
         }
         return frameIndices;
+    }
+
+    /**
+     * Declares that {@code pass} culls the view: resets its lists and counts with transfers, then fills them (and its
+     * history) with compute. Not the indexed path's index buffer, made while recording: that path orders it by hand.
+     */
+    void declareCulling(GraphBuilder g, GraphBuilder.PassBuilder pass) {
+        Buffer expand = g.importBuffer(expandImport);
+        Buffer draw = g.importBuffer(drawImport);
+        Buffer count = g.importBuffer(countImport);
+        pass.write(g.importBuffer(visibleImport), BufferAccess.STORAGE_WRITE)
+            .write(expand, BufferAccess.TRANSFER_DST).write(expand, BufferAccess.STORAGE_WRITE)
+            .write(draw, BufferAccess.TRANSFER_DST).write(draw, BufferAccess.STORAGE_WRITE)
+            .write(count, BufferAccess.TRANSFER_DST).write(count, BufferAccess.STORAGE_WRITE);
+        if (visibilityImport != null) {
+            pass.write(g.importBuffer(visibilityImport), BufferAccess.STORAGE_WRITE);
+        }
+    }
+
+    /** Declares that {@code pass} draws what culling listed for the view: its indirect commands, list and counts. */
+    void declareDrawing(GraphBuilder g, GraphBuilder.PassBuilder pass) {
+        pass.read(g.importBuffer(expandImport), BufferAccess.INDIRECT)
+            .read(g.importBuffer(drawImport), BufferAccess.INDIRECT)
+            .read(g.importBuffer(visibleImport), BufferAccess.DRAW_READ)
+            .read(g.importBuffer(countImport), BufferAccess.DRAW_READ);
     }
 
     boolean hasHistory() {

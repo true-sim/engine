@@ -559,6 +559,33 @@ class FrameGraphTest {
     }
 
     @Test
+    void openPassesDeclareUntilTheBuildEnds() {
+        // A pass recorded first, its write declared later (as one culling views other techniques add): it runs before
+        // the reader, which sees what it wrote.
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Buffer buffer = g.createBuffer("late declared", 4L * SIZE * SIZE);
+            GraphBuilder.PassBuilder fill = g.pass("fill").open();
+            fill.record(ctx -> ctx.fill(buffer, BLUE));
+            assertThatIllegalStateException().isThrownBy(() -> fill.record(ctx -> { }))
+                .withMessageContaining("recorded already");
+            fill.write(buffer, BufferAccess.TRANSFER_DST);
+            Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("read").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                .record(ctx -> unpack(ctx, buffer, image));
+            g.provide(OUT, image);
+        })).output(OUT, output);
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        assertThat(graph.passes()).containsExactly("fill", "read");
+        // Not open: declaring after recording is a mistake.
+        rejects(List.of(OUT), g -> {
+            Buffer buffer = g.createBuffer("too late", 16);
+            GraphBuilder.PassBuilder pass = g.pass("closed");
+            pass.record(ctx -> { });
+            pass.write(buffer, BufferAccess.TRANSFER_DST);
+        }, "is recorded: declare before record(), or open() it");
+    }
+
+    @Test
     void importsOfOneBufferAreOneAndAKeyGivesThemAnOwner() {
         int usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT
             | org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;

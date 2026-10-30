@@ -40,14 +40,14 @@ public final class MeshletGeometry implements GeometryProvider {
         MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)).add(view, draw.occlusion(),
             camera == null ? null : () -> view.set(camera, 1, MeshletRenderer.MODE_LIT));
         SceneData.Buffers scene = g.request(new SceneData(renderer));
-        GraphBuilder.PassBuilder pass = scene.read(g.pass(name(draw, draw.occlusion() ? " early" : "")),
-            BufferAccess.DRAW_READ).read(culling.culled(), BufferAccess.INDIRECT);
+        GraphBuilder.PassBuilder pass = culling.drawing(scene.read(g.pass(name(draw, draw.occlusion() ? " early" : "")),
+            BufferAccess.DRAW_READ), view);
         record(draw, targets, pass, false);
     }
 
     /**
      * The late phase in two passes: culling against the pyramid (compute), then drawing what became visible over the
-     * early phase's attachments. The culled lists pass between them as a buffer, which orders them.
+     * early phase's attachments. The view's lists pass between them, which orders them.
      */
     @Override
     @AllowAllocation("building the graph, when it changes")
@@ -55,14 +55,16 @@ public final class MeshletGeometry implements GeometryProvider {
         RenderView view = draw.view();
         int width = draw.width();
         int height = draw.height();
-        Buffer culled = g.createBuffer(name(draw, " late culled"), 16);
         SceneData.Buffers scene = g.request(new SceneData(renderer));
-        scene.read(g.pass(name(draw, " late culling")), BufferAccess.STORAGE_READ).read(pyramid, Access.SAMPLED_COMPUTE)
-            .write(culled, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> renderer.cullLate(ctx.unsafe().commands(), view, ctx.sampled(pyramid), width, height,
-                pyramid.mips()));
-        record(draw, targets, scene.read(g.pass(name(draw, " late")), BufferAccess.DRAW_READ)
-            .read(culled, BufferAccess.INDIRECT), true);
+        GraphBuilder.PassBuilder culling = scene.read(g.pass(name(draw, " late culling")), BufferAccess.STORAGE_READ)
+            .read(pyramid, Access.SAMPLED_COMPUTE);
+        renderer.declareCulling(g, culling);
+        view.declareCulling(g, culling);
+        culling.record(ctx -> renderer.cullLate(ctx.unsafe().commands(), view, ctx.sampled(pyramid), width, height,
+            pyramid.mips(), true));
+        GraphBuilder.PassBuilder pass = scene.read(g.pass(name(draw, " late")), BufferAccess.DRAW_READ);
+        view.declareDrawing(g, pass);
+        record(draw, targets, pass, true);
     }
 
     @AllowAllocation("building the graph, when it changes")
