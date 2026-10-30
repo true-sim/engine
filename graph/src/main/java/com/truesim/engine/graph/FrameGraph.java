@@ -139,6 +139,7 @@ public final class FrameGraph implements AutoCloseable {
     private final FrameSlots frameSlots;
     private final boolean ownsSlots;
     private final List<Technique> techniques = new ArrayList<>();
+    private long[] builtVersions = new long[0]; // each technique's buildVersion() when the graph was built
     private final Map<Key<Image>, ExternalImage> outputs = new LinkedHashMap<>();
     private final Map<Class<?>, Implementation<?, ?>> implementations = new HashMap<>();
     private final Map<Object, AutoCloseable> cache = new LinkedHashMap<>();
@@ -502,7 +503,7 @@ public final class FrameGraph implements AutoCloseable {
         for (HistoryPair pair : activeHistories) {
             pair.current.swap(pair.previous);
         }
-        if (dirty || externalsResized()) {
+        if (dirty || externalsResized() || techniquesChanged()) {
             build();
         }
         frame++;
@@ -801,6 +802,16 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     // ---------------------------------------------------------------- recording
+
+    /** Whether a technique would build differently now ({@link Technique#buildVersion}). Allocates nothing. */
+    private boolean techniquesChanged() {
+        for (int i = 0; i < builtVersions.length; i++) {
+            if (techniques.get(i).buildVersion() != builtVersions[i]) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     private boolean externalsResized() {
         for (int i = 0; i < externalBuffers.length; i++) {
@@ -1146,6 +1157,10 @@ public final class FrameGraph implements AutoCloseable {
         startTooling(g);
         startHistories(pairs, keptPair, compiled);
         dirty = false;
+        builtVersions = new long[techniques.size()];
+        for (int i = 0; i < builtVersions.length; i++) {
+            builtVersions[i] = techniques.get(i).buildVersion();
+        }
         builds++;
         LOG.debug("Frame graph built: {} of {} passes in {} batches, {} images in {} pooled, {} buffers in {} pooled, "
             + "{} barriers", order.length, compiled.builtPasses(), batchQueue.length, targetOf.length,
