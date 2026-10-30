@@ -89,9 +89,12 @@ materials and lighting doubled the mesh path's time.
 - Proof: [#143](https://github.com/true-sim/engine/issues/143).
 - Rule: a change to shared shading or vertex data reruns `MeshletBenchmark` and updates the tables, with the date.
 
-**Known flaky test:** `SceneSyncTest.aClearCoatInTheDataTurnsTheFeatureOn` fails about one run in four on main.
-- Proof: reproduced on main, [#142](https://github.com/true-sim/engine/issues/142).
-- Rule: until it is fixed, rerun it before suspecting a change.
+**Waiting for loads once is not enough.** A load can start another only in a frame: a renderable's materials are asked
+for in the `sync.update()` after its mesh uploads. Tests that waited for the loads once, then recorded a few frames,
+failed whenever generating the material took longer than those frames (about one run in four).
+- Proof: [#142](https://github.com/true-sim/engine/issues/142); with a generator slowed by 200 ms the test failed every
+  run, and with `settle` (frames alternating with waiting for the loads they started) it passed, slowed or not.
+- Rule: wait with `settle`, not with one `load()` followed by frames.
 
 ## Java
 
