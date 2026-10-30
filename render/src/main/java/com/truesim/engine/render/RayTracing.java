@@ -216,8 +216,11 @@ public final class RayTracing implements AutoCloseable {
         GpuBuffer decoded = null;
         GpuBuffer transform = null;
         // The level's triangles as 32-bit indices, only while building: the bottom level keeps its own copy.
-        GpuBuffer indices = GpuBuffer.upload(device, data.expandIndices().asSlice(4L * firstIndex,
-            4L * (endIndex - firstIndex)), usage);
+        GpuBuffer indices;
+        try (Arena arena = Arena.ofConfined()) {
+            indices = GpuBuffer.upload(device, data.expandIndices(arena).asSlice(4L * firstIndex,
+                4L * (endIndex - firstIndex)), usage);
+        }
         try (MemoryStack stack = stackPush()) {
             long vertices;
             long stride;

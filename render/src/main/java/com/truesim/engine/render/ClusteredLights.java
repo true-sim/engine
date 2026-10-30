@@ -25,6 +25,7 @@ import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.layout.ClusterPush;
+import com.truesim.engine.render.layout.LightsConstants;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import java.util.List;
@@ -53,7 +54,7 @@ public final class ClusteredLights implements Technique {
 
     static final int HEADER_BYTES = 112;
     private static final int PUSH_BYTES = ClusterPush.BYTES;
-    private static final int CLUSTERS = 1; // lights.slang's layout
+    private static final int CLUSTERS = LightsConstants.CLUSTERS;
 
     private final Lights lights;
     private final Camera camera;

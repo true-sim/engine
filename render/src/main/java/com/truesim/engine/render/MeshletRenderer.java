@@ -52,6 +52,7 @@ import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 import static org.lwjgl.vulkan.VK13.vkCmdEndRendering;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.CullPush;
 import com.truesim.engine.render.layout.DrawPush;
 import com.truesim.engine.render.layout.ExpandPush;
@@ -133,13 +134,13 @@ public final class MeshletRenderer implements AutoCloseable {
     /** VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT: the same bit as the 32-bit stage. */
     private static final long MESH_SHADER_STAGE = VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
     /** Raster bins, as meshlets/common.slang has them: opaque, double-sided, masked. */
-    static final int BINS = 3;
-    static final int BIN_OPAQUE = 0;
-    static final int BIN_DOUBLE_SIDED = 1;
-    static final int BIN_MASKED = 2;
-    private static final int PHASE_ALL = 0;
-    private static final int PHASE_EARLY = 1;
-    private static final int PHASE_LATE = 2;
+    static final int BINS = CommonConstants.BINS;
+    static final int BIN_OPAQUE = CommonConstants.BIN_OPAQUE;
+    static final int BIN_DOUBLE_SIDED = CommonConstants.BIN_DOUBLE_SIDED;
+    static final int BIN_MASKED = CommonConstants.BIN_MASKED;
+    private static final int PHASE_ALL = CommonConstants.PHASE_ALL;
+    private static final int PHASE_EARLY = CommonConstants.PHASE_EARLY;
+    private static final int PHASE_LATE = CommonConstants.PHASE_LATE;
     /** Rows of one instance dispatch: the guaranteed workgroup count. */
     private static final int MAX_ROWS = 65_535;
     /** Rows one buffer update writes: 8 bytes each, a few KiB of the stack. */

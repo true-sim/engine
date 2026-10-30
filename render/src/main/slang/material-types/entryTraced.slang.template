@@ -1,0 +1,11 @@
+// The material type's shading of the visibility buffer, with inline ray shadows.
+import visibility.resolve;
+import raytracing;
+import {module};
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void {name}TracedMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
+{
+    shadeTiles<{struct}>(QueryRays(), group, thread);
+}

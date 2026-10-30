@@ -23,6 +23,7 @@ import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.render.layout.ClassicPush;
+import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.SelectPush;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Pipeline;
@@ -30,6 +31,7 @@ import com.truesim.engine.vulkan.ShaderModule;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.assets.mesh.MeshLevel;
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
@@ -59,7 +61,7 @@ import org.lwjgl.vulkan.VkCommandBuffer;
 public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable {
 
     /** A visibility buffer triangle of a classic draw: this bit, the submesh << 24 and the triangle in the mesh. */
-    static final int CLASSIC_TRIANGLE = 0x80000000;
+    static final int CLASSIC_TRIANGLE = CommonConstants.CLASSIC_TRIANGLE;
     private static final int MAX_TRIANGLES = 1 << 24;
     private static final int MAX_SUBMESHES = 128;
     private static final int SELECT_PUSH = SelectPush.BYTES;
@@ -178,7 +180,9 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             throw new IllegalStateException("No room for the levels of mesh " + mesh);
         }
         int indexBase = pool.indexBase(mesh);
-        indices.write(4L * indexBase, data.expandIndices());
+        try (Arena arena = Arena.ofConfined()) { // the indices only until copied
+            indices.write(4L * indexBase, data.expandIndices(arena));
+        }
         entry.set(U32, 0, levelCount);
         for (MeshLevel level : data.levels()) {
             long o = 16L * levelCount++;

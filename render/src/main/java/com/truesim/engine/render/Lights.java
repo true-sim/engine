@@ -5,6 +5,7 @@ import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.math.Maths;
+import com.truesim.engine.render.layout.LightsConstants;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -38,13 +39,13 @@ public final class Lights implements AutoCloseable {
     static final int LIGHT_BYTES = 80;
     static final int SHADOW_BYTES = 128;
     /** Shadow kinds and map filters, as lights.slang numbers them. */
-    private static final int SHADOW_MAP = 0;
-    private static final int SHADOW_MASK = 1;
-    private static final int SHADOW_RAY = 2;
-    private static final int PCF = 0;
-    private static final int POINT = 0;
-    private static final int SPOT = 1;
-    private static final int DIRECTIONAL = 2;
+    private static final int SHADOW_MAP = LightsConstants.SHADOW_MAP;
+    private static final int SHADOW_MASK = LightsConstants.SHADOW_MASK;
+    private static final int SHADOW_RAY = LightsConstants.SHADOW_RAY;
+    private static final int PCF = LightsConstants.PCF;
+    private static final int POINT = LightsConstants.POINT;
+    private static final int SPOT = LightsConstants.SPOT;
+    private static final int DIRECTIONAL = LightsConstants.DIRECTIONAL;
 
     private final FrameBuffer lights;
     private final FrameBuffer shadows;
