@@ -97,7 +97,8 @@ public final class GpuImage implements AutoCloseable {
     }
 
     private GpuImage(VulkanDevice device, int width, int height, int depth, int layers, boolean cube, int samples,
-        int format, int usage, int aspect, int mips, int[] queueFamilies) {
+        int format, int usage, int aspect, int mips, int[] families) {
+        int[] queueFamilies = java.util.Arrays.stream(families).distinct().toArray(); // one family: exclusive
         if (width < 1 || height < 1 || depth < 1 || layers < 1) {
             throw new IllegalArgumentException("Image size and layers must be positive: " + width + " x " + height + " x "
                 + depth + ", " + layers + " layers");
