@@ -64,11 +64,16 @@ output compiled without the `PerPrimitiveEXT` decoration (Slang 2026.20, checked
 - Proof: `slangc -target spirv-asm`, in [#144](https://github.com/true-sim/engine/pull/144).
 - Rule: pass per-triangle values through the `SV_PrimitiveID` built-in, as `lean.slang` does.
 
-**Observed, cause unknown: depth-only mesh pipelines whose fragment shader reads `SV_PrimitiveID` and
-`SV_Barycentrics`.** On an RX 9070 XT, such a pipeline for the masked bin's shadow map lost the device in
-`ShadowsTest.maskedTexelsCastNoShadow`, every run; the same reads with color attachments did not.
-- Proof: reproduced, and gone with the full-output pipeline, in [#144](https://github.com/true-sim/engine/pull/144).
-- Rule: the masked bin's depth uses `meshIdsMain` with draw.slang's `maskedDepthMain`.
+**Depth-only mesh pipelines do not pass the mesh shader's primitive ID** (RX 9070 XT, driver 32.0.31041.1004). In a
+pipeline without color attachments, the fragment shader's `SV_PrimitiveID` is not the value the mesh shader wrote;
+with color attachments it is. A masked shadow map that found its triangle through it read out of bounds and lost the
+device (`ShadowsTest.maskedTexelsCastNoShadow`, every run).
+- Proof: the mesh shader wrote 777 for every triangle and the fragment shader discarded any other value: every
+  fragment was discarded. Barycentrics are not involved (the same without them), and with no memory read the device
+  stays. With color attachments the lean path depends on the primitive ID, and its images match the indexed path's
+  (`bothPathsShadeTheSameImage`). Experiments in [#147](https://github.com/true-sim/engine/pull/147).
+- Rule: depth-only mesh pipelines take nothing from the primitive ID; the masked bin's depth uses `meshIdsMain` with
+  draw.slang's `maskedDepthMain`.
 
 **Features and sharing must match the device.** Cube array image views failed validation until `imageCubeArray` was
 enabled, and on lavapipe (one queue family for graphics and compute) images failed when they listed that family twice
