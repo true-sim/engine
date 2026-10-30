@@ -573,6 +573,12 @@ that declare how they use each image. The graph does the rest:
 - **Swappable:** `replace` swaps a technique for another providing the same keys (one lighting or translucency
   technique for another). `implement` changes how every request of a type is computed (a cheaper blur on low
   settings). Nothing else changes.
+- **Views:** `graph.addView(name)` gives a `ViewPort`, a camera's share of the frame with techniques and outputs of
+  its own (`view.add(...)`, `view.output(key, target)`). Its techniques' keys are the view's, so two views can each
+  provide the scene color; requiring a key from a view gets the view's version, else the frame's. Techniques added to
+  the graph itself are the frame's, built once for every view, and equal requests are shared whichever view makes
+  them. `g.view()`, `g.require(view, key)` and `g.requireAll(key)` cross between views, and a view's histories are its
+  own. The engine's techniques do not use views yet: they still take their view in their constructors.
 - **Culled:** walking back from the outputs, passes whose images and buffers nothing needs are dropped.
 - **Synchronized:** barriers and layout transitions come from the declared accesses, batched into one call per pass,
   with none between reads.
@@ -589,7 +595,8 @@ that declare how they use each image. The graph does the rest:
 - **External buffers:** `g.importBuffer(new ExternalBuffer(name, gpuBuffer))` brings a buffer the graph does not own
   (a game's simulation state, a `RecordBuffer`, the engine's instances) into the graph: passes declare their accesses
   and the graph orders them. Its contents outlive the frame, so passes writing it are kept, and the frame's first use
-  waits for whatever came before (uploads, earlier frames). Graphics-queue passes only.
+  waits for whatever came before (uploads, earlier frames). Async passes use it too where both queues may: the queues
+  are of one family, or the buffer has concurrent sharing.
 - **The engine's data for custom passes:** `GpuScene.instanceAddress()`/`instanceBuffer()` (records as
   `meshlets/common.slang`'s `Instance`), `GpuScene.materialsAddress()`, and the `GeometryPool`'s buffers and per-mesh
   bases, by device address, for a game's own passes and shaders.
@@ -736,8 +743,9 @@ slots.end();
 ```
 
 More cameras on a scene are more views, each with lists and occlusion history of its own. Scenes share a `GpuScene`
-told apart by layers, or each have their own with a renderer and graph (the graph's keys, such as the scene color and
-light list, are one per graph); either way they use the same resources, and a mesh several use is on the GPU once.
+told apart by layers, or each have their own with a renderer and graph (the engine's techniques, and so the scene
+color and light list, are not per view yet); either way they use the same resources, and a mesh several use is on
+the GPU once.
 The tests draw two scenes in step, one forward and one through a visibility buffer, and two scenes from one
 `GpuScene`, with validation on.
 

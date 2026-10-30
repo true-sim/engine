@@ -139,7 +139,9 @@ public final class FrameGraph implements AutoCloseable {
     private final FrameSlots frameSlots;
     private final boolean ownsSlots;
     private final List<Technique> techniques = new ArrayList<>();
-    private long[] builtVersions = new long[0]; // each technique's buildVersion() when the graph was built
+    private final List<ViewPort> views = new ArrayList<>();
+    private Technique[] built = new Technique[0]; // every technique of the last build, the views' too
+    private long[] builtVersions = new long[0]; // each one's buildVersion() then
     private final Map<Key<Image>, ExternalImage> outputs = new LinkedHashMap<>();
     private final Map<Class<?>, Implementation<?, ?>> implementations = new HashMap<>();
     private final Map<Object, AutoCloseable> cache = new LinkedHashMap<>();
@@ -323,6 +325,40 @@ public final class FrameGraph implements AutoCloseable {
 
     /** Rebuilds on the next frame, e.g. after a technique changed what it builds. */
     public void invalidate() {
+        dirty = true;
+    }
+
+    /**
+     * A new view of the frame, named {@code name} (unique in the graph): a camera's share of it, with techniques and
+     * outputs of its own ({@link ViewPort}). Techniques added to the graph itself are the frame's, shared by every
+     * view. The graph rebuilds on its next frame.
+     */
+    public ViewPort addView(String name) {
+        Objects.requireNonNull(name, "name");
+        for (ViewPort view : views) {
+            if (view.name().equals(name)) {
+                throw new IllegalArgumentException("The graph has a view named " + name + " already");
+            }
+        }
+        ViewPort view = new ViewPort(this, name);
+        views.add(view);
+        dirty = true;
+        return view;
+    }
+
+    /** Removes {@code view}, its techniques and outputs; the graph rebuilds on its next frame. */
+    public FrameGraph removeView(ViewPort view) {
+        dirty |= views.remove(view);
+        return this;
+    }
+
+    /** The views, in the order added. */
+    public List<ViewPort> views() {
+        return List.copyOf(views);
+    }
+
+    /** A view changed its techniques or outputs: the graph rebuilds on its next frame. */
+    void changed() {
         dirty = true;
     }
 
@@ -806,7 +842,7 @@ public final class FrameGraph implements AutoCloseable {
     /** Whether a technique would build differently now ({@link Technique#buildVersion}). Allocates nothing. */
     private boolean techniquesChanged() {
         for (int i = 0; i < builtVersions.length; i++) {
-            if (techniques.get(i).buildVersion() != builtVersions[i]) {
+            if (built[i].buildVersion() != builtVersions[i]) {
                 return true;
             }
         }
@@ -1093,8 +1129,14 @@ public final class FrameGraph implements AutoCloseable {
 
     @AllowAllocation("building the graph, when it changes")
     private void build() {
-        GraphBuilder g = new GraphBuilder(this, techniques, implementations);
-        CompiledGraph compiled = GraphCompiler.compile(g, outputs, asyncCompute,
+        GraphBuilder g = new GraphBuilder(this, techniques, views, implementations);
+        Map<Object, ExternalImage> targets = new LinkedHashMap<>(outputs);
+        for (ViewPort view : views) {
+            for (Map.Entry<Key<Image>, ExternalImage> output : view.outputs.entrySet()) {
+                targets.put(g.scoped(view, output.getKey()), output.getValue());
+            }
+        }
+        CompiledGraph compiled = GraphCompiler.compile(g, targets, asyncCompute,
             graphicsQueue.family() != computeQueue.family(), grain, this::blit);
         // The slots' images and buffers, from the pool; histories keep theirs while their name and slot stay.
         Physical[] claimed = resources.claim(compiled.imageSlots(), frame);
@@ -1157,9 +1199,10 @@ public final class FrameGraph implements AutoCloseable {
         startTooling(g);
         startHistories(pairs, keptPair, compiled);
         dirty = false;
-        builtVersions = new long[techniques.size()];
+        built = g.techniques().toArray(new Technique[0]);
+        builtVersions = new long[built.length];
         for (int i = 0; i < builtVersions.length; i++) {
-            builtVersions[i] = techniques.get(i).buildVersion();
+            builtVersions[i] = built[i].buildVersion();
         }
         builds++;
         LOG.debug("Frame graph built: {} of {} passes in {} batches, {} images in {} pooled, {} buffers in {} pooled, "

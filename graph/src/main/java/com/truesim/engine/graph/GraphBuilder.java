@@ -11,11 +11,13 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Function;
 
 /**
@@ -114,7 +116,13 @@ public final class GraphBuilder {
     final List<PassInfo> passes = new ArrayList<>();
     private final List<PassBuilder> openPasses = new ArrayList<>();
     final List<ReadbackPlan> readbacks = new ArrayList<>();
-    private final Resolution<Key<?>, Technique> resolution;
+    private final Resolution<Object, Technique> resolution;
+    private final List<ViewPort> views;
+    private final List<Technique> techniques;
+    private final Map<Technique, ViewPort> viewOf = new IdentityHashMap<>();
+    private final Set<Object> provided = new HashSet<>(); // every key provided, as scoped
+    private final Map<Object, ViewPort> requestViews = new HashMap<>(); // the view each request was first made in
+    private final Map<Scoped, Scoped> interned = new HashMap<>();
     private final Map<ExternalImage, Image> externals = new IdentityHashMap<>();
     /** Imported buffers by Vulkan handle: every wrapper of one buffer is the same buffer of the build. */
     private final Map<Long, Buffer> externalBuffers = new HashMap<>();
@@ -123,18 +131,62 @@ public final class GraphBuilder {
 
     private final FrameGraph graph;
 
+    /** A key of a view: its techniques' version of {@code key}, apart from other views' and the frame's. */
+    record Scoped(ViewPort view, Key<?> key) {
+        @Override
+        public String toString() {
+            return key + " of " + view;
+        }
+    }
+
+    /** {@code key} of {@code view}, as the build resolves it: one instance each, as the resolution keys by identity. */
+    Object scoped(ViewPort view, Key<?> key) {
+        return interned.computeIfAbsent(new Scoped(view, key), s -> s);
+    }
+
     GraphBuilder(FrameGraph graph, List<Technique> techniques, Map<Class<?>, Implementation<?, ?>> implementations) {
+        this(graph, techniques, List.of(), implementations);
+    }
+
+    GraphBuilder(FrameGraph graph, List<Technique> frame, List<ViewPort> views,
+        Map<Class<?>, Implementation<?, ?>> implementations) {
         this.graph = graph;
         this.implementations = implementations;
-        this.resolution = new Resolution<>(techniques, new Resolution.Producers<>() {
+        this.views = List.copyOf(views);
+        List<Technique> all = new ArrayList<>(frame);
+        // Modifier order within each scope: the frame's, then each view's (a view's may share ids with another's).
+        Map<Technique, Integer> positions = new IdentityHashMap<>(positions(frame));
+        for (ViewPort view : views) {
+            Map<Technique, Integer> local = positions(view.techniques);
+            for (Technique technique : view.techniques) {
+                viewOf.put(technique, view);
+                positions.put(technique, all.size() + local.get(technique));
+            }
+            all.addAll(view.techniques);
+        }
+        this.techniques = List.copyOf(all);
+        for (Technique technique : all) {
+            for (Key<?> key : technique.provides()) {
+                provided.add(inScope(viewOf.get(technique), key));
+            }
+        }
+        this.resolution = new Resolution<>(all, new Resolution.Producers<>() {
             @Override
-            public List<Key<?>> provides(Technique technique) {
-                return technique.provides();
+            public List<Object> provides(Technique technique) {
+                List<Object> keys = new ArrayList<>();
+                for (Key<?> key : technique.provides()) {
+                    keys.add(inScope(viewOf.get(technique), key));
+                }
+                return keys;
             }
 
             @Override
-            public List<Key<?>> modifies(Technique technique) {
-                return technique.modifies();
+            public List<Object> modifies(Technique technique) {
+                List<Object> keys = new ArrayList<>();
+                for (Key<?> key : technique.modifies()) {
+                    keys.add(resolve(viewOf.get(technique), key));
+                }
+                return keys;
             }
 
             @Override
@@ -144,9 +196,48 @@ public final class GraphBuilder {
 
             @Override
             public String name(Technique technique) {
-                return GraphBuilder.name(technique);
+                ViewPort view = viewOf.get(technique);
+                return GraphBuilder.name(technique) + (view == null ? "" : " of " + view);
             }
-        }, Comparator.comparingInt(positions(techniques)::get), "technique");
+        }, Comparator.comparingInt(positions::get), "technique");
+    }
+
+    /** The internal key of {@code key} provided in {@code view}'s scope (null: the frame's). */
+    private Object inScope(ViewPort view, Key<?> key) {
+        return view == null ? key : scoped(view, key);
+    }
+
+    /** {@code key} as seen from {@code view} (null: the frame): the view's version where it provides one. */
+    private Object resolve(ViewPort view, Key<?> key) {
+        if (view != null) {
+            Object scoped = scoped(view, key);
+            if (provided.contains(scoped)) {
+                return scoped;
+            }
+        }
+        return key;
+    }
+
+    /** Every technique of the build: the frame's, then each view's. */
+    List<Technique> techniques() {
+        return techniques;
+    }
+
+    /**
+     * The view being built: the building technique's, or for a request the view of whoever first requested it; null
+     * for the frame's techniques.
+     */
+    public ViewPort view() {
+        Object scope = scope();
+        if (scope instanceof Technique technique) {
+            return viewOf.get(technique);
+        }
+        return scope == null ? null : requestViews.get(scope);
+    }
+
+    /** An output's image: {@code key}, the frame's or a view's ({@link #scoped}). */
+    Image output(Object key) {
+        return (Image) resolution.require(key);
     }
 
     /**
@@ -332,12 +423,32 @@ public final class GraphBuilder {
      * {@link Technique#modifies() modifies} it, in their {@link Order}, the first time it is required.
      */
     public <T> T require(Key<T> key) {
-        return key.kind().cast(resolution.require(key));
+        return key.kind().cast(resolution.require(resolve(view(), key)));
     }
 
     /** The result {@code key}, or null if no technique of the graph provides it. */
     public <T> T optional(Key<T> key) {
-        return key.kind().cast(resolution.optional(key));
+        return key.kind().cast(resolution.optional(resolve(view(), key)));
+    }
+
+    /**
+     * View {@code view}'s result {@code key} (or the frame's where it provides none), e.g. a mirror's image for the
+     * main view's shading. The pass reading it orders after whatever writes it, whichever view.
+     */
+    public <T> T require(ViewPort view, Key<T> key) {
+        return key.kind().cast(resolution.require(resolve(Objects.requireNonNull(view, "view"), key)));
+    }
+
+    /** Every view's result {@code key}, in the order the views were added, for those providing one. */
+    public <T> List<T> requireAll(Key<T> key) {
+        List<T> all = new ArrayList<>();
+        for (ViewPort view : views) {
+            Object scoped = scoped(view, key);
+            if (provided.contains(scoped)) {
+                all.add(key.kind().cast(resolution.require(scoped)));
+            }
+        }
+        return all;
     }
 
     /**
@@ -347,7 +458,7 @@ public final class GraphBuilder {
      * get the last version.
      */
     public <T> T modify(Key<T> key) {
-        Object result = resolution.take(key);
+        Object result = resolution.take(resolve(view(), key));
         if (result instanceof Image image) {
             images.get(image.id).owner = scope();
         } else {
@@ -367,7 +478,8 @@ public final class GraphBuilder {
                 info.owner = scope(); // an import provided under a key: from now on its provider's to write
             }
         }
-        resolution.put(key, key.kind() == Image.class ? image((Image) result) : buffer((Buffer) result));
+        resolution.put(resolve(view(), key),
+            key.kind() == Image.class ? image((Image) result) : buffer((Buffer) result));
     }
 
     /**
@@ -377,6 +489,7 @@ public final class GraphBuilder {
     @SuppressWarnings({"unchecked", "rawtypes"})
     public <R> R request(Request<R> request) {
         Objects.requireNonNull(request, "request");
+        requestViews.putIfAbsent(request, view()); // built in the view of whoever requests it first
         Implementation implementation = implementations.get(request.getClass());
         return resolution.request(request,
             () -> implementation == null ? request.build(this) : (R) implementation.build(request, this));
@@ -399,17 +512,20 @@ public final class GraphBuilder {
     /**
      * An image kept from frame to frame, as {@code desc} describes it, owned by the building technique: this frame's to
      * write, and last frame's to read. Names are unique within the graph; a history of the same name, descriptor and
-     * usage keeps its images and contents when the graph rebuilds.
+     * usage keeps its images and contents when the graph rebuilds. A view's histories are its own: their names are
+     * qualified by the view's.
      */
     public History history(String name, ImageDesc desc) {
+        ViewPort view = view();
+        String key = view == null ? name : view.name() + ": " + name;
         for (History other : histories) {
-            if (other.name.equals(name)) {
-                throw new IllegalStateException("Two histories are named " + name);
+            if (other.key.equals(key)) {
+                throw new IllegalStateException("Two histories are named " + key);
             }
         }
-        Image current = create(name, desc);
-        Image previous = create(name + " (last frame)", desc);
-        History history = new History(name, current, previous);
+        Image current = create(key, desc);
+        Image previous = create(key + " (last frame)", desc);
+        History history = new History(name, key, current, previous);
         images.get(current.id).history = history;
         images.get(previous.id).history = history;
         images.get(previous.id).previous = true;

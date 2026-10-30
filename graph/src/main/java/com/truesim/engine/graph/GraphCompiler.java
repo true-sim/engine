@@ -52,11 +52,11 @@ final class GraphCompiler {
      * {@code asyncCompute}, images used by both queues shared across their families with {@code twoFamilies}, batches
      * cut into chunks of {@code grain} passes.
      */
-    static CompiledGraph compile(GraphBuilder g, Map<Key<Image>, ExternalImage> outputs, boolean asyncCompute,
+    static CompiledGraph compile(GraphBuilder g, Map<?, ExternalImage> outputs, boolean asyncCompute,
         boolean twoFamilies, int grain, OutputCopy copy) {
         List<Image> results = new ArrayList<>();
-        for (Key<Image> key : outputs.keySet()) {
-            results.add(g.require(key));
+        for (Object key : outputs.keySet()) {
+            results.add(g.output(key));
         }
         g.finishOpenPasses(); // the build is done: open passes take what was declared after them
         // An output whose image fits its target (size, format, usage; not sampled or a storage image) is drawn
@@ -260,7 +260,7 @@ final class GraphCompiler {
             history.index = h;
             historyCurrent[h] = slotCount + 2 * h;
             historyPrevious[h] = slotCount + 2 * h + 1;
-            historyPlans.add(new HistoryPlan(history.name, slot, historyCurrent[h], historyPrevious[h]));
+            historyPlans.add(new HistoryPlan(history.key, slot, historyCurrent[h], historyPrevious[h]));
             newTargetOf[current.image.id] = historyCurrent[h];
             newTargetOf[previous.image.id] = historyPrevious[h];
             previousImages[h] = previous.image.id;
