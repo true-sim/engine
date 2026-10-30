@@ -66,13 +66,15 @@ output compiled without the `PerPrimitiveEXT` decoration (Slang 2026.20, checked
 
 **In depth-only mesh pipelines the fragment shader did not see the mesh shader's primitive ID** (RX 9070 XT, driver
 32.0.31041.1004). In a pipeline without color attachments, the fragment shader's `SV_PrimitiveID` was not the value the
-mesh shader wrote; with color attachments it was. Whose fault this is is not established: the SPIR-V meets the spec's
-rules for `PrimitiveId` (VUID-PrimitiveId-07040, -10595, -10596, VUID-Fragment-04332, -04333; checked against
-Vulkan-Docs on 2026-10-30), `geometryShader` is enabled and the validation layers report nothing, but it was not
-tried on another driver or GPU, nor in a minimal program outside the engine. A masked shadow map that found its
+mesh shader wrote; with color attachments it was. The same code on lavapipe (Mesa 26.0.8, in CI)
+delivers it, so it is specific to this GPU or driver. The SPIR-V meets the spec's rules for `PrimitiveId`
+(VUID-PrimitiveId-07040, -10595, -10596, VUID-Fragment-04332, -04333; checked against Vulkan-Docs on 2026-10-30),
+`geometryShader` is enabled and the validation layers report nothing. Not tried: a minimal program outside the
+engine, which a report to AMD would need. A masked shadow map that found its
 triangle through it read out of bounds and lost the device (`ShadowsTest.maskedTexelsCastNoShadow`, every run).
 - Proof: the mesh shader wrote 777 for every triangle and the fragment shader discarded any other value: every
-  fragment was discarded. Barycentrics are not involved (the same without them), and with no memory read the device
+  fragment was discarded; on lavapipe they passed (draft [#149](https://github.com/true-sim/engine/pull/149), the masked
+  quad casting its shadow). Barycentrics are not involved (the same without them), and with no memory read the device
   stays. With color attachments the lean path depends on the primitive ID, and its images match the indexed path's
   (`bothPathsShadeTheSameImage`). Experiments in [#147](https://github.com/true-sim/engine/pull/147).
 - Rule: depth-only mesh pipelines take nothing from the primitive ID; the masked bin's depth uses `meshIdsMain` with
