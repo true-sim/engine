@@ -446,7 +446,8 @@ public final class MeshletRenderer implements AutoCloseable {
     /**
      * Like {@link #cullLate(VkCommandBuffer, RenderView, int, int, int, int)}, in a frame graph pass that, with
      * {@code declared}, declares the culling's buffers and the view's lists ({@link #declareCulling},
-     * {@link RenderView#declareCulling}): on the mesh shader path the graph orders them, not barriers of its own.
+     * {@link RenderView#declareCulling}): the graph orders them, not barriers of its own (unless the indexed
+     * path's index buffers changed since the build).
      */
     void cullLate(VkCommandBuffer commands, RenderView view, int pyramid, int width, int height, int mips,
         boolean declared) {
@@ -679,11 +680,13 @@ public final class MeshletRenderer implements AutoCloseable {
         retiring.release(); // culls of one frame may run on several threads: it locks
         scene.upload(commands);
         boolean meshShading = path() == Path.MESH_SHADERS;
+        // Declared to a graph that orders everything it touches: the indexed path's index buffers too, where the build
+        // declared them and the views have them (else, e.g. the path changed since, its own barriers).
+        boolean ordered = declared && (meshShading || indicesOrdered(views, count));
         int instanceCount = scene.highWater();
         bindless.bind(commands); // the late phase samples the depth pyramid through it
-        // What came before (the early phase, the frame before) used the buffers this resets, and the visibility. A graph
-        // orders the declared ones; the indexed path's index buffer (made while recording) is not declared.
-        if (!declared || !meshShading) {
+        // What came before (the early phase, the frame before) used the buffers this resets, and the visibility.
+        if (!ordered) {
             Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         }
@@ -763,8 +766,8 @@ public final class MeshletRenderer implements AutoCloseable {
             cull.push(commands, push, CullPush.BYTES);
             Commands.dispatchIndirect(commands, chunkCommand.handle(), 0);
         }
-        if (meshShading) { // the lists and their dispatches feed the mesh shaders: declared, the graph orders them
-            if (!declared) {
+        if (meshShading) { // the lists and their dispatches feed the mesh shaders
+            if (!ordered) {
                 Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                     VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | MESH_SHADER_STAGE,
                     VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
@@ -795,10 +798,23 @@ public final class MeshletRenderer implements AutoCloseable {
                 }
             }
         }
-        Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT
-                | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-            VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        if (!ordered) { // the expansion feeds the indexed draws
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT
+                    | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+                VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT
+                    | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        }
+    }
+
+    /** Whether views[0] to views[count - 1] all have the index buffers the graph declared. */
+    private static boolean indicesOrdered(RenderView[] views, int count) {
+        for (int i = 0; i < count; i++) {
+            if (!views[i].indicesOrdered()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Begins rendering into the attachments, cleared or, with {@code load}, as they are. */
