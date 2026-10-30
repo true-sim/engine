@@ -80,6 +80,41 @@ triangle through it read out of bounds and lost the device (`ShadowsTest.maskedT
 - Rule: depth-only mesh pipelines take nothing from the primitive ID; the masked bin's depth uses `meshIdsMain` with
   draw.slang's `maskedDepthMain`.
 
+**On the integrated GPU, a struct of buffer pointers loaded in one piece came back wrong** (AMD Radeon(TM) Graphics of a
+Ryzen 9 9950X3D, drivers 32.0.21045.5002 and 32.0.21045.16010). Culling loaded a view's four list pointers as one
+struct (one `OpLoad`): the first was right, the other three read as their low 32 bits twice (`0x3008b2050` as
+`0x008b2050_008b2050`), so culling wrote far outside its lists. The light list's header, read as one struct, broke
+classic shadows on the same GPU. The RX 9070 XT runs the same SPIR-V correctly; it passes `spirv-val` and the
+validation layers report nothing.
+- Proof: the values read back on the integrated GPU; one load per pointer fixed culling, and reading the header field
+  by field fixed the shadows ([#152](https://github.com/true-sim/engine/issues/152)). Reported on
+  [AMD-Gfx-Drivers#115](https://github.com/GPUOpen-Drivers/AMD-Gfx-Drivers/issues/115), where a similar load on an
+  integrated GPU reads zeros.
+- Rule: load buffer pointers one at a time, never as a struct holding several.
+
+**On the integrated GPU, a mesh shader calling `SetMeshOutputCounts` twice drew nothing.** The mesh entry points
+returned early past the end of their list with `SetMeshOutputCounts(0, 0)` and called it again further on. Each
+invocation reached one call and the branch was the same for the whole workgroup, which the extension arguably allows
+(once, in uniform control flow). On the integrated GPU the full mesh path drew nothing and the lean path about half;
+with one call per entry point, both draw. The RX 9070 XT drew either way.
+- Proof: the renderer tests on the integrated GPU, before and after
+  ([#152](https://github.com/true-sim/engine/issues/152)).
+- Rule: one `SetMeshOutputCounts` per mesh entry point, reached by every invocation; no early return before it.
+
+**On the integrated GPU, a fragment shader's `float4` loads through a pointer from push constants failed.** In the
+custom pass test's shader, stepping a `float4` pointer lost the device, and a `uint` step followed by a `float4` load
+read 0; three 4-byte loads read the right values.
+- Proof: `CustomPassTest` on the integrated GPU ([#152](https://github.com/true-sim/engine/issues/152)).
+- Rule: where such a load misbehaves on that GPU, read the values as 4-byte words.
+
+**Storage writes from a mesh shader did not arrive on the integrated GPU**, also with
+`vertexPipelineStoresAndAtomics` enabled, so debugging values written from a mesh shader read back unchanged.
+- Proof: experiments while working on [#152](https://github.com/true-sim/engine/issues/152).
+- Rule: write debugging values from a fragment or compute shader.
+
+**On the integrated GPU, drawing a material type other than metallic-roughness can lose the device.** Cause not found;
+everything checked and measured is in [#151](https://github.com/true-sim/engine/issues/151).
+
 **Features and sharing must match the device.** Cube array image views failed validation until `imageCubeArray` was
 enabled, and on lavapipe (one queue family for graphics and compute) images failed when they listed that family twice
 for concurrent sharing.

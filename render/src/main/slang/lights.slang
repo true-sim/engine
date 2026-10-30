@@ -110,6 +110,30 @@ public struct LightListHeader
     }
 };
 
+/**
+ * `h[0]`, read field by field. Loaded as one struct, the driver of an AMD Radeon(TM) Graphics read the pointers after
+ * the first as their low half twice (pitfalls.md); one load per field reads them right.
+ */
+public LightListHeader loadHeader(LightListHeader* h)
+{
+    LightListHeader r;
+    r.layout = h[0].layout;
+    r.lightCount = h[0].lightCount;
+    r.overflow = h[0].overflow;
+    r.pad = 0;
+    r.lights = h[0].lights;
+    r.shadows = h[0].shadows;
+    r.data0 = h[0].data0;
+    r.data1 = h[0].data1;
+    r.ints = h[0].ints;
+    r.floats = h[0].floats;
+    r.camera = h[0].camera;
+    r.pad1 = 0;
+    r.cameraLow = h[0].cameraLow;
+    r.pad2 = 0;
+    return r;
+}
+
 /** Light list layouts. */
 public static const uint CLUSTERS = 1;
 
@@ -363,7 +387,7 @@ public float3 lightList<R : IShadowRays>(R rays, LightListHeader* h, Surface s, 
     {
         return 0;
     }
-    LightListHeader header = h[0];
+    LightListHeader header = loadHeader(h);
     switch (header.layout)
     {
     case CLUSTERS:
