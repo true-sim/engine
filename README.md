@@ -753,6 +753,9 @@ packages and sets `TRUESIM_REQUIRE_VALIDATION=true`, so the Vulkan tests fail wh
 
 Exclusive fullscreen is only tested when `TRUESIM_TEST_FULLSCREEN` is set, because it changes the monitor's mode.
 
+Mistakes made here once, each with its evidence and the rule that follows, are in [docs/pitfalls.md](docs/pitfalls.md);
+add to it what is verified, nothing else.
+
 ```bash
 ./gradlew build
 ```
