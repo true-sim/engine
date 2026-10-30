@@ -213,6 +213,18 @@ class SceneSyncTest {
         }
     }
 
+    /**
+     * Frames until what they ask for has loaded and shows. A load can start another only in a frame (a renderable's
+     * materials are asked for when its mesh shows), so frames alternate with waiting for the loads they started.
+     */
+    private void settle(List<FrameGraph> graphs, List<SceneSync> syncs) throws InterruptedException {
+        for (int round = 0; round < 3; round++) { // the mesh, then its materials (with their textures), then shown
+            frame(graphs, syncs, camera);
+            load();
+        }
+        frame(graphs, syncs, camera);
+    }
+
     private <T extends AutoCloseable> T closing(T closeable) {
         closing.add(closeable);
         return closeable;
@@ -464,11 +476,7 @@ class SceneSyncTest {
         renderables.set(facing(scene, -1.5, 0, -4), SQUARE, List.of(masked));
         renderables.set(facing(scene, 0, 0, -4), SQUARE, List.of(twoSided));
         renderables.set(facing(scene, 1.5, 0, -4), SQUARE, List.of(blended));
-        frame(graphs, List.of(sync), camera);
-        load();
-        for (int frame = 0; frame < 3; frame++) {
-            frame(graphs, List.of(sync), camera);
-        }
+        settle(graphs, List.of(sync));
         device.waitIdle();
         assertThat(cameraView.visibleMeshlets(0)).as("the blended one, opaque").isEqualTo(1);
         assertThat(cameraView.visibleMeshlets(1)).as("the double-sided one").isEqualTo(1);
@@ -510,11 +518,7 @@ class SceneSyncTest {
         renderables.set(facing(scene, 0, -1, -4), SQUARE, List.of(outOfRange.ref()));
         renderables.set(facing(scene, 2, 0, -4), SQUARE, List.of(unknownFeature.ref()));
         renderables.set(facing(scene, -2, 0, -4), SQUARE, List.of(typos.ref()));
-        frame(graphs, List.of(sync), camera);
-        load();
-        for (int frame = 0; frame < 3; frame++) {
-            frame(graphs, List.of(sync), camera);
-        }
+        settle(graphs, List.of(sync));
         device.waitIdle();
         assertThat(materials.count()).as("one for the equal data, one each for the rest").isEqualTo(before + 5);
         // What could not be used is reported: the unknown type, the value out of range, the unknown feature, typos.
@@ -553,11 +557,7 @@ class SceneSyncTest {
         SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
         List<FrameGraph> graphs = List.of(graph(sync, false, new GpuBuffer[] {readback(), readback()}));
         renderables.set(facing(scene, 0, 0, -4), SQUARE, List.of(coated));
-        frame(graphs, List.of(sync), camera);
-        load();
-        for (int frame = 0; frame < 3; frame++) {
-            frame(graphs, List.of(sync), camera);
-        }
+        settle(graphs, List.of(sync));
         device.waitIdle();
         Materials materials = resources.materials();
         int found = 0;
