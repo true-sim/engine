@@ -18,12 +18,9 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_STENCIL_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
-import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_SAMPLED_BIT;
-import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_STORAGE_BIT;
 import static org.lwjgl.vulkan.VK10.VK_QUEUE_FAMILY_IGNORED;
 import static org.lwjgl.vulkan.VK10.VK_REMAINING_MIP_LEVELS;
 import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
-import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -55,13 +52,12 @@ import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.GraphBuilder.PassInfo;
-import com.truesim.engine.graph.GraphCompiler.BufferSlot;
 import com.truesim.engine.graph.GraphCompiler.HistoryPlan;
-import com.truesim.engine.graph.GraphCompiler.Slot;
+import com.truesim.engine.graph.ResourcePool.HistoryPair;
+import com.truesim.engine.graph.ResourcePool.Physical;
+import com.truesim.engine.graph.ResourcePool.PhysicalBuffer;
 import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.FrameSlots;
-import com.truesim.engine.vulkan.GpuBuffer;
-import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.common.jobs.JobSystem;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.Queue;
@@ -139,11 +135,7 @@ public final class FrameGraph implements AutoCloseable {
     private final Map<Key, ExternalImage> outputs = new LinkedHashMap<>();
     private final Map<Class<?>, Implementation<?, ?>> implementations = new HashMap<>();
     private final Map<Object, AutoCloseable> cache = new LinkedHashMap<>();
-    private final List<Physical> pool = new ArrayList<>();
-    private final List<Physical> retired = new ArrayList<>();
-    private final List<PhysicalBuffer> bufferPool = new ArrayList<>();
-    private final List<PhysicalBuffer> retiredBuffers = new ArrayList<>();
-    private final Map<String, HistoryPair> histories = new HashMap<>();
+    private final ResourcePool resources; // the images and buffers kept across builds
     private HistoryPair[] activeHistories = new HistoryPair[0];
     private static final Physical[] NO_PHYSICALS = new Physical[0];
     // The seam: transitions joining the histories to a graph just built, recorded at the start of its first frame.
@@ -237,6 +229,7 @@ public final class FrameGraph implements AutoCloseable {
         this.device = Objects.requireNonNull(device, "device");
         this.bindless = device.bindless();
         this.framesInFlight = framesInFlight;
+        this.resources = new ResourcePool(device, framesInFlight);
         this.ownsSlots = shared == null;
         this.frameSlots = ownsSlots ? new FrameSlots(framesInFlight) : shared;
         this.graphicsQueue = device.graphics();
@@ -432,8 +425,8 @@ public final class FrameGraph implements AutoCloseable {
             build();
         }
         frame++;
-        if (!retired.isEmpty() || !retiredBuffers.isEmpty()) {
-            release(false);
+        if (resources.hasRetired()) {
+            resources.release(false, frame);
         }
     }
 
@@ -884,12 +877,12 @@ public final class FrameGraph implements AutoCloseable {
 
     /** The transient images in the pool, for inspection. */
     public int pooledImages() {
-        return pool.size();
+        return resources.pooledImages();
     }
 
     /** The transient buffers in the pool, for inspection. */
     public int pooledBuffers() {
-        return bufferPool.size();
+        return resources.pooledBuffers();
     }
 
     /** How many times the graph was built. */
@@ -905,32 +898,16 @@ public final class FrameGraph implements AutoCloseable {
         CompiledGraph compiled = GraphCompiler.compile(g, outputs, asyncCompute,
             graphicsQueue.family() != computeQueue.family(), grain, this::blit);
         // The slots' images and buffers, from the pool; histories keep theirs while their name and slot stay.
-        Physical[] claimed = claim(compiled.imageSlots());
+        Physical[] claimed = resources.claim(compiled.imageSlots(), frame);
         List<HistoryPlan> plans = compiled.histories();
-        HistoryPair[] pairs = new HistoryPair[plans.size()];
         boolean[] keptPair = new boolean[plans.size()];
+        HistoryPair[] pairs = resources.histories(plans, keptPair, frame);
         Physical[] newPhysicals = Arrays.copyOf(claimed, compiled.physicalCount());
-        Map<String, HistoryPair> old = new HashMap<>(histories);
-        histories.clear();
         for (int h = 0; h < plans.size(); h++) {
-            HistoryPlan plan = plans.get(h);
-            HistoryPair pair = old.remove(plan.name());
-            keptPair[h] = pair != null && pair.fits(plan.slot()); // kept: its contents carry over the rebuild
-            if (!keptPair[h]) {
-                if (pair != null) {
-                    retire(pair);
-                }
-                pair = new HistoryPair(plan.slot());
-            }
-            histories.put(plan.name(), pair);
-            pairs[h] = pair;
-            newPhysicals[plan.current()] = pair.current;
-            newPhysicals[plan.previous()] = pair.previous;
+            newPhysicals[plans.get(h).current()] = pairs[h].current;
+            newPhysicals[plans.get(h).previous()] = pairs[h].previous;
         }
-        for (HistoryPair unused : old.values()) {
-            retire(unused);
-        }
-        PhysicalBuffer[] newPhysicalBuffers = claimBuffers(compiled.bufferSlots());
+        PhysicalBuffer[] newPhysicalBuffers = resources.claimBuffers(compiled.bufferSlots(), frame);
 
         order = compiled.order();
         targetOf = compiled.targetOf();
@@ -1036,120 +1013,9 @@ public final class FrameGraph implements AutoCloseable {
         seamImages = NO_PHYSICALS;
     }
 
-    /** Destroys {@code pair}'s images once the frames in flight are done with them. */
-    private void retire(HistoryPair pair) {
-        pair.current.retireAt = frame + framesInFlight;
-        pair.previous.retireAt = frame + framesInFlight;
-        retired.add(pair.current);
-        retired.add(pair.previous);
-    }
-
     /** Whether history {@code index}'s last frame image holds what that frame wrote. */
     boolean historyValid(int index) {
         return frame > activeHistories[index].firstFrame;
-    }
-
-    /** The two images of a history, whose roles swap every frame. */
-    @AllowAllocation("building the graph, when it changes")
-    private final class HistoryPair {
-        final Physical current;
-        final Physical previous;
-        long firstFrame;
-        int endCurrent = VK_IMAGE_LAYOUT_UNDEFINED; // the layout the last graph left the current role in
-
-        HistoryPair(Slot slot) {
-            current = new Physical(slot);
-            previous = new Physical(slot);
-        }
-
-        boolean fits(Slot slot) {
-            return current.width == slot.width && current.height == slot.height && current.format == slot.format
-                && current.usage == slot.usage && current.shared == slot.shared;
-        }
-
-        void close() {
-            current.close();
-            previous.close();
-        }
-    }
-
-    /** Takes pooled images for the slots, creating the missing ones; pooled images left over retire. */
-    @AllowAllocation("building the graph, when it changes")
-    private Physical[] claim(List<Slot> slots) {
-        Physical[] claimed = new Physical[slots.size()];
-        List<Physical> free = new ArrayList<>(pool);
-        for (int s = 0; s < slots.size(); s++) {
-            Slot slot = slots.get(s);
-            for (Physical candidate : free) {
-                if (candidate.width == slot.width && candidate.height == slot.height
-                    && candidate.format == slot.format && candidate.mips == slot.mips && candidate.usage == slot.usage
-                    && candidate.shared == slot.shared) {
-                    claimed[s] = candidate;
-                    free.remove(candidate);
-                    break;
-                }
-            }
-            if (claimed[s] == null) {
-                claimed[s] = new Physical(slot);
-                pool.add(claimed[s]);
-            }
-        }
-        for (Physical unused : free) {
-            pool.remove(unused);
-            unused.retireAt = frame + framesInFlight;
-            retired.add(unused);
-        }
-        return claimed;
-    }
-
-    /**
-     * Takes pooled buffers for the slots, the smallest that fits and is at most twice the size, creating the missing
-     * ones; pooled buffers left over retire.
-     */
-    @AllowAllocation("building the graph, when it changes")
-    private PhysicalBuffer[] claimBuffers(List<BufferSlot> slots) {
-        PhysicalBuffer[] claimed = new PhysicalBuffer[slots.size()];
-        List<PhysicalBuffer> free = new ArrayList<>(bufferPool);
-        for (int s = 0; s < slots.size(); s++) {
-            BufferSlot slot = slots.get(s);
-            for (PhysicalBuffer candidate : free) {
-                if (candidate.size >= slot.size && candidate.size / 2 <= slot.size && candidate.usage == slot.usage
-                    && candidate.shared == slot.shared
-                    && (claimed[s] == null || candidate.size < claimed[s].size)) {
-                    claimed[s] = candidate;
-                }
-            }
-            if (claimed[s] == null) {
-                claimed[s] = new PhysicalBuffer(slot);
-                bufferPool.add(claimed[s]);
-            } else {
-                free.remove(claimed[s]);
-            }
-        }
-        for (PhysicalBuffer unused : free) {
-            bufferPool.remove(unused);
-            unused.retireAt = frame + framesInFlight;
-            retiredBuffers.add(unused);
-        }
-        return claimed;
-    }
-
-    /** Destroys retired images and buffers whose frames have finished (or all, when closing). */
-    private void release(boolean all) {
-        for (int i = retiredBuffers.size() - 1; i >= 0; i--) {
-            PhysicalBuffer physical = retiredBuffers.get(i);
-            if (all || physical.retireAt <= frame) {
-                physical.buffer.close();
-                retiredBuffers.remove(i);
-            }
-        }
-        for (int i = retired.size() - 1; i >= 0; i--) {
-            Physical physical = retired.get(i);
-            if (all || physical.retireAt <= frame) {
-                physical.close();
-                retired.remove(i);
-            }
-        }
     }
 
     private void blit(PassContext ctx, Image from, Image to) {
@@ -1208,20 +1074,8 @@ public final class FrameGraph implements AutoCloseable {
             }
         }
         cache.clear();
-        for (Physical physical : pool) {
-            physical.close();
-        }
-        pool.clear();
-        for (PhysicalBuffer physical : bufferPool) {
-            physical.buffer.close();
-        }
-        bufferPool.clear();
-        for (HistoryPair pair : histories.values()) {
-            pair.close();
-        }
-        histories.clear();
+        resources.close();
         activeHistories = new HistoryPair[0];
-        release(true);
         physicals = new Physical[0];
         physicalBuffers = new PhysicalBuffer[0];
         order = new PassInfo[0];
@@ -1229,80 +1083,6 @@ public final class FrameGraph implements AutoCloseable {
         dirty = true;
         if (failure != null) {
             throw failure;
-        }
-    }
-
-    /** A pooled buffer, reachable by device address. */
-    @AllowAllocation("building the graph, when it changes")
-    private final class PhysicalBuffer {
-        final GpuBuffer buffer;
-        final long size;
-        final int usage;
-        final boolean shared;
-        long retireAt;
-
-        PhysicalBuffer(BufferSlot slot) {
-            size = slot.size;
-            usage = slot.usage;
-            shared = slot.shared;
-            int all = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-            buffer = shared ? GpuBuffer.deviceLocal(device, size, all, graphicsQueue.family(), computeQueue.family())
-                : GpuBuffer.deviceLocal(device, size, all);
-        }
-    }
-
-    /** A pooled image with its bindless slots. */
-    @AllowAllocation("building the graph, when it changes")
-    private final class Physical {
-        GpuImage image; // these three swap between a history's two images
-        final int width;
-        final int height;
-        final int format;
-        final int usage;
-        final boolean shared;
-        final int mips;
-        int sampled;
-        int[] storage; // a slot per mip level
-        long retireAt;
-
-        Physical(Slot slot) {
-            width = slot.width;
-            height = slot.height;
-            format = slot.format;
-            usage = slot.usage;
-            shared = slot.shared;
-            mips = slot.mips;
-            image = shared ? GpuImage.mipmapped(device, width, height, format, usage, aspect(format), mips,
-                graphicsQueue.family(), computeQueue.family())
-                : GpuImage.mipmapped(device, width, height, format, usage, aspect(format), mips);
-            sampled = (usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0 ? bindless.addSampled(image.view()) : -1;
-            storage = new int[(usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 ? mips : 0];
-            for (int mip = 0; mip < storage.length; mip++) {
-                storage[mip] = bindless.addStorage(image.view(mip));
-            }
-        }
-
-        /** Exchanges images (and their slots) with {@code other}: a history's roles, frame to frame. */
-        void swap(Physical other) {
-            GpuImage i = image;
-            image = other.image;
-            other.image = i;
-            int s = sampled;
-            sampled = other.sampled;
-            other.sampled = s;
-            int[] st = storage;
-            storage = other.storage;
-            other.storage = st;
-        }
-
-        void close() {
-            if (sampled >= 0) {
-                bindless.removeSampled(sampled);
-            }
-            for (int slot : storage) {
-                bindless.removeStorage(slot);
-            }
-            image.close();
         }
     }
 
