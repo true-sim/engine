@@ -15,7 +15,11 @@
 //     struct Water : IMaterial
 //     {
 //         typealias Parameters = WaterParameters;
-//         static Surface surface(WaterParameters p, MaterialRef m, SurfaceInput in) { ... }
+//         static Surface surface(WaterParameters p, MaterialRef m, SurfaceInput in)
+//         {
+//             Surface s = Surface.defaults(normalize(in.normal)); // every field set, then the type's own
+//             ...
+//         }
 //     };
 module materials;
 

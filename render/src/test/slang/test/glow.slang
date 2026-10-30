@@ -18,13 +18,11 @@ public struct Glow : IMaterial
 
     public static Surface surface(GlowParameters p, MaterialRef m, SurfaceInput in)
     {
-        Surface s;
+        Surface s = Surface.defaults(normalize(in.normal)); // every field set, the clear coat's too
         s.albedo = 0;
         s.metallic = 1; // no diffuse, no specular: only the glow
-        s.normal = normalize(in.normal);
         s.roughness = 1;
         s.emissive = p.color * p.strength;
-        s.occlusion = 1;
         return s;
     }
 };

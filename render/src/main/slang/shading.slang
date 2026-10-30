@@ -19,6 +19,25 @@ public struct Surface
     public float3 clearcoatNormal; // FEATURE_CLEARCOAT: the coat's normal, unit
     public float clearcoat;        // FEATURE_CLEARCOAT: its strength (0: none, every other surface)
     public float clearcoatRoughness;
+
+    /**
+     * A surface with every field set: a matte, mid-grey dielectric facing `normal` (unit), with no emission and no clear
+     * coat. Material types start from it and set what they have, so a field added later always has a value.
+     */
+    public static Surface defaults(float3 normal)
+    {
+        Surface s;
+        s.albedo = 0.8;
+        s.metallic = 0;
+        s.normal = normal;
+        s.roughness = 0.7;
+        s.emissive = 0;
+        s.occlusion = 1;
+        s.clearcoatNormal = normal;
+        s.clearcoat = 0;
+        s.clearcoatRoughness = 1;
+        return s;
+    }
 };
 
 /** Texture `slot` at `uv`, with its screen gradients `dx`, `dy`: trilinear and anisotropic, as materials sample. */

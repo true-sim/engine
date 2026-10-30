@@ -64,16 +64,12 @@ public float3 emission(MetallicRoughnessParameters p, SurfaceInput in)
 public Surface evaluate(MetallicRoughnessParameters p, SurfaceInput in)
 {
     float3 o = orm(p, in);
-    Surface s;
+    Surface s = Surface.defaults(normal(p, in));
     s.albedo = baseColor(p, in).rgb;
     s.metallic = saturate(o.z);
-    s.normal = normal(p, in);
     s.roughness = clamp(o.y, 0.03, 1.0); // a perfect mirror's highlight would be infinitely small
     s.emissive = emission(p, in);
     s.occlusion = o.x;
-    s.clearcoatNormal = s.normal;
-    s.clearcoat = 0;
-    s.clearcoatRoughness = 1;
     return s;
 }
 
