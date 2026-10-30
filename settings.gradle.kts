@@ -26,7 +26,7 @@ project(":engine-graph").projectDir = file("graph")
 project(":engine-render").projectDir = file("render")
 project(":engine-scene").projectDir = file("scene")
 
-val truesimRepos = listOf("build-logic", "common-math", "common-jobs", "scene")
+val truesimRepos = listOf("build-logic", "common-math", "common-jobs", "common-graph", "scene")
 for (repo in truesimRepos) {
     providers.gradleProperty("truesim.$repo").orElse("../$repo").get()
         .takeIf { file(it).isDirectory }?.let { includeBuild(it) }
