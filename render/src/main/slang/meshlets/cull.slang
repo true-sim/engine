@@ -8,7 +8,7 @@ import meshlets.common;
 
 struct CullPush
 {
-    ViewRef* views;        // the renderer's views, by index
+    View* views;           // the renderer's views of the frame, by index: its view constants array
     MeshEntry* meshes;
     Instance* instances;
     Chunk* chunks;
@@ -27,7 +27,7 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     Chunk chunk = push.chunks[group.x];
     uint v = chunk.view;
-    View view = push.views[v].view[0];
+    View view = push.views[v];
     Instance instance = relative(push.instances[chunk.instance], view);
     MeshEntry mesh = push.meshes[instance.mesh];
     uint local = chunk.firstMeshlet + thread.x;

@@ -28,6 +28,7 @@ import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 
+import com.truesim.engine.render.layout.ViewLayout;
 import com.truesim.common.math.color.Color;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -618,6 +619,43 @@ class MeshletRendererTest {
         }
         assertThat(off).as("pixels off with floats alone").isGreaterThan(SIZE);
         camera.position(0, 0, 0);
+    }
+
+
+    @Test
+    void viewsLieInOneArrayWithTheFrameBeforesMatrixAndJitter() {
+        RenderView second = renderer.createView(ViewOptions.of(16, 64));
+        assertThat(second.address() - view.address()).isEqualTo((long) RenderView.BYTES * (second.index() - view.index()));
+        assertThat(renderer.viewConstantsAddress()).isEqualTo(view.address() - (long) RenderView.BYTES * view.index());
+        Camera moving = new Camera().position(10, 0, 0).set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        second.jitter(0.25f, -0.5f).output(SIZE, SIZE / 2).set(moving, 1, MeshletRenderer.MODE_WHITE);
+        // The first time, the frame before is this one.
+        float[] matrix = moving.viewProjection().clone();
+        for (int i = 0; i < 16; i++) {
+            assertThat(second.getFloat(ViewLayout.PREVIOUS_VIEW_PROJECTION + 4L * i)).isEqualTo(matrix[i]);
+        }
+        assertThat(second.getFloat(ViewLayout.JITTER)).isEqualTo(0.25f);
+        assertThat(second.getFloat(ViewLayout.PREVIOUS_JITTER)).isZero();
+        // Moved 3 units along x: a point fixed in the world, relative to the new camera, lands where it was before.
+        moving.position(13, 0, 0);
+        second.jitter(-0.25f, 0.5f).set(moving, 1, MeshletRenderer.MODE_WHITE);
+        float[] previous = new float[16];
+        for (int i = 0; i < 16; i++) {
+            previous[i] = second.getFloat(ViewLayout.PREVIOUS_VIEW_PROJECTION + 4L * i);
+        }
+        float[] point = {-3, 0.5f, -4}; // relative to the camera at 13: the world point (10, 0.5, -4)
+        float[] before = {0, 0.5f, -4}; // relative to the camera at 10
+        for (int row = 0; row < 4; row++) {
+            float now = previous[row] * point[0] + previous[4 + row] * point[1] + previous[8 + row] * point[2]
+                + previous[12 + row];
+            float then = matrix[row] * before[0] + matrix[4 + row] * before[1] + matrix[8 + row] * before[2]
+                + matrix[12 + row];
+            assertThat(now).isCloseTo(then, org.assertj.core.data.Offset.offset(1e-4f));
+        }
+        assertThat(second.getFloat(ViewLayout.PREVIOUS_JITTER)).isEqualTo(0.25f);
+        assertThat(second.getFloat(ViewLayout.PREVIOUS_JITTER + 4)).isEqualTo(-0.5f);
+        assertThat(second.getFloat(ViewLayout.JITTER)).isEqualTo(-0.25f);
+        assertThatIllegalArgumentException().isThrownBy(() -> second.output(-1, 1));
     }
 
     @Test

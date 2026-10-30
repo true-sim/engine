@@ -70,6 +70,7 @@ public bool drawnIn(Instance instance, View view)
  * positions relative to it. A view may look from an eye off that position (a light's shadow map from a camera's
  * position): the cone test and level selection use the eye.
  */
+[HostLayout]
 public struct View
 {
     public float4x4 viewProjection;
@@ -92,7 +93,12 @@ public struct View
     public ViewLists lists;        // where culling lists what the view draws
     public uint* visibility;       // per instance: 1 if the view saw it the last time its late phase looked; or null
     public uint binIndices;        // the indexed path's room in each raster bin but the first, after maxIndices
-    public uint pad3;              // 352 bytes in all
+    public uint pad3;
+    public float4x4 previousViewProjection; // the frame before's, from positions relative to this frame's camera
+    public float2 jitter;          // the projection's subpixel offset, in pixels (temporal antialiasing)
+    public float2 previousJitter;  // the frame before's
+    public uint2 outputSize;       // the pixels it renders to
+    public uint2 pad4;             // 448 bytes in all: views lie in one array, one after another
 };
 
 /**
@@ -134,12 +140,6 @@ public uint binIndexCapacity(View view, uint bin)
 {
     return bin == 0 ? view.maxIndices : view.binIndices;
 }
-
-/** A view's place in a renderer's table of views. */
-public struct ViewRef
-{
-    public View* view;
-};
 
 /**
  * `instance` relative to `view`'s camera: its world position minus the camera's, the high parts and the rest apart,
