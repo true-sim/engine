@@ -4,6 +4,14 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.util.vma.Vma.VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.util.vma.Vma.vmaCreateAllocator;
 import static org.lwjgl.util.vma.Vma.vmaDestroyAllocator;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT;
+import static org.lwjgl.vulkan.EXTDeviceFault.VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT;
+import static org.lwjgl.vulkan.EXTDeviceFault.vkGetDeviceFaultInfoEXT;
 import static org.lwjgl.vulkan.EXTMeshShader.VK_EXT_MESH_SHADER_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRFragmentShaderBarycentric.VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRFragmentShaderBarycentric.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR;
@@ -14,6 +22,8 @@ import static org.lwjgl.vulkan.KHRRayQuery.VK_KHR_RAY_QUERY_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRRayQuery.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
 import static org.lwjgl.vulkan.EXTMeshShader.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+import static org.lwjgl.vulkan.VK10.VK_ERROR_DEVICE_LOST;
+import static org.lwjgl.vulkan.VK10.VK_INCOMPLETE;
 import static org.lwjgl.vulkan.VK10.VK_SUCCESS;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -67,9 +77,14 @@ import org.lwjgl.vulkan.VkCommandBufferSubmitInfo;
 import org.lwjgl.vulkan.VkCommandPoolCreateInfo;
 import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkDeviceCreateInfo;
+import org.lwjgl.vulkan.VkDeviceFaultAddressInfoEXT;
+import org.lwjgl.vulkan.VkDeviceFaultCountsEXT;
+import org.lwjgl.vulkan.VkDeviceFaultInfoEXT;
+import org.lwjgl.vulkan.VkDeviceFaultVendorInfoEXT;
 import org.lwjgl.vulkan.VkDeviceQueueCreateInfo;
 import org.lwjgl.vulkan.VkFenceCreateInfo;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
+import org.lwjgl.vulkan.VkPhysicalDeviceFaultFeaturesEXT;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
 import org.lwjgl.vulkan.VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceProperties;
@@ -116,6 +131,10 @@ public final class VulkanDevice implements AutoCloseable {
     private final boolean primitiveIds;
     private final float maxAnisotropy;
     private final boolean swapchains;
+    /** Whether the driver can say what went wrong when the device is lost (VK_EXT_device_fault). */
+    private final boolean faults;
+    /** Whether a call checked by {@link #check} found the device lost: only then may the driver be asked why. */
+    private volatile boolean lost;
     /** With validation on, the buffers and images made on the device and not closed, with where each was made. */
     private final Map<Object, Throwable> children;
     private volatile boolean closed;
@@ -239,6 +258,11 @@ public final class VulkanDevice implements AutoCloseable {
                 structures.pNext(features13.pNext());
                 features13.pNext(queries.address());
             }
+            this.faults = gpu.supports(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+            if (faults) {
+                features13.pNext(VkPhysicalDeviceFaultFeaturesEXT.calloc(stack).sType$Default().deviceFault(true)
+                    .pNext(features13.pNext()).address());
+            }
             VkPhysicalDeviceVulkan12Features features12 = VkPhysicalDeviceVulkan12Features.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES)
                 .pNext(features13.address())
@@ -272,7 +296,7 @@ public final class VulkanDevice implements AutoCloseable {
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
                 .pNext(features.address())
                 .pQueueCreateInfos(queues.flip())
-                .ppEnabledExtensionNames(extensions(stack, swapchains, meshShaders, barycentrics, rayTracing));
+                .ppEnabledExtensionNames(extensions(stack, swapchains, meshShaders, barycentrics, rayTracing, faults));
             PointerBuffer device = stack.mallocPointer(1);
             Vulkan.check(vkCreateDevice(gpu.handle(), info, null, device), "Could not create a device on " + gpu.name());
             this.handle = new VkDevice(device.get(0), gpu.handle(), info, apiVersion);
@@ -280,7 +304,7 @@ public final class VulkanDevice implements AutoCloseable {
             for (int family : distinct.keySet()) {
                 PointerBuffer queue = stack.mallocPointer(1);
                 vkGetDeviceQueue(handle, family, 0, queue);
-                byFamily.put(family, new Queue(new org.lwjgl.vulkan.VkQueue(queue.get(0), handle), family));
+                byFamily.put(family, new Queue(new org.lwjgl.vulkan.VkQueue(queue.get(0), handle), family, this));
             }
             this.graphics = byFamily.get(graphicsFamily.index());
             this.compute = byFamily.get(computeFamily.index());
@@ -341,8 +365,11 @@ public final class VulkanDevice implements AutoCloseable {
     }
 
     private static PointerBuffer extensions(MemoryStack stack, boolean swapchains, boolean meshShaders,
-        boolean barycentrics, boolean rayTracing) {
-        PointerBuffer names = stack.mallocPointer(6);
+        boolean barycentrics, boolean rayTracing, boolean faults) {
+        PointerBuffer names = stack.mallocPointer(7);
+        if (faults) {
+            names.put(stack.UTF8(VK_EXT_DEVICE_FAULT_EXTENSION_NAME));
+        }
         if (swapchains) {
             names.put(stack.UTF8(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
         }
@@ -440,6 +467,121 @@ public final class VulkanDevice implements AutoCloseable {
 
     public VkDevice handle() {
         return handle;
+    }
+
+    /**
+     * Throws like {@link Vulkan#check} for {@code result}, what a call on this device returned: a lost device's
+     * exception also says what the driver says went wrong ({@link #faultReport()}).
+     */
+    public void check(int result, String what) {
+        if (result == VK_ERROR_DEVICE_LOST) {
+            lost = true;
+            String report = faultReport();
+            throw new DeviceLostException(report == null ? what : what + ": " + report);
+        }
+        Vulkan.check(result, what);
+    }
+
+    /**
+     * What the driver says went wrong, once a call checked by {@link #check} found the device lost (VK_EXT_device_fault;
+     * the driver may only be asked then): the fault, the addresses it involved, each with the buffer it falls in (with
+     * validation on, which notes where each was made), and the vendor's codes. Null before, or when the driver cannot
+     * say.
+     */
+    @AllowAllocation("failures")
+    public String faultReport() {
+        if (!faults || !lost) {
+            return null;
+        }
+        try (MemoryStack stack = stackPush()) {
+            VkDeviceFaultCountsEXT counts = VkDeviceFaultCountsEXT.calloc(stack).sType$Default();
+            if (vkGetDeviceFaultInfoEXT(handle, counts, null) != VK_SUCCESS) {
+                return null;
+            }
+            int addressCount = counts.addressInfoCount();
+            int vendorCount = counts.vendorInfoCount();
+            VkDeviceFaultAddressInfoEXT.Buffer addresses = VkDeviceFaultAddressInfoEXT.calloc(Math.max(1, addressCount),
+                stack);
+            VkDeviceFaultVendorInfoEXT.Buffer vendors = VkDeviceFaultVendorInfoEXT.calloc(Math.max(1, vendorCount), stack);
+            counts.vendorBinarySize(0); // the vendor's binary dump: not read
+            VkDeviceFaultInfoEXT info = VkDeviceFaultInfoEXT.calloc(stack).sType$Default().pAddressInfos(addresses)
+                .pVendorInfos(vendors);
+            int result = vkGetDeviceFaultInfoEXT(handle, counts, info);
+            if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
+                return null;
+            }
+            StringBuilder report = new StringBuilder(info.descriptionString());
+            for (int i = 0; i < Math.min(addressCount, counts.addressInfoCount()); i++) {
+                var address = addresses.get(i);
+                report.append("; ").append(addressReport(address.addressType(), address.reportedAddress(),
+                    address.addressPrecision()));
+            }
+            for (int i = 0; i < Math.min(vendorCount, counts.vendorInfoCount()); i++) {
+                var vendor = vendors.get(i);
+                report.append(String.format("; %s (code 0x%x, data 0x%x)", vendor.descriptionString(),
+                    vendor.vendorFaultCode(), vendor.vendorFaultData()));
+            }
+            return report.toString();
+        }
+    }
+
+    /** Whether the driver can say what went wrong when the device is lost (VK_EXT_device_fault). */
+    boolean reportsFaults() {
+        return faults;
+    }
+
+    /**
+     * One address of a fault report: what was done there ({@code VK_DEVICE_FAULT_ADDRESS_TYPE_*}), the address, and the
+     * buffers it may fall in. The address is known to {@code precision}, a power of two: it lies in the aligned range of
+     * that size.
+     */
+    @AllowAllocation("failures")
+    String addressReport(int type, long address, long precision) {
+        long size = Math.max(1, precision);
+        long low = address & -size;
+        return String.format("%s at 0x%x (to 0x%x): %s", faultKind(type), address, size, bufferAt(low, low + size));
+    }
+
+    private static String faultKind(int type) {
+        return switch (type) {
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT -> "invalid read";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT -> "invalid write";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT -> "invalid execution";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT -> "instruction pointer (unknown)";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT -> "instruction pointer (invalid)";
+            case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT -> "instruction pointer (fault)";
+            default -> "address type " + type;
+        };
+    }
+
+    /** The open buffers overlapping addresses [from, to), with where each was made; validation only. */
+    private String bufferAt(long from, long to) {
+        if (children == null) {
+            return "buffers unknown without validation";
+        }
+        StringBuilder found = new StringBuilder();
+        synchronized (children) {
+            children.forEach((child, made) -> {
+                if (child instanceof GpuBuffer buffer && buffer.hasDeviceAddress()) {
+                    long start = buffer.deviceAddress();
+                    if (start < to && from < start + buffer.size()) {
+                        found.append(found.isEmpty() ? "" : ", ").append(String.format("%s at 0x%x, made at %s",
+                            buffer, start, madeAt(made)));
+                    }
+                }
+            });
+        }
+        return found.isEmpty() ? "in no buffer of the device" : found.toString();
+    }
+
+    /** The first caller outside this package in {@code made}'s stack: who asked for the buffer. */
+    private static String madeAt(Throwable made) {
+        for (StackTraceElement frame : made.getStackTrace()) {
+            if (!frame.getClassName().startsWith(VulkanDevice.class.getPackageName() + ".")) {
+                return frame.toString();
+            }
+        }
+        return "?";
     }
 
     /** The Vulkan version used on this device: 1.3, or 1.4 when both the GPU and the instance have it. */
@@ -560,7 +702,7 @@ public final class VulkanDevice implements AutoCloseable {
 
     /** Waits until the device has finished all work, e.g. before destroying resources. */
     public void waitIdle() {
-        Vulkan.check(vkDeviceWaitIdle(handle), "Could not wait for the device");
+        check(vkDeviceWaitIdle(handle), "Could not wait for the device");
     }
 
     /**
@@ -596,7 +738,7 @@ public final class VulkanDevice implements AutoCloseable {
                         .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO)
                         .commandBuffer(commandBuffer));
                 queue.submit(submit, fence.get(0));
-                Vulkan.check(vkWaitForFences(handle, fence, true, Long.MAX_VALUE), "Could not wait for the commands");
+                check(vkWaitForFences(handle, fence, true, Long.MAX_VALUE), "Could not wait for the commands");
             } finally {
                 vkDestroyFence(handle, fence.get(0), null);
                 vkDestroyCommandPool(handle, pool.get(0), null);

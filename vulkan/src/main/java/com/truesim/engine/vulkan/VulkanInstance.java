@@ -25,6 +25,7 @@ import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_APPLICATION_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
 import static org.lwjgl.vulkan.EXTValidationFeatures.VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME;
 import static org.lwjgl.vulkan.EXTValidationFeatures.VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+import static org.lwjgl.vulkan.EXTValidationFeatures.VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT;
 import static org.lwjgl.vulkan.EXTValidationFeatures.VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
 import static org.lwjgl.vulkan.VK10.vkCreateInstance;
 import static org.lwjgl.vulkan.VK10.vkDestroyInstance;
@@ -158,11 +159,18 @@ public final class VulkanInstance implements AutoCloseable {
             if (debug) {
                 info.pNext(messengerInfo.address()); // also covers instance creation and destruction
             }
-            if (layer && builder.synchronization) {
+            if (layer && (builder.synchronization || builder.gpuAssisted)) {
+                IntBuffer enabled = stack.mallocInt(2);
+                if (builder.synchronization) {
+                    enabled.put(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
+                }
+                if (builder.gpuAssisted) {
+                    enabled.put(VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT);
+                }
                 VkValidationFeaturesEXT features = VkValidationFeaturesEXT.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT)
                     .pNext(info.pNext())
-                    .pEnabledValidationFeatures(stack.ints(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT));
+                    .pEnabledValidationFeatures(enabled.flip());
                 info.pNext(features.address());
             }
             PointerBuffer pointer = stack.mallocPointer(1);
@@ -198,6 +206,7 @@ public final class VulkanInstance implements AutoCloseable {
         private String applicationName = "true-sim";
         private boolean validation;
         private boolean synchronization;
+        private boolean gpuAssisted;
         private boolean surfaces = true;
         private int maxApiVersion = MAX_API_VERSION;
 
@@ -221,6 +230,16 @@ public final class VulkanInstance implements AutoCloseable {
          */
         public Builder synchronizationValidation(boolean on) {
             this.synchronization = on;
+            return this;
+        }
+
+        /**
+         * With {@link #validation}, also checks what shaders do as they run (GPU-assisted validation): reads and writes
+         * through buffer device addresses outside every buffer, and descriptor indices out of range or unwritten (much
+         * slower; for hunting faults).
+         */
+        public Builder gpuAssistedValidation(boolean on) {
+            this.gpuAssisted = on;
             return this;
         }
 
