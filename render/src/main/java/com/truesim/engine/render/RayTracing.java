@@ -58,6 +58,10 @@ import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.graph.Buffer;
+import com.truesim.engine.graph.BufferAccess;
+import com.truesim.engine.graph.ExternalBuffer;
+import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.render.layout.InstancesPush;
 import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Barriers;
@@ -327,12 +331,37 @@ public final class RayTracing implements AutoCloseable {
      * nothing.
      */
     public void buildTopLevel(VkCommandBuffer commands, RenderView view) {
+        buildTopLevel(commands, view, false);
+    }
+
+    /**
+     * Declares that {@code pass} builds the top level ({@link #buildTopLevel(VkCommandBuffer, RenderView, boolean)}):
+     * it writes the instance records, the scratch and the structure. Returns the structure as a buffer of the build,
+     * for passes tracing rays through it to read ({@link BufferAccess#ACCELERATION_STRUCTURE_READ}).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public Buffer declareTopLevelBuild(GraphBuilder g, GraphBuilder.PassBuilder pass) {
+        Buffer structure = g.importBuffer(new ExternalBuffer("top level", top.buffer()));
+        pass.write(g.importBuffer(new ExternalBuffer("top level instances", instances)), BufferAccess.STORAGE_WRITE)
+            .write(g.importBuffer(new ExternalBuffer("top level scratch", topScratch)),
+                BufferAccess.ACCELERATION_STRUCTURE_BUILD)
+            .write(structure, BufferAccess.ACCELERATION_STRUCTURE_BUILD);
+        return structure;
+    }
+
+    /**
+     * Like {@link #buildTopLevel(VkCommandBuffer, RenderView)}, in a frame graph pass that, with {@code declared},
+     * declares the build ({@link #declareTopLevelBuild}) and whose readers declare tracing: the graph orders the
+     * structure with them, not barriers of its own.
+     */
+    public void buildTopLevel(VkCommandBuffer commands, RenderView view, boolean declared) {
         GpuScene scene = view.renderer().scene();
         int count = Math.min(scene.highWater(), maxInstances);
         scene.upload(commands);
-        // Whatever traced the top level before (the last frame) is done with it before it is rebuilt.
-        Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        if (!declared) { // whatever traced the top level before (the last frame) is done with it before it is rebuilt
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        }
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, PUSH_BYTES);
             memPutLong(push + InstancesPush.INSTANCES, scene.instanceAddress());
@@ -381,9 +410,11 @@ public final class RayTracing implements AutoCloseable {
             memPutAddress(ranges, range);
             nvkCmdBuildAccelerationStructuresKHR(commands, 1, info, ranges);
         }
-        Barriers.memory(commands, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-            VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-            VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+        if (!declared) {
+            Barriers.memory(commands, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+        }
     }
 
     private static VkAccelerationStructureGeometryKHR.Buffer instancesGeometry(MemoryStack stack, long address) {
@@ -420,8 +451,9 @@ public final class RayTracing implements AutoCloseable {
     }
 
     private Structure create(long size, int type) {
+        // Traced by the graphics queue and by async compute (ray-traced shadows): shared by both, no ownership to move.
         GpuBuffer buffer = GpuBuffer.deviceLocal(device, size, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
-            | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, device.graphics().family(), device.compute().family());
         try (MemoryStack stack = stackPush()) {
             LongBuffer handle = stack.mallocLong(1);
             Vulkan.check(vkCreateAccelerationStructureKHR(device.handle(), VkAccelerationStructureCreateInfoKHR

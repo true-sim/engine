@@ -72,8 +72,11 @@ public final class Lights implements AutoCloseable {
         this.capacity = capacity;
         this.shadowCapacity = shadowCapacity;
         int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-        lights = FrameBuffer.create(device, (long) LIGHT_BYTES * capacity, usage, slots);
-        shadows = FrameBuffer.create(device, (long) SHADOW_BYTES * shadowCapacity, usage, slots);
+        // Read by the graphics queue and by async compute (light clusters, ray-traced shadows): shared by both.
+        int graphics = device.graphics().family();
+        int compute = device.compute().family();
+        lights = FrameBuffer.create(device, (long) LIGHT_BYTES * capacity, usage, slots, graphics, compute);
+        shadows = FrameBuffer.create(device, (long) SHADOW_BYTES * shadowCapacity, usage, slots, graphics, compute);
     }
 
     /**

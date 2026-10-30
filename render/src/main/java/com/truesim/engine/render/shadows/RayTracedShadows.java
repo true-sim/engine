@@ -87,7 +87,7 @@ public final class RayTracedShadows implements Technique {
         TracedPush push = new TracedPush().width(mask.width()).height(mask.height()).offset(offset).light(light);
         g.pass("ray-traced shadows of light " + light)
             .read(depth, Access.SAMPLED_COMPUTE)
-            .read(topLevel, BufferAccess.STORAGE_READ)
+            .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ)
             .write(mask, Access.STORAGE_WRITE)
             .async()
             .record(ctx -> trace(ctx, pipeline, depth, mask, push));
