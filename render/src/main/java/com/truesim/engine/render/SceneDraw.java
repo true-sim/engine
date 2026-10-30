@@ -56,7 +56,7 @@ public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, 
             case SHADED -> g.create(name + " color", width, height, output.colorFormat());
             case IDS -> g.create(name + " ids", width, height, output.colorFormat());
         };
-        Buffer lights = output.kind() == SurfaceOutput.Kind.SHADED ? g.optionalBuffer(Keys.LIGHT_LIST) : null;
+        Buffer lights = output.kind() == SurfaceOutput.Kind.SHADED ? g.optional(Keys.LIGHT_LIST) : null;
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs());
         Targets targets = new Targets(depth, color, lights, shadows);
         boolean load = false;

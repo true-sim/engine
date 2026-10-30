@@ -68,7 +68,7 @@ class GraphTechniquesTest {
     private static final int SIZE = 64;
     private static final MetallicRoughnessParameters MR = MetallicRoughnessParameters.DEFAULTS;
     private static final float HALF = (float) Math.sqrt(0.5);
-    private static final Key EDGE = Key.of("edge");
+    private static final Key<Image> EDGE = Key.image("test.edge");
 
     private VulkanInstance instance;
     private VulkanDevice device;
@@ -145,7 +145,7 @@ class GraphTechniquesTest {
     /** Provides {@link #EDGE}: the pattern, white left and black right. */
     private final class Edge implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(EDGE);
         }
 
@@ -170,9 +170,9 @@ class GraphTechniquesTest {
     }
 
     /** Provides {@code key}: the blur of {@link #EDGE}, through the shared request. */
-    private record Blurred(Key key, int radius) implements Technique {
+    private record Blurred(Key<Image> key, int radius) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(key);
         }
 
@@ -183,9 +183,9 @@ class GraphTechniquesTest {
     }
 
     /** Provides {@code out}: the left half of {@code left} beside the right half of {@code right}. */
-    private record Halves(Key out, Key left, Key right) implements Technique {
+    private record Halves(Key<Image> out, Key<Image> left, Key<Image> right) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(out);
         }
 
@@ -249,12 +249,12 @@ class GraphTechniquesTest {
     /** Copies {@link Keys#SCENE_COLOR} of each frame into the readback buffer of the frame's slot. */
     private record Readback(FrameGraph graph, GpuBuffer[] readbacks) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of();
         }
 
         @Override
-        public List<Key> modifies() {
+        public List<Key<?>> modifies() {
             return List.of(Keys.SCENE_COLOR);
         }
 
@@ -304,7 +304,7 @@ class GraphTechniquesTest {
             assertThat(pool.vertexBase(quad)).isNotNegative();
             graph.add(new Technique() {
                 @Override
-                public List<Key> provides() {
+                public List<Key<?>> provides() {
                     return List.of(EDGE);
                 }
 
@@ -747,8 +747,8 @@ class GraphTechniquesTest {
         Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
         geometry.setView(view, camera, 1, MeshletRenderer.MODE_WHITE);
         // Two techniques asking for the same depth-only draw of the camera, with occlusion culling: drawn once.
-        Key first = Key.of("first");
-        Key second = Key.of("second");
+        Key<Image> first = Key.image("test.first");
+        Key<Image> second = Key.image("test.second");
         SceneDraw draw = new SceneDraw(geometry, view, null, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, SIZE, SIZE,
             true);
         graph.add(new DepthCopy(first, draw)).add(new DepthCopy(second, draw))
@@ -777,9 +777,9 @@ class GraphTechniquesTest {
     }
 
     /** Provides {@code key}: the depth of {@code draw}, copied into the red channel of a color image. */
-    private record DepthCopy(Key key, SceneDraw draw) implements Technique {
+    private record DepthCopy(Key<Image> key, SceneDraw draw) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(key);
         }
 
@@ -855,10 +855,10 @@ class GraphTechniquesTest {
             for (int i = 0; i < depth.length; i++) {
                 upload.memory().setAtIndex(ValueLayout.JAVA_FLOAT, i, depth[i]);
             }
-            Key depthKey = Key.of("depth");
+            Key<Image> depthKey = Key.image("test.depth");
             graph.add(new Technique() {
                 @Override
-                public List<Key> provides() {
+                public List<Key<?>> provides() {
                     return List.of(depthKey);
                 }
 
@@ -878,7 +878,7 @@ class GraphTechniquesTest {
                 }
             }).add(new Technique() {
                 @Override
-                public List<Key> provides() {
+                public List<Key<?>> provides() {
                     return List.of(EDGE);
                 }
 
@@ -1008,8 +1008,8 @@ class GraphTechniquesTest {
         back.set(new Camera().position(0, 0, -20).set(0, 0, 1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1), 1,
             MeshletRenderer.MODE_WHITE);
         SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-        Key first = Key.of("first");
-        Key second = Key.of("second");
+        Key<Image> first = Key.image("test.first");
+        Key<Image> second = Key.image("test.second");
         graph.add(new DepthCopy(first, new SceneDraw(geometry, view, null, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT,
                 SIZE, SIZE, true)))
             .add(new DepthCopy(second, new SceneDraw(geometry, back, null, SurfaceOutput.depth(),
@@ -1039,9 +1039,9 @@ class GraphTechniquesTest {
 
     @Test
     void blursSmoothTheEdgeAndAreComputedOnceForEveryone() {
-        Key soft = Key.of("soft");
-        Key alsoSoft = Key.of("also soft");
-        Key both = Key.of("both");
+        Key<Image> soft = Key.image("test.soft");
+        Key<Image> alsoSoft = Key.image("test.alsoSoft");
+        Key<Image> both = Key.image("test.both");
         graph.add(new Edge())
             .add(new Blurred(soft, 4))
             .add(new Blurred(alsoSoft, 4))
@@ -1064,7 +1064,7 @@ class GraphTechniquesTest {
         graph.close();
         graph = new FrameGraph(device, 2).add(new Edge()).add(new Technique() {
             @Override
-            public List<Key> provides() {
+            public List<Key<?>> provides() {
                 return List.of(soft);
             }
 

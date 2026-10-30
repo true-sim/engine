@@ -52,14 +52,14 @@ import org.lwjgl.vulkan.VkBufferImageCopy;
 class CustomPassTest {
 
     private static final int SIZE = 8;
-    private static final Key OUT = Key.of("tinted");
+    private static final Key<Image> OUT = Key.image("test.tinted");
 
     /** Reads the instances' positions with a compute pass, then draws the target tinted by one of them. */
     private record Tint(GpuScene scene, ExternalBuffer instances, ExternalBuffer readback, Pipeline positions,
         Pipeline tint, Push push) implements Technique {
 
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(OUT);
         }
 

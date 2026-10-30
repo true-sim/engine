@@ -60,7 +60,7 @@ public final class ClusteredForwardShading implements Technique {
     }
 
     @Override
-    public List<Key> provides() {
+    public List<Key<?>> provides() {
         return List.of(Keys.SCENE_COLOR, Keys.SCENE_DEPTH);
     }
 

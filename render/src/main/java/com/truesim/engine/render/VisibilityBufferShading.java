@@ -90,7 +90,7 @@ public final class VisibilityBufferShading implements Technique {
     }
 
     @Override
-    public List<Key> provides() {
+    public List<Key<?>> provides() {
         return List.of(Keys.SCENE_COLOR, Keys.SCENE_DEPTH);
     }
 
@@ -99,7 +99,7 @@ public final class VisibilityBufferShading implements Technique {
     public void build(GraphBuilder g) {
         SceneDraw.Targets targets = g.request(new SceneDraw(geometry, view, null, SurfaceOutput.ids(), depthFormat,
             width, height, occlusion && view.options().occlusion()));
-        Buffer lights = g.optionalBuffer(Keys.LIGHT_LIST);
+        Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs());
         // With inline ray shadows, the variant tracing them, where the device can.
         boolean traced = shadows != null && shadows.traced() && g.device().rayTracing();

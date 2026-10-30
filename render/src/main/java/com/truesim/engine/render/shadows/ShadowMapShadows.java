@@ -59,19 +59,19 @@ public final class ShadowMapShadows implements Technique {
     }
 
     @Override
-    public List<Key> provides() {
+    public List<Key<?>> provides() {
         return List.of();
     }
 
     @Override
-    public List<Key> modifies() {
+    public List<Key<?>> modifies() {
         return List.of(Keys.LIGHT_LIST);
     }
 
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
-        g.modifyBuffer(Keys.LIGHT_LIST);
+        g.modify(Keys.LIGHT_LIST);
         view.filter(-1, true); // the map holds the casters only
         Image map = g.request(new SceneDraw(geometry, view, camera, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT,
             size, size, false)).depth();

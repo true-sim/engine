@@ -4,6 +4,7 @@ import static com.truesim.testing.AllocationAssertions.assertAllocationFree;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
@@ -53,10 +54,10 @@ import org.lwjgl.vulkan.VkImageSubresourceRange;
 class FrameGraphTest {
 
     private static final int SIZE = 16;
-    private static final Key A = Key.of("a");
-    private static final Key B = Key.of("b");
-    private static final Key UNUSED = Key.of("unused");
-    private static final Key OUT = Key.of("out");
+    private static final Key<Image> A = Key.image("test.a");
+    private static final Key<Image> B = Key.image("test.b");
+    private static final Key<Image> UNUSED = Key.image("test.unused");
+    private static final Key<Image> OUT = Key.image("test.out");
 
     private VulkanInstance instance;
     private VulkanDevice device;
@@ -105,25 +106,30 @@ class FrameGraphTest {
 
     // ---------------------------------------------------------------- techniques of the tests
 
+    /** A key's name without its namespace, for pass names: {@code test.a} as {@code a}. */
+    static String label(Key<?> key) {
+        return key.name().substring(key.name().indexOf('.') + 1);
+    }
+
     /** Provides {@code key}: an image cleared to {@code rgba}. */
-    record Fill(Key key, int size, float... rgba) implements Technique {
+    record Fill(Key<Image> key, int size, float... rgba) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(key);
         }
 
         @Override
         public void build(GraphBuilder g) {
-            Image image = g.create(key.name(), size, size, VK_FORMAT_R8G8B8A8_UNORM);
-            g.pass("fill " + key).write(image, Access.TRANSFER_DST).record(ctx -> clear(ctx, image, rgba));
+            Image image = g.create(label(key), size, size, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("fill " + label(key)).write(image, Access.TRANSFER_DST).record(ctx -> clear(ctx, image, rgba));
             g.provide(key, image);
         }
     }
 
     /** Provides {@code out}: the left half from {@code left}, the right half from {@code right}. */
-    record Halves(Key out, Key left, Key right) implements Technique {
+    record Halves(Key<Image> out, Key<Image> left, Key<Image> right) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(out);
         }
 
@@ -131,8 +137,8 @@ class FrameGraphTest {
         public void build(GraphBuilder g) {
             Image l = g.require(left);
             Image r = g.require(right);
-            Image image = g.createLike(out.name(), l, 1);
-            g.pass("halves " + out)
+            Image image = g.createLike(label(out), l, 1);
+            g.pass("halves " + label(out))
                 .read(l, Access.TRANSFER_SRC)
                 .read(r, Access.TRANSFER_SRC)
                 .write(image, Access.TRANSFER_DST)
@@ -175,9 +181,9 @@ class FrameGraphTest {
      * Provides {@code out}: the async copy of {@code a}, left, beside {@code b}, right. Built as a, the copy, b, so
      * filling b on the graphics queue does not wait for the copy.
      */
-    record Overlapping(Key out, Key a, Key b) implements Technique {
+    record Overlapping(Key<Image> out, Key<Image> a, Key<Image> b) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(out);
         }
 
@@ -185,8 +191,8 @@ class FrameGraphTest {
         public void build(GraphBuilder g) {
             Image copied = g.request(new AsyncCopy(g.require(a)));
             Image right = g.require(b);
-            Image image = g.createLike(out.name(), copied, 1);
-            g.pass("halves " + out).read(copied, Access.TRANSFER_SRC).read(right, Access.TRANSFER_SRC)
+            Image image = g.createLike(label(out), copied, 1);
+            g.pass("halves " + label(out)).read(copied, Access.TRANSFER_SRC).read(right, Access.TRANSFER_SRC)
                 .write(image, Access.TRANSFER_DST).record(ctx -> {
                     copy(ctx, copied, image, 0, SIZE / 2);
                     copy(ctx, right, image, SIZE / 2, SIZE / 2);
@@ -196,9 +202,9 @@ class FrameGraphTest {
     }
 
     /** Provides {@code out}: {@code from} copied {@code times} times over, each copy its own pass. */
-    record Chain(Key out, Key from, int times) implements Technique {
+    record Chain(Key<Image> out, Key<Image> from, int times) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(out);
         }
 
@@ -206,7 +212,7 @@ class FrameGraphTest {
         public void build(GraphBuilder g) {
             Image image = g.require(from);
             for (int i = 0; i < times; i++) {
-                Image next = g.create(out.name() + " " + i, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                Image next = g.create(label(out) + " " + i, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
                 Image source = image;
                 g.pass("chain " + i).read(source, Access.TRANSFER_SRC).write(next, Access.TRANSFER_DST)
                     .record(ctx -> copy(ctx, source, next, 0, SIZE));
@@ -217,9 +223,9 @@ class FrameGraphTest {
     }
 
     /** Provides {@code out}: halves of the shared copy of {@code from} and of {@code other}. */
-    record UsesCopy(Key out, Key from, Key other) implements Technique {
+    record UsesCopy(Key<Image> out, Key<Image> from, Key<Image> other) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(out);
         }
 
@@ -227,8 +233,8 @@ class FrameGraphTest {
         public void build(GraphBuilder g) {
             Image copied = g.request(new Copy(g.require(from)));
             Image second = g.require(other);
-            Image image = g.createLike(out.name(), copied, 1);
-            g.pass("use " + out)
+            Image image = g.createLike(label(out), copied, 1);
+            g.pass("use " + label(out))
                 .read(copied, Access.TRANSFER_SRC)
                 .read(second, Access.TRANSFER_SRC)
                 .write(image, Access.TRANSFER_DST)
@@ -241,20 +247,20 @@ class FrameGraphTest {
     }
 
     /** Provides {@code key}: an image copied from a buffer filled with {@code rgba}, maybe on the async queue. */
-    record Packed(Key key, int rgba, boolean async) implements Technique {
+    record Packed(Key<Image> key, int rgba, boolean async) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(key);
         }
 
         @Override
         public void build(GraphBuilder g) {
-            Buffer buffer = g.createBuffer(key.name() + " texels", 4L * SIZE * SIZE);
-            GraphBuilder.PassBuilder fill = g.pass("fill " + key + " texels").write(buffer, BufferAccess.TRANSFER_DST);
+            Buffer buffer = g.createBuffer(label(key) + " texels", 4L * SIZE * SIZE);
+            GraphBuilder.PassBuilder fill = g.pass("fill " + label(key) + " texels").write(buffer, BufferAccess.TRANSFER_DST);
             (async ? fill.async() : fill).record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0,
                 VK_WHOLE_SIZE, rgba));
-            Image image = g.create(key.name(), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
-            g.pass("unpack " + key).read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+            Image image = g.create(label(key), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("unpack " + label(key)).read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
                 .record(ctx -> unpack(ctx, buffer, image));
             g.provide(key, image);
         }
@@ -296,7 +302,7 @@ class FrameGraphTest {
     }
 
     /** A technique built from a lambda, for the misuse tests. */
-    record Lambda(List<Key> provides, java.util.function.Consumer<GraphBuilder> builder) implements Technique {
+    record Lambda(List<Key<?>> provides, java.util.function.Consumer<GraphBuilder> builder) implements Technique {
         @Override
         public void build(GraphBuilder g) {
             builder.accept(g);
@@ -418,11 +424,11 @@ class FrameGraphTest {
 
     @Test
     void equalRequestsShareOneResult() {
-        Key other = Key.of("other");
+        Key<Image> other = Key.image("test.other");
         graph.add(new Fill(A, SIZE, 1, 0, 0, 1))
             .add(new Fill(B, SIZE, 0, 0, 1, 1))
             .add(new UsesCopy(other, A, B))
-            .add(new UsesCopy(Key.of("second"), A, B)) // requests the same copy, but nothing needs it
+            .add(new UsesCopy(Key.image("test.second"), A, B)) // requests the same copy, but nothing needs it
             .add(new Halves(OUT, other, A))
             .output(OUT, output);
         int[] texels = frame();
@@ -431,8 +437,8 @@ class FrameGraphTest {
         assertThat(texels[SIZE - 1]).isEqualTo(RED);
 
         // Two consumers of one copy: the copy runs once.
-        Key both = Key.of("both");
-        Key second = Key.of("second2");
+        Key<Image> both = Key.image("test.both");
+        Key<Image> second = Key.image("test.second2");
         graph.close();
         graph = new FrameGraph(device, 2)
             .add(new Fill(A, SIZE, 0, 0, 1, 1))
@@ -451,7 +457,7 @@ class FrameGraphTest {
     @Test
     void imagesWhoseLifetimesDoNotOverlapShareMemory() {
         // fill a -> copy -> copy -> copy: the first and third images never live at once.
-        Key chained = Key.of("chained");
+        Key<Image> chained = Key.image("test.chained");
         graph.add(new Fill(A, SIZE, 0, 1, 0, 1))
             .add(new Lambda(List.of(chained), g -> {
                 Image one = g.request(new Copy(g.require(A)));
@@ -626,7 +632,7 @@ class FrameGraphTest {
 
     @Test
     void techniquesAndImplementationsSwap() {
-        Key copied = Key.of("copied");
+        Key<Image> copied = Key.image("test.copied");
         graph.add(new Fill(A, SIZE, 1, 0, 0, 1))
             .add(new UsesCopy(copied, A, A))
             .output(copied, output);
@@ -691,7 +697,7 @@ class FrameGraphTest {
 
     @Test
     void passesRecordInParallelChunksSubmittedInOrder() {
-        Key copied = Key.of("copied");
+        Key<Image> copied = Key.image("test.copied");
         graph.add(new Fill(A, SIZE, 1, 0, 0, 1))
             .add(new Fill(B, SIZE, 0, 1, 0, 1))
             .add(new Chain(copied, A, 9))
@@ -869,20 +875,20 @@ class FrameGraphTest {
     }
 
     /** Modifies {@code key} at {@code stage}: its columns {@code x} to {@code x + width} cleared to {@code rgba}. */
-    record Paint(Key key, int stage, int x, int width, float... rgba) implements Technique {
+    record Paint(Key<Image> key, int stage, int x, int width, float... rgba) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of();
         }
 
         @Override
-        public List<Key> modifies() {
+        public List<Key<?>> modifies() {
             return List.of(key);
         }
 
         @Override
-        public int stage() {
-            return stage;
+        public Order order() {
+            return Order.at(new Anchor("stage " + stage, stage)); // lower stages first
         }
 
         @Override
@@ -896,20 +902,20 @@ class FrameGraphTest {
     }
 
     /** Modifies {@code key} at {@code stage} by providing a new image: a copy, its columns from x cleared. */
-    record Replace(Key key, int stage, int x, float... rgba) implements Technique {
+    record Replace(Key<Image> key, int stage, int x, float... rgba) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of();
         }
 
         @Override
-        public List<Key> modifies() {
+        public List<Key<?>> modifies() {
             return List.of(key);
         }
 
         @Override
-        public int stage() {
-            return stage;
+        public Order order() {
+            return Order.at(new Anchor("stage " + stage, stage)); // lower stages first
         }
 
         @Override
@@ -948,33 +954,33 @@ class FrameGraphTest {
     }
 
     /** Provides {@code key}: a buffer of SIZE x SIZE texels of {@code rgba}. */
-    record FillBuffer(Key key, int rgba) implements Technique {
+    record FillBuffer(Key<Buffer> key, int rgba) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(key);
         }
 
         @Override
         public void build(GraphBuilder g) {
-            Buffer buffer = g.createBuffer(key.name(), 4L * SIZE * SIZE);
-            g.pass("fill " + key).write(buffer, BufferAccess.TRANSFER_DST)
+            Buffer buffer = g.createBuffer(label(key), 4L * SIZE * SIZE);
+            g.pass("fill " + label(key)).write(buffer, BufferAccess.TRANSFER_DST)
                 .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0, VK_WHOLE_SIZE, rgba));
             g.provide(key, buffer);
         }
     }
 
     /** Provides {@code out}: the texels of buffer {@code from}. */
-    record Unpack(Key out, Key from) implements Technique {
+    record Unpack(Key<Image> out, Key<Buffer> from) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(out);
         }
 
         @Override
         public void build(GraphBuilder g) {
-            Buffer buffer = g.requireBuffer(from);
-            Image image = g.create(out.name(), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
-            g.pass("unpack " + out).read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+            Buffer buffer = g.require(from);
+            Image image = g.create(label(out), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("unpack " + label(out)).read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
                 .record(ctx -> unpack(ctx, buffer, image));
             g.provide(out, image);
         }
@@ -982,27 +988,22 @@ class FrameGraphTest {
 
     @Test
     void keysNameBuffersToo() {
-        Key texels = Key.of("texels");
+        Key<Buffer> texels = Key.buffer("test.texels");
         graph.add(new FillBuffer(texels, RED)).add(new Unpack(OUT, texels)).output(OUT, output);
         assertThat(frame()).containsOnly(RED);
         // Modified in place, like images.
         graph.add(new Mod(List.of(), List.of(texels), g -> {
-            Buffer buffer = g.modifyBuffer(texels);
+            Buffer buffer = g.modify(texels);
             g.pass("paint texels").write(buffer, BufferAccess.TRANSFER_DST)
                 .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0, VK_WHOLE_SIZE, GREEN));
         }));
         assertThat(frame()).containsOnly(GREEN);
-        rejects(List.of(OUT), g -> g.provide(OUT, g.requireBuffer(A)), "a is an image, not a buffer");
-        rejects(List.of(OUT, texels), g -> {
-            g.provide(texels, g.createBuffer("t", 4));
-            g.provide(OUT, g.require(texels));
-        }, "texels is a buffer, not an image");
-        rejects(List.of(OUT), g -> g.provide(OUT, g.optionalBuffer(Key.of("none"))), "Not a buffer of this build");
-        rejects(List.of(OUT), g -> g.requireBuffer(Key.of("none")), "No technique provides none");
+        rejects(List.of(OUT), g -> g.provide(OUT, g.optional(Key.image("test.none"))), "Not an image of this build");
+        rejects(List.of(OUT), g -> g.require(Key.image("test.none")), "No technique provides test.none");
     }
 
     /** A technique providing and modifying the keys given, built by {@code builder}. */
-    record Mod(List<Key> provides, List<Key> modifies, java.util.function.Consumer<GraphBuilder> builder)
+    record Mod(List<Key<?>> provides, List<Key<?>> modifies, java.util.function.Consumer<GraphBuilder> builder)
         implements Technique {
         @Override
         public void build(GraphBuilder g) {
@@ -1011,7 +1012,7 @@ class FrameGraphTest {
     }
 
     /** Building {@code techniques}, outputting {@code key}, fails so. */
-    private void fails(Key key, String message, Technique... techniques) {
+    private void fails(Key<Image> key, String message, Technique... techniques) {
         graph.close();
         graph = new FrameGraph(device, 2);
         for (Technique technique : techniques) {
@@ -1023,23 +1024,19 @@ class FrameGraphTest {
 
     @Test
     void modifiersAreChecked() {
-        rejects(List.of(OUT), g -> g.modify(A), "cannot modify a");
+        rejects(List.of(OUT), g -> g.modify(A), "cannot modify test.a");
         Fill red = new Fill(A, SIZE, 1, 0, 0, 1);
-        fails(OUT, "both provides and modifies out", red, new Mod(List.of(OUT), List.of(OUT), g -> { }));
-        fails(A, "another kind of result", red, new Mod(List.of(), List.of(A), g -> {
-            g.modify(A);
-            g.provide(A, g.createBuffer("x", 4));
-        }));
+        fails(OUT, "both provides and modifies test.out", red, new Mod(List.of(OUT), List.of(OUT), g -> { }));
         fails(A, "cycle", red, new Mod(List.of(), List.of(A), g -> g.require(A))); // the version after itself
-        fails(OUT, "No technique provides a", new Mod(List.of(), List.of(A), g -> g.modify(A)),
+        fails(OUT, "No technique provides test.a", new Mod(List.of(), List.of(A), g -> g.modify(A)),
             new UsesCopy(OUT, B, B), new Fill(B, SIZE, 1, 0, 0, 1), new Mod(List.of(), List.of(B), g -> g.require(A)));
-        fails(OUT, "No technique provides a", new UsesCopy(OUT, B, B), new Fill(B, SIZE, 1, 0, 0, 1),
+        fails(OUT, "No technique provides test.a", new UsesCopy(OUT, B, B), new Fill(B, SIZE, 1, 0, 0, 1),
             new Mod(List.of(), List.of(A, B), g -> g.modify(A)));
         // A modifier that takes nothing changes nothing.
         graph.close();
         graph = new FrameGraph(device, 2).add(red).add(new Mod(List.of(), List.of(A), g -> { })).output(A, output);
         assertThat(frame()[0]).isEqualTo(RED);
-        rejects(List.of(OUT), g -> g.provide(Key.of("other"), g.createBuffer("x", 4)), "cannot provide other");
+        rejects(List.of(OUT), g -> g.provide(Key.image("test.other"), g.create("x", 1, 1, VK_FORMAT_R8G8B8A8_UNORM)), "cannot provide test.other");
     }
 
     /** Keeps a color per frame in a history and outputs last frame's (white when there is none). */
@@ -1048,7 +1045,7 @@ class FrameGraphTest {
         boolean sampled; // also samples the history: another usage, so other images
 
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of(OUT);
         }
 
@@ -1133,25 +1130,52 @@ class FrameGraphTest {
     }
 
     @Test
+    void techniquesAreRemovedById() {
+        com.truesim.common.graph.Id<Fill> redId = com.truesim.common.graph.Id.of("test.red", Fill.class);
+        graph.add(new Technique() {
+            @Override
+            public com.truesim.common.graph.Id<Fill> id() {
+                return redId;
+            }
+
+            @Override
+            public List<Key<?>> provides() {
+                return List.of(OUT);
+            }
+
+            @Override
+            public void build(GraphBuilder g) {
+                new Fill(OUT, SIZE, 1, 0, 0, 1).build(g);
+            }
+        }).output(OUT, output);
+        assertThat(frame()[0]).isEqualTo(RED);
+        graph.remove(com.truesim.common.graph.Id.of("test.red", Fill.class)); // another id of the name: not it
+        assertThat(frame()[0]).isEqualTo(RED);
+        graph.remove(redId);
+        assertThatIllegalStateException().isThrownBy(this::frame).withMessageContaining("No technique provides test.out");
+        assertThatNullPointerException().isThrownBy(() -> graph.remove((com.truesim.common.graph.Id<Fill>) null));
+    }
+
+    @Test
     void misuseIsReportedWithTheTechniquesInvolved() {
         assertThatIllegalArgumentException().isThrownBy(() -> new FrameGraph(device, 0));
         // A key nobody provides.
         graph.add(new Halves(OUT, A, B)).output(OUT, output);
-        assertThatIllegalStateException().isThrownBy(this::frame).withMessageContaining("No technique provides a");
+        assertThatIllegalStateException().isThrownBy(this::frame).withMessageContaining("No technique provides test.a");
         // Two providers of one key.
         graph.add(new Fill(A, SIZE, 1, 0, 0, 1)).add(new Fill(B, SIZE, 1, 0, 0, 1)).add(new Fill(A, SIZE, 1, 1, 1, 1));
-        assertThatIllegalStateException().isThrownBy(this::frame).withMessageContaining("Two techniques provide a");
+        assertThatIllegalStateException().isThrownBy(this::frame).withMessageContaining("Two techniques provide test.a");
         Fill twice = new Fill(UNUSED, SIZE, 1, 1, 1, 1);
         graph.add(twice);
         assertThatIllegalArgumentException().isThrownBy(() -> graph.add(twice));
         rejects(List.of(OUT), g -> g.require(OUT), "cycle"); // requires its own result
-        rejects(List.of(OUT), g -> { }, "did not provide [out]");
-        rejects(List.of(OUT), g -> g.provide(A, g.create("x", 1, 1, VK_FORMAT_R8G8B8A8_UNORM)), "cannot provide a");
+        rejects(List.of(OUT), g -> { }, "did not provide [test.out]");
+        rejects(List.of(OUT), g -> g.provide(A, g.create("x", 1, 1, VK_FORMAT_R8G8B8A8_UNORM)), "cannot provide test.a");
         rejects(List.of(OUT), g -> {
             Image image = g.create("x", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
             g.provide(OUT, image);
             g.provide(OUT, image);
-        }, "provides out twice");
+        }, "provides test.out twice");
         rejects(List.of(OUT), g -> {
             Image foreign = g.require(A);
             g.pass("scribble").write(foreign, Access.TRANSFER_DST).record(ctx -> { });
@@ -1222,7 +1246,7 @@ class FrameGraphTest {
     }
 
     /** Building with only {@code A} and a technique providing {@code keys} with {@code builder} fails so. */
-    private void rejects(List<Key> keys, java.util.function.Consumer<GraphBuilder> builder, String message) {
+    private void rejects(List<Key<?>> keys, java.util.function.Consumer<GraphBuilder> builder, String message) {
         graph.close();
         graph = new FrameGraph(device, 2).add(new Fill(A, SIZE, 1, 0, 0, 1)).add(new Lambda(keys, builder))
             .output(OUT, output);

@@ -52,10 +52,10 @@ final class GraphCompiler {
      * {@code asyncCompute}, images used by both queues shared across their families with {@code twoFamilies}, batches
      * cut into chunks of {@code grain} passes.
      */
-    static CompiledGraph compile(GraphBuilder g, Map<Key, ExternalImage> outputs, boolean asyncCompute,
+    static CompiledGraph compile(GraphBuilder g, Map<Key<Image>, ExternalImage> outputs, boolean asyncCompute,
         boolean twoFamilies, int grain, OutputCopy copy) {
         List<Image> results = new ArrayList<>();
-        for (Key key : outputs.keySet()) {
+        for (Key<Image> key : outputs.keySet()) {
             results.add(g.require(key));
         }
         // An output whose image fits its target (size, format, usage; not sampled or a storage image) is drawn

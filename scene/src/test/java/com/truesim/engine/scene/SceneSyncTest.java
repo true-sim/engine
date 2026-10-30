@@ -236,12 +236,12 @@ class SceneSyncTest {
     /** Copies {@link Keys#SCENE_COLOR} of each frame into the readback of the frame's slot. */
     private record Readback(FrameGraph graph, GpuBuffer[] readbacks) implements Technique {
         @Override
-        public List<Key> provides() {
+        public List<Key<?>> provides() {
             return List.of();
         }
 
         @Override
-        public List<Key> modifies() {
+        public List<Key<?>> modifies() {
             return List.of(Keys.SCENE_COLOR);
         }
 

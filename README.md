@@ -561,7 +561,9 @@ that declare how they use each image. The graph does the rest:
   (indirect, index, storage from compute or draws, transfer) and shaders reach by `ctx.address(buffer)`. Buffer
   barriers come from those accesses like image barriers do, across queues as well: a buffer used by both is shared
   concurrently.
-- **Keys name buffers too:** `g.provide(key, buffer)` and `g.requireBuffer(key)`, e.g. a light list.
+- **Typed keys:** `Key.image("acme.bloom")` and `Key.buffer("truesim.lightList")` name images and buffers;
+  `g.require(key)` returns the right type, so asking a buffer key for an image does not compile. Key names are
+  namespaced, like every id.
 - **External buffers:** `g.importBuffer(new ExternalBuffer(name, gpuBuffer))` brings a buffer the graph does not own
   (a game's simulation state, a `RecordBuffer`, the engine's instances) into the graph: passes declare their accesses
   and the graph orders them. Its contents outlive the frame, so passes writing it are kept, and the frame's first use
@@ -571,8 +573,11 @@ that declare how they use each image. The graph does the rest:
   bases, by device address, for a game's own passes and shaders.
 - **Modifiers:** a technique listing a key in `modifies()` takes it after its provider with `g.modify(key)` and
   writes it in place (transparency over the scene, decals) or provides a new version (a post effect). Modifiers of a
-  key run in `stage()` order, so a chain such as exposure, bloom, tone mapping needs no rewiring when an effect is
-  added or removed; whoever requires the key gets its last version. A modifier nothing needs is never built.
+  key run in their `order()`: at an `Anchor` (`OPAQUE`, `TRANSPARENT`, `POST`, `TONE_MAP`, `UI`), then after or
+  before other techniques by `id()` (ids of techniques not in the graph are ignored), else in the order added. So a
+  chain such as exposure, bloom, tone mapping needs no rewiring when an effect is added or removed, and a plugin can
+  place its own effect in it; whoever requires the key gets its last version. A modifier nothing needs is never built.
+  `graph.remove(id)` removes a technique by its id.
 - **History:** `g.history(name, width, height, format)` keeps an image from frame to frame: this frame writes
   `current()`, and `previous()` holds what the frame before wrote (`ctx.historyValid(history)` says whether there
   was one). The graph swaps the two images' roles every frame and carries their state across the frame boundary.
@@ -585,7 +590,11 @@ graph.add(new ClusteredForwardShading(geometry, width, height, VK_FORMAT_R16G16B
 graph.beginFrame(); graph.submit(acquired, renderFinished);   // per frame: nothing allocated
 
 final class Bloom implements Technique {
-    public List<Key> provides() { return List.of(BLOOM); }
+    public static final Id<Bloom> ID = Id.of("acme.bloom", Bloom.class);
+
+    public Id<Bloom> id() { return ID; }
+    public List<Key<?>> provides() { return List.of(BLOOM); }
+    public Order order() { return Order.at(Anchor.POST).after(Exposure.ID); }
 
     public void build(GraphBuilder g) {
         Image scene = g.require(Keys.SCENE_COLOR);

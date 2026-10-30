@@ -1,11 +1,13 @@
 package com.truesim.engine.graph;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.common.graph.Id;
 import com.truesim.common.graph.Resolution;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -88,7 +90,7 @@ public final class GraphBuilder {
     final List<BufferInfo> buffers = new ArrayList<>();
     final List<History> histories = new ArrayList<>();
     final List<PassInfo> passes = new ArrayList<>();
-    private final Resolution<Key, Technique> resolution;
+    private final Resolution<Key<?>, Technique> resolution;
     private final Map<ExternalImage, Image> externals = new IdentityHashMap<>();
     private final Map<ExternalBuffer, Buffer> externalBuffers = new IdentityHashMap<>();
 
@@ -101,12 +103,12 @@ public final class GraphBuilder {
         this.implementations = implementations;
         this.resolution = new Resolution<>(techniques, new Resolution.Producers<>() {
             @Override
-            public List<Key> provides(Technique technique) {
+            public List<Key<?>> provides(Technique technique) {
                 return technique.provides();
             }
 
             @Override
-            public List<Key> modifies(Technique technique) {
+            public List<Key<?>> modifies(Technique technique) {
                 return technique.modifies();
             }
 
@@ -119,7 +121,75 @@ public final class GraphBuilder {
             public String name(Technique technique) {
                 return GraphBuilder.name(technique);
             }
-        }, Comparator.comparingInt(Technique::stage), "technique"); // stable: equal stages as added
+        }, Comparator.comparingInt(positions(techniques)::get), "technique");
+    }
+
+    /**
+     * Each technique's place in the order modifiers run in: by {@link Order#anchor() anchor}, then after and before
+     * others by id (ids of techniques not in the graph are ignored), and otherwise in the order added.
+     *
+     * @throws IllegalStateException if two techniques have one id, or their orders contradict each other
+     */
+    static Map<Technique, Integer> positions(List<Technique> techniques) {
+        int n = techniques.size();
+        Map<Id<?>, Integer> byId = new HashMap<>();
+        for (int i = 0; i < n; i++) {
+            Id<?> id = techniques.get(i).id();
+            if (id != null && byId.putIfAbsent(id, i) != null) {
+                throw new IllegalStateException("Two techniques have the id " + id + ": " + name(techniques.get(i))
+                    + " and " + name(techniques.get(byId.get(id))));
+            }
+        }
+        boolean[][] before = new boolean[n][n]; // before[a][b]: a runs before b
+        for (int a = 0; a < n; a++) {
+            for (int b = 0; b < n; b++) {
+                before[a][b] = techniques.get(a).order().anchor().rank() < techniques.get(b).order().anchor().rank();
+            }
+        }
+        for (int a = 0; a < n; a++) { // then the explicit orders, which the anchors' must not overwrite
+            Order order = techniques.get(a).order();
+            for (Id<?> id : order.after()) {
+                Integer other = byId.get(id);
+                if (other != null) {
+                    before[other][a] = true;
+                }
+            }
+            for (Id<?> id : order.before()) {
+                Integer other = byId.get(id);
+                if (other != null) {
+                    before[a][other] = true;
+                }
+            }
+        }
+        int[] waiting = new int[n];
+        for (int a = 0; a < n; a++) {
+            for (int b = 0; b < n; b++) {
+                waiting[b] += before[a][b] ? 1 : 0;
+            }
+        }
+        Map<Technique, Integer> positions = new IdentityHashMap<>();
+        boolean[] placed = new boolean[n];
+        for (int position = 0; position < n; position++) {
+            int next = 0;
+            while (next < n && (placed[next] || waiting[next] > 0)) {
+                next++; // the first added of those nothing has to run before any more
+            }
+            if (next == n) {
+                List<String> left = new ArrayList<>();
+                for (int a = 0; a < n; a++) {
+                    if (!placed[a]) {
+                        left.add(name(techniques.get(a)));
+                    }
+                }
+                throw new IllegalStateException("The orders of techniques contradict each other: " + left);
+            }
+            placed[next] = true;
+            positions.put(techniques.get(next), position);
+            for (int b = 0; b < n; b++) {
+                waiting[b] -= before[next][b] ? 1 : 0;
+            }
+        }
+        return positions;
     }
 
     /** What is being built: a technique, a request, or null (the graph itself). What it makes belongs to it. */
@@ -145,81 +215,40 @@ public final class GraphBuilder {
     // ---------------------------------------------------------------- results of other techniques
 
     /**
-     * The result {@code key}, an image: built by the technique that provides it, then by every technique that
-     * {@link Technique#modifies() modifies} it, in stage order, the first time it is required.
+     * The result {@code key}: built by the technique that provides it, then by every technique that
+     * {@link Technique#modifies() modifies} it, in their {@link Order}, the first time it is required.
      */
-    public Image require(Key key) {
-        return image(key, resolution.require(key));
+    public <T> T require(Key<T> key) {
+        return key.kind().cast(resolution.require(key));
     }
 
-    /** The image result {@code key}, or null if no technique of the graph provides it. */
-    public Image optional(Key key) {
-        Object result = resolution.optional(key);
-        return result == null ? null : image(key, result);
-    }
-
-    /** The result {@code key}, a buffer (e.g. a light list), as {@link #require} gives images. */
-    public Buffer requireBuffer(Key key) {
-        return buffer(key, resolution.require(key));
-    }
-
-    /** The buffer result {@code key}, or null if no technique of the graph provides it. */
-    public Buffer optionalBuffer(Key key) {
-        Object result = resolution.optional(key);
-        return result == null ? null : buffer(key, result);
+    /** The result {@code key}, or null if no technique of the graph provides it. */
+    public <T> T optional(Key<T> key) {
+        return key.kind().cast(resolution.optional(key));
     }
 
     /**
-     * For a technique that {@link Technique#modifies() modifies} {@code key}: the image as the techniques before it
+     * For a technique that {@link Technique#modifies() modifies} {@code key}: the result as the techniques before it
      * left it, now the building technique's to write (in place: e.g. transparency drawn over the scene). It may also
-     * {@link #provide(Key, Image) provide} another image for the key (e.g. a post effect writing a new one). Those
-     * requiring the key get the last version.
+     * {@link #provide provide} another one for the key (e.g. a post effect writing a new image). Those requiring the key
+     * get the last version.
      */
-    public Image modify(Key key) {
-        return image(key, take(key));
-    }
-
-    /** {@link #modify} for a buffer result. */
-    public Buffer modifyBuffer(Key key) {
-        return buffer(key, take(key));
-    }
-
-    private Image image(Key key, Object result) {
-        if (!(result instanceof Image image)) {
-            throw new IllegalStateException(key + " is a buffer, not an image");
-        }
-        return image;
-    }
-
-    private Buffer buffer(Key key, Object result) {
-        if (!(result instanceof Buffer buffer)) {
-            throw new IllegalStateException(key + " is an image, not a buffer");
-        }
-        return buffer;
-    }
-
-    /** {@code key}'s result, now the building technique's: it writes it from here on. */
-    private Object take(Key key) {
+    public <T> T modify(Key<T> key) {
         Object result = resolution.take(key);
         if (result instanceof Image image) {
             images.get(image.id).owner = scope();
         } else {
             buffers.get(((Buffer) result).id).owner = scope();
         }
-        return result;
+        return key.kind().cast(result);
     }
 
     /**
      * Provides {@code key}: one of the keys the building technique {@link Technique#provides()}, or a new version of
      * one it {@link #modify modifies}.
      */
-    public void provide(Key key, Image image) {
-        resolution.put(key, image(image));
-    }
-
-    /** Provides {@code key} as a buffer, as {@link #provide(Key, Image)} does an image. */
-    public void provide(Key key, Buffer buffer) {
-        resolution.put(key, buffer(buffer));
+    public <T> void provide(Key<T> key, T result) {
+        resolution.put(key, key.kind() == Image.class ? image((Image) result) : buffer((Buffer) result));
     }
 
     /**

@@ -106,7 +106,7 @@ public final class ClusteredLights implements Technique {
     }
 
     @Override
-    public List<Key> provides() {
+    public List<Key<?>> provides() {
         return List.of(Keys.LIGHT_LIST);
     }
 

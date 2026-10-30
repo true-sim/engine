@@ -12,6 +12,7 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
+import com.truesim.common.graph.Id;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,11 +26,11 @@ import org.junit.jupiter.api.Test;
  */
 class GraphCompilerTest {
 
-    static final Key OUT = Key.of("out");
-    static final Key COLOR = Key.of("color");
+    static final Key<Image> OUT = Key.image("test.out");
+    static final Key<Image> COLOR = Key.image("test.color");
 
     /** A technique made of a lambda, providing {@code provides}. */
-    record Lambda(List<Key> provides, Consumer<GraphBuilder> builder) implements Technique {
+    record Lambda(List<Key<?>> provides, Consumer<GraphBuilder> builder) implements Technique {
         @Override
         public void build(GraphBuilder g) {
             builder.accept(g);
@@ -38,7 +39,7 @@ class GraphCompilerTest {
 
     private final List<String> copies = new ArrayList<>();
 
-    private CompiledGraph compile(Map<Key, ExternalImage> outputs, boolean async, Technique... techniques) {
+    private CompiledGraph compile(Map<Key<Image>, ExternalImage> outputs, boolean async, Technique... techniques) {
         GraphBuilder g = new GraphBuilder(null, List.of(techniques), Map.of()); // no device: none is used
         return GraphCompiler.compile(g, outputs, async, true, 4, (ctx, from, to) -> copies.add(from + " to " + to));
     }
@@ -70,7 +71,7 @@ class GraphCompilerTest {
             g.pass("b to out").read(b, Access.SAMPLED_COMPUTE).write(out, Access.STORAGE_WRITE).record(ctx -> { });
             g.provide(OUT, out);
         });
-        Map<Key, ExternalImage> outputs = new LinkedHashMap<>();
+        Map<Key<Image>, ExternalImage> outputs = new LinkedHashMap<>();
         outputs.put(OUT, swapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT));
         CompiledGraph c = compile(outputs, false, draw);
         // Sampled and storage images have bindless slots, which external images lack: the output is copied.
@@ -93,7 +94,7 @@ class GraphCompilerTest {
             g.pass("draw").write(out, Access.COLOR_ATTACHMENT).record(ctx -> { });
             g.provide(OUT, out);
         });
-        Map<Key, ExternalImage> outputs = Map.of(OUT, swapchain(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT));
+        Map<Key<Image>, ExternalImage> outputs = Map.of(OUT, swapchain(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT));
         CompiledGraph c = compile(outputs, false, draw);
         assertThat(names(c)).containsExactly("draw");
         assertThat(c.imageSlots()).isEmpty();
@@ -117,7 +118,7 @@ class GraphCompilerTest {
             g.pass("shade").read(ao, Access.SAMPLED_FRAGMENT).write(out, Access.COLOR_ATTACHMENT).record(ctx -> { });
             g.provide(OUT, out);
         });
-        Map<Key, ExternalImage> outputs = Map.of(OUT, swapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT));
+        Map<Key<Image>, ExternalImage> outputs = Map.of(OUT, swapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT));
         CompiledGraph on = compile(outputs, true, frame);
         assertThat(on.queues()[0]).isEqualTo(FrameGraph.COMPUTE);
         assertThat(on.batches().queue()).containsExactly(FrameGraph.COMPUTE, FrameGraph.GRAPHICS, FrameGraph.GRAPHICS);
@@ -138,7 +139,7 @@ class GraphCompilerTest {
             g.pass("remember").write(history.current(), Access.TRANSFER_DST).record(ctx -> { });
             g.provide(OUT, out);
         });
-        Map<Key, ExternalImage> outputs = Map.of(OUT, swapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT));
+        Map<Key<Image>, ExternalImage> outputs = Map.of(OUT, swapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT));
         CompiledGraph c = compile(outputs, false, remember);
         assertThat(c.histories()).hasSize(1);
         GraphCompiler.HistoryPlan plan = c.histories().get(0);
@@ -152,6 +153,60 @@ class GraphCompilerTest {
         assertThat(c.historyStartCurrent()[0]).isEqualTo(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
+    /** A modifier of {@code key} with an id and an order, painting a pass named after itself. */
+    record Modifier(Id<Modifier> id, Order order, Key<Image> key) implements Technique {
+        @Override
+        public List<Key<?>> provides() {
+            return List.of();
+        }
+
+        @Override
+        public List<Key<?>> modifies() {
+            return List.of(key);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image image = g.modify(key);
+            g.pass(id.name()).write(image, Access.TRANSFER_DST).record(ctx -> { });
+        }
+    }
+
+    private static Id<Modifier> id(String name) {
+        return Id.of("test." + name, Modifier.class);
+    }
+
+    @Test
+    void modifiersRunByAnchorThenAfterAndBeforeElseAsAdded() {
+        Id<Modifier> grade = id("grade");
+        Id<Modifier> bloom = id("bloom");
+        Id<Modifier> exposure = id("exposure");
+        Id<Modifier> ui = id("ui");
+        Id<Modifier> absent = id("absent");
+        Technique base = new Lambda(List.of(OUT), g -> {
+            Image out = g.create("out", 64, 64, VK_FORMAT_R8G8B8A8_UNORM);
+            g.pass("base").write(out, Access.TRANSFER_DST).record(ctx -> { });
+            g.provide(OUT, out);
+        });
+        Map<Key<Image>, ExternalImage> outputs = Map.of(OUT, swapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT));
+        CompiledGraph c = compile(outputs, false, base,
+            new Modifier(ui, Order.at(Anchor.UI), OUT), // added first, runs last: its anchor is the latest
+            new Modifier(grade, Order.at(Anchor.POST).after(bloom), OUT),
+            new Modifier(bloom, Order.at(Anchor.POST).after(absent), OUT), // absent: ignored
+            new Modifier(exposure, Order.at(Anchor.POST).before(bloom), OUT));
+        assertThat(names(c)).containsExactly("base", "test.exposure", "test.bloom", "test.grade", "test.ui");
+        assertThat(Anchor.POST).hasToString("anchor post");
+        assertThat(Order.NONE.anchor()).isEqualTo(Anchor.FIRST);
+        // Contradictions and two techniques of one id are errors.
+        assertThatIllegalStateException().isThrownBy(() -> compile(outputs, false, base,
+            new Modifier(grade, Order.at(Anchor.POST).after(bloom), OUT),
+            new Modifier(bloom, Order.at(Anchor.POST).after(grade), OUT)))
+            .withMessage("The orders of techniques contradict each other: [Modifier, Modifier]");
+        assertThatIllegalStateException().isThrownBy(() -> compile(outputs, false, base,
+            new Modifier(grade, Order.NONE, OUT), new Modifier(grade, Order.NONE, OUT)))
+            .withMessageStartingWith("Two techniques have the id test.grade");
+    }
+
     @Test
     void misuseIsReportedWithoutADevice() {
         Technique reader = new Lambda(List.of(OUT), g -> {
@@ -160,10 +215,10 @@ class GraphCompilerTest {
             g.pass("read early").read(image, Access.TRANSFER_SRC).write(out, Access.TRANSFER_DST).record(ctx -> { });
             g.provide(OUT, out);
         });
-        Map<Key, ExternalImage> outputs = Map.of(OUT, swapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT));
+        Map<Key<Image>, ExternalImage> outputs = Map.of(OUT, swapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT));
         assertThatIllegalStateException().isThrownBy(() -> compile(outputs, false, reader))
             .withMessageContaining("reads x before any pass writes it");
         assertThatIllegalStateException().isThrownBy(() -> compile(outputs, false))
-            .withMessage("No technique provides out");
+            .withMessage("No technique provides test.out");
     }
 }
