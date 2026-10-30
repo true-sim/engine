@@ -50,7 +50,7 @@ public final class FrameUploads implements AutoCloseable {
     // Waiting for the next frame: staging buffers, and for each a target and offset, or commands of its own.
     private final List<GpuBuffer> staging = new ArrayList<>();
     private final List<GpuBuffer> targets = new ArrayList<>();
-    private final List<Long> offsets = new ArrayList<>();
+    private long[] offsets = new long[8]; // by index of staging: no boxing
     private final List<BiConsumer<VkCommandBuffer, GpuBuffer>> commands = new ArrayList<>();
     // Recorded: staging buffers the frames in flight may still read, and when they are free.
     private final Retiring retiring; // staging buffers copied from, until their frames finish
@@ -136,9 +136,7 @@ public final class FrameUploads implements AutoCloseable {
     private GpuBuffer stage(MemorySegment data, long bytes) {
         GpuBuffer buffer = GpuBuffer.hostWritten(device, Math.max(1, bytes), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
         MemorySegment.copy(data, 0, buffer.memory(), 0, data.byteSize());
-        for (long at = data.byteSize(); at < bytes; at++) {
-            buffer.memory().set(java.lang.foreign.ValueLayout.JAVA_BYTE, at, (byte) 0);
-        }
+        buffer.memory().asSlice(data.byteSize(), bytes - data.byteSize()).fill((byte) 0); // the padding
         return buffer;
     }
 
@@ -155,7 +153,10 @@ public final class FrameUploads implements AutoCloseable {
         BiConsumer<VkCommandBuffer, GpuBuffer> record) {
         staging.add(buffer);
         targets.add(target);
-        offsets.add(offset);
+        if (staging.size() > offsets.length) {
+            offsets = java.util.Arrays.copyOf(offsets, 2 * offsets.length);
+        }
+        offsets[staging.size() - 1] = offset;
         commands.add(record);
         pendingBytes += buffer.size();
     }
@@ -174,7 +175,7 @@ public final class FrameUploads implements AutoCloseable {
         for (int i = 0; i < staging.size(); i++) {
             GpuBuffer buffer = staging.get(i);
             if (targets.get(i) != null) {
-                copy(commands, buffer, targets.get(i), offsets.get(i));
+                copy(commands, buffer, targets.get(i), offsets[i]);
             } else {
                 this.commands.get(i).accept(commands, buffer);
             }
@@ -183,7 +184,6 @@ public final class FrameUploads implements AutoCloseable {
         barrier(commands, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         staging.clear();
         targets.clear();
-        offsets.clear();
         this.commands.clear();
         pendingBytes = 0;
     }

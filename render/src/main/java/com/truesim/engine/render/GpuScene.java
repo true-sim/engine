@@ -58,6 +58,7 @@ public final class GpuScene implements AutoCloseable {
     private final int capacity;
     private final RecordBuffer instances; // the GPU's, device-local, uploading at the start of each frame
     private final long[] used;
+    private int firstFreeWord; // every word of used before it is full: the search for a free id starts here
     private final Materials defaultMaterials;
     private Materials materials;
     private int count;
@@ -216,6 +217,7 @@ public final class GpuScene implements AutoCloseable {
         instances.clear(id); // a hole
         used[id >>> 6] &= ~(1L << id);
         count--;
+        firstFreeWord = Math.min(firstFreeWord, id >>> 6);
         while (highWater > 0 && !contains(highWater - 1)) {
             highWater--;
         }
@@ -249,9 +251,10 @@ public final class GpuScene implements AutoCloseable {
     }
 
     private int lowestFree() {
-        for (int w = 0; w < used.length; w++) {
+        for (int w = firstFreeWord; w < used.length; w++) {
             long free = ~used[w];
             if (free != 0) {
+                firstFreeWord = w;
                 int id = (w << 6) + Long.numberOfTrailingZeros(free);
                 return id < capacity ? id : -1;
             }
