@@ -114,3 +114,10 @@ record component of that name existed.
 - Proof: compile errors in [#131](https://github.com/true-sim/engine/pull/131) and
   [#135](https://github.com/true-sim/engine/pull/135).
 - Rule: give builder methods on records other names (`drawBackFaces()`).
+
+**Critical downcalls crash the JVM when the validation layer reports.** `Commands` made its handles with
+`Linker.Option.critical`. The layer reports an error from inside the faulty call, through the instance's debug callback,
+an upcall; an upcall out of a critical downcall kills the JVM instead of logging the error.
+- Proof: `CommandsTest.validationErrorsInsideCommandsAreReportedNotFatal` crashes the test JVM with the option and passes
+  without it ([#152](https://github.com/true-sim/engine/issues/152)).
+- Rule: no `critical` on Vulkan downcalls.

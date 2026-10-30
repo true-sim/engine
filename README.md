@@ -756,6 +756,10 @@ packages and sets `TRUESIM_REQUIRE_VALIDATION=true`, so the Vulkan tests fail wh
 
 Exclusive fullscreen is only tested when `TRUESIM_TEST_FULLSCREEN` is set, because it changes the monitor's mode.
 
+`VulkanInstance.bestGpu()` picks the most capable GPU (discrete first, then the most memory). `TRUESIM_GPU` (or the
+system property `truesim.gpu`) chooses another, for the tests too: a type (`discrete`, `integrated`, `virtual`,
+`cpu`), an index in `gpus()` or part of a GPU's name, e.g. `TRUESIM_GPU=integrated ./gradlew test`.
+
 Mistakes made here once, each with its evidence and the rule that follows, are in [docs/pitfalls.md](docs/pitfalls.md);
 add to it what is verified, nothing else.
 
