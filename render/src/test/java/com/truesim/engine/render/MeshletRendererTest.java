@@ -462,6 +462,42 @@ class MeshletRendererTest {
     }
 
     @Test
+    void bothPathsShadeTheSameImage() {
+        assumeThat(device.meshShaders()).as("mesh shaders").isTrue();
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 16)) {
+            // A texture of smooth gradients, on a quad turned away a little and lit: positions, normals and texture
+            // coordinates all interpolated, as the indexed path's hardware does and the slim mesh path rebuilds.
+            int gradient = textures.color(16, 16, texels(16, (x, y) -> 0xff000000 | (x * 16) | (y * 16) << 8));
+            Material material = new Material(MR.withBaseColorTexture(gradient));
+            int textured = materials.addAll(java.util.List.of(material, material));
+            int mesh = pool.add(texturedQuad());
+            scene.setMaterials(materials);
+            scene.set(0, mesh, textured, 0.3, -0.2, -4, 0.2f, 0.3f, 0, 0.93f, 1.5f, 1.5f, 1.5f);
+            lookForward(1, MeshletRenderer.MODE_LIT);
+            int[][] images = new int[2][SIZE * SIZE];
+            MeshletRenderer.Path[] paths = {MeshletRenderer.Path.INDEXED, MeshletRenderer.Path.MESH_SHADERS};
+            for (int p = 0; p < paths.length; p++) {
+                renderer.setPath(paths[p]);
+                render();
+                for (int i = 0; i < SIZE * SIZE; i++) {
+                    images[p][i] = pixel(i % SIZE, i / SIZE);
+                }
+            }
+            int covered = 0;
+            for (int i = 0; i < SIZE * SIZE; i++) {
+                covered += images[0][i] != images[0][0] ? 1 : 0;
+                for (int shift = 0; shift < 24; shift += 8) {
+                    assertThat((images[1][i] >> shift) & 0xff).as("pixel %d, channel %d", i, shift / 8)
+                        .isCloseTo((images[0][i] >> shift) & 0xff, org.assertj.core.data.Offset.offset(2));
+                }
+            }
+            assertThat(covered).as("the quad covers the middle").isGreaterThan(SIZE * SIZE / 8);
+            renderer.setPath(MeshletRenderer.Path.AUTO);
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
     void viewsReportWhatDidNotFitAndResize() {
         // Three quads, a meshlet and 2 triangles each, into a view with room for two meshlets.
         for (int i = 0; i < 3; i++) {

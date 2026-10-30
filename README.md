@@ -270,14 +270,19 @@ frames recorded back to back (the paths take turns, so they see the same clocks)
 
 | Scene | Source triangles | Mesh shaders | Indexed | No meshlets: full detail | No meshlets: discrete LODs, CPU culling |
 |---|---|---|---|---|---|
-| 1,000 rocks (82k-triangle mesh) | 81.9 M | 0.065 ms | 0.071 ms | 3.49 ms | 0.11 ms (+0.20 ms CPU) |
-| 3,000 rocks | 246 M | 0.076 ms | 0.080 ms | 10.2 ms | 0.30 ms (+0.36 ms CPU) |
-| 10,000 rocks | 819 M | 0.19 ms | 0.19 ms | 33.8 ms | 0.94 ms (+0.15 ms CPU) |
-| 30,000 rocks | 2.46 billion | 0.59 ms | 0.61 ms | 102 ms | 2.80 ms (+0.47 ms CPU) |
-| terrain at a grazing angle | 2.1 M | 0.081 ms | 0.084 ms | 0.17 ms | (one mesh: full detail) |
+| 1,000 rocks (82k-triangle mesh) | 81.9 M | 0.118 ms | 0.058 ms | 6.65 ms | 0.12 ms (+0.20 ms CPU) |
+| 3,000 rocks | 246 M | 0.232 ms | 0.102 ms | 11.3 ms | 0.30 ms (+0.42 ms CPU) |
+| 10,000 rocks | 819 M | 0.641 ms | 0.247 ms | 33.2 ms | 0.95 ms (+0.15 ms CPU) |
+| 30,000 rocks | 2.46 billion | 1.33 ms | 0.736 ms | 102 ms | 2.82 ms (+0.45 ms CPU) |
+| terrain at a grazing angle | 2.1 M | 0.189 ms | 0.107 ms | 0.30 ms | (one mesh: full detail) |
 
-Small scenes depend on how the GPU clocks for short frames: from one session to the next, the 3,000 rocks and the
-terrain measured 0.08 to 0.14 ms on the same code. Comparisons are made within a session.
+Measured 2026-10-30, shaded (lit, materials). When the mesh shader path was first measured its vertices carried a
+normal and a meshlet number; materials and lighting made that some 20 values. On this GPU a mesh shader's outputs
+reach the fragment shader through memory, so the mesh path now shades lean (`lean.slang`: what interpolates per
+vertex, what is flat or rare fetched per pixel through the primitive ID and barycentrics), which brought 30,000 rocks
+from 1.53 to 1.33 ms; the indexed path stays faster here. Small scenes depend on how the GPU clocks for short frames:
+from one session to the next, they measured up to twice as long on the same code. Comparisons are made within a
+session.
 
 **Occlusion culling.** Through the frame graph, `SceneDraw` draws the camera in two phases around a `DepthPyramid`. The early
 phase draws the instances visible last frame (a bit per instance, kept on the GPU). The late phase tests every
@@ -288,8 +293,8 @@ conservative: a sphere's box is projected, and its nearest depth is compared at 
 
 | Scene | Occlusion culling off | On |
 |---|---|---|
-| in the open (rocks hide rocks) | 0.59 ms, 99,052 meshlets | 0.51 ms, 69,507 meshlets |
-| behind a wall (the terrain, upright, 80 units ahead) | 0.64 ms, 99,239 meshlets | 0.17 ms, 2,984 meshlets |
+| in the open (rocks hide rocks) | 1.03 ms, 99,052 meshlets | 0.84 ms, 69,507 meshlets |
+| behind a wall (the terrain, upright, 80 units ahead) | 1.10 ms, 99,239 meshlets | 0.30 ms, 2,984 meshlets |
 
 `TRUESIM_SCREENSHOTS=true ./gradlew :engine-render:test --tests '*Screenshots'` renders these scenes to PNGs under
 `render/build/screenshots`, shaded and colored per meshlet.
