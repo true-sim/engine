@@ -8,6 +8,10 @@ import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyBuffer;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_READ_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 
 import java.lang.foreign.ValueLayout;
 import org.junit.jupiter.api.Test;
@@ -104,6 +108,31 @@ class RecordBufferTest {
             assertThatIllegalArgumentException().isThrownBy(() -> new RecordBuffer(device, 24, 4, slots));
             assertThatIllegalArgumentException().isThrownBy(() -> new RecordBuffer(device, 0, 4, slots));
             assertThatIllegalArgumentException().isThrownBy(() -> new RecordBuffer(device, 16, 0, slots));
+        }
+    }
+
+    @Test
+    void passesDeclaringTheRecordsUploadThemInsteadOfTheFramesStart() {
+        try (VulkanInstance instance = instance(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
+            FrameSlots slots = new FrameSlots(2);
+            try (RecordBuffer records = new RecordBuffer(device, 32, 4, slots)) {
+                records.uploadInPasses();
+                records.uploadInPasses(); // once is enough
+                fill(records, 1, 50);
+                slots.begin(0);
+                device.submitAndWait(device.graphics(), slots::recordStart);
+                assertThat(records.pendingCount()).as("the frame's start leaves them to the pass").isEqualTo(1);
+                device.submitAndWait(device.graphics(), commands -> {
+                    records.uploadInPass(commands);
+                    // What a graph places from the pass's declared write and the reader's read.
+                    Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        VK_ACCESS_2_TRANSFER_READ_BIT);
+                });
+                slots.end();
+                assertThat(records.pendingCount()).isZero();
+                assertThat(read(device, records)[8]).isEqualTo(50);
+            }
         }
     }
 

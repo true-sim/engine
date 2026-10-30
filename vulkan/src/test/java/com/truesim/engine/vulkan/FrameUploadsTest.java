@@ -8,6 +8,9 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyBuffer;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_READ_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -87,6 +90,32 @@ class FrameUploadsTest {
             }
             device.submitAndWait(device.graphics(), slots::recordStart); // closed uploads record nothing
             assertThat(read(device, target)).containsExactly(0, 1, 2, 3);
+        }
+    }
+
+    @Test
+    void passesDeclaringTheTargetsUploadInsteadOfTheFramesStart() {
+        try (VulkanInstance instance = instance(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             Arena arena = Arena.ofConfined();
+             GpuBuffer target = GpuBuffer.deviceLocal(device, 16, TARGET)) {
+            FrameSlots slots = new FrameSlots(2);
+            try (FrameUploads uploads = new FrameUploads(device, slots)) {
+                uploads.flushInPasses();
+                uploads.flushInPasses(); // once is enough
+                uploads.write(target, 0, arena.allocateFrom(ValueLayout.JAVA_INT, 4, 5, 6, 7));
+                slots.begin(0);
+                device.submitAndWait(device.graphics(), slots::recordStart);
+                assertThat(uploads.pendingCount()).as("the frame's start leaves them to the pass").isEqualTo(1);
+                device.submitAndWait(device.graphics(), commands -> {
+                    uploads.flushInPass(commands);
+                    // What a graph places from the pass's declared write and the reader's read.
+                    Barriers.memory(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+                });
+                slots.end();
+                assertThat(uploads.pendingCount()).isZero();
+                assertThat(read(device, target)).containsExactly(4, 5, 6, 7);
+            }
         }
     }
 

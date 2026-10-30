@@ -72,6 +72,8 @@ public final class RecordBuffer implements AutoCloseable {
     private final long[] uploadFrame;
     private final int[] uploadAt;
     private boolean closed;
+    /** Whether passes declaring the records (a frame graph's) upload them, not the frames' starts. */
+    private boolean inPasses;
 
     /**
      * {@code capacity} records of {@code recordBytes} bytes each (a multiple of 16) in device-local memory, for the
@@ -182,6 +184,29 @@ public final class RecordBuffer implements AutoCloseable {
      * Allocates nothing, except to grow the upload buffer when more records changed than it held so far.
      */
     public synchronized void upload(VkCommandBuffer commands) {
+        upload(commands, true);
+    }
+
+    /**
+     * From now on, a pass declaring that it writes the records uploads them ({@link #uploadInPass}), as a frame graph's
+     * scene upload pass does: the frames' starts no longer do. Frames recorded otherwise keep calling {@link #upload}.
+     */
+    public synchronized void uploadInPasses() {
+        if (!inPasses) {
+            inPasses = true;
+            slots.unregister(start);
+        }
+    }
+
+    /**
+     * Like {@link #upload}, without its barriers: for a pass that declares it writes the records (with compute) to a
+     * graph, which orders it with what reads them.
+     */
+    public synchronized void uploadInPass(VkCommandBuffer commands) {
+        upload(commands, false);
+    }
+
+    private void upload(VkCommandBuffer commands, boolean barriers) {
         if (pending == 0) {
             return;
         }
@@ -214,8 +239,10 @@ public final class RecordBuffer implements AutoCloseable {
         MemorySegment.copy(indices, 0, memory, 4L * at, 4L * pending);
         MemorySegment.copy(changes, 0, memory, changesAt, (long) recordBytes * pending);
         // Whatever read the records before, in this frame or those before, has read them.
-        Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        if (barriers) {
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        }
         int words = recordBytes / 16;
         long threads = (long) pending * words;
         try (MemoryStack stack = stackPush()) {
@@ -232,8 +259,10 @@ public final class RecordBuffer implements AutoCloseable {
                 Commands.dispatch(commands, (int) Math.min(MAX_GROUPS, (threads - first + 63) / 64), 1, 1);
             }
         }
-        Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
+        if (barriers) {
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
+        }
         for (int e = 0; e < pending; e++) {
             entryOf[indices.getAtIndex(ValueLayout.JAVA_INT, e)] = -1;
         }

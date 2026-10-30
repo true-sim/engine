@@ -35,16 +35,34 @@ public record SceneData(MeshletRenderer renderer) implements Request<SceneData.B
         }
     }
 
+    /**
+     * Imports the buffers and adds the pass uploading what changed since the last frame: the instances' scatter and the
+     * pool's new meshes. The graph places its barriers from what it and the readers declare, so the frames' starts no
+     * longer upload them, for this renderer (frames recorded without a graph upload themselves, as before).
+     */
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Buffers build(GraphBuilder g) {
         GeometryPool pool = renderer.pool();
-        return new Buffers(g.importBuffer(new ExternalBuffer("instances", renderer.scene().instanceBuffer())),
+        GpuScene scene = renderer.scene();
+        Buffers buffers = new Buffers(g.importBuffer(new ExternalBuffer("instances", scene.instanceBuffer())),
             g.importBuffer(new ExternalBuffer("positions", pool.positions())),
             g.importBuffer(new ExternalBuffer("attributes", pool.attributes())),
             g.importBuffer(new ExternalBuffer("meshlets", pool.meshlets())),
             g.importBuffer(new ExternalBuffer("meshlet vertices", pool.meshletVertices())),
             g.importBuffer(new ExternalBuffer("meshlet triangles", pool.meshletTriangles())),
             g.importBuffer(new ExternalBuffer("cluster LOD", pool.clusterLod())));
+        pool.uploadInPasses();
+        scene.uploadInPasses();
+        g.pass("scene upload").write(buffers.instances, BufferAccess.STORAGE_WRITE)
+            .write(buffers.positions, BufferAccess.TRANSFER_DST).write(buffers.attributes, BufferAccess.TRANSFER_DST)
+            .write(buffers.meshlets, BufferAccess.TRANSFER_DST).write(buffers.meshletVertices, BufferAccess.TRANSFER_DST)
+            .write(buffers.meshletTriangles, BufferAccess.TRANSFER_DST)
+            .write(buffers.clusterLod, BufferAccess.TRANSFER_DST)
+            .record(ctx -> {
+                pool.uploadInPass(ctx.unsafe().commands());
+                scene.uploadInPass(ctx.unsafe().commands());
+            });
+        return buffers;
     }
 }

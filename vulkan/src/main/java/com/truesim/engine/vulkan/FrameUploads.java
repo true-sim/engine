@@ -81,6 +81,8 @@ public final class FrameUploads implements AutoCloseable {
     private int created;
     private long pendingBytes;
     private boolean closed;
+    /** Whether passes declaring the targets (a frame graph's) record the uploads, not the frames' starts. */
+    private boolean inPasses;
 
     /** Uploads deferred to the frames of {@code slots}, or run at once for {@link FrameSlots#single()}. */
     public FrameUploads(VulkanDevice device, FrameSlots slots) {
@@ -221,18 +223,46 @@ public final class FrameUploads implements AutoCloseable {
      * uploaded (a build reading it, say) calls it on the graphics queue first. Allocates nothing without uploads.
      */
     public void flush(VkCommandBuffer commands) {
+        flush(commands, true);
+    }
+
+    /**
+     * From now on, a pass declaring that it writes the targets records the uploads ({@link #flushInPass}), as a frame
+     * graph's scene upload pass does: the frames' starts no longer do. Frames recorded otherwise keep calling
+     * {@link #flush}. For buffer writes: uploads with records (images) bring their own barriers.
+     */
+    public void flushInPasses() {
+        if (deferred && !inPasses) {
+            inPasses = true;
+            slots.unregister(start);
+        }
+    }
+
+    /**
+     * Like {@link #flush}, without its barriers: for a pass that declares it writes the targets (as a transfer
+     * destination) to a graph, which orders it with what reads them.
+     */
+    public void flushInPass(VkCommandBuffer commands) {
+        flush(commands, false);
+    }
+
+    private void flush(VkCommandBuffer commands, boolean barriers) {
         retiring.release();
         if (pending.isEmpty()) {
             return;
         }
-        Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        if (barriers) {
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        }
         for (Pending upload : pending) {
             run(commands, upload.chunk(), upload.from(), upload.bytes(), upload.target(), upload.offset(),
                 upload.record());
         }
-        Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        if (barriers) {
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        }
         for (Chunk chunk : filling) {
             retiring.add(chunk); // reused once the frames now in flight finish
         }
