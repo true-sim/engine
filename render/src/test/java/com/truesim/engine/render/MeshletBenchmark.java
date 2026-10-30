@@ -49,6 +49,7 @@ import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.assets.mesh.VertexAttribute;
 import com.truesim.scene.assets.mesh.VertexFormat;
 import com.truesim.scene.meshbuild.MeshBuilder;
+import com.truesim.engine.vulkan.Format;
 import java.lang.foreign.ValueLayout;
 import java.nio.LongBuffer;
 import org.lwjgl.system.MemoryUtil;
@@ -543,7 +544,7 @@ class MeshletBenchmark {
         try (GpuImage shaded = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
             org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
              Lights lights = new Lights(device, 4096, 1)) {
-            ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+            ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, Format.R8G8B8A8_UNORM,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shaded.handle(), 0);
             for (int count : new int[] {0, 256, 4096}) {
@@ -653,7 +654,7 @@ class MeshletBenchmark {
              Lights lights = new Lights(device, 1, 1);
              Lights cascadeLights = new Lights(device, 1, 3);
              RayTracing rayTracing = device.rayTracing() ? new RayTracing(device, pool, 100_000) : null) {
-            ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+            ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, Format.R8G8B8A8_UNORM,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shaded.handle(), 0);
             lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
@@ -727,7 +728,7 @@ class MeshletBenchmark {
                 placed[o + 5], placed[o + 6], placed[o + 7], placed[o + 7], placed[o + 7]);
         }
         mainView(renderer).set(camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1, MeshletRenderer.MODE_LIT);
-        ExternalImage target = new ExternalImage("target", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+        ExternalImage target = new ExternalImage("target", WIDTH, HEIGHT, Format.R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
             .set(color.handle(), color.view());
         float half = (float) Math.sqrt(0.5);
@@ -756,7 +757,7 @@ class MeshletBenchmark {
         long queries, double period, int rock, int rockLod, MeshData rockLods, float[] placed, Camera camera) {
         int count = 30_000;
         mainView(renderer).set(camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1), 1, MeshletRenderer.MODE_LIT);
-        ExternalImage target = new ExternalImage("target", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+        ExternalImage target = new ExternalImage("target", WIDTH, HEIGHT, Format.R8G8B8A8_UNORM,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
             .set(color.handle(), color.view());
         try (ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,

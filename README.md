@@ -578,7 +578,10 @@ that declare how they use each image. The graph does the rest:
   chain such as exposure, bloom, tone mapping needs no rewiring when an effect is added or removed, and a plugin can
   place its own effect in it; whoever requires the key gets its last version. A modifier nothing needs is never built.
   `graph.remove(id)` removes a technique by its id.
-- **History:** `g.history(name, width, height, format)` keeps an image from frame to frame: this frame writes
+- **Images:** `g.create(name, ImageDesc.of(Format.R16G16B16A16_SFLOAT, w, h))` with `.fullMips()`, `.layers(n)`,
+  `.cube()`, `.volume(depth)` or `.samples(n)`, or `ImageDesc.like(image, Ratio.of(1, 2))`; formats are the engine's
+  `Format` enum, and usage follows from the declared accesses.
+- **History:** `g.history(name, desc)` keeps an image from frame to frame: this frame writes
   `current()`, and `previous()` holds what the frame before wrote (`ctx.historyValid(history)` says whether there
   was one). The graph swaps the two images' roles every frame and carries their state across the frame boundary.
 
@@ -598,8 +601,8 @@ final class Bloom implements Technique {
 
     public void build(GraphBuilder g) {
         Image scene = g.require(Keys.SCENE_COLOR);
-        Image soft = g.request(new Blur(scene, 8, 0.5));    // shared with any equal request
-        Image out = g.createLike("bloom", scene, 1);
+        Image soft = g.request(new Blur(scene, 8, Ratio.of(1, 2)));    // shared with any equal request
+        Image out = g.create("bloom", ImageDesc.like(scene, Ratio.ONE));
         g.pass("bloom")
             .read(scene, Access.SAMPLED_COMPUTE).read(soft, Access.SAMPLED_COMPUTE)
             .write(out, Access.STORAGE_WRITE)

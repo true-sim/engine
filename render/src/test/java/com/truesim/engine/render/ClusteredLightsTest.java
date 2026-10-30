@@ -14,6 +14,7 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.nvkCmdCopyBuffer;
 
+import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.ExternalImage;
@@ -27,6 +28,7 @@ import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanException;
 import com.truesim.engine.vulkan.VulkanInstance;
+import com.truesim.engine.vulkan.Format;
 import java.lang.foreign.ValueLayout;
 import java.util.HashSet;
 import java.util.List;
@@ -240,7 +242,7 @@ class ClusteredLightsTest {
         try (GpuBuffer list = GpuBuffer.hostVisible(device, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
              GpuImage target = new GpuImage(device, 4, 4, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
              FrameGraph graph = new FrameGraph(device, 2)) {
-            ExternalImage output = new ExternalImage("target", 4, 4, VK_FORMAT_R8G8B8A8_UNORM, usage,
+            ExternalImage output = new ExternalImage("target", 4, 4, Format.R8G8B8A8_UNORM, usage,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
             graph.add(clustered).add(new Technique() {
                 @Override
@@ -253,7 +255,7 @@ class ClusteredLightsTest {
                     com.truesim.engine.graph.Buffer lights = g.require(Keys.LIGHT_LIST);
                     g.pass("read back").read(lights, BufferAccess.TRANSFER_SRC).sideEffects()
                         .record(ctx -> copy(ctx.commands(), ctx.buffer(lights), list.handle(), bytes));
-                    Image image = g.create("out", 4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+                    Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4));
                     g.pass("fill").write(image, Access.TRANSFER_DST).record(ctx -> { });
                     g.provide(OUT, image);
                 }

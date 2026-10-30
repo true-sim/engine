@@ -14,6 +14,7 @@ import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_FRAGMENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_VERTEX_BIT;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
+import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
@@ -38,6 +39,7 @@ import com.truesim.engine.vulkan.VulkanInstance;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.assets.mesh.VertexFormat;
 import com.truesim.scene.meshbuild.MeshBuilder;
+import com.truesim.engine.vulkan.Format;
 import java.lang.foreign.ValueLayout;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -69,7 +71,7 @@ class CustomPassTest {
             Buffer stored = g.importBuffer(instances);
             Buffer out = g.importBuffer(readback);
             Buffer found = g.createBuffer("positions", 16L * count);
-            Image target = g.create("tinted", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image target = g.create("tinted", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("clear positions").write(found, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(found, 0));
             g.pass("find positions").read(stored, BufferAccess.STORAGE_READ).write(found, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> ctx.dispatch(positions, push.clear().address(ctx.address(stored))
@@ -123,7 +125,7 @@ class CustomPassTest {
                      .pushConstants(8).doubleSided().build()) {
                 int mesh = pool.add(square());
                 scene.set(1, mesh, 0, 1, true, 2.0, 4.0, 6.0, 0, 0, 0, 1, 1, 1, 1);
-                ExternalImage output = new ExternalImage("target", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage,
+                ExternalImage output = new ExternalImage("target", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage,
                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
                 graph.add(new Tint(scene, new ExternalBuffer("instances", scene.instanceBuffer()),
                     new ExternalBuffer("readback", readback), positions, tint, new Push())).output(OUT, output);

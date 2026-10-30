@@ -107,6 +107,7 @@ public final class VulkanDevice implements AutoCloseable {
     private final boolean meshShaders;
     private final boolean rayTracing;
     private final boolean anisotropic;
+    private final boolean cubeArrays;
     private final boolean primitiveIds;
     private final float maxAnisotropy;
     private final boolean swapchains;
@@ -134,6 +135,7 @@ public final class VulkanDevice implements AutoCloseable {
             VkPhysicalDeviceProperties properties = VkPhysicalDeviceProperties.calloc(stack);
             vkGetPhysicalDeviceProperties(gpu.handle(), properties);
             this.anisotropic = core.samplerAnisotropy();
+            this.cubeArrays = core.imageCubeArray();
             this.primitiveIds = core.geometryShader();
             this.maxAnisotropy = Math.min(16, properties.limits().maxSamplerAnisotropy());
             // Every 1.4 feature the GPU supports is enabled: the queried struct goes into the create chain as it is.
@@ -238,7 +240,7 @@ public final class VulkanDevice implements AutoCloseable {
                 .pNext(features11.address());
             features.features().shaderInt64(true).shaderInt16(true).multiDrawIndirect(true)
                 .drawIndirectFirstInstance(true).shaderStorageImageReadWithoutFormat(true)
-                .shaderStorageImageWriteWithoutFormat(true).samplerAnisotropy(anisotropic)
+                .shaderStorageImageWriteWithoutFormat(true).samplerAnisotropy(anisotropic).imageCubeArray(cubeArrays)
                 .geometryShader(primitiveIds);
             VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
@@ -429,6 +431,11 @@ public final class VulkanDevice implements AutoCloseable {
      */
     public boolean primitiveIds() {
         return primitiveIds;
+    }
+
+    /** Whether images may hold several cube maps (imageCubeArray): nearly every GPU can. */
+    public boolean cubeArrays() {
+        return cubeArrays;
     }
 
     /** Whether samplers may filter anisotropically (samplerAnisotropy): nearly every GPU can. */

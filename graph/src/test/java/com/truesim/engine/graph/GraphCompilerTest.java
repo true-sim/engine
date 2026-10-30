@@ -13,6 +13,7 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
 import com.truesim.common.graph.Id;
+import com.truesim.engine.vulkan.Format;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -45,7 +46,7 @@ class GraphCompilerTest {
     }
 
     private static ExternalImage swapchain(int usage) {
-        return new ExternalImage("swapchain", 64, 64, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
+        return new ExternalImage("swapchain", 64, 64, Format.R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     }
 
@@ -60,10 +61,10 @@ class GraphCompilerTest {
     @Test
     void passesNothingNeedsAreCulledAndTransientImagesShareSlots() {
         Technique draw = new Lambda(List.of(OUT), g -> {
-            Image a = g.create("a", 64, 64, VK_FORMAT_R16G16B16A16_SFLOAT);
-            Image unused = g.create("unused", 64, 64, VK_FORMAT_R16G16B16A16_SFLOAT);
-            Image b = g.create("b", 64, 64, VK_FORMAT_R16G16B16A16_SFLOAT);
-            Image out = g.create("out", 64, 64, VK_FORMAT_R8G8B8A8_UNORM);
+            Image a = g.create("a", ImageDesc.of(Format.R16G16B16A16_SFLOAT, 64, 64));
+            Image unused = g.create("unused", ImageDesc.of(Format.R16G16B16A16_SFLOAT, 64, 64));
+            Image b = g.create("b", ImageDesc.of(Format.R16G16B16A16_SFLOAT, 64, 64));
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64));
             g.pass("write a").write(a, Access.STORAGE_WRITE).record(ctx -> { });
             g.pass("write unused").write(unused, Access.STORAGE_WRITE).record(ctx -> { });
             g.pass("a to out").read(a, Access.SAMPLED_COMPUTE).write(out, Access.STORAGE_WRITE).record(ctx -> { });
@@ -90,7 +91,7 @@ class GraphCompilerTest {
     @Test
     void outputsThatFitAreDrawnStraightIntoTheirTarget() {
         Technique draw = new Lambda(List.of(OUT), g -> {
-            Image out = g.create("out", 64, 64, VK_FORMAT_R8G8B8A8_UNORM);
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64));
             g.pass("draw").write(out, Access.COLOR_ATTACHMENT).record(ctx -> { });
             g.provide(OUT, out);
         });
@@ -112,8 +113,8 @@ class GraphCompilerTest {
     @Test
     void asyncPassesRunInTheirOwnBatches() {
         Technique frame = new Lambda(List.of(OUT), g -> {
-            Image ao = g.create("ao", 64, 64, VK_FORMAT_R8G8B8A8_UNORM);
-            Image out = g.create("out", 64, 64, VK_FORMAT_R8G8B8A8_UNORM);
+            Image ao = g.create("ao", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64));
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64));
             g.pass("ssao").write(ao, Access.STORAGE_WRITE).async().record(ctx -> { });
             g.pass("shade").read(ao, Access.SAMPLED_FRAGMENT).write(out, Access.COLOR_ATTACHMENT).record(ctx -> { });
             g.provide(OUT, out);
@@ -132,8 +133,8 @@ class GraphCompilerTest {
     @Test
     void historiesArePlannedAfterTheSlots() {
         Technique remember = new Lambda(List.of(OUT), g -> {
-            History history = g.history("colors", 64, 64, VK_FORMAT_R8G8B8A8_UNORM);
-            Image out = g.create("out", 64, 64, VK_FORMAT_R8G8B8A8_UNORM);
+            History history = g.history("colors", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64));
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64));
             g.pass("recall").read(history.previous(), Access.SAMPLED_FRAGMENT)
                 .write(out, Access.COLOR_ATTACHMENT).record(ctx -> { });
             g.pass("remember").write(history.current(), Access.TRANSFER_DST).record(ctx -> { });
@@ -184,7 +185,7 @@ class GraphCompilerTest {
         Id<Modifier> ui = id("ui");
         Id<Modifier> absent = id("absent");
         Technique base = new Lambda(List.of(OUT), g -> {
-            Image out = g.create("out", 64, 64, VK_FORMAT_R8G8B8A8_UNORM);
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64));
             g.pass("base").write(out, Access.TRANSFER_DST).record(ctx -> { });
             g.provide(OUT, out);
         });
@@ -210,8 +211,8 @@ class GraphCompilerTest {
     @Test
     void misuseIsReportedWithoutADevice() {
         Technique reader = new Lambda(List.of(OUT), g -> {
-            Image image = g.create("x", 64, 64, VK_FORMAT_R8G8B8A8_UNORM);
-            Image out = g.create("out", 64, 64, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64));
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64));
             g.pass("read early").read(image, Access.TRANSFER_SRC).write(out, Access.TRANSFER_DST).record(ctx -> { });
             g.provide(OUT, out);
         });

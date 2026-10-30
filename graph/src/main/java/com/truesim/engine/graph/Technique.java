@@ -17,8 +17,8 @@ import java.util.List;
  *
  *     public void build(GraphBuilder g) {
  *         Image scene = g.require(SCENE_COLOR);
- *         Image blurred = g.request(new Blur(scene, 6, 0.25));   // shared with any identical request
- *         Image out = g.createLike("bloom", scene, 1);
+ *         Image blurred = g.request(new Blur(scene, 6, Ratio.of(1, 4)));   // shared with any identical request
+ *         Image out = g.create("bloom", ImageDesc.like(scene, Ratio.ONE));
  *         g.pass("bloom combine")
  *             .read(scene, Access.SAMPLED_COMPUTE).read(blurred, Access.SAMPLED_COMPUTE)
  *             .write(out, Access.STORAGE_WRITE)

@@ -8,7 +8,7 @@ package com.truesim.engine.graph;
  * {@link PassContext#historyValid(History)}.
  *
  * <pre>{@code
- * History taa = g.history("taa", width, height, VK_FORMAT_R16G16B16A16_SFLOAT);
+ * History taa = g.history("taa", ImageDesc.of(Format.R16G16B16A16_SFLOAT, width, height));
  * g.pass("taa").read(taa.previous(), Access.SAMPLED_COMPUTE).write(taa.current(), Access.STORAGE_WRITE) ...
  * }</pre>
  */

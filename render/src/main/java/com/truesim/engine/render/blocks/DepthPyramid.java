@@ -12,9 +12,11 @@ import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
+import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.layout.PyramidPush;
+import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Pipeline;
@@ -51,8 +53,8 @@ public record DepthPyramid(Image depth) implements Request<Image> {
         });
         int width = (depth.width() + 1) / 2;
         int height = (depth.height() + 1) / 2;
-        int mips = GpuImage.fullMipCount(width, height);
-        Image pyramid = g.create("depth pyramid of " + depth.name(), width, height, VK_FORMAT_R32_SFLOAT, mips);
+        Image pyramid = g.create("depth pyramid of " + depth.name(),
+            ImageDesc.of(Format.R32_SFLOAT, width, height).fullMips());
         g.pass("depth pyramid of " + depth.name())
             .read(depth, Access.SAMPLED_COMPUTE)
             .write(pyramid, Access.STORAGE_WRITE)

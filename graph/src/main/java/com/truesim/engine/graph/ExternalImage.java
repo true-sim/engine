@@ -1,5 +1,6 @@
 package com.truesim.engine.graph;
 
+import com.truesim.engine.vulkan.Format;
 import java.util.Objects;
 
 /**
@@ -11,7 +12,7 @@ import java.util.Objects;
 public final class ExternalImage {
 
     final String name;
-    final int format;
+    final Format format;
     final int usage;
     final int initialLayout;
     final int finalLayout;
@@ -25,10 +26,10 @@ public final class ExternalImage {
      * An external image of {@code width} by {@code height} {@code format} texels, created with {@code usage} (the
      * graph never uses it in ways outside it).
      */
-    public ExternalImage(String name, int width, int height, int format, int usage, int initialLayout,
+    public ExternalImage(String name, int width, int height, Format format, int usage, int initialLayout,
         int finalLayout) {
         this.name = Objects.requireNonNull(name, "name");
-        this.format = format;
+        this.format = Objects.requireNonNull(format, "format");
         this.usage = usage;
         this.initialLayout = initialLayout;
         this.finalLayout = finalLayout;
@@ -66,7 +67,7 @@ public final class ExternalImage {
         return height;
     }
 
-    public int format() {
+    public Format format() {
         return format;
     }
 }

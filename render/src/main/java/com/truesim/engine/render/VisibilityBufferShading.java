@@ -6,10 +6,12 @@ import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
+import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.layout.ShadePush;
+import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.Push;
 import com.truesim.engine.vulkan.ShaderModule;
@@ -118,7 +120,7 @@ public final class VisibilityBufferShading implements Technique {
         }
         Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain", 0);
         Image ids = targets.color();
-        Image color = g.create("scene color", width, height, colorFormat);
+        Image color = g.create("scene color", ImageDesc.of(Format.of(colorFormat), width, height));
         int tilesX = (width + TILE - 1) / TILE;
         int tilesY = (height + TILE - 1) / TILE;
         // Per bin: its indirect dispatch (x, y, z), its tile count, then its tiles.
