@@ -231,15 +231,17 @@ public final class MeshletRenderer implements AutoCloseable {
                         // the fragment shader did not see the primitive ID the mesh shader wrote (pitfalls.md).
                         meshDepth = bins(bin -> (bin == BIN_MASKED ? raster(bin, meshShader,
                             VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, meshShader,
-                            "slimMaskedDepthMain") : raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain"))
+                            "idProbeDepthMain") : raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain"))
                             .depth(depthFormat).build()); // EXPERIMENT
                     } else {
                         meshDraw = bins(bin -> raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain")
                             .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, bin == BIN_MASKED ? "maskedMain"
                                 : "fragmentMain") // the same shading
                             .color(colorFormat).depth(depthFormat).build());
-                        meshDepth = bins(bin -> depthOnly(raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT,
-                            "meshIdsMain"), bin, drawShader).depth(depthFormat).build());
+                        meshDepth = bins(bin -> (bin == BIN_MASKED && device.primitiveIds() ? raster(bin, meshShader,
+                            VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, meshShader,
+                            "idProbeDepthMain") : depthOnly(raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT,
+                            "meshIdsMain"), bin, drawShader)).depth(depthFormat).build()); // EXPERIMENT F
                     }
                     idsMesh = idsShader == null ? null : bins(bin -> raster(bin, meshShader,
                         VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader,
