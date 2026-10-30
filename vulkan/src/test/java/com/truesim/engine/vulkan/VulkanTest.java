@@ -359,7 +359,7 @@ class VulkanTest {
             assertThat(device.faultReport()).isNull();
             if (!device.reportsFaults()) { // asking a driver that can report about a healthy device is invalid
                 assertThatThrownBy(() -> device.check(VK_ERROR_DEVICE_LOST, "Could not submit"))
-                    .isInstanceOf(DeviceLostException.class).hasMessage("Could not submit");
+                    .isInstanceOf(DeviceLostException.class).hasMessage("Could not submit: VK_ERROR_DEVICE_LOST");
             }
             assertThat(instance.validationErrors()).isZero();
         }
