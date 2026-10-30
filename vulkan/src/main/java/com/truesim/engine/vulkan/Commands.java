@@ -57,8 +57,14 @@ public final class Commands {
     private static final int TIMESTAMP = 26;
     private static final int RESET_QUERIES = 27;
     private static final int QUERY_RESULTS = 28;
+    private static final int RESET_POOL = 29;
+    private static final int BEGIN_COMMANDS = 30;
+    private static final int END_COMMANDS = 31;
+    private static final int WAIT_FENCES = 32;
+    private static final int RESET_FENCES = 33;
+    private static final int PRESENT = 34;
     // Immutable entries: a thread seeing an older one only wraps the address again.
-    private static final Fn[] FUNCTIONS = new Fn[29];
+    private static final Fn[] FUNCTIONS = new Fn[35];
 
     static {
         java.util.Arrays.fill(FUNCTIONS, NONE);
@@ -102,6 +108,15 @@ public final class Commands {
         handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT));
     private static final MethodHandle H_QUERY_RESULTS = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG,
         JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle H_RESET_POOL = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle H_RESULT_POINTER = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle H_RESULT = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle H_WAIT_FENCES = LINKER.downcallHandle( // blocks: not critical
+        FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle H_RESET_FENCES =
+        handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle H_PRESENT = LINKER.downcallHandle( // may block on the display: not critical
+        FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
     private static final MethodHandle H_SUBMIT = LINKER.downcallHandle(
         FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_LONG));
 
@@ -418,6 +433,66 @@ public final class Commands {
             return (int) H_QUERY_RESULTS.invokeExact(function(QUERY_RESULTS,
                 device.getCapabilities().vkGetQueryPoolResults), device.address(), pool, first, count, size, data,
                 stride, flags);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkResetCommandPool}; returns the result. */
+    public static int resetCommandPool(VkDevice device, long pool, int flags) {
+        try {
+            return (int) H_RESET_POOL.invokeExact(function(RESET_POOL, device.getCapabilities().vkResetCommandPool),
+                device.address(), pool, flags);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkBeginCommandBuffer} with the {@code VkCommandBufferBeginInfo} at {@code info}; returns the result. */
+    public static int beginCommandBuffer(VkCommandBuffer commands, long info) {
+        try {
+            return (int) H_RESULT_POINTER.invokeExact(function(BEGIN_COMMANDS, of(commands).vkBeginCommandBuffer),
+                commands.address(), info);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkEndCommandBuffer}; returns the result. */
+    public static int endCommandBuffer(VkCommandBuffer commands) {
+        try {
+            return (int) H_RESULT.invokeExact(function(END_COMMANDS, of(commands).vkEndCommandBuffer),
+                commands.address());
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkWaitForFences} for {@code count} fences at {@code fences}; returns the result. */
+    public static int waitForFences(VkDevice device, int count, long fences, boolean all, long timeout) {
+        try {
+            return (int) H_WAIT_FENCES.invokeExact(function(WAIT_FENCES, device.getCapabilities().vkWaitForFences),
+                device.address(), count, fences, all ? 1 : 0, timeout);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkResetFences} for {@code count} fences at {@code fences}; returns the result. */
+    public static int resetFences(VkDevice device, int count, long fences) {
+        try {
+            return (int) H_RESET_FENCES.invokeExact(function(RESET_FENCES, device.getCapabilities().vkResetFences),
+                device.address(), count, fences);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkQueuePresentKHR} with the {@code VkPresentInfoKHR} at {@code info}; returns the result. */
+    public static int queuePresent(VkQueue queue, long info) {
+        try {
+            return (int) H_PRESENT.invokeExact(function(PRESENT, queue.getCapabilities().vkQueuePresentKHR),
+                queue.address(), info);
         } catch (Throwable e) {
             throw failed(e);
         }
