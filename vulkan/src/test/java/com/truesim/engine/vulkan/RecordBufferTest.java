@@ -88,12 +88,13 @@ class RecordBufferTest {
                     fill(records, 0, 1);
                     fill(records, 1, 1);
                     fill(records, 2, 1);
-                    assertThatIllegalStateException().as("more than the buffer holds in one frame")
-                        .isThrownBy(() -> records.upload(commands));
+                    records.upload(commands); // more than the upload buffer has room for: a bigger one
                 });
                 slots.end();
                 words = read(device, records);
-                assertThat(words[0]).as("cleared").isZero();
+                assertThat(words[0]).as("cleared, then set").isEqualTo(1);
+                assertThat(words[8]).isEqualTo(1);
+                assertThat(words[16]).isEqualTo(1);
                 assertThat(words[24]).isEqualTo(30);
                 assertThatIndexOutOfBoundsException().isThrownBy(() -> records.claim(4));
                 assertThatIndexOutOfBoundsException().isThrownBy(() -> records.offset(3));

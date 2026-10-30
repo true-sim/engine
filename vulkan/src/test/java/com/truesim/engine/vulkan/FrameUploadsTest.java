@@ -60,10 +60,10 @@ class FrameUploadsTest {
                 uploads.write(target, 4, data);
                 data.setAtIndex(ValueLayout.JAVA_INT, 0, 9); // staged: the caller's data is free again
                 uploads.write(target, 16, data.asSlice(0, 0)); // nothing
-                uploads.record(arena.allocateFrom(ValueLayout.JAVA_INT, 5, 6, 7, 8), (commands, staging) -> {
+                uploads.record(arena.allocateFrom(ValueLayout.JAVA_INT, 5, 6, 7, 8), (commands, staging, offset) -> {
                     try (MemoryStack stack = stackPush()) {
                         vkCmdCopyBuffer(commands, staging.handle(), other.handle(),
-                            VkBufferCopy.calloc(1, stack).size(16));
+                            VkBufferCopy.calloc(1, stack).srcOffset(offset).size(16));
                     }
                 });
                 assertThat(uploads.pendingCount()).isEqualTo(2);
@@ -91,6 +91,46 @@ class FrameUploadsTest {
     }
 
     @Test
+    void stagingBuffersAreSharedAndReused() {
+        try (VulkanInstance instance = instance(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             Arena arena = Arena.ofConfined();
+             GpuBuffer target = GpuBuffer.deviceLocal(device, 64, TARGET);
+             GpuBuffer big = GpuBuffer.deviceLocal(device, FrameUploads.CHUNK_BYTES + 16, TARGET)) {
+            FrameSlots slots = new FrameSlots(2);
+            try (FrameUploads uploads = new FrameUploads(device, slots)) {
+                for (int frame = 0; frame < 8; frame++) {
+                    // Uploads of a frame share one staging buffer, each at its own aligned offset.
+                    for (int i = 0; i < 4; i++) {
+                        uploads.write(target, 16L * i, arena.allocateFrom(ValueLayout.JAVA_INT, frame, i), 8);
+                    }
+                    slots.begin(frame % 2);
+                    device.submitAndWait(device.graphics(), slots::recordStart);
+                    slots.end();
+                    assertThat(read(device, target)).containsExactly(frame, 0, 0, 0, frame, 1, 0, 0, frame, 2, 0, 0,
+                        frame, 3, 0, 0);
+                }
+                // One staging buffer per frame in flight, and the one filled when the oldest is not free yet.
+                assertThat(uploads.stagingBuffersCreated()).isLessThanOrEqualTo(3);
+                int before = device.openChildren();
+                // An upload bigger than the shared buffers gets one of its own, freed once its frame is done.
+                MemorySegment large = arena.allocate(FrameUploads.CHUNK_BYTES + 16);
+                uploads.write(big, 0, large);
+                uploads.write(target, 0, arena.allocateFrom(ValueLayout.JAVA_INT, 7)); // in a shared one again
+                for (int frame = 0; frame < 3; frame++) {
+                    slots.begin(frame % 2);
+                    device.submitAndWait(device.graphics(), slots::recordStart);
+                    slots.end();
+                }
+                assertThat(read(device, target)[0]).isEqualTo(7);
+                if (before >= 0) {
+                    assertThat(device.openChildren()).as("the big staging buffer freed").isEqualTo(before);
+                }
+            }
+            assertThat(device.openChildren()).isIn(-1, 2); // closing freed every staging buffer: target and big remain
+        }
+    }
+
+    @Test
     void withoutFramesUploadsAreDoneAtOnce() {
         try (VulkanInstance instance = instance(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
              Arena arena = Arena.ofConfined();
@@ -99,10 +139,10 @@ class FrameUploadsTest {
             assertThat(uploads.deferred()).isFalse();
             uploads.write(target, 0, arena.allocateFrom(ValueLayout.JAVA_INT, 4, 3, 2, 1));
             assertThat(read(device, target)).containsExactly(4, 3, 2, 1);
-            uploads.record(arena.allocateFrom(ValueLayout.JAVA_INT, 7), (commands, staging) -> {
+            uploads.record(arena.allocateFrom(ValueLayout.JAVA_INT, 7), (commands, staging, offset) -> {
                 try (MemoryStack stack = stackPush()) {
                     vkCmdCopyBuffer(commands, staging.handle(), target.handle(), VkBufferCopy.calloc(1, stack)
-                        .dstOffset(12).size(4));
+                        .srcOffset(offset).dstOffset(12).size(4));
                 }
             });
             assertThat(read(device, target)).containsExactly(4, 3, 2, 7);
