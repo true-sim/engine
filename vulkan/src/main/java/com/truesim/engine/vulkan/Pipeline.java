@@ -33,7 +33,6 @@ import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CR
 import static org.lwjgl.vulkan.VK10.vkCreateComputePipelines;
 import static org.lwjgl.vulkan.VK10.vkCreateGraphicsPipelines;
 import static org.lwjgl.vulkan.VK10.vkDestroyPipeline;
-import static org.lwjgl.vulkan.VK10.VK_NULL_HANDLE;
 import static org.lwjgl.vulkan.EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
 
@@ -131,7 +130,8 @@ public final class Pipeline implements AutoCloseable {
                 info.stage().pSpecializationInfo(VkSpecializationInfo.calloc(stack).pMapEntries(entries).pData(data));
             }
             LongBuffer pipeline = stack.mallocLong(1);
-            Vulkan.check(vkCreateComputePipelines(device.handle(), VK_NULL_HANDLE, info, null, pipeline),
+            long cache = device.pipelineCache().handle();
+            Vulkan.check(vkCreateComputePipelines(device.handle(), cache, info, null, pipeline),
                 "Could not create the compute pipeline " + entry + " of " + module.name());
             return new Pipeline(device, pipeline.get(0), layout, VK_PIPELINE_BIND_POINT_COMPUTE, pushBytes);
         }
@@ -169,8 +169,8 @@ public final class Pipeline implements AutoCloseable {
         Commands.bindPipeline(commands, bindPoint, handle);
     }
 
-    /** Sets the push constants to {@code push}'s fields. Allocates nothing. */
-    public void push(VkCommandBuffer commands, Push push) {
+    /** Sets the push constants to {@code push}'s bytes. Allocates nothing. */
+    public void push(VkCommandBuffer commands, PushConstants push) {
         if (push.size() > 0) {
             push(commands, push.address(), push.size());
         }
@@ -310,7 +310,8 @@ public final class Pipeline implements AutoCloseable {
                             .topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST));
                 }
                 LongBuffer pipeline = stack.mallocLong(1);
-                Vulkan.check(vkCreateGraphicsPipelines(device.handle(), VK_NULL_HANDLE, info, null, pipeline),
+                long cache = device.pipelineCache().handle();
+                Vulkan.check(vkCreateGraphicsPipelines(device.handle(), cache, info, null, pipeline),
                     "Could not create a graphics pipeline from " + stages.getFirst().module.name());
                 return new Pipeline(device, pipeline.get(0), layout, VK_PIPELINE_BIND_POINT_GRAPHICS, pushBytes);
             }

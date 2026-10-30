@@ -3,11 +3,16 @@ package com.truesim.engine.graph;
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.graph.Id;
 import com.truesim.common.graph.Resolution;
+import com.truesim.engine.vulkan.Format;
+import com.truesim.engine.vulkan.Pipeline;
+import com.truesim.engine.vulkan.ShaderModule;
 import com.truesim.engine.vulkan.VulkanDevice;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -214,18 +219,72 @@ public final class GraphBuilder {
         return resolution.scope();
     }
 
-    // ---------------------------------------------------------------- the device, and objects kept across builds
+    // ---------------------------------------------------------------- programs, and what the device can do
 
-    /** The device the graph records for, e.g. to create pipelines. */
-    public VulkanDevice device() {
+    /** What the device can do: whether to build a ray traced variant, say. */
+    public Capabilities capabilities() {
+        VulkanDevice device = graph.device();
+        return new Capabilities(device.rayTracing(), device.meshShaders(), device.primitiveIds());
+    }
+
+    /**
+     * The compute program running {@code entry} of the SPIR-V classpath resource {@code shader}, with {@code pushBytes}
+     * of push constants and its specialization constants ({@code [vk::constant_id(i)]}, 32-bit) i = 0, 1, ... set to
+     * {@code constants}. Built once through the device's pipeline cache and shared by every technique asking for the
+     * same; it lives as long as the graph.
+     */
+    public Pipeline computeProgram(String shader, String entry, int pushBytes, int... constants) {
+        ComputeKey key = new ComputeKey(Objects.requireNonNull(shader, "shader"), Objects.requireNonNull(entry, "entry"),
+            pushBytes, List.of(Arrays.stream(constants).boxed().toArray(Integer[]::new)));
+        return graph.cached(key, device -> {
+            try (ShaderModule module = ShaderModule.load(device, shader)) {
+                return Pipeline.compute(device, module, entry, pushBytes, constants);
+            }
+        });
+    }
+
+    /** The graphics program {@code program} describes, built and shared as {@link #computeProgram} ones. */
+    public Pipeline graphicsProgram(GraphicsProgram program) {
+        return graph.cached(Objects.requireNonNull(program, "program"), device -> {
+            if (program.stages().isEmpty()) {
+                throw new IllegalArgumentException("A graphics program needs shader stages");
+            }
+            Map<String, ShaderModule> modules = new LinkedHashMap<>();
+            try {
+                Pipeline.Graphics graphics = Pipeline.graphics(device).pushConstants(program.pushBytes());
+                for (GraphicsProgram.Stage stage : program.stages()) {
+                    ShaderModule module = modules.computeIfAbsent(stage.shader(), s -> ShaderModule.load(device, s));
+                    graphics.stage(stage.kind().bit, module, stage.entry());
+                }
+                for (Format color : program.colors()) {
+                    graphics.color(color.vk());
+                }
+                if (program.depth() != null) {
+                    graphics.depth(program.depth().vk());
+                }
+                if (program.doubleSided()) {
+                    graphics.doubleSided();
+                }
+                return graphics.build();
+            } finally {
+                modules.values().forEach(ShaderModule::close);
+            }
+        });
+    }
+
+    private record ComputeKey(String shader, String entry, int pushBytes, List<Integer> constants) {
+    }
+
+    /** The device, for the graph's own tests. */
+    VulkanDevice device() {
         return graph.device();
     }
 
     /**
-     * The object kept under {@code key} (pipelines, samplers: what passes need, made once), created with
-     * {@code create} the first time. It lives as long as the graph and is closed with it.
+     * The object kept under {@code key}, created with {@code create} the first time; it lives as long as the graph and
+     * is closed with it.
      */
-    public <T extends AutoCloseable> T cached(Object key, Function<VulkanDevice, T> create) {
+    <T extends AutoCloseable> T cached(Object key, Function<VulkanDevice, T> create) {
         return graph.cached(key, create);
     }
 

@@ -48,11 +48,7 @@ public record Blur(Image source, int radius, Ratio scale) implements Request<Ima
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Image build(GraphBuilder g) {
-        Pipeline pipeline = g.cached(Blur.class, device -> {
-            try (ShaderModule shader = ShaderModule.load(device, "shaders/blocks/blur.spv")) {
-                return Pipeline.compute(device, shader, "blurMain", BlurPush.BYTES);
-            }
-        });
+        Pipeline pipeline = g.computeProgram("shaders/blocks/blur.spv", "blurMain", BlurPush.BYTES);
         String name = "blur " + radius + " of " + source.name();
         Image across = g.create(name + " (across)", ImageDesc.like(source, scale));
         Image result = g.create(name, ImageDesc.like(source, scale));

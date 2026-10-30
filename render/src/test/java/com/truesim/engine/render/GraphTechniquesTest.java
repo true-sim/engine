@@ -294,6 +294,32 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void programsAreBuiltOnceAndShared() {
+        Pipeline[] programs = new Pipeline[4];
+        graph.add(new Technique() {
+            @Override
+            public List<Key<?>> provides() {
+                return List.of(EDGE);
+            }
+
+            @Override
+            public void build(GraphBuilder g) {
+                programs[0] = g.computeProgram("shaders/test/depthcopy.spv", "copyMain", 8);
+                programs[1] = g.computeProgram("shaders/test/depthcopy.spv", "copyMain", 8);
+                programs[2] = g.computeProgram("shaders/test/depthcopy.spv", "copyMain", 8, 1); // another variant
+                programs[3] = g.computeProgram("shaders/test/depthcopy.spv", "copyMain", 8, 1);
+                Image image = g.create("cleared", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+                g.pass("clear").write(image, Access.TRANSFER_DST).record(ctx -> ctx.clear(image.whole(), 1, 0, 0, 1));
+                g.provide(EDGE, image);
+            }
+        }).output(EDGE, output);
+        frame();
+        assertThat(programs[1]).isSameAs(programs[0]);
+        assertThat(programs[3]).isSameAs(programs[2]).isNotSameAs(programs[0]);
+        assertThat(red(0, 0)).isEqualTo(1);
+    }
+
+    @Test
     void customPassesReadTheInstancesThroughTheGraph() {
         // A pass of a game's own, reading the engine's instances as an external buffer of the graph: ordered after
         // the scatter of the frame's changes, which the frame's first commands upload.
@@ -316,15 +342,7 @@ class GraphTechniquesTest {
                     com.truesim.engine.graph.Buffer buffer = g.importBuffer(instances);
                     Image image = g.create("instances as texels", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
                     g.pass("copy instances").read(buffer, com.truesim.engine.graph.BufferAccess.TRANSFER_SRC)
-                        .write(image, Access.TRANSFER_DST).record(ctx -> {
-                            try (MemoryStack stack = stackPush()) {
-                                VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
-                                region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
-                                region.imageExtent().set(SIZE, SIZE, 1);
-                                org.lwjgl.vulkan.VK10.vkCmdCopyBufferToImage(ctx.unsafe().commands(), ctx.unsafe().buffer(buffer),
-                                    ctx.unsafe().image(image), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, region);
-                            }
-                        });
+                        .write(image, Access.TRANSFER_DST).record(ctx -> ctx.copy(buffer, 0, image.whole()));
                     g.provide(EDGE, image);
                 }
             }).output(EDGE, output);
@@ -790,11 +808,7 @@ class GraphTechniquesTest {
         public void build(GraphBuilder g) {
             Image depth = g.request(draw).depth();
             Image image = g.create(key.name(), ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
-            Pipeline pipeline = g.cached(DepthCopy.class, device -> {
-                try (ShaderModule shader = ShaderModule.load(device, "shaders/test/depthcopy.spv")) {
-                    return Pipeline.compute(device, shader, "copyMain", 8);
-                }
-            });
+            Pipeline pipeline = g.computeProgram("shaders/test/depthcopy.spv", "copyMain", 8);
             g.pass("copy " + key).read(depth, Access.SAMPLED_COMPUTE).write(image, Access.STORAGE_WRITE)
                 .record(ctx -> {
                     try (MemoryStack stack = stackPush()) {

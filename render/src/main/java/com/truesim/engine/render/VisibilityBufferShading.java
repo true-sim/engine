@@ -104,7 +104,7 @@ public final class VisibilityBufferShading implements Technique {
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs());
         // With inline ray shadows, the variant tracing them, where the device can.
-        boolean traced = shadows != null && shadows.traced() && g.device().rayTracing();
+        boolean traced = shadows != null && shadows.traced() && g.capabilities().rayTracing();
         List<MaterialType> types = renderer.scene().materials().types();
         int variants = 1 << Material.FEATURE_BITS;
         Pipeline[] shade = new Pipeline[types.size() * variants];
@@ -163,11 +163,7 @@ public final class VisibilityBufferShading implements Technique {
     @AllowAllocation("building the graph, when it changes")
     /** {@code entry} of {@code shader}, with resolve.slang's FEATURES {@code features}. */
     private static Pipeline compute(GraphBuilder g, String shader, String entry, int features) {
-        return g.cached("visibility shading: " + shader + " " + entry + " " + features, device -> {
-            try (ShaderModule module = ShaderModule.load(device, shader)) {
-                return Pipeline.compute(device, module, entry, PUSH_BYTES, features);
-            }
-        });
+        return g.computeProgram(shader, entry, PUSH_BYTES, features);
     }
 
     /**

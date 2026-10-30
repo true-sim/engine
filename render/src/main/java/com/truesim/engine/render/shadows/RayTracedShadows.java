@@ -87,11 +87,7 @@ public final class RayTracedShadows implements Technique {
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
         g.modify(Keys.LIGHT_LIST);
-        Pipeline pipeline = g.cached(RayTracedShadows.class, device -> {
-            try (ShaderModule shader = ShaderModule.load(device, "shaders/shadows/traced.spv")) {
-                return Pipeline.compute(device, shader, "tracedMain", PUSH_BYTES);
-            }
-        });
+        Pipeline pipeline = g.computeProgram("shaders/shadows/traced.spv", "tracedMain", PUSH_BYTES);
         Image depth = g.request(depthSource).depth();
         Buffer topLevel = g.request(new TopLevel(rayTracing, depthSource.view()));
         Image mask = g.create("shadow mask of light " + light, ImageDesc.like(depth, Ratio.ONE).format(Format.R8_UNORM));
