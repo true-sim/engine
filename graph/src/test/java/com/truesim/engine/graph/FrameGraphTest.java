@@ -856,6 +856,88 @@ class FrameGraphTest {
     }
 
     @Test
+    void readbacksArriveOnceTheFrameIsDone() {
+        int[] buffered = new int[2]; // the value read, and from which frame
+        int[] texel = new int[2];
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Buffer buffer = g.createBuffer("counts", 64);
+            g.pass("fill counts").write(buffer, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(buffer, 7));
+            g.readback("read counts", buffer, 16, 8, (data, frame) -> {
+                buffered[0] = data.get(ValueLayout.JAVA_INT, 4);
+                buffered[1] = (int) frame;
+            });
+            Image image = g.create("cleared", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("clear").write(image, Access.TRANSFER_DST).record(ctx -> ctx.clear(image.whole(), 0, 1, 0, 1));
+            g.readback("read texels", image.whole(), (data, frame) -> {
+                assertThat(data.byteSize()).isEqualTo(4L * SIZE * SIZE);
+                texel[0] = data.get(ValueLayout.JAVA_INT, 4L * (SIZE * SIZE - 1));
+                texel[1] = (int) frame;
+            });
+            g.provide(OUT, image);
+        })).output(OUT, output);
+        frame();
+        assertThat(buffered[1]).as("not before the frame is done").isZero();
+        frame(); // the caller waited for the first: it is delivered as the second records
+        assertThat(buffered).containsExactly(7, 1);
+        assertThat(texel).containsExactly(GREEN, 1);
+    }
+
+    @Test
+    void readbacksStayInsideWhatTheyRead() {
+        graph.add(new Lambda(List.of(OUT), g -> {
+            g.readback("bad", g.createBuffer("small", 8), 4, 8, (data, frame) -> { });
+            g.provide(OUT, g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE)));
+        })).output(OUT, output);
+        assertThatIllegalArgumentException().isThrownBy(this::frame).withMessageStartingWith("Reading back 8 bytes at 4");
+    }
+
+    @Test
+    void timingsAndReadbacksOfSubmittedFramesAllocateNothing() {
+        long[] delivered = new long[2];
+        graph.add(new Fill(A, SIZE, 1, 0, 0, 1))
+            .add(new Fill(B, SIZE, 0, 1, 0, 1))
+            .add(new Overlapping(OUT, A, B))
+            .add(new Lambda(List.of(UNUSED), g -> {
+                Buffer buffer = g.createBuffer("probe", 16);
+                g.pass("fill probe").write(buffer, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(buffer, 3));
+                g.readback("read probe", buffer, 0, 16, (data, frame) -> {
+                    delivered[0]++;
+                    delivered[1] = data.get(ValueLayout.JAVA_INT, 12);
+                });
+                Image out = g.require(OUT);
+                Image copy = g.create("copy", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+                g.pass("copy").read(out, Access.TRANSFER_SRC).write(copy, Access.TRANSFER_DST)
+                    .record(ctx -> ctx.blit(out.whole(), copy.whole(), false));
+                g.provide(UNUSED, copy);
+            }))
+            .output(UNUSED, output)
+            .asyncCompute(true)
+            .timings(true);
+        assertThat(graph.timings()).isNotNull();
+        assertAllocationFree(() -> {
+            graph.beginFrame();
+            graph.submit(0, 0);
+        }, 2_000, 200, 10);
+        assertThat(graph.builds()).isEqualTo(1);
+        GpuTimings timings = graph.timings();
+        assertThat(timings.frame()).isPositive();
+        assertThat(timings.count()).isEqualTo(graph.passes().size());
+        assertThat(timings.pass(0)).isEqualTo(graph.passes().get(0));
+        assertThat(timings.totalMillis()).isNotNegative();
+        for (int i = 0; i < timings.count(); i++) {
+            assertThat(timings.millis(i)).as(timings.pass(i)).satisfiesAnyOf(m -> assertThat(m).isNaN(),
+                m -> assertThat(m).isNotNegative());
+        }
+        assertThat(delivered[0]).isPositive();
+        assertThat(delivered[1]).isEqualTo(3);
+        graph.timings(false);
+        assertThat(graph.timings()).isNull();
+        graph.beginFrame();
+        graph.submit(0, 0); // rebuilt without timings: the readbacks waiting are delivered first
+        assertThat(graph.builds()).isEqualTo(2);
+    }
+
+    @Test
     void submittingAllocatesNothing() {
         graph.add(new Fill(A, SIZE, 1, 0, 0, 1))
             .add(new Fill(B, SIZE, 0, 1, 0, 1))

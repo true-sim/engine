@@ -2,6 +2,8 @@ package com.truesim.engine.graph;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memPutAddress;
+import static org.lwjgl.vulkan.EXTDebugUtils.VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.system.MemoryUtil.memPutFloat;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
@@ -68,6 +70,8 @@ import com.truesim.common.jobs.JobSystem;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.Queue;
 import com.truesim.engine.vulkan.Vulkan;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.nio.LongBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -86,6 +90,7 @@ import org.lwjgl.vulkan.VkCommandBufferBeginInfo;
 import org.lwjgl.vulkan.VkCommandBufferSubmitInfo;
 import org.lwjgl.vulkan.VkCommandPoolCreateInfo;
 import org.lwjgl.vulkan.VkDependencyInfo;
+import org.lwjgl.vulkan.VkDebugUtilsLabelEXT;
 import org.lwjgl.vulkan.VkImageBlit;
 import org.lwjgl.vulkan.VkImageMemoryBarrier2;
 import org.lwjgl.vulkan.VkImageSubresourceLayers;
@@ -164,6 +169,15 @@ public final class FrameGraph implements AutoCloseable {
     private boolean dirty = true;
     private long frame;
     private int builds;
+    // Tooling: the frame slot being recorded and the frame each slot last recorded (-1: none since it was read), the
+    // readbacks of the build, GPU timings when on, and a debug label per pass where the instance has debug utils.
+    private int recordSlot;
+    private long[] slotFrame;
+    private ReadbackPlan[] readbacks = new ReadbackPlan[0];
+    private boolean timingsOn;
+    private GpuTimings timings;
+    private Arena labelArena;
+    private long[] passLabels = new long[0];
 
     // The built graph: passes in order, the barriers before each (from barrierStart[i] to barrierStart[i + 1]; the
     // last range is after all passes), and where each image of the build lives: a physical image (index >= 0) or an
@@ -245,6 +259,8 @@ public final class FrameGraph implements AutoCloseable {
         this.checkDeclared = device.gpu().instance().validationEnabled();
         this.bindless = device.bindless();
         this.framesInFlight = framesInFlight;
+        this.slotFrame = new long[framesInFlight];
+        Arrays.fill(slotFrame, -1);
         this.resources = new ResourcePool(device, framesInFlight);
         this.ownsSlots = shared == null;
         this.frameSlots = ownsSlots ? new FrameSlots(framesInFlight) : shared;
@@ -371,10 +387,56 @@ public final class FrameGraph implements AutoCloseable {
             execution = new Execution();
         }
         int slot = execution.begin();
+        finished(slot);
         if (ownsSlots) {
             frameSlots.begin(slot);
         }
         return slot;
+    }
+
+    /** The GPU finished what frame slot {@code slot} last recorded: its readbacks are delivered, its timings read. */
+    private void finished(int slot) {
+        long finished = slotFrame[slot];
+        if (finished < 0) {
+            return;
+        }
+        slotFrame[slot] = -1;
+        if (timings != null) {
+            timings.collect(slot, finished);
+        }
+        for (ReadbackPlan readback : readbacks) {
+            readback.deliver(slot);
+        }
+    }
+
+    /** The frame slot being recorded. */
+    int recordSlot() {
+        return recordSlot;
+    }
+
+    /** The frame being recorded, counted from 1. */
+    long frame() {
+        return frame;
+    }
+
+    /**
+     * Turns GPU timings of every pass on or off; on, {@link #timings()} has the last finished frame's. Rebuilds the graph,
+     * which then waits for the GPU once, to make the queries.
+     */
+    public FrameGraph timings(boolean on) {
+        if (on != timingsOn) {
+            timingsOn = on;
+            dirty = true;
+        }
+        if (on && timings == null) {
+            timings = new GpuTimings(device, framesInFlight); // its queries come with the build
+        }
+        return this;
+    }
+
+    /** The passes' GPU timings of the last finished frame, with {@link #timings(boolean)} on; null otherwise. */
+    public GpuTimings timings() {
+        return timingsOn ? timings : null;
     }
 
     /**
@@ -398,6 +460,8 @@ public final class FrameGraph implements AutoCloseable {
             throw new IllegalStateException("Begin the frame first: beginFrame()");
         }
         prepare();
+        recordSlot = execution.slot;
+        slotFrame[recordSlot] = frame;
         execution.ensureCommandBuffers();
         if (jobs != null && chunkBatch.length > 1) {
             frameStart = execution.commandBuffer(0, GRAPHICS);
@@ -428,7 +492,10 @@ public final class FrameGraph implements AutoCloseable {
         if (open) {
             frameSlots.begin(0);
         }
+        finished(0); // the caller waited for the frame before
         prepare();
+        recordSlot = 0;
+        slotFrame[0] = frame;
         bindless.bind(commands);
         recordSeam(commands);
         frameSlots.recordStart(commands);
@@ -474,7 +541,12 @@ public final class FrameGraph implements AutoCloseable {
     /** Passes {@code from} to {@code to} with their barriers, and with {@code last} the outputs' final layouts. */
     private void recordPasses(VkCommandBuffer commands, int from, int to, boolean last, PassContext context) {
         context.commands = commands;
+        GpuTimings timed = timingsOn ? timings : null;
         for (int i = from; i < to; i++) {
+            boolean labelled = passLabels.length > 0 && Commands.beginLabel(commands, passLabels[i]);
+            if (timed != null) {
+                timed.write(commands, recordSlot, i, false);
+            }
             barriers(commands, barrierStart[i], barrierStart[i + 1]);
             PassInfo pass = order[i];
             context.pass = pass;
@@ -484,6 +556,12 @@ public final class FrameGraph implements AutoCloseable {
                 beginRendering(commands, pass.attachments);
                 pass.body.record(context);
                 Commands.endRendering(commands);
+            }
+            if (timed != null) {
+                timed.write(commands, recordSlot, i, true);
+            }
+            if (labelled) {
+                Commands.endLabel(commands);
             }
         }
         context.pass = null;
@@ -1074,12 +1152,69 @@ public final class FrameGraph implements AutoCloseable {
         chunkFirstPass = batches.chunkFirstPass();
         chunkEndPass = batches.chunkEndPass();
         chunkCommands = new VkCommandBuffer[chunkBatch.length];
+        startTooling(g);
         startHistories(pairs, keptPair, compiled);
         dirty = false;
         builds++;
         LOG.debug("Frame graph built: {} of {} passes in {} batches, {} images in {} pooled, {} buffers in {} pooled, "
             + "{} barriers", order.length, compiled.builtPasses(), batchQueue.length, targetOf.length,
             physicals.length, bufferTargetOf.length, physicalBuffers.length, barrierTarget.length);
+    }
+
+    /**
+     * The tooling of the graph just built: its readbacks' host memory, the timings' queries and the passes' debug labels.
+     * Readbacks of the graph before that still wait are delivered first, and with them or timings on, the GPU is waited
+     * for: neither may change while frames use them.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    private void startTooling(GraphBuilder g) {
+        boolean pending = false;
+        for (ReadbackPlan readback : readbacks) {
+            pending |= readback.pending();
+        }
+        if (pending || timingsOn || timings != null) {
+            waitIdle();
+            for (int slot = 0; slot < framesInFlight; slot++) {
+                finished(slot);
+            }
+        }
+        for (ReadbackPlan readback : readbacks) {
+            readback.close();
+        }
+        readbacks = g.readbacks.toArray(new ReadbackPlan[0]);
+        for (ReadbackPlan readback : readbacks) {
+            readback.allocate(device, framesInFlight, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        }
+        if (timingsOn) {
+            if (timings == null) {
+                timings = new GpuTimings(device, framesInFlight);
+            }
+            int[] families = new int[order.length];
+            for (int c = 0; c < chunkBatch.length; c++) {
+                int family = batchQueue[chunkBatch[c]] == GRAPHICS ? graphicsQueue.family() : computeQueue.family();
+                Arrays.fill(families, chunkFirstPass[c], chunkEndPass[c], family);
+            }
+            timings.build(order, families);
+        } else if (timings != null) {
+            timings.close();
+            timings = null;
+        }
+        if (labelArena != null) {
+            labelArena.close();
+            labelArena = null;
+            passLabels = new long[0];
+        }
+        if (device.handle().getPhysicalDevice().getInstance().getCapabilities().vkCmdBeginDebugUtilsLabelEXT != 0) {
+            labelArena = Arena.ofShared();
+            passLabels = new long[order.length];
+            for (int i = 0; i < order.length; i++) {
+                MemorySegment label = labelArena.allocate(VkDebugUtilsLabelEXT.SIZEOF, VkDebugUtilsLabelEXT.ALIGNOF);
+                MemorySegment name = labelArena.allocateFrom(order[i].name);
+                memPutInt(label.address() + VkDebugUtilsLabelEXT.STYPE, VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT);
+                memPutAddress(label.address() + VkDebugUtilsLabelEXT.PLABELNAME, name.address());
+                passLabels[i] = label.address();
+            }
+        }
     }
 
     /**
@@ -1175,6 +1310,20 @@ public final class FrameGraph implements AutoCloseable {
             }
         }
         cache.clear();
+        for (ReadbackPlan readback : readbacks) {
+            readback.close();
+        }
+        readbacks = new ReadbackPlan[0];
+        Arrays.fill(slotFrame, -1);
+        if (timings != null) {
+            timings.close();
+            timings = null;
+        }
+        if (labelArena != null) {
+            labelArena.close();
+            labelArena = null;
+            passLabels = new long[0];
+        }
         resources.close();
         activeHistories = new HistoryPair[0];
         physicals = new Physical[0];

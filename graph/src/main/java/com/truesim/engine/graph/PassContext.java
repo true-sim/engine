@@ -268,17 +268,39 @@ public final class PassContext {
      */
     public void copy(Subresource from, Buffer to, long offset) {
         oneMip("Copying from", from);
+        copy(from, buffer(to), offset);
+    }
+
+    /** Copies one mip level of {@code from} to {@code offset} of the {@code VkBuffer} {@code to}. */
+    private void copy(Subresource from, long to, long offset) {
+        oneMip("Copying from", from);
         try (MemoryStack stack = stackPush()) {
             long region = bufferImageCopy(stack, offset, from);
             long info = stack.ncalloc(VkCopyImageToBufferInfo2.ALIGNOF, 1, VkCopyImageToBufferInfo2.SIZEOF);
             memPutInt(info + VkCopyImageToBufferInfo2.STYPE, VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2);
             memPutLong(info + VkCopyImageToBufferInfo2.SRCIMAGE, image(from.image()));
             memPutInt(info + VkCopyImageToBufferInfo2.SRCIMAGELAYOUT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            memPutLong(info + VkCopyImageToBufferInfo2.DSTBUFFER, buffer(to));
+            memPutLong(info + VkCopyImageToBufferInfo2.DSTBUFFER, to);
             memPutInt(info + VkCopyImageToBufferInfo2.REGIONCOUNT, 1);
             memPutAddress(info + VkCopyImageToBufferInfo2.PREGIONS, region);
             Commands.copyImageToBuffer2(commands, info);
         }
+    }
+
+    /** Copies {@code plan}'s bytes from {@code offset} of {@code from} into its host memory of this frame. */
+    void readback(ReadbackPlan plan, Buffer from, long offset) {
+        long target = plan.target(graph.recordSlot(), graph.frame());
+        try (MemoryStack stack = stackPush()) {
+            long region = stack.ncalloc(VkBufferCopy.ALIGNOF, 1, VkBufferCopy.SIZEOF);
+            memPutLong(region + VkBufferCopy.SRCOFFSET, offset);
+            memPutLong(region + VkBufferCopy.SIZE, plan.bytes);
+            Commands.copyBuffer(commands, buffer(from), target, 1, region);
+        }
+    }
+
+    /** Copies {@code from}, one mip level, into {@code plan}'s host memory of this frame, tightly packed. */
+    void readback(ReadbackPlan plan, Subresource from) {
+        copy(from, plan.target(graph.recordSlot(), graph.frame()), 0);
     }
 
     private static long bufferImageCopy(MemoryStack stack, long offset, Subresource part) {
