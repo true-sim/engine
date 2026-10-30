@@ -760,6 +760,10 @@ Exclusive fullscreen is only tested when `TRUESIM_TEST_FULLSCREEN` is set, becau
 system property `truesim.gpu`) chooses another, for the tests too: a type (`discrete`, `integrated`, `virtual`,
 `cpu`), an index in `gpus()` or part of a GPU's name, e.g. `TRUESIM_GPU=integrated ./gradlew test`.
 
+A lost device's `DeviceLostException` says what the driver saw, where the GPU has `VK_EXT_device_fault`: the kind of
+fault, its address and the buffer that holds it. To have the validation layer check shader reads and writes as they
+run, build the instance with `gpuAssistedValidation(true)` (much slower).
+
 Mistakes made here once, each with its evidence and the rule that follows, are in [docs/pitfalls.md](docs/pitfalls.md);
 add to it what is verified, nothing else.
 

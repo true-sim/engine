@@ -141,6 +141,30 @@ failed whenever generating the material took longer than those frames (about one
   run, and with `settle` (frames alternating with waiting for the loads they started) it passed, slowed or not.
 - Rule: wait with `settle`, not with one `load()` followed by frames.
 
+**After a device loss, ask the driver.** The exception of a lost device now carries the driver's report
+(`VK_EXT_device_fault`): the kind of fault, the address and the buffer it falls in. `gpuAssistedValidation(true)` on
+the instance has the layer check shader reads and writes as they run.
+- Proof: in [#151](https://github.com/true-sim/engine/issues/151) the report showed a read at address 0, in no buffer;
+  `VulkanTest.lostDevicesSayWhatTheDriverSaw` and `gpuAssistedValidationRunsWork`.
+- Rule: read the report before guessing; turn GPU-assisted validation on when the report names no buffer.
+
+**On AMD a page fault does not stop the GPU.** A fault in a frame's draw pass left the passes after it, and the next
+frame's culling, finishing and writing their buffer markers; the device was reported lost later, at a submit.
+- Proof: breadcrumbs (`vkCmdWriteBufferMarkerAMD` before and after each pass) during the hunt of
+  [#151](https://github.com/true-sim/engine/issues/151): the faulting code was in the forward draw (removing it
+  stopped the faults), yet every pass of the frame before had finished.
+- Rule: markers show how far the GPU got, not where it faulted; find the faulting code by removing code instead.
+
+**A flaky device loss can be made to fail every run.** Logging while culling was recorded turned a loss seen in about
+one run in four into one seen in every run, which made each later experiment a single run.
+- Proof: [#151](https://github.com/true-sim/engine/issues/151).
+- Rule: when a failure is rare, try slowing or speeding up the CPU side before bisecting.
+
+**An experiment script that silently did not apply its change.** One script replaced the line that set up the
+conditions instead of adding to it; two results ("never fails") came from runs without those conditions.
+- Proof: the rerun in [#151](https://github.com/true-sim/engine/issues/151) with a script that checks.
+- Rule: experiment scripts warn when a change changed nothing and when the setup is missing.
+
 ## Java
 
 **A record's components are its accessors.** A method named like a component must return the component's type:
@@ -153,6 +177,6 @@ record component of that name existed.
 **Critical downcalls crash the JVM when the validation layer reports.** `Commands` made its handles with
 `Linker.Option.critical`. The layer reports an error from inside the faulty call, through the instance's debug callback,
 an upcall; an upcall out of a critical downcall kills the JVM instead of logging the error.
-- Proof: `CommandsTest.validationErrorsInsideCommandsAreReportedNotFatal` crashes the test JVM with the option and passes
-  without it ([#152](https://github.com/true-sim/engine/issues/152)).
+- Proof: `CommandsTest.validationErrorsInsideCommandsAreReportedNotFatal` crashes the test JVM with the option and
+  passes without it ([#152](https://github.com/true-sim/engine/issues/152)).
 - Rule: no `critical` on Vulkan downcalls.
