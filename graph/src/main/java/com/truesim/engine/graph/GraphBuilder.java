@@ -115,7 +115,8 @@ public final class GraphBuilder {
     final List<ReadbackPlan> readbacks = new ArrayList<>();
     private final Resolution<Key<?>, Technique> resolution;
     private final Map<ExternalImage, Image> externals = new IdentityHashMap<>();
-    private final Map<ExternalBuffer, Buffer> externalBuffers = new IdentityHashMap<>();
+    /** Imported buffers by Vulkan handle: every wrapper of one buffer is the same buffer of the build. */
+    private final Map<Long, Buffer> externalBuffers = new HashMap<>();
 
     private final Map<Class<?>, Implementation<?, ?>> implementations;
 
@@ -359,6 +360,12 @@ public final class GraphBuilder {
      * one it {@link #modify modifies}.
      */
     public <T> void provide(Key<T> key, T result) {
+        if (key.kind() == Buffer.class) {
+            BufferInfo info = buffers.get(buffer((Buffer) result).id);
+            if (info.external != null && info.owner == null) {
+                info.owner = scope(); // an import provided under a key: from now on its provider's to write
+            }
+        }
         resolution.put(key, key.kind() == Image.class ? image((Image) result) : buffer((Buffer) result));
     }
 
@@ -434,13 +441,16 @@ public final class GraphBuilder {
     }
 
     /**
-     * {@code external} as a buffer of this build, the same one each time: passes declare their reads and writes of it
-     * as of any buffer, and the graph orders them; its contents outlive the frame.
+     * {@code external} as a buffer of this build, the same one each time, and for every {@code ExternalBuffer} of the
+     * same GPU buffer (so a game importing the engine's instances is ordered with the engine's passes): passes declare
+     * their reads and writes of it as of any buffer, and the graph orders them; its contents outlive the frame. Any pass
+     * may write it, unless a technique {@link #provide provides} it under a key: then, as any result, only that technique
+     * and those modifying the key.
      */
     public Buffer importBuffer(ExternalBuffer external) {
-        return externalBuffers.computeIfAbsent(external, e -> {
-            Buffer buffer = new Buffer(buffers.size(), e.name, e.size);
-            buffers.add(new BufferInfo(buffer, null, e));
+        return externalBuffers.computeIfAbsent(external.handle, h -> {
+            Buffer buffer = new Buffer(buffers.size(), external.name, external.size);
+            buffers.add(new BufferInfo(buffer, null, external));
             return buffer;
         });
     }
@@ -615,13 +625,16 @@ public final class GraphBuilder {
             return use(buffer, access);
         }
 
-        /** The pass writes {@code buffer}, which its technique or request made, or an imported one. */
+        /**
+         * The pass writes {@code buffer}, which its technique or request made, or an imported one no technique provides
+         * under a key (or one its technique provides, or modifies).
+         */
         public PassBuilder write(Buffer buffer, BufferAccess access) {
             if (!access.writes) {
                 throw new IllegalArgumentException(name + ": " + access + " only reads; declare it with read()");
             }
             BufferInfo info = buffers.get(buffer(buffer).id);
-            if (info.external == null && info.owner != scope()) {
+            if ((info.external == null || info.owner != null) && info.owner != scope()) {
                 throw new IllegalStateException(name + " writes " + buffer.name + ", a result of " + name(info.owner)
                     + ": results are written only by whoever makes them");
             }

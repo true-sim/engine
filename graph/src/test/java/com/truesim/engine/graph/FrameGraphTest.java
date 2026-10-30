@@ -559,6 +559,60 @@ class FrameGraphTest {
     }
 
     @Test
+    void importsOfOneBufferAreOneAndAKeyGivesThemAnOwner() {
+        int usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+            | org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        Key<Buffer> data = Key.buffer("test.data");
+        try (GpuBuffer shared = GpuBuffer.deviceLocal(device, 4L * SIZE * SIZE, usage)) {
+            ExternalBuffer engines = new ExternalBuffer("engine's", shared);
+            ExternalBuffer games = new ExternalBuffer("game's", shared); // its own wrapper of the same buffer
+            device.submitAndWait(device.graphics(),
+                commands -> vkCmdFillBuffer(commands, shared.handle(), 0, VK_WHOLE_SIZE, RED));
+            Technique provider = new Lambda(List.of(data), g -> {
+                Buffer buffer = g.importBuffer(engines);
+                g.pass("write data").write(buffer, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(buffer, BLUE));
+                g.provide(data, buffer);
+            });
+            // The game's import is the engine's buffer: its read is ordered after the engine's write.
+            graph.add(provider).add(new Lambda(List.of(OUT), g -> {
+                Buffer provided = g.require(data);
+                Buffer buffer = g.importBuffer(games);
+                assertThat(buffer).isSameAs(provided);
+                Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+                g.pass("read data").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                    .record(ctx -> unpack(ctx, buffer, image));
+                g.provide(OUT, image);
+            })).output(OUT, output);
+            assertThat(frame()[0]).isEqualTo(BLUE);
+            // Provided under a key, it is a result: only its provider and the key's modifiers write it.
+            fails(OUT, "results are written only by whoever makes them", provider, new Lambda(List.of(OUT), g -> {
+                g.require(data);
+                Buffer buffer = g.importBuffer(games);
+                g.pass("game's write").write(buffer, BufferAccess.TRANSFER_DST).record(ctx -> { });
+                Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+                g.pass("read data").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                    .record(ctx -> unpack(ctx, buffer, image));
+                g.provide(OUT, image);
+            }));
+            graph.close();
+            graph = new FrameGraph(device, 2).add(provider)
+                .add(new Mod(List.of(), List.of(data), g -> {
+                    Buffer buffer = g.modify(data);
+                    g.pass("modify data").write(buffer, BufferAccess.TRANSFER_DST)
+                        .record(ctx -> ctx.fill(buffer, GREEN));
+                }))
+                .add(new Lambda(List.of(OUT), g -> {
+                    Buffer buffer = g.require(data);
+                    Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+                    g.pass("read data").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                        .record(ctx -> unpack(ctx, buffer, image));
+                    g.provide(OUT, image);
+                })).output(OUT, output);
+            assertThat(frame()[0]).as("the modifier's write, after the provider's").isEqualTo(GREEN);
+        }
+    }
+
+    @Test
     void buffersWhoseLifetimesDoNotOverlapShareMemory() {
         long half = 2L * SIZE * SIZE;
         graph.add(new Lambda(List.of(OUT), g -> {
