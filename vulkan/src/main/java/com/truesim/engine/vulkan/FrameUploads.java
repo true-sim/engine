@@ -1,17 +1,12 @@
 package com.truesim.engine.vulkan;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.memPutAddress;
-import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.nvkCmdCopyBuffer;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
 import java.lang.foreign.MemorySegment;
@@ -22,8 +17,6 @@ import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkBufferCopy;
 import org.lwjgl.vulkan.VkCommandBuffer;
-import org.lwjgl.vulkan.VkDependencyInfo;
-import org.lwjgl.vulkan.VkMemoryBarrier2;
 
 /**
  * Uploads into device-local resources without waiting for the GPU: the data is copied into a staging buffer at once,
@@ -233,34 +226,20 @@ public final class FrameUploads implements AutoCloseable {
         if (pending.isEmpty()) {
             return;
         }
-        barrier(commands, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         for (Pending upload : pending) {
             run(commands, upload.chunk(), upload.from(), upload.bytes(), upload.target(), upload.offset(),
                 upload.record());
         }
-        barrier(commands, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         for (Chunk chunk : filling) {
             retiring.add(chunk); // reused once the frames now in flight finish
         }
         filling.clear();
         pending.clear();
         pendingBytes = 0;
-    }
-
-    private static void barrier(VkCommandBuffer commands, long srcAccess, long dstAccess) {
-        try (MemoryStack stack = stackPush()) {
-            long barrier = stack.ncalloc(VkMemoryBarrier2.ALIGNOF, 1, VkMemoryBarrier2.SIZEOF);
-            memPutInt(barrier + VkMemoryBarrier2.STYPE, VK_STRUCTURE_TYPE_MEMORY_BARRIER_2);
-            memPutLong(barrier + VkMemoryBarrier2.SRCSTAGEMASK, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
-            memPutLong(barrier + VkMemoryBarrier2.SRCACCESSMASK, srcAccess);
-            memPutLong(barrier + VkMemoryBarrier2.DSTSTAGEMASK, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
-            memPutLong(barrier + VkMemoryBarrier2.DSTACCESSMASK, dstAccess);
-            long dependency = stack.ncalloc(VkDependencyInfo.ALIGNOF, 1, VkDependencyInfo.SIZEOF);
-            memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
-            memPutInt(dependency + VkDependencyInfo.MEMORYBARRIERCOUNT, 1);
-            memPutAddress(dependency + VkDependencyInfo.PMEMORYBARRIERS, barrier);
-            nvkCmdPipelineBarrier2(commands, dependency);
-        }
     }
 
     private void checkOpen() {

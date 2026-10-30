@@ -1,7 +1,6 @@
 package com.truesim.engine.vulkan;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.memPutAddress;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -14,9 +13,6 @@ import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.vulkan.layout.ScatterPush;
@@ -27,8 +23,6 @@ import java.util.Arrays;
 import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkCommandBuffer;
-import org.lwjgl.vulkan.VkDependencyInfo;
-import org.lwjgl.vulkan.VkMemoryBarrier2;
 
 /**
  * A device-local buffer of fixed-size records that change a few at a time: instances, particles, per-object game data.
@@ -222,7 +216,7 @@ public final class RecordBuffer implements AutoCloseable {
         MemorySegment.copy(indices, 0, memory, 4L * at, 4L * pending);
         MemorySegment.copy(changes, 0, memory, changesAt, (long) recordBytes * pending);
         // Whatever read the records before, in this frame or those before, has read them.
-        barrier(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         int words = recordBytes / 16;
         long threads = (long) pending * words;
@@ -240,7 +234,7 @@ public final class RecordBuffer implements AutoCloseable {
                 vkCmdDispatch(commands, (int) Math.min(MAX_GROUPS, (threads - first + 63) / 64), 1, 1);
             }
         }
-        barrier(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
         for (int e = 0; e < pending; e++) {
             entryOf[indices.getAtIndex(ValueLayout.JAVA_INT, e)] = -1;
@@ -257,23 +251,6 @@ public final class RecordBuffer implements AutoCloseable {
     /** Where an upload buffer's records start: after an index per entry, aligned for the records. */
     private static long changesOffset(int entries) {
         return (4L * entries + 63) & ~63L;
-    }
-
-    private static void barrier(VkCommandBuffer commands, long srcStage, long srcAccess, long dstStage,
-        long dstAccess) {
-        try (MemoryStack stack = stackPush()) {
-            long barrier = stack.ncalloc(VkMemoryBarrier2.ALIGNOF, 1, VkMemoryBarrier2.SIZEOF);
-            memPutInt(barrier + VkMemoryBarrier2.STYPE, VK_STRUCTURE_TYPE_MEMORY_BARRIER_2);
-            memPutLong(barrier + VkMemoryBarrier2.SRCSTAGEMASK, srcStage);
-            memPutLong(barrier + VkMemoryBarrier2.SRCACCESSMASK, srcAccess);
-            memPutLong(barrier + VkMemoryBarrier2.DSTSTAGEMASK, dstStage);
-            memPutLong(barrier + VkMemoryBarrier2.DSTACCESSMASK, dstAccess);
-            long dependency = stack.ncalloc(VkDependencyInfo.ALIGNOF, 1, VkDependencyInfo.SIZEOF);
-            memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
-            memPutInt(dependency + VkDependencyInfo.MEMORYBARRIERCOUNT, 1);
-            memPutAddress(dependency + VkDependencyInfo.PMEMORYBARRIERS, barrier);
-            nvkCmdPipelineBarrier2(commands, dependency);
-        }
     }
 
     /** Frees the buffers: once the GPU no longer reads them. */
