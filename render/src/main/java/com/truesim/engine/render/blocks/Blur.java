@@ -82,9 +82,9 @@ public record Blur(Image source, int radius, Ratio scale) implements Request<Ima
             memPutFloat(push + BlurPush.STEP, stepX);
             memPutFloat(push + BlurPush.STEP + 4, stepY);
             memPutInt(push + BlurPush.RADIUS, radius);
-            pipeline.bind(ctx.commands());
-            pipeline.push(ctx.commands(), push, BlurPush.BYTES);
-            Commands.dispatch(ctx.commands(), (to.width() + 7) / 8, (to.height() + 7) / 8, 1);
+            pipeline.bind(ctx.unsafe().commands());
+            pipeline.push(ctx.unsafe().commands(), push, BlurPush.BYTES);
+            Commands.dispatch(ctx.unsafe().commands(), (to.width() + 7) / 8, (to.height() + 7) / 8, 1);
         }
     }
 }

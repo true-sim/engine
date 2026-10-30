@@ -16,8 +16,11 @@ import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
+import com.truesim.engine.graph.Clear;
 import com.truesim.engine.graph.GraphBuilder;
+import com.truesim.engine.graph.Load;
 import com.truesim.engine.graph.PassContext;
+import com.truesim.engine.graph.Store;
 import com.truesim.engine.render.layout.ClassicPush;
 import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.SelectPush;
@@ -271,19 +274,28 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         Buffer list = g.createBuffer(name + " draws", recordsOffset + (long) RECORD_BYTES * maxDraws
             * MeshletRenderer.BINS);
         g.pass(name + " reset").write(list, BufferAccess.TRANSFER_DST)
-            .record(ctx -> Commands.fillBuffer(ctx.commands(), ctx.buffer(list), 0, 16, 0));
+            .record(ctx -> Commands.fillBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(list), 0, 16, 0));
         g.pass(name + " selection").write(list, BufferAccess.STORAGE_WRITE).record(ctx -> {
             if (camera != null) {
                 view.set(camera, 1, MeshletRenderer.MODE_LIT);
             }
-            select(ctx.commands(), view, ctx.address(list));
+            select(ctx.unsafe().commands(), view, ctx.address(list));
         });
         GraphBuilder.PassBuilder pass = g.pass(name)
             .read(list, BufferAccess.INDIRECT)
-            .read(list, BufferAccess.DRAW_READ)
-            .write(targets.depth(), Access.DEPTH_ATTACHMENT);
+            .read(list, BufferAccess.DRAW_READ);
         if (targets.color() != null) {
-            pass.write(targets.color(), Access.COLOR_ATTACHMENT);
+            if (load) {
+                pass.attach(targets.color(), Load.LOAD, Store.STORE);
+            } else {
+                pass.attach(targets.color(), Clear.color(kind == SurfaceOutput.Kind.SHADED ? draw.output().clear()
+                    : NO_COLOR));
+            }
+        }
+        if (load) {
+            pass.attachDepth(targets.depth(), Load.LOAD, Store.STORE);
+        } else {
+            pass.attachDepth(targets.depth(), Clear.FAR);
         }
         Buffer lights = targets.lights();
         if (lights != null) {
@@ -298,14 +310,11 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             case SHADED -> this.draw;
             case IDS -> drawIds;
         };
-        float[] clear = kind == SurfaceOutput.Kind.SHADED ? draw.output().clear() : NO_COLOR;
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            long color = targets.color() == null ? 0 : ctx.view(targets.color());
-            record(ctx, pipeline, view, color, ctx.view(targets.depth()), draw.width(), draw.height(), clear, load,
-                lights == null ? 0 : ctx.address(lights), list);
+            record(ctx, pipeline, view, lights == null ? 0 : ctx.address(lights), list);
         });
     }
 
@@ -339,14 +348,11 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         return bin == MeshletRenderer.BIN_OPAQUE ? graphics : graphics.doubleSided();
     }
 
-    /** Draws the list's draws of view {@code view}, each bin with its {@code pipeline}, over the targets. */
-    private void record(PassContext ctx, Pipeline[] pipeline, RenderView view, long colorView, long depthView, int width,
-        int height, float[] clear, boolean load, long lights, Buffer list) {
-        VkCommandBuffer commands = ctx.commands();
-        long handle = ctx.buffer(list);
+    /** Draws the list's draws of view {@code view}, each bin with its {@code pipeline}, into the pass's attachments. */
+    private void record(PassContext ctx, Pipeline[] pipeline, RenderView view, long lights, Buffer list) {
+        VkCommandBuffer commands = ctx.unsafe().commands();
+        long handle = ctx.unsafe().buffer(list);
         try (MemoryStack stack = stackPush()) {
-            MeshletRenderer.beginRendering(commands, stack, colorView, depthView, width, height, clear[0], clear[1],
-                clear[2], load);
             long push = stack.ncalloc(8, 1, DRAW_PUSH);
             memPutLong(push + ClassicPush.VIEW, view.address());
             memPutLong(push + ClassicPush.MESHES, pool.meshTable().deviceAddress());
@@ -356,7 +362,6 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             memPutLong(push + ClassicPush.RECORDS, ctx.address(list) + recordsOffset);
             memPutLong(push + ClassicPush.MATERIALS, renderer.scene().materialsAddress());
             memPutLong(push + ClassicPush.LIGHTS, lights);
-            MeshletRenderer.setViewport(commands, stack, width, height);
             Commands.bindIndexBuffer(commands, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
             for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {
                 pipeline[bin].bind(commands);
@@ -364,7 +369,6 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                 Commands.drawIndexedIndirectCount(commands, handle, 16 + (long) COMMAND_BYTES * maxDraws * bin, handle,
                     4L * bin, maxDraws, COMMAND_BYTES);
             }
-            Commands.endRendering(commands);
         }
     }
 

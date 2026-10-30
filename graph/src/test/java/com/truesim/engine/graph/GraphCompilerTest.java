@@ -2,8 +2,10 @@ package com.truesim.engine.graph;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_GENERAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
@@ -249,5 +251,93 @@ class GraphCompilerTest {
             .withMessageContaining("reads x before any pass writes it");
         assertThatIllegalStateException().isThrownBy(() -> compile(outputs, false))
             .withMessage("No technique provides test.out");
+    }
+
+    @Test
+    void attachmentsThatDoNotLoadStartFromNothing() {
+        for (Load load : Load.values()) {
+            Technique draw = new Lambda(List.of(OUT), g -> {
+                Image color = g.create("color", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64));
+                g.pass("fill").write(color, Access.STORAGE_WRITE).record(ctx -> { });
+                g.pass("draw").attach(color.whole(), load, Store.STORE, load == Load.CLEAR ? Clear.color(0, 0, 0, 1)
+                    : null).record(ctx -> { });
+                g.provide(OUT, color);
+            });
+            CompiledGraph c = compile(Map.of(OUT, swapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT)), false, draw);
+            CompiledGraph.BarrierList b = c.barriers();
+            int drawn = b.start()[1];
+            assertThat(b.start()[2] - drawn).isEqualTo(1);
+            assertThat(b.newLayout()[drawn]).isEqualTo(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            // What is cleared or not cared about needs no contents: no transition of the storage write's.
+            assertThat(b.oldLayout()[drawn]).isEqualTo(load == Load.LOAD ? VK_IMAGE_LAYOUT_GENERAL
+                : VK_IMAGE_LAYOUT_UNDEFINED);
+            GraphBuilder.Attachment attachment = c.order()[1].attachments[0];
+            assertThat(attachment.load()).isEqualTo(load);
+            assertThat(attachment.depth()).isFalse();
+        }
+    }
+
+    @Test
+    void layersAreAttachedAlone() {
+        Technique cascades = new Lambda(List.of(OUT), g -> {
+            Image maps = g.create("maps", ImageDesc.of(Format.D32_SFLOAT, 64, 64).layers(2));
+            g.pass("cascade 0").attachDepth(maps.layer(0), Load.CLEAR, Store.STORE, Clear.FAR).record(ctx -> { });
+            g.pass("cascade 1").attachDepth(maps.layer(1), Load.CLEAR, Store.STORE, Clear.depthStencil(0, 0))
+                .record(ctx -> { });
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64));
+            g.pass("use").read(maps, Access.SAMPLED_COMPUTE).write(out, Access.STORAGE_WRITE).record(ctx -> { });
+            g.provide(OUT, out);
+        });
+        CompiledGraph c = compile(Map.of(OUT, swapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT)), false, cascades);
+        CompiledGraph.BarrierList b = c.barriers();
+        int second = b.start()[1];
+        assertThat(b.start()[2] - second).isEqualTo(1);
+        assertThat(b.baseLayer()[second]).isEqualTo(1);
+        assertThat(b.layerCount()[second]).isEqualTo(1);
+        assertThat(b.oldLayout()[second]).isEqualTo(VK_IMAGE_LAYOUT_UNDEFINED);
+        assertThat(c.order()[1].attachments[0].target()).isEqualTo(new Subresource(c.order()[1].attachments[0]
+            .target().image(), 0, 1, 1, 1));
+    }
+
+    @Test
+    void attachmentMisuseIsReported() {
+        Map<Key<Image>, ExternalImage> outputs = Map.of(OUT, swapchain(VK_IMAGE_USAGE_TRANSFER_DST_BIT));
+        List<Consumer<GraphBuilder>> misuses = List.of(
+            g -> g.pass("p").attach(color(g, 64), Load.CLEAR, Store.STORE),
+            g -> g.pass("p").attach(color(g, 64).whole(), Load.LOAD, Store.STORE, Clear.color(0, 0, 0, 1)),
+            g -> g.pass("p").attach(color(g, 64), Clear.FAR),
+            g -> g.pass("p").attach(g.create("chain", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64).mips(2)),
+                Clear.color(0, 0, 0, 1)),
+            g -> g.pass("p").attach(color(g, 64), Clear.color(0, 0, 0, 1)).attach(color(g, 32), Clear.color(0, 0, 0, 1)),
+            g -> g.pass("p").attachDepth(color(g, 64), Clear.FAR),
+            g -> g.pass("p").attach(depth(g), Clear.color(0, 0, 0, 1)),
+            g -> g.pass("p").attachDepth(depth(g), Clear.FAR).attachDepth(depth(g), Clear.FAR),
+            g -> g.pass("p").resolve(color(g, 64)),
+            g -> g.pass("p").attach(color(g, 64), Clear.color(0, 0, 0, 1)).resolve(color(g, 64)),
+            g -> g.pass("p").attach(g.create("ms", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64).samples(4)),
+                Clear.color(0, 0, 0, 1)).resolve(color(g, 32)));
+        for (Consumer<GraphBuilder> misuse : misuses) {
+            Technique t = new Lambda(List.of(OUT), misuse);
+            assertThatThrownBy(() -> compile(outputs, false, t)).isInstanceOfAny(IllegalArgumentException.class,
+                IllegalStateException.class);
+        }
+        Technique resolved = new Lambda(List.of(OUT), g -> {
+            Image ms = g.create("ms", ImageDesc.of(Format.R8G8B8A8_UNORM, 64, 64).samples(4));
+            Image color = color(g, 64);
+            g.pass("p").attach(ms, Clear.color(0, 0, 0, 1)).resolve(color).record(ctx -> { });
+            g.provide(OUT, color);
+        });
+        CompiledGraph c = compile(outputs, false, resolved);
+        assertThat(c.order()[0].attachments[0].resolve().image().name()).startsWith("color");
+    }
+
+    private static int images; // names images apart
+
+    private static Image color(GraphBuilder g, int size) {
+        return g.create("color " + images++, ImageDesc.of(Format.R8G8B8A8_UNORM, size, size));
+    }
+
+    private static Image depth(GraphBuilder g) {
+        return g.create("depth " + images++, ImageDesc.of(Format.D32_SFLOAT, 64, 64));
     }
 }

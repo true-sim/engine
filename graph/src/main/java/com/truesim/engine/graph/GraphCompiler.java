@@ -664,7 +664,7 @@ final class GraphCompiler {
                     int target = bufferTargets[buffer];
                     int state = physicalCount + externalList.size() + (target >= 0 ? target : bufferCount + ~target);
                     long[] barrier = access(pass, p, queues[p], cellStart[state], BUFFER, target, 0, buffer,
-                        g.buffers.get(buffer).buffer.name, target >= 0, stages, access, writes, 0, emit);
+                        g.buffers.get(buffer).buffer.name, target >= 0, stages, access, writes, 0, false, emit);
                     if (barrier != null) {
                         out.add(ranged(barrier, 0, -1, 0, -1));
                     }
@@ -699,6 +699,7 @@ final class GraphCompiler {
             boolean[] writes = new boolean[cells];
             int[] wanted = new int[cells];
             Access[] first = new Access[cells];
+            boolean[] discard = new boolean[cells]; // every access of the cell discards its contents
             for (int a = 0; a < pass.images.length; a++) {
                 if (pass.images[a] != image) {
                     continue;
@@ -715,6 +716,7 @@ final class GraphCompiler {
                             throw new IllegalStateException(pass.name + " uses " + g.images.get(image).image.name
                                 + " in two layouts: " + first[c] + " and " + access);
                         }
+                        discard[c] = (first[c] == null || discard[c]) && pass.discards[a];
                         first[c] = first[c] == null ? access : first[c];
                         wanted[c] = access.layout;
                         stages[c] |= access.stages;
@@ -728,7 +730,7 @@ final class GraphCompiler {
             for (int c = 0; c < cells; c++) {
                 if (first[c] != null) {
                     barriers[c] = access(pass, p, queue, cellStart[state] + c, IMAGE, target, info.format.aspect(),
-                        image, info.name, target >= 0, stages[c], accesses[c], writes[c], wanted[c], emit);
+                        image, info.name, target >= 0, stages[c], accesses[c], writes[c], wanted[c], discard[c], emit);
                 }
             }
             emitRuns(barriers, mips, layers);
@@ -798,10 +800,12 @@ final class GraphCompiler {
         /**
          * Pass {@code p}'s merged access to cell {@code i} of the image or buffer {@code id} ({@code name}), at barrier
          * target {@code target} of {@code kind}; {@code pooled}: in a physical image or buffer, whose earlier tenants
-         * it waits for. Returns the barrier it needs (its nine fields, without a range), or null.
+         * it waits for; {@code discard}: the pass needs none of its contents (an attachment cleared or not loaded), so it
+         * starts from an undefined layout. Returns the barrier it needs (its nine fields, without a range), or null.
          */
         private long[] access(PassInfo pass, int p, int queue, int i, int kind, int target, int aspect, int id,
-            String name, boolean pooled, long stages, long access, boolean writes, int wanted, boolean emit) {
+            String name, boolean pooled, long stages, long access, boolean writes, int wanted, boolean discard,
+            boolean emit) {
             if (lastQueue[i] >= 0 && lastQueue[i] != queue) {
                 // From the other queue: submitted, its batch's semaphore wait orders and makes visible what came before;
                 // recorded into one command buffer, nothing does. A barrier after all commands, making any write
@@ -844,7 +848,8 @@ final class GraphCompiler {
             if (writes || transition) {
                 long src = writeStages[i] | readStages[i];
                 if (emit && (src != 0 || transition)) {
-                    barrier = new long[] {target, aspect, layout[i], wanted, src, writeAccess[i], stages, access, kind};
+                    barrier = new long[] {target, aspect, discard && writes ? VK_IMAGE_LAYOUT_UNDEFINED : layout[i], wanted,
+                        src, writeAccess[i], stages, access, kind};
                 }
                 if (writes) {
                     set(i, wanted, stages, access, 0); // written: nothing sees it before a barrier

@@ -254,7 +254,7 @@ class ClusteredLightsTest {
                 public void build(GraphBuilder g) {
                     com.truesim.engine.graph.Buffer lights = g.require(Keys.LIGHT_LIST);
                     g.pass("read back").read(lights, BufferAccess.TRANSFER_SRC).sideEffects()
-                        .record(ctx -> copy(ctx.commands(), ctx.buffer(lights), list.handle(), bytes));
+                        .record(ctx -> copy(ctx.unsafe().commands(), ctx.unsafe().buffer(lights), list.handle(), bytes));
                     Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4));
                     g.pass("fill").write(image, Access.TRANSFER_DST).record(ctx -> { });
                     g.provide(OUT, image);

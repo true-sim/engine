@@ -254,7 +254,7 @@ class SceneSyncTest {
                     VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
                     region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
                     region.imageExtent().set(SIZE, SIZE, 1);
-                    vkCmdCopyImageToBuffer(ctx.commands(), ctx.image(color), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    vkCmdCopyImageToBuffer(ctx.unsafe().commands(), ctx.unsafe().image(color), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                         readbacks[graph.frameSlots().current()].handle(), region);
                 }
             });

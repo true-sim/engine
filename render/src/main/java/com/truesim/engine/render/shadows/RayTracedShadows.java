@@ -129,9 +129,9 @@ public final class RayTracedShadows implements Technique {
                 memPutFloat(push + TracedPush.TO_TOP_LEVEL_X + 4L * axis, (float) (p - depthSource.view().position(axis)));
                 memPutFloat(push + TracedPush.LIGHT_X + 4L * axis, (float) (lights.position(light, axis) - p));
             }
-            pipeline.bind(ctx.commands());
-            pipeline.push(ctx.commands(), push, PUSH_BYTES);
-            Commands.dispatch(ctx.commands(), (mask.width() + 7) / 8, (mask.height() + 7) / 8, 1);
+            pipeline.bind(ctx.unsafe().commands());
+            pipeline.push(ctx.unsafe().commands(), push, PUSH_BYTES);
+            Commands.dispatch(ctx.unsafe().commands(), (mask.width() + 7) / 8, (mask.height() + 7) / 8, 1);
         }
     }
 }

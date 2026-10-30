@@ -12,13 +12,13 @@ import java.util.Objects;
  * Culling of a {@link MeshletRenderer}'s views, shared by every technique drawing them: one pass culls all the views
  * the techniques of the graph {@link Views#add add} (the camera, a shadow map's light, ...) with one instance pass and
  * one cull pass ({@link MeshletRenderer#cullViews}), however many there are. Techniques then draw their view with
- * {@link MeshletRenderer#drawView} in passes reading {@link Views#culled()}, so they come after it.
+ * {@link MeshletRenderer#drawAttached} in passes reading {@link Views#culled()}, so they come after it.
  *
  * <pre>{@code
  * MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)); // the same for every technique
  * culling.add(sunView, false, () -> sunView.set(light, 1, MeshletRenderer.MODE_WHITE));
- * g.pass("shadow map").read(culling.culled(), BufferAccess.INDIRECT).write(map, Access.DEPTH_ATTACHMENT)
- *     .record(ctx -> renderer.drawView(ctx.commands(), sunView, 0, ctx.view(map), size, size, 0, 0, 0));
+ * g.pass("shadow map").read(culling.culled(), BufferAccess.INDIRECT).attachDepth(map, Clear.FAR)
+ *     .record(ctx -> renderer.drawAttached(ctx.unsafe().commands(), sunView, false, true, 0));
  * }</pre>
  */
 public record MeshletCulling(MeshletRenderer renderer) implements Request<MeshletCulling.Views> {
@@ -33,7 +33,7 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
         Views views = new Views(renderer, g.createBuffer("culled meshlets", 16));
         g.pass("meshlet culling")
             .write(views.culled, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> views.cull(ctx.commands()));
+            .record(ctx -> views.cull(ctx.unsafe().commands()));
         return views;
     }
 

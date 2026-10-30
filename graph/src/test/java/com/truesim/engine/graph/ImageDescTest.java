@@ -97,8 +97,8 @@ class ImageDescTest {
         assertThatIllegalArgumentException().isThrownBy(() -> ctx.storage(chain.layer(0)))
             .withMessageContaining("one mip level of every layer");
         assertThatIllegalArgumentException().isThrownBy(() -> ctx.storage(new Subresource(chain, 1, 1, 1, 1)));
-        assertThatIllegalArgumentException().isThrownBy(() -> ctx.view(chain.mip(1))).withMessageContaining("one layer");
-        assertThatIllegalArgumentException().isThrownBy(() -> ctx.view(new Subresource(chain, 1, 1, 0, 1)));
+        assertThatIllegalArgumentException().isThrownBy(() -> ctx.unsafe().view(chain.mip(1))).withMessageContaining("one layer");
+        assertThatIllegalArgumentException().isThrownBy(() -> ctx.unsafe().view(new Subresource(chain, 1, 1, 0, 1)));
     }
 
     @Test

@@ -2,6 +2,7 @@ package com.truesim.engine.graph;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memPutAddress;
+import static org.lwjgl.system.MemoryUtil.memPutFloat;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK10.VK_FILTER_LINEAR;
@@ -18,6 +19,11 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_STENCIL_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+import static org.lwjgl.vulkan.VK12.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+import static org.lwjgl.vulkan.VK12.VK_RESOLVE_MODE_AVERAGE_BIT;
+import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_RENDERING_INFO;
 import static org.lwjgl.vulkan.VK10.VK_QUEUE_FAMILY_IGNORED;
 import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -84,6 +90,10 @@ import org.lwjgl.vulkan.VkImageBlit;
 import org.lwjgl.vulkan.VkImageMemoryBarrier2;
 import org.lwjgl.vulkan.VkImageSubresourceLayers;
 import org.lwjgl.vulkan.VkImageSubresourceRange;
+import org.lwjgl.vulkan.VkRect2D;
+import org.lwjgl.vulkan.VkRenderingAttachmentInfo;
+import org.lwjgl.vulkan.VkRenderingInfo;
+import org.lwjgl.vulkan.VkViewport;
 import org.lwjgl.vulkan.VkSemaphoreCreateInfo;
 import org.lwjgl.vulkan.VkSemaphoreSubmitInfo;
 import org.lwjgl.vulkan.VkSemaphoreTypeCreateInfo;
@@ -127,6 +137,7 @@ public final class FrameGraph implements AutoCloseable {
     static final int BUFFER = 1;
 
     private final VulkanDevice device;
+    final boolean checkDeclared; // with validation on: pass bodies resolve only the resources their pass declared
     private final Bindless bindless;
     private final int framesInFlight;
     private final FrameSlots frameSlots;
@@ -231,6 +242,7 @@ public final class FrameGraph implements AutoCloseable {
             throw new IllegalArgumentException("At least one frame in flight: " + framesInFlight);
         }
         this.device = Objects.requireNonNull(device, "device");
+        this.checkDeclared = device.gpu().instance().validationEnabled();
         this.bindless = device.bindless();
         this.framesInFlight = framesInFlight;
         this.resources = new ResourcePool(device, framesInFlight);
@@ -464,8 +476,17 @@ public final class FrameGraph implements AutoCloseable {
         context.commands = commands;
         for (int i = from; i < to; i++) {
             barriers(commands, barrierStart[i], barrierStart[i + 1]);
-            order[i].body.record(context);
+            PassInfo pass = order[i];
+            context.pass = pass;
+            if (pass.attachments.length == 0) {
+                pass.body.record(context);
+            } else {
+                beginRendering(commands, pass.attachments);
+                pass.body.record(context);
+                Commands.endRendering(commands);
+            }
         }
+        context.pass = null;
         if (last) {
             barriers(commands, barrierStart[order.length], barrierStart[order.length + 1]);
         }
@@ -724,6 +745,81 @@ public final class FrameGraph implements AutoCloseable {
             }
         }
         return false;
+    }
+
+    /**
+     * Starts rendering into a pass's attachments, the viewport and scissor all of them; the views are looked up each
+     * frame, since a rebuild may move images, and the clear values read, since a technique may change them.
+     */
+    private void beginRendering(VkCommandBuffer commands, GraphBuilder.Attachment[] attachments) {
+        try (MemoryStack stack = stackPush()) {
+            long colors = stack.ncalloc(VkRenderingAttachmentInfo.ALIGNOF, attachments.length,
+                VkRenderingAttachmentInfo.SIZEOF);
+            long depth = 0;
+            long stencil = 0;
+            int colorCount = 0;
+            Image size = attachments[0].target().image();
+            for (GraphBuilder.Attachment attachment : attachments) {
+                Subresource target = attachment.target();
+                long info;
+                if (attachment.depth()) {
+                    info = stack.ncalloc(VkRenderingAttachmentInfo.ALIGNOF, 1, VkRenderingAttachmentInfo.SIZEOF);
+                    depth = info;
+                    if ((target.image().format.aspect() & VK_IMAGE_ASPECT_STENCIL_BIT) != 0) {
+                        stencil = info;
+                    }
+                } else {
+                    info = colors + (long) colorCount++ * VkRenderingAttachmentInfo.SIZEOF;
+                }
+                memPutInt(info + VkRenderingAttachmentInfo.STYPE, VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO);
+                memPutLong(info + VkRenderingAttachmentInfo.IMAGEVIEW, attachmentView(target));
+                memPutInt(info + VkRenderingAttachmentInfo.IMAGELAYOUT, attachment.depth()
+                    ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+                memPutInt(info + VkRenderingAttachmentInfo.LOADOP, attachment.load().op);
+                memPutInt(info + VkRenderingAttachmentInfo.STOREOP, attachment.store().op);
+                Clear clear = attachment.clear();
+                if (clear != null) {
+                    long value = info + VkRenderingAttachmentInfo.CLEARVALUE;
+                    if (clear.depth) {
+                        memPutFloat(value, clear.value(0));
+                        memPutInt(value + 4, clear.stencil);
+                    } else {
+                        for (int c = 0; c < 4; c++) {
+                            memPutFloat(value + 4L * c, clear.value(c));
+                        }
+                    }
+                }
+                if (attachment.resolve() != null) {
+                    memPutInt(info + VkRenderingAttachmentInfo.RESOLVEMODE, VK_RESOLVE_MODE_AVERAGE_BIT);
+                    memPutLong(info + VkRenderingAttachmentInfo.RESOLVEIMAGEVIEW, attachmentView(attachment.resolve()));
+                    memPutInt(info + VkRenderingAttachmentInfo.RESOLVEIMAGELAYOUT,
+                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+                }
+            }
+            long rendering = stack.ncalloc(VkRenderingInfo.ALIGNOF, 1, VkRenderingInfo.SIZEOF);
+            memPutInt(rendering + VkRenderingInfo.STYPE, VK_STRUCTURE_TYPE_RENDERING_INFO);
+            memPutInt(rendering + VkRenderingInfo.RENDERAREA + VkRect2D.EXTENT, size.width);
+            memPutInt(rendering + VkRenderingInfo.RENDERAREA + VkRect2D.EXTENT + 4, size.height);
+            memPutInt(rendering + VkRenderingInfo.LAYERCOUNT, 1);
+            memPutInt(rendering + VkRenderingInfo.COLORATTACHMENTCOUNT, colorCount);
+            memPutAddress(rendering + VkRenderingInfo.PCOLORATTACHMENTS, colorCount == 0 ? 0 : colors);
+            memPutAddress(rendering + VkRenderingInfo.PDEPTHATTACHMENT, depth);
+            memPutAddress(rendering + VkRenderingInfo.PSTENCILATTACHMENT, stencil);
+            Commands.beginRendering(commands, rendering);
+            long viewport = stack.ncalloc(VkViewport.ALIGNOF, 1, VkViewport.SIZEOF);
+            memPutFloat(viewport + VkViewport.WIDTH, size.width);
+            memPutFloat(viewport + VkViewport.HEIGHT, size.height);
+            memPutFloat(viewport + VkViewport.MAXDEPTH, 1);
+            Commands.setViewport(commands, 0, 1, viewport);
+            long scissor = stack.ncalloc(VkRect2D.ALIGNOF, 1, VkRect2D.SIZEOF);
+            memPutInt(scissor + VkRect2D.EXTENT, size.width);
+            memPutInt(scissor + VkRect2D.EXTENT + 4, size.height);
+            Commands.setScissor(commands, 0, 1, scissor);
+        }
+    }
+
+    private long attachmentView(Subresource target) {
+        return target.whole() ? viewOf(target.image().id) : layerViewOf(target.image().id, target.baseLayer());
     }
 
     private void barriers(VkCommandBuffer commands, int from, int to) {
@@ -1046,29 +1142,7 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     private void blit(PassContext ctx, Image from, Image to) {
-        try (MemoryStack stack = stackPush()) {
-            long region = stack.ncalloc(VkImageBlit.ALIGNOF, 1, VkImageBlit.SIZEOF);
-            layers(region + VkImageBlit.SRCSUBRESOURCE);
-            layers(region + VkImageBlit.DSTSUBRESOURCE);
-            offsets(region + VkImageBlit.SRCOFFSETS, from.width, from.height);
-            offsets(region + VkImageBlit.DSTOFFSETS, to.width, to.height);
-            boolean same = from.width == to.width && from.height == to.height;
-            device.direct().cmdBlitImage(ctx.commands(), ctx.image(from), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                ctx.image(to), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, region,
-                same ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
-        }
-    }
-
-    private static void layers(long subresource) {
-        memPutInt(subresource + VkImageSubresourceLayers.ASPECTMASK, VK_IMAGE_ASPECT_COLOR_BIT);
-        memPutInt(subresource + VkImageSubresourceLayers.LAYERCOUNT, 1);
-    }
-
-    private static void offsets(long offsets, int width, int height) {
-        // offsets[0] = (0, 0, 0), offsets[1] = (width, height, 1); VkOffset3D is three ints
-        memPutInt(offsets + 12, width);
-        memPutInt(offsets + 16, height);
-        memPutInt(offsets + 20, 1);
+        ctx.blit(from.whole(), to.whole(), from.width != to.width || from.height != to.height);
     }
 
     static int aspect(int format) {

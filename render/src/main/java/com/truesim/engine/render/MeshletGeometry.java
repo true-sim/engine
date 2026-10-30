@@ -4,9 +4,12 @@ import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
+import com.truesim.engine.graph.Clear;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
+import com.truesim.engine.graph.Load;
 import com.truesim.engine.graph.PassContext;
+import com.truesim.engine.graph.Store;
 import java.util.Objects;
 
 /**
@@ -38,14 +41,25 @@ public final class MeshletGeometry implements GeometryProvider {
             camera == null ? null : () -> view.set(camera, 1, MeshletRenderer.MODE_LIT));
         GraphBuilder.PassBuilder pass = g.pass(name(draw, draw.occlusion() ? " early" : ""))
             .read(culling.culled(), BufferAccess.INDIRECT);
-        record(draw, targets, pass, false, null);
+        record(draw, targets, pass, false);
     }
 
+    /**
+     * The late phase in two passes: culling against the pyramid (compute), then drawing what became visible over the
+     * early phase's attachments. The culled lists pass between them as a buffer, which orders them.
+     */
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void drawLate(GraphBuilder g, SceneDraw draw, SceneDraw.Targets targets, Image pyramid) {
-        GraphBuilder.PassBuilder pass = g.pass(name(draw, " late")).read(pyramid, Access.SAMPLED_COMPUTE);
-        record(draw, targets, pass, true, pyramid);
+        RenderView view = draw.view();
+        int width = draw.width();
+        int height = draw.height();
+        Buffer culled = g.createBuffer(name(draw, " late culled"), 16);
+        g.pass(name(draw, " late culling")).read(pyramid, Access.SAMPLED_COMPUTE)
+            .write(culled, BufferAccess.STORAGE_WRITE)
+            .record(ctx -> renderer.cullLate(ctx.unsafe().commands(), view, ctx.sampled(pyramid), width, height,
+                pyramid.mips()));
+        record(draw, targets, g.pass(name(draw, " late")).read(culled, BufferAccess.INDIRECT), true);
     }
 
     @AllowAllocation("building the graph, when it changes")
@@ -57,15 +71,27 @@ public final class MeshletGeometry implements GeometryProvider {
         };
     }
 
-    /** Declares the targets and records the draw (after the late phase's culling, with {@code late}). */
+    /**
+     * Declares the attachments (cleared, or with {@code late} loaded) and records the draw: the late phase's lists with
+     * {@code late}, else the early (or only) phase's.
+     */
     @AllowAllocation("building the graph, when it changes")
-    private void record(SceneDraw draw, SceneDraw.Targets targets, GraphBuilder.PassBuilder pass, boolean late,
-        Image pyramid) {
+    private void record(SceneDraw draw, SceneDraw.Targets targets, GraphBuilder.PassBuilder pass, boolean late) {
         Image depth = targets.depth();
         Image color = targets.color();
-        pass.write(depth, Access.DEPTH_ATTACHMENT);
+        SurfaceOutput.Kind kind = draw.output().kind();
         if (color != null) {
-            pass.write(color, Access.COLOR_ATTACHMENT);
+            if (late) {
+                pass.attach(color, Load.LOAD, Store.STORE);
+            } else {
+                pass.attach(color, kind == SurfaceOutput.Kind.SHADED ? Clear.color(draw.output().clear())
+                    : Clear.color(0, 0, 0, 0)); // IDs: 0 is nothing
+            }
+        }
+        if (late) {
+            pass.attachDepth(depth, Load.LOAD, Store.STORE);
+        } else {
+            pass.attachDepth(depth, Clear.FAR);
         }
         Buffer lights = targets.lights();
         if (lights != null) {
@@ -76,38 +102,15 @@ public final class MeshletGeometry implements GeometryProvider {
             shadows.readBy(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
         }
         RenderView view = draw.view();
-        int width = draw.width();
-        int height = draw.height();
-        float[] clear = draw.output().clear();
-        switch (draw.output().kind()) {
-            case DEPTH -> pass.record(ctx -> {
-                if (late) {
-                    renderer.recordLate(ctx.commands(), view, 0, ctx.view(depth), width, height,
-                        ctx.sampled(pyramid), pyramid.mips());
-                } else {
-                    renderer.drawView(ctx.commands(), view, 0, ctx.view(depth), width, height, 0, 0, 0);
-                }
-            });
+        switch (kind) {
+            case DEPTH -> pass.record(ctx -> renderer.drawAttached(ctx.unsafe().commands(), view, late, true, 0));
             case SHADED -> pass.record(ctx -> {
                 if (shadows != null) {
                     shadows.prepare(ctx);
                 }
-                if (late) {
-                    renderer.recordLate(ctx.commands(), view, ctx.view(color), ctx.view(depth), width, height,
-                        ctx.sampled(pyramid), pyramid.mips(), address(ctx, lights));
-                } else {
-                    renderer.drawView(ctx.commands(), view, ctx.view(color), ctx.view(depth), width, height, clear[0],
-                        clear[1], clear[2], address(ctx, lights));
-                }
+                renderer.drawAttached(ctx.unsafe().commands(), view, late, false, address(ctx, lights));
             });
-            case IDS -> pass.record(ctx -> {
-                if (late) {
-                    renderer.recordLateIds(ctx.commands(), view, ctx.view(color), ctx.view(depth), width, height,
-                        ctx.sampled(pyramid), pyramid.mips());
-                } else {
-                    renderer.drawIds(ctx.commands(), view, ctx.view(color), ctx.view(depth), width, height);
-                }
-            });
+            case IDS -> pass.record(ctx -> renderer.drawIdsAttached(ctx.unsafe().commands(), view, late));
         }
     }
 

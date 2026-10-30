@@ -130,7 +130,7 @@ public final class VisibilityBufferShading implements Technique {
         g.pass("material classification")
             .read(ids, Access.STORAGE_READ)
             .write(tiles, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> ctx.dispatch(classify, push(classifyPush, ctx, ids, null, lights, types.size(), 0,
+            .record(ctx -> ctx.dispatch(classify, push(classifyPush, ctx, ids, null, null, types.size(), 0,
                 ctx.address(tiles)), tilesX, tilesY, 1));
         GraphBuilder.PassBuilder pass = g.pass("visibility shading")
             .read(ids, Access.STORAGE_READ)
