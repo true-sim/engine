@@ -229,9 +229,10 @@ public final class MeshletRenderer implements AutoCloseable {
                         // Opaque bins' depth from positions alone (no fragment shader); the masked bin's fragments
                         // need texture coordinates, from the full vertices: in depth-only pipelines on an RX 9070 XT
                         // the fragment shader did not see the primitive ID the mesh shader wrote (pitfalls.md).
-                        meshDepth = bins(bin -> (bin == BIN_MASKED ? depthOnly(raster(bin, meshShader,
-                            VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain"), bin, drawShader) : raster(bin, meshShader,
-                            VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain")).depth(depthFormat).build());
+                        meshDepth = bins(bin -> (bin == BIN_MASKED ? raster(bin, meshShader,
+                            VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, meshShader,
+                            "slimMaskedDepthMain") : raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain"))
+                            .depth(depthFormat).build()); // EXPERIMENT
                     } else {
                         meshDraw = bins(bin -> raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain")
                             .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, bin == BIN_MASKED ? "maskedMain"

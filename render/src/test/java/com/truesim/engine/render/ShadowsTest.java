@@ -303,6 +303,13 @@ class ShadowsTest {
     }
 
     @Test
+    void experimentReportsTheDevice() {
+        org.assertj.core.api.Assertions.fail("EXPERIMENT device: " + device.gpu().name() + ", meshShaders "
+            + device.meshShaders() + ", barycentrics " + device.barycentrics() + ", primitiveIds " + device.primitiveIds()
+            + ", path " + renderer.path());
+    }
+
+    @Test
     void maskedTexelsCastNoShadow() {
         // The floating quad, alpha-masked: with its alpha above the cutoff it casts its shadow (drawn in the shadow
         // map's masked bin); with all of it masked it casts none, in the shadow map as for the camera.
