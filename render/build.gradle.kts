@@ -16,7 +16,7 @@ dependencies {
 // The material records of src/main/slang (materials.slang), as Java: MetallicRoughnessParameters and the others.
 slang {
     javaPackage = "com.truesim.engine.render.materials"
-    pushPackage = "com.truesim.engine.render.push"
+    pushPackage = "com.truesim.engine.render.layout"
 }
 
 // The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.

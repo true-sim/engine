@@ -19,7 +19,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
-import com.truesim.engine.render.push.PyramidPush;
+import com.truesim.engine.render.layout.PyramidPush;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;

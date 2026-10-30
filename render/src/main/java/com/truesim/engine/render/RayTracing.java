@@ -62,7 +62,7 @@ import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
 import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
-import com.truesim.engine.render.push.InstancesPush;
+import com.truesim.engine.render.layout.InstancesPush;
 import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Pipeline;

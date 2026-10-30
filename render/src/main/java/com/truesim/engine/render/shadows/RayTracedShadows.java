@@ -24,7 +24,7 @@ import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.ShadowInputs;
-import com.truesim.engine.render.push.TracedPush;
+import com.truesim.engine.render.layout.TracedPush;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import java.util.List;
