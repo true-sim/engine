@@ -215,16 +215,32 @@ public final class MeshletRenderer implements AutoCloseable {
             idsDraw = idsShader == null ? null : bins(bin -> raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT,
                 "vertexMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader, bin == BIN_MASKED ? "maskedIdsMain"
                 : "idsMain").color(ID_FORMAT).depth(depthFormat).build());
+            // Barycentrics and primitive IDs in fragment shaders: the mesh path's lean and slim interfaces (lean.slang, mesh.slang).
+            boolean slimMeshes = device.barycentrics() && device.primitiveIds();
             if (device.meshShaders()) {
                 try (ShaderModule meshShader = ShaderModule.load(device, "shaders/meshlets/mesh.spv")) {
-                    meshDraw = bins(bin -> raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain")
-                        .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, bin == BIN_MASKED ? "maskedMain"
-                            : "fragmentMain") // the same shading
-                        .color(colorFormat).depth(depthFormat).build());
-                    meshDepth = bins(bin -> depthOnly(raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT,
-                        "meshMain"), bin, drawShader).depth(depthFormat).build());
+                    if (slimMeshes) {
+                        // What interpolates, and the rest from the triangle (lean.slang); depth alone from positions.
+                        try (ShaderModule leanShader = ShaderModule.load(device, "shaders/meshlets/lean.spv")) {
+                            meshDraw = bins(bin -> raster(bin, leanShader, VK_SHADER_STAGE_MESH_BIT_EXT,
+                                "meshLeanMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, leanShader, bin == BIN_MASKED
+                                ? "leanMaskedMain" : "leanMain").color(colorFormat).depth(depthFormat).build());
+                        }
+                        // Opaque bins' depth from positions alone (no fragment shader); the masked bin's fragments
+                        // need texture coordinates, from the full vertices.
+                        meshDepth = bins(bin -> (bin == BIN_MASKED ? depthOnly(raster(bin, meshShader,
+                            VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain"), bin, drawShader) : raster(bin, meshShader,
+                            VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain")).depth(depthFormat).build());
+                    } else {
+                        meshDraw = bins(bin -> raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain")
+                            .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, bin == BIN_MASKED ? "maskedMain"
+                                : "fragmentMain") // the same shading
+                            .color(colorFormat).depth(depthFormat).build());
+                        meshDepth = bins(bin -> depthOnly(raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT,
+                            "meshIdsMain"), bin, drawShader).depth(depthFormat).build());
+                    }
                     idsMesh = idsShader == null ? null : bins(bin -> raster(bin, meshShader,
-                        VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader,
+                        VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader,
                             bin == BIN_MASKED ? "maskedIdsMain" : "idsMain").color(ID_FORMAT).depth(depthFormat)
                         .build());
                 }

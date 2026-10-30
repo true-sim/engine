@@ -1,8 +1,10 @@
 // The mesh shader path: the cull pass lists the visible meshlets, as for the indexed path, and a mesh workgroup per
 // listed meshlet emits its vertices and triangles straight from the pool. Culling in a compute pass rather than in task
 // shaders keeps every lane busy: a task workgroup per chunk of 64 meshlets launches only a few mesh workgroups when
-// instances need few meshlets (30,000 rocks: 0.95 ms against 0.59 ms). The fragment shader is the one in draw.slang.
-// Meshlets hold at most 64 vertices and 124 triangles.
+// instances need few meshlets (30,000 rocks: 0.95 ms against 0.59 ms). Where fragment shaders have barycentrics,
+// shaded draws take lean.slang's entries and opaque depth the slim one below; the visibility buffer's IDs (and
+// GPUs without them) take meshIdsMain, whose vertices carry everything for draw.slang's fragment shaders. Meshlets
+// hold at most 64 vertices and 124 triangles.
 import meshlets.common;
 
 struct MeshPush
@@ -38,10 +40,11 @@ uint triangleByte(uint i)
     return (push.meshletTriangles[i >> 2] >> ((i & 3) * 8)) & 0xff;
 }
 
+/** The visibility buffer's draws, and every draw where fragment shaders lack barycentrics: vertices carry all. */
 [shader("mesh")]
 [outputtopology("triangle")]
 [numthreads(64, 1, 1)]
-void meshMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertices VertexOut vertices[64],
+void meshIdsMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertices VertexOut vertices[64],
     out indices uint3 triangles[124], out primitives PrimitiveOut primitives[124])
 {
     View view = push.view[0];
@@ -77,3 +80,48 @@ void meshMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertice
         primitives[t].id = t;
     }
 }
+
+// The slim path, for the depth of opaque bins (no fragment shader): vertices carry their clip positions alone.
+
+struct SlimVertex
+{
+    float4 position : SV_Position;
+};
+
+[shader("mesh")]
+[outputtopology("triangle")]
+[numthreads(64, 1, 1)]
+void meshMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertices SlimVertex vertices[64],
+    out indices uint3 triangles[124])
+{
+    View view = push.view[0];
+    uint index = group.y * 65535 + group.x;
+    if (index >= min(push.visibleCount[2 * push.bin + push.late], binDrawCapacity(view, push.bin)))
+    {
+        SetMeshOutputCounts(0, 0);
+        return;
+    }
+    uint slot = binFirstSlot(view, push.bin) + index;
+    VisibleMeshlet v = push.visible[slot];
+    Instance instance = relative(push.instances[v.instance], view);
+    MeshEntry mesh = push.meshes[instance.mesh];
+    uint w = v.meshlet * 8;
+    uint vertexOffset = push.meshlets[w];
+    uint triangleOffset = push.meshlets[w + 1];
+    uint counts = push.meshlets[w + 2];
+    uint vertexCount = counts & 0xff;
+    uint triangleCount = (counts >> 8) & 0xff;
+    SetMeshOutputCounts(vertexCount, triangleCount);
+    if (thread < vertexCount)
+    {
+        uint vertex = mesh.vertexBase + push.meshletVertices[mesh.meshletVertexBase + vertexOffset + thread];
+        float3 world = toWorld(instance, decodePosition(push.positions[vertex], mesh));
+        vertices[thread].position = mul(view.viewProjection, float4(world, 1.0));
+    }
+    for (uint t = thread; t < triangleCount; t += 64)
+    {
+        uint b = mesh.indexBase + triangleOffset + t * 3;
+        triangles[t] = uint3(triangleByte(b), triangleByte(b + 1), triangleByte(b + 2));
+    }
+}
+

@@ -5,6 +5,8 @@ import static org.lwjgl.util.vma.Vma.VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_
 import static org.lwjgl.util.vma.Vma.vmaCreateAllocator;
 import static org.lwjgl.util.vma.Vma.vmaDestroyAllocator;
 import static org.lwjgl.vulkan.EXTMeshShader.VK_EXT_MESH_SHADER_EXTENSION_NAME;
+import static org.lwjgl.vulkan.KHRFragmentShaderBarycentric.VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME;
+import static org.lwjgl.vulkan.KHRFragmentShaderBarycentric.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
 import static org.lwjgl.vulkan.KHRDeferredHostOperations.VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME;
@@ -69,6 +71,7 @@ import org.lwjgl.vulkan.VkDeviceQueueCreateInfo;
 import org.lwjgl.vulkan.VkFenceCreateInfo;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures2;
+import org.lwjgl.vulkan.VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceProperties;
 import org.lwjgl.vulkan.VkPhysicalDeviceAccelerationStructureFeaturesKHR;
 import org.lwjgl.vulkan.VkPhysicalDeviceRayQueryFeaturesKHR;
@@ -106,6 +109,7 @@ public final class VulkanDevice implements AutoCloseable {
     private final int apiVersion;
     private final Vulkan14Features features14;
     private final boolean meshShaders;
+    private final boolean barycentrics;
     private final boolean rayTracing;
     private final boolean anisotropic;
     private final boolean cubeArrays;
@@ -163,6 +167,22 @@ public final class VulkanDevice implements AutoCloseable {
                 }
             }
             this.meshShaders = meshShading != null;
+            // Barycentric coordinates in fragment shaders where the GPU has them: the mesh shader path passes its
+            // fragments positions and triangles alone, and they rebuild the rest (cheaper than interpolated outputs).
+            VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR barycentric = null;
+            if (gpu.supports(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME)) {
+                VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR query =
+                    VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR);
+                vkGetPhysicalDeviceFeatures2(gpu.handle(), VkPhysicalDeviceFeatures2.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2).pNext(query.address()));
+                if (query.fragmentShaderBarycentric()) {
+                    barycentric = VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR)
+                        .fragmentShaderBarycentric(true);
+                }
+            }
+            this.barycentrics = barycentric != null;
             // Hardware ray tracing where the GPU has it: acceleration structures, traced by ray queries from any shader.
             VkPhysicalDeviceAccelerationStructureFeaturesKHR structures = null;
             VkPhysicalDeviceRayQueryFeaturesKHR queries = null;
@@ -211,6 +231,10 @@ public final class VulkanDevice implements AutoCloseable {
                 meshShading.pNext(features13.pNext());
                 features13.pNext(meshShading.address());
             }
+            if (barycentric != null) {
+                barycentric.pNext(features13.pNext());
+                features13.pNext(barycentric.address());
+            }
             if (queries != null) {
                 structures.pNext(features13.pNext());
                 features13.pNext(queries.address());
@@ -248,7 +272,7 @@ public final class VulkanDevice implements AutoCloseable {
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
                 .pNext(features.address())
                 .pQueueCreateInfos(queues.flip())
-                .ppEnabledExtensionNames(extensions(stack, swapchains, meshShaders, rayTracing));
+                .ppEnabledExtensionNames(extensions(stack, swapchains, meshShaders, barycentrics, rayTracing));
             PointerBuffer device = stack.mallocPointer(1);
             Vulkan.check(vkCreateDevice(gpu.handle(), info, null, device), "Could not create a device on " + gpu.name());
             this.handle = new VkDevice(device.get(0), gpu.handle(), info, apiVersion);
@@ -317,13 +341,16 @@ public final class VulkanDevice implements AutoCloseable {
     }
 
     private static PointerBuffer extensions(MemoryStack stack, boolean swapchains, boolean meshShaders,
-        boolean rayTracing) {
-        PointerBuffer names = stack.mallocPointer(5);
+        boolean barycentrics, boolean rayTracing) {
+        PointerBuffer names = stack.mallocPointer(6);
         if (swapchains) {
             names.put(stack.UTF8(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
         }
         if (meshShaders) {
             names.put(stack.UTF8(VK_EXT_MESH_SHADER_EXTENSION_NAME));
+        }
+        if (barycentrics) {
+            names.put(stack.UTF8(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME));
         }
         if (rayTracing) {
             names.put(stack.UTF8(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME));
@@ -424,6 +451,11 @@ public final class VulkanDevice implements AutoCloseable {
     /** Whether task and mesh shaders (VK_EXT_mesh_shader) are enabled: the GPU has them. */
     public boolean meshShaders() {
         return meshShaders;
+    }
+
+    /** Whether fragment shaders read barycentric coordinates (VK_KHR_fragment_shader_barycentric): the GPU has them. */
+    public boolean barycentrics() {
+        return barycentrics;
     }
 
     /**

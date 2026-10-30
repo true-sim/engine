@@ -403,7 +403,7 @@ public uint meshletSubmesh(uint* meshlets, uint m)
 }
 
 /** The word of vertex attribute `bit` (scene's VertexAttribute order) of a mesh vertex: attributes lie in order. */
-uint attributeWord(MeshEntry mesh, uint* attributes, uint vertex, uint bit)
+public uint attributeWord(MeshEntry mesh, uint* attributes, uint vertex, uint bit)
 {
     uint offset = countbits(mesh.attributeFormat & ((1u << bit) - 1)) * 4;
     return attributes[(mesh.attributeBase + (vertex - mesh.vertexBase) * mesh.attributeStride + offset) / 4];
