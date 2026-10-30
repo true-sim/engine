@@ -6,13 +6,19 @@ import static org.lwjgl.util.vma.Vma.vmaCreateImage;
 import static org.lwjgl.util.vma.Vma.vmaDestroyImage;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_TILING_OPTIMAL;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_TYPE_2D;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_TYPE_3D;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_VIEW_TYPE_2D;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_VIEW_TYPE_3D;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_VIEW_TYPE_CUBE;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_SAMPLED_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_STORAGE_BIT;
-import static org.lwjgl.vulkan.VK10.VK_SAMPLE_COUNT_1_BIT;
 import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_CONCURRENT;
 import static org.lwjgl.vulkan.VK10.VK_SHARING_MODE_EXCLUSIVE;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -25,7 +31,10 @@ import org.lwjgl.system.MemoryStack;
 import org.lwjgl.util.vma.VmaAllocationCreateInfo;
 import org.lwjgl.vulkan.VkImageCreateInfo;
 
-/** A 2D image in GPU memory with a view of all of it, e.g. a render target, depth buffer or texture. */
+/**
+ * An image in GPU memory with a view of all of it, e.g. a render target, depth buffer or texture: 2D (with array layers,
+ * or cube faces) or 3D, with mip levels and, for render targets, several samples per texel.
+ */
 @AllowAllocation("created rarely")
 public final class GpuImage implements AutoCloseable {
 
@@ -41,11 +50,14 @@ public final class GpuImage implements AutoCloseable {
     private final int mips;
     private final int width;
     private final int height;
+    private final int depth;
+    private final int layers;
+    private final int samples;
     private final int format;
     private boolean closed;
 
     public GpuImage(VulkanDevice device, int width, int height, int format, int usage, int aspect) {
-        this(device, width, height, format, usage, aspect, 1, new int[0]);
+        this(device, width, height, 1, 1, false, 1, format, usage, aspect, 1, new int[0]);
     }
 
     /**
@@ -54,7 +66,7 @@ public final class GpuImage implements AutoCloseable {
      */
     public GpuImage(VulkanDevice device, int width, int height, int format, int usage, int aspect,
         int... queueFamilies) {
-        this(device, width, height, format, usage, aspect, 1, queueFamilies);
+        this(device, width, height, 1, 1, false, 1, format, usage, aspect, 1, queueFamilies);
     }
 
     /**
@@ -64,7 +76,19 @@ public final class GpuImage implements AutoCloseable {
      */
     public static GpuImage mipmapped(VulkanDevice device, int width, int height, int format, int usage, int aspect,
         int mips, int... queueFamilies) {
-        return new GpuImage(device, width, height, format, usage, aspect, mips, queueFamilies);
+        return new GpuImage(device, width, height, 1, 1, false, 1, format, usage, aspect, mips, queueFamilies);
+    }
+
+    /**
+     * An image of {@code format}, {@code width} by {@code height} by {@code depth} texels (3D when {@code depth} is
+     * more than 1), of {@code layers} array layers ({@code cube}: faces of cube maps, six per cube), {@code samples}
+     * samples per texel and {@code mips} mip levels, shared by {@code queueFamilies} as above. Its views have the
+     * matching type: 2D, 2D array, cube, cube array or 3D.
+     */
+    public static GpuImage create(VulkanDevice device, Format format, int width, int height, int depth, int layers,
+        boolean cube, int samples, int mips, int usage, int... queueFamilies) {
+        return new GpuImage(device, width, height, depth, layers, cube, samples, format.vk(), usage, format.aspect(),
+            mips, queueFamilies);
     }
 
     /** How many mip levels a {@code width} by {@code height} image has, down to 1 x 1. */
@@ -72,10 +96,26 @@ public final class GpuImage implements AutoCloseable {
         return 32 - Integer.numberOfLeadingZeros(Math.max(width, height));
     }
 
-    private GpuImage(VulkanDevice device, int width, int height, int format, int usage, int aspect, int mips,
-        int[] queueFamilies) {
-        if (width < 1 || height < 1) {
-            throw new IllegalArgumentException("Image size must be positive: " + width + " x " + height);
+    private GpuImage(VulkanDevice device, int width, int height, int depth, int layers, boolean cube, int samples,
+        int format, int usage, int aspect, int mips, int[] families) {
+        int[] queueFamilies = java.util.Arrays.stream(families).distinct().toArray(); // one family: exclusive
+        if (width < 1 || height < 1 || depth < 1 || layers < 1) {
+            throw new IllegalArgumentException("Image size and layers must be positive: " + width + " x " + height + " x "
+                + depth + ", " + layers + " layers");
+        }
+        if (depth > 1 && (layers > 1 || cube || samples > 1)) {
+            throw new IllegalArgumentException("A 3D image has one layer and one sample");
+        }
+        if (cube && layers > 6 && !device.cubeArrays()) {
+            throw new IllegalArgumentException("This GPU has no cube map arrays (imageCubeArray): " + layers + " layers");
+        }
+        if (cube && (width != height || layers % 6 != 0)) {
+            throw new IllegalArgumentException("Cube maps are square, six layers each: " + width + " x " + height + ", "
+                + layers + " layers");
+        }
+        if (Integer.bitCount(samples) != 1 || samples > 64 || samples > 1 && mips > 1) {
+            throw new IllegalArgumentException("Samples are a power of two up to 64, one mip level when more than one: "
+                + samples);
         }
         if (mips < 1 || mips > fullMipCount(width, height)) {
             throw new IllegalArgumentException("A " + width + " x " + height + " image has 1 to "
@@ -85,15 +125,21 @@ public final class GpuImage implements AutoCloseable {
         this.device = device;
         this.width = width;
         this.height = height;
+        this.depth = depth;
+        this.layers = layers;
+        this.samples = samples;
         this.format = format;
+        int viewType = depth > 1 ? VK_IMAGE_VIEW_TYPE_3D : cube ? (layers == 6 ? VK_IMAGE_VIEW_TYPE_CUBE
+            : VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) : layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         try (MemoryStack stack = stackPush()) {
             VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO)
-                .imageType(VK_IMAGE_TYPE_2D)
+                .flags(cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0)
+                .imageType(depth > 1 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D)
                 .format(format)
                 .mipLevels(mips)
-                .arrayLayers(1)
-                .samples(VK_SAMPLE_COUNT_1_BIT)
+                .arrayLayers(layers)
+                .samples(samples)
                 .tiling(VK_IMAGE_TILING_OPTIMAL)
                 .usage(usage)
                 .sharingMode(queueFamilies.length > 1 ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE)
@@ -101,7 +147,7 @@ public final class GpuImage implements AutoCloseable {
             if (queueFamilies.length > 1) {
                 info.pQueueFamilyIndices(stack.ints(queueFamilies));
             }
-            info.extent().set(width, height, 1);
+            info.extent().set(width, height, depth);
             LongBuffer image = stack.mallocLong(1);
             PointerBuffer allocated = stack.mallocPointer(1);
             Vulkan.check(vmaCreateImage(device.allocator(), info,
@@ -113,9 +159,10 @@ public final class GpuImage implements AutoCloseable {
             this.mipViews = new long[mips > 1 && (usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 ? mips : 0];
             long whole = 0;
             try {
-                whole = (usage & VIEW_USAGES) != 0 ? Images.createView(device, handle, format, aspect, 0, mips) : 0;
+                whole = (usage & VIEW_USAGES) != 0
+                    ? Images.createView(device, handle, format, aspect, viewType, 0, mips, layers) : 0;
                 for (int mip = 0; mip < mipViews.length; mip++) {
-                    mipViews[mip] = Images.createView(device, handle, format, aspect, mip, 1);
+                    mipViews[mip] = Images.createView(device, handle, format, aspect, viewType, mip, 1, layers);
                 }
             } catch (RuntimeException e) {
                 destroy(device, whole, mipViews, handle, allocation); // nothing made leaks
@@ -154,6 +201,21 @@ public final class GpuImage implements AutoCloseable {
 
     public int format() {
         return format;
+    }
+
+    /** Its depth in texels: more than 1 for a 3D image. */
+    public int depth() {
+        return depth;
+    }
+
+    /** Its array layers (six per cube map). */
+    public int layers() {
+        return layers;
+    }
+
+    /** Its samples per texel. */
+    public int samples() {
+        return samples;
     }
 
     @Override

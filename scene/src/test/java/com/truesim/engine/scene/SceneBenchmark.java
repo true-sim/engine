@@ -38,6 +38,7 @@ import com.truesim.scene.meshbuild.MeshBuilder;
 import com.truesim.scene.render.MaterialData;
 import com.truesim.scene.render.RenderAssets;
 import com.truesim.scene.render.Renderables;
+import com.truesim.engine.vulkan.Format;
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -167,7 +168,7 @@ class SceneBenchmark {
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
             RenderView cameraView = geometry.createView(ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
             camera.position(FAR, 0, FAR);
-            ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+            ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, Format.R8G8B8A8_UNORM,
                 VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
                 .set(shaded.handle(), 0);
             ClusteredForwardShading forward = new ClusteredForwardShading(geometry, cameraView, WIDTH, HEIGHT,

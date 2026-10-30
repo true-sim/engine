@@ -19,6 +19,7 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
 import static org.lwjgl.vulkan.VK10.VK_QUEUE_FAMILY_IGNORED;
+import static org.lwjgl.vulkan.VK10.VK_REMAINING_ARRAY_LAYERS;
 import static org.lwjgl.vulkan.VK10.VK_REMAINING_MIP_LEVELS;
 import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -771,7 +772,7 @@ public final class FrameGraph implements AutoCloseable {
                 long range = barrier + VkImageMemoryBarrier2.SUBRESOURCERANGE;
                 memPutInt(range + VkImageSubresourceRange.ASPECTMASK, barrierAspect[b]);
                 memPutInt(range + VkImageSubresourceRange.LEVELCOUNT, VK_REMAINING_MIP_LEVELS);
-                memPutInt(range + VkImageSubresourceRange.LAYERCOUNT, 1);
+                memPutInt(range + VkImageSubresourceRange.LAYERCOUNT, VK_REMAINING_ARRAY_LAYERS);
             }
             long dependency = stack.ncalloc(VkDependencyInfo.ALIGNOF, 1, VkDependencyInfo.SIZEOF);
             memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
@@ -1014,7 +1015,7 @@ public final class FrameGraph implements AutoCloseable {
     private void recordSeam(VkCommandBuffer commands) {
         for (int i = 0; i < seamImages.length; i++) {
             com.truesim.engine.vulkan.Images.transition(commands, seamImages[i].image.handle(),
-                aspect(seamImages[i].format), seamFrom[i], seamTo[i], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                seamImages[i].format.aspect(), seamFrom[i], seamTo[i], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         }

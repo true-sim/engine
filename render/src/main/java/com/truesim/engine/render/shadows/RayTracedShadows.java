@@ -13,6 +13,8 @@ import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
+import com.truesim.engine.graph.ImageDesc;
+import com.truesim.engine.graph.Ratio;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
@@ -25,6 +27,7 @@ import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.ShadowInputs;
 import com.truesim.engine.render.layout.TracedPush;
+import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import java.util.List;
@@ -94,7 +97,7 @@ public final class RayTracedShadows implements Technique {
         });
         Image depth = g.request(depthSource).depth();
         Buffer topLevel = g.request(new TopLevel(rayTracing, depthSource.view()));
-        Image mask = g.createLike("shadow mask of light " + light, depth, 1, VK_FORMAT_R8_UNORM);
+        Image mask = g.create("shadow mask of light " + light, ImageDesc.like(depth, Ratio.ONE).format(Format.R8_UNORM));
         g.pass("ray-traced shadows of light " + light)
             .read(depth, Access.SAMPLED_COMPUTE)
             .read(topLevel, BufferAccess.STORAGE_READ)

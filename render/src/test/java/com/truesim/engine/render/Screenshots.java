@@ -142,7 +142,7 @@ class Screenshots {
             Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
             MeshletBenchmark.mainView(renderer).set(camera, 1, MeshletRenderer.MODE_LIT);
             com.truesim.engine.graph.ExternalImage external = new com.truesim.engine.graph.ExternalImage("target",
-                WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
+                WIDTH, HEIGHT, com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
             int size = 2048;
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
@@ -252,7 +252,7 @@ class Screenshots {
             MeshletBenchmark.mainView(renderer).set(camera, 1, MeshletRenderer.MODE_LIT);
             MeshletBenchmark.scatterLights(lights, 1024, groundY, 3);
             com.truesim.engine.graph.ExternalImage external = new com.truesim.engine.graph.ExternalImage("target",
-                WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
+                WIDTH, HEIGHT, com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
             ClusteredForwardShading scene = new ClusteredForwardShading(geometry, MeshletBenchmark.mainView(renderer), WIDTH, HEIGHT,
@@ -316,7 +316,7 @@ class Screenshots {
             classic.add(rockLod, rockLods);
             Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
             com.truesim.engine.graph.ExternalImage external = new com.truesim.engine.graph.ExternalImage("target",
-                WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
+                WIDTH, HEIGHT, com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
             String[] names = {"lod-meshlets.png", "lod-classic.png", "lod-classic-lit.png"};
             for (int image = 0; image < names.length; image++) {

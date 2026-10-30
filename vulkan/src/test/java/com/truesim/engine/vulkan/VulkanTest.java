@@ -351,6 +351,60 @@ class VulkanTest {
     }
 
     @Test
+    void imagesComeInEveryShape() {
+        try (VulkanInstance instance = headless(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
+            int sampled = org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_SAMPLED_BIT;
+            int storage = org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_STORAGE_BIT;
+            int attachment = org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            try (GpuImage array = GpuImage.create(device, Format.R8G8B8A8_UNORM, 16, 16, 1, 4, false, 1, 5,
+                     sampled | storage);
+                 GpuImage cube = GpuImage.create(device, Format.R16G16B16A16_SFLOAT, 16, 16, 1, 6, true, 1, 1, sampled);
+                 GpuImage volume = GpuImage.create(device, Format.R16G16B16A16_SFLOAT, 8, 8, 4, 1, false, 1, 1,
+                     sampled | storage);
+                 GpuImage msaa = GpuImage.create(device, Format.R8G8B8A8_UNORM, 16, 16, 1, 1, false, 4, 1, attachment);
+                 GpuImage shared = GpuImage.create(device, Format.R8G8B8A8_UNORM, 16, 16, 1, 1, false, 1, 1, sampled,
+                     device.graphics().family(), device.compute().family())) {
+                assertThat(array.layers()).isEqualTo(4);
+                assertThat(array.view(2)).isNotZero();
+                assertThat(cube.layers()).isEqualTo(6);
+                assertThat(volume.depth()).isEqualTo(4);
+                assertThat(msaa.samples()).isEqualTo(4);
+                assertThat(shared.view()).isNotZero();
+            }
+            if (device.cubeArrays()) {
+                try (GpuImage cubes = GpuImage.create(device, Format.R16G16B16A16_SFLOAT, 8, 8, 1, 12, true, 1, 1,
+                    sampled)) {
+                    assertThat(cubes.layers()).isEqualTo(12);
+                }
+            } else {
+                assertThatIllegalArgumentException().isThrownBy(() -> GpuImage.create(device,
+                    Format.R16G16B16A16_SFLOAT, 8, 8, 1, 12, true, 1, 1, sampled)).withMessageContaining("imageCubeArray");
+            }
+            for (int[] bad : new int[][] {{0, 1, 1, 1}, {1, 0, 1, 1}, {1, 1, 0, 1}, {1, 1, 1, 0}}) {
+                assertThatIllegalArgumentException().isThrownBy(() -> GpuImage.create(device, Format.R8G8B8A8_UNORM,
+                    8 * bad[0], 8 * bad[1], bad[2], bad[3], false, 1, 1, sampled)).withMessageContaining("positive");
+            }
+            assertThatIllegalArgumentException().isThrownBy(() -> GpuImage.create(device, Format.R8G8B8A8_UNORM, 8, 8,
+                4, 2, false, 1, 1, sampled)).withMessageContaining("3D image");
+            assertThatIllegalArgumentException().isThrownBy(() -> GpuImage.create(device, Format.R8G8B8A8_UNORM, 8, 8,
+                4, 1, true, 1, 1, sampled)).withMessageContaining("3D image");
+            assertThatIllegalArgumentException().isThrownBy(() -> GpuImage.create(device, Format.R8G8B8A8_UNORM, 8, 8,
+                4, 1, false, 4, 1, sampled)).withMessageContaining("3D image");
+            assertThatIllegalArgumentException().isThrownBy(() -> GpuImage.create(device, Format.R8G8B8A8_UNORM, 8, 4,
+                1, 6, true, 1, 1, sampled)).withMessageContaining("Cube maps");
+            assertThatIllegalArgumentException().isThrownBy(() -> GpuImage.create(device, Format.R8G8B8A8_UNORM, 8, 8,
+                1, 5, true, 1, 1, sampled)).withMessageContaining("Cube maps");
+            for (int samples : new int[] {3, 128}) {
+                assertThatIllegalArgumentException().isThrownBy(() -> GpuImage.create(device, Format.R8G8B8A8_UNORM,
+                    8, 8, 1, 1, false, samples, 1, attachment)).withMessageContaining("Samples");
+            }
+            assertThatIllegalArgumentException().isThrownBy(() -> GpuImage.create(device, Format.R8G8B8A8_UNORM, 8, 8,
+                1, 1, false, 4, 2, attachment)).withMessageContaining("Samples");
+            assertThat(instance.validationErrors()).isZero();
+        }
+    }
+
+    @Test
     void resourcesValidate() {
         try (VulkanInstance instance = headless(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
             try (GpuBuffer local = GpuBuffer.deviceLocal(device, 256, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) {

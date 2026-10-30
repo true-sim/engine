@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatNoException;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
 
+import com.truesim.engine.vulkan.Format;
 import org.junit.jupiter.api.Test;
 
 /** What pass bodies get wrong is caught before anything is recorded: no device needed. */
@@ -38,9 +39,9 @@ class PassContextTest {
 
     @Test
     void renderingNeedsTargetsOfOneSize() {
-        Image color = new Image(0, "color", 8, 8, VK_FORMAT_R8G8B8A8_UNORM, 1);
-        Image wide = new Image(1, "depth", 16, 8, VK_FORMAT_D32_SFLOAT, 1);
-        Image tall = new Image(2, "depth", 8, 16, VK_FORMAT_D32_SFLOAT, 1);
+        Image color = new Image(0, "color", ImageDesc.of(Format.R8G8B8A8_UNORM, 8, 8));
+        Image wide = new Image(1, "depth", ImageDesc.of(Format.D32_SFLOAT, 16, 8));
+        Image tall = new Image(2, "depth", ImageDesc.of(Format.D32_SFLOAT, 8, 16));
         assertThatIllegalArgumentException().isThrownBy(() -> ctx.beginRendering(null, null, true, 0, 0, 0, 0))
             .withMessageStartingWith("Rendering into a color or depth image");
         assertThatIllegalArgumentException().isThrownBy(() -> ctx.beginRendering(color, wide, true, 0, 0, 0, 0));

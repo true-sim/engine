@@ -63,6 +63,7 @@ import com.truesim.scene.render.MaterialData;
 import com.truesim.scene.render.RenderAssets;
 import com.truesim.scene.render.Renderables;
 import com.truesim.scene.render.TextureData;
+import com.truesim.engine.vulkan.Format;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -281,7 +282,7 @@ class SceneSyncTest {
             | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         GpuImage target = closing(new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage,
             VK_IMAGE_ASPECT_COLOR_BIT));
-        ExternalImage output = new ExternalImage("target", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage,
+        ExternalImage output = new ExternalImage("target", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
         return graph.add(shading).add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
     }

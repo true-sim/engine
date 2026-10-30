@@ -1,6 +1,5 @@
 package com.truesim.engine.graph;
 
-import static com.truesim.engine.graph.FrameGraph.aspect;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_SAMPLED_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_STORAGE_BIT;
@@ -11,6 +10,7 @@ import com.truesim.engine.graph.GraphCompiler.BufferSlot;
 import com.truesim.engine.graph.GraphCompiler.HistoryPlan;
 import com.truesim.engine.graph.GraphCompiler.Slot;
 import com.truesim.engine.vulkan.Bindless;
+import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Queue;
@@ -109,8 +109,7 @@ final class ResourcePool {
         }
 
         boolean fits(Slot slot) {
-            return current.width == slot.width && current.height == slot.height && current.format == slot.format
-                && current.usage == slot.usage && current.shared == slot.shared;
+            return current.desc.equals(slot.desc) && current.usage == slot.usage && current.shared == slot.shared;
         }
 
         void close() {
@@ -127,9 +126,7 @@ final class ResourcePool {
         for (int s = 0; s < slots.size(); s++) {
             Slot slot = slots.get(s);
             for (Physical candidate : free) {
-                if (candidate.width == slot.width && candidate.height == slot.height
-                    && candidate.format == slot.format && candidate.mips == slot.mips && candidate.usage == slot.usage
-                    && candidate.shared == slot.shared) {
+                if (candidate.desc.equals(slot.desc) && candidate.usage == slot.usage && candidate.shared == slot.shared) {
                     claimed[s] = candidate;
                     free.remove(candidate);
                     break;
@@ -238,9 +235,8 @@ final class ResourcePool {
     @AllowAllocation("building the graph, when it changes")
     final class Physical {
         GpuImage image; // these three swap between a history's two images
-        final int width;
-        final int height;
-        final int format;
+        final ImageDesc desc;
+        final Format format;
         final int usage;
         final boolean shared;
         final int mips;
@@ -249,15 +245,14 @@ final class ResourcePool {
         long retireAt;
 
         Physical(Slot slot) {
-            width = slot.width;
-            height = slot.height;
-            format = slot.format;
+            desc = slot.desc;
+            format = desc.format();
             usage = slot.usage;
             shared = slot.shared;
-            mips = slot.mips;
-            image = shared ? GpuImage.mipmapped(device, width, height, format, usage, aspect(format), mips,
-                graphicsQueue.family(), computeQueue.family())
-                : GpuImage.mipmapped(device, width, height, format, usage, aspect(format), mips);
+            mips = desc.mips();
+            int[] families = shared ? new int[] {graphicsQueue.family(), computeQueue.family()} : new int[0];
+            image = GpuImage.create(device, format, desc.width(), desc.height(), desc.depth(), desc.layers(),
+                desc.cubeMap(), desc.samples(), mips, usage, families);
             sampled = (usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0 ? bindless.addSampled(image.view()) : -1;
             storage = new int[(usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 ? mips : 0];
             for (int mip = 0; mip < storage.length; mip++) {

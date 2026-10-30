@@ -9,6 +9,8 @@ import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
+import com.truesim.engine.graph.ImageDesc;
+import com.truesim.engine.graph.Ratio;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.layout.BlurPush;
@@ -19,23 +21,24 @@ import org.lwjgl.system.MemoryStack;
 
 /**
  * A blurred copy of {@code source}: {@code radius} texels of the source on each side, at {@code scale} times its size
- * (0.5 for half). Equal blurs (the same image, radius and scale) requested by any techniques are computed once. By
+ * (1/2 for half). Equal blurs (the same image, radius and scale) requested by any techniques are computed once. By
  * default a separable Gaussian in two compute passes, async: on the compute queue, beside graphics work that does not
  * need it; {@code FrameGraph.implement(Blur.class, ...)} swaps in another
  * way for every blur of the graph.
  *
  * <pre>{@code
- * Image soft = g.request(new Blur(sceneColor, 8, 0.5));
+ * Image soft = g.request(new Blur(sceneColor, 8, Ratio.of(1, 2)));
  * }</pre>
  *
  * <p>The source must be sampleable and its format usable as a storage image (e.g. {@code R16G16B16A16_SFLOAT} or
  * {@code R8G8B8A8_UNORM}, not an sRGB format).
  */
-public record Blur(Image source, int radius, double scale) implements Request<Image> {
+public record Blur(Image source, int radius, Ratio scale) implements Request<Image> {
 
     public Blur {
         Objects.requireNonNull(source, "source");
-        if (radius < 1 || radius > 64 || !(scale > 0 && scale <= 1)) {
+        Objects.requireNonNull(scale, "scale");
+        if (radius < 1 || radius > 64 || scale.numerator() > scale.denominator()) {
             throw new IllegalArgumentException("A blur takes a radius of 1 to 64 texels and a scale up to 1: " + radius
                 + ", " + scale);
         }
@@ -51,8 +54,8 @@ public record Blur(Image source, int radius, double scale) implements Request<Im
             }
         });
         String name = "blur " + radius + " of " + source.name();
-        Image across = g.createLike(name + " (across)", source, scale);
-        Image result = g.createLike(name, source, scale);
+        Image across = g.create(name + " (across)", ImageDesc.like(source, scale));
+        Image result = g.create(name, ImageDesc.like(source, scale));
         float stepX = 1f / source.width();
         float stepY = 1f / source.height();
         g.pass(name + " across")

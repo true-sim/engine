@@ -130,7 +130,7 @@ class ShadowsTest {
     }
 
     private ExternalImage external(GpuImage image, int format) {
-        return new ExternalImage("target", SIZE, SIZE, format, VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+        return new ExternalImage("target", SIZE, SIZE, com.truesim.engine.vulkan.Format.of(format), VK_IMAGE_USAGE_TRANSFER_SRC_BIT
             | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
             .set(image.handle(), image.view());
     }

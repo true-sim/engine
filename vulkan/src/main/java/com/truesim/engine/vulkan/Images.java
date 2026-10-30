@@ -33,13 +33,22 @@ public final class Images {
 
     /** A 2D view of {@code count} mip levels from {@code first}. */
     public static long createView(VulkanDevice device, long image, int format, int aspect, int first, int count) {
+        return createView(device, image, format, aspect, VK_IMAGE_VIEW_TYPE_2D, first, count, 1);
+    }
+
+    /**
+     * A view of type {@code viewType} ({@code VK_IMAGE_VIEW_TYPE_*}) of {@code count} mip levels from {@code first} and
+     * {@code layers} array layers from the first.
+     */
+    public static long createView(VulkanDevice device, long image, int format, int aspect, int viewType, int first,
+        int count, int layers) {
         try (MemoryStack stack = stackPush()) {
             VkImageViewCreateInfo info = VkImageViewCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO)
                 .image(image)
-                .viewType(VK_IMAGE_VIEW_TYPE_2D)
+                .viewType(viewType)
                 .format(format);
-            info.subresourceRange().aspectMask(aspect).baseMipLevel(first).levelCount(count).layerCount(1);
+            info.subresourceRange().aspectMask(aspect).baseMipLevel(first).levelCount(count).layerCount(layers);
             LongBuffer view = stack.mallocLong(1);
             Vulkan.check(vkCreateImageView(device.handle(), info, null, view), "Could not create an image view");
             return view.get(0);

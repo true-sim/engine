@@ -1,5 +1,7 @@
 package com.truesim.engine.graph;
 
+import com.truesim.engine.vulkan.Format;
+
 /**
  * An image of the graph: made by a technique (transient, its memory pooled and shared with images whose lifetimes do
  * not overlap) or an {@link ExternalImage} brought in. A handle is valid for the build that made it; passes resolve it
@@ -9,22 +11,29 @@ public final class Image {
 
     final int id;
     final String name;
+    final ImageDesc desc;
     final int width;
     final int height;
-    final int format;
+    final Format format;
     final int mips;
 
-    Image(int id, String name, int width, int height, int format, int mips) {
-        this.mips = mips;
+    Image(int id, String name, ImageDesc desc) {
         this.id = id;
         this.name = name;
-        this.width = width;
-        this.height = height;
-        this.format = format;
+        this.desc = desc;
+        this.width = desc.width();
+        this.height = desc.height();
+        this.format = desc.format();
+        this.mips = desc.mips();
     }
 
     public String name() {
         return name;
+    }
+
+    /** What it is: format, size, layers, samples, mip levels. */
+    public ImageDesc desc() {
+        return desc;
     }
 
     public int width() {
@@ -40,8 +49,7 @@ public final class Image {
         return mips;
     }
 
-    /** The Vulkan format, e.g. {@code VK_FORMAT_R16G16B16A16_SFLOAT}. */
-    public int format() {
+    public Format format() {
         return format;
     }
 

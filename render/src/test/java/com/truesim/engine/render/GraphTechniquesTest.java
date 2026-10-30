@@ -22,6 +22,8 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.nvkCmdCopyBufferToImage;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
+import com.truesim.engine.graph.Ratio;
+import com.truesim.engine.graph.ImageDesc;
 import com.truesim.common.math.color.Color;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.ExternalImage;
@@ -50,6 +52,7 @@ import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.assets.mesh.VertexAttribute;
 import com.truesim.scene.assets.mesh.VertexFormat;
 import com.truesim.scene.meshbuild.MeshBuilder;
+import com.truesim.engine.vulkan.Format;
 import java.lang.foreign.ValueLayout;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -110,7 +113,7 @@ class GraphTechniquesTest {
         int usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
             | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         target = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
-        output = new ExternalImage("target", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
+        output = new ExternalImage("target", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
         pixels = GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         // White on the left half, black on the right.
@@ -151,7 +154,7 @@ class GraphTechniquesTest {
 
         @Override
         public void build(GraphBuilder g) {
-            Image image = g.create("edge", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create("edge", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("upload edge").write(image, Access.TRANSFER_DST).record(ctx -> {
                 try (MemoryStack stack = stackPush()) {
                     long region = stack.ncalloc(4, 1, VkBufferImageCopy.SIZEOF);
@@ -178,7 +181,7 @@ class GraphTechniquesTest {
 
         @Override
         public void build(GraphBuilder g) {
-            g.provide(key, g.request(new Blur(g.require(EDGE), radius, 1)));
+            g.provide(key, g.request(new Blur(g.require(EDGE), radius, Ratio.ONE)));
         }
     }
 
@@ -193,7 +196,7 @@ class GraphTechniquesTest {
         public void build(GraphBuilder g) {
             Image l = g.require(left);
             Image r = g.require(right);
-            Image image = g.createLike("halves", l, 1);
+            Image image = g.create("halves", ImageDesc.like(l, Ratio.ONE));
             g.pass("halves").read(l, Access.TRANSFER_SRC).read(r, Access.TRANSFER_SRC)
                 .write(image, Access.TRANSFER_DST).record(ctx -> {
                     copy(ctx.commands(), ctx.image(l), ctx.image(image), 0);
@@ -311,7 +314,7 @@ class GraphTechniquesTest {
                 @Override
                 public void build(GraphBuilder g) {
                     com.truesim.engine.graph.Buffer buffer = g.importBuffer(instances);
-                    Image image = g.create("instances as texels", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                    Image image = g.create("instances as texels", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
                     g.pass("copy instances").read(buffer, com.truesim.engine.graph.BufferAccess.TRANSFER_SRC)
                         .write(image, Access.TRANSFER_DST).record(ctx -> {
                             try (MemoryStack stack = stackPush()) {
@@ -786,7 +789,7 @@ class GraphTechniquesTest {
         @Override
         public void build(GraphBuilder g) {
             Image depth = g.request(draw).depth();
-            Image image = g.create(key.name(), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create(key.name(), ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             Pipeline pipeline = g.cached(DepthCopy.class, device -> {
                 try (ShaderModule shader = ShaderModule.load(device, "shaders/test/depthcopy.spv")) {
                     return Pipeline.compute(device, shader, "copyMain", 8);
@@ -864,7 +867,7 @@ class GraphTechniquesTest {
 
                 @Override
                 public void build(GraphBuilder g) {
-                    Image image = g.create("depth", w, h, VK_FORMAT_D32_SFLOAT);
+                    Image image = g.create("depth", ImageDesc.of(Format.D32_SFLOAT, w, h));
                     g.pass("upload depth").write(image, Access.TRANSFER_DST).record(ctx -> {
                         try (MemoryStack stack = stackPush()) {
                             VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
@@ -901,7 +904,7 @@ class GraphTechniquesTest {
                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.handle(), regions);
                         }
                     });
-                    Image marker = g.create("marker", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                    Image marker = g.create("marker", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
                     g.pass("marker").write(marker, Access.TRANSFER_DST).record(ctx -> { });
                     g.provide(EDGE, marker);
                 }
@@ -1070,7 +1073,7 @@ class GraphTechniquesTest {
 
             @Override
             public void build(GraphBuilder g) {
-                g.provide(soft, g.request(new Blur(g.require(EDGE), 2, 0.5)));
+                g.provide(soft, g.request(new Blur(g.require(EDGE), 2, Ratio.of(1, 2))));
             }
         }).output(soft, output);
         frame();
@@ -1078,7 +1081,7 @@ class GraphTechniquesTest {
             "output target");
         assertThat(red(2, 2)).isEqualTo(1);
         assertThat(red(SIZE - 3, 2)).isZero();
-        org.assertj.core.api.Assertions.assertThatNullPointerException().isThrownBy(() -> new Blur(null, 1, 1));
+        org.assertj.core.api.Assertions.assertThatNullPointerException().isThrownBy(() -> new Blur(null, 1, Ratio.ONE));
     }
 
     /** The target's pixels as last read back. */

@@ -41,6 +41,7 @@ import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.render.Renderables;
+import com.truesim.engine.vulkan.Format;
 import java.awt.image.BufferedImage;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Files;
@@ -175,7 +176,7 @@ class SceneDrawnCheck {
                     VK_FORMAT_D32_SFLOAT)
                 : new ClusteredForwardShading(geometry, cameraView, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                     VK_FORMAT_D32_SFLOAT);
-            ExternalImage output = new ExternalImage("target", WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage,
+            ExternalImage output = new ExternalImage("target", WIDTH, HEIGHT, Format.R8G8B8A8_UNORM, usage,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
             graph.add(shading).output(Keys.SCENE_COLOR, output);
             long deadline = System.nanoTime() + 120_000_000_000L;

@@ -4,8 +4,10 @@ import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
+import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.blocks.DepthPyramid;
+import com.truesim.engine.vulkan.Format;
 import java.util.Objects;
 
 /**
@@ -50,11 +52,11 @@ public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, 
     @AllowAllocation("building the graph, when it changes")
     public Targets build(GraphBuilder g) {
         String name = view.index() == 0 ? "scene" : "view " + view.index();
-        Image depth = g.create(name + " depth", width, height, depthFormat);
+        Image depth = g.create(name + " depth", ImageDesc.of(Format.of(depthFormat), width, height));
         Image color = switch (output.kind()) {
             case DEPTH -> null;
-            case SHADED -> g.create(name + " color", width, height, output.colorFormat());
-            case IDS -> g.create(name + " ids", width, height, output.colorFormat());
+            case SHADED -> g.create(name + " color", ImageDesc.of(Format.of(output.colorFormat()), width, height));
+            case IDS -> g.create(name + " ids", ImageDesc.of(Format.of(output.colorFormat()), width, height));
         };
         Buffer lights = output.kind() == SurfaceOutput.Kind.SHADED ? g.optional(Keys.LIGHT_LIST) : null;
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs());

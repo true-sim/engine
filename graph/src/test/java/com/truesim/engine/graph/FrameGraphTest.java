@@ -34,6 +34,7 @@ import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanException;
 import com.truesim.engine.vulkan.VulkanInstance;
+import com.truesim.engine.vulkan.Format;
 import java.lang.foreign.ValueLayout;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
@@ -83,7 +84,7 @@ class FrameGraphTest {
         graph = new FrameGraph(device, 2);
         int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         target = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
-        output = new ExternalImage("target", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
+        output = new ExternalImage("target", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
         pixels = GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     }
@@ -120,7 +121,7 @@ class FrameGraphTest {
 
         @Override
         public void build(GraphBuilder g) {
-            Image image = g.create(label(key), size, size, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create(label(key), ImageDesc.of(Format.R8G8B8A8_UNORM, size, size));
             g.pass("fill " + label(key)).write(image, Access.TRANSFER_DST).record(ctx -> clear(ctx, image, rgba));
             g.provide(key, image);
         }
@@ -137,7 +138,7 @@ class FrameGraphTest {
         public void build(GraphBuilder g) {
             Image l = g.require(left);
             Image r = g.require(right);
-            Image image = g.createLike(label(out), l, 1);
+            Image image = g.create(label(out), ImageDesc.like(l, Ratio.ONE));
             g.pass("halves " + label(out))
                 .read(l, Access.TRANSFER_SRC)
                 .read(r, Access.TRANSFER_SRC)
@@ -154,7 +155,7 @@ class FrameGraphTest {
     record Copy(Image source) implements Request<Image> {
         @Override
         public Image build(GraphBuilder g) {
-            Image copy = g.createLike("copy of " + source.name(), source, 1);
+            Image copy = g.create("copy of " + source.name(), ImageDesc.like(source, Ratio.ONE));
             g.pass("copy " + source.name())
                 .read(source, Access.TRANSFER_SRC)
                 .write(copy, Access.TRANSFER_DST)
@@ -167,7 +168,7 @@ class FrameGraphTest {
     record AsyncCopy(Image source) implements Request<Image> {
         @Override
         public Image build(GraphBuilder g) {
-            Image copy = g.createLike("async copy of " + source.name(), source, 1);
+            Image copy = g.create("async copy of " + source.name(), ImageDesc.like(source, Ratio.ONE));
             g.pass("async copy " + source.name())
                 .read(source, Access.TRANSFER_SRC)
                 .write(copy, Access.TRANSFER_DST)
@@ -191,7 +192,7 @@ class FrameGraphTest {
         public void build(GraphBuilder g) {
             Image copied = g.request(new AsyncCopy(g.require(a)));
             Image right = g.require(b);
-            Image image = g.createLike(label(out), copied, 1);
+            Image image = g.create(label(out), ImageDesc.like(copied, Ratio.ONE));
             g.pass("halves " + label(out)).read(copied, Access.TRANSFER_SRC).read(right, Access.TRANSFER_SRC)
                 .write(image, Access.TRANSFER_DST).record(ctx -> {
                     copy(ctx, copied, image, 0, SIZE / 2);
@@ -212,7 +213,7 @@ class FrameGraphTest {
         public void build(GraphBuilder g) {
             Image image = g.require(from);
             for (int i = 0; i < times; i++) {
-                Image next = g.create(label(out) + " " + i, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                Image next = g.create(label(out) + " " + i, ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
                 Image source = image;
                 g.pass("chain " + i).read(source, Access.TRANSFER_SRC).write(next, Access.TRANSFER_DST)
                     .record(ctx -> copy(ctx, source, next, 0, SIZE));
@@ -233,7 +234,7 @@ class FrameGraphTest {
         public void build(GraphBuilder g) {
             Image copied = g.request(new Copy(g.require(from)));
             Image second = g.require(other);
-            Image image = g.createLike(label(out), copied, 1);
+            Image image = g.create(label(out), ImageDesc.like(copied, Ratio.ONE));
             g.pass("use " + label(out))
                 .read(copied, Access.TRANSFER_SRC)
                 .read(second, Access.TRANSFER_SRC)
@@ -259,7 +260,7 @@ class FrameGraphTest {
             GraphBuilder.PassBuilder fill = g.pass("fill " + label(key) + " texels").write(buffer, BufferAccess.TRANSFER_DST);
             (async ? fill.async() : fill).record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(buffer), 0,
                 VK_WHOLE_SIZE, rgba));
-            Image image = g.create(label(key), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create(label(key), ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("unpack " + label(key)).read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
                 .record(ctx -> unpack(ctx, buffer, image));
             g.provide(key, image);
@@ -373,8 +374,8 @@ class FrameGraphTest {
     @Test
     void passesRenderIntoColorAndDepthAndCopyBuffers() {
         graph.add(new Lambda(List.of(OUT), g -> {
-            Image color = g.create("color", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
-            Image depth = g.create("depth", SIZE, SIZE, org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT);
+            Image color = g.create("color", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            Image depth = g.create("depth", ImageDesc.of(Format.D32_SFLOAT, SIZE, SIZE));
             g.pass("clear both").write(color, Access.COLOR_ATTACHMENT).write(depth, Access.DEPTH_ATTACHMENT)
                 .record(ctx -> {
                     ctx.beginRendering(color, depth, true, 0, 0, 1, 1);
@@ -500,7 +501,7 @@ class FrameGraphTest {
             graph.add(new Lambda(List.of(OUT), g -> {
                 Buffer buffer = g.importBuffer(state);
                 assertThat(g.importBuffer(state)).as("the same each time").isSameAs(buffer);
-                Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
                 g.pass("read state").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
                     .record(ctx -> unpack(ctx, buffer, image));
                 g.pass("write state").write(buffer, BufferAccess.TRANSFER_DST).record(ctx -> {
@@ -521,7 +522,7 @@ class FrameGraphTest {
             graph.close();
             graph = new FrameGraph(device, 2).add(new Lambda(List.of(OUT), g -> {
                 Buffer buffer = g.importBuffer(state);
-                Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
                 g.pass("read state").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
                     .record(ctx -> unpack(ctx, buffer, image));
                 g.provide(OUT, image);
@@ -532,7 +533,7 @@ class FrameGraphTest {
             graph = new FrameGraph(device, 2).add(new Lambda(List.of(OUT), g -> {
                 Buffer buffer = g.importBuffer(state);
                 g.pass("async write").write(buffer, BufferAccess.TRANSFER_DST).async().record(ctx -> { });
-                Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+                Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
                 g.pass("read state").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
                     .record(ctx -> unpack(ctx, buffer, image));
                 g.provide(OUT, image);
@@ -559,7 +560,7 @@ class FrameGraphTest {
                 .record(ctx -> vkCmdFillBuffer(ctx.commands(), ctx.buffer(c), 0, VK_WHOLE_SIZE, GREEN));
             g.pass("b to c").read(b, BufferAccess.TRANSFER_SRC).write(c, BufferAccess.TRANSFER_DST)
                 .record(ctx -> copy(ctx, b, c, half));
-            Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("unpack").read(c, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
                 .record(ctx -> unpack(ctx, c, image));
             g.provide(OUT, image);
@@ -643,7 +644,7 @@ class FrameGraphTest {
         assertThat(graph.passes()).containsExactly("fill a", "copy a", "use copied");
         // Another way to compute copies: here, a "copy" that is plain blue.
         graph.implement(Copy.class, (request, g) -> {
-            Image blue = g.createLike("blue", request.source(), 1);
+            Image blue = g.create("blue", ImageDesc.like(request.source(), Ratio.ONE));
             g.pass("blue").write(blue, Access.TRANSFER_DST).record(ctx -> clear(ctx, blue, 0, 0, 1, 1));
             return blue;
         });
@@ -685,7 +686,7 @@ class FrameGraphTest {
                 throw new java.io.IOException("stuck");
             });
             g.cached("closes", d -> (AutoCloseable) () -> closed[0] = true);
-            Image image = g.create("out", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("clear").write(image, Access.TRANSFER_DST).record(ctx -> clear(ctx, image, 1, 0, 0, 1));
             g.provide(OUT, image);
         })).output(OUT, output);
@@ -756,7 +757,7 @@ class FrameGraphTest {
             "graphics 2 (after acquire): halves out");
         // Async passes compute, sample, store and copy only, and never touch external images.
         rejects(List.of(OUT), g -> {
-            Image image = g.create("x", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create("x", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("draw").write(image, Access.COLOR_ATTACHMENT).async().record(ctx -> { });
             g.provide(OUT, image);
         }, "async passes compute, sample, store and copy only");
@@ -791,7 +792,7 @@ class FrameGraphTest {
     void recordingOutsideFramesUsesSlotZero() {
         int[] seen = {-2};
         graph.add(new Lambda(List.of(OUT), g -> {
-            Image image = g.create("x", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create("x", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("look").write(image, Access.TRANSFER_DST).record(ctx -> {
                 seen[0] = graph.frameSlots().current();
                 clear(ctx, image, 0, 0, 0, 1);
@@ -829,7 +830,7 @@ class FrameGraphTest {
         // Only async work: compute, then the output's blit on the graphics queue.
         graph.close();
         graph = new FrameGraph(device, 2).asyncCompute(true).add(new Lambda(List.of(OUT), g -> {
-            Image image = g.create("small", SIZE / 2, SIZE / 2, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create("small", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE / 2, SIZE / 2));
             g.pass("only compute").write(image, Access.TRANSFER_DST).async()
                 .record(ctx -> clear(ctx, image, 1, 1, 1, 1));
             g.provide(OUT, image);
@@ -894,7 +895,7 @@ class FrameGraphTest {
         @Override
         public void build(GraphBuilder g) {
             Image image = g.modify(key);
-            Image color = g.create("paint", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image color = g.create("paint", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("paint " + stage).write(color, Access.TRANSFER_DST).record(ctx -> clear(ctx, color, rgba));
             g.pass("paint over " + stage).read(color, Access.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
                 .record(ctx -> copy(ctx, color, image, x, width));
@@ -921,8 +922,8 @@ class FrameGraphTest {
         @Override
         public void build(GraphBuilder g) {
             Image before = g.modify(key);
-            Image fill = g.create("replace fill", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
-            Image after = g.createLike("replaced", before, 1);
+            Image fill = g.create("replace fill", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            Image after = g.create("replaced", ImageDesc.like(before, Ratio.ONE));
             g.pass("replace fill " + stage).write(fill, Access.TRANSFER_DST).record(ctx -> clear(ctx, fill, rgba));
             g.pass("replace " + stage).read(before, Access.TRANSFER_SRC).read(fill, Access.TRANSFER_SRC)
                 .write(after, Access.TRANSFER_DST).record(ctx -> {
@@ -979,7 +980,7 @@ class FrameGraphTest {
         @Override
         public void build(GraphBuilder g) {
             Buffer buffer = g.require(from);
-            Image image = g.create(label(out), SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create(label(out), ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("unpack " + label(out)).read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
                 .record(ctx -> unpack(ctx, buffer, image));
             g.provide(out, image);
@@ -1036,7 +1037,7 @@ class FrameGraphTest {
         graph.close();
         graph = new FrameGraph(device, 2).add(red).add(new Mod(List.of(), List.of(A), g -> { })).output(A, output);
         assertThat(frame()[0]).isEqualTo(RED);
-        rejects(List.of(OUT), g -> g.provide(Key.image("test.other"), g.create("x", 1, 1, VK_FORMAT_R8G8B8A8_UNORM)), "cannot provide test.other");
+        rejects(List.of(OUT), g -> g.provide(Key.image("test.other"), g.create("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 1, 1))), "cannot provide test.other");
     }
 
     /** Keeps a color per frame in a history and outputs last frame's (white when there is none). */
@@ -1051,10 +1052,10 @@ class FrameGraphTest {
 
         @Override
         public void build(GraphBuilder g) {
-            History history = g.history("colors", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            History history = g.history("colors", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             assertThat(history.name()).isEqualTo("colors");
             assertThat(history).hasToString("history colors");
-            Image out = g.create("recalled", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image out = g.create("recalled", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("recall").read(history.previous(), Access.TRANSFER_SRC).write(out, Access.TRANSFER_DST)
                 .record(ctx -> {
                     if (ctx.historyValid(history)) {
@@ -1076,11 +1077,11 @@ class FrameGraphTest {
     void historiesWrittenFirstOnTheComputeQueueAreJoinedAhead() {
         int[] frames = {0};
         graph.asyncCompute(true).add(new Lambda(List.of(OUT), g -> {
-            History history = g.history("async colors", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            History history = g.history("async colors", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             // The frame's first pass, on the compute queue: the seam is submitted ahead of it.
             g.pass("remember").write(history.current(), Access.TRANSFER_DST).async()
                 .record(ctx -> clear(ctx, history.current(), frames[0] % 2, 0, 1 - frames[0]++ % 2, 1));
-            Image out = g.create("recalled", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image out = g.create("recalled", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("recall").read(history.previous(), Access.TRANSFER_SRC).write(out, Access.TRANSFER_DST)
                 .record(ctx -> {
                     if (ctx.historyValid(history)) {
@@ -1120,11 +1121,11 @@ class FrameGraphTest {
         assertThat(frame()[0]).isEqualTo(0xffffffff);
         assertThat(frame()[0]).isIn(RED, BLUE);
         rejects(List.of(OUT), g -> {
-            g.history("x", 4, 4, VK_FORMAT_R8G8B8A8_UNORM);
-            g.history("x", 4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+            g.history("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4));
+            g.history("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4));
         }, "Two histories are named x");
         rejects(List.of(OUT), g -> {
-            History history = g.history("x", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            History history = g.history("x", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("scribble").write(history.previous(), Access.TRANSFER_DST).record(ctx -> { });
         }, "last frame's image is read only");
     }
@@ -1170,9 +1171,9 @@ class FrameGraphTest {
         assertThatIllegalArgumentException().isThrownBy(() -> graph.add(twice));
         rejects(List.of(OUT), g -> g.require(OUT), "cycle"); // requires its own result
         rejects(List.of(OUT), g -> { }, "did not provide [test.out]");
-        rejects(List.of(OUT), g -> g.provide(A, g.create("x", 1, 1, VK_FORMAT_R8G8B8A8_UNORM)), "cannot provide test.a");
+        rejects(List.of(OUT), g -> g.provide(A, g.create("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 1, 1))), "cannot provide test.a");
         rejects(List.of(OUT), g -> {
-            Image image = g.create("x", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create("x", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.provide(OUT, image);
             g.provide(OUT, image);
         }, "provides test.out twice");
@@ -1181,13 +1182,13 @@ class FrameGraphTest {
             g.pass("scribble").write(foreign, Access.TRANSFER_DST).record(ctx -> { });
         }, "results are written only by whoever makes them");
         rejects(List.of(OUT), g -> {
-            Image image = g.create("x", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create("x", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("early").read(image, Access.TRANSFER_SRC).write(image, Access.TRANSFER_DST).record(ctx -> { });
             g.provide(OUT, image);
         }, "in two layouts");
         rejects(List.of(OUT), g -> {
-            Image image = g.create("x", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
-            Image other = g.create("y", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create("x", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            Image other = g.create("y", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("read").read(image, Access.TRANSFER_SRC).write(other, Access.TRANSFER_DST).record(ctx -> { });
             g.provide(OUT, other);
         }, "reads x before any pass writes it");
@@ -1197,16 +1198,16 @@ class FrameGraphTest {
                 return builder.request(this);
             }
         }), "needs its own result");
-        rejects(List.of(OUT), g -> g.create("x", 0, 1, VK_FORMAT_R8G8B8A8_UNORM), "must be positive");
-        rejects(List.of(OUT), g -> g.create("x", 4, 4, VK_FORMAT_R8G8B8A8_UNORM, 4), "1 to 3 mip levels");
-        rejects(List.of(OUT), g -> g.createLike("x", g.require(A), 0), "must be positive");
+        rejects(List.of(OUT), g -> g.create("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 0, 1)), "are positive");
+        rejects(List.of(OUT), g -> g.create("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4).mips(4)), "1 to 3 mip levels");
+        assertThatIllegalArgumentException().isThrownBy(() -> Ratio.of(0, 1)).withMessageContaining("positive fraction");
         rejects(List.of(OUT), g -> g.pass("x").read(g.require(A), Access.TRANSFER_DST), "declare it with write()");
         rejects(List.of(OUT), g -> g.pass("x").write(g.require(A), Access.TRANSFER_SRC), "declare it with read()");
         // Buffers.
         rejects(List.of(OUT), g -> g.createBuffer("x", 0), "must be positive");
         rejects(List.of(OUT), g -> {
             Buffer buffer = g.createBuffer("x", 64);
-            Image image = g.create("y", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create("y", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("read").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
                 .record(ctx -> { });
             g.provide(OUT, image);
@@ -1218,7 +1219,7 @@ class FrameGraphTest {
         rejects(List.of(OUT), g -> {
             Buffer buffer = g.createBuffer("x", 64);
             g.pass("indices").write(buffer, BufferAccess.TRANSFER_DST).record(ctx -> { });
-            Image image = g.create("y", SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM);
+            Image image = g.create("y", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("draw").read(buffer, BufferAccess.INDEX).write(image, Access.TRANSFER_DST).async()
                 .record(ctx -> { });
             g.provide(OUT, image);

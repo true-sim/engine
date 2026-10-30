@@ -68,7 +68,8 @@ final class GraphCompiler {
             Image result = results.get(k++);
             ImageInfo info = g.images.get(result.id);
             boolean fits = info.external == null && substitute[result.id] < 0 && result.width == target.width
-                && result.height == target.height && result.format == target.format
+                && result.height == target.height && result.format == target.format && result.desc.flat()
+                && result.mips == 1
                 && (info.usage & ~target.usage) == 0
                 && (info.usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT)) == 0; // no slots for externals
             Image external = g.external(target);
@@ -221,16 +222,14 @@ final class GraphCompiler {
             for (Slot candidate : slots) {
                 // Only between images of one queue: sharing memory with work on the other queue would make each wait
                 // for the other, and async compute would no longer run beside graphics.
-                if (candidate.last < first[image] && candidate.width == info.image.width
-                    && candidate.height == info.image.height && candidate.format == info.image.format
-                    && candidate.mips == info.image.mips
+                if (candidate.last < first[image] && candidate.desc.equals(info.image.desc)
                     && candidate.queues == queueMask[image] && queueMask[image] != 3) {
                     slot = candidate;
                     break;
                 }
             }
             if (slot == null) {
-                slot = new Slot(info.image.width, info.image.height, info.image.format, info.image.mips);
+                slot = new Slot(info.image.desc);
                 slots.add(slot);
             }
             slot.last = last[image];
@@ -252,7 +251,7 @@ final class GraphCompiler {
             History history = g.histories.get(h);
             ImageInfo current = g.images.get(history.current.id);
             ImageInfo previous = g.images.get(history.previous.id);
-            Slot slot = new Slot(current.image.width, current.image.height, current.image.format, 1);
+            Slot slot = new Slot(current.image.desc);
             slot.usage = current.usage | previous.usage;
             slot.shared = (queueMask[current.image.id] | queueMask[previous.image.id]) == 3 && twoFamilies;
             history.index = h;
@@ -422,20 +421,14 @@ final class GraphCompiler {
 
     /** A physical image the pool is to have: a size, a format and every usage of the images sharing it. */
     static final class Slot {
-        final int width;
-        final int height;
-        final int format;
-        final int mips;
+        final ImageDesc desc;
         int usage;
         int queues;
         boolean shared; // used by both queues, of different families: concurrent sharing
         int last;
 
-        Slot(int width, int height, int format, int mips) {
-            this.width = width;
-            this.height = height;
-            this.format = format;
-            this.mips = mips;
+        Slot(ImageDesc desc) {
+            this.desc = desc;
         }
     }
 
@@ -619,7 +612,7 @@ final class GraphCompiler {
                         firstExternalPass = p;
                     }
                     int target = targets[image];
-                    access(pass, p, queues[p], index(target), IMAGE, target, aspect(g.images.get(image).image.format),
+                    access(pass, p, queues[p], index(target), IMAGE, target, g.images.get(image).image.format.aspect(),
                         image, g.images.get(image).image.name, target >= 0, stages, access, writes, wanted, emit);
                 }
                 // And one per buffer.
@@ -657,7 +650,7 @@ final class GraphCompiler {
                     int i = physicalCount + e;
                     ExternalImage external = externalList.get(e);
                     // Towards whatever comes after the frame.
-                    out.add(new long[] {~e, aspect(external.format), layout[i], external.finalLayout,
+                    out.add(new long[] {~e, external.format.aspect(), layout[i], external.finalLayout,
                         writeStages[i] | readStages[i], writeAccess[i], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                         VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, IMAGE});
                 }

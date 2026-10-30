@@ -3,7 +3,6 @@ package com.truesim.engine.graph;
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.graph.Id;
 import com.truesim.common.graph.Resolution;
-import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -265,55 +264,31 @@ public final class GraphBuilder {
 
     // ---------------------------------------------------------------- images
 
-    /** A new image, {@code width} by {@code height} {@code format} texels, owned by the building technique. */
-    public Image create(String name, int width, int height, int format) {
-        return create(name, width, height, format, 1);
-    }
-
     /**
-     * A new image of {@code mips} mip levels (up to {@code GpuImage.fullMipCount}), owned by the building technique.
-     * Passes write a level as a storage image through {@link PassContext#storage(Image, int)}.
+     * A new image, as {@code desc} describes it, owned by the building technique. Its usage follows from how passes
+     * use it; a mipmapped storage image's levels are written one at a time through
+     * {@link PassContext#storage(Image, int)}.
      */
-    public Image create(String name, int width, int height, int format, int mips) {
-        if (width < 1 || height < 1) {
-            throw new IllegalArgumentException("Image size must be positive: " + name + ", " + width + " x " + height);
-        }
-        if (mips < 1 || mips > GpuImage.fullMipCount(width, height)) {
-            throw new IllegalArgumentException(name + " has 1 to " + GpuImage.fullMipCount(width, height)
-                + " mip levels: " + mips);
-        }
-        Image image = new Image(images.size(), name, width, height, format, mips);
+    public Image create(String name, ImageDesc desc) {
+        Image image = new Image(images.size(), Objects.requireNonNull(name, "name"), Objects.requireNonNull(desc,
+            "desc"));
         images.add(new ImageInfo(image, scope(), null));
         return image;
     }
 
-    /** A new image of {@code like}'s format, {@code scale} times its size (at least 1 texel). */
-    public Image createLike(String name, Image like, double scale) {
-        return createLike(name, like, scale, like.format);
-    }
-
-    /** A new image of {@code format}, {@code scale} times {@code like}'s size (at least 1 texel). */
-    public Image createLike(String name, Image like, double scale, int format) {
-        if (!(scale > 0)) {
-            throw new IllegalArgumentException("The scale must be positive: " + scale);
-        }
-        return create(name, Math.max(1, (int) Math.round(like.width * scale)),
-            Math.max(1, (int) Math.round(like.height * scale)), format);
-    }
-
     /**
-     * An image kept from frame to frame, {@code width} by {@code height} {@code format} texels, owned by the building
-     * technique: this frame's to write, and last frame's to read. Names are unique within the graph; a history of the
-     * same name, size and format keeps its images when the graph rebuilds (its contents start over).
+     * An image kept from frame to frame, as {@code desc} describes it, owned by the building technique: this frame's to
+     * write, and last frame's to read. Names are unique within the graph; a history of the same name, descriptor and
+     * usage keeps its images and contents when the graph rebuilds.
      */
-    public History history(String name, int width, int height, int format) {
+    public History history(String name, ImageDesc desc) {
         for (History other : histories) {
             if (other.name.equals(name)) {
                 throw new IllegalStateException("Two histories are named " + name);
             }
         }
-        Image current = create(name, width, height, format);
-        Image previous = create(name + " (last frame)", width, height, format);
+        Image current = create(name, desc);
+        Image previous = create(name + " (last frame)", desc);
         History history = new History(name, current, previous);
         images.get(current.id).history = history;
         images.get(previous.id).history = history;
@@ -325,7 +300,7 @@ public final class GraphBuilder {
     /** {@code external} as an image of this build, the same one each time. */
     public Image external(ExternalImage external) {
         return externals.computeIfAbsent(external, e -> {
-            Image image = new Image(images.size(), e.name, e.width, e.height, e.format, 1);
+            Image image = new Image(images.size(), e.name, ImageDesc.of(e.format, e.width, e.height));
             images.add(new ImageInfo(image, null, e));
             return image;
         });
