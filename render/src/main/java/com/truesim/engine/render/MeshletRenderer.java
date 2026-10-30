@@ -7,7 +7,6 @@ import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.EXTMeshShader.VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
 import static org.lwjgl.vulkan.EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT;
-import static org.lwjgl.vulkan.EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_LOAD_OP_CLEAR;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_LOAD_OP_LOAD;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_STORE_OP_STORE;
@@ -18,14 +17,6 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_INDEX_TYPE_UINT32;
 import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_FRAGMENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_VERTEX_BIT;
-import static org.lwjgl.vulkan.VK10.nvkCmdSetScissor;
-import static org.lwjgl.vulkan.VK10.nvkCmdSetViewport;
-import static org.lwjgl.vulkan.VK10.nvkCmdUpdateBuffer;
-import static org.lwjgl.vulkan.VK10.vkCmdBindIndexBuffer;
-import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
-import static org.lwjgl.vulkan.VK10.vkCmdDispatchIndirect;
-import static org.lwjgl.vulkan.VK10.vkCmdDrawIndexedIndirect;
-import static org.lwjgl.vulkan.VK10.vkCmdFillBuffer;
 import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_INDEX_READ_BIT;
@@ -44,8 +35,6 @@ import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_RENDERING_INFO;
-import static org.lwjgl.vulkan.VK13.nvkCmdBeginRendering;
-import static org.lwjgl.vulkan.VK13.vkCmdEndRendering;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.render.layout.CommonConstants;
@@ -54,6 +43,7 @@ import com.truesim.engine.render.layout.DrawPush;
 import com.truesim.engine.render.layout.ExpandPush;
 import com.truesim.engine.render.layout.InstancePush;
 import com.truesim.engine.render.layout.MeshPush;
+import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.FrameBuffer;
@@ -527,7 +517,7 @@ public final class MeshletRenderer implements AutoCloseable {
             for (int bin = 0; bin < BINS; bin++) {
                 drawBin(commands, stack, v, bin, late, count, clusters, indexed[bin], mesh == null ? null : mesh[bin]);
             }
-            vkCmdEndRendering(commands);
+            Commands.endRendering(commands);
         }
     }
 
@@ -551,7 +541,7 @@ public final class MeshletRenderer implements AutoCloseable {
             memPutInt(push + MeshPush.LATE, late ? 1 : 0);
             mesh.bind(commands);
             mesh.push(commands, push, DRAW_PUSH);
-            vkCmdDrawMeshTasksIndirectEXT(commands, v.expandCommand().handle(), 16L * bin, 1, 12);
+            Commands.drawMeshTasksIndirect(commands, v.expandCommand().handle(), 16L * bin, 1, 12);
         } else {
             long push = stack.ncalloc(8, 1, DRAW_PUSH);
             memPutLong(push + DrawPush.VIEW, v.address());
@@ -566,8 +556,8 @@ public final class MeshletRenderer implements AutoCloseable {
             memPutLong(push + DrawPush.LIGHTS, clusters);
             indexed.bind(commands);
             indexed.push(commands, push, DRAW_PUSH);
-            vkCmdBindIndexBuffer(commands, v.frameIndices().handle(), 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexedIndirect(commands, v.drawCommand().handle(), 24L * bin, 1, 20);
+            Commands.bindIndexBuffer(commands, v.frameIndices().handle(), 0, VK_INDEX_TYPE_UINT32);
+            Commands.drawIndexedIndirect(commands, v.drawCommand().handle(), 24L * bin, 1, 20);
         }
     }
 
@@ -592,7 +582,7 @@ public final class MeshletRenderer implements AutoCloseable {
             memPutInt(reset + 4, 1);
             memPutInt(reset + 8, 1);
             memPutInt(reset + 12, 0);
-            nvkCmdUpdateBuffer(commands, chunkCommand.handle(), 0, 16, reset);
+            Commands.updateBuffer(commands, chunkCommand.handle(), 0, 16, reset);
             long dispatches = stack.nmalloc(4, 16 * BINS); // per raster bin: no meshlets, a dispatch of x by 1 by 1
             long draws = stack.ncalloc(4, 6 * BINS, 4); // per bin: no indices, one instance, from the bin's first
             for (int bin = 0; bin < BINS; bin++) {
@@ -615,10 +605,10 @@ public final class MeshletRenderer implements AutoCloseable {
                     memPutInt(draws + 24L * bin + 8, (int) (indices + (bin - 1) * binIndices)); // the bin's first index
                 }
                 if (early != null) {
-                    vkCmdFillBuffer(commands, v.drawCount().handle(), 0, VK_WHOLE_SIZE, 0); // counts, indices wanted
+                    Commands.fillBuffer(commands, v.drawCount().handle(), 0, VK_WHOLE_SIZE, 0); // counts, indices wanted
                 }
-                nvkCmdUpdateBuffer(commands, v.expandCommand().handle(), 0, 16 * BINS, dispatches);
-                nvkCmdUpdateBuffer(commands, v.drawCommand().handle(), 0, 24 * BINS, draws);
+                Commands.updateBuffer(commands, v.expandCommand().handle(), 0, 16 * BINS, dispatches);
+                Commands.updateBuffer(commands, v.drawCommand().handle(), 0, 24 * BINS, draws);
             }
         }
         writeRows(commands, views, early, count);
@@ -641,7 +631,7 @@ public final class MeshletRenderer implements AutoCloseable {
             for (int first = 0; first < count; first += MAX_ROWS) {
                 memPutInt(push + InstancePush.FIRST_ROW, first);
                 instancesPass.push(commands, push, InstancePush.BYTES);
-                vkCmdDispatch(commands, (instanceCount + 63) / 64, Math.min(MAX_ROWS, count - first), 1);
+                Commands.dispatch(commands, (instanceCount + 63) / 64, Math.min(MAX_ROWS, count - first), 1);
             }
         }
         // The chunks feed the cull pass's indirect dispatch and the pass itself.
@@ -661,7 +651,7 @@ public final class MeshletRenderer implements AutoCloseable {
             memPutLong(push + CullPush.MATERIALS, scene.materialsAddress()); // each meshlet's raster bin
             cull.bind(commands);
             cull.push(commands, push, CullPush.BYTES);
-            vkCmdDispatchIndirect(commands, chunkCommand.handle(), 0);
+            Commands.dispatchIndirect(commands, chunkCommand.handle(), 0);
         }
         if (meshShading) { // the lists and their dispatches feed the mesh shaders
             Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
@@ -689,7 +679,7 @@ public final class MeshletRenderer implements AutoCloseable {
                     memPutInt(push + ExpandPush.BIN, bin);
                     memPutInt(push + ExpandPush.LATE, early == null ? 1 : 0);
                     expand.push(commands, push, ExpandPush.BYTES);
-                    vkCmdDispatchIndirect(commands, v.expandCommand().handle(), 16L * bin);
+                    Commands.dispatchIndirect(commands, v.expandCommand().handle(), 16L * bin);
                 }
             }
         }
@@ -719,7 +709,7 @@ public final class MeshletRenderer implements AutoCloseable {
         memPutInt(rendering + VkRenderingInfo.COLORATTACHMENTCOUNT, colorView == 0 ? 0 : 1);
         memPutAddress(rendering + VkRenderingInfo.PCOLORATTACHMENTS, color);
         memPutAddress(rendering + VkRenderingInfo.PDEPTHATTACHMENT, depth);
-        nvkCmdBeginRendering(commands, rendering);
+        Commands.beginRendering(commands, rendering);
     }
 
     static void setViewport(VkCommandBuffer commands, MemoryStack stack, int width, int height) {
@@ -727,11 +717,11 @@ public final class MeshletRenderer implements AutoCloseable {
         memPutFloat(viewport + VkViewport.WIDTH, width);
         memPutFloat(viewport + VkViewport.HEIGHT, height);
         memPutFloat(viewport + VkViewport.MAXDEPTH, 1);
-        nvkCmdSetViewport(commands, 0, 1, viewport);
+        Commands.setViewport(commands, 0, 1, viewport);
         long scissor = stack.ncalloc(VkRect2D.ALIGNOF, 1, VkRect2D.SIZEOF);
         memPutInt(scissor + VkRect2D.EXTENT, width);
         memPutInt(scissor + VkRect2D.EXTENT + 4, height);
-        nvkCmdSetScissor(commands, 0, 1, scissor);
+        Commands.setScissor(commands, 0, 1, scissor);
     }
 
     private static void attachment(long info, long view, int layout, boolean load) {
@@ -765,7 +755,7 @@ public final class MeshletRenderer implements AutoCloseable {
                     memPutInt(data + 8L * i, v.index());
                     memPutInt(data + 8L * i + 4, phase(early, first + i));
                 }
-                nvkCmdUpdateBuffer(commands, rows.handle(), 8L * first, 8L * n, data);
+                Commands.updateBuffer(commands, rows.handle(), 8L * first, 8L * n, data);
             }
         }
     }

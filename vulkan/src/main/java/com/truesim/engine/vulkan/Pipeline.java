@@ -30,8 +30,6 @@ import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STA
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-import static org.lwjgl.vulkan.VK10.vkCmdBindPipeline;
-import static org.lwjgl.vulkan.VK10.nvkCmdPushConstants;
 import static org.lwjgl.vulkan.VK10.vkCreateComputePipelines;
 import static org.lwjgl.vulkan.VK10.vkCreateGraphicsPipelines;
 import static org.lwjgl.vulkan.VK10.vkDestroyPipeline;
@@ -168,7 +166,7 @@ public final class Pipeline implements AutoCloseable {
 
     /** Binds the pipeline. Allocates nothing. */
     public void bind(VkCommandBuffer commands) {
-        vkCmdBindPipeline(commands, bindPoint, handle);
+        Commands.bindPipeline(commands, bindPoint, handle);
     }
 
     /** Sets the push constants to {@code push}'s fields. Allocates nothing. */
@@ -183,7 +181,7 @@ public final class Pipeline implements AutoCloseable {
         if (size > pushBytes) {
             throw new IllegalArgumentException("The pipeline takes " + pushBytes + " bytes of push constants: " + size);
         }
-        nvkCmdPushConstants(commands, layout, VK_SHADER_STAGE_ALL, 0, size, data);
+        Commands.pushConstants(commands, layout, VK_SHADER_STAGE_ALL, 0, size, data);
     }
 
     @Override

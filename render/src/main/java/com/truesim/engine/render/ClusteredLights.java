@@ -4,8 +4,6 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memPutFloat;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
-import static org.lwjgl.vulkan.VK10.nvkCmdUpdateBuffer;
-import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -22,6 +20,7 @@ import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.layout.ClusterPush;
 import com.truesim.engine.render.layout.LightsConstants;
+import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
@@ -153,7 +152,7 @@ public final class ClusteredLights implements Technique {
                 memPutFloat(data + 80 + 4L * axis, high);
                 memPutFloat(data + 96 + 4L * axis, (float) (p - high));
             }
-            nvkCmdUpdateBuffer(ctx.commands(), ctx.buffer(list), 0, HEADER_BYTES, data);
+            Commands.updateBuffer(ctx.commands(), ctx.buffer(list), 0, HEADER_BYTES, data);
             Barriers.memory(ctx.commands(), VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
@@ -169,7 +168,7 @@ public final class ClusteredLights implements Technique {
             memPutInt(push + ClusterPush.LIGHT_COUNT, lights.count());
             pipeline.bind(ctx.commands());
             pipeline.push(ctx.commands(), push, PUSH_BYTES);
-            vkCmdDispatch(ctx.commands(), (clusters() + 63) / 64, 1, 1);
+            Commands.dispatch(ctx.commands(), (clusters() + 63) / 64, 1, 1);
         }
     }
 }

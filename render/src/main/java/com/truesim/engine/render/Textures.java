@@ -27,9 +27,9 @@ import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_NONE;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.FrameUploads;
@@ -204,7 +204,7 @@ public final class Textures implements AutoCloseable {
         memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
         memPutInt(dependency + VkDependencyInfo.IMAGEMEMORYBARRIERCOUNT, 1);
         memPutAddress(dependency + VkDependencyInfo.PIMAGEMEMORYBARRIERS, barrier);
-        nvkCmdPipelineBarrier2(commands, dependency);
+        Commands.pipelineBarrier2(commands, dependency);
     }
 
     private static void layers(long subresource, int mip) {

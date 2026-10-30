@@ -242,6 +242,7 @@ final class ResourcePool {
         final int mips;
         int sampled;
         int[] storage; // a slot per mip level
+        int[] sampledMips; // a sampled slot per mip level, for reading one level while writing another
         long retireAt;
 
         Physical(Slot slot) {
@@ -258,6 +259,10 @@ final class ResourcePool {
             for (int mip = 0; mip < storage.length; mip++) {
                 storage[mip] = bindless.addStorage(image.view(mip));
             }
+            sampledMips = new int[sampled >= 0 && mips > 1 ? mips : 0];
+            for (int mip = 0; mip < sampledMips.length; mip++) {
+                sampledMips[mip] = bindless.addSampled(image.view(mip));
+            }
         }
 
         /** Exchanges images (and their slots) with {@code other}: a history's roles, frame to frame. */
@@ -271,6 +276,9 @@ final class ResourcePool {
             int[] st = storage;
             storage = other.storage;
             other.storage = st;
+            int[] sm = sampledMips;
+            sampledMips = other.sampledMips;
+            other.sampledMips = sm;
         }
 
         void close() {
@@ -279,6 +287,9 @@ final class ResourcePool {
             }
             for (int slot : storage) {
                 bindless.removeStorage(slot);
+            }
+            for (int slot : sampledMips) {
+                bindless.removeSampled(slot);
             }
             image.close();
         }

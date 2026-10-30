@@ -6,7 +6,6 @@ import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkCommandBuffer;
@@ -35,7 +34,7 @@ public final class Barriers {
             memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
             memPutInt(dependency + VkDependencyInfo.MEMORYBARRIERCOUNT, 1);
             memPutAddress(dependency + VkDependencyInfo.PMEMORYBARRIERS, barrier);
-            nvkCmdPipelineBarrier2(commands, dependency);
+            Commands.pipelineBarrier2(commands, dependency);
         }
     }
 }

@@ -19,8 +19,6 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
 import static org.lwjgl.vulkan.VK10.VK_QUEUE_FAMILY_IGNORED;
-import static org.lwjgl.vulkan.VK10.VK_REMAINING_ARRAY_LAYERS;
-import static org.lwjgl.vulkan.VK10.VK_REMAINING_MIP_LEVELS;
 import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 import static org.lwjgl.vulkan.VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -49,7 +47,6 @@ import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.graph.Id;
@@ -58,6 +55,7 @@ import com.truesim.engine.graph.GraphCompiler.HistoryPlan;
 import com.truesim.engine.graph.ResourcePool.HistoryPair;
 import com.truesim.engine.graph.ResourcePool.Physical;
 import com.truesim.engine.graph.ResourcePool.PhysicalBuffer;
+import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.common.jobs.JobSystem;
@@ -170,6 +168,10 @@ public final class FrameGraph implements AutoCloseable {
     private long[] barrierSrcAccess = new long[0];
     private long[] barrierDstStage = new long[0];
     private long[] barrierDstAccess = new long[0];
+    private int[] barrierBaseMip = new int[0]; // each barrier's range: -1 counts are the rest
+    private int[] barrierMipCount = new int[0];
+    private int[] barrierBaseLayer = new int[0];
+    private int[] barrierLayerCount = new int[0];
     private int[] targetOf = new int[0];
     private Physical[] physicals = new Physical[0];
     private ExternalImage[] externals = new ExternalImage[0];
@@ -771,8 +773,10 @@ public final class FrameGraph implements AutoCloseable {
                     : externals[~target].handle);
                 long range = barrier + VkImageMemoryBarrier2.SUBRESOURCERANGE;
                 memPutInt(range + VkImageSubresourceRange.ASPECTMASK, barrierAspect[b]);
-                memPutInt(range + VkImageSubresourceRange.LEVELCOUNT, VK_REMAINING_MIP_LEVELS);
-                memPutInt(range + VkImageSubresourceRange.LAYERCOUNT, VK_REMAINING_ARRAY_LAYERS);
+                memPutInt(range + VkImageSubresourceRange.BASEMIPLEVEL, barrierBaseMip[b]);
+                memPutInt(range + VkImageSubresourceRange.LEVELCOUNT, barrierMipCount[b]); // -1: VK_REMAINING_MIP_LEVELS
+                memPutInt(range + VkImageSubresourceRange.BASEARRAYLAYER, barrierBaseLayer[b]);
+                memPutInt(range + VkImageSubresourceRange.LAYERCOUNT, barrierLayerCount[b]); // -1: VK_REMAINING_ARRAY_LAYERS
             }
             long dependency = stack.ncalloc(VkDependencyInfo.ALIGNOF, 1, VkDependencyInfo.SIZEOF);
             memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
@@ -780,7 +784,7 @@ public final class FrameGraph implements AutoCloseable {
             memPutAddress(dependency + VkDependencyInfo.PIMAGEMEMORYBARRIERS, images);
             memPutInt(dependency + VkDependencyInfo.BUFFERMEMORYBARRIERCOUNT, bufferCount);
             memPutAddress(dependency + VkDependencyInfo.PBUFFERMEMORYBARRIERS, buffers);
-            nvkCmdPipelineBarrier2(commands, dependency);
+            Commands.pipelineBarrier2(commands, dependency);
         }
     }
 
@@ -819,6 +823,16 @@ public final class FrameGraph implements AutoCloseable {
     int storageSlotOf(int image, int mip) {
         int[] slots = physicals[targetOf[image]].storage;
         return mip < slots.length ? slots[mip] : -1;
+    }
+
+    int sampledSlotOf(int image, int mip) {
+        int[] slots = physicals[targetOf[image]].sampledMips;
+        return mip < slots.length ? slots[mip] : -1;
+    }
+
+    long layerViewOf(int image, int layer) {
+        int target = targetOf[image];
+        return target >= 0 ? physicals[target].image.layerView(layer) : externals[~target].view;
     }
 
     VulkanDevice device() {
@@ -944,6 +958,10 @@ public final class FrameGraph implements AutoCloseable {
         barrierSrcAccess = barriers.srcAccess();
         barrierDstStage = barriers.dstStage();
         barrierDstAccess = barriers.dstAccess();
+        barrierBaseMip = barriers.baseMip();
+        barrierMipCount = barriers.mipCount();
+        barrierBaseLayer = barriers.baseLayer();
+        barrierLayerCount = barriers.layerCount();
         CompiledGraph.Batches batches = compiled.batches();
         batchQueue = batches.queue();
         batchOrdinal = batches.ordinal();

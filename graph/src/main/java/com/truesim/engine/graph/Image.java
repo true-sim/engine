@@ -53,6 +53,40 @@ public final class Image {
         return format;
     }
 
+    /** All of it. */
+    public Subresource whole() {
+        return new Subresource(this, 0, mips, 0, desc.layers());
+    }
+
+    /** Mip level {@code level} of every layer. */
+    public Subresource mip(int level) {
+        return new Subresource(this, level, 1, 0, desc.layers());
+    }
+
+    /** {@code count} mip levels from {@code first}, of every layer. */
+    public Subresource mips(int first, int count) {
+        return new Subresource(this, first, count, 0, desc.layers());
+    }
+
+    /** Array layer {@code index}, every mip level. */
+    public Subresource layer(int index) {
+        return new Subresource(this, 0, mips, index, 1);
+    }
+
+    /** {@code count} array layers from {@code first}, every mip level. */
+    public Subresource layers(int first, int count) {
+        return new Subresource(this, 0, mips, first, count);
+    }
+
+    /** Face {@code face} (0 to 5: +x, -x, +y, -y, +z, -z) of cube map {@code cube}. */
+    public Subresource face(int cube, int face) {
+        if (!desc.cubeMap() || face < 0 || face > 5) {
+            throw new IllegalArgumentException(name + " has no face " + face + ": " + (desc.cubeMap() ? "faces are 0 to 5"
+                : "not a cube map"));
+        }
+        return layer(6 * cube + face);
+    }
+
     @Override
     public String toString() {
         return name + " (" + width + " x " + height + ")";

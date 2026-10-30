@@ -10,20 +10,11 @@ import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_LOAD_OP_LOAD;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_STORE_OP_STORE;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
-import static org.lwjgl.vulkan.VK10.nvkCmdCopyBuffer;
-import static org.lwjgl.vulkan.VK10.nvkCmdSetScissor;
-import static org.lwjgl.vulkan.VK10.nvkCmdSetViewport;
-import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
-import static org.lwjgl.vulkan.VK10.vkCmdDispatchIndirect;
-import static org.lwjgl.vulkan.VK10.vkCmdDraw;
-import static org.lwjgl.vulkan.VK10.vkCmdDrawIndirect;
-import static org.lwjgl.vulkan.VK10.vkCmdFillBuffer;
 import static org.lwjgl.vulkan.VK12.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_RENDERING_INFO;
-import static org.lwjgl.vulkan.VK13.nvkCmdBeginRendering;
-import static org.lwjgl.vulkan.VK13.vkCmdEndRendering;
 
+import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.Push;
@@ -108,6 +99,39 @@ public final class PassContext {
         return graph.storageSlotOf(image.id, mip);
     }
 
+    /**
+     * The sampled slot of part of an image: all of it, or one mip level (every layer) of a mipmapped image, to read one
+     * level while another is written.
+     */
+    public int sampled(Subresource part) {
+        if (part.whole()) {
+            return sampled(part.image());
+        }
+        if (!part.oneMip() || part.baseLayer() != 0 || part.layerCount() != part.image().desc().layers()) {
+            throw new IllegalArgumentException("Sampling " + part + ": sample all of it, or one mip level of every layer");
+        }
+        return graph.sampledSlotOf(part.image().id, part.baseMip());
+    }
+
+    /** The storage slot of one mip level (every layer) of an image. */
+    public int storage(Subresource part) {
+        if (!part.oneMip() || part.baseLayer() != 0 || part.layerCount() != part.image().desc().layers()) {
+            throw new IllegalArgumentException("Storing into " + part + ": one mip level of every layer");
+        }
+        return graph.storageSlotOf(part.image().id, part.baseMip());
+    }
+
+    /** A {@code VkImageView} of part of an image: all of it, or one layer's first mip level, to render into. */
+    public long view(Subresource part) {
+        if (part.whole()) {
+            return view(part.image());
+        }
+        if (!part.oneLayer() || part.baseMip() != 0 || part.mipCount() != part.image().mips()) {
+            throw new IllegalArgumentException("A view of " + part + ": all of it, or one layer");
+        }
+        return graph.layerViewOf(part.image().id, part.baseLayer());
+    }
+
     // ---------------------------------------------------------------- commands
 
     /** The most workgroups a dispatch has per dimension on every device. */
@@ -131,7 +155,7 @@ public final class PassContext {
         }
         pipeline.bind(commands);
         pipeline.push(commands, push);
-        vkCmdDispatch(commands, x, y, z);
+        Commands.dispatch(commands, x, y, z);
     }
 
     /**
@@ -141,12 +165,12 @@ public final class PassContext {
     public void dispatchIndirect(Pipeline pipeline, Push push, Buffer buffer, long offset) {
         pipeline.bind(commands);
         pipeline.push(commands, push);
-        vkCmdDispatchIndirect(commands, buffer(buffer), offset);
+        Commands.dispatchIndirect(commands, buffer(buffer), offset);
     }
 
     /** Fills {@code buffer} with the 32-bit {@code value} (as {@link BufferAccess#TRANSFER_DST}). */
     public void fill(Buffer buffer, int value) {
-        vkCmdFillBuffer(commands, buffer(buffer), 0, VK_WHOLE_SIZE, value);
+        Commands.fillBuffer(commands, buffer(buffer), 0, VK_WHOLE_SIZE, value);
     }
 
     /** Copies the first {@code bytes} of {@code from} to the start of {@code to} (transfer source, destination). */
@@ -169,7 +193,7 @@ public final class PassContext {
             memPutLong(region + VkBufferCopy.SRCOFFSET, fromOffset);
             memPutLong(region + VkBufferCopy.DSTOFFSET, toOffset);
             memPutLong(region + VkBufferCopy.SIZE, bytes);
-            nvkCmdCopyBuffer(commands, buffer(from), buffer(to), 1, region);
+            Commands.copyBuffer(commands, buffer(from), buffer(to), 1, region);
         }
     }
 
@@ -208,16 +232,16 @@ public final class PassContext {
             memPutInt(rendering + VkRenderingInfo.COLORATTACHMENTCOUNT, color == null ? 0 : 1);
             memPutAddress(rendering + VkRenderingInfo.PCOLORATTACHMENTS, colorInfo);
             memPutAddress(rendering + VkRenderingInfo.PDEPTHATTACHMENT, depth == null ? 0 : depthInfo);
-            nvkCmdBeginRendering(commands, rendering);
+            Commands.beginRendering(commands, rendering);
             long viewport = stack.ncalloc(VkViewport.ALIGNOF, 1, VkViewport.SIZEOF);
             memPutFloat(viewport + VkViewport.WIDTH, size.width);
             memPutFloat(viewport + VkViewport.HEIGHT, size.height);
             memPutFloat(viewport + VkViewport.MAXDEPTH, 1);
-            nvkCmdSetViewport(commands, 0, 1, viewport);
+            Commands.setViewport(commands, 0, 1, viewport);
             long scissor = stack.ncalloc(VkRect2D.ALIGNOF, 1, VkRect2D.SIZEOF);
             memPutInt(scissor + VkRect2D.EXTENT, size.width);
             memPutInt(scissor + VkRect2D.EXTENT + 4, size.height);
-            nvkCmdSetScissor(commands, 0, 1, scissor);
+            Commands.setScissor(commands, 0, 1, scissor);
         }
     }
 
@@ -232,7 +256,7 @@ public final class PassContext {
 
     /** Ends what {@link #beginRendering} started. */
     public void endRendering() {
-        vkCmdEndRendering(commands);
+        Commands.endRendering(commands);
     }
 
     /**
@@ -242,7 +266,7 @@ public final class PassContext {
     public void draw(Pipeline pipeline, Push push, int vertices, int instances) {
         pipeline.bind(commands);
         pipeline.push(commands, push);
-        vkCmdDraw(commands, vertices, instances, 0, 0);
+        Commands.draw(commands, vertices, instances, 0, 0);
     }
 
     /**
@@ -252,6 +276,6 @@ public final class PassContext {
     public void drawIndirect(Pipeline pipeline, Push push, Buffer buffer, long offset, int draws) {
         pipeline.bind(commands);
         pipeline.push(commands, push);
-        vkCmdDrawIndirect(commands, buffer(buffer), offset, draws, 16);
+        Commands.drawIndirect(commands, buffer(buffer), offset, draws, 16);
     }
 }

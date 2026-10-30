@@ -4,8 +4,6 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memPutFloat;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
-import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8_UNORM;
-import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
@@ -21,12 +19,11 @@ import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.Lights;
-import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RayTracing;
-import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.ShadowInputs;
 import com.truesim.engine.render.layout.TracedPush;
+import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
@@ -134,7 +131,7 @@ public final class RayTracedShadows implements Technique {
             }
             pipeline.bind(ctx.commands());
             pipeline.push(ctx.commands(), push, PUSH_BYTES);
-            vkCmdDispatch(ctx.commands(), (mask.width() + 7) / 8, (mask.height() + 7) / 8, 1);
+            Commands.dispatch(ctx.commands(), (mask.width() + 7) / 8, (mask.height() + 7) / 8, 1);
         }
     }
 }

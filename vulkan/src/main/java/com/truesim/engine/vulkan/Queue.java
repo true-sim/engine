@@ -3,8 +3,6 @@ package com.truesim.engine.vulkan;
 import static org.lwjgl.vulkan.KHRSwapchain.nvkQueuePresentKHR;
 import static org.lwjgl.vulkan.KHRSwapchain.vkQueuePresentKHR;
 import static org.lwjgl.vulkan.VK10.vkQueueWaitIdle;
-import static org.lwjgl.vulkan.VK13.nvkQueueSubmit2;
-import static org.lwjgl.vulkan.VK13.vkQueueSubmit2;
 
 import org.lwjgl.vulkan.VkPresentInfoKHR;
 import org.lwjgl.vulkan.VkQueue;
@@ -35,7 +33,8 @@ public final class Queue {
 
     /** Submits work; {@code fence} (or 0) is signaled when it completes. */
     public synchronized void submit(VkSubmitInfo2.Buffer submits, long fence) {
-        Vulkan.check(vkQueueSubmit2(handle, submits, fence), "Could not submit to the queue");
+        Vulkan.check(Commands.queueSubmit2(handle, submits.remaining(), submits.address(), fence),
+            "Could not submit to the queue");
     }
 
     /** Presents swapchain images; returns the {@code VkResult}, as out-of-date and suboptimal are expected. */
@@ -45,7 +44,7 @@ public final class Queue {
 
     /** Submits {@code count} {@code VkSubmitInfo2} structs at {@code submits}, without allocating. */
     public synchronized void submit(int count, long submits, long fence) {
-        Vulkan.check(nvkQueueSubmit2(handle, count, submits, fence), "Could not submit to the queue");
+        Vulkan.check(Commands.queueSubmit2(handle, count, submits, fence), "Could not submit to the queue");
     }
 
     /** Presents with the {@code VkPresentInfoKHR} at {@code info}, without allocating; returns the {@code VkResult}. */

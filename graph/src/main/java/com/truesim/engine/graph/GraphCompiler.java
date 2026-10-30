@@ -319,7 +319,17 @@ final class GraphCompiler {
         }
         // Barriers, now that every image has a home.
         // The first walk learns the state a frame ends in, which is the next one's start.
-        Barriers barriers = new Barriers(physicalCount, newExternals, bufferSlots.size(),
+        int[] physicalMips = new int[physicalCount];
+        int[] physicalLayers = new int[physicalCount];
+        for (int s = 0; s < slotCount; s++) {
+            physicalMips[s] = slots.get(s).desc.mips();
+            physicalLayers[s] = slots.get(s).desc.layers();
+        }
+        for (HistoryPlan plan : historyPlans) {
+            physicalMips[plan.current()] = physicalMips[plan.previous()] = plan.slot().desc.mips();
+            physicalLayers[plan.current()] = physicalLayers[plan.previous()] = plan.slot().desc.layers();
+        }
+        Barriers barriers = new Barriers(physicalMips, physicalLayers, newExternals, bufferSlots.size(),
             newExternalBuffers.size());
         barriers.histories(historyCurrent, historyPrevious, previousImages);
         barriers.simulate(newOrder, queues, newTargetOf, newBufferTargetOf, g, false);
@@ -328,7 +338,7 @@ final class GraphCompiler {
         int[] startPrevious = barriers.startPrevious;
         int[] endCurrent = new int[historyCount];
         for (int h = 0; h < historyCount; h++) {
-            endCurrent[h] = barriers.layout[historyCurrent[h]];
+            endCurrent[h] = barriers.layoutOf(historyCurrent[h]);
         }
         Batches batches = schedule(newOrder.length, queues, barriers.waitPass, barriers.firstExternalPass, grain);
         return new CompiledGraph(newOrder, queues, passes.size(), newTargetOf, slots, historyPlans,
@@ -443,12 +453,14 @@ final class GraphCompiler {
 
 
     /**
-     * Derives barriers by walking the passes in order and tracking, per physical or external image and physical buffer
-     * (whose layout never changes), its layout, the
-     * stages and accesses that last wrote it, the stages that read it since, what is already visible, and which queue
-     * used it last. A pass's barriers are batched. Crossing to the other queue, a barrier after all commands follows
-     * the batch's semaphore wait. Along the way it notes, per pass, the latest pass of the other queue it depends on
-     * (for the batch's wait), and the first pass using an external image (which waits for it to be acquired).
+     * Derives barriers by walking the passes in order and tracking, per cell (a mip level of a layer of a physical image,
+     * an external image, a physical or external buffer, whose layout never changes), its layout, the stages and
+     * accesses that last wrote it, the stages that read it since, what is already visible, and which queue used it
+     * last. A pass's barriers are batched, and the barriers of one access merged into runs of mip levels per layer, or
+     * one barrier for the whole range where every layer is alike. Crossing to the other queue, a barrier after all
+     * commands follows the batch's semaphore wait. Along the way it notes, per pass, the latest pass of the other queue
+     * it depends on (for the batch's wait), and the first pass using an external image (which waits for it to be
+     * acquired).
      */
     @AllowAllocation("building the graph, when it changes")
     static final class Barriers {
@@ -456,6 +468,9 @@ final class GraphCompiler {
         final List<ExternalImage> externalList;
         final int bufferCount;          // pooled buffers, after the images' states
         final int externalBufferCount;  // external buffers, after the pooled ones
+        final int[] mipsOf;             // per state: a physical image's mips and layers, 1 for the others
+        final int[] layersOf;
+        final int[] cellStart;          // per state: its first cell
         final int[] layout;
         final long[] writeStages;
         final long[] writeAccess;
@@ -469,7 +484,8 @@ final class GraphCompiler {
         final int[][] lastReadPass;
         int[] waitPass = new int[0];
         int firstExternalPass = -1;
-        // target, aspect, old layout, new layout, srcStage, srcAccess, dstStage, dstAccess, kind
+        // target, aspect, old layout, new layout, srcStage, srcAccess, dstStage, dstAccess, kind,
+        // base mip, mip count, base layer, layer count (VK_REMAINING_*: -1)
         final List<long[]> out = new ArrayList<>();
         int[] historyCurrent = new int[0];
         int[] historyPrevious = new int[0];
@@ -478,12 +494,26 @@ final class GraphCompiler {
         int[] startPrevious = new int[0];
         final List<Integer> starts = new ArrayList<>();
 
-        Barriers(int physicalCount, List<ExternalImage> externalList, int bufferCount, int externalBufferCount) {
-            this.physicalCount = physicalCount;
+        /**
+         * Barriers for {@code physicalMips.length} physical images of {@code physicalMips} mip levels and
+         * {@code physicalLayers} layers each, the external images, and the buffers.
+         */
+        Barriers(int[] physicalMips, int[] physicalLayers, List<ExternalImage> externalList, int bufferCount,
+            int externalBufferCount) {
+            this.physicalCount = physicalMips.length;
             this.externalList = externalList;
             this.bufferCount = bufferCount;
             this.externalBufferCount = externalBufferCount;
-            int n = physicalCount + externalList.size() + bufferCount + externalBufferCount;
+            int states = physicalCount + externalList.size() + bufferCount + externalBufferCount;
+            mipsOf = new int[states];
+            layersOf = new int[states];
+            cellStart = new int[states + 1];
+            for (int i = 0; i < states; i++) {
+                mipsOf[i] = i < physicalCount ? physicalMips[i] : 1;
+                layersOf[i] = i < physicalCount ? physicalLayers[i] : 1;
+                cellStart[i + 1] = cellStart[i] + mipsOf[i] * layersOf[i];
+            }
+            int n = cellStart[states];
             layout = new int[n];
             writeStages = new long[n];
             writeAccess = new long[n];
@@ -507,15 +537,24 @@ final class GraphCompiler {
             startPrevious = new int[current.length];
         }
 
-        /** Exchanges what is known of physical images {@code a} and {@code b}. */
+        /** The layout physical image {@code physical} is in (its first cell's). */
+        int layoutOf(int physical) {
+            return layout[cellStart[physical]];
+        }
+
+        /** Exchanges what is known of physical images {@code a} and {@code b}, of one descriptor: every cell. */
         private void swapState(int a, int b) {
-            swap(layout, a, b);
-            swap(writeStages, a, b);
-            swap(writeAccess, a, b);
-            swap(readStages, a, b);
-            swap(visibleStages, a, b);
-            swap(visibleAccess, a, b);
-            swap(lastQueue, a, b);
+            for (int c = 0; c < cellStart[a + 1] - cellStart[a]; c++) {
+                int i = cellStart[a] + c;
+                int j = cellStart[b] + c;
+                swap(layout, i, j);
+                swap(writeStages, i, j);
+                swap(writeAccess, i, j);
+                swap(readStages, i, j);
+                swap(visibleStages, i, j);
+                swap(visibleAccess, i, j);
+                swap(lastQueue, i, j);
+            }
         }
 
         private static void swap(int[] array, int a, int b) {
@@ -539,7 +578,7 @@ final class GraphCompiler {
             boolean emit) {
             for (int e = 0; e < externalList.size(); e++) {
                 ExternalImage external = externalList.get(e);
-                int i = physicalCount + e;
+                int i = cellStart[physicalCount + e];
                 layout[i] = external.initialLayout;
                 writeStages[i] = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT; // whatever came before the frame
                 writeAccess[i] = external.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_2_MEMORY_WRITE_BIT;
@@ -549,7 +588,7 @@ final class GraphCompiler {
                 lastQueue[i] = GRAPHICS;
             }
             for (int e = 0; e < externalBufferCount; e++) {
-                int i = physicalCount + externalList.size() + bufferCount + e;
+                int i = cellStart[physicalCount + externalList.size() + bufferCount + e];
                 writeStages[i] = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT; // whatever came before the frame wrote it
                 writeAccess[i] = VK_ACCESS_2_MEMORY_WRITE_BIT;
                 readStages[i] = 0;
@@ -562,10 +601,11 @@ final class GraphCompiler {
                 if (emit) {
                     // The frame boundary: last frame's current image is this frame's previous one.
                     swapState(historyCurrent[h], historyPrevious[h]);
-                    startCurrent[h] = layout[historyCurrent[h]];
-                    startPrevious[h] = layout[historyPrevious[h]];
+                    startCurrent[h] = layoutOf(historyCurrent[h]);
+                    startPrevious[h] = layoutOf(historyPrevious[h]);
                 }
-                tenant[historyPrevious[h]] = previousImages[h]; // its contents carry over
+                Arrays.fill(tenant, cellStart[historyPrevious[h]], cellStart[historyPrevious[h] + 1],
+                    previousImages[h]); // its contents carry over
             }
             Arrays.fill(lastWritePass, -1);
             for (int[] reads : lastReadPass) {
@@ -579,7 +619,7 @@ final class GraphCompiler {
                 if (emit) {
                     starts.add(out.size());
                 }
-                // One merged access per image of the pass.
+                // Per image of the pass, its accesses merged per cell.
                 int[] seen = new int[pass.images.length];
                 int distinct = 0;
                 for (int a = 0; a < pass.images.length; a++) {
@@ -592,28 +632,11 @@ final class GraphCompiler {
                         continue;
                     }
                     seen[distinct++] = image;
-                    long stages = 0;
-                    long access = 0;
-                    boolean writes = false;
-                    int wanted = pass.accesses[a].layout;
-                    for (int b = a; b < pass.images.length; b++) {
-                        if (pass.images[b] == image) {
-                            Access other = pass.accesses[b];
-                            if (other.layout != wanted) {
-                                throw new IllegalStateException(pass.name + " uses " + g.images.get(image).image.name
-                                    + " in two layouts: " + pass.accesses[a] + " and " + other);
-                            }
-                            stages |= other.stages;
-                            access |= other.access;
-                            writes |= other.writes;
-                        }
-                    }
-                    if (targets[image] < 0 && firstExternalPass < 0) {
+                    int target = targets[image];
+                    if (target < 0 && firstExternalPass < 0) {
                         firstExternalPass = p;
                     }
-                    int target = targets[image];
-                    access(pass, p, queues[p], index(target), IMAGE, target, g.images.get(image).image.format.aspect(),
-                        image, g.images.get(image).image.name, target >= 0, stages, access, writes, wanted, emit);
+                    imageAccess(pass, p, queues[p], image, target, g, emit);
                 }
                 // And one per buffer.
                 int[] seenBuffers = new int[pass.buffers.length];
@@ -640,29 +663,144 @@ final class GraphCompiler {
                     }
                     int target = bufferTargets[buffer];
                     int state = physicalCount + externalList.size() + (target >= 0 ? target : bufferCount + ~target);
-                    access(pass, p, queues[p], state, BUFFER, target, 0, buffer, g.buffers.get(buffer).buffer.name,
-                        target >= 0, stages, access, writes, 0, emit);
+                    long[] barrier = access(pass, p, queues[p], cellStart[state], BUFFER, target, 0, buffer,
+                        g.buffers.get(buffer).buffer.name, target >= 0, stages, access, writes, 0, emit);
+                    if (barrier != null) {
+                        out.add(ranged(barrier, 0, -1, 0, -1));
+                    }
                 }
             }
             if (emit) {
                 starts.add(out.size());
                 for (int e = 0; e < externalList.size(); e++) {
-                    int i = physicalCount + e;
+                    int i = cellStart[physicalCount + e];
                     ExternalImage external = externalList.get(e);
                     // Towards whatever comes after the frame.
                     out.add(new long[] {~e, external.format.aspect(), layout[i], external.finalLayout,
                         writeStages[i] | readStages[i], writeAccess[i], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                        VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, IMAGE});
+                        VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, IMAGE, 0, -1, 0, -1});
                 }
             }
         }
 
         /**
-         * Pass {@code p}'s merged access to the image or buffer {@code id} ({@code name}), living at state index
-         * {@code i} and barrier target {@code target} of {@code kind}; {@code pooled}: in a physical image or buffer,
-         * whose earlier tenants it waits for.
+         * Pass {@code p}'s accesses to {@code image} (living at barrier target {@code target}), merged per cell: one
+         * layout per cell, the stages and accesses of every access covering it. Each touched cell is accessed, and the
+         * barriers merged into runs.
          */
-        private void access(PassInfo pass, int p, int queue, int i, int kind, int target, int aspect, int id,
+        private void imageAccess(PassInfo pass, int p, int queue, int image, int target, GraphBuilder g,
+            boolean emit) {
+            int state = index(target);
+            int mips = mipsOf[state];
+            int layers = layersOf[state];
+            int cells = mips * layers;
+            long[] stages = new long[cells];
+            long[] accesses = new long[cells];
+            boolean[] writes = new boolean[cells];
+            int[] wanted = new int[cells];
+            Access[] first = new Access[cells];
+            for (int a = 0; a < pass.images.length; a++) {
+                if (pass.images[a] != image) {
+                    continue;
+                }
+                Access access = pass.accesses[a];
+                int baseMip = target >= 0 ? pass.ranges[4 * a] : 0; // external images: one cell
+                int mipCount = target >= 0 ? pass.ranges[4 * a + 1] : 1;
+                int baseLayer = target >= 0 ? pass.ranges[4 * a + 2] : 0;
+                int layerCount = target >= 0 ? pass.ranges[4 * a + 3] : 1;
+                for (int layer = baseLayer; layer < baseLayer + layerCount; layer++) {
+                    for (int mip = baseMip; mip < baseMip + mipCount; mip++) {
+                        int c = layer * mips + mip;
+                        if (first[c] != null && wanted[c] != access.layout) {
+                            throw new IllegalStateException(pass.name + " uses " + g.images.get(image).image.name
+                                + " in two layouts: " + first[c] + " and " + access);
+                        }
+                        first[c] = first[c] == null ? access : first[c];
+                        wanted[c] = access.layout;
+                        stages[c] |= access.stages;
+                        accesses[c] |= access.access;
+                        writes[c] |= access.writes;
+                    }
+                }
+            }
+            Image info = g.images.get(image).image;
+            long[][] barriers = new long[cells][];
+            for (int c = 0; c < cells; c++) {
+                if (first[c] != null) {
+                    barriers[c] = access(pass, p, queue, cellStart[state] + c, IMAGE, target, info.format.aspect(),
+                        image, info.name, target >= 0, stages[c], accesses[c], writes[c], wanted[c], emit);
+                }
+            }
+            emitRuns(barriers, mips, layers);
+        }
+
+        /**
+         * Adds the barriers of one access, cell by cell, merged: a barrier for a whole range where every layer has the
+         * same barrier over one run of mip levels, else one per run of alike mip levels per layer.
+         */
+        private void emitRuns(long[][] barriers, int mips, int layers) {
+            List<long[]> runs = new ArrayList<>();
+            boolean uniform = true;
+            for (int layer = 0; layer < layers; layer++) {
+                int layerRuns = 0;
+                for (int mip = 0; mip < mips; mip++) {
+                    long[] barrier = barriers[layer * mips + mip];
+                    if (barrier == null) {
+                        continue;
+                    }
+                    long[] last = runs.isEmpty() ? null : runs.getLast();
+                    if (last != null && last[11] == layer && last[9] + last[10] == mip && alike(last, barrier)) {
+                        last[10]++;
+                    } else {
+                        runs.add(ranged(barrier, mip, 1, layer, 1));
+                        layerRuns++;
+                    }
+                }
+                uniform &= layerRuns <= 1;
+            }
+            if (uniform && runs.size() > 1) {
+                long[] firstRun = runs.getFirst();
+                boolean same = true;
+                for (int r = 1; r < runs.size(); r++) {
+                    long[] run = runs.get(r);
+                    same &= alike(firstRun, run) && run[9] == firstRun[9] && run[10] == firstRun[10]
+                        && run[11] == firstRun[11] + r;
+                }
+                if (same) {
+                    firstRun[12] = runs.size();
+                    out.add(firstRun);
+                    return;
+                }
+            }
+            out.addAll(runs);
+        }
+
+        /** Whether two barriers differ only in their range. */
+        private static boolean alike(long[] a, long[] b) {
+            for (int f = 0; f < 9; f++) {
+                if (a[f] != b[f]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** {@code barrier}'s nine fields with a range: base mip, mip count, base layer, layer count. */
+        private static long[] ranged(long[] barrier, int baseMip, int mipCount, int baseLayer, int layerCount) {
+            long[] ranged = Arrays.copyOf(barrier, 13);
+            ranged[9] = baseMip;
+            ranged[10] = mipCount;
+            ranged[11] = baseLayer;
+            ranged[12] = layerCount;
+            return ranged;
+        }
+
+        /**
+         * Pass {@code p}'s merged access to cell {@code i} of the image or buffer {@code id} ({@code name}), at barrier
+         * target {@code target} of {@code kind}; {@code pooled}: in a physical image or buffer, whose earlier tenants
+         * it waits for. Returns the barrier it needs (its nine fields, without a range), or null.
+         */
+        private long[] access(PassInfo pass, int p, int queue, int i, int kind, int target, int aspect, int id,
             String name, boolean pooled, long stages, long access, boolean writes, int wanted, boolean emit) {
             if (lastQueue[i] >= 0 && lastQueue[i] != queue) {
                 // From the other queue: submitted, its batch's semaphore wait orders and makes visible what came before;
@@ -688,6 +826,7 @@ final class GraphCompiler {
                 depend(p, otherQueue(lastWriteQueue[i], queue, lastWritePass[i]));
                 lastReadPass[i][queue] = p;
             }
+            long[] barrier = null;
             if (newTenant) {
                 // A new image in this physical one: its contents start undefined, after whatever used it before.
                 if (!writes) {
@@ -695,37 +834,38 @@ final class GraphCompiler {
                 }
                 long src = writeStages[i] | readStages[i];
                 if (emit && (kind == IMAGE || src != 0)) { // a buffer has no layout to start
-                    out.add(new long[] {target, aspect, VK_IMAGE_LAYOUT_UNDEFINED, wanted, src, writeAccess[i], stages,
-                        access, kind});
+                    barrier = new long[] {target, aspect, VK_IMAGE_LAYOUT_UNDEFINED, wanted, src, writeAccess[i],
+                        stages, access, kind};
                 }
                 tenant[i] = id;
-                set(i, wanted, stages, access, access);
-                return;
+                set(i, wanted, stages, access, 0); // written: nothing sees it before a barrier
+                return barrier;
             }
             if (writes || transition) {
                 long src = writeStages[i] | readStages[i];
                 if (emit && (src != 0 || transition)) {
-                    out.add(new long[] {target, aspect, layout[i], wanted, src, writeAccess[i], stages, access, kind});
+                    barrier = new long[] {target, aspect, layout[i], wanted, src, writeAccess[i], stages, access, kind};
                 }
                 if (writes) {
-                    set(i, wanted, stages, access, access);
+                    set(i, wanted, stages, access, 0); // written: nothing sees it before a barrier
                 } else {
                     // A transition orders like a write: later readers wait for it, later writers for this pass.
                     set(i, wanted, stages, VK_ACCESS_2_MEMORY_WRITE_BIT, access);
                     readStages[i] = stages;
                 }
-                return;
+                return barrier;
             }
             // Read after write, in the same layout: one barrier per new reading stage or access, none after that.
             if ((stages & ~visibleStages[i]) != 0 || (access & ~visibleAccess[i]) != 0) {
                 if (emit && writeStages[i] != 0) {
-                    out.add(new long[] {target, aspect, wanted, wanted, writeStages[i], writeAccess[i], stages,
-                        access, kind});
+                    barrier = new long[] {target, aspect, wanted, wanted, writeStages[i], writeAccess[i], stages,
+                        access, kind};
                 }
                 visibleStages[i] |= stages;
                 visibleAccess[i] |= access;
             }
             readStages[i] |= stages;
+            return barrier;
         }
 
         /** {@code pass}, if it ran on another queue than {@code queue}; else -1. */
@@ -737,13 +877,18 @@ final class GraphCompiler {
             waitPass[p] = Math.max(waitPass[p], on);
         }
 
-        /** After a write (or transition) by {@code stages}: visible to those stages and {@code visible} accesses. */
+        /**
+         * After a write (or transition) by {@code stages}: visible to those stages and {@code visible} accesses. A
+         * write is visible to nothing until a barrier makes it so, even to its own stage and access kind in a later
+         * pass (a storage write's access includes reads); a transition is a barrier, visible to the accesses it waits
+         * for.
+         */
         private void set(int i, int newLayout, long stages, long access, long visible) {
             layout[i] = newLayout;
             writeStages[i] = stages;
             writeAccess[i] = access;
             readStages[i] = 0;
-            visibleStages[i] = stages;
+            visibleStages[i] = visible == 0 ? 0 : stages;
             visibleAccess[i] = visible;
         }
 
@@ -764,6 +909,10 @@ final class GraphCompiler {
             long[] barrierSrcAccess = new long[n];
             long[] barrierDstStage = new long[n];
             long[] barrierDstAccess = new long[n];
+            int[] baseMip = new int[n];
+            int[] mipCount = new int[n];
+            int[] baseLayer = new int[n];
+            int[] layerCount = new int[n];
             for (int b = 0; b < n; b++) {
                 long[] barrier = out.get(b);
                 barrierTarget[b] = (int) barrier[0];
@@ -775,9 +924,14 @@ final class GraphCompiler {
                 barrierSrcAccess[b] = barrier[5];
                 barrierDstStage[b] = barrier[6];
                 barrierDstAccess[b] = barrier[7];
+                baseMip[b] = (int) barrier[9];
+                mipCount[b] = (int) barrier[10];
+                baseLayer[b] = (int) barrier[11];
+                layerCount[b] = (int) barrier[12];
             }
             return new BarrierList(barrierStart, barrierTarget, barrierKind, barrierAspect, barrierOldLayout,
-                barrierNewLayout, barrierSrcStage, barrierSrcAccess, barrierDstStage, barrierDstAccess);
+                barrierNewLayout, barrierSrcStage, barrierSrcAccess, barrierDstStage, barrierDstAccess, baseMip,
+                mipCount, baseLayer, layerCount);
         }
     }
 }

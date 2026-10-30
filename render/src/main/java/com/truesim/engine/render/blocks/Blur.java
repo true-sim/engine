@@ -3,7 +3,6 @@ package com.truesim.engine.render.blocks;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memPutFloat;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
-import static org.lwjgl.vulkan.VK10.vkCmdDispatch;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
@@ -14,6 +13,7 @@ import com.truesim.engine.graph.Ratio;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.layout.BlurPush;
+import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import java.util.Objects;
@@ -84,7 +84,7 @@ public record Blur(Image source, int radius, Ratio scale) implements Request<Ima
             memPutInt(push + BlurPush.RADIUS, radius);
             pipeline.bind(ctx.commands());
             pipeline.push(ctx.commands(), push, BlurPush.BYTES);
-            vkCmdDispatch(ctx.commands(), (to.width() + 7) / 8, (to.height() + 7) / 8, 1);
+            Commands.dispatch(ctx.commands(), (to.width() + 7) / 8, (to.height() + 7) / 8, 1);
         }
     }
 }

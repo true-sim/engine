@@ -10,7 +10,6 @@ import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 import static org.lwjgl.vulkan.VK10.vkCreateImageView;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import java.nio.LongBuffer;
 import org.lwjgl.system.MemoryStack;
@@ -55,6 +54,21 @@ public final class Images {
         }
     }
 
+    /** A 2D view of layer {@code layer}'s first mip level: for rendering into one layer or cube face. */
+    public static long createLayerView(VulkanDevice device, long image, int format, int aspect, int layer) {
+        try (MemoryStack stack = stackPush()) {
+            VkImageViewCreateInfo info = VkImageViewCreateInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO)
+                .image(image)
+                .viewType(VK_IMAGE_VIEW_TYPE_2D)
+                .format(format);
+            info.subresourceRange().aspectMask(aspect).baseMipLevel(0).levelCount(1).baseArrayLayer(layer).layerCount(1);
+            LongBuffer view = stack.mallocLong(1);
+            Vulkan.check(vkCreateImageView(device.handle(), info, null, view), "Could not create an image view");
+            return view.get(0);
+        }
+    }
+
     /**
      * Records a layout transition of a whole single-level image: everything in {@code srcStage} with
      * {@code srcAccess} finishes before {@code dstStage} with {@code dstAccess} starts. Allocates nothing.
@@ -82,7 +96,7 @@ public final class Images {
             memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
             memPutInt(dependency + VkDependencyInfo.IMAGEMEMORYBARRIERCOUNT, 1);
             memPutAddress(dependency + VkDependencyInfo.PIMAGEMEMORYBARRIERS, barrier);
-            nvkCmdPipelineBarrier2(commands, dependency);
+            Commands.pipelineBarrier2(commands, dependency);
         }
     }
 }

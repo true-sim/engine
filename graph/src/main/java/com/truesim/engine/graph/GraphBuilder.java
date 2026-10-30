@@ -59,24 +59,29 @@ public final class GraphBuilder {
         }
     }
 
-    /** One pass of the build: its accesses (image id and access, in pairs) and body. */
+    /**
+     * One pass of the build: its accesses (image id and access, in pairs, with each access's mip and layer range: base
+     * mip, mip count, base layer, layer count, four per access) and body.
+     */
     static final class PassInfo {
         final String name;
         final String owner;
         final int[] images;
         final Access[] accesses;
+        final int[] ranges;
         final int[] buffers;
         final BufferAccess[] bufferAccesses;
         final boolean sideEffects;
         final boolean async;
         final PassBody body;
 
-        PassInfo(String name, String owner, int[] images, Access[] accesses, int[] buffers,
+        PassInfo(String name, String owner, int[] images, Access[] accesses, int[] ranges, int[] buffers,
             BufferAccess[] bufferAccesses, boolean sideEffects, boolean async, PassBody body) {
             this.name = name;
             this.owner = owner;
             this.images = images;
             this.accesses = accesses;
+            this.ranges = ranges;
             this.buffers = buffers;
             this.bufferAccesses = bufferAccesses;
             this.sideEffects = sideEffects;
@@ -358,7 +363,7 @@ public final class GraphBuilder {
     @AllowAllocation("building the graph, when it changes")
     public final class PassBuilder {
         private final String name;
-        private final List<Image> used = new ArrayList<>();
+        private final List<Subresource> used = new ArrayList<>();
         private final List<Access> accesses = new ArrayList<>();
         private final List<Buffer> usedBuffers = new ArrayList<>();
         private final List<BufferAccess> bufferAccesses = new ArrayList<>();
@@ -369,16 +374,27 @@ public final class GraphBuilder {
             this.name = name;
         }
 
-        /** The pass reads {@code image}. */
+        /** The pass reads all of {@code image}. */
         public PassBuilder read(Image image, Access access) {
+            return read(image(image).whole(), access);
+        }
+
+        /** The pass reads part of an image: some of its mip levels or layers. */
+        public PassBuilder read(Subresource part, Access access) {
             if (access.writes) {
                 throw new IllegalArgumentException(name + ": " + access + " writes; declare it with write()");
             }
-            return use(image, access);
+            return use(part, access);
         }
 
-        /** The pass writes {@code image}, which its technique or request made (or an external image). */
+        /** The pass writes all of {@code image}, which its technique or request made (or an external image). */
         public PassBuilder write(Image image, Access access) {
+            return write(image(image).whole(), access);
+        }
+
+        /** The pass writes part of an image its technique or request made: some of its mip levels or layers. */
+        public PassBuilder write(Subresource part, Access access) {
+            Image image = part.image();
             if (!access.writes) {
                 throw new IllegalArgumentException(name + ": " + access + " only reads; declare it with read()");
             }
@@ -390,7 +406,7 @@ public final class GraphBuilder {
                 throw new IllegalStateException(name + " writes " + image.name + ", a result of " + name(info.owner)
                     + ": results are written only by whoever makes them");
             }
-            return use(image, access);
+            return use(part, access);
         }
 
         /** The pass reads {@code buffer}. */
@@ -421,10 +437,10 @@ public final class GraphBuilder {
             return this;
         }
 
-        private PassBuilder use(Image image, Access access) {
-            used.add(image(image));
+        private PassBuilder use(Subresource part, Access access) {
+            used.add(part);
             accesses.add(Objects.requireNonNull(access, "access"));
-            images.get(image.id).usage |= access.usage;
+            images.get(image(part.image()).id).usage |= access.usage;
             return this;
         }
 
@@ -448,15 +464,21 @@ public final class GraphBuilder {
         /** Adds the pass, recording with {@code body}. */
         public void record(PassBody body) {
             int[] ids = new int[used.size()];
+            int[] ranges = new int[4 * used.size()];
             for (int i = 0; i < ids.length; i++) {
-                ids[i] = used.get(i).id;
+                Subresource part = used.get(i);
+                ids[i] = part.image().id;
+                ranges[4 * i] = part.baseMip();
+                ranges[4 * i + 1] = part.mipCount();
+                ranges[4 * i + 2] = part.baseLayer();
+                ranges[4 * i + 3] = part.layerCount();
             }
             int[] bufferIds = new int[usedBuffers.size()];
             for (int i = 0; i < bufferIds.length; i++) {
                 bufferIds[i] = usedBuffers.get(i).id;
             }
             passes.add(new PassInfo(name, scope() == null ? "the graph" : name(scope()), ids,
-                accesses.toArray(new Access[0]), bufferIds, bufferAccesses.toArray(new BufferAccess[0]), sideEffects,
+                accesses.toArray(new Access[0]), ranges, bufferIds, bufferAccesses.toArray(new BufferAccess[0]), sideEffects,
                 async, Objects.requireNonNull(body, "body")));
         }
     }
