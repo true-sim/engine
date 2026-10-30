@@ -579,6 +579,36 @@ class FrameGraphTest {
     }
 
     @Test
+    void aTechniqueThatWouldBuildDifferentlyRebuildsTheGraph() {
+        long[] version = {1};
+        Fill red = new Fill(OUT, SIZE, 1, 0, 0, 1);
+        graph.add(new Technique() {
+            @Override
+            public List<Key<?>> provides() {
+                return red.provides();
+            }
+
+            @Override
+            public void build(GraphBuilder g) {
+                red.build(g);
+            }
+
+            @Override
+            public long buildVersion() {
+                return version[0];
+            }
+        }).output(OUT, output);
+        frame();
+        frame();
+        int builds = graph.builds();
+        version[0] = 2; // e.g. a material type registered: the technique would build another pass
+        frame();
+        assertThat(graph.builds()).as("rebuilt once").isEqualTo(builds + 1);
+        frame();
+        assertThat(graph.builds()).isEqualTo(builds + 1);
+    }
+
+    @Test
     void openPassesDeclareUntilTheBuildEnds() {
         // A pass recorded first, its write declared later (as one culling views other techniques add): it runs before
         // the reader, which sees what it wrote.

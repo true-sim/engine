@@ -632,9 +632,6 @@ class GraphTechniquesTest {
             scene.set(1, quad, quadMaterial, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
             assertThatIllegalArgumentException().as("no type takes it yet")
                 .isThrownBy(() -> materials.set(quadMaterial, new Material(GlowParameters.DEFAULTS)));
-            materials.register(Glow.TYPE);
-            assertThat(materials.types()).containsExactly(MetallicRoughnessMaterial.TYPE, Glow.TYPE);
-            assertThat(materials.type("glow")).isSameAs(Glow.TYPE);
             graph.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), view, SIZE, SIZE,
                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f))
                 .output(Keys.SCENE_COLOR, output);
@@ -644,8 +641,14 @@ class GraphTechniquesTest {
                 "visibility shading");
             int[] before = pixels.memory().toArray(ValueLayout.JAVA_INT);
             assertThat(glowing(before)).as("the metallic-roughness quad is lit, not glowing").isZero();
+            // Registered after the graph built: it rebuilds with the type's shading pass before the quad draws as it.
+            int builds = graph.builds();
+            materials.register(Glow.TYPE);
+            assertThat(materials.types()).containsExactly(MetallicRoughnessMaterial.TYPE, Glow.TYPE);
+            assertThat(materials.type("glow")).isSameAs(Glow.TYPE);
             materials.set(quadMaterial, new Material(GlowParameters.DEFAULTS));
             frame();
+            assertThat(graph.builds()).as("rebuilt for the new type").isEqualTo(builds + 1);
             int[] after = pixels.memory().toArray(ValueLayout.JAVA_INT);
             assertThat(glowing(after)).as("the quad's pixels").isGreaterThan(SIZE * SIZE / 40);
             for (int i = 0; i < after.length; i++) {

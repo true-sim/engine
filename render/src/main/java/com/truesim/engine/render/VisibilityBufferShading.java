@@ -94,6 +94,16 @@ public final class VisibilityBufferShading implements Technique {
         return List.of(Keys.SCENE_COLOR, Keys.SCENE_DEPTH);
     }
 
+    /**
+     * The scene's material table and its count of types: a shading pass per type, so a type registered after the graph
+     * built (or another table) rebuilds it before its materials draw, instead of shading as metallic-roughness.
+     */
+    @Override
+    public long buildVersion() {
+        Materials materials = renderer.scene().materials();
+        return (long) System.identityHashCode(materials) << 32 | materials.typeCount();
+    }
+
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {

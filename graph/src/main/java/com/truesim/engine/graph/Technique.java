@@ -59,6 +59,15 @@ public interface Technique {
     }
 
     /**
+     * What the technique's build depends on beyond what the graph tracks: a number that changes whenever it would build
+     * differently, e.g. the count of material types it makes a shader for. The graph reads it at the start of every
+     * frame and rebuilds when it changed. Must not allocate. 0 (the default): nothing.
+     */
+    default long buildVersion() {
+        return 0;
+    }
+
+    /**
      * Adds the technique's passes; called when the graph is (re)built, not per frame, so it may allocate (annotate it
      * {@code @AllowAllocation} in allocation-free modules). The pass bodies it creates run every frame and must not.
      */

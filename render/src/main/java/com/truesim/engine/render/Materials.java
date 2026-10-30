@@ -123,7 +123,7 @@ public final class Materials implements AutoCloseable {
      * Registers material type {@code type}, identified by its {@code MaterialType} (the generated {@code TYPE}
      * constant) and, in data, by its name. The table numbers types internally in registration order, so a number is
      * never an identity: nothing persists or keys on it. Renderers shading by type take the types when their graph
-     * builds: register them first, or {@link com.truesim.engine.graph.FrameGraph#invalidate} the graph.
+     * builds; a type registered later rebuilds the graphs shading this table by type before their next frame.
      */
     public void register(MaterialType type) {
         if (type(type.name()) != null) {
@@ -136,6 +136,11 @@ public final class Materials implements AutoCloseable {
         if (byRecord.putIfAbsent(type.parameters(), type) != null) {
             ambiguous.add(type.parameters());
         }
+    }
+
+    /** How many material types are registered. Allocates nothing. */
+    public int typeCount() {
+        return types.size();
     }
 
     /** The material types, in registration order: metallic-roughness first. */
