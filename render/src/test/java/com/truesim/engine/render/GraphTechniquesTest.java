@@ -577,7 +577,7 @@ class GraphTechniquesTest {
             scene.set(1, quad, quadMaterial, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
             assertThatIllegalArgumentException().as("no type takes it yet")
                 .isThrownBy(() -> materials.set(quadMaterial, new Material(GlowParameters.DEFAULTS)));
-            assertThat(materials.register(Glow.TYPE)).isEqualTo(1);
+            materials.register(Glow.TYPE);
             assertThat(materials.types()).containsExactly(MetallicRoughnessMaterial.TYPE, Glow.TYPE);
             assertThat(materials.type("glow")).isSameAs(Glow.TYPE);
             graph.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), view, SIZE, SIZE,
