@@ -235,7 +235,10 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
   triangles straight from the pool. Without, an expansion pass writes their triangles into one index buffer, and one
   `vkCmdDrawIndexedIndirect` draws them. The meshlet test, vertex decoding and shading are one Slang module
   (`meshlets/common.slang`) both paths import, and they draw the same image (tested). `Path.AUTO` picks mesh shaders
-  where available. Culling in task shaders instead, a workgroup per chunk, left most lanes idle when instances need
+  where available: they draw whatever the view finds. The indexed path is the optimization for views known to stay
+  within their triangle budget (`ViewOptions.triangles`; past it, triangles are dropped and `RenderView.overflowed()`
+  says so): on an RX 9070 XT it is the faster one (see the table below), so choose it with `setPath(Path.INDEXED)`
+  there. Culling in task shaders instead, a workgroup per chunk, left most lanes idle when instances need
   only a few meshlets: 0.95 ms against 0.59 ms for 30,000 rocks.
 - **Instance-level LOD range:** before culling meshlets, the instance pass skips every level finer than the first one
   whose error, seen from the instance's nearest point, is within the allowed pixels: the rule could not pick anything
