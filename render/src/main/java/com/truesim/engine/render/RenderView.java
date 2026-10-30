@@ -7,12 +7,14 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.render.layout.ViewLayout;
 import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
+import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.util.Objects;
@@ -28,16 +30,17 @@ import java.util.Objects;
 public final class RenderView implements AutoCloseable {
 
     /**
-     * The shaders' View, 352 bytes: matrices and planes, the error and mode, the camera's world position (two floats
-     * per axis), its filter, then the lists' and the occlusion history's addresses.
+     * The shaders' View ({@link ViewLayout}): matrices and planes, the error and mode, the camera's world position (two
+     * floats per axis), its filter, the lists' and the occlusion history's addresses, then the frame before's matrix and
+     * jitter, this frame's jitter and output size. Views lie one after another in the renderer's view constants array.
      */
-    static final int BYTES = 352;
+    static final int BYTES = ViewLayout.BYTES;
     private static final ValueLayout.OfInt U32 = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
     private final MeshletRenderer renderer;
     private ViewOptions options;
     private final int index;
-    private final FrameBuffer view;
+    private final long base; // where its View starts in the renderer's view constants array
     private GpuBuffer visible;
     private final GpuBuffer expandCommand;
     private final GpuBuffer drawCommand;
@@ -46,6 +49,10 @@ public final class RenderView implements AutoCloseable {
     private final VulkanDevice device;
     private GpuBuffer frameIndices; // the indexed path's, made when it first draws
     private final double[] position = new double[3];
+    private final float[] viewProjection = new float[16]; // as last set, to be the next frame's previous one
+    private boolean wasSet;
+    private float jitterX;
+    private float jitterY;
     final RenderView[] alone = {this}; // to cull the view by itself; never written
     boolean marked; // while a cull checks its views
     private boolean closed;
@@ -57,7 +64,7 @@ public final class RenderView implements AutoCloseable {
         this.index = index;
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         int commandUsage = storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        view = FrameBuffer.create(device, BYTES, storage, slots);
+        this.base = (long) index * BYTES;
         visible = GpuBuffer.deviceLocal(device, 16L * options.allDraws(), storage); // the bins, one after another
         expandCommand = GpuBuffer.deviceLocal(device, 16L * MeshletRenderer.BINS, commandUsage);
         drawCommand = GpuBuffer.deviceLocal(device, 24L * MeshletRenderer.BINS, commandUsage);
@@ -70,14 +77,16 @@ public final class RenderView implements AutoCloseable {
             device.submitAndWait(device.graphics(), commands -> Commands.fillBuffer(commands, visibility.handle(), 0,
                 visibility.size(), 0)); // nothing visible yet: the first late phase finds out
         }
-        view.putInt(172, options.draws());
-        view.putInt(188, options.binDraws());
+        FrameBuffer v = renderer.viewConstants();
+        v.put(base, MemorySegment.ofArray(new byte[BYTES]), 0, BYTES); // an earlier view's entry, gone
+        putInt(ViewLayout.MAX_DRAWS, options.draws());
+        putInt(ViewLayout.BIN_DRAWS, options.binDraws());
         filter(options.layers(), options.castersOnly());
-        view.putLong(304, visible.deviceAddress());
-        view.putLong(312, expandCommand.deviceAddress());
-        view.putLong(320, drawCommand.deviceAddress());
-        view.putLong(328, drawCount.deviceAddress());
-        view.putLong(336, visibility == null ? 0 : visibility.deviceAddress());
+        putLong(ViewLayout.LISTS_VISIBLE, visible.deviceAddress());
+        putLong(ViewLayout.LISTS_EXPAND_COMMAND, expandCommand.deviceAddress());
+        putLong(ViewLayout.LISTS_DRAW_COMMAND, drawCommand.deviceAddress());
+        putLong(ViewLayout.LISTS_VISIBLE_COUNT, drawCount.deviceAddress());
+        putLong(ViewLayout.VISIBILITY, visibility == null ? 0 : visibility.deviceAddress());
     }
 
     /**
@@ -87,33 +96,91 @@ public final class RenderView implements AutoCloseable {
      */
     public RenderView set(Camera camera, float errorPixels, int mode) {
         checkOpen();
-        FrameBuffer m = view;
         float[] matrix = camera.viewProjection();
+        // The frame before's matrix, from positions relative to this frame's camera: moved by how far the camera did
+        // (column-major: the last column takes the move), so motion vectors need no positions of the frame before.
+        // The first time, this frame's.
+        double dx = wasSet ? camera.position(0) - position[0] : 0;
+        double dy = wasSet ? camera.position(1) - position[1] : 0;
+        double dz = wasSet ? camera.position(2) - position[2] : 0;
+        float[] previous = wasSet ? viewProjection : matrix;
+        for (int row = 0; row < 4; row++) {
+            for (int column = 0; column < 3; column++) {
+                putFloat(ViewLayout.PREVIOUS_VIEW_PROJECTION + 4L * (4 * column + row), previous[4 * column + row]);
+            }
+            putFloat(ViewLayout.PREVIOUS_VIEW_PROJECTION + 4L * (12 + row), (float) (previous[row] * dx
+                + previous[4 + row] * dy + previous[8 + row] * dz + previous[12 + row]));
+        }
+        System.arraycopy(matrix, 0, viewProjection, 0, 16);
         for (int i = 0; i < 16; i++) {
-            m.putFloat(4L * i, matrix[i]);
+            putFloat(ViewLayout.VIEW_PROJECTION + 4L * i, matrix[i]);
         }
         float[] planes = camera.planes();
         for (int i = 0; i < 24; i++) {
-            m.putFloat(64 + 4L * i, planes[i]);
+            putFloat(ViewLayout.PLANES + 4L * i, planes[i]);
         }
-        m.putFloat(160, camera.projectionScale());
-        m.putFloat(164, errorPixels);
-        m.putInt(176, mode);
-        m.putInt(180, camera.orthographic() ? 1 : 0);
+        putFloat(ViewLayout.PROJECTION_SCALE, camera.projectionScale());
+        putFloat(ViewLayout.ERROR_PIXELS, errorPixels);
+        putInt(ViewLayout.MODE, mode);
+        putInt(ViewLayout.ORTHOGRAPHIC, camera.orthographic() ? 1 : 0);
         float[] inverse = camera.inverseViewProjection();
         for (int i = 0; i < 16; i++) {
-            m.putFloat(192 + 4L * i, inverse[i]);
+            putFloat(ViewLayout.INVERSE_VIEW_PROJECTION + 4L * i, inverse[i]);
         }
         // The camera's world position, two floats per axis as instances keep theirs, and the eye off it.
         for (int axis = 0; axis < 3; axis++) {
             double p = camera.position(axis);
             position[axis] = p;
             float high = (float) p;
-            m.putFloat(256 + 4L * axis, high);
-            m.putFloat(272 + 4L * axis, (float) (p - high));
-            m.putFloat(288 + 4L * axis, (float) camera.eye(axis));
+            putFloat(ViewLayout.POSITION + 4L * axis, high);
+            putFloat(ViewLayout.POSITION_LOW + 4L * axis, (float) (p - high));
+            putFloat(ViewLayout.EYE + 4L * axis, (float) camera.eye(axis));
         }
+        // The jitter of the frame before; this frame's stays until set again.
+        putFloat(ViewLayout.PREVIOUS_JITTER, getFloat(ViewLayout.JITTER));
+        putFloat(ViewLayout.PREVIOUS_JITTER + 4, getFloat(ViewLayout.JITTER + 4));
+        putFloat(ViewLayout.JITTER, jitterX);
+        putFloat(ViewLayout.JITTER + 4, jitterY);
+        wasSet = true;
         return this;
+    }
+
+    /**
+     * The subpixel offset, in pixels, the next {@link #set} camera's projection is moved by (temporal antialiasing),
+     * which shaders read beside the frame before's. Allocates nothing.
+     */
+    public RenderView jitter(float x, float y) {
+        checkOpen();
+        jitterX = x;
+        jitterY = y;
+        return this;
+    }
+
+    /** The pixels the view renders to, for shaders that need its size. Allocates nothing. */
+    public RenderView output(int width, int height) {
+        checkOpen();
+        if (width < 0 || height < 0) {
+            throw new IllegalArgumentException("An output of " + width + " x " + height);
+        }
+        putInt(ViewLayout.OUTPUT_SIZE, width);
+        putInt(ViewLayout.OUTPUT_SIZE + 4, height);
+        return this;
+    }
+
+    void putInt(long offset, int value) {
+        renderer.viewConstants().putInt(base + offset, value);
+    }
+
+    void putLong(long offset, long value) {
+        renderer.viewConstants().putLong(base + offset, value);
+    }
+
+    void putFloat(long offset, float value) {
+        renderer.viewConstants().putFloat(base + offset, value);
+    }
+
+    float getFloat(long offset) {
+        return renderer.viewConstants().getFloat(base + offset);
     }
 
     /**
@@ -122,8 +189,8 @@ public final class RenderView implements AutoCloseable {
      */
     public RenderView filter(int layers, boolean castersOnly) {
         checkOpen();
-        view.putInt(284, layers);
-        view.putInt(300, castersOnly ? 1 : 0);
+        putInt(ViewLayout.LAYERS, layers);
+        putInt(ViewLayout.FLAGS, castersOnly ? 1 : 0);
         return this;
     }
 
@@ -195,10 +262,10 @@ public final class RenderView implements AutoCloseable {
             renderer.retire(visible);
             visible = GpuBuffer.deviceLocal(device, 16L * resized.allDraws(),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-            view.putLong(304, visible.deviceAddress());
+            putLong(ViewLayout.LISTS_VISIBLE, visible.deviceAddress());
         }
-        view.putInt(172, draws);
-        view.putInt(188, binDraws);
+        putInt(ViewLayout.MAX_DRAWS, draws);
+        putInt(ViewLayout.BIN_DRAWS, binDraws);
         boolean indexed = frameIndices != null;
         options = resized;
         if (indexed && frameIndices.size() != 12L * resized.allTriangles()) {
@@ -210,7 +277,7 @@ public final class RenderView implements AutoCloseable {
 
     /** The GPU memory the view's lists, commands and history take, in bytes. */
     public long bytes() {
-        return view.size() * view.slots().count() + visible.size() + expandCommand.size() + drawCommand.size()
+        return (long) BYTES * renderer.viewConstants().slots().count() + visible.size() + expandCommand.size() + drawCommand.size()
             + drawCount.size() + (visibility == null ? 0 : visibility.size())
             + (frameIndices == null ? 0 : frameIndices.size());
     }
@@ -228,18 +295,14 @@ public final class RenderView implements AutoCloseable {
         return renderer;
     }
 
-    /** Its place in the renderer's table of views. */
+    /** Its place in the renderer's view constants array: shaders find its View there by this index. */
     public int index() {
         return index;
     }
 
     /** The shaders' View, for passes drawing it. */
     long address() {
-        return view.deviceAddress();
-    }
-
-    FrameBuffer viewBuffer() {
-        return view;
+        return renderer.viewConstants().deviceAddress() + base;
     }
 
     GpuBuffer visible() {
@@ -312,7 +375,7 @@ public final class RenderView implements AutoCloseable {
     @AllowAllocation("closing a view")
     void freeBuffers(Retiring retiring) {
         closed = true;
-        for (AutoCloseable buffer : new AutoCloseable[] {view, visible, expandCommand, drawCommand, drawCount,
+        for (AutoCloseable buffer : new AutoCloseable[] {visible, expandCommand, drawCommand, drawCount,
             visibility, frameIndices}) {
             if (buffer == null) {
                 continue;

@@ -43,6 +43,7 @@ import com.truesim.engine.render.layout.DrawPush;
 import com.truesim.engine.render.layout.ExpandPush;
 import com.truesim.engine.render.layout.InstancePush;
 import com.truesim.engine.render.layout.MeshPush;
+import com.truesim.engine.render.layout.ViewLayout;
 import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Bindless;
@@ -159,7 +160,7 @@ public final class MeshletRenderer implements AutoCloseable {
     private final java.util.BitSet indices = new java.util.BitSet(); // those of the open views
     // The views' addresses, by index, for the culling passes; and the rows the instance pass culls (a view and its
     // phase each). Both grow as views are made; the old ones go once no frame in flight reads them.
-    private FrameBuffer viewTable;
+    private FrameBuffer viewConstants; // the views' Views, one after another, by index
     private GpuBuffer rows;
     private final Retiring retiring; // the old tables, rows and view lists, until no frame reads them
     // Read only: a frame graph may record passes on several threads at once, so recording changes no field.
@@ -240,7 +241,7 @@ public final class MeshletRenderer implements AutoCloseable {
         this.chunks = GpuBuffer.deviceLocal(device, 16L * chunks, storage);
         chunkCommand = GpuBuffer.deviceLocal(device, 16,
             storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        viewTable = FrameBuffer.create(device, 8L * 4, storage, slots);
+        viewConstants = FrameBuffer.create(device, 4L * RenderView.BYTES, storage, slots);
         rows = GpuBuffer.deviceLocal(device, 8L * 4, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     }
 
@@ -251,7 +252,7 @@ public final class MeshletRenderer implements AutoCloseable {
     public RenderView createView(ViewOptions options) {
         checkOpen();
         int index = indices.nextClearBit(0);
-        if (8L * (index + 1) > viewTable.size()) {
+        if ((long) RenderView.BYTES * (index + 1) > viewConstants.size()) {
             grow(2 * (index + 1));
         }
         RenderView view = new RenderView(device, this, options, index, slots);
@@ -260,7 +261,6 @@ public final class MeshletRenderer implements AutoCloseable {
         }
         views.add(view);
         indices.set(index);
-        viewTable.putLong(8L * index, view.address());
         return view;
     }
 
@@ -272,25 +272,40 @@ public final class MeshletRenderer implements AutoCloseable {
     void removeView(RenderView view) {
         views.remove(view);
         indices.clear(view.index());
-        viewTable.putLong(8L * view.index(), 0);
         view.freeBuffers(retiring);
     }
 
-    /** Makes room for {@code capacity} views: a new table and rows, the old ones kept until no frame reads them. */
+    /**
+     * Makes room for {@code capacity} views: a bigger view constants array holding the views' entries, and rows; the
+     * old ones kept until no frame reads them.
+     */
     private void grow(int capacity) {
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-        retire(viewTable);
+        retire(viewConstants);
         retire(rows);
-        viewTable = FrameBuffer.create(device, 8L * capacity, storage, slots);
-        for (RenderView view : views) {
-            viewTable.putLong(8L * view.index(), view.address());
-        }
+        FrameBuffer old = viewConstants;
+        viewConstants = FrameBuffer.create(device, (long) RenderView.BYTES * capacity, storage, slots);
+        viewConstants.copyFrom(old);
         rows = GpuBuffer.deviceLocal(device, 8L * capacity, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     }
 
     /** Has {@code resource} freed once no frame in flight reads it. */
     void retire(AutoCloseable resource) {
         retiring.add(resource);
+    }
+
+    /** The views' entries ({@link RenderView#BYTES} each, by {@link RenderView#index()}): the view constants array. */
+    FrameBuffer viewConstants() {
+        return viewConstants;
+    }
+
+    /**
+     * The device address of the frame's view constants array: every view's {@code View} (meshlets.common), at
+     * {@link RenderView#index()}, for shaders of passes of the frame recording. Its capacity grows with the views
+     * made, so a pass takes it as it records.
+     */
+    public long viewConstantsAddress() {
+        return viewConstants.deviceAddress();
     }
 
     /** The views open, in the order they were made. */
@@ -625,13 +640,12 @@ public final class MeshletRenderer implements AutoCloseable {
             }
             for (int i = 0; i < count; i++) {
                 RenderView v = views[i];
-                FrameBuffer view = v.viewBuffer();
-                view.putInt(168, instanceCount);
+                v.putInt(ViewLayout.INSTANCE_COUNT, instanceCount);
                 // mesh shaders read no index buffer: every listed meshlet fits
                 long indices = 3L * v.options().triangles();
                 long binIndices = 3L * v.options().binTriangles();
-                view.putInt(184, meshShading ? -1 : (int) indices);
-                view.putInt(344, meshShading ? -1 : (int) binIndices);
+                v.putInt(ViewLayout.MAX_INDICES, meshShading ? -1 : (int) indices);
+                v.putInt(ViewLayout.BIN_INDICES, meshShading ? -1 : (int) binIndices);
                 for (int bin = 1; bin < BINS; bin++) {
                     memPutInt(draws + 24L * bin + 8, (int) (indices + (bin - 1) * binIndices)); // the bin's first index
                 }
@@ -648,7 +662,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, InstancePush.BYTES);
-            memPutLong(push + InstancePush.VIEWS, viewTable.deviceAddress());
+            memPutLong(push + InstancePush.VIEWS, viewConstants.deviceAddress());
             memPutLong(push + InstancePush.MESHES, pool.meshTable().deviceAddress());
             memPutLong(push + InstancePush.INSTANCES, scene.instanceAddress());
             memPutLong(push + InstancePush.CHUNKS, chunks.deviceAddress());
@@ -672,7 +686,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, CullPush.BYTES);
-            memPutLong(push + CullPush.VIEWS, viewTable.deviceAddress());
+            memPutLong(push + CullPush.VIEWS, viewConstants.deviceAddress());
             memPutLong(push + CullPush.MESHES, pool.meshTable().deviceAddress());
             memPutLong(push + CullPush.INSTANCES, scene.instanceAddress());
             memPutLong(push + CullPush.CHUNKS, chunks.deviceAddress());
@@ -827,7 +841,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 view.freeBuffers(retiring);
             }
             views.clear();
-            viewTable.close();
+            viewConstants.close();
             rows.close();
             chunks.close();
             chunkCommand.close();

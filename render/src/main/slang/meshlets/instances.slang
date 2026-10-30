@@ -7,7 +7,7 @@ import meshlets.common;
 
 struct InstancePush
 {
-    ViewRef* views;        // the renderer's views, by index
+    View* views;           // the renderer's views of the frame, by index: its view constants array
     MeshEntry* meshes;
     Instance* instances;
     Chunk* chunks;
@@ -28,7 +28,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
 {
     CulledView row = push.rows[push.firstRow + id.y];
     uint v = row.view;
-    View view = push.views[v].view[0];
+    View view = push.views[v];
     if (id.x >= view.instanceCount)
     {
         return;

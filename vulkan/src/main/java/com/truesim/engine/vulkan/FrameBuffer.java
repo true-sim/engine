@@ -136,6 +136,14 @@ public final class FrameBuffer implements AutoCloseable {
         }
     }
 
+    /**
+     * Takes what {@code source} holds (its latest bytes, as many as both have), e.g. when a bigger buffer replaces it:
+     * the frame recording gets them now, the other copies when their slots open.
+     */
+    public void copyFrom(FrameBuffer source) {
+        put(0, source.master, 0, Math.min(size, source.size));
+    }
+
     public float getFloat(long offset) {
         return master.get(F32, offset);
     }
