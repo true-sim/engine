@@ -58,6 +58,11 @@ public final class RenderView implements AutoCloseable {
     private final ExternalBuffer drawImport;
     private final ExternalBuffer countImport;
     private final ExternalBuffer visibilityImport; // or null, as the history
+    // The indexed path's index buffer as an import, once a graph declared it, always naming a live buffer: the index
+    // buffer, or after it was dropped a tiny placeholder. And whether the last build declared it (the indexed path).
+    private ExternalBuffer indicesImport;
+    private GpuBuffer noIndices;
+    private boolean indicesDeclared;
     private final double[] position = new double[3];
     private final float[] viewProjection = new float[16]; // as last set, to be the next frame's previous one
     private boolean wasSet;
@@ -342,6 +347,9 @@ public final class RenderView implements AutoCloseable {
         if (frameIndices != null) {
             renderer.retire(frameIndices);
             frameIndices = null;
+            if (indicesImport != null) {
+                indicesImport.set(noIndices); // graphs name no freed buffer; a new size rebuilds them
+            }
         }
     }
 
@@ -360,13 +368,16 @@ public final class RenderView implements AutoCloseable {
             frameIndices = GpuBuffer.deviceLocal(device, 12L * options.allTriangles(),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
                     | VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+            if (indicesImport != null) {
+                indicesImport.set(frameIndices);
+            }
         }
         return frameIndices;
     }
 
     /**
      * Declares that {@code pass} culls the view: resets its lists and counts with transfers, then fills them (and its
-     * history) with compute. Not the indexed path's index buffer, made while recording: that path orders it by hand.
+     * history) with compute; on the indexed path, its index buffer too (made now if it was not).
      */
     void declareCulling(GraphBuilder g, GraphBuilder.PassBuilder pass) {
         Buffer expand = g.importBuffer(expandImport);
@@ -379,6 +390,15 @@ public final class RenderView implements AutoCloseable {
         if (visibilityImport != null) {
             pass.write(g.importBuffer(visibilityImport), BufferAccess.STORAGE_WRITE);
         }
+        indicesDeclared = renderer.path() == MeshletRenderer.Path.INDEXED;
+        if (indicesDeclared) { // the expansion writes the index buffer: made now, while the graph builds
+            GpuBuffer indices = frameIndices();
+            if (indicesImport == null) {
+                noIndices = GpuBuffer.deviceLocal(device, 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                indicesImport = new ExternalBuffer("view " + index + " indices", indices);
+            }
+            pass.write(g.importBuffer(indicesImport), BufferAccess.STORAGE_WRITE);
+        }
     }
 
     /** Declares that {@code pass} draws what culling listed for the view: its indirect commands, list and counts. */
@@ -387,6 +407,14 @@ public final class RenderView implements AutoCloseable {
             .read(g.importBuffer(drawImport), BufferAccess.INDIRECT)
             .read(g.importBuffer(visibleImport), BufferAccess.DRAW_READ)
             .read(g.importBuffer(countImport), BufferAccess.DRAW_READ);
+        if (indicesDeclared) {
+            pass.read(g.importBuffer(indicesImport), BufferAccess.INDEX);
+        }
+    }
+
+    /** Whether the graph orders the view's index buffer: the last build declared it, and the view has one. */
+    boolean indicesOrdered() {
+        return indicesDeclared && frameIndices != null;
     }
 
     boolean hasHistory() {
@@ -417,7 +445,7 @@ public final class RenderView implements AutoCloseable {
     void freeBuffers(Retiring retiring) {
         closed = true;
         for (AutoCloseable buffer : new AutoCloseable[] {visible, expandCommand, drawCommand, drawCount,
-            visibility, frameIndices}) {
+            visibility, frameIndices, noIndices}) {
             if (buffer == null) {
                 continue;
             }
