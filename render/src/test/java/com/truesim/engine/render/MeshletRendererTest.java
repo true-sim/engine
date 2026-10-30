@@ -558,7 +558,7 @@ class MeshletRendererTest {
             slots.end();
             assertThat(small.pendingCount()).as("scattered").isZero();
             assertThat(ahead.visibleMeshlets()).isEqualTo(3);
-            // A frame changing every instance twice between its passes changes more than the upload holds.
+            // A frame changing every instance twice between its passes: more than the upload buffer held, so it grows.
             slots.begin(1);
             device.submitAndWait(device.graphics(), commands -> {
                 small.upload(commands); // nothing changed: nothing to do
@@ -569,11 +569,9 @@ class MeshletRendererTest {
                 small.remove(0);
                 small.remove(1);
                 small.remove(2);
-                assertThatIllegalStateException().isThrownBy(() -> small.upload(commands))
-                    .withMessageContaining("in one frame");
+                small.upload(commands);
             });
             slots.end();
-            // The next frame of the slot starts over.
             slots.begin(0);
             renderWith(commands -> drawing.record(commands, ahead, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
             slots.end();

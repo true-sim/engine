@@ -47,17 +47,22 @@ import org.lwjgl.vulkan.VkMemoryBarrier2;
  * <p>A record is in the changes at most once until they upload: claiming it again returns its entry, so the last
  * write wins. Claim on one thread; fill claimed entries from any (distinct entries), before the next upload. Records
  * start as zeros. Frames recorded by a frame graph upload first thing ({@link FrameSlots#recordStart}); frames recorded
- * otherwise call {@link #upload} before reading. Allocates nothing once created.
+ * otherwise call {@link #upload} before reading. Allocates nothing once created, except when more records change in a
+ * frame than ever before: the upload buffers grow then.
  */
 @AllowAllocation("created rarely")
 public final class RecordBuffer implements AutoCloseable {
 
     private static final int SCATTER_PUSH = ScatterPush.BYTES;
     private static final int MAX_GROUPS = 65_535;
+    /** Records an upload buffer holds at first; it grows (to the capacity at most) when more change in a frame. */
+    static final int FIRST_UPLOAD_RECORDS = 256;
 
+    private final VulkanDevice device;
     private final int recordBytes;
     private final int capacity;
     private final FrameSlots slots;
+    private final Retiring retiring; // upload buffers replaced by bigger ones, until their frames finish
     // Set once while constructing; null until made, so a constructor that fails frees what it made.
     private GpuBuffer records;
     private Pipeline scatter;
@@ -71,6 +76,7 @@ public final class RecordBuffer implements AutoCloseable {
     // Per frame slot, the upload buffer (indices, then records) and where in it the next upload goes: frames upload
     // once or a few times each, the next frame of the slot starting over (with one slot, where the last one ended).
     private final GpuBuffer[] uploads;
+    private final int[] uploadCapacity; // records each holds
     private final long[] uploadFrame;
     private final int[] uploadAt;
     private boolean closed;
@@ -85,11 +91,14 @@ public final class RecordBuffer implements AutoCloseable {
             throw new IllegalArgumentException("Records of a multiple of 16 bytes, at least one: " + recordBytes
                 + " bytes, " + capacity);
         }
+        this.device = Objects.requireNonNull(device, "device");
         this.recordBytes = recordBytes;
         this.capacity = capacity;
         this.slots = Objects.requireNonNull(slots, "slots");
+        this.retiring = new Retiring(slots);
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         uploads = new GpuBuffer[slots.count()];
+        uploadCapacity = new int[uploads.length];
         try {
             records = GpuBuffer.deviceLocal(device, (long) recordBytes * capacity, storage
                 | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT); // copied from: readbacks
@@ -99,7 +108,8 @@ public final class RecordBuffer implements AutoCloseable {
                 scatter = Pipeline.compute(device, shader, "scatterMain", SCATTER_PUSH);
             }
             for (int s = 0; s < uploads.length; s++) {
-                uploads[s] = GpuBuffer.hostWritten(device, changesOffset() + (long) recordBytes * capacity, storage);
+                uploads[s] = uploadBuffer(Math.min(capacity, FIRST_UPLOAD_RECORDS));
+                uploadCapacity[s] = Math.min(capacity, FIRST_UPLOAD_RECORDS);
             }
         } catch (RuntimeException e) {
             free(); // what was made leaks nothing
@@ -177,9 +187,7 @@ public final class RecordBuffer implements AutoCloseable {
      * into the open frame slot's upload buffer and scattered by a compute pass, ordered after whatever read the
      * records before (earlier frames too: the queue's order) and before what reads them after. Nothing without
      * changes. Frames recorded by a frame graph do it first; call it before reading in frames recorded otherwise.
-     * Allocates nothing.
-     *
-     * @throws IllegalStateException if more records changed between two uploads of one frame than the buffer holds
+     * Allocates nothing, except to grow the upload buffer when more records changed than it held so far.
      */
     public synchronized void upload(VkCommandBuffer commands) {
         if (pending == 0) {
@@ -189,23 +197,28 @@ public final class RecordBuffer implements AutoCloseable {
             // Between frames any slot's upload buffer may still be read by a frame in flight.
             throw new IllegalStateException("Upload records within a frame (between beginFrame and submit)");
         }
+        retiring.release();
         int slot = Math.max(slots.current(), 0);
-        GpuBuffer target = uploads[slot];
         long frame = slots.frames();
-        int at = uploadAt[slot];
-        if (uploadFrame[slot] != frame) {
-            at = 0; // the slot's last frame has finished
-        } else if (at + pending > capacity) {
-            if (!slots.isSingle()) {
-                throw new IllegalStateException("More records changed in one frame than the buffer holds: change "
-                    + "each at most once between the uploads of a frame");
+        int at = uploadFrame[slot] == frame ? uploadAt[slot] : 0; // else the slot's last frame has finished
+        if (at + pending > uploadCapacity[slot]) {
+            if (slots.isSingle() && pending <= uploadCapacity[slot]) {
+                at = 0; // one copy: the caller waited for the frames before
+            } else {
+                // A bigger buffer; this frame may still read the old one, so it goes once the frame is done.
+                int grown = Math.min(capacity, Math.max(pending, 2 * uploadCapacity[slot]));
+                GpuBuffer bigger = uploadBuffer(grown);
+                retiring.add(uploads[slot]);
+                uploads[slot] = bigger;
+                uploadCapacity[slot] = grown;
+                at = 0;
             }
-            at = 0; // one copy: the caller waited for the frames before
         }
+        GpuBuffer target = uploads[slot];
         uploadFrame[slot] = frame;
         uploadAt[slot] = at + pending;
         MemorySegment memory = target.memory();
-        long changesAt = changesOffset() + (long) recordBytes * at;
+        long changesAt = changesOffset(uploadCapacity[slot]) + (long) recordBytes * at;
         MemorySegment.copy(indices, 0, memory, 4L * at, 4L * pending);
         MemorySegment.copy(changes, 0, memory, changesAt, (long) recordBytes * pending);
         // Whatever read the records before, in this frame or those before, has read them.
@@ -235,9 +248,15 @@ public final class RecordBuffer implements AutoCloseable {
         pending = 0;
     }
 
-    /** Where an upload buffer's records start: after an index per record, aligned for the records. */
-    private long changesOffset() {
-        return (4L * capacity + 63) & ~63L;
+    /** An upload buffer for {@code entries} changed records: their indices, then their bytes. */
+    private GpuBuffer uploadBuffer(int entries) {
+        return GpuBuffer.hostWritten(device, changesOffset(entries) + (long) recordBytes * entries,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+    }
+
+    /** Where an upload buffer's records start: after an index per entry, aligned for the records. */
+    private static long changesOffset(int entries) {
+        return (4L * entries + 63) & ~63L;
     }
 
     private static void barrier(VkCommandBuffer commands, long srcStage, long srcAccess, long dstStage,
@@ -269,6 +288,7 @@ public final class RecordBuffer implements AutoCloseable {
 
     /** Frees the buffers, pipeline and memory made. */
     private void free() {
+        retiring.close();
         if (records != null) {
             records.close();
         }

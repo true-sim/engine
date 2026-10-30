@@ -118,9 +118,9 @@ public final class Textures implements AutoCloseable {
             | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, mips);
         boolean[] gone = new boolean[1];
         try {
-            uploads.record(texels, (commands, staging) -> {
+            uploads.record(texels, (commands, staging, offset) -> {
                 if (!gone[0]) {
-                    upload(commands, staging, image, width, height, mips);
+                    upload(commands, staging, offset, image, width, height, mips);
                 }
             });
         } catch (RuntimeException e) {
@@ -137,14 +137,18 @@ public final class Textures implements AutoCloseable {
         return slot;
     }
 
-    /** Level 0 from the staging buffer, each further level blitted from the one before, all left shader-readable. */
-    private static void upload(VkCommandBuffer commands, GpuBuffer staging, GpuImage image, int width, int height,
-        int mips) {
+    /**
+     * Level 0 from the staging buffer at {@code offset}, each further level blitted from the one before, all left
+     * shader-readable.
+     */
+    private static void upload(VkCommandBuffer commands, GpuBuffer staging, long offset, GpuImage image, int width,
+        int height, int mips) {
         try (MemoryStack stack = stackPush()) {
             barrier(commands, stack, image, 0, mips, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                 VK_ACCESS_2_TRANSFER_WRITE_BIT);
             long region = stack.ncalloc(VkBufferImageCopy.ALIGNOF, 1, VkBufferImageCopy.SIZEOF);
+            memPutLong(region + VkBufferImageCopy.BUFFEROFFSET, offset);
             layers(region + VkBufferImageCopy.IMAGESUBRESOURCE, 0);
             memPutInt(region + VkBufferImageCopy.IMAGEEXTENT, width);
             memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 4, height);
