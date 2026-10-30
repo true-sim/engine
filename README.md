@@ -151,8 +151,11 @@ try (ShaderModule shaders = ShaderModule.load(device, "shaders/meshlets.spv");
 
 ### Custom passes without Vulkan code
 
-A game's own passes need no Vulkan calls for the usual work. `Push` writes push constants field by field, aligned as
-Slang lays out a push struct (pointers and `float2` on 8 bytes, `float3`/`float4`/matrices on 16), and the pass
+A game's own passes need no Vulkan calls for the usual work. Push constants are written by name: with
+`slang.pushBase = "com.truesim.engine.vulkan.PushConstants"`, build-logic generates a writer per push struct
+(`[[vk::push_constant]] ConstantBuffer<FindPush>` becomes `FindPush`, with `FindPush.BYTES` and a typed setter per
+field at the offset slangc lays out). A pass keeps one, made when the graph builds, sets what the build decides once,
+and the rest each frame. `Push` writes fields in order instead, for ad hoc use. The pass
 context records the commands: `ctx.dispatch` and `dispatchIndirect`; `ctx.fill`, `ctx.copy` (buffers, and between
 buffers and images), `ctx.blit` and `ctx.clear`; `ctx.draw`, `drawIndirect`, `drawIndexedIndirect(Count)` and
 `drawMeshTasksIndirect`; `ctx.viewport` and `ctx.scissor`. A pass renders by declaring attachments: `attach(color,
@@ -164,12 +167,14 @@ that touches a resource its pass did not declare fails. Raw Vulkan stays availab
 command buffer, image, view and buffer handles) for anything else.
 
 ```java
-Push push = new Push();                                          // once, per pass
+Pipeline simulate = g.computeProgram("shaders/particles.spv", "simulateMain", SimulatePush.BYTES);
+SimulatePush step = new SimulatePush().count(count);        // once, per pass; the count the build decides
 g.pass("simulate").read(state, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
-    .record(ctx -> ctx.dispatch(simulate, push.clear().address(ctx.address(state)).address(ctx.address(next))
-        .u32(count).f32(dt), (count + 63) / 64));
+    .record(ctx -> ctx.dispatch(simulate, step.state(ctx.address(state)).next(ctx.address(next)).dt(clock.delta()),
+        (count + 63) / 64));
+DrawPush draw = new DrawPush();
 g.pass("draw").read(next, BufferAccess.DRAW_READ).attach(color, Clear.color(0, 0, 0, 1))
-    .record(ctx -> ctx.draw(particles, push.clear().address(ctx.address(next)), 6, count));
+    .record(ctx -> ctx.draw(particles, draw.particles(ctx.address(next)), 6, count));
 ```
 
 Shaders import the modules of any dependency using `truesim.slang`: its sources ship in its jar under `slang/`, so a

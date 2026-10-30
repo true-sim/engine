@@ -13,7 +13,6 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
 import com.truesim.engine.graph.ImageDesc;
-import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.Clear;
 import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
@@ -24,14 +23,14 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.GraphicsProgram;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
-import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.scene.materials.PositionsPush;
+import com.truesim.engine.scene.materials.TintPush;
 import com.truesim.engine.render.GeometryPool;
 import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Pipeline;
-import com.truesim.engine.vulkan.Push;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanException;
 import com.truesim.engine.vulkan.VulkanInstance;
@@ -56,8 +55,7 @@ class CustomPassTest {
     private static final Key<Image> OUT = Key.image("test.tinted");
 
     /** Reads the instances' positions with a compute pass, then draws the target tinted by one of them. */
-    private record Tint(GpuScene scene, ExternalBuffer instances, ExternalBuffer readback, Push push)
-        implements Technique {
+    private record Tint(GpuScene scene, ExternalBuffer instances, ExternalBuffer readback) implements Technique {
 
         @Override
         public List<Key<?>> provides() {
@@ -66,22 +64,25 @@ class CustomPassTest {
 
         @Override
         public void build(GraphBuilder g) {
-            Pipeline positions = g.computeProgram("shaders/custom/positions.spv", "positionsMain", 20);
-            Pipeline tint = g.graphicsProgram(GraphicsProgram.of(8).vertex("shaders/custom/tint.spv", "coverMain")
+            Pipeline positions = g.computeProgram("shaders/custom/positions.spv", "positionsMain", PositionsPush.BYTES);
+            Pipeline tint = g.graphicsProgram(GraphicsProgram.of(TintPush.BYTES)
+                .vertex("shaders/custom/tint.spv", "coverMain")
                 .fragment("shaders/custom/tint.spv", "tintMain").color(Format.R8G8B8A8_UNORM).drawBackFaces());
             int count = scene.capacity();
+            PositionsPush find = new PositionsPush().count(count); // push constants written by name, once per pass
+            TintPush cover = new TintPush();
             Buffer stored = g.importBuffer(instances);
             Buffer out = g.importBuffer(readback);
             Buffer found = g.createBuffer("positions", 16L * count);
             Image target = g.create("tinted", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("clear positions").write(found, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(found, 0));
             g.pass("find positions").read(stored, BufferAccess.STORAGE_READ).write(found, BufferAccess.STORAGE_WRITE)
-                .record(ctx -> ctx.dispatch(positions, push.clear().address(ctx.address(stored))
-                    .address(ctx.address(found)).u32(count), (count + 63) / 64));
+                .record(ctx -> ctx.dispatch(positions, find.instances(ctx.address(stored)).positions(ctx.address(found)),
+                    (count + 63) / 64));
             g.pass("read back").read(found, BufferAccess.TRANSFER_SRC).write(out, BufferAccess.TRANSFER_DST)
                 .record(ctx -> ctx.copy(found, out, 16L * count));
             g.pass("tint").read(found, BufferAccess.DRAW_READ).attach(target, Clear.color(0, 0, 0, 1))
-                .record(ctx -> ctx.draw(tint, push.clear().address(ctx.address(found)), 3, 1));
+                .record(ctx -> ctx.draw(tint, cover.positions(ctx.address(found)), 3, 1));
             g.provide(OUT, target);
         }
     }
@@ -118,7 +119,7 @@ class CustomPassTest {
                 ExternalImage output = new ExternalImage("target", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage,
                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
                 graph.add(new Tint(scene, new ExternalBuffer("instances", scene.instanceBuffer()),
-                    new ExternalBuffer("readback", readback), new Push())).output(OUT, output);
+                    new ExternalBuffer("readback", readback))).output(OUT, output);
                 graph.beginFrame();
                 graph.submit(0, 0);
                 device.waitIdle();

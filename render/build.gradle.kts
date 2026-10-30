@@ -17,6 +17,7 @@ dependencies {
 slang {
     javaPackage = "com.truesim.engine.render.materials"
     pushPackage = "com.truesim.engine.render.layout"
+    pushBase = "com.truesim.engine.vulkan.PushConstants" // push layouts are writers too
     constantModules = listOf("bindless", "lights", "materials", "meshlets/common") // BindlessConstants and others
 }
 

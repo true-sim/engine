@@ -1,23 +1,17 @@
 package com.truesim.engine.render.blocks;
 
-import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.memPutInt;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.ImageDesc;
-import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.graph.Subresource;
 import com.truesim.engine.render.layout.PyramidPush;
-import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
-import com.truesim.engine.vulkan.ShaderModule;
 import java.util.Objects;
-import org.lwjgl.system.MemoryStack;
 
 /**
  * The farthest-depth pyramid of a (reverse) depth image: a {@code R32_SFLOAT} image half its size (rounded up) with a
@@ -32,7 +26,6 @@ import org.lwjgl.system.MemoryStack;
  */
 public record DepthPyramid(Image depth) implements Request<Image> {
 
-    private static final int PUSH_BYTES = PyramidPush.BYTES;
 
     public DepthPyramid {
         Objects.requireNonNull(depth, "depth");
@@ -41,7 +34,7 @@ public record DepthPyramid(Image depth) implements Request<Image> {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Image build(GraphBuilder g) {
-        Pipeline pipeline = g.computeProgram("shaders/blocks/pyramid.spv", "pyramidMain", PUSH_BYTES);
+        Pipeline pipeline = g.computeProgram("shaders/blocks/pyramid.spv", "pyramidMain", PyramidPush.BYTES);
         int width = (depth.width() + 1) / 2;
         int height = (depth.height() + 1) / 2;
         Image pyramid = g.create("depth pyramid of " + depth.name(),
@@ -60,8 +53,14 @@ public record DepthPyramid(Image depth) implements Request<Image> {
             } else {
                 pass.read(below, Access.STORAGE_READ);
             }
-            int[] sizes = {sourceWidth, sourceHeight, levelWidth, levelHeight};
-            pass.write(target, Access.STORAGE_WRITE).record(ctx -> level(ctx, pipeline, below, target, sizes));
+            // What the level's size decides is set now; the slots, which a rebuild may change, each frame.
+            PyramidPush push = new PyramidPush().sourceSize(sourceWidth, sourceHeight).targetSize(levelWidth, levelHeight)
+                .fromDepth(below == null ? 1 : 0);
+            int groupsX = (levelWidth + 7) / 8;
+            int groupsY = (levelHeight + 7) / 8;
+            pass.write(target, Access.STORAGE_WRITE).record(ctx -> ctx.dispatch(pipeline, push
+                .source(below == null ? ctx.sampled(depth) : ctx.storage(below)).target(ctx.storage(target)), groupsX,
+                groupsY, 1));
             sourceWidth = levelWidth;
             sourceHeight = levelHeight;
             levelWidth = Math.max(1, levelWidth / 2); // Vulkan's mip sizes
@@ -70,20 +69,4 @@ public record DepthPyramid(Image depth) implements Request<Image> {
         return pyramid;
     }
 
-    /** Level {@code target} from the depth (level 0: no {@code below}) or the level below; {@code sizes}: their sizes. */
-    private void level(PassContext ctx, Pipeline pipeline, Subresource below, Subresource target, int[] sizes) {
-        try (MemoryStack stack = stackPush()) {
-            long push = stack.nmalloc(8, PUSH_BYTES);
-            memPutInt(push + PyramidPush.SOURCE, below == null ? ctx.sampled(depth) : ctx.storage(below));
-            memPutInt(push + PyramidPush.TARGET, ctx.storage(target));
-            memPutInt(push + PyramidPush.SOURCE_SIZE, sizes[0]);
-            memPutInt(push + PyramidPush.SOURCE_SIZE + 4, sizes[1]);
-            memPutInt(push + PyramidPush.TARGET_SIZE, sizes[2]);
-            memPutInt(push + PyramidPush.TARGET_SIZE + 4, sizes[3]);
-            memPutInt(push + PyramidPush.FROM_DEPTH, below == null ? 1 : 0);
-            pipeline.bind(ctx.unsafe().commands());
-            pipeline.push(ctx.unsafe().commands(), push, PUSH_BYTES);
-            Commands.dispatch(ctx.unsafe().commands(), (sizes[2] + 7) / 8, (sizes[3] + 7) / 8, 1);
-        }
-    }
 }

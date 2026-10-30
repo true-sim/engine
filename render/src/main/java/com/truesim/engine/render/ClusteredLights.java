@@ -23,7 +23,6 @@ import com.truesim.engine.render.layout.LightsConstants;
 import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Pipeline;
-import com.truesim.engine.vulkan.ShaderModule;
 import java.util.List;
 import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
@@ -47,7 +46,6 @@ import org.lwjgl.system.MemoryStack;
 public final class ClusteredLights implements Technique {
 
     static final int HEADER_BYTES = 112;
-    private static final int PUSH_BYTES = ClusterPush.BYTES;
     private static final int CLUSTERS = LightsConstants.CLUSTERS;
 
     private final Lights lights;
@@ -112,17 +110,18 @@ public final class ClusteredLights implements Technique {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
-        Pipeline pipeline = g.computeProgram("shaders/lights/cluster.spv", "clusterMain", PUSH_BYTES);
+        Pipeline pipeline = g.computeProgram("shaders/lights/cluster.spv", "clusterMain", ClusterPush.BYTES);
+        ClusterPush push = new ClusterPush().width(width).height(height).far(far);
         Buffer list = g.createBuffer("light clusters", HEADER_BYTES + 4L * clusters() * (1 + maxPerCluster));
         g.pass("light clusters")
             .write(list, BufferAccess.TRANSFER_DST)
             .write(list, BufferAccess.STORAGE_WRITE)
             .async()
-            .record(ctx -> cluster(ctx, pipeline, list));
+            .record(ctx -> cluster(ctx, pipeline, list, push));
         g.provide(Keys.LIGHT_LIST, list);
     }
 
-    private void cluster(PassContext ctx, Pipeline pipeline, Buffer list) {
+    private void cluster(PassContext ctx, Pipeline pipeline, Buffer list, ClusterPush push) {
         long header = ctx.address(list);
         long counts = header + HEADER_BYTES;
         try (MemoryStack stack = stackPush()) {
@@ -152,19 +151,8 @@ public final class ClusteredLights implements Technique {
             Barriers.memory(ctx.unsafe().commands(), VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-            long push = stack.nmalloc(16, PUSH_BYTES);
-            float[] viewProjection = camera.viewProjection();
-            for (int i = 0; i < 16; i++) {
-                memPutFloat(push + ClusterPush.VIEW_PROJECTION + 4L * i, viewProjection[i]);
-            }
-            memPutLong(push + ClusterPush.HEADER, header);
-            memPutInt(push + ClusterPush.WIDTH, width);
-            memPutInt(push + ClusterPush.HEIGHT, height);
-            memPutFloat(push + ClusterPush.FAR, far);
-            memPutInt(push + ClusterPush.LIGHT_COUNT, lights.count());
-            pipeline.bind(ctx.unsafe().commands());
-            pipeline.push(ctx.unsafe().commands(), push, PUSH_BYTES);
-            Commands.dispatch(ctx.unsafe().commands(), (clusters() + 63) / 64, 1, 1);
+            ctx.dispatch(pipeline, push.viewProjection(camera.viewProjection()).header(header).lightCount(lights.count()),
+                (clusters() + 63) / 64);
         }
     }
 }

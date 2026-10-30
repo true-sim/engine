@@ -8,6 +8,7 @@ description = "Engine Vulkan layer for true-sim: instances, GPUs, devices, memor
 
 slang {
     pushPackage = "com.truesim.engine.vulkan.layout"
+    pushBase = "com.truesim.engine.vulkan.PushConstants" // push layouts are writers too
 }
 
 val lwjglVersion: String by rootProject.extra

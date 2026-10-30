@@ -1,8 +1,5 @@
 package com.truesim.engine.render.blocks;
 
-import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.memPutFloat;
-import static org.lwjgl.system.MemoryUtil.memPutInt;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
@@ -13,11 +10,8 @@ import com.truesim.engine.graph.Ratio;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.layout.BlurPush;
-import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Pipeline;
-import com.truesim.engine.vulkan.ShaderModule;
 import java.util.Objects;
-import org.lwjgl.system.MemoryStack;
 
 /**
  * A blurred copy of {@code source}: {@code radius} texels of the source on each side, at {@code scale} times its size
@@ -54,33 +48,28 @@ public record Blur(Image source, int radius, Ratio scale) implements Request<Ima
         Image result = g.create(name, ImageDesc.like(source, scale));
         float stepX = 1f / source.width();
         float stepY = 1f / source.height();
+        BlurPush acrossPush = push(across, stepX, 0);
+        BlurPush downPush = push(result, 0, stepY);
         g.pass(name + " across")
             .read(source, Access.SAMPLED_COMPUTE)
             .write(across, Access.STORAGE_WRITE)
             .async()
-            .record(ctx -> dispatch(ctx, pipeline, source, across, stepX, 0, radius));
+            .record(ctx -> dispatch(ctx, pipeline, across, acrossPush.source(ctx.sampled(source))));
         g.pass(name + " down")
             .read(across, Access.SAMPLED_COMPUTE)
             .write(result, Access.STORAGE_WRITE)
             .async()
-            .record(ctx -> dispatch(ctx, pipeline, across, result, 0, stepY, radius));
+            .record(ctx -> dispatch(ctx, pipeline, result, downPush.source(ctx.sampled(across))));
         return result;
     }
 
-    private static void dispatch(PassContext ctx, Pipeline pipeline, Image from, Image to, float stepX, float stepY,
-        int radius) {
-        try (MemoryStack stack = stackPush()) {
-            long push = stack.nmalloc(8, BlurPush.BYTES);
-            memPutInt(push + BlurPush.SOURCE, ctx.sampled(from));
-            memPutInt(push + BlurPush.TARGET, ctx.storage(to));
-            memPutInt(push + BlurPush.SIZE, to.width());
-            memPutInt(push + BlurPush.SIZE + 4, to.height());
-            memPutFloat(push + BlurPush.STEP, stepX);
-            memPutFloat(push + BlurPush.STEP + 4, stepY);
-            memPutInt(push + BlurPush.RADIUS, radius);
-            pipeline.bind(ctx.unsafe().commands());
-            pipeline.push(ctx.unsafe().commands(), push, BlurPush.BYTES);
-            Commands.dispatch(ctx.unsafe().commands(), (to.width() + 7) / 8, (to.height() + 7) / 8, 1);
-        }
+    /** A pass's push constants into {@code to}, with what the build decides set: its own, as passes may record at once. */
+    @AllowAllocation("building the graph, when it changes")
+    private BlurPush push(Image to, float stepX, float stepY) {
+        return new BlurPush().size(to.width(), to.height()).step(stepX, stepY).radius(radius);
+    }
+
+    private static void dispatch(PassContext ctx, Pipeline pipeline, Image to, BlurPush push) {
+        ctx.dispatch(pipeline, push.target(ctx.storage(to)), (to.width() + 7) / 8, (to.height() + 7) / 8, 1);
     }
 }
