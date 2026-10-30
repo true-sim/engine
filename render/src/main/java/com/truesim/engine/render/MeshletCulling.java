@@ -1,7 +1,6 @@
 package com.truesim.engine.render;
 
 import com.truesim.annotations.AllowAllocation;
-import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Request;
@@ -12,12 +11,13 @@ import java.util.Objects;
  * Culling of a {@link MeshletRenderer}'s views, shared by every technique drawing them: one pass culls all the views
  * the techniques of the graph {@link Views#add add} (the camera, a shadow map's light, ...) with one instance pass and
  * one cull pass ({@link MeshletRenderer#cullViews}), however many there are. Techniques then draw their view with
- * {@link MeshletRenderer#drawAttached} in passes reading {@link Views#culled()}, so they come after it.
+ * {@link MeshletRenderer#drawAttached} in passes declaring it ({@link Views#drawing}), which reads the lists the
+ * culling wrote, so the graph orders them after it.
  *
  * <pre>{@code
  * MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)); // the same for every technique
  * culling.add(sunView, false, () -> sunView.set(light, 1, MeshletRenderer.MODE_WHITE));
- * g.pass("shadow map").read(culling.culled(), BufferAccess.INDIRECT).attachDepth(map, Clear.FAR)
+ * culling.drawing(g.pass("shadow map"), sunView).attachDepth(map, Clear.FAR)
  *     .record(ctx -> renderer.drawAttached(ctx.unsafe().commands(), sunView, false, true, 0));
  * }</pre>
  */
@@ -30,11 +30,12 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Views build(GraphBuilder g) {
-        Views views = new Views(renderer, g.createBuffer("culled meshlets", 16));
         SceneData.Buffers scene = g.request(new SceneData(renderer));
-        scene.read(g.pass("meshlet culling"), BufferAccess.STORAGE_READ)
-            .write(views.culled, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> views.cull(ctx.unsafe().commands()));
+        // Open: the views techniques add later in the build declare their lists on it.
+        GraphBuilder.PassBuilder pass = scene.read(g.pass("meshlet culling"), BufferAccess.STORAGE_READ).open();
+        renderer.declareCulling(g, pass);
+        Views views = new Views(renderer, g, pass);
+        pass.record(ctx -> views.cull(ctx.unsafe().commands()));
         return views;
     }
 
@@ -42,14 +43,16 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
     @AllowAllocation("building the graph, when it changes")
     public static final class Views {
         private final MeshletRenderer renderer;
-        private final Buffer culled;
+        private final GraphBuilder g;
+        private final GraphBuilder.PassBuilder pass;
         private RenderView[] views = new RenderView[0];
         private boolean[] early = new boolean[0];
         private Runnable[] before = new Runnable[0];
 
-        Views(MeshletRenderer renderer, Buffer culled) {
+        Views(MeshletRenderer renderer, GraphBuilder g, GraphBuilder.PassBuilder pass) {
             this.renderer = renderer;
-            this.culled = culled;
+            this.g = g;
+            this.pass = pass;
         }
 
         /**
@@ -66,6 +69,7 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
                     throw new IllegalStateException("View " + view.index() + " is culled already");
                 }
             }
+            view.declareCulling(g, pass);
             views = Arrays.copyOf(views, views.length + 1);
             views[views.length - 1] = view;
             this.early = Arrays.copyOf(this.early, this.early.length + 1);
@@ -77,16 +81,17 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
             return this;
         }
 
-        /** What draw passes read (as {@link BufferAccess#INDIRECT}), so they run after the culling. */
-        public Buffer culled() {
-            return culled;
+        /** Declares that {@code drawing} draws {@code view} as culled here (its lists); returns {@code drawing}. */
+        public GraphBuilder.PassBuilder drawing(GraphBuilder.PassBuilder drawing, RenderView view) {
+            view.declareDrawing(g, drawing);
+            return drawing;
         }
 
         void cull(org.lwjgl.vulkan.VkCommandBuffer commands) {
             for (Runnable runnable : before) {
                 runnable.run();
             }
-            renderer.cullViews(commands, views, early, views.length);
+            renderer.cullViews(commands, views, early, views.length, true); // declared on its pass
         }
     }
 }

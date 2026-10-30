@@ -112,6 +112,7 @@ public final class GraphBuilder {
     final List<BufferInfo> buffers = new ArrayList<>();
     final List<History> histories = new ArrayList<>();
     final List<PassInfo> passes = new ArrayList<>();
+    private final List<PassBuilder> openPasses = new ArrayList<>();
     final List<ReadbackPlan> readbacks = new ArrayList<>();
     private final Resolution<Key<?>, Technique> resolution;
     private final Map<ExternalImage, Image> externals = new IdentityHashMap<>();
@@ -488,6 +489,10 @@ public final class GraphBuilder {
         private final List<BufferAccess> bufferAccesses = new ArrayList<>();
         private boolean sideEffects;
         private boolean async;
+        private boolean open;
+        private int index = -1; // in the build's passes, once recorded
+        private PassBody body;
+        private String owner;
 
         private PassBuilder(String name) {
             this.name = name;
@@ -642,6 +647,7 @@ public final class GraphBuilder {
         }
 
         private PassBuilder use(Buffer buffer, BufferAccess access) {
+            checkDeclarable();
             usedBuffers.add(buffer(buffer));
             bufferAccesses.add(Objects.requireNonNull(access, "access"));
             buffers.get(buffer.id).usage |= access.usage;
@@ -653,6 +659,7 @@ public final class GraphBuilder {
         }
 
         private PassBuilder use(Subresource part, Access access, boolean discard) {
+            checkDeclarable();
             used.add(part);
             discarded.add(discard);
             accesses.add(Objects.requireNonNull(access, "access"));
@@ -677,8 +684,38 @@ public final class GraphBuilder {
             return this;
         }
 
+        /**
+         * Lets the pass declare more after {@link #record}, until the build ends: for a pass whose inputs other
+         * techniques add while the graph builds, such as one culling every view drawn in the frame.
+         */
+        public PassBuilder open() {
+            open = true;
+            return this;
+        }
+
         /** Adds the pass, recording with {@code body}. */
         public void record(PassBody body) {
+            if (index >= 0) {
+                throw new IllegalStateException(name + " is recorded already");
+            }
+            this.body = Objects.requireNonNull(body, "body");
+            owner = scope() == null ? "the graph" : name(scope());
+            index = passes.size();
+            passes.add(info());
+            if (open) {
+                openPasses.add(this);
+            }
+        }
+
+        /** Throws once the pass is recorded, unless it is {@link #open}. */
+        private void checkDeclarable() {
+            if (index >= 0 && !open) {
+                throw new IllegalStateException(name + " is recorded: declare before record(), or open() it");
+            }
+        }
+
+        /** The pass as declared so far. */
+        private PassInfo info() {
             int[] ids = new int[used.size()];
             int[] ranges = new int[4 * used.size()];
             boolean[] discards = new boolean[used.size()];
@@ -695,10 +732,18 @@ public final class GraphBuilder {
             for (int i = 0; i < bufferIds.length; i++) {
                 bufferIds[i] = usedBuffers.get(i).id;
             }
-            passes.add(new PassInfo(name, scope() == null ? "the graph" : name(scope()), ids,
-                accesses.toArray(new Access[0]), ranges, discards, attachments.toArray(new Attachment[0]), bufferIds, bufferAccesses.toArray(new BufferAccess[0]), sideEffects,
-                async, Objects.requireNonNull(body, "body")));
+            return new PassInfo(name, owner, ids, accesses.toArray(new Access[0]), ranges, discards,
+                attachments.toArray(new Attachment[0]), bufferIds, bufferAccesses.toArray(new BufferAccess[0]),
+                sideEffects, async, body);
         }
+    }
+
+    /** Ends the build: the {@link PassBuilder#open open} passes take what was declared after they were recorded. */
+    void finishOpenPasses() {
+        for (PassBuilder pass : openPasses) {
+            passes.set(pass.index, pass.info());
+        }
+        openPasses.clear();
     }
 
     static String name(Object owner) {

@@ -58,6 +58,7 @@ final class GraphCompiler {
         for (Key<Image> key : outputs.keySet()) {
             results.add(g.require(key));
         }
+        g.finishOpenPasses(); // the build is done: open passes take what was declared after them
         // An output whose image fits its target (size, format, usage; not sampled or a storage image) is drawn
         // straight into it; others are blitted.
         int[] substitute = new int[g.images.size()];
