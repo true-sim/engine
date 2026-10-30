@@ -31,7 +31,8 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
     @AllowAllocation("building the graph, when it changes")
     public Views build(GraphBuilder g) {
         Views views = new Views(renderer, g.createBuffer("culled meshlets", 16));
-        g.pass("meshlet culling")
+        SceneData.Buffers scene = g.request(new SceneData(renderer));
+        scene.read(g.pass("meshlet culling"), BufferAccess.STORAGE_READ)
             .write(views.culled, BufferAccess.STORAGE_WRITE)
             .record(ctx -> views.cull(ctx.unsafe().commands()));
         return views;

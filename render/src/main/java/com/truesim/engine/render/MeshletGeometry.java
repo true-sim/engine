@@ -39,8 +39,9 @@ public final class MeshletGeometry implements GeometryProvider {
         Camera camera = draw.camera();
         MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)).add(view, draw.occlusion(),
             camera == null ? null : () -> view.set(camera, 1, MeshletRenderer.MODE_LIT));
-        GraphBuilder.PassBuilder pass = g.pass(name(draw, draw.occlusion() ? " early" : ""))
-            .read(culling.culled(), BufferAccess.INDIRECT);
+        SceneData.Buffers scene = g.request(new SceneData(renderer));
+        GraphBuilder.PassBuilder pass = scene.read(g.pass(name(draw, draw.occlusion() ? " early" : "")),
+            BufferAccess.DRAW_READ).read(culling.culled(), BufferAccess.INDIRECT);
         record(draw, targets, pass, false);
     }
 
@@ -55,11 +56,13 @@ public final class MeshletGeometry implements GeometryProvider {
         int width = draw.width();
         int height = draw.height();
         Buffer culled = g.createBuffer(name(draw, " late culled"), 16);
-        g.pass(name(draw, " late culling")).read(pyramid, Access.SAMPLED_COMPUTE)
+        SceneData.Buffers scene = g.request(new SceneData(renderer));
+        scene.read(g.pass(name(draw, " late culling")), BufferAccess.STORAGE_READ).read(pyramid, Access.SAMPLED_COMPUTE)
             .write(culled, BufferAccess.STORAGE_WRITE)
             .record(ctx -> renderer.cullLate(ctx.unsafe().commands(), view, ctx.sampled(pyramid), width, height,
                 pyramid.mips()));
-        record(draw, targets, g.pass(name(draw, " late")).read(culled, BufferAccess.INDIRECT), true);
+        record(draw, targets, scene.read(g.pass(name(draw, " late")), BufferAccess.DRAW_READ)
+            .read(culled, BufferAccess.INDIRECT), true);
     }
 
     @AllowAllocation("building the graph, when it changes")

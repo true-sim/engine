@@ -361,6 +361,40 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void theSceneIsOneSetOfBuffersForTheEngineAndAGame() {
+        // The engine's culling and drawing declare what they read of the scene; a game's pass reading it, through the
+        // shared request or its own import, gets the same buffers, so the graph orders the two.
+        long[] address = new long[1];
+        graph.add(new ClusteredForwardShading(SceneGeometry.meshlets(renderer), view, SIZE, SIZE,
+            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)).add(new Technique() {
+                @Override
+                public List<Key<?>> provides() {
+                    return List.of();
+                }
+
+                @Override
+                public List<Key<?>> modifies() {
+                    return List.of(Keys.SCENE_COLOR);
+                }
+
+                @Override
+                public void build(GraphBuilder g) {
+                    g.modify(Keys.SCENE_COLOR);
+                    SceneData.Buffers scene = g.request(new SceneData(renderer));
+                    assertThat(g.importBuffer(new com.truesim.engine.graph.ExternalBuffer("game's instances",
+                        renderer.scene().instanceBuffer()))).isSameAs(scene.instances());
+                    assertThat(g.importBuffer(new com.truesim.engine.graph.ExternalBuffer("game's positions",
+                        pool.positions()))).isSameAs(scene.positions());
+                    scene.read(g.pass("game reads the scene"), com.truesim.engine.graph.BufferAccess.STORAGE_READ)
+                        .sideEffects().record(ctx -> address[0] = ctx.address(scene.instances()));
+                }
+            }).output(Keys.SCENE_COLOR, output);
+        frame();
+        assertThat(graph.passes()).contains("meshlet culling", "meshlets early", "game reads the scene");
+        assertThat(address[0]).isEqualTo(renderer.scene().instanceAddress());
+    }
+
+    @Test
     void meshesAddedWhileFramesAreInFlightDrawTheirFirstFrame() {
         // Every frame a mesh is added (and the one from two frames before removed) while frames are in flight, and the
         // quad draws with it at once: the upload is staged without waiting and recorded first thing in the frame.

@@ -275,13 +275,15 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             * MeshletRenderer.BINS);
         g.pass(name + " reset").write(list, BufferAccess.TRANSFER_DST)
             .record(ctx -> Commands.fillBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(list), 0, 16, 0));
-        g.pass(name + " selection").write(list, BufferAccess.STORAGE_WRITE).record(ctx -> {
-            if (camera != null) {
-                view.set(camera, 1, MeshletRenderer.MODE_LIT);
-            }
-            select(ctx.unsafe().commands(), view, ctx.address(list));
-        });
-        GraphBuilder.PassBuilder pass = g.pass(name)
+        SceneData.Buffers scene = g.request(new SceneData(renderer));
+        scene.read(g.pass(name + " selection"), BufferAccess.STORAGE_READ).write(list, BufferAccess.STORAGE_WRITE)
+            .record(ctx -> {
+                if (camera != null) {
+                    view.set(camera, 1, MeshletRenderer.MODE_LIT);
+                }
+                select(ctx.unsafe().commands(), view, ctx.address(list));
+            });
+        GraphBuilder.PassBuilder pass = scene.read(g.pass(name), BufferAccess.DRAW_READ)
             .read(list, BufferAccess.INDIRECT)
             .read(list, BufferAccess.DRAW_READ);
         if (targets.color() != null) {

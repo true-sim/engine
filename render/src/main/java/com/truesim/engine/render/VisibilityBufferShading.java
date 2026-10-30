@@ -124,13 +124,14 @@ public final class VisibilityBufferShading implements Technique {
         // Per bin: its indirect dispatch (x, y, z), its tile count, then its tiles.
         long listBytes = 4L * (4 + (long) tilesX * tilesY);
         Buffer tiles = g.createBuffer("material tiles", listBytes * shade.length);
+        SceneData.Buffers scene = g.request(new SceneData(renderer));
         g.pass("material tiles reset").write(tiles, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(tiles, 0));
-        g.pass("material classification")
+        scene.read(g.pass("material classification"), BufferAccess.STORAGE_READ)
             .read(ids, Access.STORAGE_READ)
             .write(tiles, BufferAccess.STORAGE_WRITE)
             .record(ctx -> ctx.dispatch(classify, push(classifyPush, ctx, ids, null, null, types.size(), 0,
                 ctx.address(tiles)), tilesX, tilesY, 1));
-        GraphBuilder.PassBuilder pass = g.pass("visibility shading")
+        GraphBuilder.PassBuilder pass = scene.read(g.pass("visibility shading"), BufferAccess.STORAGE_READ)
             .read(ids, Access.STORAGE_READ)
             .read(tiles, BufferAccess.INDIRECT)
             .read(tiles, BufferAccess.STORAGE_READ)
