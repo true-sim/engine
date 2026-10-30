@@ -153,9 +153,11 @@ final class GraphCompiler {
                     }
                 }
                 for (int a = 0; a < pass.buffers.length; a++) {
-                    if (g.buffers.get(pass.buffers[a]).external != null) {
+                    ExternalBuffer external = g.buffers.get(pass.buffers[a]).external;
+                    if (external != null && twoFamilies && !external.concurrent) {
                         throw new IllegalStateException(pass.name + " is async but uses the external buffer "
-                            + g.buffers.get(pass.buffers[a]).buffer.name);
+                            + external.name + ", which one queue family owns: give it concurrent sharing (a"
+                            + " GpuBuffer of the graphics and compute families)");
                     }
                     if (pass.bufferAccesses[a].draws) {
                         throw new IllegalStateException(pass.name + " is async but uses "

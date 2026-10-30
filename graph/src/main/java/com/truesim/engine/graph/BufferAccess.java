@@ -1,5 +1,9 @@
 package com.truesim.engine.graph;
 
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -49,7 +53,14 @@ public enum BufferAccess {
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false),
     /** The destination of a copy, fill or update. */
     TRANSFER_DST(VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, true,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT, false);
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT, false),
+    /** Built into (an acceleration structure's storage), or the scratch of the build. Devices with ray tracing only. */
+    ACCELERATION_STRUCTURE_BUILD(VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, true,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false),
+    /** An acceleration structure compute shaders trace rays through (ray queries). Devices with ray tracing only. */
+    ACCELERATION_STRUCTURE_READ(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR,
+        false, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false);
 
     final long stages;
     final long access;

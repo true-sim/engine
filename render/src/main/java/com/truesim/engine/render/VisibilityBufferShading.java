@@ -140,7 +140,7 @@ public final class VisibilityBufferShading implements Technique {
             pass.read(lights, BufferAccess.STORAGE_READ);
         }
         if (shadows != null) {
-            shadows.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
+            shadows.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ, traced);
         }
         pass.record(ctx -> {
             if (shadows != null) {

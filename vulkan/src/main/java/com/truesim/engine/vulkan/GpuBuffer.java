@@ -43,6 +43,7 @@ public final class GpuBuffer implements AutoCloseable {
     private final long handle;
     private final long allocation;
     private final long size;
+    private final boolean concurrent; // shared by several queue families, without ownership transfers
     private final Arena mapping; // closed with the buffer, so the mapped memory cannot be used after it
     private final MemorySegment memory;
     private final long deviceAddress;
@@ -60,6 +61,7 @@ public final class GpuBuffer implements AutoCloseable {
         }
         this.device = device;
         this.size = size;
+        this.concurrent = families.length > 1;
         try (MemoryStack stack = stackPush()) {
             VkBufferCreateInfo info = VkBufferCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO)
@@ -95,6 +97,14 @@ public final class GpuBuffer implements AutoCloseable {
     /** A buffer the CPU writes and reads directly, e.g. for uploads, readbacks and per-frame data. */
     public static GpuBuffer hostVisible(VulkanDevice device, long size, int usage) {
         return new GpuBuffer(device, size, usage, true);
+    }
+
+    /**
+     * Like {@link #hostVisible(VulkanDevice, long, int)}, used by the queues of {@code families} at once (concurrent
+     * sharing), e.g. data the graphics queue and async compute both read.
+     */
+    public static GpuBuffer hostVisible(VulkanDevice device, long size, int usage, int... families) {
+        return new GpuBuffer(device, size, usage, true, java.util.Arrays.stream(families).distinct().toArray());
     }
 
     /**
@@ -188,6 +198,14 @@ public final class GpuBuffer implements AutoCloseable {
     /** Whether the buffer has a device address: made with {@code VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT}. */
     public boolean hasDeviceAddress() {
         return deviceAddress != 0;
+    }
+
+    /**
+     * Whether queues of several families use the buffer at once (concurrent sharing), so none takes it over: e.g. the
+     * graphics queue and an async compute queue.
+     */
+    public boolean concurrent() {
+        return concurrent;
     }
 
     public long size() {

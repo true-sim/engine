@@ -553,8 +553,28 @@ class FrameGraphTest {
                     .record(ctx -> unpack(ctx, buffer, image));
                 g.provide(OUT, image);
             })).output(OUT, output);
-            assertThatIllegalStateException().isThrownBy(() -> device.submitAndWait(device.graphics(), graph::record))
-                .withMessageContaining("external buffer");
+            boolean twoFamilies = device.graphics().family() != device.compute().family();
+            if (twoFamilies) { // one queue family owns it: the graph transfers no ownership
+                assertThatIllegalStateException().isThrownBy(() -> device.submitAndWait(device.graphics(),
+                    graph::record)).withMessageContaining("external buffer").withMessageContaining("concurrent");
+            }
+        }
+        // Shared by both families: async passes use it, ordered with the graphics queue's.
+        try (GpuBuffer shared = GpuBuffer.deviceLocal(device, 4L * SIZE * SIZE, usage, device.graphics().family(),
+            device.compute().family())) {
+            ExternalBuffer state = new ExternalBuffer("shared state", shared);
+            graph.close();
+            graph = new FrameGraph(device, 2).add(new Lambda(List.of(OUT), g -> {
+                Buffer buffer = g.importBuffer(state);
+                g.pass("async write").write(buffer, BufferAccess.TRANSFER_DST).async()
+                    .record(ctx -> ctx.fill(buffer, GREEN));
+                Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+                g.pass("read state").read(buffer, BufferAccess.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                    .record(ctx -> unpack(ctx, buffer, image));
+                g.provide(OUT, image);
+            })).output(OUT, output);
+            assertThat(frame()[0]).isEqualTo(GREEN);
+            assertThat(frame()[SIZE * SIZE - 1]).isEqualTo(GREEN);
         }
     }
 

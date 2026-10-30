@@ -42,7 +42,7 @@ public final class FrameBuffer implements AutoCloseable {
     private final long[] dirtyEnd;
     private boolean closed;
 
-    private FrameBuffer(VulkanDevice device, long size, int usage, FrameSlots slots) {
+    private FrameBuffer(VulkanDevice device, long size, int usage, FrameSlots slots, int... families) {
         this.slots = slots;
         this.size = size;
         int count = slots.count();
@@ -52,7 +52,7 @@ public final class FrameBuffer implements AutoCloseable {
         dirtyEnd = new long[count];
         try {
             for (int s = 0; s < count; s++) {
-                copies[s] = GpuBuffer.hostVisible(device, size, usage);
+                copies[s] = GpuBuffer.hostVisible(device, size, usage, families);
                 memory[s] = copies[s].memory();
                 memory[s].fill((byte) 0);
             }
@@ -77,10 +77,18 @@ public final class FrameBuffer implements AutoCloseable {
 
     /** {@code size} bytes of zeros per frame slot of {@code slots}, host-visible with {@code usage}. */
     public static FrameBuffer create(VulkanDevice device, long size, int usage, FrameSlots slots) {
+        return create(device, size, usage, slots, new int[0]);
+    }
+
+    /**
+     * Like {@link #create(VulkanDevice, long, int, FrameSlots)}, each copy used by the queues of {@code families} at
+     * once (concurrent sharing), e.g. data the graphics queue and async compute both read.
+     */
+    public static FrameBuffer create(VulkanDevice device, long size, int usage, FrameSlots slots, int... families) {
         if (size <= 0) {
             throw new IllegalArgumentException("Buffer size must be positive: " + size);
         }
-        return new FrameBuffer(device, size, usage, slots);
+        return new FrameBuffer(device, size, usage, slots, families);
     }
 
     public long size() {

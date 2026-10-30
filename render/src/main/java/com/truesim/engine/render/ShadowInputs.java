@@ -10,6 +10,7 @@ import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
@@ -35,7 +36,7 @@ public record ShadowInputs() implements Request<ShadowInputs.Set> {
         private final List<Image> images = new ArrayList<>();
         private final List<Buffer> buffers = new ArrayList<>();
         private final List<Consumer<PassContext>> setups = new ArrayList<>();
-        private boolean rays;
+        private Buffer topLevel; // what inline ray shadows trace, or null
 
         /** Shading samples {@code image}. */
         public Set sample(Image image) {
@@ -55,18 +56,34 @@ public record ShadowInputs() implements Request<ShadowInputs.Set> {
             return this;
         }
 
-        /** Some light casts inline ray shadows: shading that can traces them. */
-        public Set rays() {
-            rays = true;
+        /**
+         * Some light casts inline ray shadows: shading that can traces them through {@code topLevel} (a {@code TopLevel}
+         * request's structure), which it reads when it does ({@link #readBy(GraphBuilder.PassBuilder, Access,
+         * BufferAccess, boolean)}).
+         */
+        public Set rays(Buffer topLevel) {
+            this.topLevel = Objects.requireNonNull(topLevel, "topLevel");
             return this;
         }
 
         public boolean traced() {
-            return rays;
+            return topLevel != null;
         }
 
         /** Declares that {@code pass} samples the images with {@code access}, reads the buffers with {@code read}. */
         public GraphBuilder.PassBuilder readBy(GraphBuilder.PassBuilder pass, Access access, BufferAccess read) {
+            return readBy(pass, access, read, false);
+        }
+
+        /**
+         * Like {@link #readBy(GraphBuilder.PassBuilder, Access, BufferAccess)}, for a compute pass that, with
+         * {@code traces}, traces the inline ray shadows: it reads the top level as an acceleration structure too.
+         */
+        public GraphBuilder.PassBuilder readBy(GraphBuilder.PassBuilder pass, Access access, BufferAccess read,
+            boolean traces) {
+            if (traces && topLevel != null) {
+                pass.read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ);
+            }
             for (Image image : images) {
                 pass.read(image, access);
             }

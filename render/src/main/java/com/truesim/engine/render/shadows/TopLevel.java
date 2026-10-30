@@ -13,8 +13,8 @@ import java.util.Objects;
 /**
  * The frame's top-level acceleration structure, rebuilt from {@code view}'s scene's instances relative to its camera
  * (that view's shading traces into it; other views move their rays by the difference): a shared request, so every
- * ray-traced technique of the frame (masks, inline shadows) uses one build. Its result is a small buffer that passes
- * tracing rays read, so they run after the build.
+ * ray-traced technique of the frame (masks, inline shadows) uses one build. Its result is the structure, which passes
+ * tracing rays read ({@link BufferAccess#ACCELERATION_STRUCTURE_READ}), so the graph orders them after the build.
  */
 public record TopLevel(RayTracing rayTracing, RenderView view) implements Request<Buffer> {
 
@@ -26,10 +26,10 @@ public record TopLevel(RayTracing rayTracing, RenderView view) implements Reques
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Buffer build(GraphBuilder g) {
-        Buffer built = g.createBuffer("top level", 16);
         SceneData.Buffers scene = g.request(new SceneData(view.renderer()));
-        g.pass("top level").read(scene.instances(), BufferAccess.STORAGE_READ).write(built, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> rayTracing.buildTopLevel(ctx.unsafe().commands(), view));
-        return built;
+        GraphBuilder.PassBuilder pass = g.pass("top level").read(scene.instances(), BufferAccess.STORAGE_READ);
+        Buffer structure = rayTracing.declareTopLevelBuild(g, pass);
+        pass.record(ctx -> rayTracing.buildTopLevel(ctx.unsafe().commands(), view, true));
+        return structure;
     }
 }
