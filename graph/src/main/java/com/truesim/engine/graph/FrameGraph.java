@@ -7,8 +7,6 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.system.MemoryUtil.memPutFloat;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
-import static org.lwjgl.vulkan.VK10.VK_FILTER_LINEAR;
-import static org.lwjgl.vulkan.VK10.VK_FILTER_NEAREST;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D16_UNORM;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D16_UNORM_S8_UINT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D24_UNORM_S8_UINT;
@@ -18,8 +16,6 @@ import static org.lwjgl.vulkan.VK10.VK_FORMAT_X8_D24_UNORM_PACK32;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_DEPTH_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_STENCIL_BIT;
-import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 import static org.lwjgl.vulkan.VK12.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
@@ -35,14 +31,11 @@ import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_IN
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-import static org.lwjgl.vulkan.VK10.nvkBeginCommandBuffer;
 import static org.lwjgl.vulkan.VK10.vkAllocateCommandBuffers;
 import static org.lwjgl.vulkan.VK10.vkCreateCommandPool;
 import static org.lwjgl.vulkan.VK10.vkCreateSemaphore;
 import static org.lwjgl.vulkan.VK10.vkDestroyCommandPool;
 import static org.lwjgl.vulkan.VK10.vkDestroySemaphore;
-import static org.lwjgl.vulkan.VK10.vkEndCommandBuffer;
-import static org.lwjgl.vulkan.VK10.vkResetCommandPool;
 import static org.lwjgl.vulkan.VK12.VK_SEMAPHORE_TYPE_TIMELINE;
 import static org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
 import static org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
@@ -91,9 +84,7 @@ import org.lwjgl.vulkan.VkCommandBufferSubmitInfo;
 import org.lwjgl.vulkan.VkCommandPoolCreateInfo;
 import org.lwjgl.vulkan.VkDependencyInfo;
 import org.lwjgl.vulkan.VkDebugUtilsLabelEXT;
-import org.lwjgl.vulkan.VkImageBlit;
 import org.lwjgl.vulkan.VkImageMemoryBarrier2;
-import org.lwjgl.vulkan.VkImageSubresourceLayers;
 import org.lwjgl.vulkan.VkImageSubresourceRange;
 import org.lwjgl.vulkan.VkRect2D;
 import org.lwjgl.vulkan.VkRenderingAttachmentInfo;
@@ -468,7 +459,7 @@ public final class FrameGraph implements AutoCloseable {
             bindless.bind(frameStart, true);
             recordSeam(frameStart);
             frameSlots.recordStart(frameStart);
-            Vulkan.check(vkEndCommandBuffer(frameStart), "Could not finish recording");
+            Vulkan.check(Commands.endCommandBuffer(frameStart), "Could not finish recording");
             jobs.parallelFor(chunkBatch.length, 1, recordChunks);
         } else {
             frameStart = null;
@@ -533,7 +524,7 @@ public final class FrameGraph implements AutoCloseable {
                 frameSlots.recordStart(commands); // uploads and such, ahead of every pass on the graphics queue
             }
             recordPasses(commands, chunkFirstPass[c], chunkEndPass[c], last, contexts[worker]);
-            Vulkan.check(vkEndCommandBuffer(commands), "Could not finish recording");
+            Vulkan.check(Commands.endCommandBuffer(commands), "Could not finish recording");
             chunkCommands[c] = commands;
         }
     }
@@ -640,7 +631,7 @@ public final class FrameGraph implements AutoCloseable {
             slot = (slot + 1) % framesInFlight;
             waitFor(slotGraphicsValue[slot], slotComputeValue[slot]);
             for (int i = 0; i < used.length; i++) {
-                Vulkan.check(vkResetCommandPool(device.handle(), pools[slot][i], 0), "Could not reset a command pool");
+                Vulkan.check(Commands.resetCommandPool(device.handle(), pools[slot][i], 0), "Could not reset a command pool");
                 used[i] = 0;
             }
             begun = true;
@@ -705,7 +696,7 @@ public final class FrameGraph implements AutoCloseable {
                 long info = stack.ncalloc(VkCommandBufferBeginInfo.ALIGNOF, 1, VkCommandBufferBeginInfo.SIZEOF);
                 memPutInt(info + VkCommandBufferBeginInfo.STYPE, VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
                 memPutInt(info + VkCommandBufferBeginInfo.FLAGS, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-                Vulkan.check(nvkBeginCommandBuffer(commands, info), "Could not begin recording");
+                Vulkan.check(Commands.beginCommandBuffer(commands, info), "Could not begin recording");
             }
             return commands;
         }

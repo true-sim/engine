@@ -1,7 +1,5 @@
 package com.truesim.engine.vulkan;
 
-import static org.lwjgl.vulkan.KHRSwapchain.nvkQueuePresentKHR;
-import static org.lwjgl.vulkan.KHRSwapchain.vkQueuePresentKHR;
 import static org.lwjgl.vulkan.VK10.vkQueueWaitIdle;
 
 import org.lwjgl.vulkan.VkPresentInfoKHR;
@@ -39,7 +37,7 @@ public final class Queue {
 
     /** Presents swapchain images; returns the {@code VkResult}, as out-of-date and suboptimal are expected. */
     public synchronized int present(VkPresentInfoKHR info) {
-        return vkQueuePresentKHR(handle, info);
+        return Commands.queuePresent(handle, info.address());
     }
 
     /** Submits {@code count} {@code VkSubmitInfo2} structs at {@code submits}, without allocating. */
@@ -49,7 +47,7 @@ public final class Queue {
 
     /** Presents with the {@code VkPresentInfoKHR} at {@code info}, without allocating; returns the {@code VkResult}. */
     public synchronized int present(long info) {
-        return nvkQueuePresentKHR(handle, info);
+        return Commands.queuePresent(handle, info);
     }
 
     /** Waits until everything submitted to this queue has completed. */

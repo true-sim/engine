@@ -13,10 +13,6 @@ import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 import static org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-import static org.lwjgl.vulkan.VK10.VK_TRUE;
-import static org.lwjgl.vulkan.VK10.nvkBeginCommandBuffer;
-import static org.lwjgl.vulkan.VK10.nvkResetFences;
-import static org.lwjgl.vulkan.VK10.nvkWaitForFences;
 import static org.lwjgl.vulkan.VK10.vkAllocateCommandBuffers;
 import static org.lwjgl.vulkan.VK10.vkCreateCommandPool;
 import static org.lwjgl.vulkan.VK10.vkCreateFence;
@@ -24,8 +20,6 @@ import static org.lwjgl.vulkan.VK10.vkCreateSemaphore;
 import static org.lwjgl.vulkan.VK10.vkDestroyCommandPool;
 import static org.lwjgl.vulkan.VK10.vkDestroyFence;
 import static org.lwjgl.vulkan.VK10.vkDestroySemaphore;
-import static org.lwjgl.vulkan.VK10.vkEndCommandBuffer;
-import static org.lwjgl.vulkan.VK10.vkResetCommandPool;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
@@ -158,11 +152,11 @@ public final class Frames implements AutoCloseable {
             try (MemoryStack stack = stackPush()) {
                 long fences = stack.nmalloc(Long.BYTES, Long.BYTES);
                 memPutLong(fences, fence);
-                Vulkan.check(nvkWaitForFences(device.handle(), 1, fences, VK_TRUE, Long.MAX_VALUE),
+                Vulkan.check(Commands.waitForFences(device.handle(), 1, fences, true, Long.MAX_VALUE),
                     "Could not wait for a frame");
             }
             for (int w = 0; w < pools.length; w++) {
-                Vulkan.check(vkResetCommandPool(device.handle(), pools[w], 0), "Could not reset a command pool");
+                Vulkan.check(Commands.resetCommandPool(device.handle(), pools[w], 0), "Could not reset a command pool");
                 recorded[w] = false;
             }
         }
@@ -183,14 +177,14 @@ public final class Frames implements AutoCloseable {
                 long info = stack.ncalloc(VkCommandBufferBeginInfo.ALIGNOF, 1, VkCommandBufferBeginInfo.SIZEOF);
                 memPutInt(info + VkCommandBufferBeginInfo.STYPE, VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
                 memPutInt(info + VkCommandBufferBeginInfo.FLAGS, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-                Vulkan.check(nvkBeginCommandBuffer(commands[worker], info), "Could not begin recording");
+                Vulkan.check(Commands.beginCommandBuffer(commands[worker], info), "Could not begin recording");
             }
             return commands[worker];
         }
 
         /** Finishes recording worker {@code worker}'s command buffer. */
         public void end(int worker) {
-            Vulkan.check(vkEndCommandBuffer(commands[worker]), "Could not finish recording");
+            Vulkan.check(Commands.endCommandBuffer(commands[worker]), "Could not finish recording");
             recorded[worker] = true;
         }
 
@@ -230,7 +224,7 @@ public final class Frames implements AutoCloseable {
                 }
                 long fences = stack.nmalloc(Long.BYTES, Long.BYTES);
                 memPutLong(fences, fence);
-                Vulkan.check(nvkResetFences(device.handle(), 1, fences), "Could not reset a fence");
+                Vulkan.check(Commands.resetFences(device.handle(), 1, fences), "Could not reset a fence");
                 queue.submit(1, submit, fence);
             }
         }
