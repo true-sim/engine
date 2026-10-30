@@ -3,6 +3,10 @@
 // or per light: materials, shadow maps) must go through NonUniformResourceIndex, or a wave reads one lane's image.
 module bindless;
 
+/** A struct the host writes into buffers that shaders read through pointers: the build generates its layout as Java. */
+[__AttributeUsage(_AttributeTargets.Struct)]
+public struct HostLayoutAttribute {};
+
 [[vk::binding(0, 0)]]
 public Texture2D<float4> textures[];
 

@@ -38,6 +38,7 @@ public struct Level
  * part and the rest (position + positionLow), about 48 bits: precise anywhere in a large world. Loaded through
  * relative(), which makes it relative to a view's camera; everything after works camera-relative, in floats.
  */
+[HostLayout]
 public struct Instance
 {
     public float4 rotation;        // quaternion x, y, z, w

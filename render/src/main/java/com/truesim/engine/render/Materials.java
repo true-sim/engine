@@ -4,6 +4,7 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.render.layout.MaterialLayout;
 import com.truesim.engine.render.materials.MetallicRoughnessMaterial;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
@@ -35,7 +36,7 @@ import java.util.Set;
 public final class Materials implements AutoCloseable {
 
     /** A material's slot. */
-    static final int SLOT_BYTES = 32;
+    static final int SLOT_BYTES = MaterialLayout.BYTES;
     /** Material types a table may name: their ids fill a header's 8 bits. */
     public static final int MAX_TYPES = 256;
     /** Room for blocks per material by default: metallic-roughness and a clear coat take 96. */
@@ -431,20 +432,20 @@ public final class Materials implements AutoCloseable {
         material.parameters().write(scratch, 0);
         long slot = (long) SLOT_BYTES * id;
         for (int s = 0; s < MAX_FEATURE_SECTIONS; s++) {
-            table.putInt(slot + 20 + 4L * s, 0);
+            table.putInt(slot + MaterialLayout.FEATURES + 4L * s, 0);
         }
         long o = align(material.parameters().bytes());
         for (MaterialFeature feature : material.features()) {
             feature.write(scratch, o);
-            table.putInt(slot + 20 + 4L * Integer.numberOfTrailingZeros(feature.feature()), (int) (block + o));
+            table.putInt(slot + MaterialLayout.FEATURES + 4L * Integer.numberOfTrailingZeros(feature.feature()), (int) (block + o));
             o += align(feature.bytes());
         }
         table.put(block, scratch, 0, bytes);
-        table.putInt(slot, material.header(typeId));
-        table.putInt(slot + 4, (int) block);
-        table.putInt(slot + 8, material.parameters().maskTexture());
-        table.putFloat(slot + 12, material.parameters().maskAlpha());
-        table.putInt(slot + 16, 0);
+        table.putInt(slot + MaterialLayout.HEADER, material.header(typeId));
+        table.putInt(slot + MaterialLayout.PARAMETERS, (int) block);
+        table.putInt(slot + MaterialLayout.MASK_TEXTURE, material.parameters().maskTexture());
+        table.putFloat(slot + MaterialLayout.MASK_ALPHA, material.parameters().maskAlpha());
+        table.putInt(slot + MaterialLayout.GEOMETRY, 0);
         materials[id] = material;
         return true;
     }

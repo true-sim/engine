@@ -62,6 +62,7 @@ public static const int SRGB = 1;
 // ---------------------------------------------------------------------------------------------- the slot
 
 /** One material's slot: 32 bytes. Offsets count from the table's start. */
+[HostLayout]
 public struct Material
 {
     public uint header;            // type bits 0-7 (0: metallic-roughness), double-sided bit 8, masked bit 9,

@@ -1,6 +1,7 @@
 package com.truesim.engine.render;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.render.layout.InstanceLayout;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.RecordBuffer;
@@ -43,7 +44,7 @@ import org.lwjgl.vulkan.VkCommandBuffer;
 public final class GpuScene implements AutoCloseable {
 
     /** Bytes per instance record. */
-    public static final int INSTANCE_BYTES = 64;
+    public static final int INSTANCE_BYTES = InstanceLayout.BYTES;
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfFloat FLOAT =
         ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -178,25 +179,25 @@ public final class GpuScene implements AutoCloseable {
         long o = instances.offset(entry);
         check(mesh, material);
         MemorySegment m = instances.changes();
-        m.set(FLOAT, o, qx);
-        m.set(FLOAT, o + 4, qy);
-        m.set(FLOAT, o + 8, qz);
-        m.set(FLOAT, o + 12, qw);
+        m.set(FLOAT, o + InstanceLayout.ROTATION, qx);
+        m.set(FLOAT, o + InstanceLayout.ROTATION + 4, qy);
+        m.set(FLOAT, o + InstanceLayout.ROTATION + 8, qz);
+        m.set(FLOAT, o + InstanceLayout.ROTATION + 12, qw);
         float hx = (float) x;
         float hy = (float) y;
         float hz = (float) z;
-        m.set(FLOAT, o + 16, hx);
-        m.set(FLOAT, o + 20, hy);
-        m.set(FLOAT, o + 24, hz);
-        m.set(INT, o + 28, mesh | LIVE | (castsShadows ? CASTS_SHADOWS : 0));
-        m.set(FLOAT, o + 32, sx);
-        m.set(FLOAT, o + 36, sy);
-        m.set(FLOAT, o + 40, sz);
-        m.set(INT, o + 44, material);
-        m.set(FLOAT, o + 48, (float) (x - hx));
-        m.set(FLOAT, o + 52, (float) (y - hy));
-        m.set(FLOAT, o + 56, (float) (z - hz));
-        m.set(INT, o + 60, layers);
+        m.set(FLOAT, o + InstanceLayout.POSITION, hx);
+        m.set(FLOAT, o + InstanceLayout.POSITION + 4, hy);
+        m.set(FLOAT, o + InstanceLayout.POSITION + 8, hz);
+        m.set(INT, o + InstanceLayout.MESH, mesh | LIVE | (castsShadows ? CASTS_SHADOWS : 0));
+        m.set(FLOAT, o + InstanceLayout.SCALE, sx);
+        m.set(FLOAT, o + InstanceLayout.SCALE + 4, sy);
+        m.set(FLOAT, o + InstanceLayout.SCALE + 8, sz);
+        m.set(INT, o + InstanceLayout.MATERIAL_BASE, material);
+        m.set(FLOAT, o + InstanceLayout.POSITION_LOW, (float) (x - hx));
+        m.set(FLOAT, o + InstanceLayout.POSITION_LOW + 4, (float) (y - hy));
+        m.set(FLOAT, o + InstanceLayout.POSITION_LOW + 8, (float) (z - hz));
+        m.set(INT, o + InstanceLayout.LAYERS, layers);
     }
 
     private void check(int mesh, int material) {
