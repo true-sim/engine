@@ -51,6 +51,7 @@ import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
 import static org.lwjgl.vulkan.VK13.nvkCmdPipelineBarrier2;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.common.graph.Id;
 import com.truesim.engine.graph.GraphBuilder.PassInfo;
 import com.truesim.engine.graph.GraphCompiler.HistoryPlan;
 import com.truesim.engine.graph.ResourcePool.HistoryPair;
@@ -132,7 +133,7 @@ public final class FrameGraph implements AutoCloseable {
     private final FrameSlots frameSlots;
     private final boolean ownsSlots;
     private final List<Technique> techniques = new ArrayList<>();
-    private final Map<Key, ExternalImage> outputs = new LinkedHashMap<>();
+    private final Map<Key<Image>, ExternalImage> outputs = new LinkedHashMap<>();
     private final Map<Class<?>, Implementation<?, ?>> implementations = new HashMap<>();
     private final Map<Object, AutoCloseable> cache = new LinkedHashMap<>();
     private final ResourcePool resources; // the images and buffers kept across builds
@@ -253,12 +254,19 @@ public final class FrameGraph implements AutoCloseable {
         return this;
     }
 
+    /** Removes the technique whose {@link Technique#id() id} is {@code id}, if there is one; the graph rebuilds. */
+    public FrameGraph remove(Id<? extends Technique> id) {
+        Objects.requireNonNull(id, "id");
+        dirty |= techniques.removeIf(t -> t.id() == id);
+        return this;
+    }
+
     /**
      * Swaps in {@code technique} for the techniques providing any of its keys, e.g. one lighting technique for another:
      * whoever requires those keys gets the new one. Removes nothing if none does. The graph rebuilds on its next frame.
      */
     public FrameGraph replace(Technique technique) {
-        List<Key> keys = technique.provides();
+        List<Key<?>> keys = technique.provides();
         techniques.removeIf(t -> t.provides().stream().anyMatch(keys::contains));
         return add(technique);
     }
@@ -278,14 +286,14 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     /** Makes each frame end with result {@code key} in {@code target}; the graph rebuilds on its next frame. */
-    public FrameGraph output(Key key, ExternalImage target) {
+    public FrameGraph output(Key<Image> key, ExternalImage target) {
         outputs.put(Objects.requireNonNull(key, "key"), Objects.requireNonNull(target, "target"));
         dirty = true;
         return this;
     }
 
     /** Stops outputting {@code key}. */
-    public FrameGraph removeOutput(Key key) {
+    public FrameGraph removeOutput(Key<Image> key) {
         dirty |= outputs.remove(key) != null;
         return this;
     }

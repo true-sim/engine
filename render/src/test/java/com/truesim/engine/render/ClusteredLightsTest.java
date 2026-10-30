@@ -45,7 +45,7 @@ class ClusteredLightsTest {
 
     private static final int WIDTH = 256;
     private static final int HEIGHT = 128;
-    private static final Key OUT = Key.of("out");
+    private static final Key<Image> OUT = Key.image("test.out");
 
     private VulkanInstance instance;
     private VulkanDevice device;
@@ -244,13 +244,13 @@ class ClusteredLightsTest {
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
             graph.add(clustered).add(new Technique() {
                 @Override
-                public List<Key> provides() {
+                public List<Key<?>> provides() {
                     return List.of(OUT);
                 }
 
                 @Override
                 public void build(GraphBuilder g) {
-                    com.truesim.engine.graph.Buffer lights = g.requireBuffer(Keys.LIGHT_LIST);
+                    com.truesim.engine.graph.Buffer lights = g.require(Keys.LIGHT_LIST);
                     g.pass("read back").read(lights, BufferAccess.TRANSFER_SRC).sideEffects()
                         .record(ctx -> copy(ctx.commands(), ctx.buffer(lights), list.handle(), bytes));
                     Image image = g.create("out", 4, 4, VK_FORMAT_R8G8B8A8_UNORM);

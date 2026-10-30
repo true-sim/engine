@@ -74,19 +74,19 @@ public final class RayTracedShadows implements Technique {
     }
 
     @Override
-    public List<Key> provides() {
+    public List<Key<?>> provides() {
         return List.of();
     }
 
     @Override
-    public List<Key> modifies() {
+    public List<Key<?>> modifies() {
         return List.of(Keys.LIGHT_LIST);
     }
 
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
-        g.modifyBuffer(Keys.LIGHT_LIST);
+        g.modify(Keys.LIGHT_LIST);
         Pipeline pipeline = g.cached(RayTracedShadows.class, device -> {
             try (ShaderModule shader = ShaderModule.load(device, "shaders/shadows/traced.spv")) {
                 return Pipeline.compute(device, shader, "tracedMain", PUSH_BYTES);

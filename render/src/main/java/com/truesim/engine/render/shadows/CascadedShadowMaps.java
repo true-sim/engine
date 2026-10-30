@@ -223,19 +223,19 @@ public final class CascadedShadowMaps implements Technique {
     }
 
     @Override
-    public List<Key> provides() {
+    public List<Key<?>> provides() {
         return List.of();
     }
 
     @Override
-    public List<Key> modifies() {
+    public List<Key<?>> modifies() {
         return List.of(Keys.LIGHT_LIST);
     }
 
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
-        g.modifyBuffer(Keys.LIGHT_LIST);
+        g.modify(Keys.LIGHT_LIST);
         ShadowInputs.Set inputs = g.request(new ShadowInputs());
         Image[] maps = new Image[cascades];
         for (int i = 0; i < cascades; i++) {

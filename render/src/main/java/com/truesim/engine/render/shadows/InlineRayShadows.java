@@ -48,19 +48,19 @@ public final class InlineRayShadows implements Technique {
     }
 
     @Override
-    public List<Key> provides() {
+    public List<Key<?>> provides() {
         return List.of();
     }
 
     @Override
-    public List<Key> modifies() {
+    public List<Key<?>> modifies() {
         return List.of(Keys.LIGHT_LIST);
     }
 
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
-        g.modifyBuffer(Keys.LIGHT_LIST);
+        g.modify(Keys.LIGHT_LIST);
         Buffer topLevel = g.request(new TopLevel(rayTracing, view));
         g.request(new ShadowInputs()).after(topLevel).rays().setup(ctx -> {
             lights.shadowRay(entry, rayTracing.slot(), offset, view.position(0), view.position(1),
