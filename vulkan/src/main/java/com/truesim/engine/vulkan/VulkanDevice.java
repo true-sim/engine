@@ -230,7 +230,8 @@ public final class VulkanDevice implements AutoCloseable {
                 .scalarBlockLayout(true)
                 .shaderInt8(true)
                 .storageBuffer8BitAccess(true)
-                .drawIndirectCount(true);
+                .drawIndirectCount(true)
+                .hostQueryReset(true); // timings: the graph resets its queries from the host
             VkPhysicalDeviceVulkan11Features features11 = VkPhysicalDeviceVulkan11Features.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES)
                 .pNext(features12.address())
@@ -365,6 +366,7 @@ public final class VulkanDevice implements AutoCloseable {
         check(missing, features.features().multiDrawIndirect(), "multiDrawIndirect");
         check(missing, features.features().drawIndirectFirstInstance(), "drawIndirectFirstInstance");
         check(missing, features12.drawIndirectCount(), "drawIndirectCount");
+        check(missing, features12.hostQueryReset(), "hostQueryReset");
         check(missing, features13.dynamicRendering(), "dynamicRendering");
         check(missing, features13.synchronization2(), "synchronization2");
         check(missing, features13.maintenance4(), "maintenance4");

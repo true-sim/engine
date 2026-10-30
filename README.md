@@ -601,6 +601,12 @@ that declare how they use each image. The graph does the rest:
 - **History:** `g.history(name, desc)` keeps an image from frame to frame: this frame writes
   `current()`, and `previous()` holds what the frame before wrote (`ctx.historyValid(history)` says whether there
   was one). The graph swaps the two images' roles every frame and carries their state across the frame boundary.
+- **Readbacks:** `g.readback(name, buffer, offset, bytes, receiver)` or `g.readback(name, image.mip(0), receiver)` copies
+  off the GPU each frame; the receiver gets the bytes on the render thread once the GPU finished that frame (in the
+  next `beginFrame` of its slot, or the next `record`), with nothing to invalidate.
+- **Tooling:** every pass records inside a debug label of its name where the instance has debug utils (validation),
+  so captures and validation messages name it. `graph.timings(true)` times each pass on the GPU; `graph.timings()`
+  has the last finished frame's milliseconds per pass, read without allocating.
 
 ```java
 graph.add(new ClusteredForwardShading(geometry, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT))

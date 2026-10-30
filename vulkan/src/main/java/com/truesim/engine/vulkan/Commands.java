@@ -9,6 +9,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.invoke.MethodHandle;
 import org.lwjgl.vulkan.VKCapabilitiesDevice;
 import org.lwjgl.vulkan.VkCommandBuffer;
+import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkQueue;
 
 /**
@@ -51,8 +52,13 @@ public final class Commands {
     private static final int COPY_IMAGE_TO_BUFFER = 21;
     private static final int BLIT = 22;
     private static final int CLEAR_COLOR = 23;
+    private static final int BEGIN_LABEL = 24;
+    private static final int END_LABEL = 25;
+    private static final int TIMESTAMP = 26;
+    private static final int RESET_QUERIES = 27;
+    private static final int QUERY_RESULTS = 28;
     // Immutable entries: a thread seeing an older one only wraps the address again.
-    private static final Fn[] FUNCTIONS = new Fn[24];
+    private static final Fn[] FUNCTIONS = new Fn[29];
 
     static {
         java.util.Arrays.fill(FUNCTIONS, NONE);
@@ -90,6 +96,12 @@ public final class Commands {
         JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT));
     private static final MethodHandle H_CLEAR_COLOR = handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG,
         JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle H_TIMESTAMP =
+        handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle H_RESET_QUERIES =
+        handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT));
+    private static final MethodHandle H_QUERY_RESULTS = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG,
+        JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT));
     private static final MethodHandle H_SUBMIT = LINKER.downcallHandle(
         FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_LONG));
 
@@ -345,6 +357,67 @@ public final class Commands {
         try {
             H_CLEAR_COLOR.invokeExact(function(CLEAR_COLOR, of(commands).vkCmdClearColorImage), commands.address(),
                 image, layout, color, rangeCount, ranges);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /**
+     * {@code vkCmdBeginDebugUtilsLabelEXT} with the {@code VkDebugUtilsLabelEXT} at {@code label}, where the instance
+     * has debug utils (with validation, say); otherwise nothing. Returns whether it began a label.
+     */
+    public static boolean beginLabel(VkCommandBuffer commands, long label) {
+        long address = commands.getDevice().getPhysicalDevice().getInstance().getCapabilities()
+            .vkCmdBeginDebugUtilsLabelEXT;
+        if (address == 0) {
+            return false;
+        }
+        try {
+            H_ONE_POINTER.invokeExact(function(BEGIN_LABEL, address), commands.address(), label);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+        return true;
+    }
+
+    /** {@code vkCmdEndDebugUtilsLabelEXT}, ending what {@link #beginLabel} began. */
+    public static void endLabel(VkCommandBuffer commands) {
+        long address = commands.getDevice().getPhysicalDevice().getInstance().getCapabilities()
+            .vkCmdEndDebugUtilsLabelEXT;
+        try {
+            H_NONE.invokeExact(function(END_LABEL, address), commands.address());
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkCmdWriteTimestamp2}. */
+    public static void writeTimestamp2(VkCommandBuffer commands, long stage, long pool, int query) {
+        try {
+            H_TIMESTAMP.invokeExact(function(TIMESTAMP, of(commands).vkCmdWriteTimestamp2), commands.address(), stage,
+                pool, query);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkResetQueryPool}, from the host. */
+    public static void resetQueryPool(VkDevice device, long pool, int first, int count) {
+        try {
+            H_RESET_QUERIES.invokeExact(function(RESET_QUERIES, device.getCapabilities().vkResetQueryPool),
+                device.address(), pool, first, count);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkGetQueryPoolResults} into the {@code size} bytes at {@code data}; returns the result. */
+    public static int getQueryPoolResults(VkDevice device, long pool, int first, int count, long size, long data,
+        long stride, int flags) {
+        try {
+            return (int) H_QUERY_RESULTS.invokeExact(function(QUERY_RESULTS,
+                device.getCapabilities().vkGetQueryPoolResults), device.address(), pool, first, count, size, data,
+                stride, flags);
         } catch (Throwable e) {
             throw failed(e);
         }

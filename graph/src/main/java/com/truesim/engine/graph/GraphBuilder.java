@@ -112,6 +112,7 @@ public final class GraphBuilder {
     final List<BufferInfo> buffers = new ArrayList<>();
     final List<History> histories = new ArrayList<>();
     final List<PassInfo> passes = new ArrayList<>();
+    final List<ReadbackPlan> readbacks = new ArrayList<>();
     private final Resolution<Key<?>, Technique> resolution;
     private final Map<ExternalImage, Image> externals = new IdentityHashMap<>();
     private final Map<ExternalBuffer, Buffer> externalBuffers = new IdentityHashMap<>();
@@ -270,6 +271,40 @@ public final class GraphBuilder {
                 modules.values().forEach(ShaderModule::close);
             }
         });
+    }
+
+    // ---------------------------------------------------------------- readbacks
+
+    /**
+     * Copies {@code bytes} at {@code offset} of {@code from} off the GPU each frame, for {@code receiver}, which gets
+     * them once the GPU finished the frame (a frame or more later, on the render thread): GPU culling statistics, a
+     * picking result. The copy is a pass of its own, after {@code from}'s writers.
+     */
+    public void readback(String name, Buffer from, long offset, long bytes, Readback receiver) {
+        Objects.requireNonNull(receiver, "receiver");
+        if (offset < 0 || bytes <= 0 || offset + bytes > from.size()) {
+            throw new IllegalArgumentException("Reading back " + bytes + " bytes at " + offset + " of " + from);
+        }
+        ReadbackPlan plan = new ReadbackPlan(receiver, bytes);
+        readbacks.add(plan);
+        pass(name).read(from, BufferAccess.TRANSFER_SRC).sideEffects().record(ctx -> ctx.readback(plan, from, offset));
+    }
+
+    /**
+     * Copies one mip level of an image (its layers) off the GPU each frame, tightly packed, for {@code receiver}, as
+     * {@link #readback(String, Buffer, long, long, Readback)} does: a screenshot, a probe of the depth.
+     */
+    public void readback(String name, Subresource from, Readback receiver) {
+        Objects.requireNonNull(receiver, "receiver");
+        if (!from.oneMip()) {
+            throw new IllegalArgumentException("Reading back " + from + ": one mip level");
+        }
+        Image image = from.image();
+        long bytes = (long) image.format.bytes() * Math.max(1, image.width >> from.baseMip())
+            * Math.max(1, image.height >> from.baseMip()) * from.layerCount();
+        ReadbackPlan plan = new ReadbackPlan(receiver, bytes);
+        readbacks.add(plan);
+        pass(name).read(from, Access.TRANSFER_SRC).sideEffects().record(ctx -> ctx.readback(plan, from));
     }
 
     private record ComputeKey(String shader, String entry, int pushBytes, List<Integer> constants) {
