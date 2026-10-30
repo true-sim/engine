@@ -984,9 +984,9 @@ class GraphTechniquesTest {
             .output(Keys.SCENE_COLOR, output);
         frame();
         java.util.List<String> passes = graph.passes();
-        assertThat(passes).startsWith("meshlet culling", "meshlets early", "depth pyramid of scene depth, level 0")
-            .endsWith("meshlets late culling", "meshlets late"); // a pass per pyramid level between
-        assertThat(passes.subList(2, passes.size() - 2)).allMatch(p -> p.startsWith("depth pyramid of scene depth, level "));
+        assertThat(passes).startsWith("scene upload", "meshlet culling", "meshlets early",
+            "depth pyramid of scene depth, level 0").endsWith("meshlets late culling", "meshlets late"); // a pass per level
+        assertThat(passes.subList(3, passes.size() - 2)).allMatch(p -> p.startsWith("depth pyramid of scene depth, level "));
         assertThat(graph.pooledImages()).isEqualTo(2); // depth and its pyramid: the color is the target
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
         assertThat(red(1, 1)).isZero(); // blue clear color
@@ -996,7 +996,7 @@ class GraphTechniquesTest {
         graph = new FrameGraph(device, 2).add(MeshletBenchmark.forward(view, SIZE, SIZE).occlusion(false))
             .output(Keys.SCENE_COLOR, output);
         frame();
-        assertThat(graph.passes()).containsExactly("meshlet culling", "meshlets");
+        assertThat(graph.passes()).containsExactly("scene upload", "meshlet culling", "meshlets");
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
     }
 

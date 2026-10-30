@@ -14,6 +14,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
 import java.util.Objects;
+import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
  * Every mesh's GPU data in shared device-local buffers, one per kind, as scene's {@link MeshData} lays it out:
@@ -459,6 +460,16 @@ public final class GeometryPool implements AutoCloseable {
             throw new IllegalArgumentException("No mesh " + mesh);
         }
         return meshTable.memory().get(U32, (long) MESH_ENTRY_BYTES * mesh + offset);
+    }
+
+    /** From now on a frame graph's scene upload pass ({@link SceneData}) records the pool's uploads, not frame starts. */
+    void uploadInPasses() {
+        uploads.flushInPasses();
+    }
+
+    /** Records the waiting uploads for that pass, which declares the pool's buffers as transfer destinations. */
+    void uploadInPass(VkCommandBuffer commands) {
+        uploads.flushInPass(commands);
     }
 
     /** The pool's uploads, for work outside frames that reads meshes added since the last frame. */

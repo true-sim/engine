@@ -278,6 +278,16 @@ public final class GpuScene implements AutoCloseable {
         instances.upload(commands);
     }
 
+    /** From now on a frame graph's scene upload pass ({@link SceneData}) uploads the instances, not frame starts. */
+    void uploadInPasses() {
+        instances.uploadInPasses();
+    }
+
+    /** Uploads the instances for that pass, which declares it writes them with compute. */
+    void uploadInPass(VkCommandBuffer commands) {
+        instances.uploadInPass(commands);
+    }
+
     /** The instances' device address, for shaders: id i's record at {@code instanceAddress() + i * INSTANCE_BYTES}. */
     public long instanceAddress() {
         return instances.deviceAddress();

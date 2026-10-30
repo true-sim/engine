@@ -112,7 +112,9 @@ read 0; three 4-byte loads read the right values.
 - Proof: experiments while working on [#152](https://github.com/true-sim/engine/issues/152).
 - Rule: write debugging values from a fragment or compute shader.
 
-**On the integrated GPU, drawing a material type other than metallic-roughness can lose the device.** Cause not found;
+**On the integrated GPU, drawing a material type other than metallic-roughness can lose the device.** Since the
+uploads became a graph pass, `SceneSyncTest` loses it every run there. It comes with forward shading checking the
+material's type, whatever the shape of the check; not the barriers, the lean path or the data. Cause not found;
 everything checked and measured is in [#151](https://github.com/true-sim/engine/issues/151).
 
 **Features and sharing must match the device.** Cube array image views failed validation until `imageCubeArray` was
