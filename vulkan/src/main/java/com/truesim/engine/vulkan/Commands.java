@@ -70,7 +70,6 @@ public final class Commands {
         java.util.Arrays.fill(FUNCTIONS, NONE);
     }
 
-    private static final Linker.Option CRITICAL = Linker.Option.critical(false);
     private static final MethodHandle H_BARRIER = handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG));
     private static final MethodHandle H_BIND_PIPELINE =
         handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_INT, JAVA_LONG));
@@ -111,20 +110,24 @@ public final class Commands {
     private static final MethodHandle H_RESET_POOL = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_INT));
     private static final MethodHandle H_RESULT_POINTER = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
     private static final MethodHandle H_RESULT = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
-    private static final MethodHandle H_WAIT_FENCES = LINKER.downcallHandle( // blocks: not critical
-        FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle H_WAIT_FENCES =
+        handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
     private static final MethodHandle H_RESET_FENCES =
         handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
-    private static final MethodHandle H_PRESENT = LINKER.downcallHandle( // may block on the display: not critical
-        FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle H_PRESENT = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
     private static final MethodHandle H_SUBMIT = LINKER.downcallHandle(
         FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_LONG));
 
     private Commands() {
     }
 
+    /**
+     * A downcall handle of {@code descriptor}. Not critical: the validation layer reports errors by calling the
+     * instance's debug callback (an upcall) from inside the very call that went wrong, and an upcall out of a critical
+     * downcall crashes the JVM (pitfalls.md); what critical would save is a few nanoseconds a call.
+     */
     private static MethodHandle handle(FunctionDescriptor descriptor) {
-        return LINKER.downcallHandle(descriptor, CRITICAL);
+        return LINKER.downcallHandle(descriptor);
     }
 
     /** Function {@code slot} at {@code address}: wrapped the first time, and when a device has it elsewhere. */

@@ -132,9 +132,22 @@ class VulkanTest {
                 assertThat(gpu.supports("VK_no_such_extension")).isFalse();
             }
             Gpu best = instance.bestGpu();
-            for (Gpu gpu : gpus) {
-                assertThat(best.type().compareTo(gpu.type())).isNotPositive();
+            if (System.getenv(VulkanInstance.GPU_VARIABLE) == null && System.getProperty("truesim.gpu") == null) {
+                for (Gpu gpu : gpus) {
+                    assertThat(best.type().compareTo(gpu.type())).isNotPositive();
+                }
             }
+            // Chosen by index, type or part of the name.
+            for (int i = 0; i < gpus.size(); i++) {
+                Gpu gpu = gpus.get(i);
+                assertThat(instance.gpu(String.valueOf(i)).name()).isEqualTo(gpu.name());
+                assertThat(instance.gpu(" " + gpu.type().name().toLowerCase(java.util.Locale.ROOT) + " ").type())
+                    .isEqualTo(gpu.type());
+                assertThat(instance.gpu(gpu.name().toUpperCase(java.util.Locale.ROOT)).name()).isEqualTo(gpu.name());
+            }
+            assertThatThrownBy(() -> instance.gpu("no such gpu")).isInstanceOf(VulkanException.class)
+                .hasMessageContaining("0: " + gpus.getFirst().name());
+            assertThatThrownBy(() -> instance.gpu(String.valueOf(gpus.size()))).isInstanceOf(VulkanException.class);
             assertThat(instance.validationErrors()).isZero();
         }
     }

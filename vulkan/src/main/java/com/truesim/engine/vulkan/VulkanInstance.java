@@ -42,6 +42,7 @@ import java.nio.LongBuffer;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -358,11 +359,70 @@ public final class VulkanInstance implements AutoCloseable {
         }
     }
 
-    /** The most capable GPU: discrete before integrated before others, then the one with most memory. */
+    /** The environment variable (or, as {@code truesim.gpu}, system property) that picks the GPU {@link #bestGpu} gives. */
+    public static final String GPU_VARIABLE = "TRUESIM_GPU";
+
+    /**
+     * The most capable GPU: discrete before integrated before others, then the one with most memory. Unless
+     * {@value #GPU_VARIABLE} (or the system property {@code truesim.gpu}) names another, as {@link #gpu(String)} reads
+     * it: {@code TRUESIM_GPU=integrated} runs an application, or the tests, on the integrated GPU.
+     */
     public Gpu bestGpu() {
-        return gpus().stream()
-            .min(Comparator.comparing(Gpu::type).thenComparing(Comparator.comparingLong(Gpu::deviceLocalMemory).reversed()))
-            .orElseThrow(() -> new VulkanException("No GPU supports Vulkan 1.3"));
+        String preference = System.getProperty("truesim.gpu", System.getenv(GPU_VARIABLE));
+        if (preference != null && !preference.isBlank()) {
+            Gpu chosen = gpu(preference);
+            LOG.info("GPU {} chosen by {}={}", chosen.name(), GPU_VARIABLE, preference);
+            return chosen;
+        }
+        return ranked(gpus()).getFirst();
+    }
+
+    /**
+     * The GPU {@code preference} names: a type ({@code discrete}, {@code integrated}, {@code virtual}, {@code cpu}: the
+     * most capable of that type), an index into {@link #gpus()}, or a part of a GPU's name (any case, e.g.
+     * {@code "radeon(tm) graphics"}, {@code "llvmpipe"}). Throws, listing the GPUs, when none matches.
+     */
+    public Gpu gpu(String preference) {
+        String wanted = preference.strip().toLowerCase(Locale.ROOT);
+        List<Gpu> gpus = ranked(gpus());
+        Gpu chosen = null;
+        if (wanted.chars().allMatch(Character::isDigit) && !wanted.isEmpty()) {
+            int index = Integer.parseInt(wanted);
+            List<Gpu> listed = gpus();
+            chosen = index < listed.size() ? listed.get(index) : null;
+        } else {
+            for (GpuType type : GpuType.values()) {
+                if (type.name().toLowerCase(Locale.ROOT).equals(wanted)) {
+                    chosen = gpus.stream().filter(g -> g.type() == type).findFirst().orElse(null);
+                    break;
+                }
+            }
+            if (chosen == null) {
+                chosen = gpus.stream().filter(g -> g.name().toLowerCase(Locale.ROOT).contains(wanted)).findFirst()
+                    .orElse(null);
+            }
+        }
+        if (chosen == null) {
+            List<String> names = new ArrayList<>();
+            List<Gpu> listed = gpus();
+            for (int i = 0; i < listed.size(); i++) {
+                names.add(i + ": " + listed.get(i).name() + " (" + listed.get(i).type().name().toLowerCase(Locale.ROOT)
+                    + ")");
+            }
+            throw new VulkanException("No GPU matches \"" + preference + "\"; there are " + names);
+        }
+        return chosen;
+    }
+
+    /** {@code gpus}, most capable first: discrete before integrated before others, then by memory. */
+    private static List<Gpu> ranked(List<Gpu> gpus) {
+        if (gpus.isEmpty()) {
+            throw new VulkanException("No GPU supports Vulkan 1.3");
+        }
+        List<Gpu> ranked = new ArrayList<>(gpus);
+        ranked.sort(Comparator.comparing(Gpu::type)
+            .thenComparing(Comparator.comparingLong(Gpu::deviceLocalMemory).reversed()));
+        return ranked;
     }
 
     // ---------------------------------------------------------------- surfaces
