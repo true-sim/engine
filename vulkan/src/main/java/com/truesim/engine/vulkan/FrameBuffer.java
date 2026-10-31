@@ -51,9 +51,13 @@ public final class FrameBuffer implements AutoCloseable {
         memory = new MemorySegment[count];
         dirtyStart = new long[count];
         dirtyEnd = new long[count];
+        boolean copiesOnly = !slots.isSingle(); // mirrored: the CPU writes the copies, reading its master only
         try {
             for (int s = 0; s < count; s++) {
-                copies[s] = GpuBuffer.hostVisible(device, size, usage, families);
+                // Write-combined (or resizable-BAR) memory where the CPU only writes, in order: copies the GPU reads
+                // fast. With one copy the CPU reads it too.
+                copies[s] = copiesOnly ? GpuBuffer.hostWritten(device, size, usage, families)
+                    : GpuBuffer.hostVisible(device, size, usage, families);
                 memory[s] = copies[s].memory();
                 memory[s].fill((byte) 0);
             }
