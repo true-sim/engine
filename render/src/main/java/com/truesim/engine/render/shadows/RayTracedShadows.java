@@ -82,30 +82,29 @@ public final class RayTracedShadows implements Technique {
         g.modify(Keys.LIGHT_LIST);
         Pipeline pipeline = g.computeProgram("shaders/shadows/traced.spv", "tracedMain", TracedPush.BYTES);
         Image depth = g.request(depthSource).depth();
-        Buffer topLevel = g.request(new TopLevel(rayTracing, depthSource.view()));
+        TopLevel.Structure top = g.request(new TopLevel(rayTracing)).anchor(g, depthSource.view());
         Image mask = g.create("shadow mask of light " + light, ImageDesc.like(depth, Ratio.ONE).format(Format.R8_UNORM));
         TracedPush push = new TracedPush().width(mask.width()).height(mask.height()).offset(offset).light(light);
         g.pass("ray-traced shadows of light " + light)
             .read(depth, Access.SAMPLED_COMPUTE)
-            .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ)
+            .read(top.buffer(), BufferAccess.ACCELERATION_STRUCTURE_READ)
             .write(mask, Access.STORAGE_WRITE)
             .async()
-            .record(ctx -> trace(ctx, pipeline, depth, mask, push));
+            .record(ctx -> trace(ctx, pipeline, depth, mask, push, top.anchor()));
         g.request(new ShadowInputs(g.view())).sample(mask).setup(ctx -> {
             lights.shadowMask(entry, ctx.sampled(mask), 0);
             lights.shadows(light, entry, 1);
         });
     }
 
-    private void trace(PassContext ctx, Pipeline pipeline, Image depth, Image mask, TracedPush push) {
+    private void trace(PassContext ctx, Pipeline pipeline, Image depth, Image mask, TracedPush push, RenderView view) {
         push.inverseViewProjection(camera.inverseViewProjection()).depth(ctx.sampled(depth)).mask(ctx.storage(mask))
             .scene(rayTracing.slot()).lights(lights.lightsAddress());
-        // The way from the camera's positions into the top level's (built relative to the depth source's view), and
+        // The way from the camera's positions into the top level's (built relative to its anchor's camera, view), and
         // the light relative to the camera: differences of world positions, small enough for floats.
         double x = camera.position(0);
         double y = camera.position(1);
         double z = camera.position(2);
-        RenderView view = depthSource.view();
         push.toTopLevelX((float) (x - view.position(0))).toTopLevelY((float) (y - view.position(1)))
             .toTopLevelZ((float) (z - view.position(2)));
         push.lightX((float) (lights.position(light, 0) - x)).lightY((float) (lights.position(light, 1) - y))
