@@ -42,7 +42,8 @@ class GraphCompilerTest {
 
     private CompiledGraph compile(Map<Key<Image>, ExternalImage> outputs, boolean async, Technique... techniques) {
         GraphBuilder g = new GraphBuilder(null, List.of(techniques), Map.of()); // no device: none is used
-        return GraphCompiler.compile(g, outputs, async, true, 4, (ctx, from, to) -> copies.add(from + " to " + to));
+        return GraphCompiler.compile(g, List.copyOf(outputs.entrySet()), async, true, 4,
+            (ctx, from, to) -> copies.add(from + " to " + to));
     }
 
     private static ExternalImage swapchain(int usage) {

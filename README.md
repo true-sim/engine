@@ -13,6 +13,7 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 | `engine-graph`    | `com.truesim.engine.graph`    | Frame graph: techniques plugged together by the results they provide and need |
 | `engine-render`   | `com.truesim.engine.render`   | GPU-driven meshlet rendering of scene's meshes: geometry pool, GPU culling and LOD; blur |
 | `engine-scene`    | `com.truesim.engine.scene`    | Draws scenes: scene's renderables and assets onto renderers, one view per scene and camera |
+| `engine-xr`       | `com.truesim.engine.xr`       | VR headsets through OpenXR: their eyes as frame graph views, a desktop mirror |
 
 ## Platform
 
@@ -859,6 +860,43 @@ Renderables keep their instance ids while drawn, are on their nodes' layers and 
 materials' masked alpha and double-sidedness follow (blended alpha draws opaque until transparents come). Not
 followed yet: lights and cameras from the scene. Removed meshes are not yet followed by
 `ClassicLodGeometry` and ray tracing, so draw views with meshlets.
+
+## VR
+
+`engine-xr` drives a headset through its OpenXR runtime (SteamVR, Meta's, Monado), behind the engine's own API: no
+OpenXR type is part of it. A headset's two eyes are frame graph views with cameras of their own, rendered in the same
+frame as the desktop windows, so an eye can also be shown on the desktop for people around the player.
+
+- **Connecting:** `Headset.connect(name)` (`HeadsetException.Unavailable` without a runtime or a headset, to fall back
+  to the desktop). The runtime names the Vulkan extensions it needs and the GPU it is connected to: the instance and
+  device are made with them (`vulkanInstanceExtensions()`, `gpu(instance)`, `vulkanDeviceExtensions()`).
+- **Eyes:** `headset.start(graph)` makes the session and the eyes' images (the runtime's recommended size times
+  `XrSettings.RESOLUTION_SCALE`); `headset.present(eye, view, key)` shows a view's result in an eye and sizes the view
+  to it. `headset.camera(eye)` is the eye's camera: the tracking space's `origin(x, y, z)` in the world plus the eye's
+  pose, with the eye's own off-center field of view, updated for the time each frame shows.
+- **Frames:** `headset.render(presenter)` waits for the headset's next frame (pacing the loop), renders the graph
+  through the presenter, the windows in the same frame, and hands the eyes' images to the runtime. While the runtime
+  does not show the app, the eyes' images are held: their views render only for their other outputs.
+- **Mirror:** a view's result goes to several targets, so `presenter.present(leftEye, key, window)` shows the left eye
+  on the desktop, scaled to the window; a third view with its own camera is a spectator view.
+- **Settings:** `XrSettings` (resolution scale, the eyes' near plane, seated or room-scale tracking space).
+- **Testing:** `HeadsetTest` needs a headset connected and starts the runtime: it runs with `TRUESIM_XR=true`.
+
+```java
+try (Headset headset = Headset.connect("true-sim")) {
+    VulkanInstance instance = VulkanInstance.builder().extensions(headset.vulkanInstanceExtensions()).build();
+    VulkanDevice device = VulkanDevice.create(headset.gpu(instance), headset.vulkanDeviceExtensions());
+    headset.start(graph).origin(spawnX, spawnY, spawnZ);
+    for (Eye eye : Eye.values()) {
+        SceneView view = sceneViews.add(eye.name(), headset.camera(eye), options);
+        headset.present(eye, view.port(), Keys.SCENE_COLOR);
+    }
+    while (!headset.exiting()) {
+        platform.pollEvents(listener);
+        headset.render(presenter);
+    }
+}
+```
 
 ## Building
 

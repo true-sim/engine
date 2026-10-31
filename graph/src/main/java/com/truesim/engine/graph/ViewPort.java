@@ -34,7 +34,7 @@ public final class ViewPort {
     private final FrameGraph graph;
     private final String name;
     final List<Technique> techniques = new ArrayList<>();
-    final Map<Key<Image>, ExternalImage> outputs = new LinkedHashMap<>();
+    final Map<Key<Image>, List<ExternalImage>> outputs = new LinkedHashMap<>(); // each key into one target or more
     private final List<AutoCloseable> owned = new ArrayList<>();
     private int width;
     private int height;
@@ -42,7 +42,7 @@ public final class ViewPort {
     private int rate = 1;
     private int skipped; // frames skipped since it last ran, while enabled
     boolean active; // runs this frame: set when the frame starts
-    boolean suspended; // set by a presenter while its window cannot show it (minimized): runs no frame
+    private ExternalImage[] targets = new ExternalImage[0]; // every output's, to check holds without allocating
 
     ViewPort(FrameGraph graph, String name) {
         this.graph = graph;
@@ -135,15 +135,45 @@ public final class ViewPort {
 
     /** Starts a frame: whether the view runs in it. */
     void startFrame() {
-        active = enabled && ++skipped >= rate && !suspended; // suspended while due: runs when it may again
+        active = enabled && ++skipped >= rate && !allHeld(); // held while due: runs when it may again
         if (active) {
             skipped = 0;
         }
     }
 
-    /** Whether the view will run in the next frame to start, as {@link #startFrame} will find. */
-    boolean runsNextFrame() {
-        return enabled && skipped + 1 >= rate && !suspended;
+    /**
+     * Whether the view is due in the next frame to start: on, and at its rate. It runs then unless every output is
+     * held ({@link ExternalImage#hold}).
+     */
+    boolean dueNextFrame() {
+        return enabled && skipped + 1 >= rate;
+    }
+
+    /** Whether it has outputs and every one is held: nothing to draw into this frame. */
+    private boolean allHeld() {
+        if (targets.length == 0) {
+            return false;
+        }
+        for (ExternalImage target : targets) {
+            if (!target.held) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** How many targets its outputs draw into. */
+    public int outputCount() {
+        return targets.length;
+    }
+
+    /** Its outputs' targets, again: they changed. */
+    private void retarget() {
+        List<ExternalImage> all = new ArrayList<>();
+        for (List<ExternalImage> list : outputs.values()) {
+            all.addAll(list);
+        }
+        targets = all.toArray(new ExternalImage[0]);
     }
 
     /** Adds a technique of this view; the graph rebuilds on its next frame. */
@@ -219,11 +249,40 @@ public final class ViewPort {
         return this;
     }
 
-    /** Draws the view's result {@code key} into {@code target} every frame; the graph rebuilds on its next frame. */
+    /**
+     * Draws the view's result {@code key} into {@code target} every frame, besides any other targets it has (a headset's
+     * eye and a desktop window showing it, say); the graph rebuilds on its next frame.
+     */
     public ViewPort output(Key<Image> key, ExternalImage target) {
-        outputs.put(Objects.requireNonNull(key, "key"), Objects.requireNonNull(target, "target"));
+        Objects.requireNonNull(target, "target");
+        List<ExternalImage> targets = outputs.computeIfAbsent(Objects.requireNonNull(key, "key"), k -> new ArrayList<>());
+        for (ExternalImage existing : targets) {
+            if (existing == target) {
+                return this;
+            }
+        }
+        targets.add(target);
+        retarget();
         graph.changed();
         return this;
+    }
+
+    /** Stops drawing {@code key} into {@code target}, its other targets kept. */
+    public ViewPort removeOutput(Key<Image> key, ExternalImage target) {
+        List<ExternalImage> targets = outputs.get(key);
+        if (targets != null && targets.removeIf(t -> t == target)) {
+            if (targets.isEmpty()) {
+                outputs.remove(key);
+            }
+            retarget();
+            graph.changed();
+        }
+        return this;
+    }
+
+    /** Stops drawing {@code key} into {@code texture}, its other targets kept. */
+    public ViewPort removeOutput(Key<Image> key, Texture texture) {
+        return removeOutput(key, texture.external);
     }
 
     /**
@@ -234,9 +293,10 @@ public final class ViewPort {
         return output(key, texture.external);
     }
 
-    /** Stops drawing {@code key} into a target. */
+    /** Stops drawing {@code key} into any target. */
     public ViewPort removeOutput(Key<Image> key) {
         if (outputs.remove(key) != null) {
+            retarget();
             graph.changed();
         }
         return this;
