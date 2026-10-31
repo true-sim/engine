@@ -1,5 +1,8 @@
 package com.truesim.engine.xr;
 
+import static org.lwjgl.openxr.EXTEyeGazeInteraction.XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME;
+import static org.lwjgl.openxr.EXTHandInteraction.XR_EXT_HAND_INTERACTION_EXTENSION_NAME;
+import static org.lwjgl.openxr.EXTHandTracking.XR_EXT_HAND_TRACKING_EXTENSION_NAME;
 import static org.lwjgl.openxr.KHRVulkanEnable.XR_KHR_VULKAN_ENABLE_EXTENSION_NAME;
 import static org.lwjgl.openxr.KHRVulkanEnable.xrGetVulkanDeviceExtensionsKHR;
 import static org.lwjgl.openxr.KHRVulkanEnable.xrGetVulkanGraphicsDeviceKHR;
@@ -13,12 +16,14 @@ import static org.lwjgl.openxr.XR10.XR_INFINITE_DURATION;
 import static org.lwjgl.openxr.XR10.XR_REFERENCE_SPACE_TYPE_LOCAL;
 import static org.lwjgl.openxr.XR10.XR_REFERENCE_SPACE_TYPE_STAGE;
 import static org.lwjgl.openxr.XR10.XR_SESSION_STATE_EXITING;
+import static org.lwjgl.openxr.XR10.XR_SESSION_STATE_FOCUSED;
 import static org.lwjgl.openxr.XR10.XR_SESSION_STATE_LOSS_PENDING;
 import static org.lwjgl.openxr.XR10.XR_SESSION_STATE_READY;
 import static org.lwjgl.openxr.XR10.XR_SESSION_STATE_STOPPING;
 import static org.lwjgl.openxr.XR10.XR_SUCCESS;
 import static org.lwjgl.openxr.XR10.XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
 import static org.lwjgl.openxr.XR10.XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+import static org.lwjgl.openxr.XR10.XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED;
 import static org.lwjgl.openxr.XR10.XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED;
 import static org.lwjgl.openxr.XR10.XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
 import static org.lwjgl.openxr.XR10.XR_VIEW_STATE_ORIENTATION_VALID_BIT;
@@ -110,7 +115,9 @@ import org.lwjgl.openxr.XrSwapchainImageBaseHeader;
 import org.lwjgl.openxr.XrSwapchainImageReleaseInfo;
 import org.lwjgl.openxr.XrSwapchainImageVulkanKHR;
 import org.lwjgl.openxr.XrSwapchainImageWaitInfo;
+import org.lwjgl.openxr.XrSystemEyeGazeInteractionPropertiesEXT;
 import org.lwjgl.openxr.XrSystemGetInfo;
+import org.lwjgl.openxr.XrSystemHandTrackingPropertiesEXT;
 import org.lwjgl.openxr.XrSystemProperties;
 import org.lwjgl.openxr.XrView;
 import org.lwjgl.openxr.XrViewConfigurationView;
@@ -153,7 +160,14 @@ public final class Headset implements AutoCloseable {
     private final String name;
     private final int recommendedWidth;
     private final int recommendedHeight;
+    /** Extensions enabled where the runtime has them: tracked hands' joints and gestures, the eyes' gaze. */
+    private static final List<String> OPTIONAL = List.of(XR_EXT_HAND_TRACKING_EXTENSION_NAME,
+        XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME, XR_EXT_HAND_INTERACTION_EXTENSION_NAME);
     private final Camera[] cameras = {new Camera(), new Camera()};
+    private boolean handTracking;
+    private boolean eyeGaze;
+    private boolean handInteraction;
+    private XrInput input;
     private final double[] origin = new double[3];
     // The session, once started.
     private FrameGraph graph;
@@ -194,12 +208,25 @@ public final class Headset implements AutoCloseable {
     @AllowAllocation("connecting, once")
     public static Headset connect(String applicationName) {
         XrInstance instance;
+        List<String> enabled;
+        List<String> extensions;
         try (MemoryStack stack = stackPush()) {
             List<String> available = extensions(stack);
             if (!available.contains(XR_KHR_VULKAN_ENABLE_EXTENSION_NAME)) {
                 throw new HeadsetException.Unavailable("The OpenXR runtime cannot render with Vulkan");
             }
-            PointerBuffer names = stack.pointers(stack.UTF8(XR_KHR_VULKAN_ENABLE_EXTENSION_NAME));
+            List<String> wanted = new ArrayList<>(List.of(XR_KHR_VULKAN_ENABLE_EXTENSION_NAME));
+            for (String optional : OPTIONAL) {
+                if (available.contains(optional)) {
+                    wanted.add(optional);
+                }
+            }
+            PointerBuffer names = stack.mallocPointer(wanted.size());
+            for (String name : wanted) {
+                names.put(stack.UTF8(name));
+            }
+            names.flip();
+            enabled = List.copyOf(wanted);
             XrInstanceCreateInfo create = XrInstanceCreateInfo.calloc(stack).type$Default()
                 .applicationInfo(XrApplicationInfo.calloc(stack).applicationName(stack.UTF8(applicationName))
                     .applicationVersion(1).engineName(stack.UTF8("true-sim")).engineVersion(1)
@@ -211,6 +238,7 @@ public final class Headset implements AutoCloseable {
                 throw new HeadsetException.Unavailable("No OpenXR runtime to use (" + result + ")");
             }
             instance = new XrInstance(handle.get(0), create);
+            extensions = enabled;
         } catch (UnsatisfiedLinkError | IllegalStateException e) {
             throw new HeadsetException.Unavailable("No OpenXR loader or runtime: " + e.getMessage());
         }
@@ -225,23 +253,34 @@ public final class Headset implements AutoCloseable {
             check(result, "find the headset");
             XrInstanceProperties instanceProperties = XrInstanceProperties.calloc(stack).type$Default();
             check(xrGetInstanceProperties(instance, instanceProperties), "read the runtime");
-            XrSystemProperties systemProperties = XrSystemProperties.calloc(stack).type$Default();
+            XrSystemHandTrackingPropertiesEXT hands = XrSystemHandTrackingPropertiesEXT.calloc(stack).type$Default();
+            XrSystemEyeGazeInteractionPropertiesEXT eyes = XrSystemEyeGazeInteractionPropertiesEXT.calloc(stack)
+                .type$Default().next(hands.address());
+            XrSystemProperties systemProperties = XrSystemProperties.calloc(stack).type$Default().next(eyes.address());
             check(xrGetSystemProperties(instance, system.get(0), systemProperties), "read the headset");
+            boolean handTracking = extensions.contains(XR_EXT_HAND_TRACKING_EXTENSION_NAME)
+                && hands.supportsHandTracking();
+            boolean eyeGaze = extensions.contains(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)
+                && eyes.supportsEyeGazeInteraction();
             IntBuffer count = stack.mallocInt(1);
             check(xrEnumerateViewConfigurationViews(instance, system.get(0), XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
                 count, null), "list the eyes");
-            XrViewConfigurationView.Buffer eyes = XrViewConfigurationView.calloc(count.get(0), stack);
-            for (int i = 0; i < eyes.capacity(); i++) {
-                eyes.get(i).type$Default();
+            XrViewConfigurationView.Buffer eyeViews = XrViewConfigurationView.calloc(count.get(0), stack);
+            for (int i = 0; i < eyeViews.capacity(); i++) {
+                eyeViews.get(i).type$Default();
             }
             check(xrEnumerateViewConfigurationViews(instance, system.get(0), XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
-                count, eyes), "list the eyes");
+                count, eyeViews), "list the eyes");
             // The runtime must be asked for its Vulkan requirements before a session.
             check(xrGetVulkanGraphicsRequirementsKHR(instance, system.get(0),
                 XrGraphicsRequirementsVulkanKHR.calloc(stack).type$Default()), "read the Vulkan requirements");
-            return new Headset(instance, system.get(0), instanceProperties.runtimeNameString(),
-                systemProperties.systemNameString(), eyes.get(0).recommendedImageRectWidth(),
-                eyes.get(0).recommendedImageRectHeight());
+            Headset headset = new Headset(instance, system.get(0), instanceProperties.runtimeNameString(),
+                systemProperties.systemNameString(), eyeViews.get(0).recommendedImageRectWidth(),
+                eyeViews.get(0).recommendedImageRectHeight());
+            headset.handTracking = handTracking;
+            headset.eyeGaze = eyeGaze;
+            headset.handInteraction = extensions.contains(XR_EXT_HAND_INTERACTION_EXTENSION_NAME);
+            return headset;
         } catch (RuntimeException e) {
             if (!(e instanceof HeadsetException.Unavailable)) {
                 xrDestroyInstance(instance);
@@ -369,7 +408,21 @@ public final class Headset implements AutoCloseable {
                 createSwapchain(stack, eye, format);
             }
         }
+        input = new XrInput(this, instance, session, space, handInteraction, eyeGaze, handTracking);
         return this;
+    }
+
+    /** The headset's input: controllers or tracked hands, poses, gaze, vibration. Once started. */
+    public XrInput input() {
+        if (input == null) {
+            throw new IllegalStateException("Start the headset first: start(graph)");
+        }
+        return input;
+    }
+
+    /** The tracking space's origin, for the input's world positions. */
+    double[] originRef() {
+        return origin;
     }
 
     private boolean hasStage(MemoryStack stack) {
@@ -488,6 +541,7 @@ public final class Headset implements AutoCloseable {
             check(xrWaitFrame(session, XrFrameWaitInfo.calloc(stack).type$Default(), frame), "wait for a frame");
             check(xrBeginFrame(session, XrFrameBeginInfo.calloc(stack).type$Default()), "begin a frame");
             long time = frame.predictedDisplayTime();
+            input.update(time, state == XR_SESSION_STATE_FOCUSED);
             boolean shown = frame.shouldRender() && locate(stack, time);
             if (shown) {
                 for (int e = 0; e < 2; e++) {
@@ -620,10 +674,13 @@ public final class Headset implements AutoCloseable {
                             running = false;
                         }
                         case XR_SESSION_STATE_EXITING, XR_SESSION_STATE_LOSS_PENDING -> exiting = true;
+                        case XR_SESSION_STATE_FOCUSED -> input.profilesChanged();
                         default -> {
                             // synchronized, visible, focused, idle: frames go on as they are
                         }
                     }
+                } else if (event.type() == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED && input != null) {
+                    input.profilesChanged();
                 }
                 event.type$Default();
             }
@@ -656,6 +713,9 @@ public final class Headset implements AutoCloseable {
             if (swapchains[e] != null) {
                 xrDestroySwapchain(swapchains[e]);
             }
+        }
+        if (input != null) {
+            input.close();
         }
         if (space != null) {
             xrDestroySpace(space);

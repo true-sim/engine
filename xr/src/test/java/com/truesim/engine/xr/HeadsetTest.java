@@ -87,6 +87,27 @@ class HeadsetTest {
             assertThat(headset.camera(Eye.LEFT).position(1)).as("at the origin's height plus the head's")
                 .isGreaterThan(1.7);
             assertThat(headset.running()).isTrue();
+            // Input: the head tracked, whatever the hands hold, and a short buzz on each controller.
+            XrInput input = headset.input();
+            double[] position = new double[3];
+            float[] orientation = new float[4];
+            assertThat(input.head(position, orientation)).as("the head tracked").isTrue();
+            StringBuilder report = new StringBuilder();
+            input.poll(new XrListener() {
+                @Override
+                public void profile(Hand hand, String profile) {
+                    report.append(hand).append(": ").append(profile).append("; ");
+                }
+            });
+            for (Hand hand : Hand.values()) {
+                report.append(hand).append(" grip tracked ").append(input.pose(hand, XrPose.GRIP, position, orientation))
+                    .append(", trigger ").append(input.axis(hand, XrAxis.TRIGGER)).append("; ");
+                if (!input.profile(hand).isEmpty() && !input.profile(hand).contains("hand_interaction")) {
+                    input.vibrate(hand, 0.5f, 0, 100_000_000L);
+                }
+            }
+            System.out.println("Input: " + report + "hand tracking " + input.handTracking() + ", eye tracking "
+                + input.eyeTracking());
         }
         assertThat(true).isTrue();
     }

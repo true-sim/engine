@@ -879,6 +879,14 @@ frame as the desktop windows, so an eye can also be shown on the desktop for peo
   does not show the app, the eyes' images are held: their views render only for their other outputs.
 - **Mirror:** a view's result goes to several targets, so `presenter.present(leftEye, key, window)` shows the left eye
   on the desktop, scaled to the window; a third view with its own camera is a spectator view.
+- **Input** (`headset.input()`), at the level of the platform's devices, for an input manager to combine with mouse,
+  keyboard and gamepads: per hand, buttons (`XrButton`: trigger, squeeze, primary A/X, secondary B/Y, menu, thumbstick,
+  trackpad, and a tracked hand's pinch and aim gesture), touches (`XrTouch`), axes (`XrAxis`), poses (`XrPose`: grip,
+  aim, pinch, poke) in world positions, and vibration (`vibrate(hand, amplitude, frequency, duration)`); the head's
+  pose; the eyes' gaze and the hands' 26 joints where the runtime offers them (`XR_EXT_eye_gaze_interaction`,
+  `XR_EXT_hand_tracking`). `input.poll(listener)` reports button, touch and controller changes. The engine suggests
+  where each input is on Meta Touch, Valve Index, HTC Vive, Windows Mixed Reality and simple controllers, and tracked
+  hands (`XR_EXT_hand_interaction`), so the same names work on each.
 - **Settings:** `XrSettings` (resolution scale, the eyes' near plane, seated or room-scale tracking space).
 - **Testing:** `HeadsetTest` needs a headset connected and starts the runtime: it runs with `TRUESIM_XR=true`.
 
