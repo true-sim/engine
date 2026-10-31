@@ -104,10 +104,7 @@ public final class RenderView implements AutoCloseable {
         int instances = renderer.scene().capacity();
         visibility = options.occlusion()
             ? GpuBuffer.deviceLocal(device, 4L * instances, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT) : null;
-        if (visibility != null) {
-            device.submitAndWait(device.graphics(), commands -> Commands.fillBuffer(commands, visibility.handle(), 0,
-                visibility.size(), 0)); // nothing visible yet: the first late phase finds out
-        }
+        visibilityGrown = visibility != null; // cleared by the first cull, no wait: nothing visible yet
         visibleImport = new ExternalBuffer("view " + index + " visible", visible);
         expandImport = new ExternalBuffer("view " + index + " expand command", expandCommand);
         drawImport = new ExternalBuffer("view " + index + " draw command", drawCommand);

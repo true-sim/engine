@@ -358,7 +358,6 @@ public final class FrameGraph implements AutoCloseable {
         return this;
     }
 
-    /** Stops outputting {@code key}. */
     /** Copies the frame's result {@code key} into {@code texture} every frame; the graph rebuilds on its next frame. */
     public FrameGraph output(Key<Image> key, Texture texture) {
         return output(key, texture.external);
@@ -436,6 +435,7 @@ public final class FrameGraph implements AutoCloseable {
         return List.copyOf(textures);
     }
 
+    /** Stops outputting {@code key}; the graph rebuilds on its next frame. */
     public FrameGraph removeOutput(Key<Image> key) {
         dirty |= outputs.remove(key) != null;
         return this;
@@ -730,10 +730,14 @@ public final class FrameGraph implements AutoCloseable {
         for (int s = 0; s < switches.length; s++) {
             switches[s].on = switches[s].on(switchViews[s], settings);
         }
+        for (ExternalImage external : externals) {
+            external.heldThisFrame = external.held; // read once: hold() from another thread waits for the next frame
+        }
         for (int i = 0; i < order.length; i++) {
             ExternalImage into = order[i].into;
             Switch switched = passSwitch[i];
-            passSkipped[i] = !runs(passViews[i]) || into != null && into.held || switched != null && !switched.on;
+            passSkipped[i] = !runs(passViews[i]) || into != null && into.heldThisFrame
+                || switched != null && !switched.on;
         }
         if (resources.hasRetired()) {
             resources.release(false, frame);
@@ -1251,7 +1255,7 @@ public final class FrameGraph implements AutoCloseable {
         int target = barrierTarget[b];
         if (barrierKind[b] == IMAGE && target < 0) {
             ViewPort view = externalView[~target];
-            if (externals[~target].held || view != null && !view.active) {
+            if (externals[~target].heldThisFrame || view != null && !view.active) {
                 return true;
             }
         }

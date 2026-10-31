@@ -16,6 +16,7 @@ struct CullPush
     float* clusterLod;     // 10 floats per meshlet
     Occlusion occlusion;
     Material* materials;   // for each meshlet's raster bin
+    uint* chunkCommand;    // the dispatch (x, y, z), then the chunks wanted and [4] those written
 };
 
 [[vk::push_constant]]
@@ -25,7 +26,12 @@ ConstantBuffer<CullPush> push;
 [numthreads(64, 1, 1)]
 void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
-    Chunk chunk = push.chunks[group.x];
+    uint chunkIndex = group.y * 65535 + group.x; // rows of 65,535 workgroups
+    if (chunkIndex >= push.chunkCommand[4])
+    {
+        return; // the last row's workgroups past the chunks written
+    }
+    Chunk chunk = push.chunks[chunkIndex];
     uint v = chunk.view;
     View view = push.views[v];
     Instance instance = relative(push.instances[chunk.instance], view);

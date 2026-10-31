@@ -213,6 +213,12 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
         double y = camera.position(1);
         double z = camera.position(2);
         float[] viewProjection = camera.viewProjection();
+        // The splits and corners take depth as near / distance: an infinite reverse-depth perspective, as Camera.set
+        // makes; another projection would fit the cascades wrongly without a word.
+        // (Its depth row is then (0, 0, 0, near) whatever the camera's turn: column-major, entries 2, 6, 10 and 14.)
+        if (camera.orthographic() || viewProjection[2] != 0 || viewProjection[6] != 0 || viewProjection[10] != 0) {
+            throw new IllegalStateException("Cascades fit a camera of infinite reverse-depth perspective (Camera.set)");
+        }
         double near = viewProjection[14]; // reverse depth: depth = near / distance
         splits[0] = (float) near;
         for (int i = 1; i <= cascades; i++) {

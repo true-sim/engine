@@ -485,6 +485,48 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void chunksGrowBetweenFramesToWhatFramesWanted() {
+        // Room for one chunk of 64 meshlets, three quads culled: the frame wants three, leaves two out and says so, and
+        // the chunks grow as it ends; the frames after find all three.
+        GpuBuffer[] readbacks = {GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+            GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)};
+        try (GpuScene few = new GpuScene(device, pool, 4, graph.frameSlots());
+             MeshletRenderer drawing = new MeshletRenderer(device, few, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots(), 1)) {
+            for (int i = 0; i < 3; i++) {
+                few.set(i, quad, i - 1, 0, -4, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+            }
+            SceneGeometry geometry = SceneGeometry.meshlets(drawing);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            ViewPort port = graph.addView("main").size(SIZE, SIZE);
+            SceneView fewView = geometry.createView(port, camera, ViewOptions.of(256, 1 << 12));
+            port.add(new ClusteredForwardShading(geometry, fewView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                    .clearColor(0, 0, 0))
+                .add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+            fewView.set(1, MeshletRenderer.MODE_WHITE);
+            assertThat(drawing.chunkCapacity()).isEqualTo(1);
+            graph.beginFrame();
+            graph.submit(0, 0);
+            device.waitIdle();
+            assertThat(drawing.wantedChunks()).as("one of three fitted").isEqualTo(3);
+            // Grown as a frame ends once the GPU has said what it wanted: that frame's, or the next one's.
+            for (int frame = 0; frame < 3; frame++) {
+                graph.beginFrame();
+                graph.submit(0, 0);
+            }
+            device.waitIdle();
+            assertThat(drawing.chunkCapacity()).isGreaterThanOrEqualTo(3);
+            assertThat(drawing.chunksOverflowed()).isFalse();
+            assertThat(fewView.view().visibleMeshlets()).as("all three found").isEqualTo(3);
+        } finally {
+            device.waitIdle();
+            for (GpuBuffer readback : readbacks) {
+                readback.close();
+            }
+        }
+    }
+
+    @Test
     void meshesAddedWhileFramesAreInFlightDrawTheirFirstFrame() {
         // Every frame a mesh is added (and the one from two frames before removed) while frames are in flight, and the
         // quad draws with it at once: the upload is staged without waiting and recorded first thing in the frame.

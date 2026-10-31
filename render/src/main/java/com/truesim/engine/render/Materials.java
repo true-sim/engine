@@ -77,6 +77,8 @@ public final class Materials implements AutoCloseable {
     private final List<MaterialType> types = new ArrayList<>();
     /** The type of each parameters' record, where one type takes it. */
     private final Map<Class<?>, MaterialType> byRecord = new HashMap<>();
+    /** Per parameters record: where in its block the mask alpha and mask texture lie (-1: none), as slots copy them. */
+    private final Map<Class<?>, int[]> maskOffsets = new HashMap<>();
     private final Set<Class<?>> ambiguous = new HashSet<>();
     private final Arena arena = Arena.ofShared();
     private MemorySegment scratch;
@@ -145,6 +147,117 @@ public final class Materials implements AutoCloseable {
         types.add(type);
         if (byRecord.putIfAbsent(type.parameters(), type) != null) {
             ambiguous.add(type.parameters());
+        }
+        maskOffsets.computeIfAbsent(type.parameters(), record -> findMasks(type));
+    }
+
+    /**
+     * Where the fields a record's {@code maskAlpha()} and {@code maskTexture()} read lie in its block: found by making
+     * the record from values with one field at a time set to a marker, and seeing which comes back as the mask. So
+     * {@link #update} keeps the slot's copies (what alpha masking reads) with the block.
+     */
+    @AllowAllocation("registering a type, once")
+    private static int[] findMasks(MaterialType type) {
+        int[] found = {-1, -1};
+        for (java.lang.reflect.Field constant : type.parameters().getFields()) {
+            if (constant.getType() != MaterialField.class
+                || !java.lang.reflect.Modifier.isStatic(constant.getModifiers())) {
+                continue;
+            }
+            MaterialField field;
+            try {
+                field = (MaterialField) constant.get(null);
+            } catch (IllegalAccessException e) {
+                continue;
+            }
+            for (int component = 0; component < Math.max(1, field.count()); component++) {
+                MaterialParameters probed = type.fromValues().apply(new MaskProbe(field.path(), component, ""));
+                if (field.kind() != MaterialField.Kind.I32 && probed.maskAlpha() == MaskProbe.ALPHA) {
+                    found[0] = field.offset() + 4 * component;
+                }
+                if (field.kind() == MaterialField.Kind.I32 && probed.maskTexture() == MaskProbe.TEXTURE) {
+                    found[1] = field.offset();
+                }
+            }
+        }
+        return found;
+    }
+
+    /** Values that are the fallbacks but for one field's component, a marker: to see what a record's mask reads. */
+    private record MaskProbe(String path, int component, String prefix) implements MaterialValues {
+        static final float ALPHA = 0.123456f;
+        static final int TEXTURE = 987_654;
+
+        private boolean probed(String name) {
+            return path.equals(prefix + name);
+        }
+
+        /** Component {@code i} of a probed vector: the marker in the component probed, else 0. */
+        private float c(int i) {
+            return component == i ? ALPHA : 0;
+        }
+
+        @Override
+        public float f32(String name, float fallback) {
+            return probed(name) ? ALPHA : fallback;
+        }
+
+        @Override
+        public int i32(String name, int fallback) {
+            return probed(name) ? TEXTURE : fallback;
+        }
+
+        @Override
+        public com.truesim.common.math.Vec2 vec2(String name, com.truesim.common.math.Vec2 fallback) {
+            return probed(name) ? new com.truesim.common.math.Vec2(c(0), c(1)) : fallback;
+        }
+
+        @Override
+        public com.truesim.common.math.Vec3 vec3(String name, com.truesim.common.math.Vec3 fallback) {
+            return probed(name) ? new com.truesim.common.math.Vec3(c(0), c(1), c(2)) : fallback;
+        }
+
+        @Override
+        public com.truesim.common.math.Vec4 vec4(String name, com.truesim.common.math.Vec4 fallback) {
+            return probed(name) ? new com.truesim.common.math.Vec4(c(0), c(1), c(2), c(3)) : fallback;
+        }
+
+        @Override
+        public com.truesim.common.math.color.Color color(String name, com.truesim.common.math.color.Color fallback) {
+            return probed(name) ? new com.truesim.common.math.color.Color(c(0), c(1), c(2), c(3)) : fallback;
+        }
+
+        @Override
+        public int texture(String name, boolean srgb, int fallback) {
+            return probed(name) ? TEXTURE : fallback;
+        }
+
+        @Override
+        public MaterialValues nested(String name) {
+            return new MaskProbe(path, component, prefix + name + ".");
+        }
+    }
+
+    /**
+     * After a field of material {@code id}'s parameters was written in place at block offset {@code at} ({@code bytes}
+     * long): the slot's copy of the mask alpha or texture, if the field holds it, so alpha masking follows.
+     */
+    private void followMasks(int id, MaterialField field, long at, int bytes) {
+        Material material = material(id);
+        if (field.owner() != material.parameters().getClass()) {
+            return; // a feature's: features hold no mask
+        }
+        int[] masks = maskOffsets.get(field.owner());
+        if (masks == null) {
+            return;
+        }
+        long block = heapStart + heapUnit[id] * ALIGNMENT;
+        long slot = (long) SLOT_BYTES * id;
+        if (masks[0] >= 0 && block + masks[0] >= at && block + masks[0] < at + bytes) {
+            table.putFloat(slot + MaterialLayout.MASK_ALPHA, table.getFloat(block + masks[0]));
+        }
+        if (masks[1] >= 0 && block + masks[1] >= at && block + masks[1] < at + bytes) {
+            table.putInt(slot + MaterialLayout.MASK_TEXTURE, table.getInt(block + masks[1]));
         }
     }
 
@@ -312,7 +425,9 @@ public final class Materials implements AutoCloseable {
         if (!field.accepts(value)) {
             throw new IllegalArgumentException(field + " is out of its range: " + value);
         }
-        table.putFloat(fieldOffset(id, field), value);
+        long offset = fieldOffset(id, field);
+        table.putFloat(offset, value);
+        followMasks(id, field, offset, 4);
     }
 
     /** {@link #update(int, MaterialField, float)} for an integer field, or a texture slot. */
@@ -320,7 +435,9 @@ public final class Materials implements AutoCloseable {
         if (field.kind() != MaterialField.Kind.I32) {
             throw new IllegalArgumentException(field + " holds no integer");
         }
-        table.putInt(fieldOffset(id, field), value);
+        long offset = fieldOffset(id, field);
+        table.putInt(offset, value);
+        followMasks(id, field, offset, 4);
     }
 
     /** {@link #update(int, MaterialField, float)} for a vector or color field: its first {@code count()} values. */
@@ -337,6 +454,7 @@ public final class Materials implements AutoCloseable {
         if (field.count() > 3) {
             table.putFloat(offset + 12, w);
         }
+        followMasks(id, field, offset, 4 * field.count());
     }
 
     private long fieldOffset(int id, MaterialField field) {
