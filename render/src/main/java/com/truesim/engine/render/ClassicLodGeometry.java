@@ -6,11 +6,18 @@ import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.VK_INDEX_TYPE_UINT32;
 import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_FRAGMENT_BIT;
 import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_VERTEX_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK12.vkCmdDrawIndexedIndirectCount;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_READ_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
@@ -24,9 +31,11 @@ import com.truesim.engine.graph.Store;
 import com.truesim.engine.render.layout.ClassicPush;
 import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.SelectPush;
+import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Pipeline;
+import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.ShaderModule;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.assets.mesh.MeshData;
@@ -81,13 +90,22 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     private final Pipeline[] draw;
     private final Pipeline[] drawDepth;
     private final Pipeline[] drawIds;
-    private final GpuBuffer indices;
-    private final GpuBuffer meshes;
-    private final GpuBuffer levels;
-    private final GpuBuffer parts;
+    // Grown with the pool (indices, meshes) or as meshes come (levels, parts); replaced ones freed once no frame reads
+    // them.
+    private final VulkanDevice device;
+    private final Retiring oldBuffers;
+    private GpuBuffer indices;
+    private GpuBuffer meshes;
+    private GpuBuffer levels;
+    private GpuBuffer parts;
     private int levelCount;
     private int partCount;
     private boolean closed;
+
+    private static final int INDEX_USAGE = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+        | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    private static final int TABLE_USAGE = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
     /**
      * Classic LOD drawing of {@code renderer}'s instances into {@code colorFormat} and {@code depthFormat} attachments
@@ -100,6 +118,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             throw new IllegalArgumentException("Room for at least one draw: " + maxDraws);
         }
         this.pool = renderer.pool();
+        this.device = device;
+        this.oldBuffers = new Retiring(pool.frameSlots());
         this.maxDraws = maxDraws;
         // The bins' counts, each bin's commands, then a record per draw slot of every bin.
         this.recordsOffset = (16 + (long) COMMAND_BYTES * maxDraws * MeshletRenderer.BINS + 15) & ~15L;
@@ -133,7 +153,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         // Laid out as the pool's meshlet triangles: mesh triangle t's indices at the mesh's index base + 3t.
         indices = GpuBuffer.deviceLocal(device, 12L * pool.capacity().triangles(),
-            storage | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            INDEX_USAGE);
         meshes = GpuBuffer.hostVisible(device, 8L * pool.capacity().meshes(), storage);
         meshes.memory().fill((byte) 0); // no levels: not drawn
         // A level and a part hold a meshlet at least.
@@ -168,6 +188,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             throw new IllegalArgumentException("Classic LOD draws whole levels: discrete LODs or flat meshes, not a "
                 + "cluster hierarchy");
         }
+        coverPool();
         MemorySegment entry = meshes.memory().asSlice(8L * mesh, 8);
         if (entry.get(U32, 4) != 0) {
             throw new IllegalStateException("Mesh " + mesh + " is drawn the classic way already");
@@ -176,10 +197,17 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         for (MeshLevel level : data.levels()) {
             neededParts += partsOf(data, level, null, 0, 0, 0);
         }
-        if (levelCount + data.levels().size() > levels.size() / 16 || partCount + neededParts > parts.size() / 16) {
-            throw new IllegalStateException("No room for the levels of mesh " + mesh);
+        if (levelCount + data.levels().size() > levels.size() / 16) {
+            levels = grownTable(levels, 16L * Math.max(2L * levelCount, levelCount + data.levels().size()));
+        }
+        if (partCount + neededParts > parts.size() / 16) {
+            parts = grownTable(parts, 16L * Math.max(2L * partCount, partCount + neededParts));
         }
         int indexBase = pool.indexBase(mesh);
+        long indexEnd = 4L * (indexBase + 3L * data.triangleCount());
+        if (indexEnd > indices.size()) {
+            growIndices(Math.max(12L * pool.capacity().triangles(), indexEnd));
+        }
         try (Arena arena = Arena.ofConfined()) { // the indices only until copied
             indices.write(4L * indexBase, data.expandIndices(arena));
         }
@@ -194,6 +222,42 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         }
         entry.set(U32, 4, data.levels().size());
         return this;
+    }
+
+    /** Grows the per-mesh table to the pool's mesh numbers, for any instance's mesh to be looked up. */
+    private synchronized void coverPool() {
+        if (meshes.size() < 8L * pool.capacity().meshes()) {
+            meshes = grownTable(meshes, 8L * pool.capacity().meshes());
+        }
+    }
+
+    /** A host-visible table of {@code bytes} holding {@code old}'s contents, the rest zero. */
+    private GpuBuffer grownTable(GpuBuffer old, long bytes) {
+        GpuBuffer grown = GpuBuffer.hostVisible(device, bytes, TABLE_USAGE);
+        MemorySegment.copy(old.memory(), 0, grown.memory(), 0, old.size());
+        grown.memory().asSlice(old.size()).fill((byte) 0);
+        oldBuffers.add(old); // frames in flight read it; those recorded from now on read the new one
+        return grown;
+    }
+
+    /** The index buffer at {@code bytes}, its indices copied over: waits, as adding does. */
+    private void growIndices(long bytes) {
+        GpuBuffer old = indices;
+        GpuBuffer grown = GpuBuffer.deviceLocal(device, bytes, INDEX_USAGE);
+        device.submitAndWait(device.graphics(), commands -> {
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+            try (MemoryStack stack = stackPush()) {
+                long region = stack.ncalloc(org.lwjgl.vulkan.VkBufferCopy.ALIGNOF, 1,
+                    org.lwjgl.vulkan.VkBufferCopy.SIZEOF);
+                memPutLong(region + org.lwjgl.vulkan.VkBufferCopy.SIZE, old.size());
+                Commands.copyBuffer(commands, old.handle(), grown.handle(), 1, region);
+            }
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        });
+        indices = grown;
+        oldBuffers.add(old);
     }
 
     /** Whether the levels are whole meshes: one level, or discrete LODs (every meshlet with the same group sphere). */
@@ -330,6 +394,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         view.refresh(); // from where its camera is now
         GpuScene scene = renderer.scene();
         scene.upload(commands);
+        coverPool();
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, SELECT_PUSH);
             memPutLong(push + SelectPush.VIEW, view.address());
@@ -398,6 +463,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             meshes.close();
             levels.close();
             parts.close();
+            oldBuffers.close();
         }
     }
 }

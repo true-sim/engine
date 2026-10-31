@@ -129,8 +129,8 @@ public final class RayTracing implements AutoCloseable {
     private final Bindless bindless;
     private final long scratchAlignment;
     private final boolean quantized;
-    private final GpuBuffer bottomTable;
-    private final Structure[] bottom;
+    private GpuBuffer bottomTable; // per pool mesh, grown with the pool
+    private Structure[] bottom;
     private final int maxInstances;
     private final GpuBuffer instances;
     private final long instancesAddress; // 16-byte aligned, as instance data must be
@@ -144,7 +144,7 @@ public final class RayTracing implements AutoCloseable {
     // through the stages below, and structures and buffers no frame in flight may read any more, freed once they are not.
     private final FrameSlots slots;
     private final boolean deferred;
-    private final Pending[] pendingOf; // per pool mesh: its bottom level on its way, or null
+    private Pending[] pendingOf; // per pool mesh: its bottom level on its way, or null
     private final List<Pending> pending = new ArrayList<>();
     private final List<Retired> retired = new ArrayList<>();
     private final FrameSlots.FrameStart start = this::recordStart;
@@ -154,7 +154,8 @@ public final class RayTracing implements AutoCloseable {
         final int mesh;
         final int triangles;
         final int vertexCount;
-        final long vertices;
+        final long vertices; // an address, or an offset into the pool's positions (fromPool)
+        final boolean fromPool;
         final long stride;
         final int format;
         final GpuBuffer indices;
@@ -169,12 +170,13 @@ public final class RayTracing implements AutoCloseable {
         long copiedAt;
         boolean cancelled; // removed on its way
 
-        Pending(int mesh, int triangles, int vertexCount, long vertices, long stride, int format, GpuBuffer indices,
-            GpuBuffer decoded, GpuBuffer transform, long due) {
+        Pending(int mesh, int triangles, int vertexCount, long vertices, boolean fromPool, long stride, int format,
+            GpuBuffer indices, GpuBuffer decoded, GpuBuffer transform, long due) {
             this.mesh = mesh;
             this.triangles = triangles;
             this.vertexCount = vertexCount;
             this.vertices = vertices;
+            this.fromPool = fromPool;
             this.stride = stride;
             this.format = format;
             this.indices = indices;
@@ -250,6 +252,29 @@ public final class RayTracing implements AutoCloseable {
         }
     }
 
+    /** {@code buffer}'s address rounded up to 16 bytes, as a build transform's must be. */
+    private static long align16(GpuBuffer buffer) {
+        return (buffer.deviceAddress() + 15) & ~15L;
+    }
+
+    /** Where in {@code buffer} its 16-byte aligned address falls. */
+    private static long alignedOffset(GpuBuffer buffer) {
+        return align16(buffer) - buffer.deviceAddress();
+    }
+
+    /** Room for as many meshes as the pool has grown to: the per-mesh table copied into a bigger one. */
+    private void growMeshes() {
+        int meshes = pool.capacity().meshes();
+        bottom = java.util.Arrays.copyOf(bottom, meshes);
+        pendingOf = java.util.Arrays.copyOf(pendingOf, meshes);
+        GpuBuffer old = bottomTable;
+        bottomTable = GpuBuffer.hostVisible(device, 8L * meshes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        MemorySegment.copy(old.memory(), 0, bottomTable.memory(), 0, old.size());
+        bottomTable.memory().asSlice(old.size()).fill((byte) 0);
+        retired.add(new Retired(old::close, slots.retireAt())); // frames in flight read it
+    }
+
     /** Whether bottom levels read the pool's quantized positions as they are (else decoded copies). */
     public boolean quantizedVertices() {
         return quantized;
@@ -279,6 +304,9 @@ public final class RayTracing implements AutoCloseable {
     public void add(int mesh, MeshData data, int level) {
         if (!pool.contains(mesh)) {
             throw new IllegalArgumentException("No mesh " + mesh + " in the pool");
+        }
+        if (mesh >= bottom.length) {
+            growMeshes();
         }
         if (bottom[mesh] != null || pendingOf[mesh] != null) {
             throw new IllegalStateException("Mesh " + mesh + " has a bottom level already");
@@ -313,8 +341,8 @@ public final class RayTracing implements AutoCloseable {
                 vertices = pool.positions().deviceAddress() + (long) MeshData.POSITION_BYTES * pool.vertexBase(mesh);
                 stride = MeshData.POSITION_BYTES;
                 format = VK_FORMAT_R16G16B16A16_UNORM;
-                transform = GpuBuffer.hostVisible(device, 48, usage);
-                MemorySegment rows = transform.memory();
+                transform = GpuBuffer.hostVisible(device, 64, usage);
+                MemorySegment rows = transform.memory().asSlice(alignedOffset(transform), 48);
                 for (int axis = 0; axis < 3; axis++) {
                     for (int column = 0; column < 4; column++) {
                         double value = column == axis ? data.boxExtent(axis) : column == 3 ? data.boxMin(axis) : 0;
@@ -348,7 +376,7 @@ public final class RayTracing implements AutoCloseable {
             geometry.geometry().triangles().vertexData().deviceAddress(vertices);
             geometry.geometry().triangles().indexData().deviceAddress(indices.deviceAddress());
             if (transform != null) {
-                geometry.geometry().triangles().transformData().deviceAddress(transform.deviceAddress());
+                geometry.geometry().triangles().transformData().deviceAddress(align16(transform));
             }
             VkAccelerationStructureBuildGeometryInfoKHR.Buffer info = VkAccelerationStructureBuildGeometryInfoKHR
                 .calloc(1, stack);
@@ -428,11 +456,12 @@ public final class RayTracing implements AutoCloseable {
         long stride;
         int format;
         if (quantized) {
-            vertices = pool.positions().deviceAddress() + (long) MeshData.POSITION_BYTES * pool.vertexBase(mesh);
+            // An offset: the pool's buffer may be replaced by a bigger one before the build, which reads the one of then.
+            vertices = (long) MeshData.POSITION_BYTES * pool.vertexBase(mesh);
             stride = MeshData.POSITION_BYTES;
             format = VK_FORMAT_R16G16B16A16_UNORM;
-            transform = GpuBuffer.hostVisible(device, 48, usage);
-            MemorySegment rows = transform.memory();
+            transform = GpuBuffer.hostVisible(device, 64, usage);
+            MemorySegment rows = transform.memory().asSlice(alignedOffset(transform), 48);
             for (int axis = 0; axis < 3; axis++) {
                 for (int column = 0; column < 4; column++) {
                     double value = column == axis ? data.boxExtent(axis) : column == 3 ? data.boxMin(axis) : 0;
@@ -457,8 +486,8 @@ public final class RayTracing implements AutoCloseable {
             format = VK_FORMAT_R32G32B32_SFLOAT;
         }
         // Staged now, the uploads arrive in the next frame; it is built at the start of the one after.
-        Pending staged = new Pending(mesh, (endIndex - firstIndex) / 3, data.vertexCount(), vertices, stride, format,
-            indices, decoded, transform, slots.frames() + 2);
+        Pending staged = new Pending(mesh, (endIndex - firstIndex) / 3, data.vertexCount(), vertices, quantized,
+            stride, format, indices, decoded, transform, slots.frames() + 2);
         pendingOf[mesh] = staged;
         pending.add(staged);
     }
@@ -470,6 +499,9 @@ public final class RayTracing implements AutoCloseable {
      */
     @AllowAllocation("removing, once per mesh")
     public void remove(int mesh) {
+        if (mesh >= bottom.length) {
+            return; // never added
+        }
         Pending onItsWay = pendingOf[mesh];
         if (onItsWay != null) {
             onItsWay.cancelled = true; // freed by the stage it is in, when the GPU is done with it
@@ -495,7 +527,7 @@ public final class RayTracing implements AutoCloseable {
 
     /** Whether pool mesh {@code mesh} has a bottom level its instances are traced through. */
     public boolean hasBottomLevel(int mesh) {
-        return bottom[mesh] != null;
+        return mesh < bottom.length && bottom[mesh] != null;
     }
 
     /** How many bottom levels are on their way: staged, building or compacting. */
@@ -571,10 +603,11 @@ public final class RayTracing implements AutoCloseable {
                 .vertexStride(p.stride)
                 .maxVertex(p.vertexCount - 1)
                 .indexType(VK_INDEX_TYPE_UINT32);
-            geometry.geometry().triangles().vertexData().deviceAddress(p.vertices);
+            geometry.geometry().triangles().vertexData().deviceAddress(p.fromPool
+                ? pool.positionsAtFrameStart().deviceAddress() + p.vertices : p.vertices);
             geometry.geometry().triangles().indexData().deviceAddress(p.indices.deviceAddress());
             if (p.transform != null) {
-                geometry.geometry().triangles().transformData().deviceAddress(p.transform.deviceAddress());
+                geometry.geometry().triangles().transformData().deviceAddress(align16(p.transform));
             }
             VkAccelerationStructureBuildGeometryInfoKHR.Buffer info = VkAccelerationStructureBuildGeometryInfoKHR
                 .calloc(1, stack);
@@ -733,6 +766,9 @@ public final class RayTracing implements AutoCloseable {
         builtZ = originZ;
         bottomAdded = false;
         topLevelBuilds++;
+        if (bottom.length < pool.capacity().meshes()) {
+            growMeshes(); // the instance pass looks every instance's mesh up
+        }
         if (!declared) { // whatever traced the top level before (the last frame) is done with it before it is rebuilt
             Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);

@@ -403,6 +403,48 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void aPoolGrowingWhileFramesAreInFlightKeepsItsMeshes() {
+        // A pool with room for one quad grows with every mesh added while frames are in flight; the first mesh, copied
+        // into each bigger buffer on the GPU, draws throughout.
+        GpuBuffer[] readbacks = {GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+            GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)};
+        try (GeometryPool growing = new GeometryPool(device, GeometryPool.Capacity.of(4, 1, 1), graph.frameSlots());
+             GpuScene moving = new GpuScene(device, growing, 4, graph.frameSlots());
+             MeshletRenderer drawing = new MeshletRenderer(device, moving, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots())) {
+            SceneGeometry geometry = SceneGeometry.meshlets(drawing);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            ViewPort port = graph.addView("main").size(SIZE, SIZE);
+            SceneView movingView = geometry.createView(port, camera, ViewOptions.of(256, 1 << 12));
+            port.add(new ClusteredForwardShading(geometry, movingView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                    .clearColor(0, 0, 0))
+                .add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+            int first = -1;
+            for (int frame = 0; frame < 8; frame++) {
+                graph.beginFrame();
+                int added = growing.add(quadMesh);
+                first = frame == 0 ? added : first;
+                moving.set(0, first, frame % 2 == 0 ? -1 : 1, 0, -3, HALF, 0, 0, HALF, 0.5f, 0.5f, 0.5f);
+                movingView.set(1, MeshletRenderer.MODE_WHITE);
+                graph.submit(0, 0);
+                if (frame == 7) {
+                    device.waitIdle();
+                    assertThat(litColumn(readbacks[1])).as("the last frame").isGreaterThan(SIZE / 2.0 + 4);
+                    assertThat(litColumn(readbacks[0])).as("the frame before").isLessThan(SIZE / 2.0 - 4);
+                }
+            }
+            assertThat(growing.meshCount()).isEqualTo(8);
+            assertThat(growing.capacity().meshes()).isGreaterThanOrEqualTo(8);
+            assertThat(growing.capacity().vertices()).isGreaterThanOrEqualTo(32);
+        } finally {
+            device.waitIdle();
+            for (GpuBuffer readback : readbacks) {
+                readback.close();
+            }
+        }
+    }
+
+    @Test
     void meshesAddedWhileFramesAreInFlightDrawTheirFirstFrame() {
         // Every frame a mesh is added (and the one from two frames before removed) while frames are in flight, and the
         // quad draws with it at once: the upload is staged without waiting and recorded first thing in the frame.
@@ -1552,6 +1594,20 @@ class GraphTechniquesTest {
                 .isThrownBy(() -> classic.add(hill, hillMesh));
             assertThatIllegalArgumentException().as("another mesh's data")
                 .isThrownBy(() -> classic.add(hill, quadMesh));
+            // The pool growing under it: its indices copied into a bigger buffer, its mesh table grown, and a quad added
+            // after drawn in the first one's place as that was.
+            MeshData wide = MeshletRendererTest.grid(64, 1, false, VertexFormat.POSITIONS_ONLY);
+            classic.add(pool.add(wide), wide);
+            int later = quad;
+            for (int i = 0; i < 4; i++) {
+                later = pool.add(quadMesh);
+            }
+            assertThat(pool.capacity().meshes()).isGreaterThan(4);
+            classic.add(later, quadMesh);
+            scene.set(1, later, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+            frame();
+            frame();
+            assertThat(differing(expected)).as("after the pool grew").isZero();
             classic.close();
             assertThatIllegalStateException().isThrownBy(() -> classic.add(hill, hillMesh));
         }

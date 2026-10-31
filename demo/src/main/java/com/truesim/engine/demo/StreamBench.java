@@ -152,13 +152,14 @@ public final class StreamBench {
         boolean rays = List.of(args).contains("rays"); // bottom levels for ray tracing too, as meshes come
         large = List.of(args).contains("large");
         direct = List.of(args).contains("direct");
+        boolean grow = List.of(args).contains("grow"); // the pool starts small and grows as meshes come
         ExecutorService builders = Executors.newFixedThreadPool(3);
         try (VulkanInstance instance = VulkanInstance.builder().applicationName("stream bench").surfaces(false)
                  .build();
              VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
              FrameGraph graph = new FrameGraph(device, 2).timings(true); // GPU time per frame; no rebuilds here
-             GeometryPool pool = new GeometryPool(device, large ? GeometryPool.Capacity.of(1 << 24, 1 << 20, 512)
-                 : GeometryPool.Capacity.of(1 << 22, 1 << 17, 512),
+             GeometryPool pool = new GeometryPool(device, grow ? GeometryPool.START
+                 : large ? GeometryPool.Capacity.of(1 << 24, 1 << 20, 512) : GeometryPool.Capacity.of(1 << 22, 1 << 17, 512),
                  graph.frameSlots());
              Materials materials = new Materials(device, 1024, graph.frameSlots());
              Textures textures = new Textures(device, graph.frameSlots());

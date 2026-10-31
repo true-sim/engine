@@ -174,6 +174,22 @@ public final class FrameUploads implements AutoCloseable {
         pendingBytes += staging.size();
     }
 
+    /**
+     * Records {@code commands}, reading no staged data, in order with the uploads: after those queued before, before
+     * those queued after (in the next frame, or at once, waiting). For work on the targets themselves, such as copying a
+     * buffer into a bigger one; it brings its own barriers.
+     */
+    public void recordCommands(java.util.function.Consumer<VkCommandBuffer> commands) {
+        checkOpen();
+        Objects.requireNonNull(commands, "commands");
+        Staged record = (buffer, staging, offset) -> commands.accept(buffer);
+        if (!deferred) {
+            device.submitAndWait(device.graphics(), commands);
+            return;
+        }
+        pending.add(new Pending(null, 0, 0, null, 0, record));
+    }
+
     /** How many uploads wait for the next frame, and their bytes. */
     public int pendingCount() {
         return pending.size();
@@ -239,7 +255,7 @@ public final class FrameUploads implements AutoCloseable {
         if (target != null) {
             copy(commands, chunk.buffer, from, bytes, target, offset);
         } else {
-            record.record(commands, chunk.buffer, from);
+            record.record(commands, chunk == null ? null : chunk.buffer, from);
         }
     }
 

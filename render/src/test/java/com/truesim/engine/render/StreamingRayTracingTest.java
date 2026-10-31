@@ -34,7 +34,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Bottom levels with frames in flight: built in frames, never waited for; traced once built; compacted, removed and
- * freed while frames run; a mesh's id reused; meshes and textures prepared on another thread. Validated,
+ * freed while frames run; a mesh's id reused; meshes and textures prepared on another thread; the pool growing from
+ * room for nothing much. Validated,
  * synchronization included, a top level built every frame.
  */
 class StreamingRayTracingTest {
@@ -71,7 +72,7 @@ class StreamingRayTracingTest {
         try (instance; VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
             assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
             FrameGraph graph = new FrameGraph(device, 2);
-            GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 14, 256, 8), graph.frameSlots());
+            GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(16, 1, 1), graph.frameSlots());
             GpuScene scene = new GpuScene(device, pool, 16, graph.frameSlots());
             MeshletRenderer renderer = new MeshletRenderer(device, scene, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_FORMAT_D32_SFLOAT, graph.frameSlots());

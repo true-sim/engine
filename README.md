@@ -234,7 +234,7 @@ CPU writes instances and views, the GPU decides what to draw. The world's instan
 
 ```java
 FrameSlots slots = graph.frameSlots();                              // a copy per frame in flight
-try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 22, 65_536, 1024));
+try (GeometryPool pool = new GeometryPool(device, slots);              // starts small, grows as meshes come
      GpuScene scene = new GpuScene(device, pool, 100_000, slots);
      MeshletRenderer renderer = new MeshletRenderer(device, scene, colorFormat, depthFormat, slots)) {
     int car = pool.add(carMesh);                                     // uploaded once
@@ -248,6 +248,11 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
 
 - **Geometry pool:** every mesh's streams in shared device-local buffers, reached by buffer device address, with a
   table entry per mesh; any number of meshes and instances draw in one pass.
+- **The pool grows by itself:** a buffer without room for a mesh is replaced by one twice its size (or more), its
+  contents copied over on the GPU in the next frame, in order with the uploads, and the old one freed once no frame
+  reads it; the mesh table grows alike, and ray tracing's and classic LOD's per-mesh data follow. Nothing waits, and
+  the graph rebuilds once for the new sizes. A capacity given to the constructor is only where it starts
+  (`GeometryPool.START` without one); give one sized for the content to skip the growing.
 - **Meshes come and go:** `pool.remove(mesh)` frees a mesh's ranges and number for later meshes, first fit and
   deterministic, once no frame in flight can draw it (given the graph's `frameSlots()`). `Materials.remove` and
   `Textures.remove` do the same for material ids and bindless texture slots, so streamed content can be unloaded.

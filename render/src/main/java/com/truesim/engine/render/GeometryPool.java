@@ -2,17 +2,30 @@ package com.truesim.engine.render;
 
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_READ_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.graph.ExternalBuffer;
+import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.FrameUploads;
 import com.truesim.engine.vulkan.GpuBuffer;
+import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.assets.mesh.MeshData;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
@@ -30,6 +43,11 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  *
  * <p>Meshes are removed with {@link #remove}: their ranges are reused once no frame in flight can draw them (the
  * pool's {@link FrameSlots}). Ranges are handed out first fit, so the same adds and removes give the same layout.
+ *
+ * <p>The pool grows as meshes come: the capacity it is made with is where it starts. A buffer without room for a mesh
+ * is replaced by one twice its size (or more, for a large mesh), its contents copied over on the GPU in the next
+ * frame, the old one freed once no frame reads it; the mesh table grows alike. Shaders reach the buffers by address,
+ * read anew each frame, and a frame graph rebuilds once for the new sizes.
  *
  * <p>Given a frame graph's {@link FrameSlots}, adding a mesh does not wait for the GPU: its data is staged at once and
  * copied in at the start of the next frame ({@link FrameUploads}), so it draws from the next frame recorded on.
@@ -52,8 +70,8 @@ public final class GeometryPool implements AutoCloseable {
     private static final ValueLayout.OfFloat F32 = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
     /**
-     * How much the pool holds: vertices, meshlets (and as many triangles as 124 per meshlet allow) and meshes.
-     * Attributes take up to 28 bytes per vertex.
+     * How much the pool holds before it grows: vertices, meshlets (and as many triangles as 124 per meshlet allow) and
+     * meshes. Attributes take up to 28 bytes per vertex.
      */
     public record Capacity(int vertices, int meshlets, int triangles, int meshes) {
 
@@ -70,43 +88,53 @@ public final class GeometryPool implements AutoCloseable {
         }
     }
 
-    private final Capacity capacity;
+    private Capacity capacity;
     private final VulkanDevice device;
-    private final GpuBuffer positions;
-    private final GpuBuffer attributes;
-    private final GpuBuffer meshletVertices;
-    private final GpuBuffer meshletTriangles;
-    private final GpuBuffer meshlets;
-    private final GpuBuffer clusterLod;
-    private final GpuBuffer meshTable;
-    private final GpuBuffer levels;
+    private final int positionUsage;
+    private final int dataUsage;
+    private final int tableUsage;
+    private GpuBuffer positions;
+    private GpuBuffer attributes;
+    private GpuBuffer meshletVertices;
+    private GpuBuffer meshletTriangles;
+    private GpuBuffer meshlets;
+    private GpuBuffer clusterLod;
+    private GpuBuffer meshTable;
+    private GpuBuffer levels;
+    // The positions as the GPU has them at a frame's start: the replaced buffer until the frame copying it records.
+    private volatile GpuBuffer positionsOnGpu;
+    // The buffers as a frame graph imports them, set anew when one grows.
+    private final ExternalBuffer[] graphBuffers;
     private final FrameSlots slots;
     private final FrameUploads uploads;
+    // Buffers replaced by bigger ones: until the frame copying from them records, then until no frame reads them.
+    private final List<GpuBuffer> replaced = new ArrayList<>();
+    private final Retiring oldBuffers;
     // Where meshes live: ranges of each kind of data, and mesh numbers.
     private final RangeAllocator vertexRanges;
     private final RangeAllocator attributeRanges;
     private final RangeAllocator meshletVertexRanges;
     private final RangeAllocator meshletRanges;
     private final RangeAllocator triangleRanges;
-    private final int[] freeIds;
+    private int[] freeIds;
     private int freeIdCount;
     private int idCount; // ids handed out so far, from 0; freed ones are reused first
     // Per mesh number: its ranges (starts and lengths), and whether it is live.
-    private final int[] vertexStart;
-    private final int[] vertexLength;
-    private final long[] attributeStart;
-    private final long[] attributeLength;
-    private final int[] meshletVertexStart;
-    private final int[] meshletVertexLength;
-    private final int[] meshletStart;
-    private final int[] meshletLength;
-    private final long[] triangleStart;
-    private final long[] triangleLength;
-    private final boolean[] live;
-    private final boolean[] fits;
+    private int[] vertexStart;
+    private int[] vertexLength;
+    private long[] attributeStart;
+    private long[] attributeLength;
+    private int[] meshletVertexStart;
+    private int[] meshletVertexLength;
+    private int[] meshletStart;
+    private int[] meshletLength;
+    private long[] triangleStart;
+    private long[] triangleLength;
+    private boolean[] live;
+    private boolean[] fits;
     // Removed meshes waiting for the frames that may draw them: their numbers and when they are free.
-    private final int[] retiring;
-    private final long[] retireAt;
+    private int[] retiring;
+    private long[] retireAt;
     private int retiringCount;
     private int vertexCount;
     private int meshletCount;
@@ -114,41 +142,59 @@ public final class GeometryPool implements AutoCloseable {
     private int unfit; // live meshes too large for the mesh shader path
     private boolean closed;
 
+    /** Where a pool made without a capacity starts: a few meshes' worth, grown as meshes come. */
+    public static final Capacity START = Capacity.of(1 << 16, 1024, 64);
+
+    /** A pool starting small ({@link #START}), for frames the caller waits for. */
+    public GeometryPool(VulkanDevice device) {
+        this(device, START);
+    }
+
+    /** A pool starting small ({@link #START}), for the frames of {@code slots} (a frame graph's). */
+    public GeometryPool(VulkanDevice device, FrameSlots slots) {
+        this(device, START, slots);
+    }
+
     /**
-     * A pool of {@code capacity}, for frames the caller waits for between {@link #remove removing} a mesh and adding
-     * another.
+     * A pool starting at {@code capacity}, for frames the caller waits for between {@link #remove removing} a mesh and
+     * adding another.
      */
     public GeometryPool(VulkanDevice device, Capacity capacity) {
         this(device, capacity, FrameSlots.single());
     }
 
     /**
-     * A pool of {@code capacity} whose removed meshes keep their data until no frame of {@code slots} (a frame graph's)
-     * can still draw them.
+     * A pool starting at {@code capacity} whose removed meshes keep their data until no frame of {@code slots} (a frame
+     * graph's) can still draw them. Sized for what it will hold, it never grows.
      */
     public GeometryPool(VulkanDevice device, Capacity capacity, FrameSlots slots) {
         this.device = Objects.requireNonNull(device, "device");
         this.capacity = capacity;
         this.slots = Objects.requireNonNull(slots, "slots");
         this.uploads = new FrameUploads(device, slots);
+        this.oldBuffers = new Retiring(slots);
         int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-        int transferDst = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         long triangleIndices = 3L * capacity.triangles();
         // Positions are ray tracing's build input too, where the device traces rays: bottom-level acceleration
-        // structures read them as they are.
+        // structures read them as they are. Each is copied from when it grows.
         int buildInput = device.rayTracing() ? VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
             : 0;
-        positions = GpuBuffer.deviceLocal(device, (long) MeshData.POSITION_BYTES * capacity.vertices(),
-            usage | transferDst | buildInput);
-        attributes = GpuBuffer.deviceLocal(device, 28L * capacity.vertices(), usage | transferDst);
-        meshletVertices = GpuBuffer.deviceLocal(device, 4L * capacity.meshlets() * 255, usage | transferDst);
-        meshletTriangles = GpuBuffer.deviceLocal(device, (triangleIndices + 3) & ~3L, usage | transferDst);
-        meshlets = GpuBuffer.deviceLocal(device, (long) MeshData.MESHLET_BYTES * capacity.meshlets(),
-            usage | transferDst);
-        clusterLod = GpuBuffer.deviceLocal(device, (long) MeshData.CLUSTER_LOD_BYTES * capacity.meshlets(),
-            usage | transferDst);
+        tableUsage = usage;
+        dataUsage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        positionUsage = dataUsage | buildInput;
+        positions = GpuBuffer.deviceLocal(device, (long) MeshData.POSITION_BYTES * capacity.vertices(), positionUsage);
+        positionsOnGpu = positions;
+        attributes = GpuBuffer.deviceLocal(device, 28L * capacity.vertices(), dataUsage);
+        meshletVertices = GpuBuffer.deviceLocal(device, 4L * capacity.meshlets() * 255, dataUsage);
+        meshletTriangles = GpuBuffer.deviceLocal(device, (triangleIndices + 3) & ~3L, dataUsage);
+        meshlets = GpuBuffer.deviceLocal(device, (long) MeshData.MESHLET_BYTES * capacity.meshlets(), dataUsage);
+        clusterLod = GpuBuffer.deviceLocal(device, (long) MeshData.CLUSTER_LOD_BYTES * capacity.meshlets(), dataUsage);
         meshTable = GpuBuffer.hostVisible(device, (long) MESH_ENTRY_BYTES * capacity.meshes(), usage);
         levels = GpuBuffer.hostVisible(device, 8L * MAX_LEVELS * capacity.meshes(), usage);
+        graphBuffers = new ExternalBuffer[] {new ExternalBuffer("positions", positions),
+            new ExternalBuffer("attributes", attributes), new ExternalBuffer("meshlets", meshlets),
+            new ExternalBuffer("meshlet vertices", meshletVertices),
+            new ExternalBuffer("meshlet triangles", meshletTriangles), new ExternalBuffer("cluster LOD", clusterLod)};
         int meshes = capacity.meshes();
         vertexRanges = new RangeAllocator(capacity.vertices());
         attributeRanges = new RangeAllocator(attributes.size());
@@ -175,9 +221,10 @@ public final class GeometryPool implements AutoCloseable {
 
     /**
      * Uploads {@code mesh} and returns its number, for instances to draw it by: a free one, the lowest removed one first.
-     * Drawn from the next frame on (or, without frame slots, waits until the upload has finished).
+     * Drawn from the next frame on (or, without frame slots, waits until the upload has finished). The pool grows if
+     * it lacks room.
      *
-     * @throws IllegalStateException if the pool has no room left for it
+     * @throws IllegalStateException if the mesh has more than {@link #MAX_LEVELS} detail levels
      */
     public int add(MeshData mesh) {
         int id = tryAdd(mesh);
@@ -272,7 +319,7 @@ public final class GeometryPool implements AutoCloseable {
         return id;
     }
 
-    /** Like {@link #add(Prepared)}, or -1 without room for it: the prepared mesh stays the caller's then. */
+    /** Like {@link #add(Prepared)}, or -1 for too many levels: the prepared mesh stays the caller's then. */
     public int tryAdd(Prepared prepared) {
         if (prepared.taken) {
             throw new IllegalStateException("The prepared mesh was added or closed already");
@@ -285,6 +332,13 @@ public final class GeometryPool implements AutoCloseable {
         long indexBase, long meshletBase) {
         MeshData mesh = prepared.mesh;
         prepared.taken = true;
+        // The buffers of now: one may be replaced by a bigger one before the frame records, copying this in.
+        GpuBuffer positions = this.positions;
+        GpuBuffer attributes = this.attributes;
+        GpuBuffer meshletVertices = this.meshletVertices;
+        GpuBuffer meshletTriangles = this.meshletTriangles;
+        GpuBuffer meshlets = this.meshlets;
+        GpuBuffer clusterLod = this.clusterLod;
         uploads.record(prepared.staging, (commands, staging, offset) -> {
             copy(commands, staging, 0, positions, (long) MeshData.POSITION_BYTES * vertexBase,
                 mesh.positions().byteSize());
@@ -315,8 +369,7 @@ public final class GeometryPool implements AutoCloseable {
     }
 
     /**
-     * Adds {@code mesh} as {@link #add} does, or returns -1 if the pool has no room for it now: room may come back as
-     * removed meshes leave the frames in flight. Allocates nothing when there is no room.
+     * Adds {@code mesh} as {@link #add} does, or returns -1 if it has more than {@link #MAX_LEVELS} detail levels.
      */
     public int tryAdd(MeshData mesh) {
         return tryAdd(mesh, null);
@@ -331,23 +384,18 @@ public final class GeometryPool implements AutoCloseable {
         int meshletVertexTotal = (int) (mesh.meshletVertices().byteSize() / 4);
         long indexTotal = 3L * mesh.triangleCount();
         long indexRange = (indexTotal + 3) & ~3L; // whole words: the last one is padded
-        if (mesh.levels().size() > MAX_LEVELS || freeIdCount == 0 && idCount == capacity.meshes()) {
+        if (mesh.levels().size() > MAX_LEVELS) {
             return -1;
+        }
+        if (freeIdCount == 0 && idCount == capacity.meshes()) {
+            growMeshes();
         }
         // Each kind of data in a range of its own; triangle bytes start on a word, so no word holds two meshes.
-        long vertexBase = vertexRanges.allocate(mesh.vertexCount(), 1);
-        long attributeBase = attributeRanges.allocate(mesh.attributes().byteSize(), 4);
-        long meshletVertexBase = meshletVertexRanges.allocate(meshletVertexTotal, 1);
-        long meshletBase = meshletRanges.allocate(mesh.meshletCount(), 1);
-        long indexBase = triangleRanges.allocate(indexRange, 4);
-        if (vertexBase < 0 || attributeBase < 0 || meshletVertexBase < 0 || meshletBase < 0 || indexBase < 0) {
-            give(vertexRanges, vertexBase, mesh.vertexCount());
-            give(attributeRanges, attributeBase, mesh.attributes().byteSize());
-            give(meshletVertexRanges, meshletVertexBase, meshletVertexTotal);
-            give(meshletRanges, meshletBase, mesh.meshletCount());
-            give(triangleRanges, indexBase, indexRange);
-            return -1;
-        }
+        long vertexBase = place(vertexRanges, mesh.vertexCount(), 1);
+        long attributeBase = place(attributeRanges, mesh.attributes().byteSize(), 4);
+        long meshletVertexBase = place(meshletVertexRanges, meshletVertexTotal, 1);
+        long meshletBase = place(meshletRanges, mesh.meshletCount(), 1);
+        long indexBase = place(triangleRanges, indexRange, 4);
         boolean fitsMesh = true;
         for (int m = 0; m < mesh.meshletCount() && fitsMesh; m++) {
             fitsMesh = mesh.meshletVertexCount(m) <= MESH_SHADER_VERTICES
@@ -461,15 +509,108 @@ public final class GeometryPool implements AutoCloseable {
         return id;
     }
 
-    private static void give(RangeAllocator ranges, long start, long length) {
-        if (start >= 0) {
-            ranges.release(start, length);
+    /** A range of {@code length} from {@code ranges}, grown (and its buffers with it) if it has none free. */
+    private long place(RangeAllocator ranges, long length, long alignment) {
+        long start = ranges.allocate(length, alignment);
+        if (start < 0) {
+            // The free end merges with the new room, so this much more always holds it.
+            long grown = Math.max(2 * ranges.capacity(), ranges.capacity() + length + alignment);
+            grow(ranges, (grown + 3) & ~3L);
+            start = ranges.allocate(length, alignment);
+        }
+        return start;
+    }
+
+    /** Grows {@code ranges} to {@code units} and the buffers it places data in to match. */
+    private void grow(RangeAllocator ranges, long units) {
+        if (ranges == vertexRanges) {
+            if (units > Integer.MAX_VALUE) {
+                throw new IllegalStateException("The geometry pool holds at most " + Integer.MAX_VALUE + " vertices");
+            }
+            positions = grown(positions, (long) MeshData.POSITION_BYTES * units, positionUsage);
+        } else if (ranges == attributeRanges) {
+            attributes = grown(attributes, units, dataUsage);
+        } else if (ranges == meshletVertexRanges) {
+            meshletVertices = grown(meshletVertices, 4L * units, dataUsage);
+        } else if (ranges == meshletRanges) {
+            meshlets = grown(meshlets, (long) MeshData.MESHLET_BYTES * units, dataUsage);
+            clusterLod = grown(clusterLod, (long) MeshData.CLUSTER_LOD_BYTES * units, dataUsage);
+        } else {
+            meshletTriangles = grown(meshletTriangles, units, dataUsage);
+        }
+        ranges.grow(units);
+        capacity = new Capacity((int) vertexRanges.capacity(), (int) Math.min(Integer.MAX_VALUE,
+            meshletRanges.capacity()), (int) Math.min(Integer.MAX_VALUE, triangleRanges.capacity() / 3),
+            capacity.meshes());
+        GpuBuffer[] buffers = {positions, attributes, meshlets, meshletVertices, meshletTriangles, clusterLod};
+        for (int i = 0; i < buffers.length; i++) {
+            graphBuffers[i].set(buffers[i]);
         }
     }
 
+    /**
+     * A buffer of {@code bytes} taking {@code old}'s place: what {@code old} holds is copied in, in order with the
+     * uploads (those queued before land in {@code old} first, those after in the new one), and {@code old} is freed once
+     * no frame reads it.
+     */
+    private GpuBuffer grown(GpuBuffer old, long bytes, int usage) {
+        GpuBuffer grown = GpuBuffer.deviceLocal(device, bytes, usage);
+        synchronized (replaced) {
+            replaced.add(old);
+        }
+        uploads.recordCommands(commands -> {
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+            copy(commands, old, 0, grown, 0, old.size());
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            if (positionsOnGpu == old) {
+                positionsOnGpu = grown;
+            }
+            synchronized (replaced) {
+                if (replaced.remove(old)) { // else the pool was closed
+                    oldBuffers.add(old); // this frame reads it too
+                }
+            }
+        });
+        return grown;
+    }
+
+    /** Twice the mesh numbers: the tables copied into bigger ones, the old ones freed once no frame reads them. */
+    private void growMeshes() {
+        int meshes = capacity.meshes();
+        int more = (int) Math.min(Integer.MAX_VALUE - 8, 2L * meshes);
+        meshTable = grownTable(meshTable, (long) MESH_ENTRY_BYTES * more);
+        levels = grownTable(levels, 8L * MAX_LEVELS * more);
+        freeIds = Arrays.copyOf(freeIds, more);
+        vertexStart = Arrays.copyOf(vertexStart, more);
+        vertexLength = Arrays.copyOf(vertexLength, more);
+        attributeStart = Arrays.copyOf(attributeStart, more);
+        attributeLength = Arrays.copyOf(attributeLength, more);
+        meshletVertexStart = Arrays.copyOf(meshletVertexStart, more);
+        meshletVertexLength = Arrays.copyOf(meshletVertexLength, more);
+        meshletStart = Arrays.copyOf(meshletStart, more);
+        meshletLength = Arrays.copyOf(meshletLength, more);
+        triangleStart = Arrays.copyOf(triangleStart, more);
+        triangleLength = Arrays.copyOf(triangleLength, more);
+        live = Arrays.copyOf(live, more);
+        fits = Arrays.copyOf(fits, more);
+        retiring = Arrays.copyOf(retiring, more);
+        retireAt = Arrays.copyOf(retireAt, more);
+        capacity = new Capacity(capacity.vertices(), capacity.meshlets(), capacity.triangles(), more);
+    }
+
+    private GpuBuffer grownTable(GpuBuffer old, long bytes) {
+        GpuBuffer grown = GpuBuffer.hostVisible(device, bytes, tableUsage);
+        MemorySegment.copy(old.memory(), 0, grown.memory(), 0, old.size());
+        grown.memory().asSlice(old.size()).fill((byte) 0);
+        oldBuffers.add(old); // frames in flight read it; those recorded from now on read the new one
+        return grown;
+    }
+
     private IllegalStateException noRoom(MeshData mesh) {
-        return new IllegalStateException("The geometry pool has no room for a mesh of " + mesh.vertexCount()
-            + " vertices, " + mesh.meshletCount() + " meshlets and " + mesh.levels().size() + " levels");
+        return new IllegalStateException("A mesh may have at most " + MAX_LEVELS + " detail levels here: "
+            + mesh.levels().size());
     }
 
     /**
@@ -615,6 +756,22 @@ public final class GeometryPool implements AutoCloseable {
         return slots;
     }
 
+    /**
+     * The positions buffer as the GPU has it at a frame's start, before the frame's uploads: the one replaced by a
+     * bigger one until the frame copying it over. For builds recorded at frame starts (ray tracing's).
+     */
+    GpuBuffer positionsAtFrameStart() {
+        return positionsOnGpu;
+    }
+
+    /**
+     * The buffers as a frame graph imports them: positions, attributes, meshlets, meshlet vertices, meshlet triangles
+     * and cluster LOD records. Set anew when a buffer grows, so the graph rebuilds for its size.
+     */
+    ExternalBuffer[] graphBuffers() {
+        return graphBuffers;
+    }
+
     /** The pool's uploads, for work outside frames that reads meshes added since the last frame. */
     FrameUploads uploads() {
         return uploads;
@@ -677,6 +834,11 @@ public final class GeometryPool implements AutoCloseable {
                 meshlets, clusterLod, meshTable, levels}) {
                 buffer.close();
             }
+            synchronized (replaced) {
+                replaced.forEach(GpuBuffer::close);
+                replaced.clear();
+            }
+            oldBuffers.close();
         }
     }
 }
