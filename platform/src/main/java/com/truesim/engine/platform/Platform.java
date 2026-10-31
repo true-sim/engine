@@ -4,6 +4,7 @@ import static org.lwjgl.sdl.SDLError.SDL_GetError;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_DISPLAY_ADDED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_DISPLAY_REMOVED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_DROP_FILE;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_FINGER_CANCELED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_FINGER_DOWN;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_FINGER_MOTION;
@@ -46,16 +47,25 @@ import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_PEN_PROXIMITY_OUT;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_PEN_UP;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_QUIT;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_SENSOR_UPDATE;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_TEXT_EDITING;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_TEXT_INPUT;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_CLOSE_REQUESTED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_DISPLAY_CHANGED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_EXPOSED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_FOCUS_GAINED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_FOCUS_LOST;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_HIDDEN;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_MAXIMIZED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_MINIMIZED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_MOUSE_ENTER;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_MOUSE_LEAVE;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_MOVED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_OCCLUDED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_RESIZED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_RESTORED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_SHOWN;
 import static org.lwjgl.sdl.SDLEvents.SDL_PollEvent;
 import static org.lwjgl.sdl.SDLGamepad.SDL_AddGamepadMapping;
 import static org.lwjgl.sdl.SDLGamepad.SDL_GetGamepadJoystick;
@@ -121,10 +131,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.sdl.SDL_CommonEvent;
 import org.lwjgl.sdl.SDL_DisplayMode;
+import org.lwjgl.sdl.SDL_DropEvent;
 import org.lwjgl.sdl.SDL_Event;
-import org.lwjgl.sdl.SDL_GamepadDeviceEvent;
 import org.lwjgl.sdl.SDL_GamepadAxisEvent;
 import org.lwjgl.sdl.SDL_GamepadButtonEvent;
+import org.lwjgl.sdl.SDL_GamepadDeviceEvent;
 import org.lwjgl.sdl.SDL_GamepadSensorEvent;
 import org.lwjgl.sdl.SDL_GamepadTouchpadEvent;
 import org.lwjgl.sdl.SDL_JoyAxisEvent;
@@ -144,6 +155,7 @@ import org.lwjgl.sdl.SDL_PenProximityEvent;
 import org.lwjgl.sdl.SDL_PenTouchEvent;
 import org.lwjgl.sdl.SDL_Rect;
 import org.lwjgl.sdl.SDL_SensorEvent;
+import org.lwjgl.sdl.SDL_TextEditingEvent;
 import org.lwjgl.sdl.SDL_TextInputEvent;
 import org.lwjgl.sdl.SDL_TouchFingerEvent;
 import org.lwjgl.sdl.SDL_WindowEvent;
@@ -734,7 +746,20 @@ public final class Platform implements AutoCloseable {
             case SDL_EVENT_WINDOW_MOVED -> listener.windowMoved(
                 SDL_WindowEvent.nwindowID(e), SDL_WindowEvent.ndata1(e), SDL_WindowEvent.ndata2(e));
             case SDL_EVENT_WINDOW_MINIMIZED -> listener.windowMinimized(SDL_WindowEvent.nwindowID(e), true);
-            case SDL_EVENT_WINDOW_RESTORED -> listener.windowMinimized(SDL_WindowEvent.nwindowID(e), false);
+            case SDL_EVENT_WINDOW_RESTORED -> {
+                listener.windowMinimized(SDL_WindowEvent.nwindowID(e), false);
+                listener.windowMaximized(SDL_WindowEvent.nwindowID(e), false);
+            }
+            case SDL_EVENT_WINDOW_MAXIMIZED -> listener.windowMaximized(SDL_WindowEvent.nwindowID(e), true);
+            case SDL_EVENT_WINDOW_SHOWN -> listener.windowShown(SDL_WindowEvent.nwindowID(e), true);
+            case SDL_EVENT_WINDOW_HIDDEN -> listener.windowShown(SDL_WindowEvent.nwindowID(e), false);
+            case SDL_EVENT_WINDOW_OCCLUDED -> listener.windowOccluded(SDL_WindowEvent.nwindowID(e), true);
+            case SDL_EVENT_WINDOW_EXPOSED -> listener.windowOccluded(SDL_WindowEvent.nwindowID(e), false);
+            case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED -> listener.windowScaleChanged(SDL_WindowEvent.nwindowID(e));
+            case SDL_EVENT_WINDOW_MOUSE_ENTER -> listener.mouseEntered(SDL_WindowEvent.nwindowID(e), true);
+            case SDL_EVENT_WINDOW_MOUSE_LEAVE -> listener.mouseEntered(SDL_WindowEvent.nwindowID(e), false);
+            case SDL_EVENT_DROP_FILE -> dropped(e, listener);
+            case SDL_EVENT_TEXT_EDITING -> editing(e, listener);
             case SDL_EVENT_WINDOW_FOCUS_GAINED -> listener.windowFocusChanged(SDL_WindowEvent.nwindowID(e), true);
             case SDL_EVENT_WINDOW_FOCUS_LOST -> listener.windowFocusChanged(SDL_WindowEvent.nwindowID(e), false);
             case SDL_EVENT_WINDOW_DISPLAY_CHANGED -> listener.windowDisplayChanged(
@@ -810,15 +835,25 @@ public final class Platform implements AutoCloseable {
             case SDL_EVENT_MOUSE_REMOVED -> removed(InputDevice.Kind.MOUSE, e, listener);
             case SDL_EVENT_GAMEPAD_REMOVED -> removed(InputDevice.Kind.GAMEPAD, e, listener);
             case SDL_EVENT_JOYSTICK_REMOVED -> removedJoystick(e, listener);
-            default -> {
-                // not forwarded
-            }
+            default -> listener.other(SDL_CommonEvent.ntype(e), e);
         }
     }
 
     /** A stick or trigger from SDL's signed 16-bit range to [-1, 1]. */
     static float axis(short value) {
         return Math.max(value / 32767f, -1f);
+    }
+
+    @AllowAllocation("a dropped file's path is a string")
+    private static void dropped(long e, PlatformListener listener) {
+        listener.fileDropped(SDL_DropEvent.nwindowID(e), SDL_DropEvent.ndataString(e), SDL_DropEvent.nx(e),
+            SDL_DropEvent.ny(e));
+    }
+
+    @AllowAllocation("composed text is a string")
+    private static void editing(long e, PlatformListener listener) {
+        listener.textEditing(SDL_TextEditingEvent.nwindowID(e), SDL_TextEditingEvent.ntextString(e),
+            SDL_TextEditingEvent.nstart(e), SDL_TextEditingEvent.nlength(e));
     }
 
     @AllowAllocation("typed text is a string")

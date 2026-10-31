@@ -119,6 +119,46 @@ class PlatformTest {
         }
 
         @Override
+        public void windowMaximized(int window, boolean maximized) {
+            events.add("maximized " + window + " " + maximized);
+        }
+
+        @Override
+        public void windowShown(int window, boolean shown) {
+            events.add("shown " + window + " " + shown);
+        }
+
+        @Override
+        public void windowOccluded(int window, boolean occluded) {
+            events.add("occluded " + window + " " + occluded);
+        }
+
+        @Override
+        public void windowScaleChanged(int window) {
+            events.add("scale " + window);
+        }
+
+        @Override
+        public void mouseEntered(int window, boolean entered) {
+            events.add("entered " + window + " " + entered);
+        }
+
+        @Override
+        public void fileDropped(int window, String path, float x, float y) {
+            events.add("dropped " + window + " " + path + " " + x + "," + y);
+        }
+
+        @Override
+        public void textEditing(int window, String text, int start, int length) {
+            events.add("editing " + window + " " + text + " " + start + "+" + length);
+        }
+
+        @Override
+        public void other(int type, long event) {
+            events.add("other " + type);
+        }
+
+        @Override
         public void windowFocusChanged(int window, boolean focused) {
             events.add("focus " + window + " " + focused);
         }
@@ -737,7 +777,39 @@ class PlatformTest {
         push(SDL_EVENT_QUIT);
         send();
         assertThat(poll(recorder)).containsExactly("close 99", "moved 99 3,4", "minimized 99 true",
-            "minimized 99 false", "focus 99 true", "display 99 3", "displays", "quit");
+            "minimized 99 false", "maximized 99 false", "focus 99 true", "display 99 3", "displays", "quit");
+        // The rest of a window's life, and what SDL sends that has no method of its own.
+        int[] more = {org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_MAXIMIZED, org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_SHOWN,
+            org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_HIDDEN, org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_OCCLUDED,
+            org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_EXPOSED, org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED,
+            org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_MOUSE_ENTER, org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_MOUSE_LEAVE};
+        for (int type : more) {
+            push(type);
+            SDL_WindowEvent.nwindowID(e, 99);
+            send();
+        }
+        try (java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofConfined()) {
+            push(org.lwjgl.sdl.SDLEvents.SDL_EVENT_DROP_FILE);
+            org.lwjgl.system.MemoryUtil.memPutInt(e + org.lwjgl.sdl.SDL_DropEvent.WINDOWID, 99);
+            org.lwjgl.system.MemoryUtil.memPutFloat(e + org.lwjgl.sdl.SDL_DropEvent.X, 5);
+            org.lwjgl.system.MemoryUtil.memPutFloat(e + org.lwjgl.sdl.SDL_DropEvent.Y, 6);
+            org.lwjgl.system.MemoryUtil.memPutAddress(e + org.lwjgl.sdl.SDL_DropEvent.DATA,
+                arena.allocateFrom("level.gltf").address());
+            send();
+            push(org.lwjgl.sdl.SDLEvents.SDL_EVENT_TEXT_EDITING);
+            org.lwjgl.system.MemoryUtil.memPutInt(e + org.lwjgl.sdl.SDL_TextEditingEvent.WINDOWID, 99);
+            org.lwjgl.system.MemoryUtil.memPutAddress(e + org.lwjgl.sdl.SDL_TextEditingEvent.TEXT,
+                arena.allocateFrom("ka").address());
+            org.lwjgl.system.MemoryUtil.memPutInt(e + org.lwjgl.sdl.SDL_TextEditingEvent.START, 1);
+            org.lwjgl.system.MemoryUtil.memPutInt(e + org.lwjgl.sdl.SDL_TextEditingEvent.LENGTH, 1);
+            send();
+            push(org.lwjgl.sdl.SDLEvents.SDL_EVENT_CLIPBOARD_UPDATE);
+            send();
+            assertThat(poll(recorder)).containsExactly("maximized 99 true", "shown 99 true", "shown 99 false",
+                "occluded 99 true", "occluded 99 false", "scale 99", "entered 99 true", "entered 99 false",
+                "dropped 99 level.gltf 5.0,6.0", "editing 99 ka 1+1",
+                "other " + org.lwjgl.sdl.SDLEvents.SDL_EVENT_CLIPBOARD_UPDATE);
+        }
         // Real window changes come back as events.
         Window window = platform.createWindow(WindowOptions.of("events", 300, 200).withHidden(true).withVulkan(false));
         poll(recorder);
@@ -802,6 +874,14 @@ class PlatformTest {
         ignoring.windowPixelSizeChanged(1, 2, 3);
         ignoring.windowMoved(1, 2, 3);
         ignoring.windowMinimized(1, true);
+        ignoring.windowMaximized(1, true);
+        ignoring.windowShown(1, true);
+        ignoring.windowOccluded(1, true);
+        ignoring.windowScaleChanged(1);
+        ignoring.mouseEntered(1, true);
+        ignoring.fileDropped(1, "a", 0, 0);
+        ignoring.textEditing(1, "a", 0, 0);
+        ignoring.other(1, 0);
         ignoring.windowFocusChanged(1, true);
         ignoring.windowDisplayChanged(1, 2);
         ignoring.displaysChanged();
