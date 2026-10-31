@@ -699,6 +699,27 @@ class VulkanTest {
     }
 
     @Test
+    void extraExtensionsAreEnabledOrRefused() {
+        // What an OpenXR runtime asks for besides the engine's own: enabled where there, refused where not.
+        try (VulkanInstance instance = validated(VulkanInstance.builder().applicationName("tests").validation(true)
+            .surfaces(false).extensions(List.of("VK_KHR_get_surface_capabilities2", "VK_KHR_get_surface_capabilities2"))
+            .build())) {
+            assumeThat(instance.gpus()).isNotEmpty();
+            Gpu gpu = instance.bestGpu();
+            assumeThat(gpu.supports(VK_KHR_SWAPCHAIN_EXTENSION_NAME)).as("no presentation").isTrue();
+            try (VulkanDevice device = VulkanDevice.create(gpu, List.of(VK_KHR_SWAPCHAIN_EXTENSION_NAME))) {
+                assertThat(device.canPresent()).isTrue();
+            }
+            assertThatThrownBy(() -> VulkanDevice.create(gpu, List.of("VK_TRUESIM_no_such_extension")))
+                .isInstanceOf(VulkanException.class).hasMessageContaining("VK_TRUESIM_no_such_extension");
+        } catch (UnsatisfiedLinkError e) {
+            assumeThat(e).as("no Vulkan available").isNull();
+        }
+        assertThatThrownBy(() -> VulkanInstance.builder().surfaces(false).extensions(List.of("VK_TRUESIM_missing"))
+            .build()).isInstanceOf(VulkanException.class).hasMessageContaining("VK_TRUESIM_missing");
+    }
+
+    @Test
     void headlessDevicesCannotPresent() {
         try (Platform platform = Platform.start();
              VulkanInstance instance = validated(VulkanInstance.builder().validation(true).build())) {

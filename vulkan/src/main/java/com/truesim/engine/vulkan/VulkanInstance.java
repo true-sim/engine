@@ -116,6 +116,14 @@ public final class VulkanInstance implements AutoCloseable {
                     extensions.add(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME); // HDR color spaces, where offered
                 }
             }
+            for (String extra : builder.extensions) {
+                if (!available.contains(extra)) {
+                    throw new VulkanException("The instance extension " + extra + " is missing");
+                }
+                if (!extensions.contains(extra)) {
+                    extensions.add(extra);
+                }
+            }
             boolean layer = builder.validation && layers().contains(VALIDATION_LAYER);
             if (builder.validation && !layer) {
                 LOG.warn("Validation requested but {} is not installed; continuing without", VALIDATION_LAYER);
@@ -205,6 +213,7 @@ public final class VulkanInstance implements AutoCloseable {
         private boolean gpuAssisted;
         private boolean surfaces = true;
         private int maxApiVersion = MAX_API_VERSION;
+        private final List<String> extensions = new ArrayList<>();
 
         private Builder() {
         }
@@ -259,6 +268,19 @@ public final class VulkanInstance implements AutoCloseable {
                     + Vulkan.version(MIN_API_VERSION) + " and " + Vulkan.version(MAX_API_VERSION));
             }
             this.maxApiVersion = version;
+            return this;
+        }
+
+        /**
+         * Instance extensions to enable besides the engine's, e.g. those an OpenXR runtime asks for: building fails if
+         * one is missing.
+         */
+        public Builder extensions(java.util.Collection<String> names) {
+            for (String name : names) {
+                if (!extensions.contains(name)) {
+                    extensions.add(name);
+                }
+            }
             return this;
         }
 

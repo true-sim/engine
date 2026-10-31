@@ -111,6 +111,55 @@ public final class Camera {
     }
 
     /**
+     * An eye of a headset, as OpenXR gives it: looking from ({@code ex}, {@code ey}, {@code ez}) relative to the
+     * {@link #position}, turned by unit quaternion ({@code qx}, {@code qy}, {@code qz}, {@code qw}) from looking along
+     * -Z with +Y up, seeing the angles (radians) {@code left} and {@code down} (negative) to {@code right} and
+     * {@code up} (an off-center frustum), on a {@code width} by {@code height} viewport, the near plane at
+     * {@code near}. Allocates nothing.
+     */
+    public Camera setFov(double ex, double ey, double ez, double qx, double qy, double qz, double qw, double left,
+        double right, double up, double down, int width, int height, double near) {
+        // The rotation's columns: where it turns right (+X), up (+Y) and back (+Z).
+        double rx = 1 - 2 * (qy * qy + qz * qz);
+        double ry = 2 * (qx * qy + qz * qw);
+        double rz = 2 * (qx * qz - qy * qw);
+        double tx = 2 * (qx * qy - qz * qw);
+        double ty = 1 - 2 * (qx * qx + qz * qz);
+        double tz = 2 * (qy * qz + qx * qw);
+        double bx = 2 * (qx * qz + qy * qw);
+        double by = 2 * (qy * qz - qx * qw);
+        double bz = 1 - 2 * (qx * qx + qy * qy);
+        double l = Maths.tan(left);
+        double r = Maths.tan(right);
+        double u = Maths.tan(up);
+        double d = Maths.tan(down);
+        // x / w from l to r and y / w from d to u onto -1 to 1 (y flipped: Vulkan's y points down); w = distance.
+        double sx = 2 / (r - l);
+        double ox = (r + l) / (r - l);
+        double sy = 2 / (u - d);
+        double oy = (u + d) / (u - d);
+        double re = rx * ex + ry * ey + rz * ez;
+        double te = tx * ex + ty * ey + tz * ez;
+        double be = bx * ex + by * ey + bz * ez;
+        set(0, sx * rx + ox * bx, sx * ry + ox * by, sx * rz + ox * bz, -sx * re - ox * be);
+        set(1, -sy * tx - oy * bx, -sy * ty - oy * by, -sy * tz - oy * bz, sy * te + oy * be);
+        set(2, 0, 0, 0, near);
+        set(3, -bx, -by, -bz, be);
+        eye[0] = ex;
+        eye[1] = ey;
+        eye[2] = ez;
+        projectionScale = (float) (height / (u - d));
+        plane(0, 3, 0, 1);
+        plane(1, 3, 0, -1);
+        plane(2, 3, 1, 1);
+        plane(3, 3, 1, -1);
+        plane(4, 3, 2, -1);
+        plane(5, 3, 2, -1);
+        orthographic = false;
+        return this;
+    }
+
+    /**
      * An orthographic view, e.g. a directional light's for a shadow map: from ({@code ex}, {@code ey}, {@code ez})
      * (relative to the {@link #position}) along ({@code fx}, {@code fy}, {@code fz}), ({@code ux}, {@code uy},
      * {@code uz}) roughly up, seeing {@code halfWidth} and {@code halfHeight} to each side and {@code depth} ahead, on
