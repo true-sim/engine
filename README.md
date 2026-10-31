@@ -692,7 +692,9 @@ that declare how they use each image. The graph does the rest:
   `DisplayTransform`'s settings change while running, without a rebuild: the tone curve (`NONE`, `REINHARD`, `ACES`),
   exposure, paper white (how bright SDR white and UI show in HDR, 200 nits) and the display's peak brightness (1000
   nits). In SDR the curve maps into 0 to 1; in HDR scene color 1.0 shows at paper white and brighter colors roll off
-  towards the peak.
+  towards the peak. HDR windows tell their displays about the content (`VK_EXT_hdr_metadata`, where the GPU has it):
+  the peak as its brightest and paper white as its frame average, followed as the settings change
+  (`OutputTransform.metadata`, `target.metadata()`).
 
 ```java
 try (Presenter presenter = new Presenter(graph, instance)) {

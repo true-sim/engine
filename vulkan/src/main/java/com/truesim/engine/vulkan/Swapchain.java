@@ -16,6 +16,7 @@ import static org.lwjgl.vulkan.KHRSwapchain.VK_ERROR_OUT_OF_DATE_KHR;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_SUBOPTIMAL_KHR;
+import static org.lwjgl.vulkan.EXTHdrMetadata.vkSetHdrMetadataEXT;
 import static org.lwjgl.vulkan.KHRSwapchain.nvkAcquireNextImageKHR;
 import static org.lwjgl.vulkan.KHRSwapchain.vkCreateSwapchainKHR;
 import static org.lwjgl.vulkan.KHRSwapchain.vkDestroySwapchainKHR;
@@ -42,6 +43,7 @@ import java.nio.LongBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkHdrMetadataEXT;
 import org.lwjgl.vulkan.VkPresentInfoKHR;
 import org.lwjgl.vulkan.VkSemaphoreCreateInfo;
 import org.lwjgl.vulkan.VkSurfaceCapabilitiesKHR;
@@ -75,6 +77,7 @@ public final class Swapchain implements AutoCloseable {
     private boolean outOfDate;
     private boolean hdr; // HDR output asked for
     private DisplayEncoding encoding = DisplayEncoding.SDR_SRGB;
+    private HdrMetadata metadata; // told the display while HDR, or null
 
     /** A swapchain for {@code surface} of {@code width} x {@code height} pixels (the window's pixel size). */
     @AllowAllocation("set up once")
@@ -158,6 +161,7 @@ public final class Swapchain implements AutoCloseable {
                 vkDestroySwapchainKHR(device.handle(), previous, null);
             }
             this.handle = swapchain.get(0);
+            applyMetadata();
 
             IntBuffer imageCount = stack.mallocInt(1);
             Vulkan.checkList(vkGetSwapchainImagesKHR(device.handle(), handle, imageCount, null),
@@ -279,6 +283,32 @@ public final class Swapchain implements AutoCloseable {
         if (on != hdr) {
             hdr = on;
             recreate(width, height);
+        }
+    }
+
+    /**
+     * What to tell the display about the content while the swapchain is HDR ({@link HdrMetadata}; null: nothing),
+     * now and whenever it is made again. Ignored where the device has no {@code VK_EXT_hdr_metadata}.
+     */
+    public void metadata(HdrMetadata told) {
+        metadata = told;
+        applyMetadata();
+    }
+
+    /** The HDR metadata told the display, or null. */
+    public HdrMetadata metadata() {
+        return metadata;
+    }
+
+    /** Tells the display the metadata, where there is some, the swapchain is HDR and the device can. */
+    private void applyMetadata() {
+        if (metadata == null || handle == 0 || encoding == DisplayEncoding.SDR_SRGB || !device.hdrMetadata()) {
+            return;
+        }
+        try (MemoryStack stack = stackPush()) {
+            VkHdrMetadataEXT.Buffer told = VkHdrMetadataEXT.calloc(1, stack);
+            metadata.fill(told.get(0), encoding);
+            vkSetHdrMetadataEXT(device.handle(), stack.longs(handle), told);
         }
     }
 

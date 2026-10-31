@@ -155,4 +155,14 @@ class DisplayTransformTest {
         assertThat(DisplayTransform.ALL).containsExactly(DisplayTransform.CURVE, DisplayTransform.EXPOSURE,
             DisplayTransform.PAPER_WHITE, DisplayTransform.PEAK);
     }
+
+    @Test
+    void hdrDisplaysAreToldThePeakAndPaperWhite() {
+        com.truesim.engine.settings.EngineSettings settings = new com.truesim.engine.settings.EngineSettings();
+        assertThat(new DisplayTransform().metadata(settings))
+            .isEqualTo(new com.truesim.engine.vulkan.HdrMetadata(1000, 0.0001f, 1000, 200));
+        settings.set(DisplayTransform.PEAK, 400f).set(DisplayTransform.PAPER_WHITE, 600f);
+        assertThat(new DisplayTransform().metadata(settings).maxFrameAverageLight()).as("never above the peak")
+            .isEqualTo(400);
+    }
 }

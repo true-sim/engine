@@ -102,18 +102,34 @@ class PresenterTest {
                 // An output transform: each window's result made for its display's encoding, HDR where asked and
                 // offered; changed while running, and removed again.
                 List<com.truesim.engine.vulkan.DisplayEncoding> made = new java.util.ArrayList<>();
-                presenter.outputTransform((source, target, encoding) -> {
-                    made.add(encoding);
-                    return new FrameGraphTest.Lambda(List.of(target), g -> {
-                        Image from = g.require(source);
-                        Image to = g.create("transformed", ImageDesc.of(Format.R16G16B16A16_SFLOAT, from.width(),
-                            from.height()));
-                        g.pass("transform").read(from, Access.TRANSFER_SRC).write(to, Access.TRANSFER_DST)
-                            .record(ctx -> ctx.blit(from.whole(), to.whole(), false));
-                        g.provide(target, to);
-                    });
+                com.truesim.engine.settings.Setting<Float> peak = com.truesim.engine.settings.Setting.decimal(
+                    "test.peak", 1000, 100, 10000, "the content's peak");
+                presenter.outputTransform(new OutputTransform() {
+                    @Override
+                    public Technique transform(Key<Image> source, Key<Image> target,
+                        com.truesim.engine.vulkan.DisplayEncoding encoding) {
+                        made.add(encoding);
+                        return new FrameGraphTest.Lambda(List.of(target), g -> {
+                            Image from = g.require(source);
+                            Image to = g.create("transformed", ImageDesc.of(Format.R16G16B16A16_SFLOAT, from.width(),
+                                from.height()));
+                            g.pass("transform").read(from, Access.TRANSFER_SRC).write(to, Access.TRANSFER_DST)
+                                .record(ctx -> ctx.blit(from.whole(), to.whole(), false));
+                            g.provide(target, to);
+                        });
+                    }
+
+                    @Override
+                    public com.truesim.engine.vulkan.HdrMetadata metadata(
+                        com.truesim.engine.settings.EngineSettings settings) {
+                        float nits = settings.get(peak);
+                        return new com.truesim.engine.vulkan.HdrMetadata(nits, 0, nits, 100);
+                    }
                 });
                 assertThat(made).as("one per window").hasSize(3);
+                assertThat(mainTarget.metadata().maxLuminance()).isEqualTo(1000);
+                graph.settings().set(peak, 600f);
+                assertThat(mainTarget.metadata().maxLuminance()).as("following the settings").isEqualTo(600);
                 assertThat(presenter.render()).isEqualTo(3);
                 assertThat(mainTarget.encoding()).isIn((Object[]) com.truesim.engine.vulkan.DisplayEncoding.values());
                 graph.settings().set(PresentSettings.HDR, false);
@@ -124,6 +140,7 @@ class PresenterTest {
                 assertThat(presenter.render()).isEqualTo(3);
                 presenter.outputTransform(null);
                 assertThat(presenter.render()).as("copied as they are again").isEqualTo(3);
+                assertThat(mainTarget.metadata()).as("nothing told without a transform").isNull();
                 // A window closed stops being presented to; so does a target closed.
                 third.close();
                 assertThat(presenter.targets()).containsExactly(mainTarget, sideTarget);
