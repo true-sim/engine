@@ -103,10 +103,13 @@ public uint pixelBin(uint2 ids)
 /**
  * Each bin's tile list: (groups x, y, z, count), then the tiles, x | y << 16; room for the whole image's tiles, so the
  * lists lie as the shading passes find them whatever the render region (classification pushes the stride as its bin).
+ * Only bins with a shading variant have one: a table of each bin's list (types * VARIANTS words, to 16 bytes) comes
+ * first, then the lists.
  */
 uint* tileList(uint bin)
 {
-    return push.tiles + bin * push.bin;
+    uint table = ((push.types * VARIANTS + 3) / 4) * 4;
+    return push.tiles + table + push.tiles[bin] * push.bin;
 }
 
 static const uint MAX_BINS = 256 * VARIANTS;
