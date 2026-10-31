@@ -158,6 +158,15 @@ Streaming 12 ray-traced meshes a frame took the render thread 6 to 11.6 ms, a 90
 - Rule: what runs while frames do (streaming, adding, removing) records into a frame and frees through the frame
   slots; `submitAndWait` and `waitIdle` are for setup and shutdown only.
 
+**A layout computed twice, from two sizes.** The visibility buffer's per-bin tile lists were spaced by the whole image's
+tile count where Java dispatched them and by the render region's where `resolve.slang` classified into them. With
+dynamic resolution every bin past 0 read another bin's header: its pixels went unshaded, and its indirect dispatch
+could take tile words as group counts.
+- Proof: `GraphTechniquesTest.theVisibilityBufferShadesEachMaterialTypeWithItsOwnShader` at half the render scale finds
+  no glowing pixels without the fix and the quad's with it; the tests at full size and of one bin passed throughout.
+- Rule: a buffer layout shared by Java and a shader is computed once and handed over (a push field), never derived on
+  both sides; test it with a region smaller than the image and with more than one bin.
+
 ## Tests and measurements
 
 **After a device loss, look at the first failure only.** Once one test lost the device, the tests after it failed too,

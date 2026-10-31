@@ -142,8 +142,9 @@ public final class VisibilityBufferShading implements Technique {
         scene.read(g.pass("material classification"), BufferAccess.STORAGE_READ)
             .read(ids, Access.STORAGE_READ)
             .write(tiles, BufferAccess.STORAGE_WRITE)
+            // The stride between bins' lists as the bin: the whole image's, as the shading passes below space them.
             .record(ctx -> ctx.dispatch(classify, push(classifyPush, ctx, ids, null, null, size(ctx, ids), types.size(),
-                0, ctx.address(tiles)), (ctx.regionWidth(ids) + TILE - 1) / TILE,
+                (int) (listBytes / 4), ctx.address(tiles)), (ctx.regionWidth(ids) + TILE - 1) / TILE,
                 (ctx.regionHeight(ids) + TILE - 1) / TILE, 1));
         GraphBuilder.PassBuilder pass = scene.read(g.pass("visibility shading"), BufferAccess.STORAGE_READ)
             .read(ids, Access.STORAGE_READ)

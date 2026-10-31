@@ -574,6 +574,13 @@ class MeshletRendererTest {
         small.resize(8, 6);
         renderWith(commands -> renderer.record(commands, small, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
         assertThat(small.overflowed()).isFalse();
+        // Over the room for draws on the indexed path: a dropped meshlet reserves no indices, so later meshlets' draws
+        // run through no range nothing wrote.
+        small.resize(2, 6);
+        renderWith(commands -> renderer.record(commands, small, color.view(), depth.view(), SIZE, SIZE, 0, 0, 0));
+        assertThat(small.overflowed()).isTrue();
+        assertThat(covered()).as("two quads drawn, nothing more").isEqualTo(two);
+        small.resize(8, 6);
         assertThat(renderer.viewBytes()).isEqualTo(view.bytes() + small.bytes());
         if (device.meshShaders()) {
             long indexed = small.bytes();

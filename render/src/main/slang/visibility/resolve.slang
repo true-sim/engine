@@ -31,7 +31,8 @@ public struct ShadePush
     uint size;                 // width in the low 16 bits, height in the high
     uint types;                // how many material types there are: higher type ids shade as type 0 (its bins)
     float3 clear;              // the color behind everything
-    uint bin;                  // the bin this pass shades: type * VARIANTS + FEATURES
+    uint bin;                  // shading: the bin this pass shades, type * VARIANTS + FEATURES; classification: the
+                               // uints from one bin's list to the next (full-image tiles: the region may be smaller)
     uint* classicIndices;      // the classic LOD path's indices, as the pool's triangles lie (null: no such path)
     uint* tiles;               // classification: the first bin's tile list; shading: this pass's bin's
 };
@@ -99,11 +100,13 @@ public uint pixelBin(uint2 ids)
     return (type < push.types ? type : 0) * VARIANTS + materialFeatures(m);
 }
 
-/** Each bin's tile list: (groups x, y, z, count), then the tiles, x | y << 16; tiles x * tiles y of room. */
+/**
+ * Each bin's tile list: (groups x, y, z, count), then the tiles, x | y << 16; room for the whole image's tiles, so the
+ * lists lie as the shading passes find them whatever the render region (classification pushes the stride as its bin).
+ */
 uint* tileList(uint bin)
 {
-    uint tiles = ((width() + 7) / 8) * ((height() + 7) / 8);
-    return push.tiles + bin * (4 + tiles);
+    return push.tiles + bin * push.bin;
 }
 
 static const uint MAX_BINS = 256 * VARIANTS;
