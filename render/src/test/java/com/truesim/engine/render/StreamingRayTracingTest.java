@@ -28,12 +28,14 @@ import com.truesim.engine.vulkan.VulkanException;
 import com.truesim.engine.vulkan.VulkanInstance;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.assets.mesh.VertexFormat;
+import java.lang.foreign.MemorySegment;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
  * Bottom levels with frames in flight: built in frames, never waited for; traced once built; compacted, removed and
- * freed while frames run; a mesh's id reused. Validated, synchronization included, a top level built every frame.
+ * freed while frames run; a mesh's id reused; meshes and textures prepared on another thread. Validated,
+ * synchronization included, a top level built every frame.
  */
 class StreamingRayTracingTest {
 
@@ -57,7 +59,7 @@ class StreamingRayTracingTest {
     }
 
     @Test
-    void bottomLevelsBuildInFramesAndLeaveThemWhenRemoved() {
+    void bottomLevelsBuildInFramesAndLeaveThemWhenRemoved() throws Exception {
         VulkanInstance instance;
         try {
             instance = VulkanInstance.builder().applicationName("tests").validation(true)
@@ -101,8 +103,11 @@ class StreamingRayTracingTest {
                 pool.remove(mesh);
                 assertThat(rayTracing.hasBottomLevel(mesh)).isFalse();
                 assertThat(rayTracing.bottomLevelBytes()).isZero();
-                // The id again, at once, and removed on its way: nothing leaks, nothing is traced.
-                int again = pool.add(bumps);
+                // The id again, at once (its data prepared on a loader thread), and removed on its way: nothing leaks,
+                // nothing is traced.
+                GeometryPool.Prepared prepared = java.util.concurrent.CompletableFuture
+                    .supplyAsync(() -> pool.prepare(bumps)).get();
+                int again = pool.add(prepared);
                 rayTracing.add(again, bumps, 0);
                 graph.beginFrame();
                 graph.submit(0, 0);
@@ -121,6 +126,20 @@ class StreamingRayTracingTest {
                     graph.submit(0, 0);
                 }
                 assertThat(rayTracing.hasBottomLevel(again)).isTrue();
+                // A texture prepared on a loader thread, added while frames run: uploaded and mipmapped in a frame.
+                try (Textures textures = new Textures(device, graph.frameSlots())) {
+                    MemorySegment texels = java.lang.foreign.Arena.ofAuto().allocate(4L * 512 * 512);
+                    Textures.Prepared texture = java.util.concurrent.CompletableFuture
+                        .supplyAsync(() -> textures.prepareColor(512, 512, texels)).get();
+                    int slot = textures.add(texture);
+                    for (int frame = 0; frame < 4; frame++) {
+                        graph.beginFrame();
+                        graph.submit(0, 0);
+                    }
+                    assertThat(textures.contains(slot)).isTrue();
+                    textures.remove(slot);
+                    device.waitIdle();
+                }
                 device.waitIdle();
                 assertThat(instance.validationErrors()).as("validation errors").isZero();
             } finally {

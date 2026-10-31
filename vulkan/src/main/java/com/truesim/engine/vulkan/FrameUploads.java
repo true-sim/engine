@@ -59,6 +59,12 @@ public final class FrameUploads implements AutoCloseable {
             this.buffer = GpuBuffer.hostWritten(device, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
         }
 
+        /** A staging buffer a caller filled: full, so nothing else goes into it; freed after, not reused. */
+        Chunk(GpuBuffer filled) {
+            this.buffer = filled;
+            this.used = filled.size();
+        }
+
         @Override
         public void close() {
             recycle(this);
@@ -135,6 +141,37 @@ public final class FrameUploads implements AutoCloseable {
         checkOpen();
         Objects.requireNonNull(record, "record");
         upload(data, data.byteSize(), null, 0, record);
+    }
+
+    /**
+     * A staging buffer of {@code bytes} for {@link #record(GpuBuffer, Staged)}: host-written, a transfer source. Make
+     * and fill it on any thread (a loader's), so the copy into it costs the frame's thread nothing.
+     */
+    public static GpuBuffer staging(VulkanDevice device, long bytes) {
+        return GpuBuffer.hostWritten(device, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    }
+
+    /**
+     * Like {@link #record(MemorySegment, Staged)}, reading {@code staging}, filled already ({@link #staging}): only the
+     * commands are recorded, in the next frame (or at once, waiting), nothing is copied now. The staging buffer is the
+     * uploads' from now on, freed once the frame reading it is done.
+     */
+    public void record(GpuBuffer staging, Staged record) {
+        checkOpen();
+        Objects.requireNonNull(record, "record");
+        Chunk chunk = new Chunk(Objects.requireNonNull(staging, "staging"));
+        created++;
+        if (!deferred) {
+            try {
+                device.submitAndWait(device.graphics(), commands -> record.record(commands, staging, 0));
+            } finally {
+                staging.close();
+            }
+            return;
+        }
+        filling.add(filling.isEmpty() ? 0 : filling.size() - 1, chunk); // not last: nothing is appended to it
+        pending.add(new Pending(chunk, 0, staging.size(), null, 0, record));
+        pendingBytes += staging.size();
     }
 
     /** How many uploads wait for the next frame, and their bytes. */

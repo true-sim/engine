@@ -71,6 +71,7 @@ public final class GeometryPool implements AutoCloseable {
     }
 
     private final Capacity capacity;
+    private final VulkanDevice device;
     private final GpuBuffer positions;
     private final GpuBuffer attributes;
     private final GpuBuffer meshletVertices;
@@ -126,6 +127,7 @@ public final class GeometryPool implements AutoCloseable {
      * can still draw them.
      */
     public GeometryPool(VulkanDevice device, Capacity capacity, FrameSlots slots) {
+        this.device = Objects.requireNonNull(device, "device");
         this.capacity = capacity;
         this.slots = Objects.requireNonNull(slots, "slots");
         this.uploads = new FrameUploads(device, slots);
@@ -186,10 +188,142 @@ public final class GeometryPool implements AutoCloseable {
     }
 
     /**
+     * A mesh made ready on any thread ({@link #prepare}): its data staged in one buffer, the costly part of adding one
+     * (megabytes copied for a large mesh, and memory allocated). Add it on the frame's thread with
+     * {@link #add(Prepared)}; close it if it is not added.
+     */
+    public static final class Prepared implements AutoCloseable {
+        private final MeshData mesh;
+        private final GpuBuffer staging;
+        // Where each kind of data starts in the staging buffer: positions at 0.
+        private final long attributes;
+        private final long meshletVertices;
+        private final long triangles;
+        private final long meshlets;
+        private final long clusterLod;
+        private boolean taken;
+
+        private Prepared(MeshData mesh, GpuBuffer staging, long attributes, long meshletVertices, long triangles,
+            long meshlets, long clusterLod) {
+            this.mesh = mesh;
+            this.staging = staging;
+            this.attributes = attributes;
+            this.meshletVertices = meshletVertices;
+            this.triangles = triangles;
+            this.meshlets = meshlets;
+            this.clusterLod = clusterLod;
+        }
+
+        /** The mesh it holds. */
+        public MeshData mesh() {
+            return mesh;
+        }
+
+        /** Frees it, unless it was added. */
+        @Override
+        public void close() {
+            if (!taken) {
+                taken = true;
+                staging.close();
+            }
+        }
+    }
+
+    /**
+     * {@code mesh}'s data staged for {@link #add(Prepared)}, on any thread (a loader's): nothing of the pool is touched,
+     * so the frame's thread only places it and records its copies.
+     */
+    public Prepared prepare(MeshData mesh) {
+        long positionBytes = mesh.positions().byteSize();
+        long attributes = align(positionBytes);
+        long meshletVertices = align(attributes + mesh.attributes().byteSize());
+        long triangles = align(meshletVertices + mesh.meshletVertices().byteSize());
+        long triangleBytes = (mesh.meshletTriangles().byteSize() + 3) & ~3L; // whole words
+        long meshlets = align(triangles + triangleBytes);
+        long clusterLod = align(meshlets + mesh.meshlets().byteSize());
+        long total = clusterLod + mesh.clusterLod().byteSize();
+        GpuBuffer staging = FrameUploads.staging(device, Math.max(16, total));
+        MemorySegment memory = staging.memory();
+        MemorySegment.copy(mesh.positions(), 0, memory, 0, positionBytes);
+        MemorySegment.copy(mesh.attributes(), 0, memory, attributes, mesh.attributes().byteSize());
+        MemorySegment.copy(mesh.meshletVertices(), 0, memory, meshletVertices, mesh.meshletVertices().byteSize());
+        MemorySegment.copy(mesh.meshletTriangles(), 0, memory, triangles, mesh.meshletTriangles().byteSize());
+        memory.asSlice(triangles + mesh.meshletTriangles().byteSize(),
+            triangleBytes - mesh.meshletTriangles().byteSize()).fill((byte) 0);
+        MemorySegment.copy(mesh.meshlets(), 0, memory, meshlets, mesh.meshlets().byteSize());
+        MemorySegment.copy(mesh.clusterLod(), 0, memory, clusterLod, mesh.clusterLod().byteSize());
+        return new Prepared(mesh, staging, attributes, meshletVertices, triangles, meshlets, clusterLod);
+    }
+
+    private static long align(long offset) {
+        return (offset + 15) & ~15L;
+    }
+
+    /**
+     * Adds {@code prepared} ({@link #prepare}): on the frame's thread, as {@link #add(MeshData)}, but its data is
+     * staged already, so only its ranges are placed and its copies recorded. The prepared mesh is the pool's from now
+     * on.
+     */
+    public int add(Prepared prepared) {
+        int id = tryAdd(prepared);
+        if (id < 0) {
+            throw noRoom(prepared.mesh);
+        }
+        return id;
+    }
+
+    /** Like {@link #add(Prepared)}, or -1 without room for it: the prepared mesh stays the caller's then. */
+    public int tryAdd(Prepared prepared) {
+        if (prepared.taken) {
+            throw new IllegalStateException("The prepared mesh was added or closed already");
+        }
+        return tryAdd(prepared.mesh, prepared);
+    }
+
+    /** Records copies of a prepared mesh's data from its staging buffer into the pool's buffers, at their bases. */
+    private void recordPrepared(Prepared prepared, long vertexBase, long attributeBase, long meshletVertexBase,
+        long indexBase, long meshletBase) {
+        MeshData mesh = prepared.mesh;
+        prepared.taken = true;
+        uploads.record(prepared.staging, (commands, staging, offset) -> {
+            copy(commands, staging, 0, positions, (long) MeshData.POSITION_BYTES * vertexBase,
+                mesh.positions().byteSize());
+            copy(commands, staging, prepared.attributes, attributes, attributeBase, mesh.attributes().byteSize());
+            copy(commands, staging, prepared.meshletVertices, meshletVertices, 4L * meshletVertexBase,
+                mesh.meshletVertices().byteSize());
+            copy(commands, staging, prepared.triangles, meshletTriangles, indexBase,
+                (mesh.meshletTriangles().byteSize() + 3) & ~3L);
+            copy(commands, staging, prepared.meshlets, meshlets, (long) MeshData.MESHLET_BYTES * meshletBase,
+                mesh.meshlets().byteSize());
+            copy(commands, staging, prepared.clusterLod, clusterLod, (long) MeshData.CLUSTER_LOD_BYTES * meshletBase,
+                mesh.clusterLod().byteSize());
+        });
+    }
+
+    private static void copy(VkCommandBuffer commands, GpuBuffer from, long fromOffset, GpuBuffer to, long toOffset,
+        long bytes) {
+        if (bytes == 0) {
+            return;
+        }
+        try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+            long region = stack.ncalloc(org.lwjgl.vulkan.VkBufferCopy.ALIGNOF, 1, org.lwjgl.vulkan.VkBufferCopy.SIZEOF);
+            org.lwjgl.system.MemoryUtil.memPutLong(region + org.lwjgl.vulkan.VkBufferCopy.SRCOFFSET, fromOffset);
+            org.lwjgl.system.MemoryUtil.memPutLong(region + org.lwjgl.vulkan.VkBufferCopy.DSTOFFSET, toOffset);
+            org.lwjgl.system.MemoryUtil.memPutLong(region + org.lwjgl.vulkan.VkBufferCopy.SIZE, bytes);
+            com.truesim.engine.vulkan.Commands.copyBuffer(commands, from.handle(), to.handle(), 1, region);
+        }
+    }
+
+    /**
      * Adds {@code mesh} as {@link #add} does, or returns -1 if the pool has no room for it now: room may come back as
      * removed meshes leave the frames in flight. Allocates nothing when there is no room.
      */
     public int tryAdd(MeshData mesh) {
+        return tryAdd(mesh, null);
+    }
+
+    /** Places {@code mesh}: its data written now, or copied from {@code prepared}'s staging (if not null). */
+    private int tryAdd(MeshData mesh, Prepared prepared) {
         if (closed) {
             throw new IllegalStateException("The pool is closed");
         }
@@ -221,12 +355,16 @@ public final class GeometryPool implements AutoCloseable {
         }
         int id = freeIdCount > 0 ? takeLowestFreeId() : idCount++;
         // The meshlet records count their vertices and triangles from the mesh's start; shaders add these bases.
-        uploads.write(positions, (long) MeshData.POSITION_BYTES * vertexBase, mesh.positions());
-        uploads.write(attributes, attributeBase, mesh.attributes());
-        uploads.write(meshletVertices, 4L * meshletVertexBase, mesh.meshletVertices());
-        writeTriangles(mesh, indexBase);
-        uploads.write(meshlets, (long) MeshData.MESHLET_BYTES * meshletBase, mesh.meshlets());
-        uploads.write(clusterLod, (long) MeshData.CLUSTER_LOD_BYTES * meshletBase, mesh.clusterLod());
+        if (prepared != null) {
+            recordPrepared(prepared, vertexBase, attributeBase, meshletVertexBase, indexBase, meshletBase);
+        } else {
+            uploads.write(positions, (long) MeshData.POSITION_BYTES * vertexBase, mesh.positions());
+            uploads.write(attributes, attributeBase, mesh.attributes());
+            uploads.write(meshletVertices, 4L * meshletVertexBase, mesh.meshletVertices());
+            writeTriangles(mesh, indexBase);
+            uploads.write(meshlets, (long) MeshData.MESHLET_BYTES * meshletBase, mesh.meshlets());
+            uploads.write(clusterLod, (long) MeshData.CLUSTER_LOD_BYTES * meshletBase, mesh.clusterLod());
+        }
         MemorySegment entry = meshTable.memory().asSlice((long) MESH_ENTRY_BYTES * id, MESH_ENTRY_BYTES);
         for (int axis = 0; axis < 3; axis++) {
             entry.set(F32, 4L * axis, (float) mesh.boxMin(axis));

@@ -183,4 +183,51 @@ class FrameUploadsTest {
             assertThat(uploads.pendingCount()).isZero();
         }
     }
+
+    @Test
+    void stagingFilledOnAnotherThreadIsRecordedAndFreed() throws Exception {
+        try (VulkanInstance instance = instance(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             GpuBuffer target = GpuBuffer.deviceLocal(device, 16, TARGET)) {
+            FrameSlots slots = new FrameSlots(2);
+            try (FrameUploads uploads = new FrameUploads(device, slots)) {
+                // Filled by a loader thread; only recorded on the frame's.
+                GpuBuffer staging = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                    GpuBuffer filled = FrameUploads.staging(device, 16);
+                    for (int i = 0; i < 4; i++) {
+                        filled.memory().setAtIndex(ValueLayout.JAVA_INT, i, 10 + i);
+                    }
+                    return filled;
+                }).get();
+                uploads.record(staging, (commands, from, offset) -> {
+                    try (MemoryStack stack = stackPush()) {
+                        vkCmdCopyBuffer(commands, from.handle(), target.handle(),
+                            VkBufferCopy.calloc(1, stack).srcOffset(offset).size(12)); // uploads of a frame: apart
+                    }
+                });
+                uploads.write(target, 12, java.lang.foreign.Arena.ofAuto().allocateFrom(ValueLayout.JAVA_INT, 99));
+                assertThat(uploads.pendingCount()).isEqualTo(2);
+                assertThat(uploads.pendingBytes()).isEqualTo(20);
+                for (int frame = 0; frame < 4; frame++) { // its frame, then the frames that free its staging
+                    slots.begin(frame % 2);
+                    device.submitAndWait(device.graphics(), slots::recordStart);
+                    slots.end();
+                }
+                assertThat(read(device, target)).as("the staged buffer's, and the write's")
+                    .containsExactly(10, 11, 12, 99);
+            }
+            // Without frames: at once, and freed.
+            try (FrameUploads uploads = new FrameUploads(device, FrameSlots.single())) {
+                GpuBuffer staging = FrameUploads.staging(device, 4);
+                staging.memory().setAtIndex(ValueLayout.JAVA_INT, 0, 42);
+                uploads.record(staging, (commands, from, offset) -> {
+                    try (MemoryStack stack = stackPush()) {
+                        vkCmdCopyBuffer(commands, from.handle(), target.handle(),
+                            VkBufferCopy.calloc(1, stack).srcOffset(offset).size(4));
+                    }
+                });
+                assertThat(read(device, target)).containsExactly(42, 11, 12, 99);
+            }
+            assertThat(instance.validationErrors()).isZero();
+        }
+    }
 }
