@@ -532,6 +532,11 @@ interface:
 - **Shadow techniques modify `Keys.LIGHT_LIST`**, so they go in the shading's view and run whenever shading requires
   the light list. They put what shading must read into the view's shared `ShadowInputs` (images to sample, buffers to
   wait for) with a setup that fills their lights' entries when the frame records. A new technique is one class; shading needs no change.
+- **Each view has a shadow table of its own** (`lights.shadowTable(view)`), with the same entry numbers: a light names
+  its entries once, and each view's techniques fill them in its table, which its light list points shading at. So each
+  view's cascades fit its own camera (`new CascadedShadowMaps(geometry, lights, light, entry, sceneView, ...)`, one per
+  view through `addPerView`, each `update()`d every frame), and a ray-traced mask is of its view's pixels. An entry no
+  technique of the view filled reads as lit.
 - **Ray tracing is a generic parameter** (`IShadowRays`): shading pipelines that cannot trace use `NoRays`, so only the
   visibility buffer's traced variant (`shadeTraced.slang`) needs ray queries. Forward shading counts inline ray
   shadows as lit; a ray-traced mask works with any shading.

@@ -19,6 +19,7 @@ import com.truesim.engine.render.Lights;
 import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.ShadowInputs;
+import com.truesim.engine.render.ShadowTable;
 import com.truesim.engine.render.layout.TracedPush;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
@@ -91,8 +92,9 @@ public final class RayTracedShadows implements Technique {
             .write(mask, Access.STORAGE_WRITE)
             .async()
             .record(ctx -> trace(ctx, pipeline, depth, mask, push));
+        ShadowTable table = lights.shadowTable(g.view());
         g.request(new ShadowInputs(g.view())).sample(mask).setup(ctx -> {
-            lights.shadowMask(entry, ctx.sampled(mask), 0);
+            table.shadowMask(entry, ctx.sampled(mask), 0); // its view's: the mask is of its pixels
             lights.shadows(light, entry, 1);
         });
     }

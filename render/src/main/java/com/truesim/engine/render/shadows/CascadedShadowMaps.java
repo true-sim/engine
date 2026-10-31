@@ -14,7 +14,9 @@ import com.truesim.engine.render.Lights;
 import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.SceneGeometry;
+import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ShadowInputs;
+import com.truesim.engine.render.ShadowTable;
 import com.truesim.engine.render.SurfaceOutput;
 import com.truesim.engine.render.ViewOptions;
 import java.util.List;
@@ -94,6 +96,21 @@ public final class CascadedShadowMaps implements Technique {
         this.splits = new float[cascades + 1];
         this.biases = new float[cascades];
         this.normalOffsets = new float[cascades];
+    }
+
+    /**
+     * Like {@link #CascadedShadowMaps(SceneGeometry, Lights, int, int, Camera, int, int, ViewOptions, float)}, for
+     * {@code view}: its camera, its own entries (its view's {@link Lights#shadowTable shadow table}), and its cascades'
+     * views owned by its port, closed with it. One per view, e.g. from {@code SceneViews.addPerView}; each needs its
+     * {@link #update} every frame.
+     */
+    @AllowAllocation("created rarely")
+    public CascadedShadowMaps(SceneGeometry geometry, Lights lights, int light, int firstEntry, SceneView view,
+        int cascades, int size, ViewOptions options, float maxDistance) {
+        this(geometry, lights, light, firstEntry, view.camera(), cascades, size, options, maxDistance);
+        for (RenderView cascade : views) {
+            view.port().own(cascade);
+        }
     }
 
     /** How the splits blend logarithmic (1) and uniform (0) spacing: 0.75 by default. */
@@ -237,6 +254,7 @@ public final class CascadedShadowMaps implements Technique {
     public void build(GraphBuilder g) {
         g.modify(Keys.LIGHT_LIST);
         ShadowInputs.Set inputs = g.request(new ShadowInputs(g.view()));
+        ShadowTable table = lights.shadowTable(g.view()); // its view's entries: its cascades fit its camera
         Image[] maps = new Image[cascades];
         for (int i = 0; i < cascades; i++) {
             maps[i] = g.request(new SceneDraw(geometry, views[i], cameras[i], SurfaceOutput.depth(),
@@ -245,7 +263,7 @@ public final class CascadedShadowMaps implements Technique {
         }
         inputs.setup(ctx -> {
             for (int i = 0; i < cascades; i++) {
-                lights.shadowMap(firstEntry + i, cameras[i], ctx.sampled(maps[i]), size, biases[i], splits[i + 1],
+                table.shadowMap(firstEntry + i, cameras[i], ctx.sampled(maps[i]), size, biases[i], splits[i + 1],
                     normalOffsets[i]);
             }
             lights.shadows(light, firstEntry, cascades);

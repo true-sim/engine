@@ -93,10 +93,10 @@ class ClusteredLightsTest {
             .point(2, 30, 0, -10, 1, 10, 10, 10)           // off to the right: in no cluster
             .spot(3, -3, 1, -30, 5, 10, 10, 10, 0, 0, -1, 0.3, 0.5)
             .shadows(3, 0, 1)
-            .shadowMap(0, camera, 0, 1024, 1e-3f, 0)
-            .shadowMask(1, 0, 0)
-            .shadowRay(2, 0, 2e-3f, 0, 0, 0)
             .point(4, 0.2f, 0.1f, -3, 0.5f, 1, 1, 1);
+        lights.shadowTable(null).shadowMap(0, camera, 0, 1024, 1e-3f, 0).shadowMask(1, 0, 0)
+            .shadowRay(2, 0, 2e-3f, 0, 0, 0).clear(3);
+        assertThat(lights.shadowTable(null).capacity()).isEqualTo(4);
         // Many small lights in one spot: more than a cluster holds.
         for (int i = 5; i < 16; i++) {
             lights.point(i, 0.5f, 0.5f, -50, 0.2f, 1, 1, 1);

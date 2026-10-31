@@ -11,6 +11,7 @@ import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.ShadowInputs;
+import com.truesim.engine.render.ShadowTable;
 import java.util.List;
 import java.util.Objects;
 
@@ -62,8 +63,9 @@ public final class InlineRayShadows implements Technique {
     public void build(GraphBuilder g) {
         g.modify(Keys.LIGHT_LIST);
         Buffer topLevel = g.request(new TopLevel(rayTracing, view.renderer()));
+        ShadowTable table = lights.shadowTable(g.view());
         g.request(new ShadowInputs(g.view())).rays(topLevel).setup(ctx -> {
-            lights.shadowRay(entry, rayTracing.slot(), offset, rayTracing.origin(0), rayTracing.origin(1),
+            table.shadowRay(entry, rayTracing.slot(), offset, rayTracing.origin(0), rayTracing.origin(1),
                 rayTracing.origin(2)); // the top level is relative to the origin
             lights.shadows(light, entry, 1);
         });

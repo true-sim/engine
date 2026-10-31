@@ -69,6 +69,8 @@ public struct Shadow
 public static const uint SHADOW_MAP = 0;
 public static const uint SHADOW_MASK = 1;
 public static const uint SHADOW_RAY = 2;
+/** No shadow: an entry no technique of the view set reads as lit. */
+public static const uint SHADOW_NONE = 3;
 
 /** Shadow map filters: what PCSS, VSM, ESM and others will add to. */
 public static const uint PCF = 0;
