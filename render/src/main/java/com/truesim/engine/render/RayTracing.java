@@ -3,6 +3,7 @@ package com.truesim.engine.render;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memPutAddress;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
+import static org.lwjgl.system.MemoryUtil.memPutFloat;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
@@ -103,7 +104,10 @@ import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
  *       straight from the pool's quantized positions (the mesh's box as the build transform) where the GPU
  *       takes that vertex format, from decoded positions where not, then compacted;</li>
  *   <li>a top-level one, rebuilt on the GPU every frame ({@link #buildTopLevel}) from a scene's instance buffer
- *       by a compute pass: no work per instance on the CPU.</li>
+ *       by a compute pass: no work per instance on the CPU. It is relative to a world position, its
+ *       {@link #origin(double, double, double) origin}: anything traces into it by subtracting that from its world
+ *       positions (a camera shading: its own position less the origin), and the app moves it when the cameras have
+ *       gone far from it, as the structure holds floats.</li>
  * </ul>
  *
  * <p>Shaders trace into the top level through its slot ({@link #slot()}) in the bindless set's acceleration structure
@@ -131,6 +135,9 @@ public final class RayTracing implements AutoCloseable {
     private final Pipeline instancePass;
     private long bottomBytes;
     private boolean closed;
+    private double originX; // the world position the top level is relative to
+    private double originY;
+    private double originZ;
 
     /** An acceleration structure and the buffer it lives in. */
     private record Structure(GpuBuffer buffer, long handle, long address) { }
@@ -325,17 +332,38 @@ public final class RayTracing implements AutoCloseable {
     }
 
     /**
-     * Records the top level's build from {@code view}'s scene's instances, relative to the view's camera (where the
-     * traced points are): a compute pass writes the instance records
-     * (transform, mesh's bottom level), then the top level is built, ready for ray queries after this. Allocates
-     * nothing.
+     * Moves the top level's origin to world position ({@code x}, {@code y}, {@code z}), from the next build: keep it
+     * within a few kilometres of whatever traces rays, where its floats are fine (at 7,000 km they are 0.5 m apart).
+     * Read when frames record. (0, 0, 0) at first.
      */
-    public void buildTopLevel(VkCommandBuffer commands, RenderView view) {
-        buildTopLevel(commands, view, false);
+    public RayTracing origin(double x, double y, double z) {
+        originX = x;
+        originY = y;
+        originZ = z;
+        return this;
+    }
+
+    /** The origin's world position along {@code axis} (0 x, 1 y, 2 z). */
+    public double origin(int axis) {
+        return switch (axis) {
+            case 0 -> originX;
+            case 1 -> originY;
+            case 2 -> originZ;
+            default -> throw new IndexOutOfBoundsException("axis " + axis);
+        };
     }
 
     /**
-     * Declares that {@code pass} builds the top level ({@link #buildTopLevel(VkCommandBuffer, RenderView, boolean)}):
+     * Records the top level's build from {@code renderer}'s scene's instances, relative to the {@link #origin}: a
+     * compute pass writes the instance records (transform, mesh's bottom level), then the top level is built, ready for
+     * ray queries after this. Allocates nothing.
+     */
+    public void buildTopLevel(VkCommandBuffer commands, MeshletRenderer renderer) {
+        buildTopLevel(commands, renderer, false);
+    }
+
+    /**
+     * Declares that {@code pass} builds the top level ({@link #buildTopLevel(VkCommandBuffer, MeshletRenderer, boolean)}):
      * it writes the instance records, the scratch and the structure. Returns the structure as a buffer of the build,
      * for passes tracing rays through it to read ({@link BufferAccess#ACCELERATION_STRUCTURE_READ}).
      */
@@ -350,12 +378,12 @@ public final class RayTracing implements AutoCloseable {
     }
 
     /**
-     * Like {@link #buildTopLevel(VkCommandBuffer, RenderView)}, in a frame graph pass that, with {@code declared},
+     * Like {@link #buildTopLevel(VkCommandBuffer, MeshletRenderer)}, in a frame graph pass that, with {@code declared},
      * declares the build ({@link #declareTopLevelBuild}) and whose readers declare tracing: the graph orders the
      * structure with them, not barriers of its own.
      */
-    public void buildTopLevel(VkCommandBuffer commands, RenderView view, boolean declared) {
-        GpuScene scene = view.renderer().scene();
+    public void buildTopLevel(VkCommandBuffer commands, MeshletRenderer renderer, boolean declared) {
+        GpuScene scene = renderer.scene();
         int count = Math.min(scene.highWater(), maxInstances);
         scene.upload(commands);
         if (!declared) { // whatever traced the top level before (the last frame) is done with it before it is rebuilt
@@ -368,7 +396,9 @@ public final class RayTracing implements AutoCloseable {
             memPutLong(push + InstancesPush.BOTTOM, bottomTable.deviceAddress());
             memPutLong(push + InstancesPush.RECORDS, instancesAddress);
             memPutInt(push + InstancesPush.COUNT, count);
-            memPutLong(push + InstancesPush.VIEW, view.address()); // relative to the camera shading the traced points
+            putOrigin(push + InstancesPush.ORIGIN_X, push + InstancesPush.ORIGIN_LOW_X, originX);
+            putOrigin(push + InstancesPush.ORIGIN_Y, push + InstancesPush.ORIGIN_LOW_Y, originY);
+            putOrigin(push + InstancesPush.ORIGIN_Z, push + InstancesPush.ORIGIN_LOW_Z, originZ);
             instancePass.bind(commands);
             instancePass.push(commands, push, PUSH_BYTES);
             Commands.dispatch(commands, (count + 63) / 64, 1, 1);
@@ -415,6 +445,13 @@ public final class RayTracing implements AutoCloseable {
                 VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
         }
+    }
+
+    /** {@code value} as a float at {@code high} and what it leaves at {@code low}: two floats, as instances hold. */
+    private static void putOrigin(long high, long low, double value) {
+        float h = (float) value;
+        memPutFloat(high, h);
+        memPutFloat(low, (float) (value - h));
     }
 
     private static VkAccelerationStructureGeometryKHR.Buffer instancesGeometry(MemoryStack stack, long address) {

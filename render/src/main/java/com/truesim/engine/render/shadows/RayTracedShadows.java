@@ -82,31 +82,31 @@ public final class RayTracedShadows implements Technique {
         g.modify(Keys.LIGHT_LIST);
         Pipeline pipeline = g.computeProgram("shaders/shadows/traced.spv", "tracedMain", TracedPush.BYTES);
         Image depth = g.request(depthSource).depth();
-        TopLevel.Structure top = g.request(new TopLevel(rayTracing)).anchor(g, depthSource.view());
+        Buffer topLevel = g.request(new TopLevel(rayTracing, depthSource.view().renderer()));
         Image mask = g.create("shadow mask of light " + light, ImageDesc.like(depth, Ratio.ONE).format(Format.R8_UNORM));
         TracedPush push = new TracedPush().width(mask.width()).height(mask.height()).offset(offset).light(light);
         g.pass("ray-traced shadows of light " + light)
             .read(depth, Access.SAMPLED_COMPUTE)
-            .read(top.buffer(), BufferAccess.ACCELERATION_STRUCTURE_READ)
+            .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ)
             .write(mask, Access.STORAGE_WRITE)
             .async()
-            .record(ctx -> trace(ctx, pipeline, depth, mask, push, top.anchor()));
+            .record(ctx -> trace(ctx, pipeline, depth, mask, push));
         g.request(new ShadowInputs(g.view())).sample(mask).setup(ctx -> {
             lights.shadowMask(entry, ctx.sampled(mask), 0);
             lights.shadows(light, entry, 1);
         });
     }
 
-    private void trace(PassContext ctx, Pipeline pipeline, Image depth, Image mask, TracedPush push, RenderView view) {
+    private void trace(PassContext ctx, Pipeline pipeline, Image depth, Image mask, TracedPush push) {
         push.inverseViewProjection(camera.inverseViewProjection()).depth(ctx.sampled(depth)).mask(ctx.storage(mask))
             .scene(rayTracing.slot()).lights(lights.lightsAddress());
-        // The way from the camera's positions into the top level's (built relative to its anchor's camera, view), and
-        // the light relative to the camera: differences of world positions, small enough for floats.
+        // The way from the camera's positions into the top level's (built relative to the origin), and the light
+        // relative to the camera: differences of world positions, small enough for floats.
         double x = camera.position(0);
         double y = camera.position(1);
         double z = camera.position(2);
-        push.toTopLevelX((float) (x - view.position(0))).toTopLevelY((float) (y - view.position(1)))
-            .toTopLevelZ((float) (z - view.position(2)));
+        push.toTopLevelX((float) (x - rayTracing.origin(0))).toTopLevelY((float) (y - rayTracing.origin(1)))
+            .toTopLevelZ((float) (z - rayTracing.origin(2)));
         push.lightX((float) (lights.position(light, 0) - x)).lightY((float) (lights.position(light, 1) - y))
             .lightZ((float) (lights.position(light, 2) - z));
         ctx.dispatch(pipeline, push, (mask.width() + 7) / 8, (mask.height() + 7) / 8, 1);

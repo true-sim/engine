@@ -10,7 +10,12 @@ struct InstancesPush
     uint64_t* bottom;     // per pool mesh: its bottom level's address, or 0
     uint* records;        // 16 words per instance
     uint count;
-    View* view;           // the camera the top level is relative to: shading's
+    float originX;        // the world position the top level is relative to (RayTracing.origin), high part
+    float originY;
+    float originZ;
+    float originLowX;     // and the rest
+    float originLowY;
+    float originLowZ;
 };
 
 [[vk::push_constant]]
@@ -26,7 +31,12 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
         return;
     }
     Instance stored = push.instances[i];
-    Instance instance = relative(stored, push.view[0]);
+    // Relative to the origin: floats near it hold positions finely, wherever in the world it is.
+    precise float3 high = stored.position - float3(push.originX, push.originY, push.originZ);
+    precise float3 low = stored.positionLow - float3(push.originLowX, push.originLowY, push.originLowZ);
+    Instance instance = stored;
+    instance.position = high + low;
+    instance.mesh = stored.mesh & INSTANCE_MESH;
     float3 x = rotate(instance.rotation, float3(instance.scale.x, 0, 0));
     float3 y = rotate(instance.rotation, float3(0, instance.scale.y, 0));
     float3 z = rotate(instance.rotation, float3(0, 0, instance.scale.z));
