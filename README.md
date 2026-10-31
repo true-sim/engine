@@ -246,6 +246,9 @@ try (GeometryPool pool = new GeometryPool(device, slots);              // starts
 }
 ```
 
+- **Who closes what:** whoever makes a resource closes it, after what uses it; handing a resource to another object
+  never hands over closing it. The one exception is a graph view's own (`ViewPort.own`): `SceneGeometry.createView`
+  and the techniques that make render views for a port register them there, so they close with the port.
 - **Geometry pool:** every mesh's streams in shared device-local buffers, reached by buffer device address, with a
   table entry per mesh; any number of meshes and instances draw in one pass.
 - **The pool grows by itself:** a buffer without room for a mesh is replaced by one twice its size (or more), its
@@ -895,8 +898,10 @@ renderers above, following the scene's change logs and asset cache:
 
 ```java
 FrameSlots slots = new FrameSlots(2);                 // shared by every graph drawing these resources
-SceneResources resources = new SceneResources(assets, new GeometryPool(device, slots),
-    new Materials(device, 4096, slots), new Textures(device, slots))
+GeometryPool pool = new GeometryPool(device, slots); // the caller's: closed by it, after the resources
+Materials materials = new Materials(device, 4096, slots);
+Textures textures = new Textures(device, slots);
+SceneResources resources = new SceneResources(assets, pool, materials, textures)
     .loading(SceneResources.Loading.WHOLE)            // or STREAM, the default; per asset with loading(ref, mode)
     .prepareOn(tasks, 2);
 

@@ -769,12 +769,12 @@ public final class GeometryPool implements AutoCloseable {
 
     /** From now on a frame graph's scene upload pass ({@link SceneData}) records the pool's uploads, not frame starts. */
     void uploadInPasses() {
-        uploads.flushInPasses();
+        uploads.uploadInPasses();
     }
 
     /** Records the waiting uploads for that pass, which declares the pool's buffers as transfer destinations. */
     void uploadInPass(VkCommandBuffer commands) {
-        uploads.flushInPass(commands);
+        uploads.uploadInPass(commands);
     }
 
     /** The frames the pool's meshes are drawn in: what changes to them wait for. */
