@@ -48,7 +48,7 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  * frame than ever before: the upload buffers grow then.
  */
 @AllowAllocation("created rarely")
-public final class RecordBuffer implements AutoCloseable {
+public final class RecordBuffer implements AutoCloseable, DeviceBuffer {
 
     private static final int SCATTER_PUSH = ScatterPush.BYTES;
     private static final int MAX_GROUPS = 65_535;
@@ -171,6 +171,7 @@ public final class RecordBuffer implements AutoCloseable {
     }
 
     /** The records, for shaders: record i at {@code deviceAddress() + i * recordBytes()}, after the frame's upload. */
+    @Override
     public long deviceAddress() {
         return records.deviceAddress();
     }

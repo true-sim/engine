@@ -37,7 +37,7 @@ import org.lwjgl.vulkan.VkBufferDeviceAddressInfo;
  * are no longer handed out, and segments over the memory throw.
  */
 @AllowAllocation("created rarely")
-public final class GpuBuffer implements AutoCloseable {
+public final class GpuBuffer implements AutoCloseable, DeviceBuffer {
 
     private final VulkanDevice device;
     private final long handle;
@@ -193,6 +193,7 @@ public final class GpuBuffer implements AutoCloseable {
      * The buffer's address for shaders, e.g. passed in push constants; the buffer needs
      * {@code VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT}.
      */
+    @Override
     public long deviceAddress() {
         checkOpen();
         if (deviceAddress == 0) {

@@ -16,4 +16,15 @@ class MaterialFieldTest {
         assertThat(MaterialField.i32(MetallicRoughnessParameters.class, "flags", 20).texture()).isFalse();
         assertThat(texture).hasToString("MetallicRoughnessParameters.baseColorTexture");
     }
+
+    @Test
+    void bufferFieldsAreTheirOwnKind() {
+        MaterialField buffer = MaterialField.buffer(MetallicRoughnessParameters.class, "data", 8);
+        assertThat(buffer.kind()).isEqualTo(MaterialField.Kind.BUFFER);
+        assertThat(buffer.texture()).isFalse();
+        assertThat(MaterialValues.NONE.buffer("data", null)).isNull();
+        assertThat(MetallicRoughnessParameters.DEFAULTS).satisfies(p -> p.buffers(0, (offset, b) -> {
+            throw new AssertionError("no buffer fields");
+        }));
+    }
 }

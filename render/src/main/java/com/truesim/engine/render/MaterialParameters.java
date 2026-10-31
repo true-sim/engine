@@ -30,4 +30,11 @@ public interface MaterialParameters {
      */
     default void textures(java.util.function.IntConsumer each) {
     }
+
+    /**
+     * Gives {@code each} every buffer field ({@code T*} in Slang), nested records' too, with its offset in the block
+     * past {@code base}: for {@link Materials} to write their addresses as they change. Generated; none by default.
+     */
+    default void buffers(long base, MaterialBuffers each) {
+    }
 }

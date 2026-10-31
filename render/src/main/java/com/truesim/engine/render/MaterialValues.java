@@ -29,6 +29,11 @@ public interface MaterialValues {
     /** The values of nested record field {@code name}. */
     MaterialValues nested(String name);
 
+    /** The buffer of field {@code name} ({@code T*} in Slang); {@code fallback} for none, as by default. */
+    default com.truesim.engine.vulkan.DeviceBuffer buffer(String name, com.truesim.engine.vulkan.DeviceBuffer fallback) {
+        return fallback;
+    }
+
     /** No values: every field its fallback. */
     MaterialValues NONE = new MaterialValues() {
         @Override
