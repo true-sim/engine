@@ -23,4 +23,11 @@ public interface MaterialParameters {
 
     /** The {@code Material.FEATURE_*} bits its type allows, from {@code [MaterialParameters(features)]}. */
     int allowedFeatures();
+
+    /**
+     * Gives {@code each} the value of every {@code [Texture]} field, nested records' too, -1 for none: for
+     * {@link Materials} to count the materials naming each texture. Generated; none by default.
+     */
+    default void textures(java.util.function.IntConsumer each) {
+    }
 }

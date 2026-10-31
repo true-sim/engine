@@ -26,8 +26,14 @@ public final class MaterialField {
     private final int count;
     private final float low;
     private final float high;
+    private final boolean texture;
 
     private MaterialField(Class<?> owner, String path, int offset, Kind kind, int count, float low, float high) {
+        this(owner, path, offset, kind, count, low, high, false);
+    }
+
+    private MaterialField(Class<?> owner, String path, int offset, Kind kind, int count, float low, float high,
+        boolean texture) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.path = Objects.requireNonNull(path, "path");
         this.offset = offset;
@@ -35,6 +41,7 @@ public final class MaterialField {
         this.count = count;
         this.low = low;
         this.high = high;
+        this.texture = texture;
     }
 
     public static MaterialField f32(Class<?> owner, String path, int offset) {
@@ -47,6 +54,11 @@ public final class MaterialField {
 
     public static MaterialField i32(Class<?> owner, String path, int offset) {
         return new MaterialField(owner, path, offset, Kind.I32, 1, 0, 0);
+    }
+
+    /** A {@code [Texture]} field: an {@link Kind#I32} holding a texture, or -1 for none. */
+    public static MaterialField texture(Class<?> owner, String path, int offset) {
+        return new MaterialField(owner, path, offset, Kind.I32, 1, 0, 0, true);
     }
 
     public static MaterialField floats(Class<?> owner, String path, int offset, int count) {
@@ -75,6 +87,11 @@ public final class MaterialField {
     /** How many floats a {@link Kind#FLOATS} field has. */
     public int count() {
         return count;
+    }
+
+    /** Whether it holds a texture ({@code [Texture]}): {@link Materials} counts the materials naming each. */
+    public boolean texture() {
+        return texture;
     }
 
     /** Whether {@code value} is in the field's range ({@code [Range]}); every value of fields without one. */
