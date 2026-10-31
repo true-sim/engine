@@ -112,6 +112,54 @@ class RecordBufferTest {
     }
 
     @Test
+    void recordsGrowKeepingWhatTheyHold() {
+        try (VulkanInstance instance = instance(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
+            FrameSlots slots = new FrameSlots(2);
+            try (RecordBuffer records = new RecordBuffer(device, 32, 2, slots)) {
+                fill(records, 0, 10);
+                slots.begin(0);
+                device.submitAndWait(device.graphics(), slots::recordStart);
+                slots.end();
+                // A change claimed, then grown twice before the next upload: the change and the record stay.
+                fill(records, 1, 20);
+                long firstAddress = records.deviceAddress();
+                records.grow(4);
+                records.grow(8);
+                assertThat(records.capacity()).isEqualTo(8);
+                assertThat(records.deviceAddress()).as("frames recorded from now on read the new one")
+                    .isNotEqualTo(firstAddress);
+                assertThat(records.pendingCount()).isEqualTo(1);
+                fill(records, 5, 50);
+                slots.begin(1);
+                device.submitAndWait(device.graphics(), slots::recordStart);
+                slots.end();
+                int[] words = read(device, records);
+                assertThat(words).hasSize(64);
+                assertThat(words[0]).as("copied over").isEqualTo(10);
+                assertThat(words[8]).as("claimed before it grew").isEqualTo(20);
+                assertThat(words[40]).isEqualTo(50);
+                assertThat(words[16]).as("new room: zeros").isZero();
+                assertThat(words[56]).isZero();
+                // Grown with nothing changed: copied over all the same.
+                records.grow(16);
+                slots.begin(0);
+                device.submitAndWait(device.graphics(), slots::recordStart);
+                slots.end();
+                words = read(device, records);
+                assertThat(words).hasSize(128);
+                assertThat(words[0]).isEqualTo(10);
+                assertThat(words[40]).isEqualTo(50);
+                assertThat(words[127]).isZero();
+                assertThatIllegalArgumentException().isThrownBy(() -> records.grow(16));
+                assertThatIllegalArgumentException().isThrownBy(() -> records.grow(Integer.MAX_VALUE));
+                records.grow(32); // closed before the upload: the replaced buffer is freed with it
+                device.waitIdle();
+            }
+            assertThat(instance.validationErrors()).as("validation errors").isZero();
+        }
+    }
+
+    @Test
     void passesDeclaringTheRecordsUploadThemInsteadOfTheFramesStart() {
         try (VulkanInstance instance = instance(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
             FrameSlots slots = new FrameSlots(2);
