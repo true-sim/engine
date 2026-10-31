@@ -101,6 +101,7 @@ public final class Window implements AutoCloseable {
     /** What lives on this window, such as Vulkan surfaces, closed before it. */
     private final List<AutoCloseable> dependents = new ArrayList<>();
     private long handle;
+    private volatile com.truesim.engine.settings.EngineSettings pendingSettings; // changed on another thread
     private WindowSettings windowed; // as last applied or read: its windowed geometry while fullscreen or maximized
 
     @AllowAllocation("opening a window")
@@ -639,8 +640,8 @@ public final class Window implements AutoCloseable {
 
     /**
      * Applies the window settings {@code settings} holds ({@link WindowSettings#from}; a scoped view for this window,
-     * say), and applies them again whenever one of them changes, until the window closes. Change them on the
-     * platform's thread.
+     * say), and applies them again whenever one of them changes, until the window closes: at once when changed on the
+     * platform's thread, at its next {@link Platform#pollEvents} when changed on another (an options screen's, say).
      */
     @AllowAllocation("following settings, once")
     public Window follow(com.truesim.engine.settings.EngineSettings settings) {
@@ -652,10 +653,24 @@ public final class Window implements AutoCloseable {
         }
         attach(settings.onAnyChange(name -> {
             if (handle != 0 && names.contains(name)) {
-                apply(WindowSettings.from(settings));
+                if (platform.onOwnerThread()) {
+                    apply(WindowSettings.from(settings));
+                } else {
+                    pendingSettings = settings; // the platform's thread applies them
+                }
             }
         }));
         return this;
+    }
+
+    /** Applies settings changed on another thread since the last call; the platform calls it as it polls events. */
+    @AllowAllocation("settings changed on another thread, rarely")
+    void applyPendingSettings() {
+        com.truesim.engine.settings.EngineSettings settings = pendingSettings;
+        if (settings != null && handle != 0) {
+            pendingSettings = null;
+            apply(WindowSettings.from(settings));
+        }
     }
 
     // ---------------------------------------------------------------- rendering

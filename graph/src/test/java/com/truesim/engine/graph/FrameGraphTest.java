@@ -747,6 +747,15 @@ class FrameGraphTest {
             .withMessageContaining("is in view right already");
         assertThatIllegalArgumentException().isThrownBy(() -> right.add(once));
         assertThatIllegalArgumentException().isThrownBy(() -> graph.add(once)).withMessageContaining("view right");
+        // Switched, it is the same instance: each when() wraps it anew, and still refused.
+        com.truesim.engine.settings.Setting<Boolean> on = com.truesim.engine.settings.Setting.bool("test.once", true,
+            "switches the one instance");
+        assertThatIllegalArgumentException().isThrownBy(() -> graph.addView("fourth").add(once.when(on)))
+            .withMessageContaining("is in view right already");
+        Technique switchedOnce = remembering.get();
+        right.add(switchedOnce.when(on));
+        assertThatIllegalArgumentException().isThrownBy(() -> graph.add(switchedOnce.when(on)))
+            .withMessageContaining("view right");
         Technique framed = remembering.get();
         graph.add(framed);
         assertThatIllegalArgumentException().isThrownBy(() -> right.add(framed)).withMessageContaining("the graph");
@@ -1047,6 +1056,35 @@ class FrameGraphTest {
         graph.implement(Copy.class, null);
         assertThat(frame()[0]).isEqualTo(GREEN);
         assertThat(graph.builds()).isEqualTo(4);
+    }
+
+    @Test
+    void aFrameThatThrowsLeavesTheGraphUsable() {
+        // A pass that throws while recording, then a technique that fails to build: each frame is dropped, the next
+        // begins, and once they are gone the graph draws.
+        boolean[] throwing = {true};
+        Mod failing = new Mod(List.of(), List.of(OUT), g -> {
+            Image image = g.modify(OUT);
+            g.pass("throws").write(image, Access.TRANSFER_DST).record(ctx -> {
+                if (throwing[0]) {
+                    throw new IllegalStateException("a pass failed");
+                }
+            });
+        });
+        graph.add(new Fill(OUT, SIZE, 1, 0, 0, 1)).add(failing).output(OUT, output);
+        graph.beginFrame();
+        assertThatIllegalStateException().isThrownBy(() -> graph.submit(0, 0)).withMessage("a pass failed");
+        graph.beginFrame(); // not "begun already"
+        assertThatIllegalStateException().isThrownBy(() -> graph.submit(0, 0)).withMessage("a pass failed");
+        throwing[0] = false;
+        Mod unbuildable = new Mod(List.of(), List.of(OUT), g -> {
+            throw new IllegalStateException("cannot build");
+        });
+        graph.add(unbuildable);
+        graph.beginFrame();
+        assertThatIllegalStateException().isThrownBy(() -> graph.submit(0, 0)).withMessage("cannot build");
+        graph.remove(unbuildable);
+        assertThat(submitted(2)[0]).as("drawn again").isEqualTo(RED);
     }
 
     /** Submits {@code frames} frames the graph's way, then reads the target back. */

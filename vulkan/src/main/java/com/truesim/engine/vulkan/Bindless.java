@@ -275,16 +275,22 @@ public final class Bindless implements AutoCloseable {
      * after bind, a slot reused earlier would be rewritten under a frame still reading it.
      */
     @AllowAllocation("removing, rarely")
-    public synchronized void removeSampled(int slot, Retiring retiring) {
-        sampled.check(slot);
-        retiring.add(() -> removeSampled(slot)); // locks when it runs
+    public void removeSampled(int slot, Retiring retiring) {
+        synchronized (this) {
+            sampled.check(slot);
+        }
+        // Outside this lock: retiring frees under its own lock, calling removeSampled, which takes this one. One order
+        // of the two locks, so no deadlock.
+        retiring.add(() -> removeSampled(slot));
     }
 
     /** Frees a storage slot once no frame in flight of {@code retiring}'s slots can use it. */
     @AllowAllocation("removing, rarely")
-    public synchronized void removeStorage(int slot, Retiring retiring) {
-        storage.check(slot);
-        retiring.add(() -> removeStorage(slot));
+    public void removeStorage(int slot, Retiring retiring) {
+        synchronized (this) {
+            storage.check(slot);
+        }
+        retiring.add(() -> removeStorage(slot)); // outside this lock, as removeSampled
     }
 
     /** How many sampled and storage slots are taken. */

@@ -368,7 +368,7 @@ public final class Swapchain implements AutoCloseable {
             if (result == VK_SUBOPTIMAL_KHR) {
                 outOfDate = true; // still usable this time
             } else {
-                Vulkan.check(result, "Could not acquire a swapchain image");
+                device.check(result, "Could not acquire a swapchain image"); // a lost device marked and reported
             }
             return memGetInt(index);
         }
@@ -400,7 +400,7 @@ public final class Swapchain implements AutoCloseable {
             if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
                 outOfDate = true;
             } else if (result != VK_SUCCESS) {
-                Vulkan.check(result, "Could not present");
+                device.check(result, "Could not present");
             }
         }
     }

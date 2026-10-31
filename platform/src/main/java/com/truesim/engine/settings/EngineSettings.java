@@ -172,9 +172,25 @@ public final class EngineSettings {
             return () -> listeners.remove(listener);
         }
 
+        /**
+         * Tells every listener, also when one throws: the value is set already, so each must hear of it. The first
+         * exception is rethrown after, later ones suppressed in it.
+         */
         void changed(String key) {
+            RuntimeException failure = null;
             for (Consumer<String> listener : List.copyOf(listeners)) {
-                listener.accept(key);
+                try {
+                    listener.accept(key);
+                } catch (RuntimeException e) {
+                    if (failure == null) {
+                        failure = e;
+                    } else {
+                        failure.addSuppressed(e);
+                    }
+                }
+            }
+            if (failure != null) {
+                throw failure;
             }
         }
     }

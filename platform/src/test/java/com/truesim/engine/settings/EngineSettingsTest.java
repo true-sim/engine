@@ -66,6 +66,24 @@ class EngineSettingsTest {
     }
 
     @Test
+    void everyListenerHearsAChangeThoughOneThrows() {
+        EngineSettings settings = new EngineSettings();
+        List<String> heard = new ArrayList<>();
+        settings.onAnyChange(name -> {
+            throw new IllegalStateException("first");
+        });
+        settings.onAnyChange(heard::add);
+        settings.onAnyChange(name -> {
+            throw new IllegalStateException("third");
+        });
+        org.assertj.core.api.Assertions.assertThatIllegalStateException().isThrownBy(() -> settings.set(SIZE, 4096))
+            .withMessage("first")
+            .satisfies(e -> assertThat(e.getSuppressed()).extracting(Throwable::getMessage).containsExactly("third"));
+        assertThat(heard).as("heard though the one before threw").containsExactly("shadows.size");
+        assertThat(settings.get(SIZE)).isEqualTo(4096);
+    }
+
+    @Test
     void valuesAreSetCheckedAndHeard() {
         EngineSettings settings = new EngineSettings();
         assertThat(settings.get(SIZE)).as("the default").isEqualTo(2048);
