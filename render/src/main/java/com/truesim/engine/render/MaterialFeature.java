@@ -21,4 +21,8 @@ public interface MaterialFeature {
     /** As {@link MaterialParameters#textures}: every {@code [Texture]} field's value. Generated; none by default. */
     default void textures(java.util.function.IntConsumer each) {
     }
+
+    /** As {@link MaterialParameters#buffers}: every buffer field, past {@code base}. Generated; none by default. */
+    default void buffers(long base, MaterialBuffers each) {
+    }
 }

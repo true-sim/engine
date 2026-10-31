@@ -12,7 +12,7 @@ import java.util.Objects;
  * The buffer may change between frames ({@link #set}); a new size rebuilds the graph. Every {@code ExternalBuffer} of
  * one GPU buffer is the same buffer of a build, so set them alike.
  */
-public final class ExternalBuffer {
+public final class ExternalBuffer implements com.truesim.engine.vulkan.DeviceBuffer {
 
     final String name;
     long handle;
@@ -45,5 +45,14 @@ public final class ExternalBuffer {
 
     public long size() {
         return size;
+    }
+
+    /**
+     * The buffer's address, as last {@link #set}: a material naming it is read by the passes reading scene data, which
+     * the graph orders after the passes writing it. 0 for a buffer without one.
+     */
+    @Override
+    public long deviceAddress() {
+        return address;
     }
 }

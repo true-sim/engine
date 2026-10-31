@@ -23,7 +23,7 @@ import java.nio.ByteOrder;
  * view's entry); one part from one thread at a time.
  */
 @AllowAllocation("created rarely")
-public final class FrameBuffer implements AutoCloseable {
+public final class FrameBuffer implements AutoCloseable, DeviceBuffer {
 
     private static final ValueLayout.OfInt U32 = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfFloat F32 = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -184,6 +184,7 @@ public final class FrameBuffer implements AutoCloseable {
      * The address of the copy shaders of the frame being recorded read: the open slot's, or between frames the one
      * opened last (slot 0 before the first frame).
      */
+    @Override
     public long deviceAddress() {
         return copies[copySlot()].deviceAddress();
     }

@@ -16,7 +16,9 @@ public final class MaterialField {
         /** A 32-bit integer, or a texture slot. */
         I32,
         /** A float2 to float4 (or a color). */
-        FLOATS
+        FLOATS,
+        /** A buffer's address ({@code T*} in Slang), set as a buffer. */
+        BUFFER
     }
 
     private final Class<?> owner;
@@ -54,6 +56,11 @@ public final class MaterialField {
 
     public static MaterialField i32(Class<?> owner, String path, int offset) {
         return new MaterialField(owner, path, offset, Kind.I32, 1, 0, 0);
+    }
+
+    /** A buffer field ({@code T*} in Slang): the address of a buffer, 0 for none. */
+    public static MaterialField buffer(Class<?> owner, String path, int offset) {
+        return new MaterialField(owner, path, offset, Kind.BUFFER, 1, 0, 0);
     }
 
     /** A {@code [Texture]} field: an {@link Kind#I32} holding a texture, or -1 for none. */
