@@ -138,6 +138,14 @@ public final class RayTracing implements AutoCloseable {
     private double originX; // the world position the top level is relative to
     private double originY;
     private double originZ;
+    // What the top level was last built from: it stands while they are the same (bottom levels: none added since).
+    private GpuScene builtScene;
+    private long builtVersion;
+    private double builtX;
+    private double builtY;
+    private double builtZ;
+    private boolean bottomAdded = true;
+    private long topLevelBuilds;
 
     /** An acceleration structure and the buffer it lives in. */
     private record Structure(GpuBuffer buffer, long handle, long address) { }
@@ -212,6 +220,7 @@ public final class RayTracing implements AutoCloseable {
         if (bottom[mesh] != null) {
             throw new IllegalStateException("Mesh " + mesh + " has a bottom level already");
         }
+        bottomAdded = true; // instances of the mesh enter the top level at its next build
         MeshLevel chosen = data.levels().get(level);
         int firstMeshlet = chosen.firstMeshlet();
         int lastMeshlet = firstMeshlet + chosen.meshletCount() - 1;
@@ -356,10 +365,16 @@ public final class RayTracing implements AutoCloseable {
     /**
      * Records the top level's build from {@code renderer}'s scene's instances, relative to the {@link #origin}: a
      * compute pass writes the instance records (transform, mesh's bottom level), then the top level is built, ready for
-     * ray queries after this. Allocates nothing.
+     * ray queries after this. Records no build while the scene's instances ({@link GpuScene#version()}), the origin and
+     * the bottom levels are as they were at the last one: the structure built then stands. Allocates nothing.
      */
     public void buildTopLevel(VkCommandBuffer commands, MeshletRenderer renderer) {
         buildTopLevel(commands, renderer, false);
+    }
+
+    /** How many times the top level was built: frames whose instances, origin and bottom levels stayed build none. */
+    public long topLevelBuilds() {
+        return topLevelBuilds;
     }
 
     /**
@@ -386,6 +401,17 @@ public final class RayTracing implements AutoCloseable {
         GpuScene scene = renderer.scene();
         int count = Math.min(scene.highWater(), maxInstances);
         scene.upload(commands);
+        if (scene == builtScene && scene.version() == builtVersion && originX == builtX && originY == builtY
+            && originZ == builtZ && !bottomAdded) {
+            return; // nothing it was built from changed
+        }
+        builtScene = scene;
+        builtVersion = scene.version();
+        builtX = originX;
+        builtY = originY;
+        builtZ = originZ;
+        bottomAdded = false;
+        topLevelBuilds++;
         if (!declared) { // whatever traced the top level before (the last frame) is done with it before it is rebuilt
             Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);

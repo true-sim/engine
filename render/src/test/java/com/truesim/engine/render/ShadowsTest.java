@@ -291,6 +291,35 @@ class ShadowsTest {
     }
 
     @Test
+    void theTopLevelIsBuiltOnlyWhenInstancesTheOriginOrBottomLevelsChange() {
+        assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
+        rayTracing = new RayTracing(device, pool, 16);
+        rayTracing.add(quad, quadMesh, quadMesh.levels().size() - 1);
+        try (Lights lights = new Lights(device, 4, 4)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
+            InlineRayShadows rays = new InlineRayShadows(rayTracing, view, lights, 0, 0).offset(2e-3f);
+            expectShadow(visibility(geometry), "the first build", shadow, lights, rays);
+            assertThat(rayTracing.topLevelBuilds()).as("two frames, nothing changed after the first").isEqualTo(1);
+            frame(colorTarget, 4);
+            frame(colorTarget, 4);
+            assertThat(rayTracing.topLevelBuilds()).as("a still scene").isEqualTo(1);
+            // The floating quad moves 1 right: rebuilt, the shadow with it.
+            scene.set(1, quad, 1, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            expectShadow(visibility(geometry), "the quad moved", new double[] {shadow[0] + 1, shadow[1]}, lights, rays);
+            assertThat(rayTracing.topLevelBuilds()).isEqualTo(2);
+            // The origin moves: rebuilt relative to it, the shadow where it was.
+            rayTracing.origin(5, 0, -5);
+            expectShadow(visibility(geometry), "the origin moved", new double[] {shadow[0] + 1, shadow[1]}, lights,
+                rays);
+            assertThat(rayTracing.topLevelBuilds()).isEqualTo(3);
+        }
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
+    @Test
     void shadowMapsStayInTheWorldWhileTheCameraMoves() {
         // The scene 7,000 km from the origin. The sun's camera sits at a world position of its own over the floor,
         // not relative to the camera: its map does not change as the camera moves, and serves the camera wherever it
