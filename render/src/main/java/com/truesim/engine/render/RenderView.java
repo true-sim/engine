@@ -66,6 +66,9 @@ public final class RenderView implements AutoCloseable {
     private final double[] position = new double[3];
     private final float[] viewProjection = new float[16]; // as last set, to be the next frame's previous one
     private boolean wasSet;
+    private Camera camera; // as last set: read again when the frame culls, if it moved since
+    private float errorPixels;
+    private int mode;
     private float jitterX;
     private float jitterY;
     final RenderView[] alone = {this}; // to cull the view by itself; never written
@@ -112,10 +115,42 @@ public final class RenderView implements AutoCloseable {
     /**
      * Sets the view's camera: its matrices and world position (instances are drawn relative to it), the error allowed
      * on screen in pixels (detail is chosen per meshlet so that simplification moves no surface by more) and the
-     * shading {@code mode} ({@link MeshletRenderer#MODE_LIT}, ...). Allocates nothing.
+     * shading {@code mode} ({@link MeshletRenderer#MODE_LIT}, ...). The camera is read now, and again when a frame
+     * culls the view if it changed since: setting it once is enough for a camera that moves (a headset's eyes, located
+     * just before the frame records). Allocates nothing.
      */
     public RenderView set(Camera camera, float errorPixels, int mode) {
         checkOpen();
+        this.camera = camera;
+        this.errorPixels = errorPixels;
+        this.mode = mode;
+        return write(camera);
+    }
+
+    /**
+     * Reads the camera last {@link #set} again where it changed since it was read (moved, turned, resized): when a frame
+     * culls the view, so the frame draws from where the camera is then. Allocates nothing.
+     */
+    void refresh() {
+        if (camera == null || !changed(camera)) {
+            return;
+        }
+        write(camera);
+    }
+
+    /** Whether {@code from}'s matrices or position differ from those the view holds. */
+    private boolean changed(Camera from) {
+        float[] matrix = from.viewProjection();
+        for (int i = 0; i < 16; i++) {
+            if (matrix[i] != viewProjection[i]) {
+                return true;
+            }
+        }
+        return from.position(0) != position[0] || from.position(1) != position[1] || from.position(2) != position[2];
+    }
+
+    /** Writes {@code camera} as this frame's, the one held before as the frame before's. */
+    private RenderView write(Camera camera) {
         float[] matrix = camera.viewProjection();
         // The frame before's matrix, from positions relative to this frame's camera: moved by how far the camera did
         // (column-major: the last column takes the move), so motion vectors need no positions of the frame before.
