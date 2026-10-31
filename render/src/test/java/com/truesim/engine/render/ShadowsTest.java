@@ -250,10 +250,12 @@ class ShadowsTest {
                 differ += Math.abs((inline[i] & 0xff) - (masked[i] & 0xff)) > 32 ? 1 : 0;
             }
             assertThat(differ).as("inline rays against the mask").isLessThan(SIZE * SIZE / 50);
-            // Two views tracing inline shadows: one build of the top level a frame, relative to the camera of the view
-            // built first, 2 right and 1 back; the other view moves its rays by the difference, its shadow in place.
+            // Two views tracing inline shadows, one looking from 2 right and 1 back: one build of the top level a frame,
+            // relative to an origin away from both cameras; each view moves its rays by its camera less the origin.
             graph.close();
             graph = new FrameGraph(device, 2);
+            rayTracing.origin(-3, 1, 2);
+            assertThat(rayTracing.origin(0)).isEqualTo(-3);
             Camera away = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1).position(2, 0, 1);
             com.truesim.engine.graph.ViewPort awayPort = graph.addView("away").size(SIZE, SIZE);
             SceneView anchor = geometry.createView(awayPort, away, ViewOptions.of(256, 1 << 12).withOcclusion(true))
@@ -271,11 +273,12 @@ class ShadowsTest {
                 byte[] two = frame(colorTarget, 4);
                 assertThat(graph.passes()).containsOnlyOnce("top level");
                 int lit = floor(two, this, 3, -2);
-                assertThat(floor(two, this, shadow[0], shadow[1])).as("in shadow, the top level the other view's")
+                assertThat(floor(two, this, shadow[0], shadow[1])).as("in shadow, the top level relative to the origin")
                     .isLessThan((int) (lit * shadowRatio));
                 assertThat(floor(two, this, shadow[0] + 0.4, shadow[1] - 0.4)).isLessThan((int) (lit * shadowRatio));
                 device.waitIdle();
             }
+            rayTracing.origin(0, 0, 0);
             // Forward shading cannot trace inline: the light shines unshadowed.
             SceneView main = newGraph();
             main.port().add(forward.apply(main)).add(new ClusteredLights(lights, main))

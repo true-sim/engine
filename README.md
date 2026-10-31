@@ -535,9 +535,11 @@ interface:
 - **Ray tracing is a generic parameter** (`IShadowRays`): shading pipelines that cannot trace use `NoRays`, so only the
   visibility buffer's traced variant (`shadeTraced.slang`) needs ray queries. Forward shading counts inline ray
   shadows as lit; a ray-traced mask works with any shading.
-- **One top level per frame** (`TopLevel`, a shared request) serves every ray-traced technique of every view. It is
-  built relative to one camera, its anchor's: the first view a technique names (`top.anchor(g, view)`) whose technique
-  runs that frame. Other views move their rays by the difference to `top.anchor()`'s position.
+- **One top level per frame** (`TopLevel`, a shared request) serves every ray-traced technique of every view: VR's two
+  eyes, a mirror, a second player. It is built relative to a world position, `rayTracing.origin(x, y, z)` (0, 0, 0 at
+  first), not to a camera: each view moves its rays by its camera less the origin. Its transforms are floats, so the
+  app keeps the origin within a few kilometres of the cameras, moving it when they have gone far (at 7,000 km floats
+  are 0.5 m apart). Rendering stays relative to each camera; the top level's records are only for its build.
 - A mask needs the camera's depth before shading: for the visibility buffer that is its own IDs' draw (shared); for
   forward shading, a depth-only draw of the camera as a view of its own, for now.
 
