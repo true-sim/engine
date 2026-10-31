@@ -472,6 +472,11 @@ public final class GeometryPool implements AutoCloseable {
         uploads.flushInPass(commands);
     }
 
+    /** The frames the pool's meshes are drawn in: what changes to them wait for. */
+    FrameSlots frameSlots() {
+        return slots;
+    }
+
     /** The pool's uploads, for work outside frames that reads meshes added since the last frame. */
     FrameUploads uploads() {
         return uploads;

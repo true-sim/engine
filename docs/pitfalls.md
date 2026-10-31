@@ -150,6 +150,14 @@ per mesh.
   ([#101](https://github.com/true-sim/engine/issues/101)).
 - Rule: reuse fences and command pools, resetting them; never create one per wait.
 
+**A wait for the GPU in a streaming path waits for every frame queued ahead.** `RayTracing.add` made 3 to 4
+`submitAndWait` calls per mesh on the graphics queue; with frames in flight each waited for the frames before it too.
+Streaming 12 ray-traced meshes a frame took the render thread 6 to 11.6 ms, a 90 Hz headset's whole budget.
+- Proof: `StreamBench --args=rays` before and after building bottom levels in frames (true-sim/engine#101's streaming
+  work): frames with adds 6.09 ms on average (max 11.59, 25 over 4 ms) against 1.25 (max 1.96, none over 4 ms).
+- Rule: what runs while frames do (streaming, adding, removing) records into a frame and frees through the frame
+  slots; `submitAndWait` and `waitIdle` are for setup and shutdown only.
+
 ## Tests and measurements
 
 **After a device loss, look at the first failure only.** Once one test lost the device, the tests after it failed too,
