@@ -30,7 +30,7 @@ import org.lwjgl.vulkan.VkImageSubresourceRange;
  * ({@link ViewPort#output(Key, Texture)}) and any pass to sample by its {@link #slot()}, which never changes: a mirror,
  * a security camera's screen, a minimap. Between frames it rests readable by shaders; a frame its view is skipped
  * leaves it as it was. A build reads it with {@link GraphBuilder#texture}, after the view's copy into it. It starts
- * transparent black, and closes with its graph.
+ * transparent black, and is freed when removed ({@link FrameGraph#removeTexture}) or its graph closes.
  *
  * <pre>{@code
  * Texture screen = graph.texture("security screen", Format.R8G8B8A8_UNORM, 512, 512);
@@ -45,6 +45,7 @@ public final class Texture {
     private final GpuImage image;
     private final int slot;
     final ExternalImage external; // how frames see it: taken from and left in its resting layout, with its contents
+    boolean removed; // from its graph: builds may no longer read it
 
     @AllowAllocation("set up rarely")
     Texture(VulkanDevice device, String name, Format format, int width, int height) {

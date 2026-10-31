@@ -63,6 +63,7 @@ import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.common.jobs.JobSystem;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.Queue;
+import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.Vulkan;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -146,6 +147,7 @@ public final class FrameGraph implements AutoCloseable {
     private long[] builtVersions = new long[0]; // each one's buildVersion() then
     private final Map<Key<Image>, ExternalImage> outputs = new LinkedHashMap<>();
     private final List<Texture> textures = new ArrayList<>();
+    private Retiring retiring; // removed textures, until no frame in flight samples them
     private final Map<Class<?>, Implementation<?, ?>> implementations = new HashMap<>();
     private final Map<Object, AutoCloseable> cache = new LinkedHashMap<>();
     private final ResourcePool resources; // the images and buffers kept across builds
@@ -267,6 +269,7 @@ public final class FrameGraph implements AutoCloseable {
         this.resources = new ResourcePool(device, framesInFlight);
         this.ownsSlots = shared == null;
         this.frameSlots = ownsSlots ? new FrameSlots(framesInFlight) : shared;
+        this.retiring = new Retiring(frameSlots);
         this.graphicsQueue = device.graphics();
         this.computeQueue = device.compute();
         this.asyncCompute = graphicsQueue != computeQueue;
@@ -348,6 +351,31 @@ public final class FrameGraph implements AutoCloseable {
             Objects.requireNonNull(format, "format"), width, height);
         textures.add(texture);
         return texture;
+    }
+
+    /**
+     * Removes {@code texture}, made by {@link #texture}: outputs into it go (the graph rebuilds on its next frame), a
+     * build reading it fails, and its image and slot are freed once no frame in flight samples it.
+     */
+    @AllowAllocation("set up rarely")
+    public FrameGraph removeTexture(Texture texture) {
+        if (!textures.remove(texture)) {
+            return this;
+        }
+        texture.removed = true;
+        outputs.values().removeIf(target -> target == texture.external);
+        for (ViewPort view : views) {
+            view.outputs.values().removeIf(target -> target == texture.external);
+        }
+        dirty = true;
+        retiring.add(texture::close);
+        return this;
+    }
+
+    /** The textures made and not removed. */
+    @AllowAllocation("inspection")
+    public List<Texture> textures() {
+        return List.copyOf(textures);
     }
 
     public FrameGraph removeOutput(Key<Image> key) {
@@ -602,6 +630,7 @@ public final class FrameGraph implements AutoCloseable {
             build();
         }
         frame++;
+        retiring.release(); // removed textures no frame in flight samples any more
         for (int h = 0; h < activeHistories.length; h++) {
             HistoryPair pair = activeHistories[h];
             if (!historyRuns(h) && pair.firstFrame >= frame) {
@@ -1529,6 +1558,8 @@ public final class FrameGraph implements AutoCloseable {
             texture.close();
         }
         textures.clear();
+        retiring.close(); // the frames are done: removed textures go now
+        retiring = new Retiring(frameSlots); // for what is removed after, at once
         for (ReadbackPlan readback : readbacks) {
             readback.close();
         }
