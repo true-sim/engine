@@ -1,13 +1,16 @@
 // The top level's instance records, from the meshlet renderer's instances: one thread per instance writes a
 // VkAccelerationStructureInstanceKHR (64 bytes): its 3 x 4 transform (rotation and scale, then position, row-major),
-// its index as custom index, mask 0xff (0: left out, when its mesh has no bottom level), opaque and two-sided, and its
-// mesh's bottom level.
+// its index as custom index, mask 0xff (0: left out, when its mesh has no bottom level), two-sided, opaque unless one
+// of its materials is masked (then its triangles are candidates rays alpha-test), and its mesh's bottom level.
 import meshlets.common;
+import materials;
+import raytracing;
 
 struct InstancesPush
 {
     Instance* instances;
-    uint64_t* bottom;     // per pool mesh: its bottom level's address, or 0
+    BottomLevel* bottom;  // per pool mesh: its bottom level, address 0 for none
+    Material* materials;  // the scene's
     uint* records;        // 16 words per instance
     uint count;
     float originX;        // the world position the top level is relative to (RayTracing.origin), high part
@@ -49,12 +52,19 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
         push.records[w + r * 4 + 2] = asuint(z[r]);
         push.records[w + r * 4 + 3] = asuint(instance.position[r]);
     }
-    uint64_t bottom = push.bottom[instance.mesh];
+    BottomLevel level = push.bottom[instance.mesh];
+    uint64_t bottom = level.address;
     // Rays trace shadows: holes and instances casting none are left out.
     bool casts = (stored.mesh & INSTANCE_LIVE) != 0 && (stored.mesh & INSTANCE_CASTS_SHADOWS) != 0;
     uint mask = bottom != 0 && casts ? 0xffu : 0u;
     push.records[w + 12] = (i & 0xffffffu) | (mask << 24);
-    push.records[w + 13] = 0x5u << 24;       // triangle facing cull disable | force opaque
+    bool masked = false;
+    for (uint s = 0; s < level.submeshes && bottom != 0; s++)
+    {
+        masked = masked || materialMasked(push.materials[instance.materialBase + s]);
+    }
+    // Triangle facing cull disable, and force opaque or (masked) force no opaque.
+    push.records[w + 13] = (masked ? 0x9u : 0x5u) << 24;
     push.records[w + 14] = uint(bottom);
     push.records[w + 15] = uint(bottom >> 32);
 }

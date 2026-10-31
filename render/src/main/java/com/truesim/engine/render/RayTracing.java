@@ -66,7 +66,9 @@ import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.ExternalBuffer;
 import com.truesim.engine.graph.GraphBuilder;
+import com.truesim.engine.render.layout.BottomLevelLayout;
 import com.truesim.engine.render.layout.InstancesPush;
+import com.truesim.engine.render.layout.RaySceneLayout;
 import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.FrameUploads;
@@ -217,8 +219,12 @@ public final class RayTracing implements AutoCloseable {
         final ExternalBuffer instancesImport;
         final ExternalBuffer scratchImport;
         final Runnable follow = this::follow;
+        // Its RayScene for shaders tracing it, per frame slot: the slot and the addresses of what alpha-tests masked
+        // triangles, written as each frame records (a material table's copy is the frame's).
+        final com.truesim.engine.vulkan.FrameBuffer record;
         // What it was last built from: it stands while they are the same.
         boolean built;
+        long builtMaterials; // the materials' version: which instances are masked
         long builtVersion;
         long builtBottoms;
         int builtCount; // the instances of the last build: a refit keeps their number
@@ -234,7 +240,23 @@ public final class RayTracing implements AutoCloseable {
             topImport = new ExternalBuffer("top level", top.buffer());
             instancesImport = new ExternalBuffer("top level instances", instances);
             scratchImport = new ExternalBuffer("top level scratch", scratch);
+            record = com.truesim.engine.vulkan.FrameBuffer.create(device, RaySceneLayout.BYTES,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, slots,
+                device.graphics().family(), device.compute().family()); // traced by async compute too
             scene.onGrow(follow);
+        }
+
+        /** Its RayScene as this frame's tracing reads it. Allocates nothing. */
+        void writeRecord() {
+            record.putInt(RaySceneLayout.SLOT, slot);
+            record.putLong(RaySceneLayout.INSTANCES, scene.instanceAddress());
+            record.putLong(RaySceneLayout.MESHES, pool.meshTable().deviceAddress());
+            record.putLong(RaySceneLayout.MESHLETS, pool.meshlets().deviceAddress());
+            record.putLong(RaySceneLayout.MESHLET_VERTICES, pool.meshletVertices().deviceAddress());
+            record.putLong(RaySceneLayout.MESHLET_TRIANGLES, pool.meshletTriangles().deviceAddress());
+            record.putLong(RaySceneLayout.ATTRIBUTES, pool.attributes().deviceAddress());
+            record.putLong(RaySceneLayout.MATERIALS, scene.materialsAddress());
+            record.putLong(RaySceneLayout.BOTTOM, bottomTable.deviceAddress());
         }
 
         /** A top level for {@code count} instances: its instance records, structure, scratch and bindless slot. */
@@ -323,7 +345,7 @@ public final class RayTracing implements AutoCloseable {
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         int meshes = pool.capacity().meshes();
         bottom = new Structure[meshes];
-        bottomTable = GpuBuffer.hostVisible(device, 8L * meshes, storage);
+        bottomTable = GpuBuffer.hostVisible(device, (long) BottomLevelLayout.BYTES * meshes, storage);
         bottomTable.memory().fill((byte) 0);
         startInstances = Math.max(1, maxInstances);
         try (ShaderModule shader = ShaderModule.load(device, "shaders/raytracing/instances.spv")) {
@@ -372,6 +394,7 @@ public final class RayTracing implements AutoCloseable {
         if (t != null) {
             scene.stopFollowing(t.follow);
             retire(t.freeing());
+            retire(t.record::close);
         }
     }
 
@@ -404,7 +427,7 @@ public final class RayTracing implements AutoCloseable {
         bottom = java.util.Arrays.copyOf(bottom, meshes);
         pendingOf = java.util.Arrays.copyOf(pendingOf, meshes);
         GpuBuffer old = bottomTable;
-        bottomTable = GpuBuffer.hostVisible(device, 8L * meshes,
+        bottomTable = GpuBuffer.hostVisible(device, (long) BottomLevelLayout.BYTES * meshes,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
         MemorySegment.copy(old.memory(), 0, bottomTable.memory(), 0, old.size());
         bottomTable.memory().asSlice(old.size()).fill((byte) 0);
@@ -432,6 +455,15 @@ public final class RayTracing implements AutoCloseable {
      */
     public int slot(GpuScene scene) {
         return top(scene).slot;
+    }
+
+    /**
+     * The address of {@code scene}'s {@code RayScene} (raytracing.slang) for the frame recording: its top level's slot
+     * and what alpha-tests its masked triangles, for shaders tracing rays into it ({@code occluded}). Written as its
+     * top level's build records ({@link #buildTopLevel}): read it in passes after that one.
+     */
+    public long sceneAddress(GpuScene scene) {
+        return top(scene).record.deviceAddress();
     }
 
     /** {@link #slot(GpuScene)} of the one scene with a top level; throws with none or several. */
@@ -474,6 +506,7 @@ public final class RayTracing implements AutoCloseable {
         int firstMeshlet = chosen.firstMeshlet();
         int lastMeshlet = firstMeshlet + chosen.meshletCount() - 1;
         int firstIndex = data.meshletTriangleOffset(firstMeshlet);
+        describeBottom(mesh, data, chosen);
         int endIndex = data.meshletTriangleOffset(lastMeshlet) + 3 * data.meshletTriangleCount(lastMeshlet);
         int triangles = (endIndex - firstIndex) / 3;
         int usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
@@ -576,7 +609,7 @@ public final class RayTracing implements AutoCloseable {
                 destroy(built);
                 bottom[mesh] = compacted;
                 bottomBytes += compactedSize.get(0);
-                bottomTable.memory().setAtIndex(ValueLayout.JAVA_LONG, mesh, compacted.address());
+                setBottom(mesh, compacted.address());
             }
         } finally {
             indices.close();
@@ -589,10 +622,35 @@ public final class RayTracing implements AutoCloseable {
         }
     }
 
+    /** Mesh {@code mesh}'s bottom level's address in the table shaders read ({@code BottomLevel}), 0 for none. */
+    private void setBottom(int mesh, long address) {
+        bottomTable.memory().set(ValueLayout.JAVA_LONG_UNALIGNED, (long) BottomLevelLayout.BYTES * mesh
+            + BottomLevelLayout.ADDRESS, address);
+    }
+
+    /**
+     * What rays alpha-testing mesh {@code mesh}'s triangles look up ({@code BottomLevel}): the level its bottom level
+     * is built from, the triangle its first is, and how many submeshes (instance materials) its meshlets name.
+     */
+    private void describeBottom(int mesh, MeshData data, MeshLevel level) {
+        int submeshes = 0;
+        for (int m = level.firstMeshlet(); m < level.firstMeshlet() + level.meshletCount(); m++) {
+            submeshes = Math.max(submeshes, data.meshletSubmesh(m) + 1);
+        }
+        MemorySegment entry = bottomTable.memory().asSlice((long) BottomLevelLayout.BYTES * mesh,
+            BottomLevelLayout.BYTES);
+        entry.set(ValueLayout.JAVA_INT_UNALIGNED, BottomLevelLayout.FIRST_MESHLET, level.firstMeshlet());
+        entry.set(ValueLayout.JAVA_INT_UNALIGNED, BottomLevelLayout.MESHLET_COUNT, level.meshletCount());
+        entry.set(ValueLayout.JAVA_INT_UNALIGNED, BottomLevelLayout.SUBMESHES, submeshes);
+        entry.set(ValueLayout.JAVA_INT_UNALIGNED, BottomLevelLayout.FIRST_INDEX,
+            data.meshletTriangleOffset(level.firstMeshlet()));
+    }
+
     /** Stages {@code mesh}'s level for a build in a later frame ({@link #add}). */
     @AllowAllocation("building, once per mesh")
     private void addDeferred(int mesh, MeshData data, int level) {
         MeshLevel chosen = data.levels().get(level);
+        describeBottom(mesh, data, chosen);
         int firstMeshlet = chosen.firstMeshlet();
         int lastMeshlet = firstMeshlet + chosen.meshletCount() - 1;
         int firstIndex = data.meshletTriangleOffset(firstMeshlet);
@@ -661,7 +719,7 @@ public final class RayTracing implements AutoCloseable {
         if (onItsWay != null) {
             onItsWay.cancelled = true; // freed by the stage it is in, when the GPU is done with it
             pendingOf[mesh] = null;
-            bottomTable.memory().setAtIndex(ValueLayout.JAVA_LONG, mesh, 0); // built, it may be traced already
+            setBottom(mesh, 0); // built, it may be traced already
             bottomVersion++;
         }
         Structure structure = bottom[mesh];
@@ -669,7 +727,7 @@ public final class RayTracing implements AutoCloseable {
             return;
         }
         bottom[mesh] = null;
-        bottomTable.memory().setAtIndex(ValueLayout.JAVA_LONG, mesh, 0);
+        setBottom(mesh, 0);
         bottomVersion++; // its instances leave top levels at their next build
         long compacted = structure.buffer().size();
         bottomBytes -= compacted;
@@ -810,7 +868,7 @@ public final class RayTracing implements AutoCloseable {
             retired.add(new Retired(() -> destroy(uncompacted), slots.retireAt()));
             return;
         }
-        bottomTable.memory().setAtIndex(ValueLayout.JAVA_LONG, p.mesh, p.built.address());
+        setBottom(p.mesh, p.built.address());
         bottomVersion++; // its instances enter top levels at their next build
         p.compacted = create(size, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
         try (MemoryStack stack = stackPush()) {
@@ -835,7 +893,7 @@ public final class RayTracing implements AutoCloseable {
         pendingOf[p.mesh] = null;
         bottom[p.mesh] = p.compacted;
         bottomBytes += p.compacted.buffer().size();
-        bottomTable.memory().setAtIndex(ValueLayout.JAVA_LONG, p.mesh, p.compacted.address());
+        setBottom(p.mesh, p.compacted.address());
         bottomVersion++;
     }
 
@@ -918,8 +976,10 @@ public final class RayTracing implements AutoCloseable {
         SceneTop t = top(scene); // a build outside a graph: made and grown now, its buffers fresh
         int count = Math.min(scene.highWater(), t.maxInstances);
         scene.upload(commands);
+        t.writeRecord();
+        long materials = scene.materials() == null ? 0 : scene.materials().version();
         boolean same = t.built && t.builtBottoms == bottomVersion && originX == t.builtX && originY == t.builtY
-            && originZ == t.builtZ;
+            && originZ == t.builtZ && t.builtMaterials == materials;
         if (same && scene.version() == t.builtVersion) {
             return; // nothing it was built from changed
         }
@@ -932,6 +992,7 @@ public final class RayTracing implements AutoCloseable {
         t.builtCount = count;
         t.builtVersion = scene.version();
         t.builtBottoms = bottomVersion;
+        t.builtMaterials = materials;
         t.builtX = originX;
         t.builtY = originY;
         t.builtZ = originZ;
@@ -947,6 +1008,7 @@ public final class RayTracing implements AutoCloseable {
             long push = stack.nmalloc(8, PUSH_BYTES);
             memPutLong(push + InstancesPush.INSTANCES, scene.instanceAddress());
             memPutLong(push + InstancesPush.BOTTOM, bottomTable.deviceAddress());
+            memPutLong(push + InstancesPush.MATERIALS, scene.materialsAddress()); // masked instances are not opaque
             memPutLong(push + InstancesPush.RECORDS, t.instancesAddress);
             memPutInt(push + InstancesPush.COUNT, count);
             putOrigin(push + InstancesPush.ORIGIN_X, push + InstancesPush.ORIGIN_LOW_X, originX);
@@ -1107,6 +1169,7 @@ public final class RayTracing implements AutoCloseable {
             for (SceneTop t : tops.values()) {
                 t.scene.stopFollowing(t.follow);
                 t.freeing().run();
+                t.record.close();
             }
             tops.clear();
             for (Structure structure : bottom) {

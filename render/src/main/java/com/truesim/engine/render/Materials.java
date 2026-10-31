@@ -70,6 +70,7 @@ public final class Materials implements AutoCloseable {
     private int[][] named; // per material id: the textures it names, as counted (-1: none; null: none at all)
     private final int[] textureUsers = new int[com.truesim.engine.vulkan.Bindless.SAMPLED_SLOTS]; // per texture slot
     private final Gather gather = new Gather();
+    private long version; // counts materials written and removed
     // Per material id with buffer fields: where each lies in its block, its buffer, the address last written there.
     private long[][] bufferAt;
     private com.truesim.engine.vulkan.DeviceBuffer[][] buffersOf;
@@ -719,6 +720,7 @@ public final class Materials implements AutoCloseable {
             freeBlocks(i);
         }
         live -= length;
+        version++;
         retiring[retiringCount] = id;
         retireAt[retiringCount++] = table.slots().retireAt();
     }
@@ -822,6 +824,15 @@ public final class Materials implements AutoCloseable {
         materials[id] = material;
         name(id, material);
         nameBuffers(id, material);
+        version++;
+    }
+
+    /**
+     * Changes as materials are added, set or removed (not as fields are updated in place): what was built from the
+     * materials' kinds, as a top level's opaque and masked instances, is built again. Allocates nothing.
+     */
+    public long version() {
+        return version;
     }
 
     /** How many materials the table holds, the default one included. */

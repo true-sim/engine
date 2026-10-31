@@ -561,6 +561,66 @@ class ShadowsTest {
     }
 
     @Test
+    void maskedTexelsCastNoRayTracedShadow() {
+        // As maskedTexelsCastNoShadow, by rays: the masked quad's instance comes as a candidate, its texel alpha-tested
+        // as rasterizing tests it. Then a quad with texture coordinates whose texture masks out its x < 0 half: only
+        // the other half casts.
+        assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
+        double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
+        MeshData mapped = uvQuad();
+        int mappedQuad = pool.add(mapped);
+        rayTracing = new RayTracing(device, pool, 16);
+        rayTracing.add(quad, quadMesh, quadMesh.levels().size() - 1);
+        rayTracing.add(mappedQuad, mapped, mapped.levels().size() - 1);
+        try (Lights lights = new Lights(device, 4, 4); Materials materials = new Materials(device, 4);
+             Textures textures = new Textures(device)) {
+            java.lang.foreign.MemorySegment half = java.lang.foreign.Arena.ofAuto().allocate(4L * 8 * 8, 4);
+            for (int i = 0; i < 64; i++) {
+                half.setAtIndex(java.lang.foreign.ValueLayout.JAVA_INT, i, i % 8 < 4 ? 0x00ffffff : 0xffffffff);
+            }
+            int solid = materials.add(Material.DEFAULT.alphaMask(0.5f));
+            int clear = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
+                .withBaseColor(new Color(0.8, 0.8, 0.8, 0))).alphaMask(0.5f));
+            int halved = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
+                .withBaseColorTexture(textures.color(8, 8, half))).alphaMask(0.5f));
+            scene.setMaterials(materials);
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            SceneDraw depthOnly = new SceneDraw(geometry, geometry.createView(ViewOptions.of(256, 1 << 12)), camera,
+                SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, SIZE, SIZE, false);
+            scene.set(1, quad, solid, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            expectShadow(forward(geometry), "masked, alpha above the cutoff, by rays", shadow, lights,
+                new RayTracedShadows(rayTracing, lights, 0, 0, depthOnly, camera));
+            scene.set(1, quad, clear, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            frame(colorTarget, 4);
+            byte[] color = frame(colorTarget, 4);
+            int lit = floor(color, this, 3, -2);
+            assertThat(floor(color, this, shadow[0], shadow[1])).as("all masked: no ray stops")
+                .isGreaterThan((int) (lit * 0.9));
+            scene.set(1, mappedQuad, halved, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            frame(colorTarget, 4);
+            color = frame(colorTarget, 4);
+            assertThat(floor(color, this, shadow[0] - 0.5, shadow[1])).as("under the masked half: lit")
+                .isGreaterThan((int) (lit * 0.9));
+            assertThat(floor(color, this, shadow[0] + 0.5, shadow[1])).as("under the kept half: shadowed")
+                .isLessThan((int) (lit * shadowRatio));
+            scene.setMaterials(null);
+        }
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
+    /** The test quad (2 x 2, in the xz plane) with texture coordinates: u along x, from 0 at x = -1 to 1 at x = 1. */
+    private static MeshData uvQuad() {
+        float[] positions = {-1, 0, -1, 1, 0, -1, -1, 0, 1, 1, 0, 1};
+        float[] uvs = {0, 0, 1, 0, 0, 1, 1, 1};
+        return new com.truesim.scene.meshbuild.MeshBuilder(
+            com.truesim.scene.assets.mesh.VertexFormat.of(com.truesim.scene.assets.mesh.VertexAttribute.UV0), 4)
+            .positions(positions).attribute(com.truesim.scene.assets.mesh.VertexAttribute.UV0, uvs)
+            .submesh(new int[] {0, 2, 1, 1, 2, 3}).buildFlat();
+    }
+
+    @Test
     void cascadesShadowNearAndFar() {
         // A second quad, farther out on a longer floor: its shadow falls in a farther cascade.
         scene.set(0, quad, 0, -5, -10, 0, 0, 0, 1, 10, 1, 15);

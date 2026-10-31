@@ -54,8 +54,9 @@ public struct Shadow
     public float4x4 toShadow;      // maps: positions relative to the entry's to the map's clip space (reverse depth)
     public uint kind;              // SHADOW_MAP, SHADOW_MASK, SHADOW_RAY
     public uint filter;            // maps: PCF, ...
-    public uint map;               // maps: the depth map's sampled slot; masks: the mask's; rays: the scene's slot
-    public uint size;              // maps: texels across
+    public uint map;               // maps: the depth map's sampled slot; masks: the mask's; rays: the low half of the
+                                   // scene's RayScene address (raytracing.slang)
+    public uint size;              // maps: texels across; rays: the high half of that address
     public float bias;             // maps: in the map's depth units
     public float split;            // cascades: the view depth this cascade reaches
     public float2 params;          // maps: (normal offset, 0); masks: (channel, 0); rays: (offset per unit of distance, 0)
@@ -211,13 +212,13 @@ public struct ShadowQuery
 public interface IShadowRays
 {
     /** Whether the way from origin along direction is clear up to tMax: 1, or 0 when something is in the way. */
-    float clear(uint scene, float3 origin, float3 direction, float tMax);
+    float clear(uint64_t scene, float3 origin, float3 direction, float tMax);
 }
 
 /** No ray tracing: inline ray shadows count as lit. */
 public struct NoRays : IShadowRays
 {
-    public float clear(uint scene, float3 origin, float3 direction, float tMax)
+    public float clear(uint64_t scene, float3 origin, float3 direction, float tMax)
     {
         return 1;
     }
@@ -288,7 +289,7 @@ public struct RayShadow<R : IShadowRays> : IShadow
     {
         float offset = s.params.x * q.fromViewer + 1.0e-3;
         float3 normal = dot(q.normal, q.toLight) < 0 ? -q.normal : q.normal;
-        return rays.clear(s.map, q.world + normal * offset, q.toLight, q.distance);
+        return rays.clear((uint64_t(s.size) << 32) | s.map, q.world + normal * offset, q.toLight, q.distance);
     }
 }
 

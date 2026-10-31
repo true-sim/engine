@@ -11,14 +11,14 @@ import lights;
 struct TracedPush
 {
     float4x4 inverseViewProjection;  // clip space back to positions relative to the camera
+    RayScene* scene;                 // the top level and what alpha-tests its masked triangles
+    Light* lights;
     uint depth;                      // sampled slot of the scene's depth
     uint mask;                       // storage slot of the mask: 1 lit, 0 in shadow
-    uint scene;                      // the top level's slot
     uint width;
     uint height;
     float offset;                    // off the surface, per unit of distance from the camera
-    Light* lights;
-    uint light;                      // which of them
+    uint light;                      // which of the lights
     float toTopLevelX;               // what moves a position relative to the camera into the top level's
     float toTopLevelY;
     float toTopLevelZ;
@@ -52,7 +52,6 @@ float3 neighbour(int2 pixel, int2 step, float depth, float3 position)
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
-[require(spvRayQueryKHR)]
 void tracedMain(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= push.width || id.y >= push.height)
