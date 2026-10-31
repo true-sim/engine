@@ -109,6 +109,7 @@ public final class GeometryPool implements AutoCloseable {
     private final FrameUploads uploads;
     // Buffers replaced by bigger ones: until the frame copying from them records, then until no frame reads them.
     private final List<GpuBuffer> replaced = new ArrayList<>();
+    private final List<java.util.function.IntConsumer> removing = new ArrayList<>(); // what follows removals
     private final Retiring oldBuffers;
     // Where meshes live: ranges of each kind of data, and mesh numbers.
     private final RangeAllocator vertexRanges;
@@ -454,13 +455,16 @@ public final class GeometryPool implements AutoCloseable {
 
     /**
      * Removes mesh {@code mesh}: instances must no longer draw it from the next frame on. Its data stays until no frame
-     * in flight can still draw it, then its ranges and number are reused. Allocates nothing. Geometry that keeps data of
-     * its own per mesh ({@link ClassicLodGeometry}, {@link RayTracing}'s bottom levels) does not follow removals yet:
-     * remove only meshes those were not given.
+     * in flight can still draw it, then its ranges and number are reused. What keeps data of its own per mesh
+     * ({@link ClassicLodGeometry}'s levels, {@link RayTracing}'s bottom levels) lets go of it too ({@link #onRemove}).
+     * Allocates nothing.
      */
     public void remove(int mesh) {
         if (!contains(mesh)) {
             throw new IllegalArgumentException("No mesh " + mesh);
+        }
+        for (int i = 0; i < removing.size(); i++) {
+            removing.get(i).accept(mesh); // while it is the pool's still: its ranges known
         }
         live[mesh] = false;
         unfit -= fits[mesh] ? 0 : 1;
@@ -469,6 +473,19 @@ public final class GeometryPool implements AutoCloseable {
         meshCount--;
         retiring[retiringCount] = mesh;
         retireAt[retiringCount++] = slots.retireAt();
+    }
+
+    /**
+     * Calls {@code follower} with each mesh removed, before it leaves: geometry keeping data of its own per mesh lets
+     * go of it, so the number, reused, starts clean.
+     */
+    public void onRemove(java.util.function.IntConsumer follower) {
+        removing.add(Objects.requireNonNull(follower, "follower"));
+    }
+
+    /** Stops calling {@code follower} as meshes are removed. */
+    public void stopFollowing(java.util.function.IntConsumer follower) {
+        removing.remove(follower);
     }
 
     /** Whether {@code mesh} is a mesh of the pool, added and not removed. */

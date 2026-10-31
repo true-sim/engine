@@ -118,6 +118,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             throw new IllegalArgumentException("Room for at least one draw: " + maxDraws);
         }
         this.pool = renderer.pool();
+        pool.onRemove(forget);
         this.device = device;
         this.oldBuffers = new Retiring(pool.frameSlots());
         this.maxDraws = maxDraws;
@@ -222,6 +223,18 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         }
         entry.set(U32, 4, data.levels().size());
         return this;
+    }
+
+    private final java.util.function.IntConsumer forget = this::forget;
+
+    /**
+     * Mesh {@code mesh} leaves the pool: no longer drawn the classic way, so its number, reused, starts clean. Its levels'
+     * and parts' room stays taken until the geometry closes (they are appended, not reused).
+     */
+    private synchronized void forget(int mesh) {
+        if (8L * mesh < meshes.size()) {
+            meshes.memory().asSlice(8L * mesh, 8).fill((byte) 0);
+        }
     }
 
     /** Grows the per-mesh table to the pool's mesh numbers, for any instance's mesh to be looked up. */
@@ -459,6 +472,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                     pipeline.close();
                 }
             }
+            pool.stopFollowing(forget);
             indices.close();
             meshes.close();
             levels.close();

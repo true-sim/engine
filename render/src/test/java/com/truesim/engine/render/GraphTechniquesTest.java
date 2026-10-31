@@ -1708,6 +1708,12 @@ class GraphTechniquesTest {
             frame();
             frame();
             assertThat(differing(expected)).as("after the pool grew").isZero();
+            // A mesh removed from the pool is forgotten here too: its number, reused, is added anew.
+            scene.removeFrom(1);
+            pool.remove(later);
+            int reused = pool.add(quadMesh);
+            assertThat(reused).as("the number reused").isEqualTo(later);
+            classic.add(reused, quadMesh); // not "drawn the classic way already"
             classic.close();
             assertThatIllegalStateException().isThrownBy(() -> classic.add(hill, hillMesh));
         }

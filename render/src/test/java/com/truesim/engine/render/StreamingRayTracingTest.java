@@ -142,6 +142,10 @@ class StreamingRayTracingTest {
                 }
                 assertThat(rayTracing.topLevelBuilds()).as("the new one built").isGreaterThan(grownBuilds);
                 scene.removeFrom(1);
+                // The mesh leaving the pool takes its bottom level with it: no separate remove.
+                scene.remove(0);
+                pool.remove(again);
+                assertThat(rayTracing.hasBottomLevel(again)).as("gone with its mesh").isFalse();
                 // A texture prepared on a loader thread, added while frames run: uploaded and mipmapped in a frame.
                 try (Textures textures = new Textures(device, graph.frameSlots())) {
                     MemorySegment texels = java.lang.foreign.Arena.ofAuto().allocate(4L * 512 * 512);
