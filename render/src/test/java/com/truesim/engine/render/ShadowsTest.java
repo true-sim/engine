@@ -435,15 +435,17 @@ class ShadowsTest {
             frame(colorTarget, 4);
             frame(colorTarget, 4);
             assertThat(rayTracing.topLevelBuilds()).as("a still scene").isEqualTo(1);
-            // The floating quad moves 1 right: rebuilt, the shadow with it.
+            // The floating quad moves 1 right: refitted (the same instances), the shadow with it.
             scene.set(1, quad, 1, -3, -5, 0, 0, 0, 1, 1, 1, 1);
             expectShadow(visibility(geometry), "the quad moved", new double[] {shadow[0] + 1, shadow[1]}, lights, rays);
             assertThat(rayTracing.topLevelBuilds()).isEqualTo(2);
-            // The origin moves: rebuilt relative to it, the shadow where it was.
+            assertThat(rayTracing.topLevelRefits()).as("moved only: refitted").isEqualTo(1);
+            // The origin moves: built anew relative to it, the shadow where it was.
             rayTracing.origin(5, 0, -5);
             expectShadow(visibility(geometry), "the origin moved", new double[] {shadow[0] + 1, shadow[1]}, lights,
                 rays);
             assertThat(rayTracing.topLevelBuilds()).isEqualTo(3);
+            assertThat(rayTracing.topLevelRefits()).as("not refitted across a new origin").isEqualTo(1);
         }
         scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
     }
