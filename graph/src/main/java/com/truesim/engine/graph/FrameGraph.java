@@ -780,7 +780,7 @@ public final class FrameGraph implements AutoCloseable {
             } else if (pass.attachments.length == 0) {
                 pass.body.record(context);
             } else {
-                beginRendering(commands, pass.attachments);
+                beginRendering(commands, pass);
                 pass.body.record(context);
                 Commands.endRendering(commands);
             }
@@ -1071,7 +1071,8 @@ public final class FrameGraph implements AutoCloseable {
      * Starts rendering into a pass's attachments, the viewport and scissor all of them; the views are looked up each
      * frame, since a rebuild may move images, and the clear values read, since a technique may change them.
      */
-    private void beginRendering(VkCommandBuffer commands, GraphBuilder.Attachment[] attachments) {
+    private void beginRendering(VkCommandBuffer commands, PassInfo pass) {
+        GraphBuilder.Attachment[] attachments = pass.attachments;
         try (MemoryStack stack = stackPush()) {
             long colors = stack.ncalloc(VkRenderingAttachmentInfo.ALIGNOF, attachments.length,
                 VkRenderingAttachmentInfo.SIZEOF);
@@ -1079,6 +1080,8 @@ public final class FrameGraph implements AutoCloseable {
             long stencil = 0;
             int colorCount = 0;
             Image size = attachments[0].target().image();
+            int width = pass.region ? regionWidth(pass.view, size) : size.width;
+            int height = pass.region ? regionHeight(pass.view, size) : size.height;
             for (GraphBuilder.Attachment attachment : attachments) {
                 Subresource target = attachment.target();
                 long info;
@@ -1118,8 +1121,8 @@ public final class FrameGraph implements AutoCloseable {
             }
             long rendering = stack.ncalloc(VkRenderingInfo.ALIGNOF, 1, VkRenderingInfo.SIZEOF);
             memPutInt(rendering + VkRenderingInfo.STYPE, VK_STRUCTURE_TYPE_RENDERING_INFO);
-            memPutInt(rendering + VkRenderingInfo.RENDERAREA + VkRect2D.EXTENT, size.width);
-            memPutInt(rendering + VkRenderingInfo.RENDERAREA + VkRect2D.EXTENT + 4, size.height);
+            memPutInt(rendering + VkRenderingInfo.RENDERAREA + VkRect2D.EXTENT, width);
+            memPutInt(rendering + VkRenderingInfo.RENDERAREA + VkRect2D.EXTENT + 4, height);
             memPutInt(rendering + VkRenderingInfo.LAYERCOUNT, 1);
             memPutInt(rendering + VkRenderingInfo.COLORATTACHMENTCOUNT, colorCount);
             memPutAddress(rendering + VkRenderingInfo.PCOLORATTACHMENTS, colorCount == 0 ? 0 : colors);
@@ -1127,13 +1130,13 @@ public final class FrameGraph implements AutoCloseable {
             memPutAddress(rendering + VkRenderingInfo.PSTENCILATTACHMENT, stencil);
             Commands.beginRendering(commands, rendering);
             long viewport = stack.ncalloc(VkViewport.ALIGNOF, 1, VkViewport.SIZEOF);
-            memPutFloat(viewport + VkViewport.WIDTH, size.width);
-            memPutFloat(viewport + VkViewport.HEIGHT, size.height);
+            memPutFloat(viewport + VkViewport.WIDTH, width);
+            memPutFloat(viewport + VkViewport.HEIGHT, height);
             memPutFloat(viewport + VkViewport.MAXDEPTH, 1);
             Commands.setViewport(commands, 0, 1, viewport);
             long scissor = stack.ncalloc(VkRect2D.ALIGNOF, 1, VkRect2D.SIZEOF);
-            memPutInt(scissor + VkRect2D.EXTENT, size.width);
-            memPutInt(scissor + VkRect2D.EXTENT + 4, size.height);
+            memPutInt(scissor + VkRect2D.EXTENT, width);
+            memPutInt(scissor + VkRect2D.EXTENT + 4, height);
             Commands.setScissor(commands, 0, 1, scissor);
         }
     }
@@ -1378,6 +1381,9 @@ public final class FrameGraph implements AutoCloseable {
     @AllowAllocation("building the graph, when it changes")
     private void build() {
         GraphBuilder g = new GraphBuilder(this, techniques, views, implementations);
+        for (ViewPort view : views) {
+            view.resolve(settings, g.settingsRead); // the images' sizes, for the techniques to build with
+        }
         List<Map.Entry<Object, ExternalImage>> targets = new ArrayList<>();
         for (Map.Entry<Key<Image>, ExternalImage> output : outputs.entrySet()) {
             targets.add(Map.entry(output.getKey(), output.getValue()));
@@ -1545,6 +1551,7 @@ public final class FrameGraph implements AutoCloseable {
         historyView = new ViewPort[historyCount];
         boolean[] shared = new boolean[historyCount];
         for (int i = 0; i < order.length; i++) {
+            order[i].view = g.regionView(order[i].scope);
             passViews[i] = g.runsFor(order[i].scope);
             for (int image : order[i].images) {
                 History history = g.images.get(image).history;
@@ -1741,8 +1748,35 @@ public final class FrameGraph implements AutoCloseable {
         return frame > activeHistories[index].firstFrame;
     }
 
+    /**
+     * An output's copy: the render region of {@code from} (all of it outside views) scaled into all of {@code to}. A
+     * region smaller than the image is scaled unfiltered, as filtering would blend in texels beyond its edge; a technique
+     * scaling it up within its bounds does better ({@code DisplayTransform}).
+     */
     void blit(PassContext ctx, Image from, Image to) {
-        ctx.blit(from.whole(), to.whole(), from.width != to.width || from.height != to.height);
+        int width = ctx.regionWidth(from);
+        int height = ctx.regionHeight(from);
+        boolean whole = width == from.width && height == from.height;
+        ctx.blit(from.whole(), width, height, to.whole(), whole && (width != to.width || height != to.height));
+    }
+
+    /**
+     * The width of {@code view}'s render region in {@code image}: its share of an image of the view's size (null: all
+     * of it).
+     */
+    static int regionWidth(ViewPort view, Image image) {
+        if (view == null || !view.dynamic() || view.width() == view.regionWidth()) {
+            return image.width; // all of it at a fixed resolution
+        }
+        return Math.max(1, (int) (((long) image.width * view.regionWidth() + view.width() - 1) / view.width()));
+    }
+
+    /** The height of {@code view}'s render region in {@code image}. */
+    static int regionHeight(ViewPort view, Image image) {
+        if (view == null || !view.dynamic() || view.height() == view.regionHeight()) {
+            return image.height;
+        }
+        return Math.max(1, (int) (((long) image.height * view.regionHeight() + view.height() - 1) / view.height()));
     }
 
     static int aspect(int format) {

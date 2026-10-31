@@ -97,6 +97,8 @@ public final class GraphBuilder {
         final PassBody body;
         final Object scope; // what recorded it (a technique or request), its view (an output's copy), or null: the graph
         ExternalImage into; // an output's copy: its target, skipped while held; else null
+        boolean region; // renders within its view's render region (PassBuilder.region())
+        ViewPort view; // the view whose region it renders within, set when the graph is built; null: the frame's
 
         PassInfo(String name, String owner, Object scope, int[] images, Access[] accesses, int[] ranges,
             boolean[] discards, Attachment[] attachments, int[] buffers, BufferAccess[] bufferAccesses,
@@ -522,6 +524,11 @@ public final class GraphBuilder {
         }
     }
 
+    /** The view a pass of {@code scope} renders the region of: its own, or null for the frame's and shared work. */
+    ViewPort regionView(Object scope) {
+        return scope instanceof ViewPort port ? port : scope instanceof Technique technique ? viewOf.get(technique) : null;
+    }
+
     /** The view {@code technique} belongs to, or null: the frame's. */
     ViewPort viewOf(Technique technique) {
         return viewOf.get(technique);
@@ -746,6 +753,7 @@ public final class GraphBuilder {
         private boolean sideEffects;
         private boolean async;
         private boolean open;
+        private boolean region;
         private int index = -1; // in the build's passes, once recorded
         private PassBody body;
         private String owner;
@@ -932,6 +940,17 @@ public final class GraphBuilder {
         }
 
         /**
+         * The pass renders within its view's render region ({@link ViewPort#regionWidth()}) rather than all of its
+         * attachments: the rendering area, viewport and scissor the graph sets are the region's share of them (all of
+         * an image of the view's size, half of a half-sized one), from the top left corner. Under dynamic resolution
+         * that changes every frame; at a fixed resolution it is all of them. A pass of no one view renders all of them.
+         */
+        public PassBuilder region() {
+            region = true;
+            return this;
+        }
+
+        /**
          * The pass may run on the async compute queue, beside graphics work it does not depend on: compute, sampling,
          * storage and transfer accesses only (no attachments, no external images, no index buffers or draw shaders).
          * Where the device has no separate compute queue, or async compute is off, it runs on the graphics queue in its
@@ -1000,9 +1019,11 @@ public final class GraphBuilder {
             for (int i = 0; i < bufferIds.length; i++) {
                 bufferIds[i] = usedBuffers.get(i).id;
             }
-            return new PassInfo(name, owner, scope, ids, accesses.toArray(new Access[0]), ranges, discards,
+            PassInfo info = new PassInfo(name, owner, scope, ids, accesses.toArray(new Access[0]), ranges, discards,
                 attachments.toArray(new Attachment[0]), bufferIds, bufferAccesses.toArray(new BufferAccess[0]),
                 sideEffects, async, body);
+            info.region = region;
+            return info;
         }
     }
 
