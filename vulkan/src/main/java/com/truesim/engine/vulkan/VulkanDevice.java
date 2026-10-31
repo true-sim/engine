@@ -48,6 +48,8 @@ import static org.lwjgl.vulkan.VK10.vkDestroyFence;
 import static org.lwjgl.vulkan.VK10.vkDeviceWaitIdle;
 import static org.lwjgl.vulkan.VK10.vkEndCommandBuffer;
 import static org.lwjgl.vulkan.VK10.vkGetDeviceQueue;
+import static org.lwjgl.vulkan.VK10.vkResetCommandPool;
+import static org.lwjgl.vulkan.VK10.vkResetFences;
 import static org.lwjgl.vulkan.VK10.vkWaitForFences;
 import static org.lwjgl.vulkan.VK11.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 import static org.lwjgl.vulkan.VK11.vkGetPhysicalDeviceFeatures2;
@@ -135,6 +137,7 @@ public final class VulkanDevice implements AutoCloseable {
     /** Whether the driver can say what went wrong when the device is lost (VK_EXT_device_fault). */
     private final boolean faults;
     private final boolean hdrMetadata;
+    private final Map<Queue, OneOff> oneOffs = new java.util.IdentityHashMap<>(); // submitAndWait's, per queue
     /** Whether a call checked by {@link #check} found the device lost: only then may the driver be asked why. */
     private volatile boolean lost;
     /** With validation on, the buffers and images made on the device and not closed, with where each was made. */
@@ -747,9 +750,88 @@ public final class VulkanDevice implements AutoCloseable {
 
     /**
      * Records commands with {@code commands} and runs them on {@code queue}, waiting until they completed: for setup
-     * work such as uploads, not for frames.
+     * work such as uploads, not for frames. Each queue keeps a command pool and a fence for it, reset each time: waiting
+     * for a fence just made took 8 ms on an RX 9070 XT, a reused one 0.06 ms. Calls from other threads wait their turn;
+     * one made from inside {@code commands} records into a pool and fence of its own.
      */
     public void submitAndWait(Queue queue, Consumer<VkCommandBuffer> commands) {
+        OneOff oneOff = oneOff(queue);
+        synchronized (oneOff) {
+            if (!oneOff.busy) {
+                oneOff.busy = true;
+                try {
+                    oneOff.run(queue, commands);
+                } finally {
+                    oneOff.busy = false;
+                }
+                return;
+            }
+        }
+        submitAndWaitAlone(queue, commands); // nested: the queue's command buffer is being recorded
+    }
+
+    /** The command pool, buffer and fence {@link #submitAndWait} reuses on {@code queue}, made at first use. */
+    private OneOff oneOff(Queue queue) {
+        synchronized (oneOffs) {
+            return oneOffs.computeIfAbsent(queue, q -> new OneOff(q.family()));
+        }
+    }
+
+    /** A queue's reusable means for {@link #submitAndWait}: a command pool with one buffer, and a fence. */
+    private final class OneOff {
+        final long pool;
+        final VkCommandBuffer commands;
+        final long fence;
+        boolean busy; // recording or waiting: a nested call makes its own
+
+        OneOff(int family) {
+            try (MemoryStack stack = stackPush()) {
+                LongBuffer made = stack.mallocLong(1);
+                Vulkan.check(vkCreateCommandPool(handle, VkCommandPoolCreateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO)
+                    .flags(VK_COMMAND_POOL_CREATE_TRANSIENT_BIT)
+                    .queueFamilyIndex(family), null, made), "Could not create a command pool");
+                pool = made.get(0);
+                PointerBuffer buffer = stack.mallocPointer(1);
+                Vulkan.check(vkAllocateCommandBuffers(handle, VkCommandBufferAllocateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
+                    .commandPool(pool)
+                    .level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+                    .commandBufferCount(1), buffer), "Could not allocate a command buffer");
+                commands = new VkCommandBuffer(buffer.get(0), handle);
+                Vulkan.check(vkCreateFence(handle, VkFenceCreateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_FENCE_CREATE_INFO), null, made), "Could not create a fence");
+                fence = made.get(0);
+            }
+        }
+
+        void run(Queue queue, Consumer<VkCommandBuffer> record) {
+            try (MemoryStack stack = stackPush()) {
+                Vulkan.check(vkResetCommandPool(handle, pool, 0), "Could not reset a command pool");
+                Vulkan.check(vkBeginCommandBuffer(commands, VkCommandBufferBeginInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
+                    .flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)), "Could not begin recording");
+                record.accept(commands);
+                Vulkan.check(vkEndCommandBuffer(commands), "Could not finish recording");
+                LongBuffer fences = stack.longs(fence);
+                Vulkan.check(vkResetFences(handle, fences), "Could not reset a fence");
+                queue.submit(VkSubmitInfo2.calloc(1, stack)
+                    .sType(VK_STRUCTURE_TYPE_SUBMIT_INFO_2)
+                    .pCommandBufferInfos(VkCommandBufferSubmitInfo.calloc(1, stack)
+                        .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO)
+                        .commandBuffer(commands)), fence);
+                check(vkWaitForFences(handle, fences, true, Long.MAX_VALUE), "Could not wait for the commands");
+            }
+        }
+
+        void destroy() {
+            vkDestroyFence(handle, fence, null);
+            vkDestroyCommandPool(handle, pool, null);
+        }
+    }
+
+    /** {@link #submitAndWait} with a command pool and fence of its own, destroyed after. */
+    private void submitAndWaitAlone(Queue queue, Consumer<VkCommandBuffer> commands) {
         try (MemoryStack stack = stackPush()) {
             LongBuffer pool = stack.mallocLong(1);
             Vulkan.check(vkCreateCommandPool(handle, VkCommandPoolCreateInfo.calloc(stack)
@@ -800,6 +882,12 @@ public final class VulkanDevice implements AutoCloseable {
                     children.forEach((child, made) -> LOG.warn("Not closed: {}", child, made));
                 }
             }
+        }
+        synchronized (oneOffs) {
+            for (OneOff oneOff : oneOffs.values()) {
+                oneOff.destroy();
+            }
+            oneOffs.clear();
         }
         pipelineCache.close();
         bindless.close();
