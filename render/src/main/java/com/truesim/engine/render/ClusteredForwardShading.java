@@ -25,7 +25,7 @@ public final class ClusteredForwardShading implements Technique {
     private final int depthFormat;
     private final float[] clear = new float[3];
     private final SceneView view;
-    private boolean occlusion = true;
+    private Boolean occlusion; // or null: as the graph's settings say
 
     /**
      * {@code geometry} shaded as {@code view} sees it; added to {@code view}'s port. The providers' pipelines must have been made for
@@ -47,8 +47,10 @@ public final class ClusteredForwardShading implements Technique {
     }
 
     /**
-     * Two-phase occlusion culling, on by default where the view was made with it; the graph rebuilds when it changes.
+     * Two-phase occlusion culling where the view was made with it, overriding the graph's settings
+     * ({@link RenderSettings#OCCLUSION}); the graph rebuilds when it changes.
      */
+    @AllowAllocation("set up rarely")
     public ClusteredForwardShading occlusion(boolean on) {
         this.occlusion = on;
         return this;
@@ -65,7 +67,8 @@ public final class ClusteredForwardShading implements Technique {
         view.checkBuilding(g, this);
         SceneDraw.Targets targets = g.request(new SceneDraw(geometry, view.view(), null,
             SurfaceOutput.shaded(colorFormat, clear), depthFormat, view.width(), view.height(),
-            occlusion && view.view().options().occlusion()));
+            (occlusion != null ? occlusion : g.setting(RenderSettings.OCCLUSION))
+            && view.view().options().occlusion()));
         g.provide(Keys.SCENE_COLOR, targets.color());
         g.provide(Keys.SCENE_DEPTH, targets.depth());
     }

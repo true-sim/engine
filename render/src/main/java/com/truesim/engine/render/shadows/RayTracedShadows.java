@@ -20,6 +20,7 @@ import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.ShadowInputs;
 import com.truesim.engine.render.ShadowTable;
+import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.render.layout.TracedPush;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
@@ -42,7 +43,7 @@ public final class RayTracedShadows implements Technique {
     private final int entry;
     private final SceneDraw depthSource;
     private final Camera camera;
-    private float offset = 2.0e-3f;
+    private Float offset; // or null: as the graph's settings say
 
     /**
      * Shadows of light {@code light} of {@code lights}, traced into a top level of the depth source's view's scene, for
@@ -59,9 +60,10 @@ public final class RayTracedShadows implements Technique {
     }
 
     /**
-     * How far rays start off the surface towards the light, per unit of distance from the camera (2e-3 by default): the
+     * How far rays start off the surface towards the light, per unit of distance from the camera, overriding {@link ShadowSettings#RAY_OFFSET}: the
      * drawn surface is a detail level within a pixel of the traced one, so a ray from it must clear that difference.
      */
+    @AllowAllocation("set up rarely")
     public RayTracedShadows offset(float perUnit) {
         this.offset = perUnit;
         return this;
@@ -85,13 +87,15 @@ public final class RayTracedShadows implements Technique {
         Image depth = g.request(depthSource).depth();
         Buffer topLevel = g.request(new TopLevel(rayTracing, depthSource.view().renderer()));
         Image mask = g.create("shadow mask of light " + light, ImageDesc.like(depth, Ratio.ONE).format(Format.R8_UNORM));
-        TracedPush push = new TracedPush().width(mask.width()).height(mask.height()).offset(offset).light(light);
+        TracedPush push = new TracedPush().width(mask.width()).height(mask.height()).light(light);
+        EngineSettings settings = g.settings();
         g.pass("ray-traced shadows of light " + light)
             .read(depth, Access.SAMPLED_COMPUTE)
             .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ)
             .write(mask, Access.STORAGE_WRITE)
             .async()
-            .record(ctx -> trace(ctx, pipeline, depth, mask, push));
+            .record(ctx -> trace(ctx, pipeline, depth, mask,
+                push.offset(offset != null ? offset : settings.get(ShadowSettings.RAY_OFFSET))));
         ShadowTable table = lights.shadowTable(g.view());
         g.request(new ShadowInputs(g.view())).sample(mask).setup(ctx -> {
             table.shadowMask(entry, ctx.sampled(mask), 0); // its view's: the mask is of its pixels

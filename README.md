@@ -76,7 +76,11 @@ views (one window's own values), and saving and loading as text (`toMap`/`load`:
 keys are kept, unreadable ones default, values are parsed when first read). The frame graph has settings
 (`graph.settings()`): a build reads them with `g.setting(key)` and rebuilds when one it read changes; pass bodies read
 `g.settings()` when they record. Windows follow theirs (`platform.createWindow(options, settings.scoped("window.main"))`),
-and so does the `Presenter` (the graph's present settings, or a window's own).
+and so does the `Presenter` (the graph's present settings, or a window's own). The core's tuning values are settings
+too, read from the graph's settings unless a technique is given its own: light clusters (`ClusteredLights.ALL`:
+tiles, slices, range, lights per cluster), occlusion culling (`RenderSettings.OCCLUSION`), cascades and ray offsets
+(`ShadowSettings.ALL`), and the display transform (`DisplayTransform.ALL`); `RenderSettings.ALL` lists them all for an
+options screen.
 
 ```java
 EngineSettings settings = new EngineSettings().load(saved);

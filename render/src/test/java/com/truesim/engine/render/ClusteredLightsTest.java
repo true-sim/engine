@@ -178,6 +178,46 @@ class ClusteredLightsTest {
     }
 
     @Test
+    void clustersFollowTheGraphsSettings() {
+        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        lights.directional(0, -0.4f, -0.8f, -0.3f, 3, 3, 3).setCount(1);
+        try (FrameGraph graph = new FrameGraph(device, 2);
+             GpuImage target = new GpuImage(device, 4, 4, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT)) {
+            graph.settings().set(ClusteredLights.TILE_SIZE, 32).set(ClusteredLights.MAX_PER_CLUSTER, 16);
+            ViewPort port = graph.addView("main").size(WIDTH, HEIGHT);
+            ClusteredLights clustered = new ClusteredLights(lights, port,
+                new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1));
+            assertThat(clustered.tilesAcross()).as("its graph's settings, read now").isEqualTo((WIDTH + 31) / 32);
+            ExternalImage output = new ExternalImage("target", 4, 4, Format.R8G8B8A8_UNORM, usage,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
+            port.add(clustered).add(new Technique() {
+                @Override
+                public List<Key<?>> provides() {
+                    return List.of(OUT);
+                }
+
+                @Override
+                public void build(GraphBuilder g) {
+                    com.truesim.engine.graph.Buffer list = g.require(Keys.LIGHT_LIST);
+                    Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4));
+                    g.pass("use").read(list, BufferAccess.STORAGE_READ).write(image, Access.TRANSFER_DST)
+                        .record(ctx -> { });
+                    g.provide(OUT, image);
+                }
+            }).output(OUT, output);
+            device.submitAndWait(device.graphics(), graph::record);
+            assertThat(clustered.tilesAcross()).isEqualTo((WIDTH + 31) / 32);
+            assertThat(clustered.maxPerCluster()).isEqualTo(16);
+            int builds = graph.builds();
+            graph.settings().set(ClusteredLights.TILE_SIZE, 128);
+            device.submitAndWait(device.graphics(), graph::record);
+            assertThat(graph.builds()).as("rebuilt for the new tiles").isEqualTo(builds + 1);
+            assertThat(clustered.tilesAcross()).isEqualTo((WIDTH + 127) / 128);
+            assertThat(RenderSettings.ALL).containsAll(ClusteredLights.ALL).contains(RenderSettings.OCCLUSION);
+        }
+    }
+
+    @Test
     void misuseIsReported() {
         Camera any = new Camera();
         try (FrameGraph graph = new FrameGraph(device, 2)) {

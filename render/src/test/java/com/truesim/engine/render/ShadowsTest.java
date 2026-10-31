@@ -323,6 +323,13 @@ class ShadowsTest {
                 .isLessThan((int) (lit * shadowRatio));
             assertThat(floor(falling, this, shadow[0], shadow[1])).as("cascades short of the floor: lit")
                 .isGreaterThan((int) (floor(falling, this, 3, -2) * 0.8));
+            // The cascades' split blend from the graph's settings, refit at the next update: uniform splits.
+            graph.settings().set(com.truesim.engine.render.shadows.ShadowSettings.CASCADE_LAMBDA, 0f);
+            farCascades.update();
+            assertThat(farCascades.split(0)).as("a third of 50 units").isCloseTo(50f / 3, org.assertj.core.data.Offset
+                .offset(0.1f));
+            farCascades.lambda(1).update();
+            assertThat(farCascades.split(0)).as("its own value wins").isLessThan(10);
             // A view removed: its shadow table and its cascades' views go with it.
             int tables = lights.shadowTableCount();
             int views = renderer.views().size();

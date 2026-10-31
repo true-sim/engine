@@ -12,6 +12,7 @@ import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.ShadowInputs;
 import com.truesim.engine.render.ShadowTable;
+import com.truesim.engine.settings.EngineSettings;
 import java.util.List;
 import java.util.Objects;
 
@@ -28,7 +29,7 @@ public final class InlineRayShadows implements Technique {
     private final Lights lights;
     private final int light;
     private final int entry;
-    private float offset = 2.0e-3f;
+    private Float offset; // or null: as the graph's settings say
 
     /**
      * Shadows of light {@code light} of {@code lights}, traced into a top level of {@code view}'s scene relative to its
@@ -42,7 +43,8 @@ public final class InlineRayShadows implements Technique {
         this.entry = entry;
     }
 
-    /** How far rays start off the surface, per unit of distance from the camera (2e-3 by default). */
+    /** How far rays start off the surface, per unit of distance from the camera, overriding {@link ShadowSettings#RAY_OFFSET}. */
+    @AllowAllocation("set up rarely")
     public InlineRayShadows offset(float perUnit) {
         this.offset = perUnit;
         return this;
@@ -64,8 +66,10 @@ public final class InlineRayShadows implements Technique {
         g.modify(Keys.LIGHT_LIST);
         Buffer topLevel = g.request(new TopLevel(rayTracing, view.renderer()));
         ShadowTable table = lights.shadowTable(g.view());
+        EngineSettings settings = g.settings();
         g.request(new ShadowInputs(g.view())).rays(topLevel).setup(ctx -> {
-            table.shadowRay(entry, rayTracing.slot(), offset, rayTracing.origin(0), rayTracing.origin(1),
+            table.shadowRay(entry, rayTracing.slot(), offset != null ? offset : settings.get(ShadowSettings.RAY_OFFSET),
+                rayTracing.origin(0), rayTracing.origin(1),
                 rayTracing.origin(2)); // the top level is relative to the origin
             lights.shadows(light, entry, 1);
         });
