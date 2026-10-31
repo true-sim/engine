@@ -17,4 +17,8 @@ public interface MaterialFeature {
 
     /** Its {@code Material.FEATURE_*} bit. */
     int feature();
+
+    /** As {@link MaterialParameters#textures}: every {@code [Texture]} field's value. Generated; none by default. */
+    default void textures(java.util.function.IntConsumer each) {
+    }
 }
