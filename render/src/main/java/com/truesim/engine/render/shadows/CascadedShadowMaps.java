@@ -65,6 +65,7 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
     private Float lambda; // these three, or null: as the graph's settings say
     private Float biasTexels;
     private Float casters;
+    private float margin; // world units each cascade reaches beyond the camera's view
     private final ViewPort port; // the view's, whose graph's settings it reads; or null: its own settings
     private EngineSettings settings = new EngineSettings(); // without a view: defaults, or as set
 
@@ -163,6 +164,18 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
         return this;
     }
 
+    /**
+     * Makes each cascade reach {@code units} beyond the camera's view: for cascades {@link #share shared} by views near
+     * the camera, such as a headset's eyes (fitted to one eye, a margin of the distance between them covers the other).
+     */
+    public CascadedShadowMaps margin(float units) {
+        if (units < 0) {
+            throw new IllegalArgumentException("A margin is not negative: " + units);
+        }
+        this.margin = units;
+        return this;
+    }
+
     /** Where cascade {@code i} ends, in view depth (cascade 0 starts at the camera's near plane). */
     public float split(int i) {
         return splits[Objects.checkIndex(i, cascades) + 1];
@@ -240,7 +253,7 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
                 double ez = corner[2] - center[2];
                 radius = Math.max(radius, Math.sqrt(ex * ex + ey * ey + ez * ez));
             }
-            radius = Math.ceil(radius * 16) / 16; // steady as the camera turns
+            radius = Math.ceil((radius + margin) * 16) / 16; // steady as the camera turns
             // Snapped to whole texels of the world along the light's right and up.
             double texel = 2 * radius / size;
             double wx = x + center[0];
@@ -270,6 +283,34 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
         for (int k = 0; k < 3; k++) {
             corner[k] = (inverse[k] * ndcX + inverse[4 + k] * ndcY + inverse[8 + k] * ndcZ + inverse[12 + k]) / w;
         }
+    }
+
+    /**
+     * These cascades for another view (a headset's other eye): add it to that view, this technique to the first. The
+     * maps draw once a frame; each view's shadow table points at them. Each call makes a technique for one view more.
+     */
+    public Technique share() {
+        return new Technique() {
+            @Override
+            public List<Key<?>> provides() {
+                return List.of();
+            }
+
+            @Override
+            public List<Key<?>> modifies() {
+                return List.of(Keys.LIGHT_LIST);
+            }
+
+            @Override
+            public void build(GraphBuilder g) {
+                CascadedShadowMaps.this.build(g);
+            }
+
+            @Override
+            public String toString() {
+                return "shared " + CascadedShadowMaps.this;
+            }
+        };
     }
 
     @Override

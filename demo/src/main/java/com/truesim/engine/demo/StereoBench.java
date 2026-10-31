@@ -36,7 +36,7 @@ import java.util.Map;
  * Where a stereo frame's GPU time goes: the demo's scene from two eyes 64 mm apart, each a view of its own at a Quest
  * 3's eye size, offscreen, passes timed and averaged over many frames, then grouped by what they do (which work each
  * eye repeats). {@code ./gradlew :engine-demo:stereoBench}; {@code --args="visibility"} shades through the visibility
- * buffer.
+ * buffer, {@code shared} gives both eyes one set of shadow cascades.
  */
 public final class StereoBench {
 
@@ -49,6 +49,7 @@ public final class StereoBench {
 
     public static void main(String[] args) {
         boolean visibility = List.of(args).contains("visibility");
+        boolean shared = List.of(args).contains("shared"); // one set of cascades for both eyes
         int color = VK_FORMAT_R16G16B16A16_SFLOAT;
         int depth = VK_FORMAT_D32_SFLOAT;
         try (VulkanInstance instance = VulkanInstance.builder().applicationName("stereo bench").surfaces(false)
@@ -59,6 +60,10 @@ public final class StereoBench {
             int usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
             List<AutoCloseable> owned = new ArrayList<>();
             Camera[] eyes = {new Camera(), new Camera()};
+            List<CascadedShadowMaps> cascades = new ArrayList<>();
+            CascadedShadowMaps sharedCascades = new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, eyes[0],
+                3, 2048, ViewOptions.shadow(1 << 16, 1 << 22), 150).margin(0.064f);
+            owned.add(sharedCascades);
             for (int e = 0; e < 2; e++) {
                 GpuImage target = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage,
                     VK_IMAGE_ASPECT_COLOR_BIT);
@@ -69,8 +74,8 @@ public final class StereoBench {
                 port.add(visibility ? new VisibilityBufferShading(world.geometry(), view, color, depth)
                         : new ClusteredForwardShading(world.geometry(), view, color, depth))
                     .add(new ClusteredLights(world.lights(), view))
-                    .add(new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, view, 3, 2048,
-                        ViewOptions.shadow(1 << 16, 1 << 22), 150))
+                    .add(shared ? (e == 0 ? sharedCascades : sharedCascades.share()) : add(cascades, new CascadedShadowMaps(world.geometry(),
+                        world.lights(), 0, 0, view, 3, 2048, ViewOptions.shadow(1 << 16, 1 << 22), 150)))
                     .output(Keys.SCENE_COLOR, new ExternalImage("eye " + e, WIDTH, HEIGHT, Format.R8G8B8A8_UNORM,
                         usage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
                         .set(target.handle(), target.view()));
@@ -82,6 +87,12 @@ public final class StereoBench {
                     double offset = (e == 0 ? -0.032 : 0.032);
                     eyes[e].position(30 + offset, 6, 30).set(-0.7, -0.15, -0.7, 0, 1, 0, Math.PI / 2, WIDTH, HEIGHT,
                         0.05);
+                }
+                if (shared) {
+                    sharedCascades.update();
+                }
+                for (CascadedShadowMaps each : cascades) {
+                    each.update(); // fitted to its eye, every frame
                 }
                 graph.beginFrame();
                 graph.submit(0, 0);
@@ -108,6 +119,11 @@ public final class StereoBench {
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    private static CascadedShadowMaps add(List<CascadedShadowMaps> all, CascadedShadowMaps cascades) {
+        all.add(cascades);
+        return cascades;
     }
 
     private static void report(Map<String, double[]> sums, boolean visibility) {

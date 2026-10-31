@@ -53,6 +53,14 @@ eyes, located inside `Headset.render` just before the frame records, could not h
 - Rule: per-frame inputs that the docs say are read when the frame runs are read there, not copied when handed over;
   test the order an app uses (set once, change later), not only set-then-draw.
 
+**One technique instance in two views built for one of them only.** The graph keeps each technique's view in an
+identity map, so the same `CascadedShadowMaps` added to both eyes' views filled the second view's shadow table twice
+and the first view's never: its floor was lit where it should be shadowed, with no error.
+- Proof: `ShadowsTest.viewsShareOneSetOfCascadesDrawnOnce` failed (the first view's floor 213 against at most 106)
+  until the second view got `cascades.share()`, and passed with only one view.
+- Rule: `ViewPort.add` and `FrameGraph.add` refuse an instance that is in another view or the frame already; sharing
+  work between views goes through equal requests, each view with a technique of its own.
+
 ## Shaders and the GPU
 
 **An instance's `mesh` word holds flag bits.** Indexing the mesh table with it unmasked read out of bounds and lost the

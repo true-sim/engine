@@ -577,7 +577,10 @@ interface:
   view's cascades fit its own camera (`new CascadedShadowMaps(geometry, lights, light, entry, sceneView, ...)`, one per
   view through `addPerView`, each `update()`d every frame), and a ray-traced mask is of its view's pixels. An entry no
   technique of the view filled reads as lit. A view's table and its cascades' views go with the view, freed once no
-  frame in flight reads them.
+  frame in flight reads them. Views close together, such as a headset's eyes, share one set: cascades fitted to one
+  eye with a `margin(units)` covering the other, added to its view and `cascades.share()` to the other. Their maps draw
+  once a frame and both tables point at them: half the cascade work of a stereo frame (`StereoBench --args=shared`).
+  A technique instance belongs to one view (or the frame): adding it to a second is refused.
 - **Ray tracing is a generic parameter** (`IShadowRays`): shading pipelines that cannot trace use `NoRays`, so only the
   visibility buffer's traced variant (`shadeTraced.slang`) needs ray queries. Forward shading counts inline ray
   shadows as lit; a ray-traced mask works with any shading.

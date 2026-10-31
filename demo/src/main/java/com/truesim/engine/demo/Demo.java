@@ -107,6 +107,7 @@ public final class Demo implements PlatformListener {
     private SceneView mainView;
     private final Camera camera = new Camera();
     private final List<SceneView> shaded = new ArrayList<>(); // every view drawing the scene: shading swaps in all
+    private final List<CascadedShadowMaps> cascades = new ArrayList<>(); // fitted to their cameras every frame
     private boolean visibility;
     private Presenter.Target mainTarget;
     private DynamicResolution automatic;
@@ -191,8 +192,18 @@ public final class Demo implements PlatformListener {
     /** A view of the scene through {@code through} on {@code port}: shading, lights and the sun's shadows. */
     private SceneView sceneView(ViewPort port, Camera through) {
         SceneView view = world.geometry().createView(port, through, CAMERA).set(1, MeshletRenderer.MODE_LIT);
-        port.add(shading(view)).add(new ClusteredLights(world.lights(), view))
-            .add(new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, view, 3, 2048, CASCADES, 150));
+        CascadedShadowMaps sun = new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, view, 3, 2048,
+            CASCADES, 150);
+        cascades.add(sun);
+        port.add(shading(view)).add(new ClusteredLights(world.lights(), view)).add(sun);
+        shaded.add(view);
+        return view;
+    }
+
+    /** A view of the scene for an eye: shading and lights, with the sun's cascades both eyes share. */
+    private SceneView eyeView(ViewPort port, Camera through, Technique sun) {
+        SceneView view = world.geometry().createView(port, through, CAMERA).set(1, MeshletRenderer.MODE_LIT);
+        port.add(shading(view)).add(new ClusteredLights(world.lights(), view)).add(sun);
         shaded.add(view);
         return view;
     }
@@ -206,9 +217,14 @@ public final class Demo implements PlatformListener {
     private void startHeadset() {
         origin[1] = DemoMeshes.height(0, 0);
         headset.start(graph).origin(origin[0], origin[1], origin[2]);
+        // One set of sun cascades for both eyes, fitted to the left one: the margin covers the other eye and how far the
+        // head moves in a frame (the eyes are located just before the frame records).
+        CascadedShadowMaps sun = new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0,
+            headset.camera(Eye.LEFT), 3, 2048, CASCADES, 150).margin(0.25f);
+        cascades.add(sun);
         for (Eye e : Eye.values()) {
             ViewPort port = graph.addView(e.name().toLowerCase(Locale.ROOT) + " eye");
-            sceneView(port, headset.camera(e));
+            eyeView(port, headset.camera(e), e == Eye.LEFT ? sun : sun.share());
             headset.present(e, port, Keys.SCENE_COLOR);
             eyes[e.ordinal()] = port;
         }
@@ -228,6 +244,9 @@ public final class Demo implements PlatformListener {
             last = now;
             move(dt);
             world.update((now - start) / 1e9);
+            for (CascadedShadowMaps sun : cascades) {
+                sun.update();
+            }
             if (automatic != null) {
                 automatic.update();
             }

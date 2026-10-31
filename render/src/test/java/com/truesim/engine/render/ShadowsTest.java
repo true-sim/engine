@@ -342,6 +342,46 @@ class ShadowsTest {
     }
 
     @Test
+    void viewsShareOneSetOfCascadesDrawnOnce() {
+        // Two views, as a headset's eyes, a little apart: one set of cascades fitted to the first, with a margin for the
+        // second, shared with it; its maps draw once, and both floors are shadowed.
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
+        double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
+        try (Lights lights = new Lights(device, 4, 4); GpuImage rightTarget = new GpuImage(device, SIZE, SIZE,
+            VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            SceneView left = newGraph();
+            Camera rightCamera = new Camera().position(camera.position(0) + 0.064, camera.position(1),
+                camera.position(2));
+            rightCamera.set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1); // as the first, 64 mm to the right
+            SceneView right = geometry.createView(graph.addView("right").size(SIZE, SIZE), rightCamera,
+                ViewOptions.of(256, 1 << 12).withOcclusion(true)).set(1, MeshletRenderer.MODE_LIT);
+            CascadedShadowMaps shared = new CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, 1024,
+                ViewOptions.shadow(256, 1 << 12), 40).margin(0.1f);
+            assertThatIllegalArgumentException().isThrownBy(() -> shared.margin(-1));
+            left.port().add(forward(geometry).apply(left)).add(new ClusteredLights(lights, left)).add(shared)
+                .output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+            right.port().add(forward(geometry).apply(right)).add(new ClusteredLights(lights, right)).add(shared.share())
+                .output(Keys.SCENE_COLOR, external(rightTarget, VK_FORMAT_R8G8B8A8_UNORM));
+            shared.update();
+            frame(colorTarget, 4);
+            byte[] leftColor = frame(colorTarget, 4);
+            byte[] rightColor = frame(rightTarget, 4);
+            for (int i = 0; i < 3; i++) {
+                assertThat(graph.passes()).containsOnlyOnce("meshlet depth, view " + shared.view(i).index());
+            }
+            // 64 mm apart, the floor points fall on the same pixels, near enough.
+            assertThat(floor(leftColor, this, shadow[0], shadow[1])).as("the first view's floor in shadow")
+                .isLessThan((int) (floor(leftColor, this, 3, -2) * shadowRatio));
+            assertThat(floor(rightColor, this, shadow[0], shadow[1])).as("the second view's, from the same maps")
+                .isLessThan((int) (floor(rightColor, this, 3, -2) * shadowRatio));
+            device.waitIdle();
+        }
+    }
+
+    @Test
     void theTopLevelIsBuiltOnlyWhenInstancesTheOriginOrBottomLevelsChange() {
         assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
         SceneGeometry geometry = SceneGeometry.meshlets(renderer);
