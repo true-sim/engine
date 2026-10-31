@@ -550,6 +550,12 @@ try (RayTracing rayTracing = new RayTracing(device, pool, 100_000)) { // at most
 - **Bottom levels straight from the pool:** built from the pool's quantized positions (16-bit, with the mesh's box as
   the geometry's transform) where the GPU accepts that format, so no float copy of the vertices is made. Built for fast
   tracing, then compacted.
+- **Streamed without stalls:** with a frame graph's frame slots (the pool's), `add` returns at once. The level's inputs
+  go with the pool's uploads; it is built at the start of the frame after they arrive, traced from the frame after
+  that build finished (its instances are left out until then), and compacted a few frames later, never waited for.
+  `remove` takes it out of the next top level and frees it once no frame in flight traces it, so a pool mesh id can be
+  reused at once. Without frame slots both wait for the GPU, as before. Streaming 12 meshes a frame at 90 Hz, frames
+  with adds went from 6.1 ms on the render thread (up to 11.6) to 1.3 ms (`StreamBench --args=rays`).
 - **Top level on the GPU, every frame:** a compute pass turns the renderer's instances into acceleration structure
   instances, and the top level is rebuilt from them. Nothing per instance is written on the CPU, and recording
   allocates nothing.
@@ -951,6 +957,9 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
   thumbstick walks, triggers buzz, `P` shows the left eye on the desktop for people watching.
 - `--args="--validation"` turns Vulkan validation on and prints the error count at exit; `--seconds=10` quits by
   itself; `--probe` prints what the main view's scene color holds now and then.
+- `./gradlew :engine-demo:streamBench` flies over a grid of cells for 30 s at 90 Hz: cells coming into range get
+  meshes built on worker threads, a texture, materials and instances, those leaving lose them. It reports frame work
+  percentiles and the slowest frames with what happened in them (`--args=rays` builds bottom levels too).
 - `./gradlew :engine-demo:stereoBench` times the scene drawn for two eyes at a Quest 3's eye size, offscreen, pass by
   pass and grouped by kind (`--args="visibility"` for the visibility buffer, `-Procks=20000` for more rocks,
   `shared` for one set of shadow cascades, `rebuild` for what rebuilds and resizes cost the render thread, `noshadows`

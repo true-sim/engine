@@ -35,3 +35,13 @@ tasks.register<JavaExec>("stereoBench") {
     providers.gradleProperty("png").orNull?.let { systemProperty("truesim.demo.png", it) }
     providers.gradleProperty("casterDetail").orNull?.let { systemProperty("truesim.demo.casterDetail", it) }
 }
+
+// Hitches while content streams (StreamBench): ./gradlew :engine-demo:streamBench
+tasks.register<JavaExec>("streamBench") {
+    group = "application"
+    description = "Streams cells of meshes, textures and materials while frames run, and reports frame times."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "com.truesim.engine.demo.StreamBench"
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xmx4g")
+    providers.gradleProperty("jfr").orNull?.let { jvmArgs("-XX:StartFlightRecording=filename=$it,settings=profile") }
+}
