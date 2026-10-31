@@ -1,11 +1,11 @@
 package com.truesim.engine.platform;
 
 import com.truesim.annotations.AllowAllocation;
-import java.util.LinkedHashMap;
+import com.truesim.engine.settings.EngineSettings;
+import com.truesim.engine.settings.Setting;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.function.Function;
-import java.util.function.UnaryOperator;
 
 /**
  * A window's preferences, everything the platform can set on it, as one value: to open a window with
@@ -89,9 +89,77 @@ public record WindowSettings(
         }
     }
 
-    /** What SDL gives a new window: windowed, 1280 x 720, centered on the primary display, decorated, resizable. */
+    public static final Setting<WindowMode> MODE = Setting.choice("window.mode", WindowMode.WINDOWED, "how it covers the screen");
+    public static final Setting<String> DISPLAY = Setting.text("window.display", "", "the display it is on, by key (\"\": the primary)");
+    public static final Setting<Integer> WIDTH = Setting.integer("window.width", 1280, 1, 65535, "windowed width, in screen coordinates");
+    public static final Setting<Integer> HEIGHT = Setting.integer("window.height", 720, 1, 65535, "windowed height");
+    public static final Setting<Boolean> CENTERED = Setting.bool("window.centered", true, "windowed: centered on its display, else at (x, y)");
+    public static final Setting<Integer> X = Setting.integer("window.x", 0, Integer.MIN_VALUE, Integer.MAX_VALUE, "windowed position, in screen coordinates");
+    public static final Setting<Integer> Y = Setting.integer("window.y", 0, Integer.MIN_VALUE, Integer.MAX_VALUE, "windowed position, in screen coordinates");
+    public static final Setting<Integer> FULLSCREEN_WIDTH = Setting.integer("window.fullscreenWidth", 0, 0, 65535, "exclusive fullscreen: the display mode wanted (0: the desktop's)");
+    public static final Setting<Integer> FULLSCREEN_HEIGHT = Setting.integer("window.fullscreenHeight", 0, 0, 65535, "exclusive fullscreen: the display mode wanted (0: the desktop's)");
+    public static final Setting<Float> REFRESH_RATE = Setting.decimal("window.refreshRate", 0f, 0, 1000, "exclusive fullscreen: in Hz (0: the desktop's)");
+    public static final Setting<Boolean> MAXIMIZED = Setting.bool("window.maximized", false, "windowed: maximized");
+    public static final Setting<Boolean> RESIZABLE = Setting.bool("window.resizable", true, "the user may resize it");
+    public static final Setting<Boolean> BORDERED = Setting.bool("window.bordered", true, "has decorations");
+    public static final Setting<Boolean> ALWAYS_ON_TOP = Setting.bool("window.alwaysOnTop", false, "stays above other windows");
+    public static final Setting<Boolean> FOCUSABLE = Setting.bool("window.focusable", true, "may take input focus");
+    public static final Setting<Float> OPACITY = Setting.decimal("window.opacity", 1f, 0, 1, "0 (transparent) to 1 (opaque), where the system supports it");
+    public static final Setting<Integer> MIN_WIDTH = Setting.integer("window.minWidth", 0, 0, 65535, "smallest size the user may resize it to (0: no limit)");
+    public static final Setting<Integer> MIN_HEIGHT = Setting.integer("window.minHeight", 0, 0, 65535, "smallest size the user may resize it to (0: no limit)");
+    public static final Setting<Integer> MAX_WIDTH = Setting.integer("window.maxWidth", 0, 0, 65535, "largest size (0: no limit)");
+    public static final Setting<Integer> MAX_HEIGHT = Setting.integer("window.maxHeight", 0, 0, 65535, "largest size (0: no limit)");
+    public static final Setting<Float> MIN_ASPECT = Setting.decimal("window.minAspect", 0f, 0, 100, "narrowest width over height while resizing (0: no limit)");
+    public static final Setting<Float> MAX_ASPECT = Setting.decimal("window.maxAspect", 0f, 0, 100, "widest (0: no limit)");
+    public static final Setting<Boolean> MOUSE_GRAB = Setting.bool("window.mouseGrab", false, "confines the mouse to the window while it has focus");
+    public static final Setting<Boolean> KEYBOARD_GRAB = Setting.bool("window.keyboardGrab", false, "takes system shortcuts (such as Alt+Tab) while it has focus");
+    public static final Setting<Boolean> RELATIVE_MOUSE = Setting.bool("window.relativeMouse", false, "hides the mouse and reports motion only, for mouse look");
+    public static final Setting<Boolean> CURSOR_VISIBLE = Setting.bool("window.cursorVisible", true, "shows the mouse cursor");
+    public static final Setting<Boolean> KEEP_SCREEN_ON = Setting.bool("window.keepScreenOn", true, "keeps the screen saver and display sleep off");
+
+    /** Every window setting, in the order of the record's components. */
+    public static final List<Setting<?>> ALL = List.of(MODE, DISPLAY, WIDTH, HEIGHT, CENTERED, X, Y, FULLSCREEN_WIDTH, FULLSCREEN_HEIGHT, REFRESH_RATE, MAXIMIZED, RESIZABLE, BORDERED, ALWAYS_ON_TOP, FOCUSABLE, OPACITY, MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH, MAX_HEIGHT, MIN_ASPECT, MAX_ASPECT, MOUSE_GRAB, KEYBOARD_GRAB, RELATIVE_MOUSE, CURSOR_VISIBLE, KEEP_SCREEN_ON);
+
+    /** Each setting's default ({@link #ALL}): windowed, 1280 x 720, centered on the primary display, decorated. */
     public static WindowSettings defaults() {
-        return new WindowSettings(WindowMode.WINDOWED, "", 1280, 720, true, 0, 0, 0, 0, 0, false, true, true, false, true, 1, 0, 0, 0, 0, 0, 0, false, false, false, true, true);
+        return from(new EngineSettings());
+    }
+
+    /** The window settings {@code settings} holds (a window's scoped view, say): defaults where none is set. */
+    public static WindowSettings from(EngineSettings settings) {
+        return new WindowSettings(settings.get(MODE), settings.get(DISPLAY), settings.get(WIDTH), settings.get(HEIGHT), settings.get(CENTERED), settings.get(X), settings.get(Y), settings.get(FULLSCREEN_WIDTH), settings.get(FULLSCREEN_HEIGHT), settings.get(REFRESH_RATE), settings.get(MAXIMIZED), settings.get(RESIZABLE), settings.get(BORDERED), settings.get(ALWAYS_ON_TOP), settings.get(FOCUSABLE), settings.get(OPACITY), settings.get(MIN_WIDTH), settings.get(MIN_HEIGHT), settings.get(MAX_WIDTH), settings.get(MAX_HEIGHT), settings.get(MIN_ASPECT), settings.get(MAX_ASPECT), settings.get(MOUSE_GRAB), settings.get(KEYBOARD_GRAB), settings.get(RELATIVE_MOUSE), settings.get(CURSOR_VISIBLE), settings.get(KEEP_SCREEN_ON));
+    }
+
+    /** Writes these into {@code settings} (a window's scoped view, say), telling its listeners what changed. */
+    public EngineSettings store(EngineSettings settings) {
+        settings.set(MODE, mode);
+        settings.set(DISPLAY, display);
+        settings.set(WIDTH, width);
+        settings.set(HEIGHT, height);
+        settings.set(CENTERED, centered);
+        settings.set(X, x);
+        settings.set(Y, y);
+        settings.set(FULLSCREEN_WIDTH, fullscreenWidth);
+        settings.set(FULLSCREEN_HEIGHT, fullscreenHeight);
+        settings.set(REFRESH_RATE, refreshRate);
+        settings.set(MAXIMIZED, maximized);
+        settings.set(RESIZABLE, resizable);
+        settings.set(BORDERED, bordered);
+        settings.set(ALWAYS_ON_TOP, alwaysOnTop);
+        settings.set(FOCUSABLE, focusable);
+        settings.set(OPACITY, opacity);
+        settings.set(MIN_WIDTH, minWidth);
+        settings.set(MIN_HEIGHT, minHeight);
+        settings.set(MAX_WIDTH, maxWidth);
+        settings.set(MAX_HEIGHT, maxHeight);
+        settings.set(MIN_ASPECT, minAspect);
+        settings.set(MAX_ASPECT, maxAspect);
+        settings.set(MOUSE_GRAB, mouseGrab);
+        settings.set(KEYBOARD_GRAB, keyboardGrab);
+        settings.set(RELATIVE_MOUSE, relativeMouse);
+        settings.set(CURSOR_VISIBLE, cursorVisible);
+        settings.set(KEEP_SCREEN_ON, keepScreenOn);
+        return settings;
     }
 
     public WindowSettings withMode(WindowMode mode) {
@@ -202,103 +270,16 @@ public record WindowSettings(
         return new WindowSettings(mode, display, width, height, centered, x, y, fullscreenWidth, fullscreenHeight, refreshRate, maximized, resizable, bordered, alwaysOnTop, focusable, opacity, minWidth, minHeight, maxWidth, maxHeight, minAspect, maxAspect, mouseGrab, keyboardGrab, relativeMouse, cursorVisible, keepScreenOn);
     }
 
-    /** Every setting as text, by name: to save. {@link #fromMap} reads it back. */
+    /** Every setting as text, by its {@link #ALL setting}'s name: to save. {@link #fromMap} reads it back. */
     public Map<String, String> toMap() {
-        Map<String, String> map = new LinkedHashMap<>();
-        map.put("mode", String.valueOf(mode));
-        map.put("display", String.valueOf(display));
-        map.put("width", String.valueOf(width));
-        map.put("height", String.valueOf(height));
-        map.put("centered", String.valueOf(centered));
-        map.put("x", String.valueOf(x));
-        map.put("y", String.valueOf(y));
-        map.put("fullscreenWidth", String.valueOf(fullscreenWidth));
-        map.put("fullscreenHeight", String.valueOf(fullscreenHeight));
-        map.put("refreshRate", String.valueOf(refreshRate));
-        map.put("maximized", String.valueOf(maximized));
-        map.put("resizable", String.valueOf(resizable));
-        map.put("bordered", String.valueOf(bordered));
-        map.put("alwaysOnTop", String.valueOf(alwaysOnTop));
-        map.put("focusable", String.valueOf(focusable));
-        map.put("opacity", String.valueOf(opacity));
-        map.put("minWidth", String.valueOf(minWidth));
-        map.put("minHeight", String.valueOf(minHeight));
-        map.put("maxWidth", String.valueOf(maxWidth));
-        map.put("maxHeight", String.valueOf(maxHeight));
-        map.put("minAspect", String.valueOf(minAspect));
-        map.put("maxAspect", String.valueOf(maxAspect));
-        map.put("mouseGrab", String.valueOf(mouseGrab));
-        map.put("keyboardGrab", String.valueOf(keyboardGrab));
-        map.put("relativeMouse", String.valueOf(relativeMouse));
-        map.put("cursorVisible", String.valueOf(cursorVisible));
-        map.put("keepScreenOn", String.valueOf(keepScreenOn));
-        return map;
+        return store(new EngineSettings()).toMap();
     }
 
     /**
-     * Settings saved by {@link #toMap()}: unknown keys are ignored, and missing or unreadable ones keep their default,
-     * so preferences saved by another version still load.
+     * Settings saved by {@link #toMap()}: unknown keys are ignored, and missing, unreadable or out-of-range ones keep
+     * their default, so preferences saved by another version still load.
      */
     public static WindowSettings fromMap(Map<String, String> map) {
-        WindowSettings s = defaults();
-        s = attempt(s, w -> w.withMode(read(map, "mode", WindowMode::valueOf, w.mode())));
-        s = attempt(s, w -> w.withDisplay(read(map, "display", Function.identity(), w.display())));
-        s = attempt(s, w -> w.withWidth(read(map, "width", Integer::parseInt, w.width())));
-        s = attempt(s, w -> w.withHeight(read(map, "height", Integer::parseInt, w.height())));
-        s = attempt(s, w -> w.withCentered(read(map, "centered", WindowSettings::bool, w.centered())));
-        s = attempt(s, w -> w.withX(read(map, "x", Integer::parseInt, w.x())));
-        s = attempt(s, w -> w.withY(read(map, "y", Integer::parseInt, w.y())));
-        s = attempt(s, w -> w.withFullscreenWidth(read(map, "fullscreenWidth", Integer::parseInt, w.fullscreenWidth())));
-        s = attempt(s, w -> w.withFullscreenHeight(read(map, "fullscreenHeight", Integer::parseInt, w.fullscreenHeight())));
-        s = attempt(s, w -> w.withRefreshRate(read(map, "refreshRate", Float::parseFloat, w.refreshRate())));
-        s = attempt(s, w -> w.withMaximized(read(map, "maximized", WindowSettings::bool, w.maximized())));
-        s = attempt(s, w -> w.withResizable(read(map, "resizable", WindowSettings::bool, w.resizable())));
-        s = attempt(s, w -> w.withBordered(read(map, "bordered", WindowSettings::bool, w.bordered())));
-        s = attempt(s, w -> w.withAlwaysOnTop(read(map, "alwaysOnTop", WindowSettings::bool, w.alwaysOnTop())));
-        s = attempt(s, w -> w.withFocusable(read(map, "focusable", WindowSettings::bool, w.focusable())));
-        s = attempt(s, w -> w.withOpacity(read(map, "opacity", Float::parseFloat, w.opacity())));
-        s = attempt(s, w -> w.withMinWidth(read(map, "minWidth", Integer::parseInt, w.minWidth())));
-        s = attempt(s, w -> w.withMinHeight(read(map, "minHeight", Integer::parseInt, w.minHeight())));
-        s = attempt(s, w -> w.withMaxWidth(read(map, "maxWidth", Integer::parseInt, w.maxWidth())));
-        s = attempt(s, w -> w.withMaxHeight(read(map, "maxHeight", Integer::parseInt, w.maxHeight())));
-        s = attempt(s, w -> w.withMinAspect(read(map, "minAspect", Float::parseFloat, w.minAspect())));
-        s = attempt(s, w -> w.withMaxAspect(read(map, "maxAspect", Float::parseFloat, w.maxAspect())));
-        s = attempt(s, w -> w.withMouseGrab(read(map, "mouseGrab", WindowSettings::bool, w.mouseGrab())));
-        s = attempt(s, w -> w.withKeyboardGrab(read(map, "keyboardGrab", WindowSettings::bool, w.keyboardGrab())));
-        s = attempt(s, w -> w.withRelativeMouse(read(map, "relativeMouse", WindowSettings::bool, w.relativeMouse())));
-        s = attempt(s, w -> w.withCursorVisible(read(map, "cursorVisible", WindowSettings::bool, w.cursorVisible())));
-        s = attempt(s, w -> w.withKeepScreenOn(read(map, "keepScreenOn", WindowSettings::bool, w.keepScreenOn())));
-        return s;
-    }
-
-    /** {@code change} of {@code s}, or {@code s} where the value changed to is out of range. */
-    private static WindowSettings attempt(WindowSettings s, UnaryOperator<WindowSettings> change) {
-        try {
-            return change.apply(s);
-        } catch (IllegalArgumentException e) {
-            return s;
-        }
-    }
-
-    /** {@code map}'s value of {@code key} through {@code parse}, or {@code fallback} if missing or unreadable. */
-    private static <T> T read(Map<String, String> map, String key, Function<String, T> parse, T fallback) {
-        String value = map.get(key);
-        if (value == null) {
-            return fallback;
-        }
-        try {
-            T parsed = parse.apply(value.strip());
-            return parsed == null ? fallback : parsed;
-        } catch (IllegalArgumentException e) {
-            return fallback;
-        }
-    }
-
-    private static Boolean bool(String value) {
-        return switch (value) {
-            case "true" -> true;
-            case "false" -> false;
-            default -> null;
-        };
+        return from(new EngineSettings().load(map));
     }
 }

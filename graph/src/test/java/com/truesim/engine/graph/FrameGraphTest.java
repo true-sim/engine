@@ -1702,6 +1702,33 @@ class FrameGraphTest {
         }
     }
 
+    private static final com.truesim.engine.settings.Setting<Boolean> RED_FILL =
+        com.truesim.engine.settings.Setting.bool("test.red", true, "fills red, or blue");
+
+    @Test
+    void buildsReadSettingsAndRebuildWhenTheyChange() {
+        graph.add(new Lambda(List.of(OUT), g -> {
+            boolean red = g.setting(RED_FILL);
+            assertThat(g.settings()).isSameAs(graph.settings());
+            new Fill(OUT, SIZE, red ? 1 : 0, 0, red ? 0 : 1, 1).build(g);
+        })).output(OUT, output);
+        assertThat(frame()[0]).isEqualTo(RED);
+        int builds = graph.builds();
+        graph.settings().set(RED_FILL, false);
+        assertThat(frame()[0]).as("rebuilt: a setting its build read changed").isEqualTo(BLUE);
+        assertThat(graph.builds()).isEqualTo(builds + 1);
+        graph.settings().set(com.truesim.engine.settings.Setting.integer("test.unread", 1, 0, 9, "unread"), 2);
+        frame();
+        assertThat(graph.builds()).as("a setting no build read: no rebuild").isEqualTo(builds + 1);
+        // Settings of the app's: read from now on.
+        com.truesim.engine.settings.EngineSettings app = new com.truesim.engine.settings.EngineSettings();
+        graph.settings(app);
+        assertThat(graph.settings()).isSameAs(app);
+        assertThat(frame()[0]).isEqualTo(RED);
+        app.set(RED_FILL, false);
+        assertThat(frame()[0]).isEqualTo(BLUE);
+    }
+
     @Test
     void historiesWrittenFirstOnTheComputeQueueAreJoinedAhead() {
         int[] frames = {0};

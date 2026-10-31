@@ -446,15 +446,15 @@ class PlatformTest {
             .withMouseGrab(true).withKeyboardGrab(true).withRelativeMouse(true).withCursorVisible(false)
             .withKeepScreenOn(false);
         Map<String, String> saved = custom.toMap();
-        assertThat(saved).hasSize(27).containsEntry("mode", "EXCLUSIVE_FULLSCREEN").containsEntry("width", "1600");
+        assertThat(saved).hasSize(27).containsEntry("window.mode", "EXCLUSIVE_FULLSCREEN").containsEntry("window.width", "1600");
         assertThat(WindowSettings.fromMap(saved)).as("read back").isEqualTo(custom);
         // Saved by another version: unknown keys ignored, missing or unreadable ones default.
-        Map<String, String> old = new java.util.HashMap<>(Map.of("width", " 1024 ", "height", "oops",
-            "mode", "SOMETHING_NEW", "bordered", "maybe", "hdr", "true"));
+        Map<String, String> old = new java.util.HashMap<>(Map.of("window.width", " 1024 ", "window.height", "oops",
+            "window.mode", "SOMETHING_NEW", "window.bordered", "maybe", "hdr", "true"));
         WindowSettings loaded = WindowSettings.fromMap(old);
         assertThat(loaded.width()).isEqualTo(1024);
         assertThat(loaded).isEqualTo(defaults.withWidth(1024));
-        assertThat(WindowSettings.fromMap(Map.of("width", "0"))).as("out of range: the default")
+        assertThat(WindowSettings.fromMap(Map.of("window.width", "0"))).as("out of range: the default")
             .isEqualTo(defaults);
         assertThat(WindowSettings.fromMap(defaults.toMap())).isEqualTo(defaults);
         for (java.util.function.Supplier<WindowSettings> invalid : List.<java.util.function.Supplier<WindowSettings>>of(
@@ -597,6 +597,38 @@ class PlatformTest {
         dialog.setParent(null);
         dialog.close();
         window.close();
+    }
+
+    @Test
+    void windowsFollowTheirEngineSettings() {
+        com.truesim.engine.settings.EngineSettings settings = new com.truesim.engine.settings.EngineSettings();
+        com.truesim.engine.settings.EngineSettings mine = settings.scoped("window.main");
+        mine.set(WindowSettings.WIDTH, 700).set(WindowSettings.HEIGHT, 500);
+        Window window = platform.createWindow(WindowOptions.of("follows", 320, 200).withHidden(true)
+            .withVulkan(false), mine);
+        window.sync();
+        assertThat(window.width()).isEqualTo(700);
+        assertThat(WindowSettings.from(mine).width()).isEqualTo(700);
+        // Changed while it runs: applied at once. Another window's settings and other keys change nothing.
+        mine.set(WindowSettings.WIDTH, 900);
+        window.sync();
+        assertThat(window.width()).isEqualTo(900);
+        settings.scoped("window.other").set(WindowSettings.WIDTH, 300);
+        window.sync();
+        assertThat(window.width()).isEqualTo(900);
+        // The window's state written back into the settings, to save.
+        window.setSize(640, 480);
+        window.sync();
+        window.settings().store(mine);
+        assertThat(mine.get(WindowSettings.WIDTH)).isEqualTo(640);
+        assertThat(settings.toMap()).containsEntry("window.main.window.width", "640");
+        assertThat(WindowSettings.ALL).hasSize(27);
+        window.close();
+        mine.set(WindowSettings.WIDTH, 1000); // closed: no longer followed
+        Window shown = platform.createWindow(WindowOptions.of("shown", 320, 200).withVulkan(false),
+            settings.scoped("window.shown"));
+        assertThat(shown.isVisible()).isTrue();
+        shown.close();
     }
 
     @Test
