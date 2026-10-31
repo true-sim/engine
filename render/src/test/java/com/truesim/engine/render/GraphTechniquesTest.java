@@ -767,6 +767,17 @@ class GraphTechniquesTest {
             assertThatIllegalArgumentException().isThrownBy(() -> materials.register(Glow.TYPE));
             assertThatIllegalArgumentException().isThrownBy(() -> new MaterialType("half", GlowParameters.class,
                 GlowParameters::fromValues, 0, "a.spv", "a", "b.spv", null));
+            // At half the resolution: the glow type's bin, past bin 0, is shaded from the list classification wrote
+            // into, though the render region has fewer tiles than the images the lists are spaced for.
+            graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.HEADROOM, 1.5f);
+            main.port().renderScale(0.5f);
+            frame();
+            frame();
+            assertThat(main.port().regionWidth()).isLessThan(main.port().width());
+            assertThat(glowing(pixels.memory().toArray(ValueLayout.JAVA_INT))).as("the quad's pixels, at half")
+                .isGreaterThan(SIZE * SIZE / 40);
+            main.port().renderScale(1);
+            graph.settings().set(ResolutionSettings.DYNAMIC, false);
             scene.setMaterials(null);
         }
     }

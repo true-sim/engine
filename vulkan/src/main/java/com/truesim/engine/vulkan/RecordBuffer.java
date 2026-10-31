@@ -220,9 +220,15 @@ public final class RecordBuffer implements AutoCloseable {
      * records before (earlier frames too: the queue's order) and before what reads them after. Nothing without
      * changes. Frames recorded by a frame graph do it first; call it before reading in frames recorded otherwise.
      * Allocates nothing, except to grow the upload buffer when more records changed than it held so far.
+     *
+     * <p>Nothing once a pass uploads them ({@link #uploadInPasses}): passes reading the records may call it whatever
+     * records them, and under parallel recording one recorded before the uploading pass would otherwise take the
+     * changes into a command buffer later in the frame than readers the graph ordered after the upload.
      */
     public synchronized void upload(VkCommandBuffer commands) {
-        upload(commands, true);
+        if (!inPasses) {
+            upload(commands, true);
+        }
     }
 
     /**

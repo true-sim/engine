@@ -170,6 +170,9 @@ class RecordBufferTest {
                 slots.begin(0);
                 device.submitAndWait(device.graphics(), slots::recordStart);
                 assertThat(records.pendingCount()).as("the frame's start leaves them to the pass").isEqualTo(1);
+                device.submitAndWait(device.graphics(), records::upload);
+                assertThat(records.pendingCount()).as("another pass's upload leaves them to the pass too")
+                    .isEqualTo(1);
                 device.submitAndWait(device.graphics(), commands -> {
                     records.uploadInPass(commands);
                     // What a graph places from the pass's declared write and the reader's read.

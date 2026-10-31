@@ -63,14 +63,16 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     lists.visibleCount = push.views[v].lists.visibleCount;
     uint index;
     InterlockedAdd(lists.visibleCount[2 * bin + (late ? 1 : 0)], 1, index);
+    if (index >= binDrawCapacity(view, bin))
+    {
+        // Over the bin's capacity: dropped, and counted. Checked before reserving indices: a range reserved and never
+        // written would leave a hole later meshlets' draws run through.
+        return;
+    }
     uint indices = ((push.meshlets[m * 8 + 2] >> 8) & 0xff) * 3;
     uint first;
     InterlockedAdd(lists.drawCommand[6 * bin + 5], indices, first); // indices reserved so far in the bin
     InterlockedMax(lists.visibleCount[6 + bin], first + indices); // the most any phase wanted, for the CPU to read
-    if (index >= binDrawCapacity(view, bin))
-    {
-        return; // over the bin's capacity: dropped, and counted
-    }
     uint slot = binFirstSlot(view, bin) + index;
     bool fits = first + indices <= binIndexCapacity(view, bin); // meshlets past the index capacity come last: no gaps
     lists.visible[slot] = VisibleMeshlet(fits ? chunk.instance : 0xffffffff, m, first, 0); // first: in the bin
