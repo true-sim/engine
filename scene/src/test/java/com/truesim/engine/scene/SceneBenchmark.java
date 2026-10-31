@@ -11,6 +11,7 @@ import com.truesim.common.jobs.TaskScheduler;
 import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
+import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.ClusteredForwardShading;
 import com.truesim.engine.render.GeometryPool;
@@ -20,6 +21,7 @@ import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.SceneGeometry;
+import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.VisibilityBufferShading;
@@ -166,14 +168,16 @@ class SceneBenchmark {
             Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
             SceneSync sync = new SceneSync(resources, renderables, gpu, WRITERS > 1 ? jobs : null);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-            RenderView cameraView = geometry.createView(ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
+            ViewPort port = graph.addView("main").size(WIDTH, HEIGHT);
+            SceneView main = geometry.createView(port, camera, ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
+            RenderView cameraView = main.view();
             camera.position(FAR, 0, FAR);
             ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, Format.R8G8B8A8_UNORM,
                 VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
                 .set(shaded.handle(), 0);
-            ClusteredForwardShading forward = new ClusteredForwardShading(geometry, cameraView, WIDTH, HEIGHT,
-                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
-            graph.add(forward).output(Keys.SCENE_COLOR, target);
+            ClusteredForwardShading forward = new ClusteredForwardShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT);
+            port.add(forward).output(Keys.SCENE_COLOR, target);
             Stats unused = new Stats();
 
             // Loading: the meshes are generated in the background, uploaded as they arrive at frame boundaries.
@@ -228,8 +232,8 @@ class SceneBenchmark {
                 }
             });
             if (device.primitiveIds()) {
-                graph.replace(new VisibilityBufferShading(geometry, cameraView, WIDTH, HEIGHT,
-                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT));
+                port.replace(new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT));
                 run("still, visibility buffer", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> { });
                 run("camera moving, visibility buffer", graph, slots, tasks, scene, renderables, sync, cameraView, camera,
                     frame -> camera.position(FAR - 0.05 * frame, 0, FAR + 0.1 * frame));

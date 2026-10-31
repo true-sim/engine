@@ -25,6 +25,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.ClusteredForwardShading;
 import com.truesim.engine.render.GeometryPool;
@@ -40,6 +41,7 @@ import com.truesim.engine.render.Materials;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.SceneGeometry;
+import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.VisibilityBufferShading;
@@ -283,20 +285,23 @@ class SceneSyncTest {
         MeshletRenderer renderer = closing(new MeshletRenderer(device, sync.gpu(), VK_FORMAT_R8G8B8A8_UNORM,
             VK_FORMAT_D32_SFLOAT, slots));
         SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-        RenderView cameraView = geometry.createView(options);
-        cameraViews.add(cameraView);
+        ViewPort port = graph.addView("main").size(SIZE, SIZE);
+        // the frame's camera is set on the render view every frame (frame), not taken from the scene view
+        SceneView cameraView = new SceneView(port, geometry.createView(options), new Camera());
+        cameraViews.add(cameraView.view());
         Technique shading = visibilityBuffer
-            ? new VisibilityBufferShading(geometry, cameraView, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
-                VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0)
-            : new ClusteredForwardShading(geometry, cameraView, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
-                VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0);
+            ? new VisibilityBufferShading(geometry, cameraView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                .clearColor(0, 0, 0)
+            : new ClusteredForwardShading(geometry, cameraView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                .clearColor(0, 0, 0);
         int usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
             | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         GpuImage target = closing(new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage,
             VK_IMAGE_ASPECT_COLOR_BIT));
         ExternalImage output = new ExternalImage("target", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
-        return graph.add(shading).add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+        port.add(shading).add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+        return graph;
     }
 
     /** {@link #graph(SceneSync, boolean, GpuBuffer[], ViewOptions)} of a sync of every layer, with occlusion. */

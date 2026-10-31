@@ -18,6 +18,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.render.layout.ClusterPush;
 import com.truesim.engine.render.layout.LightsConstants;
 import com.truesim.engine.vulkan.Commands;
@@ -28,19 +29,19 @@ import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
 
 /**
- * Light binning by clusters: provides {@link Keys#LIGHT_LIST}, the {@link Lights} binned per cluster of the camera's
- * frustum, for every technique shading the view. Tiles of {@code tileSize} pixels across and down, {@code slices}
- * depth slices from {@code near} to {@code far} (exponential: each longer by the same ratio), up to
- * {@code maxPerCluster} lights each; built once per frame on the async compute queue, by a thread per cluster testing
- * the lights' spheres against its box. {@code graph.replace} swaps it for another binning; shading reads any of them
- * through {@code lights.slang}'s {@code ILightList}.
+ * Light binning by clusters: provides {@link Keys#LIGHT_LIST}, the {@link Lights} binned per cluster of a {@link
+ * SceneView}'s frustum, for every technique shading the view: added to its port, whose size it bins. Tiles of {@code
+ * tileSize} pixels across and down, {@code slices} depth slices from {@code near} to {@code far} (exponential: each
+ * longer by the same ratio), up to {@code maxPerCluster} lights each; built once per frame on the async compute queue,
+ * by a thread per cluster testing the lights' spheres against its box. {@code graph.replace} swaps it for another
+ * binning; shading reads any of them through {@code lights.slang}'s {@code ILightList}.
  *
  * <p>The light list is one buffer: the common header ({@code LightListHeader}), a count per cluster, then the slots.
  * Fixed slots per cluster: no atomics, a deterministic order, and overflow reported in the header (the most lights a
  * cluster wanted).
  *
  * <pre>{@code
- * graph.add(new ClusteredLights(lights, camera, 1920, 1080));   // the shading techniques find it by key
+ * view.port().add(new ClusteredLights(lights, view));   // the view's shading techniques find it by key
  * }</pre>
  */
 public final class ClusteredLights implements Technique {
@@ -49,9 +50,8 @@ public final class ClusteredLights implements Technique {
     private static final int CLUSTERS = LightsConstants.CLUSTERS;
 
     private final Lights lights;
+    private final ViewPort port;
     private final Camera camera;
-    private final int width;
-    private final int height;
     private final int tileSize;
     private final int slices;
     private final float near;
@@ -59,21 +59,18 @@ public final class ClusteredLights implements Technique {
     private final int maxPerCluster;
 
     /**
-     * {@code lights} binned for {@code camera} (read when the frame runs: the camera of the view shaded), on a
-     * {@code width} by {@code height} image.
+     * {@code lights} binned for {@code camera} (read when the frame runs: the camera of the view shaded) on
+     * {@code port}'s images (their size read when the graph builds); added to {@code port}.
      */
-    public ClusteredLights(Lights lights, Camera camera, int width, int height, int tileSize, int slices, float near,
+    public ClusteredLights(Lights lights, ViewPort port, Camera camera, int tileSize, int slices, float near,
         float far, int maxPerCluster) {
         this.lights = Objects.requireNonNull(lights, "lights");
+        this.port = Objects.requireNonNull(port, "port");
         this.camera = Objects.requireNonNull(camera, "camera");
-        if (width < 1 || height < 1 || tileSize < 1 || slices < 1 || !(near > 0) || !(far > near)
-            || maxPerCluster < 1) {
-            throw new IllegalArgumentException("Clusters need a size, tiles, slices, 0 < near < far and room for "
-                + "lights: " + width + " x " + height + ", " + tileSize + ", " + slices + ", " + near + ", " + far
-                + ", " + maxPerCluster);
+        if (tileSize < 1 || slices < 1 || !(near > 0) || !(far > near) || maxPerCluster < 1) {
+            throw new IllegalArgumentException("Clusters need tiles, slices, 0 < near < far and room for lights: "
+                + tileSize + ", " + slices + ", " + near + ", " + far + ", " + maxPerCluster);
         }
-        this.width = width;
-        this.height = height;
         this.tileSize = tileSize;
         this.slices = slices;
         this.near = near;
@@ -82,20 +79,32 @@ public final class ClusteredLights implements Technique {
     }
 
     /** Tiles of 64 pixels, 24 slices from 0.1 to 1,000 units, up to 128 lights per cluster. */
-    public ClusteredLights(Lights lights, Camera camera, int width, int height) {
-        this(lights, camera, width, height, 64, 24, 0.1f, 1000, 128);
+    public ClusteredLights(Lights lights, ViewPort port, Camera camera) {
+        this(lights, port, camera, 64, 24, 0.1f, 1000, 128);
     }
 
+    /** {@code lights} binned for {@code view}'s camera on its port: tiles of 64 pixels, 24 slices, ... as above. */
+    public ClusteredLights(Lights lights, SceneView view) {
+        this(lights, view.port(), view.camera());
+    }
+
+    /** Tiles across the view's port, at its size now. */
     public int tilesAcross() {
-        return (width + tileSize - 1) / tileSize;
+        return (port.width() + tileSize - 1) / tileSize;
     }
 
+    /** Tiles down the view's port, at its size now. */
     public int tilesDown() {
-        return (height + tileSize - 1) / tileSize;
+        return (port.height() + tileSize - 1) / tileSize;
     }
 
+    /** Clusters of the view's port, at its size now. */
     public int clusters() {
-        return tilesAcross() * tilesDown() * slices;
+        return clusters(tilesAcross(), tilesDown());
+    }
+
+    private int clusters(int across, int down) {
+        return across * down * slices;
     }
 
     public int maxPerCluster() {
@@ -110,18 +119,26 @@ public final class ClusteredLights implements Technique {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
+        if (g.view() != port) {
+            throw new IllegalStateException("ClusteredLights of " + port + " was added to "
+                + (g.view() == null ? "the frame" : g.view()) + ": add it to its view");
+        }
+        int across = tilesAcross();
+        int down = tilesDown();
         Pipeline pipeline = g.computeProgram("shaders/lights/cluster.spv", "clusterMain", ClusterPush.BYTES);
-        ClusterPush push = new ClusterPush().width(width).height(height).far(far);
-        Buffer list = g.createBuffer("light clusters", HEADER_BYTES + 4L * clusters() * (1 + maxPerCluster));
+        ClusterPush push = new ClusterPush().width(port.width()).height(port.height()).far(far);
+        Buffer list = g.createBuffer("light clusters",
+            HEADER_BYTES + 4L * clusters(across, down) * (1 + maxPerCluster));
         g.pass("light clusters")
             .write(list, BufferAccess.TRANSFER_DST)
             .write(list, BufferAccess.STORAGE_WRITE)
             .async()
-            .record(ctx -> cluster(ctx, pipeline, list, push));
+            .record(ctx -> cluster(ctx, pipeline, list, push, across, down));
         g.provide(Keys.LIGHT_LIST, list);
     }
 
-    private void cluster(PassContext ctx, Pipeline pipeline, Buffer list, ClusterPush push) {
+    private void cluster(PassContext ctx, Pipeline pipeline, Buffer list, ClusterPush push, int across, int down) {
+        int clusters = clusters(across, down);
         long header = ctx.address(list);
         long counts = header + HEADER_BYTES;
         try (MemoryStack stack = stackPush()) {
@@ -132,9 +149,9 @@ public final class ClusteredLights implements Technique {
             memPutLong(data + 16, lights.lightsAddress());
             memPutLong(data + 24, lights.shadowsAddress());
             memPutLong(data + 32, counts);
-            memPutLong(data + 40, counts + 4L * clusters());
-            memPutInt(data + 48, tilesAcross());
-            memPutInt(data + 52, tilesDown());
+            memPutLong(data + 40, counts + 4L * clusters);
+            memPutInt(data + 48, across);
+            memPutInt(data + 52, down);
             memPutInt(data + 56, slices);
             memPutInt(data + 60, tileSize);
             memPutFloat(data + 64, near);
@@ -152,7 +169,7 @@ public final class ClusteredLights implements Technique {
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
             ctx.dispatch(pipeline, push.viewProjection(camera.viewProjection()).header(header).lightCount(lights.count()),
-                (clusters() + 63) / 64);
+                (clusters + 63) / 64);
         }
     }
 }

@@ -403,8 +403,8 @@ try (Textures textures = new Textures(device); Materials materials = new Materia
 shadow table whose entries each have a world position of their own: a shadow map's is its light camera's. A light
 list hands lights to shading relative to its camera and moves a surface into an entry's positions before the lookup,
 so one set of lights and shadow maps serves every view: the camera, another player's, a mirror's. A **light
-binning** technique turns them into the frame's light list, `Keys.LIGHT_LIST` (a buffer). Shading techniques use it
-if the graph has one, and otherwise light by the sun; `graph.replace` swaps one binning for another.
+binning** technique turns them into a view's light list, `Keys.LIGHT_LIST` (a buffer). Shading techniques use it
+if their view has one, and otherwise light by the sun; `port.replace` swaps one binning for another.
 
 `ClusteredLights` is the first binning: the camera's frustum is cut into tiles of 64 pixels and 24 exponential depth
 slices, and a compute pass on the async queue gives each cluster the lights whose sphere reaches its box (lights read
@@ -414,7 +414,7 @@ in batches of 64 into shared memory; directional lights reach every cluster).
 lights.directional(0, -0.4f, -0.8f, -0.3f, 3, 3, 3).shadows(0, 0, 4); // the sun, four cascades: entries 0 to 3
 lights.point(1, x, y, z, 10, 20, 15, 10);                              // range 10
 lights.setCount(2);
-graph.add(new ClusteredLights(lights, camera, width, height));       // provides Keys.LIGHT_LIST
+port.add(new ClusteredLights(lights, main));                         // provides the view's Keys.LIGHT_LIST
 ```
 
 - **One interface for every layout:** a light list is one buffer, a common header (layout, lights, shadows, the
@@ -458,17 +458,22 @@ Drawing and shading are separate, and each is swappable:
   depth only, shaded color, or visibility buffer IDs. It does two-phase occlusion culling for views made with it.
   Shading techniques ask for the camera's draw and shadow techniques for the light's; equal requests are drawn once, and the
   renderer culls all its views in one pass.
-- **Shading techniques** provide `Keys.SCENE_COLOR` and `Keys.SCENE_DEPTH`; `graph.replace` swaps them:
+- **Shading techniques** provide a view's `Keys.SCENE_COLOR` and `Keys.SCENE_DEPTH`, at the size of its port. They
+  take a `SceneView` (the port, the `RenderView` its culling draws and the camera) and are added to its port, as are
+  the light binning and shadows; built anywhere else, they fail. `port.replace` swaps them:
 
 ```java
 SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-RenderView view = geometry.createView(ViewOptions.of(1 << 20, 1 << 24).withOcclusion(true));
-view.set(camera, 1, MeshletRenderer.MODE_LIT);
-graph.add(new ClusteredForwardShading(geometry, view, width, height, colorFormat, depthFormat))
-    .add(new ClusteredLights(lights, camera, width, height))
+ViewPort port = graph.addView("main").size(width, height);
+SceneView main = geometry.createView(port, camera, ViewOptions.of(1 << 20, 1 << 24).withOcclusion(true))
+    .set(1, MeshletRenderer.MODE_LIT);
+port.add(new ClusteredForwardShading(geometry, main, colorFormat, depthFormat))
+    .add(new ClusteredLights(lights, main))
     .add(new ShadowMapShadows(geometry, lights, 0, 0, sunCamera, 2048,
-        geometry.createView(ViewOptions.shadow(1 << 18, 1 << 22)), bias));
-graph.replace(new VisibilityBufferShading(geometry, view, width, height, colorFormat, depthFormat));
+        geometry.createView(ViewOptions.shadow(1 << 18, 1 << 22)), bias))
+    .output(Keys.SCENE_COLOR, target);
+port.replace(new VisibilityBufferShading(geometry, main, colorFormat, depthFormat));
+port.size(newWidth, newHeight);                       // a resized window: the graph rebuilds at the new size
 ```
 
 - `ClusteredForwardShading` shades as the meshlets are drawn, so pixels covered later are shaded too.
@@ -524,9 +529,9 @@ interface:
 | screen-space mask | `RayTracedShadows`: a ray query per pixel of the camera's depth, on the async queue | `MaskShadow`: the mask's texel |
 | inline ray | `InlineRayShadows`: nothing but the frame's top level | `RayShadow`: a ray query while shading |
 
-- **Shadow techniques modify `Keys.LIGHT_LIST`**, so they run whenever shading requires the light list. They put what
-  shading must read into the shared `ShadowInputs` (images to sample, buffers to wait for) with a setup that fills
-  their lights' entries when the frame records. A new technique is one class; shading needs no change.
+- **Shadow techniques modify `Keys.LIGHT_LIST`**, so they go in the shading's view and run whenever shading requires
+  the light list. They put what shading must read into the view's shared `ShadowInputs` (images to sample, buffers to
+  wait for) with a setup that fills their lights' entries when the frame records. A new technique is one class; shading needs no change.
 - **Ray tracing is a generic parameter** (`IShadowRays`): shading pipelines that cannot trace use `NoRays`, so only the
   visibility buffer's traced variant (`shadeTraced.slang`) needs ray queries. Forward shading counts inline ray
   shadows as lit; a ray-traced mask works with any shading.
@@ -574,11 +579,13 @@ that declare how they use each image. The graph does the rest:
   technique for another). `implement` changes how every request of a type is computed (a cheaper blur on low
   settings). Nothing else changes.
 - **Views:** `graph.addView(name)` gives a `ViewPort`, a camera's share of the frame with techniques and outputs of
-  its own (`view.add(...)`, `view.output(key, target)`). Its techniques' keys are the view's, so two views can each
-  provide the scene color; requiring a key from a view gets the view's version, else the frame's. Techniques added to
-  the graph itself are the frame's, built once for every view, and equal requests are shared whichever view makes
-  them. `g.view()`, `g.require(view, key)` and `g.requireAll(key)` cross between views, and a view's histories are its
-  own. The engine's techniques do not use views yet: they still take their view in their constructors.
+  its own (`view.add(...)`, `view.output(key, target)`) and a size, `view.size(w, h)`, which its techniques read when
+  they build (a resized window sets it, and the graph rebuilds). Its techniques' keys are the view's, so two views can
+  each provide the scene color; requiring a key from a view gets the view's version, else the frame's, and the frame's
+  techniques see no view's keys. Techniques added to the graph itself are the frame's, built once for every view, and
+  equal requests are shared whichever view makes them. `g.view()`, `g.require(view, key)` and `g.requireAll(key)`
+  cross between views, and a view's histories are its own. The scene's techniques of a view (shading, light binning,
+  shadows) take a `SceneView`, which ties the port to the scene's camera and the `RenderView` its culling draws.
 - **Culled:** walking back from the outputs, passes whose images and buffers nothing needs are dropped.
 - **Synchronized:** barriers and layout transitions come from the declared accesses, batched into one call per pass,
   with none between reads.
@@ -629,7 +636,7 @@ that declare how they use each image. The graph does the rest:
   build left behind.
 
 ```java
-graph.add(new ClusteredForwardShading(geometry, width, height, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT))
+port.add(new ClusteredForwardShading(geometry, main, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT))
     .add(new Bloom())                       // requires Keys.SCENE_COLOR, provides BLOOM
     .add(new ToneMap())                     // requires BLOOM, provides TONEMAPPED
     .output(TONEMAPPED, swapchainImage);    // an ExternalImage, set to the acquired image each frame
@@ -708,9 +715,9 @@ renderers above, following the scene's change logs and asset cache:
   written once and again only where nodes moved or renderables changed. Given a `JobSystem`, many instances at once
   (most nodes moved) are claimed in order and written on its threads: 30,000 moving rocks in 0.5 ms on 4 threads
   against 1.0 ms on one, the same ids and image either way. Drawing is the renderers' business: cameras
-  are `RenderView`s, each at its own world position (moving one rewrites no instance), drawn by the frame graph's
-  techniques, so the rendering mode is the graph's: `ClusteredForwardShading`, `VisibilityBufferShading`, shadows,
-  swapped with `graph.replace`.
+  are `SceneView`s (a `RenderView` in a graph view), each at its own world position (moving one rewrites no
+  instance), drawn by their views' techniques, so the rendering mode is the graph's: `ClusteredForwardShading`,
+  `VisibilityBufferShading`, shadows, swapped with `port.replace`.
 
 ```java
 FrameSlots slots = new FrameSlots(2);                 // shared by every graph drawing these resources
@@ -721,9 +728,10 @@ GpuScene worldGpu = new GpuScene(device, resources.pool(), 100_000, slots);
 SceneSync world = new SceneSync(resources, worldRenderables, worldGpu);
 SceneSync gizmos = new SceneSync(resources, gizmoRenderables, worldGpu); // same table: its nodes on layer 1
 SceneGeometry geometry = SceneGeometry.meshlets(new MeshletRenderer(device, worldGpu, colorFormat, depthFormat, slots));
-RenderView view = geometry.createView(ViewOptions.of(1 << 20, 1 << 24).withOcclusion(true).withLayers(1));
-FrameGraph worldGraph = new FrameGraph(device, slots)
-    .add(new VisibilityBufferShading(geometry, view, width, height, colorFormat, depthFormat))
+FrameGraph worldGraph = new FrameGraph(device, slots);
+ViewPort port = worldGraph.addView("main").size(width, height);
+SceneView view = geometry.createView(port, camera, ViewOptions.of(1 << 20, 1 << 24).withOcclusion(true).withLayers(1));
+port.add(new VisibilityBufferShading(geometry, view, colorFormat, depthFormat))
     .output(Keys.SCENE_COLOR, swapchainTarget);
 SceneSync preview = ...;                              // another scene: its own GpuScene, renderer and graph
 
@@ -735,17 +743,16 @@ tasks.drainCompleted();                               // the frame boundary: loa
 scene.update(); worldRenderables.update();
 world.update(); gizmos.update();
 camera.position(cameraX, cameraY, cameraZ);           // the camera's world position, in doubles
-view.set(camera, 1, MeshletRenderer.MODE_LIT);
+view.set(1, MeshletRenderer.MODE_LIT);
 ...                                                   // the same for the preview
 worldGraph.submit(acquired[slot], presentReady);
 previewGraph.submit(0, 0);
 slots.end();
 ```
 
-More cameras on a scene are more views, each with lists and occlusion history of its own. Scenes share a `GpuScene`
-told apart by layers, or each have their own with a renderer and graph (the engine's techniques, and so the scene
-color and light list, are not per view yet); either way they use the same resources, and a mesh several use is on
-the GPU once.
+More cameras on a scene are more views (`graph.addView`, each a `SceneView`), each with lists, occlusion history,
+scene color and light list of its own. Scenes share a `GpuScene` told apart by layers, or each have their own with a
+renderer and graph; either way they use the same resources, and a mesh several use is on the GPU once.
 The tests draw two scenes in step, one forward and one through a visibility buffer, and two scenes from one
 `GpuScene`, with validation on.
 

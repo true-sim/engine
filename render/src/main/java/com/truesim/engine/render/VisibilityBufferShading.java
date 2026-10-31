@@ -41,20 +41,17 @@ public final class VisibilityBufferShading implements Technique {
     private final SceneGeometry geometry;
     private final MeshletRenderer renderer;
     private final ClassicLodGeometry classic; // null: meshlets
-    private final int width;
-    private final int height;
     private final int colorFormat;
     private final int depthFormat;
     private final float[] clear = new float[3];
-    private final RenderView view;
+    private final SceneView view;
     private boolean occlusion = true;
     // One per pass: a frame graph may record the classification and the shading on two threads at once.
     private final ShadePush classifyPush = new ShadePush(); // one per pass: passes may record at once
     private final ShadePush shadePush = new ShadePush();
 
-    /** {@code geometry} shaded as {@code view} sees it. */
-    public VisibilityBufferShading(SceneGeometry geometry, RenderView view, int width, int height, int colorFormat,
-        int depthFormat) {
+    /** {@code geometry} shaded as {@code view} sees it, at its port's size; added to {@code view}'s port. */
+    public VisibilityBufferShading(SceneGeometry geometry, SceneView view, int colorFormat, int depthFormat) {
         this.geometry = Objects.requireNonNull(geometry, "geometry");
         this.view = Objects.requireNonNull(view, "view");
         MeshletGeometry meshlets = geometry.provider(MeshletGeometry.class);
@@ -64,11 +61,6 @@ public final class VisibilityBufferShading implements Technique {
                 "The visibility buffer shades one provider's geometry, meshlets or classic LOD, for now");
         }
         this.renderer = meshlets != null ? meshlets.renderer() : classic.renderer();
-        if (width < 1 || height < 1 || width > 0xffff || height > 0xffff) {
-            throw new IllegalArgumentException("A size of 1 to 65,535 per side: " + width + " x " + height);
-        }
-        this.width = width;
-        this.height = height;
         this.colorFormat = colorFormat;
         this.depthFormat = depthFormat;
     }
@@ -107,10 +99,18 @@ public final class VisibilityBufferShading implements Technique {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
-        SceneDraw.Targets targets = g.request(new SceneDraw(geometry, view, null, SurfaceOutput.ids(), depthFormat,
-            width, height, occlusion && view.options().occlusion()));
+        view.checkBuilding(g, this);
+        int width = view.width();
+        int height = view.height();
+        if (width > 0xffff || height > 0xffff) {
+            throw new IllegalStateException("The visibility buffer shades up to 65,535 pixels per side: " + width
+                + " x " + height);
+        }
+        int size = width | height << 16;
+        SceneDraw.Targets targets = g.request(new SceneDraw(geometry, view.view(), null, SurfaceOutput.ids(),
+            depthFormat, width, height, occlusion && view.view().options().occlusion()));
         Buffer lights = g.optional(Keys.LIGHT_LIST);
-        ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs());
+        ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         // With inline ray shadows, the variant tracing them, where the device can.
         boolean traced = shadows != null && shadows.traced() && g.capabilities().rayTracing();
         List<MaterialType> types = renderer.scene().materials().types();
@@ -139,7 +139,7 @@ public final class VisibilityBufferShading implements Technique {
         scene.read(g.pass("material classification"), BufferAccess.STORAGE_READ)
             .read(ids, Access.STORAGE_READ)
             .write(tiles, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> ctx.dispatch(classify, push(classifyPush, ctx, ids, null, null, types.size(), 0,
+            .record(ctx -> ctx.dispatch(classify, push(classifyPush, ctx, ids, null, null, size, types.size(), 0,
                 ctx.address(tiles)), tilesX, tilesY, 1));
         GraphBuilder.PassBuilder pass = scene.read(g.pass("visibility shading"), BufferAccess.STORAGE_READ)
             .read(ids, Access.STORAGE_READ)
@@ -161,7 +161,7 @@ public final class VisibilityBufferShading implements Technique {
                     continue;
                 }
                 long list = listBytes * bin;
-                ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, ids, color, lights, types.size(), bin,
+                ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, ids, color, lights, size, types.size(), bin,
                     ctx.address(tiles) + list), tiles, list);
             }
         });
@@ -176,13 +176,14 @@ public final class VisibilityBufferShading implements Technique {
     }
 
     /**
-     * resolve.slang's ShadePush, into {@code push}: for {@code types} types, shading bin {@code bin}'s tiles at
+     * resolve.slang's ShadePush, into {@code push}: for images of {@code size} (width, height in the high 16 bits),
+     * {@code types} types, shading bin {@code bin}'s tiles at
      * {@code tiles}.
      */
-    private ShadePush push(ShadePush push, PassContext ctx, Image ids, Image color, Buffer lights, int types, int bin,
-        long tiles) {
+    private ShadePush push(ShadePush push, PassContext ctx, Image ids, Image color, Buffer lights, int size, int types,
+        int bin, long tiles) {
         GeometryPool pool = renderer.pool();
-        return push.view(view.address())
+        return push.view(view.view().address())
             .meshes(pool.meshTable().deviceAddress())
             .instances(renderer.scene().instanceAddress())
             .positions(pool.positions().deviceAddress())
@@ -194,7 +195,7 @@ public final class VisibilityBufferShading implements Technique {
             .lights(lights == null ? 0 : ctx.address(lights))
             .ids(ctx.storage(ids))
             .color(color == null ? 0 : ctx.storage(color))
-            .size(width | height << 16)
+            .size(size)
             .types(types)
             .clear(clear[0], clear[1], clear[2])
             .bin(bin)

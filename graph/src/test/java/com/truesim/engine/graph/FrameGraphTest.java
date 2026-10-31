@@ -699,6 +699,36 @@ class FrameGraphTest {
     }
 
     @Test
+    void aViewsSizeIsReadWhenItsTechniquesBuildAndRebuildsWhenItChanges() {
+        int[] sizes = new int[1];
+        ViewPort main = graph.addView("main");
+        assertThatIllegalStateException().isThrownBy(main::width).withMessageContaining("view main has no size");
+        assertThatIllegalArgumentException().isThrownBy(() -> main.size(0, SIZE));
+        main.size(SIZE, SIZE).add(new Technique() {
+            @Override
+            public List<Key<?>> provides() {
+                return List.of(OUT);
+            }
+
+            @Override
+            public void build(GraphBuilder g) {
+                sizes[0] = g.view().width();
+                new Fill(OUT, g.view().height(), 1, 0, 0, 1).build(g);
+            }
+        }).output(OUT, output);
+        assertThat(frame()[0]).isEqualTo(RED);
+        assertThat(sizes[0]).isEqualTo(SIZE);
+        int builds = graph.builds();
+        main.size(SIZE, SIZE);
+        frame();
+        assertThat(graph.builds()).as("the same size: no rebuild").isEqualTo(builds);
+        // Another technique for the same key replaces the first.
+        main.replace(new Fill(OUT, SIZE, 0, 0, 1, 1));
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        assertThat(graph.builds()).isEqualTo(builds + 1);
+    }
+
+    @Test
     void aTechniqueThatWouldBuildDifferentlyRebuildsTheGraph() {
         long[] version = {1};
         Fill red = new Fill(OUT, SIZE, 1, 0, 0, 1);

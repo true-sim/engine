@@ -17,6 +17,7 @@ import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.graph.ViewPort;
 import com.truesim.common.math.color.Color;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
@@ -27,7 +28,7 @@ import com.truesim.engine.render.Material;
 import com.truesim.engine.render.Materials;
 import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.MeshletRenderer;
-import com.truesim.engine.render.RenderView;
+import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.SceneGeometry;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.Textures;
@@ -129,7 +130,9 @@ class SceneDrawnCheck {
             Camera camera = new Camera().position(far, 0, far)
                 .set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-            RenderView cameraView = geometry.createView(ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
+            ViewPort port = graph.addView("main").size(WIDTH, HEIGHT);
+            SceneView cameraView = geometry.createView(port, camera,
+                ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
             SceneGraph scene = new SceneGraph(new ChangeClock(), ROCKS + 64, SceneGraph.DEFAULT_LOG_CAPACITY);
             Renderables renderables = new Renderables(scene);
             SceneSync sync = null;
@@ -172,13 +175,11 @@ class SceneDrawnCheck {
                 }
             }
             Technique shading = visibility
-                ? new VisibilityBufferShading(geometry, cameraView, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
-                    VK_FORMAT_D32_SFLOAT)
-                : new ClusteredForwardShading(geometry, cameraView, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
-                    VK_FORMAT_D32_SFLOAT);
+                ? new VisibilityBufferShading(geometry, cameraView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                : new ClusteredForwardShading(geometry, cameraView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
             ExternalImage output = new ExternalImage("target", WIDTH, HEIGHT, Format.R8G8B8A8_UNORM, usage,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
-            graph.add(shading).output(Keys.SCENE_COLOR, output);
+            port.add(shading).output(Keys.SCENE_COLOR, output);
             long deadline = System.nanoTime() + 120_000_000_000L;
             int settled = 0;
             while (settled < 4) {
@@ -193,7 +194,7 @@ class SceneDrawnCheck {
                 } else {
                     settled++;
                 }
-                cameraView.set(camera, 1, MeshletRenderer.MODE_LIT);
+                cameraView.set(1, MeshletRenderer.MODE_LIT);
                 graph.submit(0, 0);
                 slots.end();
                 assertThat(System.nanoTime()).as("meshes loading").isLessThan(deadline);
@@ -202,7 +203,7 @@ class SceneDrawnCheck {
                 }
             }
             device.waitIdle();
-            int meshlets = cameraView.visibleMeshlets();
+            int meshlets = cameraView.view().visibleMeshlets();
             device.submitAndWait(device.graphics(), commands -> {
                 try (MemoryStack stack = stackPush()) {
                     VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
