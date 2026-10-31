@@ -105,8 +105,7 @@ public final class SceneSync implements AutoCloseable {
     // instance (occlusion history, later previous transforms) stays with its instance.
     private int instanceCount;          // drawn
     // Items to draw at the end of the update, oldest first: their meshes arrived (maybe before the changes of the
-    // frame were followed), or the instance table or the material table had no room. Checked again then: they may be
-    // gone.
+    // frame were followed), or assets they wait for had not. Checked again then: they may be gone.
     private int[] waiting = new int[64];
     private int waitingCount;
     private boolean[] isWaiting = new boolean[64];
@@ -278,8 +277,8 @@ public final class SceneSync implements AutoCloseable {
     }
 
     /**
-     * Renderables whose meshes are on the GPU that do not draw yet: the material table has no room for their materials,
-     * or assets they wait for ({@link SceneResources.Loading#WHOLE}) have not arrived. They draw as those come.
+     * Renderables whose meshes are on the GPU that do not draw yet: assets they wait for
+     * ({@link SceneResources.Loading#WHOLE}) have not arrived. They draw as those come.
      */
     public int waitingCount() {
         int count = 0;
@@ -366,15 +365,10 @@ public final class SceneSync implements AutoCloseable {
 
     /**
      * Draws {@code item}, drawn now, with {@code materials} instead: the new set is taken before the old one goes, so
-     * materials both use stay on the GPU. With no room in the material table it stops drawing until there is.
+     * materials both use stay on the GPU.
      */
     private void swapMaterials(int item, List<AssetRef<MaterialData>> materials) {
         SceneResources.MaterialSet set = resources.acquireSet(materials, itemMesh[item].mesh.data.materialSlots());
-        if (set == null) {
-            hide(item);
-            queue(item);
-            return;
-        }
         resources.releaseSet(itemSet[item]);
         itemSet[item] = set;
         if (itemSlot[item] != NONE) {
@@ -465,7 +459,7 @@ public final class SceneSync implements AutoCloseable {
     /** Draws {@code item}, a live renderable's whose mesh is on the GPU: the lowest free instance id, its materials. */
     private boolean tryShow(int item) {
         if (!holdMaterials(item)) {
-            return false; // the material table is full: drawn when ids free
+            return false; // its renderable is gone
         }
         if (!resources.ready(itemSet[item])) {
             return false; // assets it waits for are not on the GPU yet
@@ -479,7 +473,7 @@ public final class SceneSync implements AutoCloseable {
 
     /**
      * Holds {@code item}'s block of materials, from when its mesh is on the GPU, while it waits too: its materials and
-     * textures load. Whether it holds one: not while the material table has no room, nor once its renderable is gone.
+     * textures load. Whether it holds one: not once its renderable is gone.
      */
     private boolean holdMaterials(int item) {
         if (itemSet[item] == null && renderables.has(itemNode[item])) {

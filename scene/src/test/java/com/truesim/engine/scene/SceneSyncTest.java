@@ -1138,8 +1138,8 @@ class SceneSyncTest {
     }
 
     @Test
-    void renderablesWaitForRoomInTheMaterialTable() throws InterruptedException {
-        // The table holds 16 ids, the default one taken: 15 renderables of materials of their own fit, one more waits.
+    void theMaterialTableGrowsForMoreMaterials() throws InterruptedException {
+        // The table starts with 16 ids, the default one taken: 16 renderables of materials of their own grow it.
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Renderables renderables = new Renderables(scene);
         SceneSync sync = closing(new SceneSync(resources, renderables, closing(new GpuScene(device, pool, 32, slots))));
@@ -1152,43 +1152,18 @@ class SceneSyncTest {
         update(scene, renderables, sync);
         load();
         update(scene, renderables, sync);
-        assertThat(sync.instanceCount()).isEqualTo(15);
-        assertThat(sync.waitingCount()).isEqualTo(1);
-        assertThat(materials.hasRoom(1)).isFalse();
-        // A drawn one goes: its ids free once no frame in flight reads them, and the waiting one draws.
-        long drawn = NodeHandle.NONE;
-        for (long node : nodes) {
-            drawn = sync.slotOf(node) >= 0 ? node : drawn;
-        }
-        renderables.remove(drawn);
-        update(scene, renderables, sync);
-        assertThat(sync.waitingCount()).isEqualTo(1);
-        for (int frame = 0; frame < slots.count(); frame++) {
-            slots.begin(frame);
-            slots.end();
-        }
-        update(scene, renderables, sync);
+        assertThat(sync.instanceCount()).isEqualTo(16);
         assertThat(sync.waitingCount()).isZero();
-        assertThat(sync.instanceCount()).isEqualTo(15);
-        // A drawn one changes its material with the table full: it waits for room too, keeping its mesh.
-        long changing = NodeHandle.NONE;
-        for (long node : nodes) {
-            changing = sync.slotOf(node) >= 0 ? node : changing;
-        }
+        assertThat(materials.count()).isEqualTo(17);
+        // A drawn one changes its material: drawn on with the new one, keeping its mesh and id.
+        long changing = nodes[3];
         int mesh = sync.meshOf(changing);
+        int slot = sync.slotOf(changing);
         renderables.setMaterials(changing,
             List.of(AssetRef.generated(RenderAssets.MATERIAL, GLOWS, new Glow(99, 0, 0), 9)));
         update(scene, renderables, sync);
-        assertThat(sync.slotOf(changing)).isEqualTo(-1);
-        assertThat(sync.waitingCount()).isEqualTo(1);
+        assertThat(sync.slotOf(changing)).isEqualTo(slot);
         assertThat(sync.meshOf(changing)).isEqualTo(mesh);
-        for (int frame = 0; frame < slots.count(); frame++) {
-            slots.begin(frame);
-            slots.end();
-        }
-        update(scene, renderables, sync);
-        assertThat(sync.slotOf(changing)).isNotNegative();
-        assertThat(sync.instanceCount()).isEqualTo(15);
     }
 
     @Test

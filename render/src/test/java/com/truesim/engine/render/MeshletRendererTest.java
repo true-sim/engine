@@ -903,14 +903,16 @@ class MeshletRendererTest {
             render();
             assertThat(channel(8, SIZE / 2 + 3, SIZE / 2 + 18))
                 .isCloseTo(flat, org.assertj.core.data.Offset.offset(2.0));
-            scene.setMaterials(null);
-            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(5, Material.DEFAULT));
-            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(-1, Material.DEFAULT));
-            for (int i = materials.count(); i < 8; i++) {
-                materials.add(new Material(MR.withMetallic(1).withEmissive(new Color(1, 0, 0, 1))
-                    .withEmissiveTexture(checker).withOrmTexture(tilted).withOcclusion(1)));
+            // Grown under it, ids and blocks: the table copied into bigger ones, the blocks moved up, the image the same.
+            int[] before = image();
+            for (int i = materials.count(); i < 40; i++) {
+                materials.add(new Material(MR.withRoughness(0.5f).withEmissive(new Color(0, 0, 1, 1))));
             }
-            assertThatIllegalStateException().isThrownBy(() -> materials.add(Material.DEFAULT));
+            render();
+            assertThat(image()).as("after the table grew").isEqualTo(before);
+            scene.setMaterials(null);
+            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(1000, Material.DEFAULT));
+            assertThatIllegalArgumentException().isThrownBy(() -> materials.set(-1, Material.DEFAULT));
             assertThatIllegalArgumentException().isThrownBy(() -> textures.color(4, 4, texels(2, (x, y) -> 0)));
             assertThatIllegalArgumentException().isThrownBy(() -> textures.data(0, 4, texels(2, (x, y) -> 0)));
             assertThatIllegalArgumentException().isThrownBy(() -> scene.set(0, quadMesh, -1, 0, 0, 0, 0,
@@ -1018,14 +1020,12 @@ class MeshletRendererTest {
             int a = materials.add(new Material(MR.withRoughness(0.1f)));
             int b = materials.add(new Material(MR.withRoughness(0.2f)));
             assertThat(materials.count()).isEqualTo(3);
-            assertThatIllegalStateException().isThrownBy(() -> materials.add(Material.DEFAULT));
             materials.remove(a);
             assertThat(materials.contains(a)).isFalse();
             assertThat(materials.count()).isEqualTo(2);
             assertThatIllegalArgumentException().isThrownBy(() -> materials.set(a, Material.DEFAULT));
             assertThatIllegalArgumentException().isThrownBy(() -> materials.remove(a));
             assertThatIllegalArgumentException().isThrownBy(() -> materials.remove(0)); // the default stays
-            assertThatIllegalStateException().isThrownBy(() -> materials.add(Material.DEFAULT)); // still in flight
             MemorySegment texels = arena.allocate(4 * 4 * 4);
             int slot = textures.color(4, 4, texels);
             int inUse = device.bindless().slotsInUse();

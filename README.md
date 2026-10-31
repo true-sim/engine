@@ -256,6 +256,9 @@ try (GeometryPool pool = new GeometryPool(device, slots);              // starts
 - **So does the instance table:** taking an id past a `GpuScene`'s capacity doubles it (or more); the instances are
   copied over on the GPU in the next frame, the old buffer freed once no frame reads it, and views' occlusion
   history grows along. `add` never runs out of ids.
+- **And the material table:** without ids in a row or room for blocks, `Materials` takes a table twice the size (or
+  more) holding what the old one holds, values changed in place included; frames in flight read the old one until
+  they finish. Scenes never wait for room.
 - **Meshes come and go:** `pool.remove(mesh)` frees a mesh's ranges and number for later meshes, first fit and
   deterministic, once no frame in flight can draw it (given the graph's `frameSlots()`). `Materials.remove` and
   `Textures.remove` do the same for material ids and bindless texture slots, so streamed content can be unloaded.
