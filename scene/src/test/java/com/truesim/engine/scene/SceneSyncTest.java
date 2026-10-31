@@ -713,7 +713,7 @@ class SceneSyncTest {
     }
 
     @Test
-    void renderablesBeyondTheRendererWaitForSlots() throws InterruptedException {
+    void renderablesBeyondTheTablesRoomGrowIt() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Renderables renderables = new Renderables(scene);
         SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
@@ -725,20 +725,12 @@ class SceneSyncTest {
         update(scene, renderables, sync);
         load();
         update(scene, renderables, sync);
-        assertThat(sync.instanceCount()).isEqualTo(INSTANCES);
-        assertThat(sync.waitingCount()).isEqualTo(2);
-        long drawn = nodes[nodes.length - 1];
-        long waiting = nodes[0];
-        assertThat(sync.slotOf(drawn)).isNotNegative();
-        assertThat(sync.slotOf(waiting)).isEqualTo(-1);
-        renderables.remove(drawn); // its slot goes to a waiting renderable
-        update(scene, renderables, sync);
-        assertThat(sync.instanceCount()).isEqualTo(INSTANCES);
-        assertThat(sync.waitingCount()).isEqualTo(1);
-        renderables.remove(waiting); // waiting renderables may go too
-        update(scene, renderables, sync);
+        assertThat(sync.instanceCount()).as("the instance table grew").isEqualTo(INSTANCES + 2);
         assertThat(sync.waitingCount()).isZero();
-        assertThat(sync.instanceCount()).isEqualTo(INSTANCES);
+        assertThat(sync.slotOf(nodes[nodes.length - 1])).isNotNegative();
+        renderables.remove(nodes[nodes.length - 1]);
+        update(scene, renderables, sync);
+        assertThat(sync.instanceCount()).isEqualTo(INSTANCES + 1);
         // A mesh change: drawn again with the new mesh once it loads.
         renderables.setMesh(nodes[2], SMALL);
         update(scene, renderables, sync);
@@ -1010,39 +1002,6 @@ class SceneSyncTest {
         assertThat(sync.slotOf(early)).isEqualTo(-1);
         assertThat(sync.slotOf(stays)).isZero();
         assertThat(sync.instanceCount()).isEqualTo(1);
-        // The renderer full, one waiting; a drawn one and the waiting one go in the same frame.
-        long[] nodes = new long[INSTANCES + 1];
-        nodes[0] = stays;
-        for (int i = 1; i < nodes.length; i++) {
-            nodes[i] = facing(scene, i, 0, -3);
-            renderables.set(nodes[i], SQUARE, List.of());
-        }
-        update(scene, renderables, sync);
-        assertThat(sync.waitingCount()).isEqualTo(1);
-        long waiting = NodeHandle.NONE;
-        for (long node : nodes) {
-            waiting = sync.slotOf(node) < 0 ? node : waiting;
-        }
-        renderables.remove(stays);
-        renderables.remove(waiting);
-        update(scene, renderables, sync);
-        assertThat(sync.waitingCount()).isZero();
-        assertThat(sync.instanceCount()).isEqualTo(INSTANCES - 1);
-        assertThat(sync.slotOf(waiting)).isEqualTo(-1);
-        // Waiting ones draw oldest first as slots free.
-        long first = facing(scene, 10, 0, -3);
-        long second = facing(scene, 11, 0, -3);
-        long third = facing(scene, 12, 0, -3);
-        renderables.set(first, SQUARE, List.of());
-        renderables.set(second, SQUARE, List.of());
-        renderables.set(third, SQUARE, List.of());
-        update(scene, renderables, sync);
-        assertThat(sync.slotOf(first)).isNotNegative();
-        assertThat(sync.waitingCount()).isEqualTo(2);
-        renderables.remove(first);
-        update(scene, renderables, sync);
-        assertThat(sync.slotOf(second)).isNotNegative();
-        assertThat(sync.slotOf(third)).isEqualTo(-1);
     }
 
     @Test

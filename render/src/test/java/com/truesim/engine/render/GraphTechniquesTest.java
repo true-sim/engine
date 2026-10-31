@@ -445,6 +445,46 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void aSceneGrowingWhileFramesAreInFlightKeepsItsInstances() {
+        // A scene with room for one instance grows as one is added every frame (behind the camera) while frames are in
+        // flight; the first, set once, is copied into each bigger table on the GPU and draws throughout, culled with
+        // occlusion, whose per-instance history grows along.
+        GpuBuffer[] readbacks = {GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+            GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)};
+        try (GpuScene growing = new GpuScene(device, pool, 1, graph.frameSlots());
+             MeshletRenderer drawing = new MeshletRenderer(device, growing, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots())) {
+            SceneGeometry geometry = SceneGeometry.meshlets(drawing);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            ViewPort port = graph.addView("main").size(SIZE, SIZE);
+            SceneView growingView = geometry.createView(port, camera, ViewOptions.of(256, 1 << 12).withOcclusion(true));
+            port.add(new ClusteredForwardShading(geometry, growingView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                    .clearColor(0, 0, 0))
+                .add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+            for (int frame = 0; frame < 8; frame++) {
+                graph.beginFrame();
+                if (frame == 0) {
+                    growing.set(0, quad, 1, 0, -3, HALF, 0, 0, HALF, 0.5f, 0.5f, 0.5f);
+                } else {
+                    growing.add(quad, 0, 1, true, 0, 0, 5, 0, 0, 0, 1, 1, 1, 1); // behind the camera
+                }
+                growingView.set(1, MeshletRenderer.MODE_WHITE);
+                graph.submit(0, 0);
+            }
+            device.waitIdle();
+            assertThat(litColumn(readbacks[1])).as("the first instance, set once").isGreaterThan(SIZE / 2.0 + 4);
+            assertThat(litColumn(readbacks[0])).isGreaterThan(SIZE / 2.0 + 4);
+            assertThat(growing.count()).isEqualTo(8);
+            assertThat(growing.capacity()).isGreaterThanOrEqualTo(8);
+        } finally {
+            device.waitIdle();
+            for (GpuBuffer readback : readbacks) {
+                readback.close();
+            }
+        }
+    }
+
+    @Test
     void meshesAddedWhileFramesAreInFlightDrawTheirFirstFrame() {
         // Every frame a mesh is added (and the one from two frames before removed) while frames are in flight, and the
         // quad draws with it at once: the upload is staged without waiting and recorded first thing in the frame.

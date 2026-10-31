@@ -276,8 +276,8 @@ public final class SceneSync implements AutoCloseable {
     }
 
     /**
-     * Renderables ready to draw that the instance table has no id for, or the material table no room for their
-     * materials: they draw as room frees.
+     * Renderables ready to draw that the material table has no room for their materials for: they draw as room
+     * frees.
      */
     public int waitingCount() {
         int count = 0;
@@ -460,10 +460,7 @@ public final class SceneSync implements AutoCloseable {
 
     /** Draws {@code item}, a live renderable's whose mesh is on the GPU: the lowest free instance id, its materials. */
     private boolean tryShow(int item) {
-        int slot = gpu.freeId();
-        if (slot < 0) {
-            return false; // the instance table is full (maybe by other scenes'): drawn when an id frees
-        }
+        int slot = gpu.freeId(); // the table grows if it is full
         SceneResources.Mesh mesh = itemMesh[item].mesh;
         SceneResources.MaterialSet set = resources.acquireSet(renderables.materials(itemNode[item]),
             mesh.data.materialSlots());

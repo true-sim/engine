@@ -49,7 +49,8 @@ public final class RenderView implements AutoCloseable {
     private final GpuBuffer expandCommand;
     private final GpuBuffer drawCommand;
     private final GpuBuffer drawCount; // the early (or only) phase's, then the late one's
-    private final GpuBuffer visibility; // per instance, 1 if visible the last time the late phase looked; or null
+    private GpuBuffer visibility; // per instance, 1 if visible the last time the late phase looked; or null
+    private boolean visibilityGrown; // replaced by a bigger one, cleared at the next cull
     private final VulkanDevice device;
     private GpuBuffer frameIndices; // the indexed path's, made when it first draws
     // The lists as imported buffers of the frame graph, which the culling and drawing passes declare.
@@ -245,6 +246,32 @@ public final class RenderView implements AutoCloseable {
         putInt(ViewLayout.OUTPUT_SIZE, width);
         putInt(ViewLayout.OUTPUT_SIZE + 4, height);
         return this;
+    }
+
+    /**
+     * Grows the visibility to the scene's ids, as the scene grew: a bigger buffer, cleared at the next cull (nothing
+     * visible yet, as when the view was made), the old one retired.
+     */
+    void followInstances() {
+        long bytes = 4L * renderer.scene().capacity();
+        if (visibility == null || visibility.size() >= bytes) {
+            return;
+        }
+        renderer.retire(visibility);
+        visibility = GpuBuffer.deviceLocal(device, bytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        visibilityImport.set(visibility);
+        putLong(ViewLayout.VISIBILITY, visibility.deviceAddress());
+        visibilityGrown = true;
+    }
+
+    /** Clears a visibility grown since the last cull, with the cull's resets (whose barrier orders it). */
+    void clearGrownVisibility(org.lwjgl.vulkan.VkCommandBuffer commands) {
+        if (visibilityGrown) {
+            visibilityGrown = false;
+            Commands.fillBuffer(commands, visibility.handle(), 0, visibility.size(), 0);
+        }
     }
 
     void putInt(long offset, int value) {

@@ -596,8 +596,12 @@ class MeshletRendererTest {
                 assertThat(small.freeId()).isEqualTo(i);
                 assertThat(small.add(quad, 0, 1, true, i, 0, -5, 0, 0, 0, 1, 1, 1, 1)).isEqualTo(i);
             }
-            assertThat(small.add(quad, 0, 1, true, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1)).as("full").isEqualTo(-1);
-            assertThat(small.freeId()).isEqualTo(-1);
+            assertThat(small.freeId()).as("full: the next id grows it").isEqualTo(3);
+            assertThat(small.add(quad, 0, 1, true, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1)).isEqualTo(3);
+            assertThat(small.capacity()).isEqualTo(6);
+            small.set(9, quad, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1); // past it: grown to hold it
+            assertThat(small.capacity()).isEqualTo(12);
+            small.removeFrom(3);
             assertThat(small.count()).isEqualTo(3);
             assertThat(small.highWater()).isEqualTo(3);
             small.remove(1);
@@ -617,7 +621,6 @@ class MeshletRendererTest {
             assertThatIllegalArgumentException().isThrownBy(() -> small.set(0, 99, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1));
             assertThatIllegalArgumentException().isThrownBy(() -> small.set(0, quad, -1, 0f, 0, 0, 0, 0, 0, 1, 1, 1,
                 1));
-            assertThatIllegalArgumentException().isThrownBy(() -> small.set(3, quad, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1));
             small.close();
             small.close();
         }
@@ -1049,8 +1052,6 @@ class MeshletRendererTest {
 
     @Test
     void misuseIsChecked() {
-        assertThatIllegalArgumentException().isThrownBy(() -> scene.set(256, quad, 0, 0, 0, 0, 0, 0, 1, 1,
-            1, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> scene.set(0, 5, 0, 0, 0, 0, 0, 0, 1, 1, 1,
             1));
         assertThatIllegalArgumentException().isThrownBy(() -> new GpuScene(device, pool, 0));

@@ -253,6 +253,9 @@ try (GeometryPool pool = new GeometryPool(device, slots);              // starts
   reads it; the mesh table grows alike, and ray tracing's and classic LOD's per-mesh data follow. Nothing waits, and
   the graph rebuilds once for the new sizes. A capacity given to the constructor is only where it starts
   (`GeometryPool.START` without one); give one sized for the content to skip the growing.
+- **So does the instance table:** taking an id past a `GpuScene`'s capacity doubles it (or more); the instances are
+  copied over on the GPU in the next frame, the old buffer freed once no frame reads it, and views' occlusion
+  history grows along. `add` never runs out of ids.
 - **Meshes come and go:** `pool.remove(mesh)` frees a mesh's ranges and number for later meshes, first fit and
   deterministic, once no frame in flight can draw it (given the graph's `frameSlots()`). `Materials.remove` and
   `Textures.remove` do the same for material ids and bindless texture slots, so streamed content can be unloaded.
