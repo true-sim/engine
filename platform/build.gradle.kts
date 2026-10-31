@@ -11,7 +11,7 @@ val lwjglNatives: List<String> by rootProject.extra
 dependencies {
     api(platform("org.lwjgl:lwjgl-bom:$lwjglVersion"))
     api("org.lwjgl:lwjgl")
-    api("org.lwjgl:lwjgl-sdl")
+    implementation("org.lwjgl:lwjgl-sdl")
     for (natives in lwjglNatives) {
         runtimeOnly("org.lwjgl:lwjgl::$natives")
         runtimeOnly("org.lwjgl:lwjgl-sdl::$natives")

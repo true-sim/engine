@@ -1,10 +1,5 @@
 package com.truesim.engine.vulkan;
 
-import static org.lwjgl.sdl.SDLInit.SDL_INIT_VIDEO;
-import static org.lwjgl.sdl.SDLInit.SDL_WasInit;
-import static org.lwjgl.sdl.SDLVideo.SDL_GetCurrentVideoDriver;
-import static org.lwjgl.sdl.SDLVulkan.SDL_Vulkan_CreateSurface;
-import static org.lwjgl.sdl.SDLVulkan.SDL_Vulkan_GetInstanceExtensions;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
 import static org.lwjgl.vulkan.EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
@@ -110,15 +105,12 @@ public final class VulkanInstance implements AutoCloseable {
             Set<String> available = instanceExtensions();
             List<String> extensions = new ArrayList<>();
             if (builder.surfaces) {
-                // SDL crashes when asked before its video subsystem runs, so check first.
-                PointerBuffer required = SDL_WasInit(SDL_INIT_VIDEO) != 0 ? SDL_Vulkan_GetInstanceExtensions() : null;
-                if (required == null) {
-                    throw new VulkanException("Surfaces need a running Platform (SDL video)");
+                String driver = com.truesim.engine.platform.Platform.runningVideoDriver();
+                if (driver == null) {
+                    throw new VulkanException("Surfaces need a running Platform");
                 }
-                for (int i = 0; i < required.remaining(); i++) {
-                    extensions.add(required.getStringUTF8(i));
-                }
-                addHeadlessSurface(SDL_GetCurrentVideoDriver(), available, extensions);
+                extensions.addAll(com.truesim.engine.platform.Platform.vulkanInstanceExtensions());
+                addHeadlessSurface(driver, available, extensions);
             }
             boolean layer = builder.validation && layers().contains(VALIDATION_LAYER);
             if (builder.validation && !layer) {
@@ -451,13 +443,10 @@ public final class VulkanInstance implements AutoCloseable {
         if (!surfaces) {
             throw new IllegalStateException("This instance was built without surfaces");
         }
-        try (MemoryStack stack = stackPush()) {
-            LongBuffer surface = stack.mallocLong(1);
-            if (!SDL_Vulkan_CreateSurface(window.handle(), handle, null, surface)) {
-                throw new VulkanException("Could not create a surface for " + window + ": "
-                    + org.lwjgl.sdl.SDLError.SDL_GetError());
-            }
-            return new Surface(this, window, surface.get(0));
+        try {
+            return new Surface(this, window, window.createVulkanSurface(handle.address()));
+        } catch (com.truesim.engine.platform.PlatformException e) {
+            throw new VulkanException("Could not create a surface for " + window + ": " + e.getMessage());
         }
     }
 

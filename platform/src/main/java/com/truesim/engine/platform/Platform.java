@@ -75,6 +75,14 @@ import static org.lwjgl.sdl.SDLInit.SDL_INIT_JOYSTICK;
 import static org.lwjgl.sdl.SDLInit.SDL_INIT_SENSOR;
 import static org.lwjgl.sdl.SDLInit.SDL_INIT_VIDEO;
 import static org.lwjgl.sdl.SDLInit.SDL_Init;
+import static org.lwjgl.sdl.SDLInit.SDL_WasInit;
+import static org.lwjgl.sdl.SDLMouse.SDL_CursorVisible;
+import static org.lwjgl.sdl.SDLMouse.SDL_HideCursor;
+import static org.lwjgl.sdl.SDLMouse.SDL_ShowCursor;
+import static org.lwjgl.sdl.SDLVideo.SDL_DisableScreenSaver;
+import static org.lwjgl.sdl.SDLVideo.SDL_EnableScreenSaver;
+import static org.lwjgl.sdl.SDLVideo.SDL_ScreenSaverEnabled;
+import static org.lwjgl.sdl.SDLVulkan.SDL_Vulkan_GetInstanceExtensions;
 import static org.lwjgl.sdl.SDLInit.SDL_Quit;
 import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoystickNameForID;
 import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoystickProductForID;
@@ -204,6 +212,11 @@ public final class Platform implements AutoCloseable {
         }
     }
 
+    /** The video driver of the platform running, or {@code null} before one has started video. Safe from any thread. */
+    public static String runningVideoDriver() {
+        return SDL_WasInit(SDL_INIT_VIDEO) == 0 ? null : SDL_GetCurrentVideoDriver();
+    }
+
     /** The video driver in use, e.g. {@code windows}, {@code wayland}, {@code x11}, {@code cocoa} or {@code offscreen}. */
     public String videoDriver() {
         checkThread();
@@ -218,6 +231,24 @@ public final class Platform implements AutoCloseable {
         checkThread();
         Window window = new Window(this, options);
         windows.add(window);
+        return window;
+    }
+
+    /**
+     * Opens a window as {@code options} say, then changed to {@code settings} (saved preferences, say) before it shows.
+     */
+    @AllowAllocation("opening a window")
+    public Window createWindow(WindowOptions options, WindowSettings settings) {
+        Window window = createWindow(options.withHidden(true));
+        try {
+            window.apply(settings);
+            if (!options.hidden()) {
+                window.show();
+            }
+        } catch (RuntimeException e) {
+            window.close();
+            throw e;
+        }
         return window;
     }
 
@@ -272,6 +303,107 @@ public final class Platform implements AutoCloseable {
             SDL_free(ids);
         }
         return List.copyOf(displays);
+    }
+
+    /**
+     * The key {@link WindowSettings#display()} names display {@code id} by, stable from run to run: its name, or with
+     * displays of the same name (identical monitors), its name and its place among them left to right, top to bottom
+     * from 1 ({@code "DELL U2720Q #2"}).
+     */
+    @AllowAllocation("a snapshot")
+    public String displayKey(int id) {
+        checkThread();
+        String name = SDL_GetDisplayName(id);
+        if (name == null) {
+            return "";
+        }
+        List<Display> same = new ArrayList<>();
+        for (Display display : displays()) {
+            if (name.equals(display.name())) {
+                same.add(display);
+            }
+        }
+        if (same.size() < 2) {
+            return name;
+        }
+        same.sort(java.util.Comparator.comparingInt((Display d) -> d.bounds().x()).thenComparingInt(d -> d.bounds().y()));
+        for (int i = 0; i < same.size(); i++) {
+            if (same.get(i).id() == id) {
+                return name + " #" + (i + 1);
+            }
+        }
+        return name;
+    }
+
+    /** The id of the display {@code key} names ({@link #displayKey}): the primary one if empty or none has it. */
+    @AllowAllocation("a snapshot")
+    int displayNamed(String key) {
+        if (!key.isEmpty()) {
+            for (Display display : displays()) {
+                if (key.equals(displayKey(display.id()))) {
+                    return display.id();
+                }
+            }
+            for (Display display : displays()) { // a monitor of that name, wherever it went
+                if (key.startsWith(display.name())) {
+                    return display.id();
+                }
+            }
+        }
+        return SDL_GetPrimaryDisplay();
+    }
+
+    // ---------------------------------------------------------------- cursor and screen
+
+    /** Shows or hides the mouse cursor, over every window. */
+    public void setCursorVisible(boolean visible) {
+        checkThread();
+        if (visible) {
+            SDL_ShowCursor();
+        } else {
+            SDL_HideCursor();
+        }
+    }
+
+    public boolean isCursorVisible() {
+        checkThread();
+        return SDL_CursorVisible();
+    }
+
+    /** Keeps the screen saver and display sleep off while the platform runs (SDL's default), or lets them be. */
+    public void setKeepScreenOn(boolean on) {
+        checkThread();
+        if (on) {
+            SDL_DisableScreenSaver();
+        } else {
+            SDL_EnableScreenSaver();
+        }
+    }
+
+    public boolean keepScreenOn() {
+        checkThread();
+        return !SDL_ScreenSaverEnabled();
+    }
+
+    /**
+     * The Vulkan instance extensions windows need for their surfaces, or none before a platform has started video.
+     * Safe from any thread.
+     */
+    @AllowAllocation("a snapshot")
+    public static List<String> vulkanInstanceExtensions() {
+        // SDL crashes when asked before its video subsystem runs, so check first.
+        if (SDL_WasInit(SDL_INIT_VIDEO) == 0) {
+            return List.of();
+        }
+        PointerBuffer names = SDL_Vulkan_GetInstanceExtensions();
+        if (names == null) {
+            return List.of();
+        }
+        List<String> list = new ArrayList<>();
+        for (int i = 0; i < names.remaining(); i++) {
+            list.add(names.getStringUTF8(i));
+        }
+        return List.copyOf(list);
     }
 
     @AllowAllocation("a snapshot")

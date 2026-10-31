@@ -30,6 +30,7 @@ import static org.lwjgl.sdl.SDLEvents.SDL_PushEvent;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -320,6 +321,12 @@ class PlatformTest {
             assertThat(mode.displayId()).isEqualTo(primary.id());
             assertThat(mode.width()).isPositive();
         }
+        // Settings name displays by key: each found again by its own, the primary by none.
+        for (Display display : displays) {
+            assertThat(platform.displayNamed(platform.displayKey(display.id()))).isEqualTo(display.id());
+        }
+        assertThat(platform.displayNamed("")).isEqualTo(primary.id());
+        assertThat(platform.displayNamed("no such monitor")).isEqualTo(primary.id());
     }
 
     // ---------------------------------------------------------------- windows
@@ -358,7 +365,7 @@ class PlatformTest {
         assertThat(platform.windows()).containsExactly(window, second);
         assertThat(platform.window(window.id())).isSameAs(window);
         assertThat(platform.window(-1)).isNull();
-        assertThat(window.handle()).isNotZero();
+        assertThat(window.handle()).isNotZero(); // inside the platform only
         assertThat(window.toString()).isEqualTo("Window " + window.id());
         assertThat(window.title()).isEqualTo("first");
         window.setTitle("renamed");
@@ -422,6 +429,123 @@ class PlatformTest {
         assertThat(window.fullscreenMode().width()).isEqualTo(display.desktop().width());
         window.windowed();
         window.sync();
+    }
+
+    @Test
+    void windowSettingsSaveAndLoad() {
+        WindowSettings defaults = WindowSettings.defaults();
+        assertThat(defaults.mode()).isEqualTo(WindowMode.WINDOWED);
+        assertThat(defaults.centered()).isTrue();
+        assertThat(defaults.keepScreenOn()).as("SDL's default").isTrue();
+        WindowSettings custom = defaults.withMode(WindowMode.EXCLUSIVE_FULLSCREEN).withDisplay("Second screen")
+            .withWidth(1600).withHeight(900).withCentered(false).withX(-20).withY(30).withFullscreenWidth(2560)
+            .withFullscreenHeight(1440).withRefreshRate(143.9f).withMaximized(true).withResizable(false)
+            .withBordered(false).withAlwaysOnTop(true).withFocusable(false).withOpacity(0.75f).withMinWidth(320)
+            .withMinHeight(200).withMaxWidth(3840).withMaxHeight(2160).withMinAspect(1).withMaxAspect(2.5f)
+            .withMouseGrab(true).withKeyboardGrab(true).withRelativeMouse(true).withCursorVisible(false)
+            .withKeepScreenOn(false);
+        Map<String, String> saved = custom.toMap();
+        assertThat(saved).hasSize(27).containsEntry("mode", "EXCLUSIVE_FULLSCREEN").containsEntry("width", "1600");
+        assertThat(WindowSettings.fromMap(saved)).as("read back").isEqualTo(custom);
+        // Saved by another version: unknown keys ignored, missing or unreadable ones default.
+        Map<String, String> old = new java.util.HashMap<>(Map.of("width", " 1024 ", "height", "oops",
+            "mode", "SOMETHING_NEW", "bordered", "maybe", "hdr", "true"));
+        WindowSettings loaded = WindowSettings.fromMap(old);
+        assertThat(loaded.width()).isEqualTo(1024);
+        assertThat(loaded).isEqualTo(defaults.withWidth(1024));
+        assertThat(WindowSettings.fromMap(Map.of("width", "0"))).as("out of range: the default")
+            .isEqualTo(defaults);
+        assertThatIllegalArgumentException().isThrownBy(() -> defaults.withWidth(0));
+        assertThatIllegalArgumentException().isThrownBy(() -> defaults.withOpacity(1.5f));
+        assertThatIllegalArgumentException().isThrownBy(() -> defaults.withMinAspect(-1));
+    }
+
+    @Test
+    void windowSettingsChangeALiveWindowAndReadBack() {
+        boolean full = !platform.videoDriver().equals("offscreen"); // offscreen keeps decorations and stacking to itself
+        WindowSettings wanted = WindowSettings.defaults().withWidth(800).withHeight(600).withCentered(false).withX(40)
+            .withY(60).withBordered(false).withAlwaysOnTop(true).withMinWidth(200).withMinHeight(100)
+            .withMaxWidth(1600).withMaxHeight(1200).withMinAspect(1).withMaxAspect(2).withOpacity(0.5f)
+            .withKeepScreenOn(false);
+        Window window = platform.createWindow(WindowOptions.of("settings", 640, 480).withHidden(true)
+            .withVulkan(false), wanted);
+        window.sync();
+        WindowSettings now = window.settings();
+        assertThat(now.mode()).isEqualTo(WindowMode.WINDOWED);
+        assertThat(now.width()).isEqualTo(800);
+        assertThat(now.height()).isEqualTo(600);
+        assertThat(now.minWidth()).isEqualTo(200);
+        assertThat(now.maxHeight()).isEqualTo(1200);
+        assertThat(now.keepScreenOn()).isFalse();
+        assertThat(platform.keepScreenOn()).isFalse();
+        if (full) {
+            assertThat(now.bordered()).isFalse();
+            assertThat(now.alwaysOnTop()).isTrue();
+            assertThat(now.minAspect()).isEqualTo(1);
+            assertThat(now.maxAspect()).isEqualTo(2);
+        }
+        assertThat(WindowSettings.fromMap(now.toMap())).as("what it is now, saved and read back").isEqualTo(now);
+        // Changed again while open: back to the defaults, and the screen saver allowed again.
+        window.apply(WindowSettings.defaults().withKeepScreenOn(true));
+        window.sync();
+        assertThat(window.width()).isEqualTo(1280);
+        assertThat(window.isBordered()).isTrue();
+        assertThat(platform.keepScreenOn()).isTrue();
+        assertThat(window.minimumSize()).containsExactly(0, 0);
+        // Borderless fullscreen through settings keeps the windowed size for later.
+        window.apply(window.settings().withMode(WindowMode.BORDERLESS_FULLSCREEN));
+        window.sync();
+        assertThat(window.settings().width()).as("its windowed width, kept").isEqualTo(1280);
+        window.apply(window.settings().withMode(WindowMode.WINDOWED));
+        window.sync();
+        assertThat(window.width()).isEqualTo(1280);
+        // The operations behind the settings, and those without one.
+        window.setOpacity(1);
+        assertThat(window.opacity()).isBetween(0f, 1f);
+        assertThatIllegalArgumentException().isThrownBy(() -> window.setOpacity(2));
+        window.setFocusable(false);
+        window.setFocusable(true);
+        assertThat(window.isFocusable()).isTrue();
+        window.setMouseGrab(false);
+        window.setKeyboardGrab(false);
+        window.setRelativeMouse(false);
+        assertThat(window.isMouseGrabbed()).isFalse();
+        assertThat(window.isKeyboardGrabbed()).isFalse();
+        assertThat(window.isRelativeMouse()).isFalse();
+        platform.setCursorVisible(true);
+        assertThat(platform.isCursorVisible()).isTrue();
+        window.maximize();
+        window.restore();
+        window.minimize();
+        window.restore();
+        window.sync();
+        assertThat(window.isMinimized()).isFalse();
+        window.flash(false);
+        window.flash(true);
+        window.flash(null);
+        for (WindowProgress progress : WindowProgress.values()) {
+            window.setProgress(progress, 0.5f);
+        }
+        java.nio.ByteBuffer icon = org.lwjgl.system.MemoryUtil.memCalloc(4 * 2 * 2);
+        try {
+            window.setIcon(2, 2, icon);
+            assertThatIllegalArgumentException().isThrownBy(() -> window.setIcon(4, 4, icon));
+        } finally {
+            org.lwjgl.system.MemoryUtil.memFree(icon);
+        }
+        Window dialog = platform.createWindow(WindowOptions.of("dialog", 200, 100).withHidden(true).withVulkan(false));
+        dialog.setParent(window);
+        dialog.setModal(true);
+        dialog.setModal(false);
+        dialog.setParent(null);
+        dialog.close();
+        window.close();
+    }
+
+    @Test
+    void theVulkanSurfaceExtensionsComeFromThePlatform() {
+        assertThat(Platform.runningVideoDriver()).isEqualTo(platform.videoDriver());
+        assertThat(Platform.vulkanInstanceExtensions()).contains("VK_KHR_surface");
     }
 
     @Test
