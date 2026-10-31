@@ -586,6 +586,10 @@ that declare how they use each image. The graph does the rest:
   equal requests are shared whichever view makes them. `g.view()`, `g.require(view, key)` and `g.requireAll(key)`
   cross between views, and a view's histories are its own. The scene's techniques of a view (shading, light binning,
   shadows) take a `SceneView`, which ties the port to the scene's camera and the `RenderView` its culling draws.
+  `graph.addPerView(port -> technique)` gives every view, now and later, a technique of its own, and a view drops one
+  by id (`port.remove(id)`). A view owns what is made for it (`port.own(resource)`, its render view among them),
+  closed when it is removed or the graph closes. `SceneViews` does both for the scene: `addPerView(view -> ...)`
+  factories, and `add(name, camera, options)` making the port, its render view and its techniques at once.
 - **Culled:** walking back from the outputs, passes whose images and buffers nothing needs are dropped.
 - **Synchronized:** barriers and layout transitions come from the declared accesses, batched into one call per pass,
   with none between reads.

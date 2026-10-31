@@ -1144,6 +1144,36 @@ class GraphTechniquesTest {
         }
     }
 
+    @Test
+    void sceneViewsGiveEveryViewItsTechniquesAndCloseTheirRenderViews() {
+        // Views made through SceneViews: each gets the shading every view gets, and its render view goes with it.
+        scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
+        scene.removeFrom(1);
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        SceneViews views = new SceneViews(graph, geometry)
+            .addPerView(v -> new ClusteredForwardShading(geometry, v, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                .occlusion(false).clearColor(0, 0, 1));
+        Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        SceneView main = views.add("main", camera, ViewOptions.of(256, 1 << 12)).set(1, MeshletRenderer.MODE_WHITE);
+        main.port().size(SIZE, SIZE).output(Keys.SCENE_COLOR, output);
+        SceneView side = views.add("side", camera, ViewOptions.of(256, 1 << 12)).set(1, MeshletRenderer.MODE_WHITE);
+        side.port().size(SIZE / 2, SIZE / 2);
+        frame();
+        assertThat(red(SIZE / 2, SIZE / 2)).as("the main view's shading").isEqualTo(1);
+        assertThat(views.views()).containsExactly(main, side);
+        assertThat(renderer.views()).contains(main.view(), side.view());
+        // A view removed: its port leaves the graph, and its render view closes.
+        views.remove(side);
+        assertThat(graph.views()).containsExactly(main.port());
+        assertThat(renderer.views()).contains(main.view()).doesNotContain(side.view());
+        frame();
+        assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
+        // The graph closing closes the render views its ports own.
+        graph.close();
+        assertThat(renderer.views()).doesNotContain(main.view());
+        graph = new FrameGraph(device, 2);
+    }
+
     /** The meshlets {@code view} drew in the early phase of the last frame. */
     private static int early(RenderView view) {
         return view.drawCount().memory().get(ValueLayout.JAVA_INT, 0);

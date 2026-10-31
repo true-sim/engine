@@ -50,10 +50,11 @@ public final class SceneGeometry {
 
     /**
      * A new view of the geometry's instances ({@link #createView(ViewOptions)}) for {@code port}, looking through
-     * {@code camera}: what the scene's techniques of the port take.
+     * {@code camera}: what the scene's techniques of the port take. The port owns the render view: it closes when the
+     * port is removed or its graph closes.
      */
     public SceneView createView(ViewPort port, Camera camera, ViewOptions options) {
-        return new SceneView(port, createView(options), camera);
+        return new SceneView(port, port.own(createView(options)), camera);
     }
 
     /** The renderer whose scene and views the providers draw. */

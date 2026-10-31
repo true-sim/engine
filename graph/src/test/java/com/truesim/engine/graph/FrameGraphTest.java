@@ -729,6 +729,50 @@ class FrameGraphTest {
     }
 
     @Test
+    void perViewTechniquesGoToEveryViewAndViewsCloseWhatTheyOwn() {
+        com.truesim.common.graph.Id<Technique> id = com.truesim.common.graph.Id.of("test.fill", Technique.class);
+        List<String> made = new java.util.ArrayList<>();
+        ViewPort main = graph.addView("main");
+        graph.addPerView(view -> {
+            made.add(view.name());
+            Fill red = new Fill(OUT, SIZE, 1, 0, 0, 1);
+            return new Technique() {
+                @Override
+                public List<Key<?>> provides() {
+                    return red.provides();
+                }
+
+                @Override
+                public void build(GraphBuilder g) {
+                    red.build(g);
+                }
+
+                @Override
+                public com.truesim.common.graph.Id<Technique> id() {
+                    return id;
+                }
+            };
+        });
+        ViewPort side = graph.addView("side");
+        assertThat(made).as("one for the view there, one for the view added").containsExactly("main", "side");
+        main.output(OUT, output);
+        assertThat(frame()[0]).isEqualTo(RED);
+        // A view drops one by id, and takes another.
+        main.remove(id).add(new Fill(OUT, SIZE, 0, 0, 1, 1));
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        // What a view owns closes with it, newest first, and with the graph.
+        List<String> closed = new java.util.ArrayList<>();
+        side.own(() -> closed.add("side, first"));
+        side.own(() -> closed.add("side, second"));
+        main.own(() -> closed.add("main"));
+        graph.removeView(side);
+        assertThat(closed).containsExactly("side, second", "side, first");
+        graph.close();
+        assertThat(closed).endsWith("main");
+        graph = new FrameGraph(device, 2);
+    }
+
+    @Test
     void aTechniqueThatWouldBuildDifferentlyRebuildsTheGraph() {
         long[] version = {1};
         Fill red = new Fill(OUT, SIZE, 1, 0, 0, 1);

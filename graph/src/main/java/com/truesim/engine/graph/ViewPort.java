@@ -1,6 +1,7 @@
 package com.truesim.engine.graph;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.common.graph.Id;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -27,6 +28,7 @@ public final class ViewPort {
     private final String name;
     final List<Technique> techniques = new ArrayList<>();
     final Map<Key<Image>, ExternalImage> outputs = new LinkedHashMap<>();
+    private final List<AutoCloseable> owned = new ArrayList<>();
     private int width;
     private int height;
 
@@ -95,6 +97,48 @@ public final class ViewPort {
         List<Key<?>> keys = technique.provides();
         techniques.removeIf(t -> t.provides().stream().anyMatch(keys::contains));
         return add(technique);
+    }
+
+    /** Removes the view's technique whose {@link Technique#id() id} is {@code id}, if it has one; the graph rebuilds. */
+    public ViewPort remove(Id<? extends Technique> id) {
+        Objects.requireNonNull(id, "id");
+        if (techniques.removeIf(t -> t.id() == id)) {
+            graph.changed();
+        }
+        return this;
+    }
+
+    /**
+     * Gives the view {@code resource}, made for it (its culling lists, say): closed when the view is removed or its
+     * graph closes, in the reverse order given. Closed at once, while frames may be in flight: a resource that frames
+     * read must retire what they use itself, as a renderer's view does.
+     */
+    public <T extends AutoCloseable> T own(T resource) {
+        owned.add(Objects.requireNonNull(resource, "resource"));
+        return resource;
+    }
+
+    /** Closes what the view owns, newest first; the first failure is thrown once all were tried. */
+    void closeOwned() {
+        IllegalStateException failure = null;
+        for (int i = owned.size() - 1; i >= 0; i--) {
+            AutoCloseable resource = owned.get(i);
+            try {
+                resource.close();
+            } catch (Exception e) {
+                IllegalStateException wrapped = new IllegalStateException("Could not close " + resource + " of " + this,
+                    e);
+                if (failure == null) {
+                    failure = wrapped;
+                } else {
+                    failure.addSuppressed(wrapped);
+                }
+            }
+        }
+        owned.clear();
+        if (failure != null) {
+            throw failure;
+        }
     }
 
     /** Removes a technique of this view, if it is one; the graph rebuilds on its next frame. */

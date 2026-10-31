@@ -58,7 +58,6 @@ import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.ShaderModule;
 import com.truesim.engine.vulkan.VulkanDevice;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
@@ -145,7 +144,6 @@ public final class MeshletRenderer implements AutoCloseable {
     private final GpuScene scene;
     private final GeometryPool pool;
     private final Bindless bindless;
-    private final FrameSlots slots;
     private final int maxChunks;
     private final Pipeline instancesPass;
     private final Pipeline cull;
@@ -160,16 +158,10 @@ public final class MeshletRenderer implements AutoCloseable {
     private final Pipeline[] idsMesh;
     private final GpuBuffer chunks;
     private final GpuBuffer chunkCommand;
-    private final List<RenderView> views = new ArrayList<>();
-    private final java.util.BitSet indices = new java.util.BitSet(); // those of the open views
-    // The views' addresses, by index, for the culling passes; and the rows the instance pass culls (a view and its
-    // phase each). Both grow as views are made; the old ones go once no frame in flight reads them.
-    private FrameBuffer viewConstants; // the views' Views, one after another, by index
-    private GpuBuffer rows;
+    private final RenderViews views; // the open views, their constants array and culled rows
     // The culling's buffers as imported buffers of the frame graph, which the culling passes declare.
     private final ExternalBuffer chunksImport;
     private final ExternalBuffer chunkCommandImport;
-    private final ExternalBuffer rowsImport;
     private final Retiring retiring; // the old tables, rows and view lists, until no frame reads them
     // Read only: a frame graph may record passes on several threads at once, so recording changes no field.
     private static final boolean[] NOT_EARLY = {false};
@@ -200,7 +192,7 @@ public final class MeshletRenderer implements AutoCloseable {
         this.scene = Objects.requireNonNull(scene, "scene");
         this.pool = scene.pool();
         this.bindless = device.bindless();
-        this.slots = Objects.requireNonNull(slots, "slots");
+        Objects.requireNonNull(slots, "slots");
         this.maxChunks = chunks;
         this.retiring = new Retiring(slots);
         try (ShaderModule instanceShader = ShaderModule.load(device, "shaders/meshlets/instances.spv");
@@ -266,11 +258,9 @@ public final class MeshletRenderer implements AutoCloseable {
         this.chunks = GpuBuffer.deviceLocal(device, 16L * chunks, storage);
         chunkCommand = GpuBuffer.deviceLocal(device, 16,
             storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        viewConstants = FrameBuffer.create(device, 4L * RenderView.BYTES, storage, slots);
-        rows = GpuBuffer.deviceLocal(device, 8L * 4, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        views = new RenderViews(device, slots, retiring);
         chunksImport = new ExternalBuffer("meshlet chunks", this.chunks);
         chunkCommandImport = new ExternalBuffer("chunk command", chunkCommand);
-        rowsImport = new ExternalBuffer("culled rows", rows);
     }
 
     /**
@@ -279,16 +269,10 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public RenderView createView(ViewOptions options) {
         checkOpen();
-        int index = indices.nextClearBit(0);
-        if ((long) RenderView.BYTES * (index + 1) > viewConstants.size()) {
-            grow(2 * (index + 1));
-        }
-        RenderView view = new RenderView(device, this, options, index, slots);
+        RenderView view = views.create(this, options);
         if (path() == Path.INDEXED) {
             view.frameIndices(); // the indexed path draws it; on mesh shaders no view has one
         }
-        views.add(view);
-        indices.set(index);
         return view;
     }
 
@@ -299,25 +283,6 @@ public final class MeshletRenderer implements AutoCloseable {
     @AllowAllocation("closing a view")
     void removeView(RenderView view) {
         views.remove(view);
-        indices.clear(view.index());
-        view.freeBuffers(retiring);
-    }
-
-    /**
-     * Makes room for {@code capacity} views: a bigger view constants array holding the views' entries, and rows; the
-     * old ones kept until no frame reads them.
-     */
-    private void grow(int capacity) {
-        int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-        retire(viewConstants);
-        retire(rows);
-        FrameBuffer old = viewConstants;
-        viewConstants = FrameBuffer.create(device, (long) RenderView.BYTES * capacity, storage, slots);
-        viewConstants.copyFrom(old);
-        rows = GpuBuffer.deviceLocal(device, 8L * capacity, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        if (rowsImport != null) {
-            rowsImport.set(rows); // a new size: the graph rebuilds
-        }
     }
 
     /** Has {@code resource} freed once no frame in flight reads it. */
@@ -327,7 +292,7 @@ public final class MeshletRenderer implements AutoCloseable {
 
     /** The views' entries ({@link RenderView#BYTES} each, by {@link RenderView#index()}): the view constants array. */
     FrameBuffer viewConstants() {
-        return viewConstants;
+        return views.constants();
     }
 
     /**
@@ -336,12 +301,12 @@ public final class MeshletRenderer implements AutoCloseable {
      * made, so a pass takes it as it records.
      */
     public long viewConstantsAddress() {
-        return viewConstants.deviceAddress();
+        return views.constants().deviceAddress();
     }
 
     /** The views open, in the order they were made. */
     public List<RenderView> views() {
-        return java.util.Collections.unmodifiableList(views);
+        return views.open();
     }
 
     /**
@@ -354,7 +319,7 @@ public final class MeshletRenderer implements AutoCloseable {
         }
         this.path = Objects.requireNonNull(requested, "path");
         if (path() == Path.MESH_SHADERS) {
-            for (RenderView view : views) {
+            for (RenderView view : views.open()) {
                 view.dropIndices();
             }
         }
@@ -362,11 +327,7 @@ public final class MeshletRenderer implements AutoCloseable {
 
     /** The GPU memory of all views ({@link RenderView#bytes}), in bytes. */
     public long viewBytes() {
-        long bytes = 0;
-        for (RenderView view : views) {
-            bytes += view.bytes();
-        }
-        return bytes;
+        return views.bytes();
     }
 
     /** The path the next frame takes. */
@@ -464,7 +425,7 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     void declareCulling(GraphBuilder g, GraphBuilder.PassBuilder pass) {
         Buffer command = g.importBuffer(chunkCommandImport);
-        Buffer culledRows = g.importBuffer(rowsImport);
+        Buffer culledRows = g.importBuffer(views.rowsImport());
         pass.write(g.importBuffer(chunksImport), BufferAccess.STORAGE_WRITE)
             .write(command, BufferAccess.TRANSFER_DST)
             .write(command, BufferAccess.STORAGE_WRITE)
@@ -730,7 +691,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, InstancePush.BYTES);
-            memPutLong(push + InstancePush.VIEWS, viewConstants.deviceAddress());
+            memPutLong(push + InstancePush.VIEWS, this.views.constants().deviceAddress());
             memPutLong(push + InstancePush.MESHES, pool.meshTable().deviceAddress());
             memPutLong(push + InstancePush.INSTANCES, scene.instanceAddress());
             memPutLong(push + InstancePush.CHUNKS, chunks.deviceAddress());
@@ -738,7 +699,7 @@ public final class MeshletRenderer implements AutoCloseable {
             memPutLong(push + InstancePush.LEVELS, pool.levels().deviceAddress());
             memPutInt(push + InstancePush.MAX_CHUNKS, maxChunks);
             occlusion(push + InstancePush.OCCLUSION, pyramid, width, height, mips);
-            memPutLong(push + InstancePush.ROWS, rows.deviceAddress());
+            memPutLong(push + InstancePush.ROWS, this.views.rows().deviceAddress());
             instancesPass.bind(commands);
             // A row of workgroups per view, at most 65,535 rows a dispatch (the guaranteed size).
             for (int first = 0; first < count; first += MAX_ROWS) {
@@ -754,7 +715,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         try (MemoryStack stack = stackPush()) {
             long push = stack.nmalloc(8, CullPush.BYTES);
-            memPutLong(push + CullPush.VIEWS, viewConstants.deviceAddress());
+            memPutLong(push + CullPush.VIEWS, this.views.constants().deviceAddress());
             memPutLong(push + CullPush.MESHES, pool.meshTable().deviceAddress());
             memPutLong(push + CullPush.INSTANCES, scene.instanceAddress());
             memPutLong(push + CullPush.CHUNKS, chunks.deviceAddress());
@@ -883,7 +844,7 @@ public final class MeshletRenderer implements AutoCloseable {
                     memPutInt(data + 8L * i, v.index());
                     memPutInt(data + 8L * i + 4, phase(early, first + i));
                 }
-                Commands.updateBuffer(commands, rows.handle(), 8L * first, 8L * n, data);
+                Commands.updateBuffer(commands, this.views.rows().handle(), 8L * first, 8L * n, data);
             }
         }
     }
@@ -920,12 +881,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 }
             }
             retiring.close(); // the GPU is done: what is retired from now on goes at once
-            for (RenderView view : views) {
-                view.freeBuffers(retiring);
-            }
-            views.clear();
-            viewConstants.close();
-            rows.close();
+            views.close();
             chunks.close();
             chunkCommand.close();
         }
