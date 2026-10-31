@@ -451,6 +451,31 @@ class ShadowsTest {
     }
 
     @Test
+    void eachSceneHasATopLevelOfItsOwn() {
+        assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
+        rayTracing = new RayTracing(device, pool, 16);
+        rayTracing.add(quad, quadMesh, quadMesh.levels().size() - 1);
+        try (GpuScene other = new GpuScene(device, pool, 40);
+             MeshletRenderer otherRenderer = new MeshletRenderer(device, other, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT)) {
+            other.set(0, quad, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1);
+            for (int frame = 0; frame < 3; frame++) {
+                device.submitAndWait(device.graphics(), commands -> {
+                    rayTracing.buildTopLevel(commands, renderer);
+                    rayTracing.buildTopLevel(commands, otherRenderer);
+                });
+            }
+            assertThat(rayTracing.topLevelBuilds()).as("one each: neither rebuilds the other's").isEqualTo(2);
+            assertThat(rayTracing.slot(scene)).isNotEqualTo(rayTracing.slot(other));
+            assertThat(rayTracing.instanceCapacity(scene)).isEqualTo(16);
+            assertThat(rayTracing.instanceCapacity(other)).as("the scene's capacity, more").isEqualTo(40);
+            assertThatIllegalStateException().isThrownBy(rayTracing::slot).withMessageContaining("name the scene");
+            rayTracing.stopFollowing(other);
+            assertThat(rayTracing.slot()).as("one scene left").isEqualTo(rayTracing.slot(scene));
+        }
+    }
+
+    @Test
     void shadowMapsStayInTheWorldWhileTheCameraMoves() {
         // The scene 7,000 km from the origin. The sun's camera sits at a world position of its own over the floor,
         // not relative to the camera: its map does not change as the camera moves, and serves the camera wherever it

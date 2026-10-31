@@ -68,7 +68,7 @@ public final class InlineRayShadows implements Technique {
         ShadowTable table = lights.shadowTable(g.view());
         EngineSettings settings = g.settings();
         g.request(new ShadowInputs(g.view())).rays(topLevel).setup(ctx -> {
-            table.shadowRay(entry, rayTracing.slot(), offset != null ? offset : settings.get(ShadowSettings.RAY_OFFSET),
+            table.shadowRay(entry, rayTracing.slot(view.renderer().scene()), offset != null ? offset : settings.get(ShadowSettings.RAY_OFFSET),
                 rayTracing.origin(0), rayTracing.origin(1),
                 rayTracing.origin(2)); // the top level is relative to the origin
             table.light(light, entry, 1);

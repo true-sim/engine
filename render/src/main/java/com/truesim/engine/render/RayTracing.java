@@ -110,15 +110,15 @@ import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
  *   <li>a bottom-level acceleration structure per mesh ({@link #add}), built once from one of its detail levels,
  *       straight from the pool's quantized positions (the mesh's box as the build transform) where the GPU
  *       takes that vertex format, from decoded positions where not, then compacted;</li>
- *   <li>a top-level one, rebuilt on the GPU every frame ({@link #buildTopLevel}) from a scene's instance buffer
- *       by a compute pass: no work per instance on the CPU. It is relative to a world position, its
+ *   <li>a top-level one per scene, rebuilt on the GPU when its instances change ({@link #buildTopLevel}) from the
+ *       scene's instance buffer by a compute pass: no work per instance on the CPU. It is relative to a world position, its
  *       {@link #origin(double, double, double) origin}: anything traces into it by subtracting that from its world
  *       positions (a camera shading: its own position less the origin), and the app moves it when the cameras have
  *       gone far from it, as the structure holds floats.</li>
  * </ul>
  *
- * <p>Shaders trace into the top level through its slot ({@link #slot()}) in the bindless set's acceleration structure
- * binding, with ray queries. Instances whose mesh has no bottom level are left out of the top level.
+ * <p>Shaders trace into a scene's top level through its slot ({@link #slot(GpuScene)}) in the bindless set's
+ * acceleration structure binding, with ray queries. Instances whose mesh has no bottom level are left out of it.
  */
 @AllowAllocation("set up once")
 public final class RayTracing implements AutoCloseable {
@@ -136,19 +136,10 @@ public final class RayTracing implements AutoCloseable {
     private final boolean quantized;
     private GpuBuffer bottomTable; // per pool mesh, grown with the pool
     private Structure[] bottom;
-    // The top level, for maxInstances instances: grown with the scenes it is built from (followed), each time a new
-    // one in a new slot, the old one retired once no frame traces it.
-    private int maxInstances;
-    private GpuBuffer instances;
-    private long instancesAddress; // 16-byte aligned, as instance data must be
-    private Structure top;
-    private GpuBuffer topScratch;
-    private volatile int topSlot;
-    private final ExternalBuffer topImport;
-    private final ExternalBuffer instancesImport;
-    private final ExternalBuffer scratchImport;
-    private final List<GpuScene> followed = new ArrayList<>();
-    private final Runnable followScenes = this::followScenes;
+    // A top level per scene, made as a scene is first followed or built from, for startInstances instances or the
+    // scene's capacity: two scenes never overwrite each other's, nor rebuild each other's every frame.
+    private final int startInstances;
+    private final java.util.Map<GpuScene, SceneTop> tops = new java.util.IdentityHashMap<>();
     private final Pipeline instancePass;
     private long bottomBytes;
     private boolean closed;
@@ -204,26 +195,108 @@ public final class RayTracing implements AutoCloseable {
     private double originX; // the world position the top level is relative to
     private double originY;
     private double originZ;
-    // What the top level was last built from: it stands while they are the same (bottom levels: none added since).
-    private GpuScene builtScene;
-    private long builtVersion;
-    private int builtCount; // the instances of the last build: a refit keeps their number
-    private int refits; // since the last full build: refits loosen the tree, so a build comes every MAX_REFITS
     private long topLevelRefits;
-    /** Refits between full builds of the top level while only instances move. */
+    /** Refits between full builds of a top level while only instances move. */
     private static final int MAX_REFITS = 60;
-    private double builtX;
-    private double builtY;
-    private double builtZ;
-    private boolean bottomAdded = true;
+    private long bottomVersion; // counts changes to the bottom levels: top levels built before see them at their next build
     private long topLevelBuilds;
+
+    /**
+     * A scene's top level, for maxInstances instances: grown with the scene, each time a new one in a new slot, the old
+     * one retired once no frame traces it.
+     */
+    private final class SceneTop {
+        final GpuScene scene;
+        int maxInstances;
+        GpuBuffer instances;
+        long instancesAddress; // 16-byte aligned, as instance data must be
+        Structure top;
+        GpuBuffer scratch;
+        volatile int slot;
+        final ExternalBuffer topImport;
+        final ExternalBuffer instancesImport;
+        final ExternalBuffer scratchImport;
+        final Runnable follow = this::follow;
+        // What it was last built from: it stands while they are the same.
+        boolean built;
+        long builtVersion;
+        long builtBottoms;
+        int builtCount; // the instances of the last build: a refit keeps their number
+        int refits; // since the last full build: refits loosen the tree, so a build comes every MAX_REFITS
+        double builtX;
+        double builtY;
+        double builtZ;
+
+        @AllowAllocation("a scene's top level, once")
+        SceneTop(GpuScene scene) {
+            this.scene = scene;
+            make(Math.max(startInstances, scene.capacity()));
+            topImport = new ExternalBuffer("top level", top.buffer());
+            instancesImport = new ExternalBuffer("top level instances", instances);
+            scratchImport = new ExternalBuffer("top level scratch", scratch);
+            scene.onGrow(follow);
+        }
+
+        /** A top level for {@code count} instances: its instance records, structure, scratch and bindless slot. */
+        private void make(int count) {
+            instances = GpuBuffer.deviceLocal(device, (long) AS_INSTANCE_BYTES * count + 16,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                    | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
+            instancesAddress = (instances.deviceAddress() + 15) & ~15L;
+            try (MemoryStack stack = stackPush()) {
+                VkAccelerationStructureGeometryKHR.Buffer geometry = instancesGeometry(stack, instancesAddress);
+                VkAccelerationStructureBuildGeometryInfoKHR info = buildInfo(stack,
+                    VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, TOP_FLAGS, geometry);
+                VkAccelerationStructureBuildSizesInfoKHR sizes = sizes(stack, info, count);
+                top = create(sizes.accelerationStructureSize(), VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR);
+                scratch = RayTracing.this.scratch(Math.max(sizes.buildScratchSize(), sizes.updateScratchSize()));
+            }
+            slot = bindless.addAccelerationStructure(top.handle());
+            maxInstances = count;
+        }
+
+        /** Grows to the scene's capacity, if it is smaller. */
+        private void follow() {
+            if (scene.capacity() > maxInstances) {
+                grow(scene.capacity());
+            }
+        }
+
+        /**
+         * A top level for {@code count} instances in this one's place, in a new slot (shaders read the slot anew each
+         * frame), built at the next build; the old one is freed once no frame traces it.
+         */
+        @AllowAllocation("growing, rarely")
+        private void grow(int count) {
+            retire(freeing());
+            make(count);
+            topImport.set(top.buffer());
+            instancesImport.set(instances);
+            scratchImport.set(scratch);
+            built = false; // the new one is empty until built
+        }
+
+        /** What frees the top level as it is now. */
+        private Runnable freeing() {
+            Structure oldTop = top;
+            GpuBuffer oldInstances = instances;
+            GpuBuffer oldScratch = scratch;
+            int oldSlot = slot;
+            return () -> {
+                bindless.removeAccelerationStructure(oldSlot);
+                destroy(oldTop);
+                oldScratch.close();
+                oldInstances.close();
+            };
+        }
+    }
 
     /** An acceleration structure and the buffer it lives in. */
     private record Structure(GpuBuffer buffer, long handle, long address) { }
 
     /**
-     * Ray tracing over {@code pool}'s meshes, room for {@code maxInstances} instances to start with: the top level grows
-     * with the scenes it is built from ({@link #follow}), to hold all their instances.
+     * Ray tracing over {@code pool}'s meshes, each scene's top level made with room for {@code maxInstances} instances
+     * (or the scene's capacity, if more): it grows with its scene ({@link #follow}), to hold all its instances.
      */
     public RayTracing(VulkanDevice device, GeometryPool pool, int maxInstances) {
         if (!device.rayTracing()) {
@@ -252,10 +325,7 @@ public final class RayTracing implements AutoCloseable {
         bottom = new Structure[meshes];
         bottomTable = GpuBuffer.hostVisible(device, 8L * meshes, storage);
         bottomTable.memory().fill((byte) 0);
-        makeTopLevel(Math.max(1, maxInstances));
-        topImport = new ExternalBuffer("top level", top.buffer());
-        instancesImport = new ExternalBuffer("top level instances", instances);
-        scratchImport = new ExternalBuffer("top level scratch", topScratch);
+        startInstances = Math.max(1, maxInstances);
         try (ShaderModule shader = ShaderModule.load(device, "shaders/raytracing/instances.spv")) {
             instancePass = Pipeline.compute(device, shader, "instancesMain", PUSH_BYTES);
         }
@@ -274,75 +344,56 @@ public final class RayTracing implements AutoCloseable {
         return align16(buffer) - buffer.deviceAddress();
     }
 
-    /** A top level for {@code count} instances: its instance records, structure, scratch and bindless slot. */
-    private void makeTopLevel(int count) {
-        instances = GpuBuffer.deviceLocal(device, (long) AS_INSTANCE_BYTES * count + 16,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-                | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR);
-        instancesAddress = (instances.deviceAddress() + 15) & ~15L;
-        try (MemoryStack stack = stackPush()) {
-            VkAccelerationStructureGeometryKHR.Buffer geometry = instancesGeometry(stack, instancesAddress);
-            VkAccelerationStructureBuildGeometryInfoKHR info = buildInfo(stack, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
-                TOP_FLAGS, geometry);
-            VkAccelerationStructureBuildSizesInfoKHR sizes = sizes(stack, info, count);
-            top = create(sizes.accelerationStructureSize(), VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR);
-            topScratch = scratch(Math.max(sizes.buildScratchSize(), sizes.updateScratchSize()));
-        }
-        topSlot = bindless.addAccelerationStructure(top.handle());
-        maxInstances = count;
-    }
-
-    /**
-     * Grows the top level with {@code scene} from now on, to hold every instance of it, as its table grows: before the
-     * frames, so a frame graph rebuilds for the new buffers. Top-level builds from a scene follow it themselves; a
-     * graph's ({@code TopLevel}) as it builds.
-     */
-    @AllowAllocation("following a scene, once")
-    public void follow(GpuScene scene) {
-        if (!followed.contains(scene)) {
-            followed.add(scene);
-            scene.onGrow(followScenes);
-        }
-        followScenes();
-    }
-
-    /** Grows the top level to the largest followed scene's capacity, if it is smaller. */
-    private void followScenes() {
-        int needed = maxInstances;
-        for (int i = 0; i < followed.size(); i++) {
-            needed = Math.max(needed, followed.get(i).capacity());
-        }
-        if (needed > maxInstances) {
-            growTopLevel(needed);
-        }
-    }
-
-    /**
-     * A top level for {@code count} instances in this one's place, in a new slot (shaders read {@link #slot()} anew each
-     * frame), built at the next build; the old one is freed once no frame traces it.
-     */
-    @AllowAllocation("growing, rarely")
-    private void growTopLevel(int count) {
-        Structure oldTop = top;
-        GpuBuffer oldInstances = instances;
-        GpuBuffer oldScratch = topScratch;
-        int oldSlot = topSlot;
-        Runnable free = () -> {
-            bindless.removeAccelerationStructure(oldSlot);
-            destroy(oldTop);
-            oldScratch.close();
-            oldInstances.close();
-        };
+    /** Frees {@code free} once no frame in flight reads what it frees: at once without frames in flight. */
+    private void retire(Runnable free) {
         if (deferred) {
             retired.add(new Retired(free, slots.retireAt()));
         } else {
             free.run(); // no frames in flight: the caller waits for them
         }
-        makeTopLevel(count);
-        topImport.set(top.buffer());
-        instancesImport.set(instances);
-        scratchImport.set(topScratch);
-        builtScene = null; // the new one is empty until built
+    }
+
+    /**
+     * Gives {@code scene} a top level of its own and grows it with the scene from now on, to hold every instance of it,
+     * as its table grows: before the frames, so a frame graph rebuilds for the new buffers. Builds from a scene follow
+     * it themselves; a graph's ({@code TopLevel}) as it builds.
+     */
+    public void follow(GpuScene scene) {
+        top(scene).follow();
+    }
+
+    /**
+     * Drops {@code scene}'s top level, freed once no frame traces it: for a scene no longer traced (closing, say). A
+     * later build from it makes a new one. Nothing for a scene without one.
+     */
+    @AllowAllocation("dropping a scene, once")
+    public void stopFollowing(GpuScene scene) {
+        SceneTop t = tops.remove(scene);
+        if (t != null) {
+            scene.stopFollowing(t.follow);
+            retire(t.freeing());
+        }
+    }
+
+    /** {@code scene}'s top level, made now if it has none. */
+    private SceneTop top(GpuScene scene) {
+        SceneTop t = tops.get(scene);
+        return t != null ? t : newTop(scene);
+    }
+
+    @AllowAllocation("a scene's top level, once")
+    private SceneTop newTop(GpuScene scene) {
+        SceneTop t = new SceneTop(Objects.requireNonNull(scene, "scene"));
+        tops.put(scene, t);
+        return t;
+    }
+
+    /** The one scene's top level, where there is exactly one: else the scene must be named. */
+    private SceneTop onlyTop() {
+        if (tops.size() != 1) {
+            throw new IllegalStateException("Top levels of " + tops.size() + " scenes: name the scene");
+        }
+        return tops.values().iterator().next();
     }
 
     private final java.util.function.IntConsumer forgetMesh = this::remove;
@@ -357,11 +408,7 @@ public final class RayTracing implements AutoCloseable {
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
         MemorySegment.copy(old.memory(), 0, bottomTable.memory(), 0, old.size());
         bottomTable.memory().asSlice(old.size()).fill((byte) 0);
-        if (deferred) {
-            retired.add(new Retired(old::close, slots.retireAt())); // frames in flight read it
-        } else {
-            old.close(); // no frames in flight: the caller waits for them
-        }
+        retire(old::close); // frames in flight read it
     }
 
     /** Whether bottom levels read the pool's quantized positions as they are (else decoded copies). */
@@ -369,17 +416,27 @@ public final class RayTracing implements AutoCloseable {
         return quantized;
     }
 
-    /** How many instances the top level holds now: it grows with the scenes it follows. */
+    /** How many instances {@code scene}'s top level holds now: it grows with the scene. */
+    public int instanceCapacity(GpuScene scene) {
+        return top(scene).maxInstances;
+    }
+
+    /** {@link #instanceCapacity(GpuScene)} of the one scene with a top level; throws with none or several. */
     public int instanceCapacity() {
-        return maxInstances;
+        return onlyTop().maxInstances;
     }
 
     /**
-     * The top level's slot in the bindless set's acceleration structure binding, for shaders to trace into: a new one
-     * when the top level grows, so read it each frame.
+     * {@code scene}'s top level's slot in the bindless set's acceleration structure binding, for shaders to trace into:
+     * a new one when the top level grows, so read it each frame. Made now if the scene has none.
      */
+    public int slot(GpuScene scene) {
+        return top(scene).slot;
+    }
+
+    /** {@link #slot(GpuScene)} of the one scene with a top level; throws with none or several. */
     public int slot() {
-        return topSlot;
+        return onlyTop().slot;
     }
 
     /** Bytes the bottom levels take, compacted. */
@@ -412,7 +469,7 @@ public final class RayTracing implements AutoCloseable {
             addDeferred(mesh, data, level);
             return;
         }
-        bottomAdded = true; // instances of the mesh enter the top level at its next build
+        bottomVersion++; // instances of the mesh enter top levels at their next build
         MeshLevel chosen = data.levels().get(level);
         int firstMeshlet = chosen.firstMeshlet();
         int lastMeshlet = firstMeshlet + chosen.meshletCount() - 1;
@@ -605,7 +662,7 @@ public final class RayTracing implements AutoCloseable {
             onItsWay.cancelled = true; // freed by the stage it is in, when the GPU is done with it
             pendingOf[mesh] = null;
             bottomTable.memory().setAtIndex(ValueLayout.JAVA_LONG, mesh, 0); // built, it may be traced already
-            bottomAdded = true;
+            bottomVersion++;
         }
         Structure structure = bottom[mesh];
         if (structure == null) {
@@ -613,7 +670,7 @@ public final class RayTracing implements AutoCloseable {
         }
         bottom[mesh] = null;
         bottomTable.memory().setAtIndex(ValueLayout.JAVA_LONG, mesh, 0);
-        bottomAdded = true; // its instances leave the top level at its next build
+        bottomVersion++; // its instances leave top levels at their next build
         long compacted = structure.buffer().size();
         bottomBytes -= compacted;
         if (deferred) {
@@ -754,7 +811,7 @@ public final class RayTracing implements AutoCloseable {
             return;
         }
         bottomTable.memory().setAtIndex(ValueLayout.JAVA_LONG, p.mesh, p.built.address());
-        bottomAdded = true; // its instances enter the top level at its next build
+        bottomVersion++; // its instances enter top levels at their next build
         p.compacted = create(size, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
         try (MemoryStack stack = stackPush()) {
             vkCmdCopyAccelerationStructureKHR(commands, VkCopyAccelerationStructureInfoKHR.calloc(stack)
@@ -779,7 +836,7 @@ public final class RayTracing implements AutoCloseable {
         bottom[p.mesh] = p.compacted;
         bottomBytes += p.compacted.buffer().size();
         bottomTable.memory().setAtIndex(ValueLayout.JAVA_LONG, p.mesh, p.compacted.address());
-        bottomAdded = true;
+        bottomVersion++;
     }
 
     private static void freeInputs(Pending p) {
@@ -815,35 +872,38 @@ public final class RayTracing implements AutoCloseable {
     }
 
     /**
-     * Records the top level's build from {@code renderer}'s scene's instances, relative to the {@link #origin}: a
+     * Records the build of {@code renderer}'s scene's top level from its instances, relative to the {@link #origin}: a
      * compute pass writes the instance records (transform, mesh's bottom level), then the top level is built, ready for
      * ray queries after this. Records no build while the scene's instances ({@link GpuScene#version()}), the origin and
-     * the bottom levels are as they were at the last one: the structure built then stands. Allocates nothing.
+     * the bottom levels are as they were at its last one: the structure built then stands. Allocates nothing, but for a
+     * scene's first top level.
      */
     public void buildTopLevel(VkCommandBuffer commands, MeshletRenderer renderer) {
         buildTopLevel(commands, renderer, false);
     }
 
-    /** Of {@link #topLevelBuilds}, how many refitted the top level rather than building it anew: instances moved only. */
+    /** Of {@link #topLevelBuilds}, how many refitted a top level rather than building it anew: instances moved only. */
     public long topLevelRefits() {
         return topLevelRefits;
     }
 
-    /** How many times the top level was built: frames whose instances, origin and bottom levels stayed build none. */
+    /** How many times top levels were built, of all scenes: one whose instances, origin and bottom levels stayed, none. */
     public long topLevelBuilds() {
         return topLevelBuilds;
     }
 
     /**
-     * Declares that {@code pass} builds the top level ({@link #buildTopLevel(VkCommandBuffer, MeshletRenderer, boolean)}):
-     * it writes the instance records, the scratch and the structure. Returns the structure as a buffer of the build,
-     * for passes tracing rays through it to read ({@link BufferAccess#ACCELERATION_STRUCTURE_READ}).
+     * Declares that {@code pass} builds {@code scene}'s top level
+     * ({@link #buildTopLevel(VkCommandBuffer, MeshletRenderer, boolean)}): it writes the instance records, the scratch
+     * and the structure. Returns the structure as a buffer of the build, for passes tracing rays through it to read
+     * ({@link BufferAccess#ACCELERATION_STRUCTURE_READ}).
      */
     @AllowAllocation("building the graph, when it changes")
-    public Buffer declareTopLevelBuild(GraphBuilder g, GraphBuilder.PassBuilder pass) {
-        Buffer structure = g.importBuffer(topImport); // set anew as the top level grows: the graph rebuilds
-        pass.write(g.importBuffer(instancesImport), BufferAccess.STORAGE_WRITE)
-            .write(g.importBuffer(scratchImport), BufferAccess.ACCELERATION_STRUCTURE_BUILD)
+    public Buffer declareTopLevelBuild(GraphBuilder g, GraphBuilder.PassBuilder pass, GpuScene scene) {
+        SceneTop t = top(scene);
+        Buffer structure = g.importBuffer(t.topImport); // set anew as the top level grows: the graph rebuilds
+        pass.write(g.importBuffer(t.instancesImport), BufferAccess.STORAGE_WRITE)
+            .write(g.importBuffer(t.scratchImport), BufferAccess.ACCELERATION_STRUCTURE_BUILD)
             .write(structure, BufferAccess.ACCELERATION_STRUCTURE_BUILD);
         return structure;
     }
@@ -855,28 +915,26 @@ public final class RayTracing implements AutoCloseable {
      */
     public void buildTopLevel(VkCommandBuffer commands, MeshletRenderer renderer, boolean declared) {
         GpuScene scene = renderer.scene();
-        if (!followed.contains(scene)) {
-            follow(scene); // a build outside a graph: grown now, its buffers fresh
-        }
-        int count = Math.min(scene.highWater(), maxInstances);
+        SceneTop t = top(scene); // a build outside a graph: made and grown now, its buffers fresh
+        int count = Math.min(scene.highWater(), t.maxInstances);
         scene.upload(commands);
-        if (scene == builtScene && scene.version() == builtVersion && originX == builtX && originY == builtY
-            && originZ == builtZ && !bottomAdded) {
+        boolean same = t.built && t.builtBottoms == bottomVersion && originX == t.builtX && originY == t.builtY
+            && originZ == t.builtZ;
+        if (same && scene.version() == t.builtVersion) {
             return; // nothing it was built from changed
         }
         // Instances moved (or changed), the same number of them, the same bottom levels and origin: refitted, the tree
         // kept, unless enough refits have loosened it. Else built anew.
-        boolean refit = scene == builtScene && count == builtCount && originX == builtX && originY == builtY
-            && originZ == builtZ && !bottomAdded && refits < MAX_REFITS;
-        refits = refit ? refits + 1 : 0;
+        boolean refit = same && count == t.builtCount && t.refits < MAX_REFITS;
+        t.refits = refit ? t.refits + 1 : 0;
         topLevelRefits += refit ? 1 : 0;
-        builtCount = count;
-        builtScene = scene;
-        builtVersion = scene.version();
-        builtX = originX;
-        builtY = originY;
-        builtZ = originZ;
-        bottomAdded = false;
+        t.built = true;
+        t.builtCount = count;
+        t.builtVersion = scene.version();
+        t.builtBottoms = bottomVersion;
+        t.builtX = originX;
+        t.builtY = originY;
+        t.builtZ = originZ;
         topLevelBuilds++;
         if (bottom.length < pool.capacity().meshes()) {
             growMeshes(); // the instance pass looks every instance's mesh up
@@ -889,7 +947,7 @@ public final class RayTracing implements AutoCloseable {
             long push = stack.nmalloc(8, PUSH_BYTES);
             memPutLong(push + InstancesPush.INSTANCES, scene.instanceAddress());
             memPutLong(push + InstancesPush.BOTTOM, bottomTable.deviceAddress());
-            memPutLong(push + InstancesPush.RECORDS, instancesAddress);
+            memPutLong(push + InstancesPush.RECORDS, t.instancesAddress);
             memPutInt(push + InstancesPush.COUNT, count);
             putOrigin(push + InstancesPush.ORIGIN_X, push + InstancesPush.ORIGIN_LOW_X, originX);
             putOrigin(push + InstancesPush.ORIGIN_Y, push + InstancesPush.ORIGIN_LOW_Y, originY);
@@ -912,7 +970,7 @@ public final class RayTracing implements AutoCloseable {
             long data = geometry + VkAccelerationStructureGeometryKHR.GEOMETRY;
             memPutInt(data + VkAccelerationStructureGeometryInstancesDataKHR.STYPE,
                 VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR);
-            memPutLong(data + VkAccelerationStructureGeometryInstancesDataKHR.DATA, instancesAddress);
+            memPutLong(data + VkAccelerationStructureGeometryInstancesDataKHR.DATA, t.instancesAddress);
             long info = stack.ncalloc(VkAccelerationStructureBuildGeometryInfoKHR.ALIGNOF, 1,
                 VkAccelerationStructureBuildGeometryInfoKHR.SIZEOF);
             memPutInt(info + VkAccelerationStructureBuildGeometryInfoKHR.STYPE,
@@ -923,13 +981,13 @@ public final class RayTracing implements AutoCloseable {
             memPutInt(info + VkAccelerationStructureBuildGeometryInfoKHR.MODE,
                 refit ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
             if (refit) { // in place
-                memPutLong(info + VkAccelerationStructureBuildGeometryInfoKHR.SRCACCELERATIONSTRUCTURE, top.handle());
+                memPutLong(info + VkAccelerationStructureBuildGeometryInfoKHR.SRCACCELERATIONSTRUCTURE, t.top.handle());
             }
-            memPutLong(info + VkAccelerationStructureBuildGeometryInfoKHR.DSTACCELERATIONSTRUCTURE, top.handle());
+            memPutLong(info + VkAccelerationStructureBuildGeometryInfoKHR.DSTACCELERATIONSTRUCTURE, t.top.handle());
             memPutInt(info + VkAccelerationStructureBuildGeometryInfoKHR.GEOMETRYCOUNT, 1);
             memPutAddress(info + VkAccelerationStructureBuildGeometryInfoKHR.PGEOMETRIES, geometry);
             memPutLong(info + VkAccelerationStructureBuildGeometryInfoKHR.SCRATCHDATA,
-                align(topScratch.deviceAddress()));
+                align(t.scratch.deviceAddress()));
             long range = stack.ncalloc(VkAccelerationStructureBuildRangeInfoKHR.ALIGNOF, 1,
                 VkAccelerationStructureBuildRangeInfoKHR.SIZEOF);
             memPutInt(range + VkAccelerationStructureBuildRangeInfoKHR.PRIMITIVECOUNT, count);
@@ -1046,14 +1104,11 @@ public final class RayTracing implements AutoCloseable {
             }
             retired.clear();
             pool.stopFollowing(forgetMesh);
-            for (GpuScene scene : followed) {
-                scene.stopFollowing(followScenes);
+            for (SceneTop t : tops.values()) {
+                t.scene.stopFollowing(t.follow);
+                t.freeing().run();
             }
-            followed.clear();
-            bindless.removeAccelerationStructure(topSlot);
-            destroy(top);
-            topScratch.close();
-            instances.close();
+            tops.clear();
             for (Structure structure : bottom) {
                 if (structure != null) {
                     destroy(structure);
