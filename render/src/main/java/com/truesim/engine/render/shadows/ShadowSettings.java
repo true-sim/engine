@@ -25,12 +25,14 @@ public final class ShadowSettings {
     /**
      * The error, in pixels of its own target, that draws through a camera of their own allow when choosing detail
      * (shadow maps, a camera's depth drawn as a view of its own): 1 as a camera's view. Coarser casters draw far fewer
-     * triangles (20,000 rocks, two eyes: cascades 0.92 ms at 1, 0.56 at 2, 0.41 at 4) but sit off the finer surfaces
-     * they shadow, which then shadow themselves in spots: raise {@link #CASCADE_BIAS} with it.
+     * triangles (20,000 rocks, two eyes: cascades 0.92 ms at 1, 0.56 at 2, 0.41 at 4) but sit up to so many texels off
+     * the finer surfaces they shadow: cascades add that much depth bias, so those surfaces do not shadow themselves in
+     * spots. At 2, a sparse scene's image is all but the same (0.004 % of pixels change); in a dense one, which rocks
+     * shadow which changes here and there (5 %).
      */
     public static final Setting<Float> CASTER_DETAIL = Setting.decimal("shadows.casterDetail", 1, 0.25f, 16,
-        "the error in pixels shadow casters allow when choosing detail: higher draws coarser casters, faster, and needs "
-            + "more cascade bias");
+        "the error in pixels shadow casters allow when choosing detail: higher draws coarser casters, faster, with "
+            + "cascade bias to match");
     /** Every shadow setting. */
     public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, RAY_OFFSET,
         CASTER_DETAIL);

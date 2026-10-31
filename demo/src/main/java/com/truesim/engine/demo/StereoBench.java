@@ -97,6 +97,11 @@ public final class StereoBench {
                         usage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
                         .set(target.handle(), target.view()));
             }
+            String detail = System.getProperty("truesim.demo.casterDetail");
+            if (detail != null) {
+                graph.settings().set(com.truesim.engine.render.shadows.ShadowSettings.CASTER_DETAIL,
+                    Float.parseFloat(detail));
+            }
             Map<String, double[]> sums = new LinkedHashMap<>(); // per pass: total, frames timed
             RenderDocCapture renderDoc = capture ? RenderDocCapture.attach(instance.handle().address()) : null;
             if (capture && renderDoc == null) {

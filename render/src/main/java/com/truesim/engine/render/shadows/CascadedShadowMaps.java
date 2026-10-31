@@ -176,6 +176,11 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
         return this;
     }
 
+    /** Cascade {@code i}'s depth bias, in its map's depth units, as of the last {@link #update}. */
+    public float depthBias(int i) {
+        return biases[i];
+    }
+
     /** Where cascade {@code i} ends, in view depth (cascade 0 starts at the camera's near plane). */
     public float split(int i) {
         return splits[Objects.checkIndex(i, cascades) + 1];
@@ -200,6 +205,9 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
         EngineSettings settings = port != null ? port.settings() : this.settings;
         float lambda = this.lambda != null ? this.lambda : settings.get(ShadowSettings.CASCADE_LAMBDA);
         float biasTexels = this.biasTexels != null ? this.biasTexels : settings.get(ShadowSettings.CASCADE_BIAS);
+        // Casters coarser than a pixel of error sit up to that many texels off the surfaces they shadow, towards the
+        // light too: so much more depth bias, so they do not shadow those surfaces in spots.
+        float casterError = Math.max(0, settings.get(ShadowSettings.CASTER_DETAIL) - 1);
         float casters = this.casters != null ? this.casters : settings.get(ShadowSettings.CASCADE_CASTERS);
         double x = camera.position(0);
         double y = camera.position(1);
@@ -271,7 +279,7 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
             // At the slice's snapped center in the world, looking from back along the light.
             cameras[i].position(x + cx, y + cy, z + cz).setOrthographic(bx * back, by * back, bz * back, dx, dy, dz,
                 ux, uy, 0, radius, radius, depth, size, size);
-            biases[i] = (float) (biasTexels / 3 * texel / depth);
+            biases[i] = (float) ((biasTexels / 3 + casterError) * texel / depth);
             normalOffsets[i] = (float) (biasTexels * texel);
         }
     }

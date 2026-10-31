@@ -525,6 +525,12 @@ class ShadowsTest {
             float[] last = cascades.camera(2).viewProjection();
             assertThat(Math.abs(first[0]) + Math.abs(first[4]) + Math.abs(first[8]))
                 .isGreaterThan(Math.abs(last[0]) + Math.abs(last[4]) + Math.abs(last[8]));
+            // Coarser casters: as many texels more depth bias as pixels more error.
+            float fine = cascades.depthBias(0);
+            graph.settings().set(com.truesim.engine.render.shadows.ShadowSettings.CASTER_DETAIL, 3f);
+            cascades.settings(graph.settings()).update();
+            assertThat(cascades.depthBias(0)).as("two texels deeper").isGreaterThan(fine * 2);
+            graph.settings().reset(com.truesim.engine.render.shadows.ShadowSettings.CASTER_DETAIL);
             camera.position(10.3, 0, 4.7);
             cascades.lambda(0).bias(2).casters(50).update();
             assertThat(cascades.split(0)).isCloseTo((float) (0.1 + 39.9 / 3),
