@@ -45,7 +45,7 @@ public final class VisibilityBufferShading implements Technique {
     private final int depthFormat;
     private final float[] clear = new float[3];
     private final SceneView view;
-    private boolean occlusion = true;
+    private Boolean occlusion; // or null: as the graph's settings say
     // One per pass: a frame graph may record the classification and the shading on two threads at once.
     private final ShadePush classifyPush = new ShadePush(); // one per pass: passes may record at once
     private final ShadePush shadePush = new ShadePush();
@@ -74,8 +74,10 @@ public final class VisibilityBufferShading implements Technique {
     }
 
     /**
-     * Two-phase occlusion culling, on by default where the view was made with it; the graph rebuilds when it changes.
+     * Two-phase occlusion culling where the view was made with it, overriding the graph's settings
+     * ({@link RenderSettings#OCCLUSION}); the graph rebuilds when it changes.
      */
+    @AllowAllocation("set up rarely")
     public VisibilityBufferShading occlusion(boolean on) {
         this.occlusion = on;
         return this;
@@ -108,7 +110,8 @@ public final class VisibilityBufferShading implements Technique {
         }
         int size = width | height << 16;
         SceneDraw.Targets targets = g.request(new SceneDraw(geometry, view.view(), null, SurfaceOutput.ids(),
-            depthFormat, width, height, occlusion && view.view().options().occlusion()));
+            depthFormat, width, height, (occlusion != null ? occlusion : g.setting(RenderSettings.OCCLUSION))
+            && view.view().options().occlusion()));
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         // With inline ray shadows, the variant tracing them, where the device can.

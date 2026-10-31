@@ -49,6 +49,11 @@ public final class ViewPort {
         this.name = name;
     }
 
+    /** The settings of the view's graph ({@link FrameGraph#settings()}), as they are now. */
+    public com.truesim.engine.settings.EngineSettings settings() {
+        return graph.settings();
+    }
+
     /** The view's name, unique in its graph: in errors, and qualifying its histories' names. */
     public String name() {
         return name;

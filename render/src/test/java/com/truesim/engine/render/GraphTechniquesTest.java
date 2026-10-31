@@ -1015,6 +1015,17 @@ class GraphTechniquesTest {
         frame();
         assertThat(graph.passes()).containsExactly("scene upload", "meshlet culling", "meshlets");
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
+        // Off through the graph's settings instead, and on again: rebuilt each time.
+        graph.close();
+        graph = new FrameGraph(device, 2);
+        main = main(camera);
+        main.port().add(MeshletBenchmark.forward(main)).output(Keys.SCENE_COLOR, output);
+        graph.settings().set(RenderSettings.OCCLUSION, false);
+        frame();
+        assertThat(graph.passes()).containsExactly("scene upload", "meshlet culling", "meshlets");
+        graph.settings().set(RenderSettings.OCCLUSION, true);
+        frame();
+        assertThat(graph.passes()).endsWith("meshlets late culling", "meshlets late");
     }
 
     /** How many pixels are drawn: white, not the blue clear color. */

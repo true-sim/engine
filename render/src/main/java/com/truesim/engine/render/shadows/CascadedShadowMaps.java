@@ -8,6 +8,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.Lights;
@@ -17,6 +18,7 @@ import com.truesim.engine.render.SceneGeometry;
 import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ShadowInputs;
 import com.truesim.engine.render.ShadowTable;
+import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.render.SurfaceOutput;
 import com.truesim.engine.render.ViewOptions;
 import java.util.List;
@@ -60,9 +62,11 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
     private final double[] direction = new double[3];
     private final double[] corner = new double[3];
     private final double[] center = new double[3];
-    private float lambda = 0.75f;
-    private float biasTexels = 1.5f;
-    private float casters = 100;
+    private Float lambda; // these three, or null: as the graph's settings say
+    private Float biasTexels;
+    private Float casters;
+    private final ViewPort port; // the view's, whose graph's settings it reads; or null: its own settings
+    private EngineSettings settings = new EngineSettings(); // without a view: defaults, or as set
 
     /**
      * Shadows of directional light {@code light} of {@code lights} in shadow table entries {@code firstEntry} on, for
@@ -72,6 +76,13 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
     @AllowAllocation("created rarely")
     public CascadedShadowMaps(SceneGeometry geometry, Lights lights, int light, int firstEntry, Camera camera,
         int cascades, int size, ViewOptions options, float maxDistance) {
+        this(geometry, lights, light, firstEntry, camera, cascades, size, options, maxDistance, null);
+    }
+
+    @AllowAllocation("created rarely")
+    private CascadedShadowMaps(SceneGeometry geometry, Lights lights, int light, int firstEntry, Camera camera,
+        int cascades, int size, ViewOptions options, float maxDistance, ViewPort port) {
+        this.port = port;
         this.geometry = Objects.requireNonNull(geometry, "geometry");
         this.lights = Objects.requireNonNull(lights, "lights");
         this.camera = Objects.requireNonNull(camera, "camera");
@@ -107,7 +118,7 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
     @AllowAllocation("created rarely")
     public CascadedShadowMaps(SceneGeometry geometry, Lights lights, int light, int firstEntry, SceneView view,
         int cascades, int size, ViewOptions options, float maxDistance) {
-        this(geometry, lights, light, firstEntry, view.camera(), cascades, size, options, maxDistance);
+        this(geometry, lights, light, firstEntry, view.camera(), cascades, size, options, maxDistance, view.port());
         view.port().own(this);
     }
 
@@ -119,22 +130,34 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
         }
     }
 
-    /** How the splits blend logarithmic (1) and uniform (0) spacing: 0.75 by default. */
+    /**
+     * The settings it reads without a view of its own (made with a camera): its graph's, say. Read at each
+     * {@link #update}.
+     */
+    public CascadedShadowMaps settings(EngineSettings settings) {
+        this.settings = java.util.Objects.requireNonNull(settings, "settings");
+        return this;
+    }
+
+    /** How the splits blend logarithmic (1) and uniform (0) spacing, overriding {@link ShadowSettings#CASCADE_LAMBDA}. */
+    @AllowAllocation("set up rarely")
     public CascadedShadowMaps lambda(float lambda) {
         this.lambda = lambda;
         return this;
     }
 
     /**
-     * The bias, in texels (1.5 by default): the lookup moves that far along the surface's normal, and a third of it
+     * The bias, in texels (overriding {@link ShadowSettings#CASCADE_BIAS}): the lookup moves that far along the surface's normal, and a third of it
      * deep; both scale with each cascade's texel size.
      */
+    @AllowAllocation("set up rarely")
     public CascadedShadowMaps bias(float texels) {
         this.biasTexels = texels;
         return this;
     }
 
-    /** How far behind each cascade's slice, towards the light, casters still cast into it (100 units by default). */
+    /** How far behind each cascade's slice casters still cast into it, overriding {@link ShadowSettings#CASCADE_CASTERS}. */
+    @AllowAllocation("set up rarely")
     public CascadedShadowMaps casters(float distance) {
         this.casters = distance;
         return this;
@@ -161,6 +184,10 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
      * setting the camera, before the frame records. Allocates nothing.
      */
     public void update() {
+        EngineSettings settings = port != null ? port.settings() : this.settings;
+        float lambda = this.lambda != null ? this.lambda : settings.get(ShadowSettings.CASCADE_LAMBDA);
+        float biasTexels = this.biasTexels != null ? this.biasTexels : settings.get(ShadowSettings.CASCADE_BIAS);
+        float casters = this.casters != null ? this.casters : settings.get(ShadowSettings.CASCADE_CASTERS);
         double x = camera.position(0);
         double y = camera.position(1);
         double z = camera.position(2);
