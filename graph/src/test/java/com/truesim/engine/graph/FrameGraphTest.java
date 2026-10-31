@@ -736,10 +736,20 @@ class FrameGraphTest {
             };
         };
         graph.addView("left").add(remembering.get()).output(OUT, output);
-        graph.addView("right").add(remembering.get());
+        ViewPort right = graph.addView("right").add(remembering.get());
         frame();
         frame();
         assertThat(graph.passes()).contains("recall", "remember");
+        // One instance in two places would build for one of them only: refused.
+        Technique once = remembering.get();
+        right.add(once);
+        assertThatIllegalArgumentException().isThrownBy(() -> graph.addView("third").add(once))
+            .withMessageContaining("is in view right already");
+        assertThatIllegalArgumentException().isThrownBy(() -> right.add(once));
+        assertThatIllegalArgumentException().isThrownBy(() -> graph.add(once)).withMessageContaining("view right");
+        Technique framed = remembering.get();
+        graph.add(framed);
+        assertThatIllegalArgumentException().isThrownBy(() -> right.add(framed)).withMessageContaining("the graph");
     }
 
     @Test

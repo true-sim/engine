@@ -304,6 +304,11 @@ public final class FrameGraph implements AutoCloseable {
         if (techniques.contains(Objects.requireNonNull(technique, "technique"))) {
             throw new IllegalArgumentException(GraphBuilder.name(technique) + " is in the graph already");
         }
+        String place = placeOf(technique);
+        if (place != null) {
+            throw new IllegalArgumentException(GraphBuilder.name(technique) + " is in " + place + " already: a "
+                + "technique builds for one view or the frame");
+        }
         techniques.add(technique);
         dirty = true;
         return this;
@@ -1370,6 +1375,23 @@ public final class FrameGraph implements AutoCloseable {
     /** The transient buffers in the pool, for inspection. */
     public int pooledBuffers() {
         return resources.pooledBuffers();
+    }
+
+    /** Where {@code technique} (this instance) is: "the graph", "view <name>", or null. */
+    String placeOf(Technique technique) {
+        for (Technique added : techniques) {
+            if (added == technique) {
+                return "the graph";
+            }
+        }
+        for (ViewPort view : views) {
+            for (Technique added : view.techniques) {
+                if (added == technique) {
+                    return "view " + view.name();
+                }
+            }
+        }
+        return null;
     }
 
     /** How many times the graph was built. */

@@ -374,10 +374,10 @@ public final class ViewPort {
     /** Adds a technique of this view; the graph rebuilds on its next frame. */
     public ViewPort add(Technique technique) {
         Objects.requireNonNull(technique, "technique");
-        for (Technique added : techniques) {
-            if (added == technique) {
-                throw new IllegalArgumentException(technique + " is in view " + name + " already");
-            }
+        String place = graph.placeOf(technique);
+        if (place != null) {
+            throw new IllegalArgumentException(technique + " is in " + place + " already: a technique builds for one "
+                + "view, so give each view one of its own");
         }
         techniques.add(technique);
         graph.changed();
