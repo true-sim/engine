@@ -249,11 +249,13 @@ public final class GeometryPool implements AutoCloseable {
         private final long triangles;
         private final long meshlets;
         private final long clusterLod;
+        private final Levels levels; // made with it, off the frame's thread
         private boolean taken;
 
         private Prepared(MeshData mesh, GpuBuffer staging, long attributes, long meshletVertices, long triangles,
             long meshlets, long clusterLod) {
             this.mesh = mesh;
+            this.levels = Levels.of(mesh);
             this.staging = staging;
             this.attributes = attributes;
             this.meshletVertices = meshletVertices;
@@ -397,11 +399,8 @@ public final class GeometryPool implements AutoCloseable {
         long meshletVertexBase = place(meshletVertexRanges, meshletVertexTotal, 1);
         long meshletBase = place(meshletRanges, mesh.meshletCount(), 1);
         long indexBase = place(triangleRanges, indexRange, 4);
-        boolean fitsMesh = true;
-        for (int m = 0; m < mesh.meshletCount() && fitsMesh; m++) {
-            fitsMesh = mesh.meshletVertexCount(m) <= MESH_SHADER_VERTICES
-                && mesh.meshletTriangleCount(m) <= MESH_SHADER_TRIANGLES;
-        }
+        Levels walked = prepared != null ? prepared.levels : Levels.of(mesh); // a prepared mesh's, walked already
+        boolean fitsMesh = walked.fitsMeshShaders();
         int id = freeIdCount > 0 ? takeLowestFreeId() : idCount++;
         // The meshlet records count their vertices and triangles from the mesh's start; shaders add these bases.
         if (prepared != null) {
@@ -433,7 +432,7 @@ public final class GeometryPool implements AutoCloseable {
         entry.set(U32, 68, mesh.format().stride());
         entry.set(U32, 72, MAX_LEVELS * id);
         entry.set(U32, 76, mesh.levels().size());
-        writeLevels(mesh, entry, id);
+        writeLevels(walked, entry, id);
         vertexStart[id] = (int) vertexBase;
         vertexLength[id] = mesh.vertexCount();
         attributeStart[id] = attributeBase;
@@ -671,39 +670,64 @@ public final class GeometryPool implements AutoCloseable {
      * meshlet's parent error can exceed it there. Roots and other meshlets past a level whose parent error does exceed
      * it extend that level's end, so the range stays right for any mesh.
      */
-    private void writeLevels(MeshData mesh, MemorySegment entry, int id) {
-        double[] lod = new double[10];
-        double cx = mesh.bounds().x();
-        double cy = mesh.bounds().y();
-        double cz = mesh.bounds().z();
-        double radius = mesh.bounds().radius();
-        double[] parentErrors = new double[mesh.meshletCount()];
-        for (int m = 0; m < mesh.meshletCount(); m++) {
-            mesh.meshletLod(m, lod);
-            radius = Math.max(radius, Math.sqrt(square(lod[0] - cx) + square(lod[1] - cy) + square(lod[2] - cz))
-                + lod[3]);
-            if (lod[9] != Double.POSITIVE_INFINITY) {
-                radius = Math.max(radius, Math.sqrt(square(lod[5] - cx) + square(lod[6] - cy) + square(lod[7] - cz))
-                    + lod[8]);
-            }
-            parentErrors[m] = lod[9];
-        }
-        entry.set(F32, 80, (float) cx);
-        entry.set(F32, 84, (float) cy);
-        entry.set(F32, 88, (float) cz);
-        entry.set(F32, 92, (float) radius);
-        MemorySegment table = levels.memory();
-        long base = 8L * MAX_LEVELS * id;
-        for (int l = 0; l < mesh.levels().size(); l++) {
-            var level = mesh.levels().get(l);
-            int end = level.firstMeshlet() + level.meshletCount();
-            for (int m = end; m < mesh.meshletCount(); m++) {
-                if (parentErrors[m] > level.error()) {
-                    end = m + 1;
+    /**
+     * What a mesh's entry and level table take from its meshlets: its bounding sphere, grown to hold every meshlet's and
+     * its parent's, per detail level the end of the meshlets it draws and its error, and whether every meshlet fits a
+     * mesh shader's workgroup. A walk over every meshlet, so a prepared mesh has it made on the loader's thread
+     * ({@link #prepare}).
+     */
+    private record Levels(float x, float y, float z, float radius, int[] ends, float[] errors,
+        boolean fitsMeshShaders) {
+
+        @AllowAllocation("adding a mesh")
+        static Levels of(MeshData mesh) {
+            double[] lod = new double[10];
+            double cx = mesh.bounds().x();
+            double cy = mesh.bounds().y();
+            double cz = mesh.bounds().z();
+            double radius = mesh.bounds().radius();
+            double[] parentErrors = new double[mesh.meshletCount()];
+            boolean fits = true;
+            for (int m = 0; m < mesh.meshletCount(); m++) {
+                fits &= mesh.meshletVertexCount(m) <= MESH_SHADER_VERTICES
+                    && mesh.meshletTriangleCount(m) <= MESH_SHADER_TRIANGLES;
+                mesh.meshletLod(m, lod);
+                radius = Math.max(radius, Math.sqrt(square(lod[0] - cx) + square(lod[1] - cy) + square(lod[2] - cz))
+                    + lod[3]);
+                if (lod[9] != Double.POSITIVE_INFINITY) {
+                    radius = Math.max(radius, Math.sqrt(square(lod[5] - cx) + square(lod[6] - cy)
+                        + square(lod[7] - cz)) + lod[8]);
                 }
+                parentErrors[m] = lod[9];
             }
-            table.set(U32, base + 8L * l, end);
-            table.set(F32, base + 8L * l + 4, (float) level.error());
+            int levels = mesh.levels().size();
+            int[] ends = new int[levels];
+            float[] errors = new float[levels];
+            for (int l = 0; l < levels; l++) {
+                var level = mesh.levels().get(l);
+                int end = level.firstMeshlet() + level.meshletCount();
+                for (int m = end; m < mesh.meshletCount(); m++) {
+                    if (parentErrors[m] > level.error()) {
+                        end = m + 1;
+                    }
+                }
+                ends[l] = end;
+                errors[l] = (float) level.error();
+            }
+            return new Levels((float) cx, (float) cy, (float) cz, (float) radius, ends, errors, fits);
+        }
+    }
+
+    private void writeLevels(Levels levels, MemorySegment entry, int id) {
+        entry.set(F32, 80, levels.x());
+        entry.set(F32, 84, levels.y());
+        entry.set(F32, 88, levels.z());
+        entry.set(F32, 92, levels.radius());
+        MemorySegment table = this.levels.memory();
+        long base = 8L * MAX_LEVELS * id;
+        for (int l = 0; l < levels.ends().length; l++) {
+            table.set(U32, base + 8L * l, levels.ends()[l]);
+            table.set(F32, base + 8L * l + 4, levels.errors()[l]);
         }
     }
 
