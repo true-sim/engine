@@ -59,6 +59,7 @@ import org.junit.jupiter.api.Test;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.EXTDebugUtils;
+import org.lwjgl.vulkan.EXTSwapchainColorspace;
 import org.lwjgl.vulkan.KHRSurface;
 import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VkBufferImageCopy;
@@ -277,6 +278,30 @@ class VulkanTest {
             assertThat(Swapchain.chooseFormat(formats)).isEqualTo(2);
             assertThat(Swapchain.chooseFormat(formats.position(3).slice())).isZero();
             assertThat(Swapchain.chooseFormat(VkSurfaceFormatKHR.calloc(1, stack))).isZero();
+            // HDR where asked for and offered: HDR10 first, then scRGB; otherwise SDR as before.
+            VkSurfaceFormatKHR.Buffer hdr = VkSurfaceFormatKHR.calloc(4, stack);
+            int[][] hdrOffered = {
+                {VK10.VK_FORMAT_B8G8R8A8_SRGB, KHRSurface.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+                {VK10.VK_FORMAT_R16G16B16A16_SFLOAT, EXTSwapchainColorspace.VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT},
+                {VK10.VK_FORMAT_A2B10G10R10_UNORM_PACK32, EXTSwapchainColorspace.VK_COLOR_SPACE_HDR10_ST2084_EXT},
+                {VK10.VK_FORMAT_A2R10G10B10_UNORM_PACK32, EXTSwapchainColorspace.VK_COLOR_SPACE_HDR10_ST2084_EXT}};
+            for (int i = 0; i < hdrOffered.length; i++) {
+                MemoryUtil.memPutInt(hdr.address(i) + VkSurfaceFormatKHR.FORMAT, hdrOffered[i][0]);
+                MemoryUtil.memPutInt(hdr.address(i) + VkSurfaceFormatKHR.COLORSPACE, hdrOffered[i][1]);
+            }
+            assertThat(Swapchain.chooseFormat(hdr, true)).as("HDR10").isEqualTo(2);
+            assertThat(Swapchain.chooseFormat(hdr, false)).as("SDR wanted").isZero();
+            assertThat(Swapchain.chooseFormat(hdr.position(3).slice(), true)).as("the other HDR10 format").isZero();
+            assertThat(Swapchain.chooseFormat(hdr.position(0).limit(2).slice(), true)).as("scRGB").isEqualTo(1);
+            assertThat(Swapchain.chooseFormat(formats.position(0).limit(4), true)).as("none offered: SDR").isEqualTo(2);
+            assertThat(Swapchain.encoding(EXTSwapchainColorspace.VK_COLOR_SPACE_HDR10_ST2084_EXT))
+                .isEqualTo(DisplayEncoding.HDR10_PQ);
+            assertThat(Swapchain.encoding(EXTSwapchainColorspace.VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT))
+                .isEqualTo(DisplayEncoding.SCRGB_LINEAR);
+            assertThat(Swapchain.encoding(KHRSurface.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR))
+                .isEqualTo(DisplayEncoding.SDR_SRGB);
+            assertThat(DisplayEncoding.SDR_SRGB.hdr()).isFalse();
+            assertThat(DisplayEncoding.HDR10_PQ.hdr()).isTrue();
         }
 
         // Validation messages by severity.

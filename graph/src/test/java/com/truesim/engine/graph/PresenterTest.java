@@ -99,6 +99,31 @@ class PresenterTest {
                 sideTarget.apply(sideTarget.settings());
                 assertThat(presenter.render()).isEqualTo(3);
                 assertThat(PresentSettings.fromMap(sideTarget.settings().toMap())).isEqualTo(sideTarget.settings());
+                // An output transform: each window's result made for its display's encoding, HDR where asked and
+                // offered; changed while running, and removed again.
+                List<com.truesim.engine.vulkan.DisplayEncoding> made = new java.util.ArrayList<>();
+                presenter.outputTransform((source, target, encoding) -> {
+                    made.add(encoding);
+                    return new FrameGraphTest.Lambda(List.of(target), g -> {
+                        Image from = g.require(source);
+                        Image to = g.create("transformed", ImageDesc.of(Format.R16G16B16A16_SFLOAT, from.width(),
+                            from.height()));
+                        g.pass("transform").read(from, Access.TRANSFER_SRC).write(to, Access.TRANSFER_DST)
+                            .record(ctx -> ctx.blit(from.whole(), to.whole(), false));
+                        g.provide(target, to);
+                    });
+                });
+                assertThat(made).as("one per window").hasSize(3);
+                assertThat(presenter.render()).isEqualTo(3);
+                assertThat(mainTarget.encoding()).isIn((Object[]) com.truesim.engine.vulkan.DisplayEncoding.values());
+                graph.settings().set(PresentSettings.HDR, false);
+                assertThat(mainTarget.settings().hdr()).isFalse();
+                assertThat(mainTarget.encoding()).as("SDR asked").isEqualTo(com.truesim.engine.vulkan.DisplayEncoding.SDR_SRGB);
+                assertThat(presenter.render()).isEqualTo(3);
+                graph.settings().set(PresentSettings.HDR, true);
+                assertThat(presenter.render()).isEqualTo(3);
+                presenter.outputTransform(null);
+                assertThat(presenter.render()).as("copied as they are again").isEqualTo(3);
                 // A window closed stops being presented to; so does a target closed.
                 third.close();
                 assertThat(presenter.targets()).containsExactly(mainTarget, sideTarget);
@@ -133,13 +158,15 @@ class PresenterTest {
         PresentSettings defaults = PresentSettings.defaults();
         assertThat(defaults.presentMode()).as("vsync").isEqualTo(PresentMode.FIFO);
         PresentSettings mailbox = defaults.withPresentMode(PresentMode.MAILBOX);
-        assertThat(mailbox.toMap()).containsExactly(Map.entry("present.mode", "MAILBOX"));
+        assertThat(mailbox.toMap()).containsEntry("present.mode", "MAILBOX").containsEntry("present.hdr", "true");
         assertThat(PresentSettings.fromMap(mailbox.toMap())).isEqualTo(mailbox);
         assertThat(PresentSettings.fromMap(Map.of("present.mode", " IMMEDIATE ", "hdr", "true")).presentMode())
             .isEqualTo(PresentMode.IMMEDIATE);
         assertThat(PresentSettings.fromMap(Map.of("present.mode", "SOMETHING_NEW"))).isEqualTo(defaults);
         assertThat(PresentSettings.fromMap(Map.of())).isEqualTo(defaults);
-        assertThat(PresentSettings.ALL).containsExactly(PresentSettings.PRESENT_MODE);
+        assertThat(defaults.hdr()).as("HDR where offered").isTrue();
+        assertThat(defaults.withHdr(false).hdr()).isFalse();
+        assertThat(PresentSettings.ALL).containsExactly(PresentSettings.PRESENT_MODE, PresentSettings.HDR);
         com.truesim.engine.settings.EngineSettings settings = mailbox.store(new com.truesim.engine.settings.EngineSettings());
         assertThat(PresentSettings.from(settings)).isEqualTo(mailbox);
         assertThatNullPointerException().isThrownBy(() -> defaults.withPresentMode(null));

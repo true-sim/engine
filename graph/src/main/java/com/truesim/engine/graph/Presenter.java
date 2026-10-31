@@ -13,6 +13,7 @@ import static org.lwjgl.vulkan.VK10.vkDestroySemaphore;
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.platform.Window;
 import com.truesim.engine.settings.EngineSettings;
+import com.truesim.engine.vulkan.DisplayEncoding;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Surface;
 import com.truesim.engine.vulkan.Swapchain;
@@ -30,7 +31,9 @@ import org.lwjgl.vulkan.VkSemaphoreCreateInfo;
  * Presents views of a {@link FrameGraph} to windows: any number of windows, all from one frame of the graph. Each
  * window gets a surface and swapchain; its view is sized to the window's pixels and resized with it. A window whose
  * view does not run in a frame (turned off, its {@link ViewPort#rate rate}, or the window minimized) is neither
- * acquired nor presented that frame, and keeps showing its last one.
+ * acquired nor presented that frame, and keeps showing its last one. Given an {@link OutputTransform}, each window's
+ * result is tone mapped and encoded for the display it is on, SDR or HDR (the {@link PresentSettings#HDR} setting
+ * asks for HDR where the display offers it); without one, it is copied as it is, in SDR.
  *
  * <pre>{@code
  * Presenter presenter = new Presenter(graph, instance);
@@ -57,6 +60,7 @@ public final class Presenter implements AutoCloseable {
     private int[] images = new int[0];
     private long[] acquired = new long[0];
     private long[] finished = new long[0];
+    private OutputTransform outputTransform; // or null: results copied as they are, in SDR
     private boolean closed;
 
     /** Presents views of {@code graph} through surfaces of {@code instance} (made with surfaces). */
@@ -110,6 +114,20 @@ public final class Presenter implements AutoCloseable {
         acquired = new long[n];
         finished = new long[n];
         return target;
+    }
+
+    /**
+     * Tone maps and encodes every window's result with {@code transform} from now on (null: copied as it is, in SDR),
+     * for the display each is on; windows asking for HDR get it where their display offers it.
+     */
+    @AllowAllocation("set up rarely")
+    public Presenter outputTransform(OutputTransform transform) {
+        this.outputTransform = transform;
+        for (Target target : targets) {
+            target.swapchain.setHdr(target.wantsHdr());
+            target.sync();
+        }
+        return this;
     }
 
     /** The windows presented to. */
@@ -170,6 +188,9 @@ public final class Presenter implements AutoCloseable {
         private final long[] available; // per frame slot: signaled when the acquired image may be written
         private PresentSettings settings;
         private EngineSettings.Subscription watch; // of the settings it follows, or null
+        private final Key<Image> shown; // the transformed result the window shows, with an output transform
+        private Technique transform; // the output transform's technique in the view, or null
+        private DisplayEncoding transformed; // the encoding it was made for
         private long presented;
         private boolean removed;
 
@@ -182,7 +203,8 @@ public final class Presenter implements AutoCloseable {
             int width = Math.max(1, window.pixelWidth());
             int height = Math.max(1, window.pixelHeight());
             surface = instance.createSurface(window);
-            swapchain = new Swapchain(device, surface, settings.presentMode(), width, height);
+            shown = Key.image("presenter.window" + window.id());
+            swapchain = new Swapchain(device, surface, settings.presentMode(), wantsHdr(), width, height);
             int usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
                 | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
             image = new ExternalImage(window.title(), width, height, Format.of(swapchain.format()), usage,
@@ -197,8 +219,39 @@ public final class Presenter implements AutoCloseable {
                     available[s] = semaphore.get(0);
                 }
             }
-            view.size(width, height).output(key, image);
+            view.size(width, height);
+            sync();
             window.attach(this); // closing the window stops presenting to it first
+        }
+
+        /** Whether its swapchain should be HDR: asked for, and an output transform to encode for it. */
+        boolean wantsHdr() {
+            return settings.hdr() && outputTransform != null;
+        }
+
+        /**
+         * Matches the view to the swapchain as it is now: the window's image in its format, and the result shown
+         * through the output transform made for its encoding (or copied as it is, without one).
+         */
+        @AllowAllocation("when the swapchain changes")
+        void sync() {
+            image.reformat(Format.of(swapchain.format()));
+            if (transform != null && (outputTransform == null || transformed != swapchain.encoding())) {
+                view.remove(transform).removeOutput(shown);
+                transform = null;
+            }
+            if (outputTransform != null && transform == null) {
+                transformed = swapchain.encoding();
+                transform = outputTransform.transform(key, shown, transformed);
+                view.removeOutput(key).add(transform).output(shown, image);
+            } else if (outputTransform == null) {
+                view.output(key, image);
+            }
+        }
+
+        /** How the window's images reach its display now: SDR, HDR10 or scRGB. */
+        public DisplayEncoding encoding() {
+            return swapchain.encoding();
         }
 
         /**
@@ -217,6 +270,7 @@ public final class Presenter implements AutoCloseable {
                 swapchain.recreate(width, height);
                 image.resize(width, height);
                 view.size(width, height);
+                sync(); // another display, maybe another encoding
             }
             if (!view.runsNextFrame()) {
                 return -1;
@@ -255,6 +309,8 @@ public final class Presenter implements AutoCloseable {
                 swapchain.setPresentMode(changed.presentMode());
             }
             settings = changed;
+            swapchain.setHdr(wantsHdr());
+            sync();
             return this;
         }
 
@@ -271,7 +327,10 @@ public final class Presenter implements AutoCloseable {
             device.waitIdle();
             targets.remove(this);
             window.detach(this);
-            view.removeOutput(key);
+            view.removeOutput(key).removeOutput(shown);
+            if (transform != null) {
+                view.remove(transform);
+            }
             view.suspended = false;
             swapchain.close();
             surface.close();

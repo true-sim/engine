@@ -5,6 +5,8 @@ import static org.lwjgl.system.MemoryUtil.memGetInt;
 import static org.lwjgl.system.MemoryUtil.memPutAddress;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
+import static org.lwjgl.vulkan.EXTSwapchainColorspace.VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
+import static org.lwjgl.vulkan.EXTSwapchainColorspace.VK_COLOR_SPACE_HDR10_ST2084_EXT;
 import static org.lwjgl.vulkan.KHRSurface.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 import static org.lwjgl.vulkan.KHRSurface.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 import static org.lwjgl.vulkan.KHRSurface.vkGetPhysicalDeviceSurfaceCapabilitiesKHR;
@@ -18,7 +20,10 @@ import static org.lwjgl.vulkan.KHRSwapchain.nvkAcquireNextImageKHR;
 import static org.lwjgl.vulkan.KHRSwapchain.vkCreateSwapchainKHR;
 import static org.lwjgl.vulkan.KHRSwapchain.vkDestroySwapchainKHR;
 import static org.lwjgl.vulkan.KHRSwapchain.vkGetSwapchainImagesKHR;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_A2R10G10B10_UNORM_PACK32;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_B8G8R8A8_SRGB;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_R16G16B16A16_SFLOAT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_SRGB;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
@@ -68,10 +73,21 @@ public final class Swapchain implements AutoCloseable {
     private long[] views = new long[0];
     private long[] presentReady = new long[0];
     private boolean outOfDate;
+    private boolean hdr; // HDR output asked for
+    private DisplayEncoding encoding = DisplayEncoding.SDR_SRGB;
 
     /** A swapchain for {@code surface} of {@code width} x {@code height} pixels (the window's pixel size). */
     @AllowAllocation("set up once")
     public Swapchain(VulkanDevice device, Surface surface, PresentMode mode, int width, int height) {
+        this(device, surface, mode, false, width, height);
+    }
+
+    /**
+     * A swapchain for {@code surface} of {@code width} x {@code height} pixels, with {@code hdr} in HDR where the
+     * display offers it ({@link #encoding()} tells which it got).
+     */
+    @AllowAllocation("set up once")
+    public Swapchain(VulkanDevice device, Surface surface, PresentMode mode, boolean hdr, int width, int height) {
         if (!device.canPresent()) {
             throw new VulkanException("The device was created headless");
         }
@@ -81,6 +97,7 @@ public final class Swapchain implements AutoCloseable {
         this.device = device;
         this.surface = surface;
         this.requested = mode;
+        this.hdr = hdr;
         create(width, height);
     }
 
@@ -112,6 +129,7 @@ public final class Swapchain implements AutoCloseable {
             }
             VkSurfaceFormatKHR chosen = chooseFormat(stack);
             this.format = chosen.format();
+            this.encoding = encoding(chosen.colorSpace());
             this.presentMode = supportedPresentModes().contains(requested) ? requested : PresentMode.FIFO;
             int count = Math.max(capabilities.minImageCount() + 1, 3);
             if (capabilities.maxImageCount() > 0) {
@@ -163,7 +181,7 @@ public final class Swapchain implements AutoCloseable {
         }
     }
 
-    /** An sRGB format, so shaders write linear colors and the display shows them right; else the first offered. */
+    /** The format {@link #chooseFormat(VkSurfaceFormatKHR.Buffer, boolean)} picks among the surface's. */
     private VkSurfaceFormatKHR chooseFormat(MemoryStack stack) {
         IntBuffer count = stack.mallocInt(1);
         Vulkan.checkList(vkGetPhysicalDeviceSurfaceFormatsKHR(device.gpu().handle(), surface.handle(), count, null),
@@ -171,7 +189,32 @@ public final class Swapchain implements AutoCloseable {
         VkSurfaceFormatKHR.Buffer formats = VkSurfaceFormatKHR.malloc(count.get(0), stack);
         Vulkan.checkList(vkGetPhysicalDeviceSurfaceFormatsKHR(device.gpu().handle(), surface.handle(), count, formats),
             "Could not list the surface's formats");
-        return formats.get(chooseFormat(formats));
+        return formats.get(chooseFormat(formats, hdr));
+    }
+
+    /**
+     * The index of the format to present with: with {@code hdr}, HDR10 (10 bits, PQ) or else scRGB (16-bit floats),
+     * where offered; otherwise, or where neither is, the first 8-bit sRGB format with the sRGB color space, or 0.
+     */
+    static int chooseFormat(VkSurfaceFormatKHR.Buffer formats, boolean hdr) {
+        if (hdr) {
+            for (int i = 0; i < formats.capacity(); i++) {
+                VkSurfaceFormatKHR candidate = formats.get(i);
+                if ((candidate.format() == VK_FORMAT_A2B10G10R10_UNORM_PACK32
+                    || candidate.format() == VK_FORMAT_A2R10G10B10_UNORM_PACK32)
+                    && candidate.colorSpace() == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+                    return i;
+                }
+            }
+            for (int i = 0; i < formats.capacity(); i++) {
+                VkSurfaceFormatKHR candidate = formats.get(i);
+                if (candidate.format() == VK_FORMAT_R16G16B16A16_SFLOAT
+                    && candidate.colorSpace() == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT) {
+                    return i;
+                }
+            }
+        }
+        return chooseFormat(formats);
     }
 
     /** The index of the first sRGB format with the sRGB color space, or 0. */
@@ -225,6 +268,37 @@ public final class Swapchain implements AutoCloseable {
     public void setPresentMode(PresentMode mode) {
         this.requested = mode;
         recreate(width, height);
+    }
+
+    /**
+     * Asks for HDR output where the display offers it, or for SDR, and rebuilds (waiting for the GPU) if that
+     * changes what was asked.
+     */
+    @AllowAllocation("recreating")
+    public void setHdr(boolean on) {
+        if (on != hdr) {
+            hdr = on;
+            recreate(width, height);
+        }
+    }
+
+    /** Whether HDR output was asked for; {@link #encoding()} tells whether the display gave it. */
+    public boolean hdrRequested() {
+        return hdr;
+    }
+
+    /** How the images reach the display: SDR, or HDR10 or scRGB where asked for and offered. */
+    public DisplayEncoding encoding() {
+        return encoding;
+    }
+
+    /** The encoding of images in color space {@code colorSpace}. */
+    static DisplayEncoding encoding(int colorSpace) {
+        return switch (colorSpace) {
+            case VK_COLOR_SPACE_HDR10_ST2084_EXT -> DisplayEncoding.HDR10_PQ;
+            case VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT -> DisplayEncoding.SCRGB_LINEAR;
+            default -> DisplayEncoding.SDR_SRGB;
+        };
     }
 
     /** The present mode in use. */

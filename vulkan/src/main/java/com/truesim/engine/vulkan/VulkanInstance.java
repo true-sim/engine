@@ -1,5 +1,6 @@
 package com.truesim.engine.vulkan;
 
+import static org.lwjgl.vulkan.EXTSwapchainColorspace.VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
 import static org.lwjgl.vulkan.EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
@@ -111,6 +112,9 @@ public final class VulkanInstance implements AutoCloseable {
                 }
                 extensions.addAll(com.truesim.engine.platform.Platform.vulkanInstanceExtensions());
                 addHeadlessSurface(driver, available, extensions);
+                if (available.contains(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) {
+                    extensions.add(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME); // HDR color spaces, where offered
+                }
             }
             boolean layer = builder.validation && layers().contains(VALIDATION_LAYER);
             if (builder.validation && !layer) {
