@@ -140,6 +140,7 @@ public final class FrameGraph implements AutoCloseable {
     private final boolean ownsSlots;
     private final List<Technique> techniques = new ArrayList<>();
     private final List<ViewPort> views = new ArrayList<>();
+    private final List<Function<ViewPort, ? extends Technique>> perView = new ArrayList<>();
     private Technique[] built = new Technique[0]; // every technique of the last build, the views' too
     private long[] builtVersions = new long[0]; // each one's buildVersion() then
     private final Map<Key<Image>, ExternalImage> outputs = new LinkedHashMap<>();
@@ -342,13 +343,35 @@ public final class FrameGraph implements AutoCloseable {
         }
         ViewPort view = new ViewPort(this, name);
         views.add(view);
+        for (Function<ViewPort, ? extends Technique> factory : perView) {
+            view.add(factory.apply(view));
+        }
         dirty = true;
         return view;
     }
 
-    /** Removes {@code view}, its techniques and outputs; the graph rebuilds on its next frame. */
+    /**
+     * Adds the technique {@code factory} makes for each view, to every view: those there now and those added later.
+     * Per-view state lives in the instance it makes, e.g. post effects; a view drops one with
+     * {@link ViewPort#remove(Id)}. The graph rebuilds on its next frame.
+     */
+    public FrameGraph addPerView(Function<ViewPort, ? extends Technique> factory) {
+        perView.add(Objects.requireNonNull(factory, "factory"));
+        for (ViewPort view : views) {
+            view.add(factory.apply(view));
+        }
+        return this;
+    }
+
+    /**
+     * Removes {@code view}, its techniques and outputs, and closes what it owns ({@link ViewPort#own}); the graph
+     * rebuilds on its next frame.
+     */
     public FrameGraph removeView(ViewPort view) {
-        dirty |= views.remove(view);
+        if (views.remove(view)) {
+            dirty = true;
+            view.closeOwned();
+        }
         return this;
     }
 
@@ -1346,6 +1369,17 @@ public final class FrameGraph implements AutoCloseable {
         }
         // A cached object that fails to close does not stop the rest: the first failure is thrown at the end.
         IllegalStateException failure = null;
+        for (ViewPort view : views) {
+            try {
+                view.closeOwned();
+            } catch (IllegalStateException e) {
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
+            }
+        }
         for (AutoCloseable object : cache.values()) {
             try {
                 object.close();
