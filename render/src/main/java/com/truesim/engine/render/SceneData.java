@@ -45,13 +45,10 @@ public record SceneData(MeshletRenderer renderer) implements Request<SceneData.B
     public Buffers build(GraphBuilder g) {
         GeometryPool pool = renderer.pool();
         GpuScene scene = renderer.scene();
+        ExternalBuffer[] geometry = pool.graphBuffers(); // the pool's own: set anew as it grows
         Buffers buffers = new Buffers(g.importBuffer(new ExternalBuffer("instances", scene.instanceBuffer())),
-            g.importBuffer(new ExternalBuffer("positions", pool.positions())),
-            g.importBuffer(new ExternalBuffer("attributes", pool.attributes())),
-            g.importBuffer(new ExternalBuffer("meshlets", pool.meshlets())),
-            g.importBuffer(new ExternalBuffer("meshlet vertices", pool.meshletVertices())),
-            g.importBuffer(new ExternalBuffer("meshlet triangles", pool.meshletTriangles())),
-            g.importBuffer(new ExternalBuffer("cluster LOD", pool.clusterLod())));
+            g.importBuffer(geometry[0]), g.importBuffer(geometry[1]), g.importBuffer(geometry[2]),
+            g.importBuffer(geometry[3]), g.importBuffer(geometry[4]), g.importBuffer(geometry[5]));
         pool.uploadInPasses();
         scene.uploadInPasses();
         g.pass("scene upload").write(buffers.instances, BufferAccess.STORAGE_WRITE)

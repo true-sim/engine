@@ -834,7 +834,7 @@ class SceneSyncTest {
     }
 
     @Test
-    void meshesWaitForRoomInThePool() throws InterruptedException {
+    void thePoolGrowsForMoreMeshes() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Renderables renderables = new Renderables(scene);
         SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
@@ -847,40 +847,11 @@ class SceneSyncTest {
         update(scene, renderables, sync);
         load();
         update(scene, renderables, sync);
-        assertThat(resources.waitingForRoomCount()).isEqualTo(1);
-        assertThat(resources.meshCount()).isEqualTo(meshes);
-        assertThat(resources.uploadedMeshCount()).isEqualTo(meshes - 1);
-        assertThat(sync.instanceCount()).isEqualTo(meshes - 1);
-        assertThat(sync.renderableCount()).isEqualTo(meshes);
-        // A drawn one goes: its room frees once no frame in flight draws it, and the waiting mesh goes in.
-        long drawn = NodeHandle.NONE;
-        long waiting = NodeHandle.NONE;
-        for (long node : nodes) {
-            if (sync.meshOf(node) < 0) {
-                waiting = node;
-            } else {
-                drawn = node;
-            }
-        }
-        renderables.remove(drawn);
-        update(scene, renderables, sync);
-        assertThat(sync.meshOf(waiting)).as("the room is still drawn by frames in flight").isEqualTo(-1);
-        for (int frame = 0; frame < slots.count(); frame++) {
-            slots.begin(frame);
-            slots.end();
-        }
-        update(scene, renderables, sync);
         assertThat(resources.waitingForRoomCount()).isZero();
-        assertThat(sync.meshOf(waiting)).isNotNegative();
-        assertThat(sync.instanceCount()).isEqualTo(meshes - 1);
-        // A waiting mesh nobody uses any more stops waiting.
-        renderables.set(scene.create(), AssetRef.generated(RenderAssets.MESH, SQUARES, new Square(99), 1), List.of());
-        update(scene, renderables, sync);
-        load();
-        update(scene, renderables, sync);
-        assertThat(resources.waitingForRoomCount()).isEqualTo(1);
+        assertThat(resources.uploadedMeshCount()).isEqualTo(meshes);
+        assertThat(pool.meshCount()).isEqualTo(meshes);
+        assertThat(pool.capacity().meshes()).isGreaterThanOrEqualTo(meshes);
         sync.close();
-        assertThat(resources.waitingForRoomCount()).isZero();
         assertThat(resources.meshCount()).isZero();
     }
 

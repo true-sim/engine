@@ -994,15 +994,16 @@ class MeshletRendererTest {
             slots.begin(0);
             own.remove(first);
             slots.end();
-            // Frames 0 and the next may still draw it: no room yet.
-            assertThatIllegalStateException().isThrownBy(() -> own.add(square));
+            // Frames 0 and the next may still draw it: its number and room are not reused yet, the pool grows.
+            int second = own.add(square);
+            assertThat(second).isNotEqualTo(first);
+            assertThat(own.capacity().meshes()).isGreaterThan(1);
             slots.begin(1);
             slots.end();
-            assertThatIllegalStateException().isThrownBy(() -> own.add(square));
             slots.begin(0); // waited for frame 0: nothing in flight can draw it
             assertThat(own.add(square)).isEqualTo(first);
             slots.end();
-            assertThat(own.meshCount()).isEqualTo(1);
+            assertThat(own.meshCount()).isEqualTo(2);
         }
     }
 
@@ -1065,14 +1066,16 @@ class MeshletRendererTest {
             VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, com.truesim.engine.vulkan.FrameSlots.single(), 0));
         assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer(device, scene,
             VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, com.truesim.engine.vulkan.FrameSlots.single(), 65_536));
-        // Each limit of the pool: meshes, meshlets, triangles, meshlet vertices, attributes.
+        // Each limit of the pool grows when reached: meshes, meshlets, triangles, meshlet vertices, attributes.
         MeshData small = grid(2, 1, false, VertexFormat.of(VertexAttribute.NORMAL));
         for (GeometryPool.Capacity limit : new GeometryPool.Capacity[] {
             new GeometryPool.Capacity(1000, 100, 1000, 1), new GeometryPool.Capacity(1000, 1, 1000, 4),
             new GeometryPool.Capacity(1000, 100, 9, 4), new GeometryPool.Capacity(13, 100, 1000, 4)}) {
             try (GeometryPool limited = new GeometryPool(device, limit)) {
-                limited.add(small);
-                assertThatIllegalStateException().as("%s", limit).isThrownBy(() -> limited.add(small));
+                int first = limited.add(small);
+                int second = limited.add(small);
+                assertThat(limited.contains(first) && limited.contains(second)).as("%s", limit).isTrue();
+                assertThat(limited.capacity()).as("%s", limit).isNotEqualTo(limit);
             }
         }
         assertThat(pool.meshCount()).isEqualTo(2);
@@ -1080,8 +1083,9 @@ class MeshletRendererTest {
         assertThat(pool.vertexCount()).isEqualTo(4 + 65 * 65);
         assertThat(pool.meshletCount()).isPositive();
         try (GeometryPool tiny = new GeometryPool(device, GeometryPool.Capacity.of(4, 1, 1))) {
-            assertThatIllegalStateException().isThrownBy(() -> tiny.add(grid(8, 1, false,
-                VertexFormat.POSITIONS_ONLY)));
+            int grown = tiny.add(grid(8, 1, false, VertexFormat.POSITIONS_ONLY)); // grows to hold it
+            assertThat(tiny.contains(grown)).isTrue();
+            assertThat(tiny.capacity().vertices()).isGreaterThanOrEqualTo(81);
             tiny.close();
             assertThatIllegalStateException().isThrownBy(() -> tiny.add(grid(1, 1, false,
                 VertexFormat.POSITIONS_ONLY)));

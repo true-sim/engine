@@ -11,7 +11,7 @@ import java.util.Arrays;
 @AllowAllocation("growing the free list, when meshes are added or removed")
 final class RangeAllocator {
 
-    private final long capacity;
+    private long capacity;
     // Free ranges, sorted by start, never touching (touching ones are merged).
     private long[] starts = new long[8];
     private long[] lengths = new long[8];
@@ -30,6 +30,16 @@ final class RangeAllocator {
 
     long capacity() {
         return capacity;
+    }
+
+    /** Grows to {@code capacity}: the new room is free, joined to a free range at the old end. */
+    void grow(long capacity) {
+        if (capacity <= this.capacity) {
+            throw new IllegalArgumentException("Grows to more than " + this.capacity + ": " + capacity);
+        }
+        long old = this.capacity;
+        this.capacity = capacity;
+        release(old, capacity - old);
     }
 
     /** How much is free in all, though perhaps not in one piece. */
