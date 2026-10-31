@@ -283,7 +283,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                 }
                 select(ctx.unsafe().commands(), view, ctx.address(list));
             });
-        GraphBuilder.PassBuilder pass = scene.read(g.pass(name), BufferAccess.DRAW_READ)
+        GraphBuilder.PassBuilder pass = scene.read(targets.inRegion(g.pass(name)), BufferAccess.DRAW_READ)
             .read(list, BufferAccess.INDIRECT)
             .read(list, BufferAccess.DRAW_READ);
         if (targets.color() != null) {

@@ -87,7 +87,7 @@ public final class RayTracedShadows implements Technique {
         Image depth = g.request(depthSource).depth();
         Buffer topLevel = g.request(new TopLevel(rayTracing, depthSource.view().renderer()));
         Image mask = g.create("shadow mask of light " + light, ImageDesc.like(depth, Ratio.ONE).format(Format.R8_UNORM));
-        TracedPush push = new TracedPush().width(mask.width()).height(mask.height()).light(light);
+        TracedPush push = new TracedPush().light(light);
         EngineSettings settings = g.settings();
         g.pass("ray-traced shadows of light " + light)
             .read(depth, Access.SAMPLED_COMPUTE)
@@ -115,6 +115,8 @@ public final class RayTracedShadows implements Technique {
             .toTopLevelZ((float) (z - rayTracing.origin(2)));
         push.lightX((float) (lights.position(light, 0) - x)).lightY((float) (lights.position(light, 1) - y))
             .lightZ((float) (lights.position(light, 2) - z));
-        ctx.dispatch(pipeline, push, (mask.width() + 7) / 8, (mask.height() + 7) / 8, 1);
+        int width = ctx.regionWidth(mask); // the pixels drawn this frame (dynamic resolution)
+        int height = ctx.regionHeight(mask);
+        ctx.dispatch(pipeline, push.width(width).height(height), (width + 7) / 8, (height + 7) / 8, 1);
     }
 }

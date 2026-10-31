@@ -6,6 +6,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.Request;
+import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.render.blocks.DepthPyramid;
 import com.truesim.engine.vulkan.Format;
 import java.util.Objects;
@@ -24,9 +25,18 @@ import java.util.Objects;
  * @param width the targets' size
  * @param height the targets' size
  * @param occlusion two-phase occlusion culling (a view made with occlusion)
+ * @param port the graph's view whose render region it draws in (dynamic resolution); null: the view it is built for
+ *     when it is that view's own draw (no camera of its own, targets of the view's size), else all of its targets (a
+ *     light's draw)
  */
 public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, SurfaceOutput output, int depthFormat,
-    int width, int height, boolean occlusion) implements Request<SceneDraw.Targets> {
+    int width, int height, boolean occlusion, ViewPort port) implements Request<SceneDraw.Targets> {
+
+    /** A draw in the region of the view it is built for if it is that view's own, else into all of its targets. */
+    public SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, SurfaceOutput output, int depthFormat,
+        int width, int height, boolean occlusion) {
+        this(geometry, view, camera, output, depthFormat, width, height, occlusion, null);
+    }
 
     public SceneDraw {
         Objects.requireNonNull(geometry, "geometry");
@@ -43,9 +53,18 @@ public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, 
     /**
      * What the draw wrote: {@code depth}, {@code color} (shaded color or IDs; null for depth only), and the light list
      * and shadow inputs shading used ({@link Keys#LIGHT_LIST}, {@link ShadowInputs}; null without a light list, or
-     * without shading).
+     * without shading), within the render region of {@code region} (null: all of them).
      */
-    public record Targets(Image depth, Image color, Buffer lights, ShadowInputs.Set shadows) {
+    public record Targets(Image depth, Image color, Buffer lights, ShadowInputs.Set shadows, ViewPort region) {
+
+        public Targets(Image depth, Image color, Buffer lights, ShadowInputs.Set shadows) {
+            this(depth, color, lights, shadows, null);
+        }
+
+        /** {@code pass}, drawing (or culling) within the render region of {@link #region} where there is one. */
+        public GraphBuilder.PassBuilder inRegion(GraphBuilder.PassBuilder pass) {
+            return region == null ? pass : pass.region(region);
+        }
     }
 
     @Override
@@ -60,14 +79,18 @@ public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, 
         };
         Buffer lights = output.kind() == SurfaceOutput.Kind.SHADED ? g.optional(Keys.LIGHT_LIST) : null;
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
-        Targets targets = new Targets(depth, color, lights, shadows);
+        // The view's own draw renders within its render region; a light's, into all of its targets.
+        ViewPort built = g.view();
+        ViewPort region = port != null ? port : camera == null && built != null && built.width() == width
+            && built.height() == height ? built : null;
+        Targets targets = new Targets(depth, color, lights, shadows, region);
         boolean load = false;
         for (GeometryProvider provider : geometry.providers()) {
             provider.drawFirst(g, this, targets, load);
             load = true;
         }
         if (occlusion) {
-            Image pyramid = g.request(new DepthPyramid(depth));
+            Image pyramid = g.request(new DepthPyramid(depth, region));
             for (GeometryProvider provider : geometry.providers()) {
                 provider.drawLate(g, this, targets, pyramid);
             }

@@ -188,7 +188,7 @@ public final class ClusteredLights implements Technique {
         int across = tilesAcross();
         int down = tilesDown();
         Pipeline pipeline = g.computeProgram("shaders/lights/cluster.spv", "clusterMain", ClusterPush.BYTES);
-        ClusterPush push = new ClusterPush().width(port.width()).height(port.height()).far(far());
+        ClusterPush push = new ClusterPush().far(far());
         Buffer list = g.createBuffer("light clusters",
             HEADER_BYTES + 4L * clusters(across, down) * (1 + maxPerCluster()));
         g.pass("light clusters")
@@ -231,8 +231,9 @@ public final class ClusteredLights implements Technique {
             Barriers.memory(ctx.unsafe().commands(), VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-            ctx.dispatch(pipeline, push.viewProjection(camera.viewProjection()).header(header).lightCount(lights.count()),
-                (clusters + 63) / 64);
+            // The tiles map onto the render region (dynamic resolution); the grid has room for all of the images.
+            ctx.dispatch(pipeline, push.width(port.regionWidth()).height(port.regionHeight())
+                .viewProjection(camera.viewProjection()).header(header).lightCount(lights.count()), (clusters + 63) / 64);
         }
     }
 }

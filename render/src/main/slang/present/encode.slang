@@ -2,14 +2,18 @@
 // encoded for it. SDR: tone mapped into 0 to 1, linear (the copy into the window's sRGB image encodes it). HDR10: the
 // tone curve applied relative to the display's peak brightness, in nits from paper white (SDR white), moved to Rec.
 // 2020 primaries and encoded by the PQ curve. scRGB: the same curve, in Rec. 709 primaries, 1.0 being 80 nits.
+// The result is the size the view shows at; scene color rendered smaller (a render scale, dynamic resolution's region)
+// is scaled up, filtered, never reading past the region.
 import bindless;
 
 public struct EncodePush
 {
     uint source;        // sampled slot of the view's linear scene color
     uint target;        // storage slot of the result, 16-bit floats
-    uint width;
+    uint width;         // the result's size
     uint height;
+    uint sourceWidth;   // the render region in the scene color, from its top left corner
+    uint sourceHeight;
     uint encoding;      // ENCODE_SDR, ENCODE_HDR10, ENCODE_SCRGB
     uint curve;         // CURVE_NONE, CURVE_REINHARD, CURVE_ACES
     float exposure;     // scene color is multiplied by this first
@@ -72,7 +76,22 @@ void encodeMain(uint3 id : SV_DispatchThreadID)
     {
         return;
     }
-    float3 color = max(textures[push.source].Load(int3(id.xy, 0)).rgb, 0) * push.exposure;
+    float3 color;
+    if (push.sourceWidth == push.width && push.sourceHeight == push.height)
+    {
+        color = textures[push.source].Load(int3(id.xy, 0)).rgb;
+    }
+    else
+    {
+        // The pixel's center in the region, kept half a texel inside it, so filtering reads none beyond.
+        float2 region = float2(push.sourceWidth, push.sourceHeight);
+        float2 p = clamp((float2(id.xy) + 0.5) * region / float2(push.width, push.height), 0.5, region - 0.5);
+        uint sceneWidth;
+        uint sceneHeight;
+        textures[push.source].GetDimensions(sceneWidth, sceneHeight);
+        color = textures[push.source].SampleLevel(samplers[LINEAR_CLAMP], p / float2(sceneWidth, sceneHeight), 0).rgb;
+    }
+    color = max(color, 0) * push.exposure;
     float3 encoded;
     if (push.encoding == ENCODE_SDR)
     {

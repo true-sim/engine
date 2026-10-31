@@ -31,6 +31,7 @@ import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
+import com.truesim.engine.graph.ResolutionSettings;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.vulkan.Pipeline;
@@ -1037,6 +1038,96 @@ class GraphTechniquesTest {
             }
         }
         return count;
+    }
+
+    /** The target as read back by the last {@link #frame()}. */
+    private int[] readPixels() {
+        int[] read = new int[SIZE * SIZE];
+        for (int i = 0; i < read.length; i++) {
+            read[i] = pixels.memory().getAtIndex(ValueLayout.JAVA_INT, i);
+        }
+        return read;
+    }
+
+    /** The mean difference of the channels of {@code a} and {@code b}, 0 to 255. */
+    private static double difference(int[] a, int[] b) {
+        double total = 0;
+        for (int i = 0; i < a.length; i++) {
+            for (int shift = 0; shift < 24; shift += 8) {
+                total += Math.abs(((a[i] >> shift) & 0xff) - ((b[i] >> shift) & 0xff));
+            }
+        }
+        return total / (3.0 * a.length);
+    }
+
+    @Test
+    void dynamicResolutionDrawsWhatAFixedResolutionDraws() {
+        // The lit floor, and a quad standing on it hiding part of it.
+        scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+        scene.set(1, quad, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+        scene.removeFrom(2);
+        Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        try (Lights lights = new Lights(device, 4, 1)) {
+            lights.point(0, -1, -0.5f, -1.5f, 3, 6, 0, 0).point(1, 1, -0.5f, -1.5f, 3, 0, 0, 6)
+                .directional(2, -0.4f, -0.8f, -0.3f, 1, 1, 1).setCount(3);
+            SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+            SceneView main = main(camera);
+            List<Technique> shadings = new java.util.ArrayList<>(List.of(new ClusteredForwardShading(geometry, main,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f)));
+            if (device.primitiveIds()) {
+                shadings.add(new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f));
+            }
+            main.port().add(shadings.getFirst()).add(new ClusteredLights(lights, main))
+                .output(Keys.SCENE_COLOR, output);
+            for (Technique shading : shadings) {
+                main.port().replace(shading);
+                graph.settings().set(ResolutionSettings.DYNAMIC, false);
+                frame();
+                frame(); // the late phase has drawn what the early one missed the first time
+                int[] fixed = readPixels();
+                // Images larger than the view, its region all of what it shows: the same image, to the bit.
+                graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.HEADROOM, 1.5f);
+                frame();
+                frame();
+                assertThat(main.port().width()).isGreaterThan(SIZE);
+                assertThat(main.port().regionWidth()).isEqualTo(SIZE);
+                assertThat(readPixels()).as("%s, the region all of the view", shading).isEqualTo(fixed);
+                // Half the pixels each way, scaled up: near the same image.
+                main.port().renderScale(0.5f);
+                frame();
+                frame();
+                assertThat(main.port().regionWidth()).isEqualTo(SIZE / 2);
+                assertThat(difference(readPixels(), fixed)).as("%s, at half the resolution", shading)
+                    .isLessThan(12);
+                main.port().renderScale(1);
+            }
+        }
+    }
+
+    @Test
+    void occlusionCullingHidesWhatIsBehindAtADynamicResolution() {
+        // A wall filling the view 5 units ahead, and 8 quads behind it, 10 units ahead.
+        scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);
+        for (int i = 1; i <= 8; i++) {
+            scene.set(i, quad, (i % 4 - 1.5f) * 2.5f, i <= 4 ? -1.5f : 1.5f, -10, HALF, 0, 0, HALF, 0.5f, 0.5f, 0.5f);
+        }
+        scene.removeFrom(9);
+        Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_WHITE);
+        graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.HEADROOM, 1.5f);
+        SceneView main = main(camera);
+        main.port().renderScale(0.5f);
+        main.port().add(MeshletBenchmark.forward(main).clearColor(0, 0, 1)).output(Keys.SCENE_COLOR, output);
+        frame();
+        frame();
+        frame();
+        assertThat(view.visibleMeshlets()).as("hidden by the wall, in the region's pyramid").isEqualTo(1);
+        assertThat(covered()).isEqualTo(SIZE * SIZE);
+        scene.set(0, quad, 100, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);
+        frame();
+        assertThat(view.visibleMeshlets()).as("shown the frame the wall moves").isEqualTo(8);
     }
 
     @Test

@@ -335,12 +335,12 @@ public final class PassContext {
      * Changes every frame under dynamic resolution, so read it while recording, for dispatch sizes and push constants.
      */
     public int regionWidth(Image image) {
-        return FrameGraph.regionWidth(pass.view, image);
+        return graph.regionWidth(pass.view, java.util.Objects.requireNonNull(image, "image")); // a size: needs no declaring
     }
 
     /** The height of the pass's render region in {@code image}. */
     public int regionHeight(Image image) {
-        return FrameGraph.regionHeight(pass.view, image);
+        return graph.regionHeight(pass.view, java.util.Objects.requireNonNull(image, "image"));
     }
 
     /** The pass's view ({@link GraphBuilder#view()} of its technique), or null: the frame's, or shared work. */

@@ -40,8 +40,8 @@ public final class MeshletGeometry implements GeometryProvider {
         MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)).add(view, draw.occlusion(),
             camera == null ? null : () -> view.set(camera, 1, MeshletRenderer.MODE_LIT));
         SceneData.Buffers scene = g.request(new SceneData(renderer));
-        GraphBuilder.PassBuilder pass = culling.drawing(scene.read(g.pass(name(draw, draw.occlusion() ? " early" : "")),
-            BufferAccess.DRAW_READ), view);
+        GraphBuilder.PassBuilder pass = culling.drawing(scene.read(targets.inRegion(g.pass(name(draw,
+            draw.occlusion() ? " early" : ""))), BufferAccess.DRAW_READ), view);
         record(draw, targets, pass, false);
     }
 
@@ -53,16 +53,17 @@ public final class MeshletGeometry implements GeometryProvider {
     @AllowAllocation("building the graph, when it changes")
     public void drawLate(GraphBuilder g, SceneDraw draw, SceneDraw.Targets targets, Image pyramid) {
         RenderView view = draw.view();
-        int width = draw.width();
-        int height = draw.height();
+        Image depth = targets.depth();
         SceneData.Buffers scene = g.request(new SceneData(renderer));
-        GraphBuilder.PassBuilder culling = scene.read(g.pass(name(draw, " late culling")), BufferAccess.STORAGE_READ)
-            .read(pyramid, Access.SAMPLED_COMPUTE);
+        GraphBuilder.PassBuilder culling = scene.read(targets.inRegion(g.pass(name(draw, " late culling"))),
+            BufferAccess.STORAGE_READ).read(pyramid, Access.SAMPLED_COMPUTE);
         renderer.declareCulling(g, culling);
         view.declareCulling(g, culling);
-        culling.record(ctx -> renderer.cullLate(ctx.unsafe().commands(), view, ctx.sampled(pyramid), width, height,
-            pyramid.mips(), true));
-        GraphBuilder.PassBuilder pass = scene.read(g.pass(name(draw, " late")), BufferAccess.DRAW_READ);
+        // Against the pyramid of the depth's render region, which may change every frame.
+        culling.record(ctx -> renderer.cullLate(ctx.unsafe().commands(), view, ctx.sampled(pyramid),
+            ctx.regionWidth(depth), ctx.regionHeight(depth), pyramid.mips(), true));
+        GraphBuilder.PassBuilder pass = scene.read(targets.inRegion(g.pass(name(draw, " late"))),
+            BufferAccess.DRAW_READ);
         view.declareDrawing(g, pass);
         record(draw, targets, pass, true);
     }
