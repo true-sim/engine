@@ -1,6 +1,10 @@
 package com.truesim.engine.scene;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.common.jobs.Lane;
+import com.truesim.common.jobs.Task;
+import com.truesim.common.jobs.TaskScheduler;
+import com.truesim.common.jobs.TaskState;
 import com.truesim.common.math.Vec2;
 import com.truesim.common.math.Vec3;
 import com.truesim.common.math.Vec4;
@@ -19,6 +23,7 @@ import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.render.MaterialData;
 import com.truesim.scene.render.RenderAssets;
 import com.truesim.scene.render.TextureData;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -26,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.locks.LockSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,14 +51,44 @@ import org.slf4j.LoggerFactory;
  * }</pre>
  *
  * <p>An asset is acquired in the cache while some scene uses it, uploaded once it has loaded, and freed on the GPU (once
- * no frame in flight draws it) and released in the cache when the last scene lets go. Materials draw as the default until
- * they load, and untextured where their textures have not loaded yet. Give the pool, materials and textures the frame
- * slots of every graph drawing them (shared slots for several graphs). Use it on the main thread, the asset cache's.
+ * no frame in flight draws it) and released in the cache when the last scene lets go. Give the pool, materials and
+ * textures the frame slots of every graph drawing them (shared slots for several graphs). Use it on the main thread, the
+ * asset cache's.
+ *
+ * <p>How renderables come in is the application's choice, and each asset's ({@link Loading}): streamed, they draw as
+ * soon as their mesh is on the GPU, materials as the default until they load and untextured until their textures do;
+ * whole, they wait until those assets are on the GPU too, so nothing pops in. To show a level only once it has loaded,
+ * {@link #awaitLoaded} blocks until every asset the scenes use is there. Given a lane ({@link #prepareOn}), meshes and
+ * textures are made ready for the GPU on its threads (their data copied into staging memory), so the main thread only
+ * places them.
+ *
+ * <pre>{@code
+ * resources.loading(SceneResources.Loading.WHOLE)                 // the application's default: no pop-in
+ *     .loading(skyTexture, SceneResources.Loading.STREAM)         // this one may come late
+ *     .prepareOn(tasks.platformLane("gpu prepare", 2));
+ * world.update();                                                 // the level's renderables, their assets acquired
+ * resources.awaitLoaded(tasks, Duration.ofSeconds(30));           // a loading screen's wait
+ * world.update();                                                 // all of it drawn from the next frame
+ * }</pre>
  */
 public final class SceneResources implements AutoCloseable {
 
     static final int NONE = -1;
     private static final Logger LOG = LoggerFactory.getLogger(SceneResources.class);
+
+    /** How a renderable takes in an asset: whether it waits for it to draw. */
+    public enum Loading {
+        /**
+         * Drawn without it until it arrives: a renderable draws once its mesh is on the GPU, a material as the default
+         * until it loads, a texture as none until it does.
+         */
+        STREAM,
+        /**
+         * Waited for: a renderable using it first draws once it is on the GPU (a material: loaded, with its textures
+         * that are waited for too). An asset that fails is not waited for.
+         */
+        WHOLE
+    }
 
     private final AssetCache assets;
     private final GeometryPool pool;
@@ -65,14 +101,16 @@ public final class SceneResources implements AutoCloseable {
     private final Map<AssetRef<MaterialData>, MaterialEntry> materialEntries = new HashMap<>();
     private final Map<AssetRef<TextureData>, TextureEntry> textureEntries = new HashMap<>();
     private final List<MaterialSet> dirtySets = new ArrayList<>();
-    /** Loaded meshes the pool had no room for: tried again as views update, as room frees. */
-    private final List<Mesh> waitingForRoom = new ArrayList<>();
+    private Loading loading = Loading.STREAM;
+    private final Map<AssetRef<?>, Loading> loadingOf = new HashMap<>();
+    private Lane workers; // where meshes and textures are made ready, or null: on the main thread
+    private int preparing; // meshes and textures being made ready on the workers
     private boolean closed;
 
     /**
      * Hears what keeps a scene from drawing as its data says, which is otherwise only logged: games show it, count it
-     * or fail a test on it. Every method does nothing by default. Room running out is not reported here: it is
-     * waited out, see {@link #waitingForRoomCount()} and {@link SceneSync#waitingCount()}.
+     * or fail a test on it. Every method does nothing by default. Room in the material table running out is not
+     * reported here: it is waited out, see {@link SceneSync#waitingCount()}.
      */
     public interface Diagnostics {
 
@@ -109,6 +147,9 @@ public final class SceneResources implements AutoCloseable {
         MeshData data;
         int id = NONE; // in the pool
         final List<MeshUser> users = new ArrayList<>(2);
+        boolean preparing; // being made ready on the workers: its data stays held until it is
+        boolean dropped; // let go of while preparing
+        boolean failed; // it could not load or be placed: never drawn
 
         Mesh(AssetRef<MeshData> ref) {
             this.ref = ref;
@@ -191,6 +232,7 @@ public final class SceneResources implements AutoCloseable {
     private static final class MaterialEntry {
         final AssetRef<MaterialData> ref;
         MaterialData data;
+        boolean failed;
         final List<TextureEntry> textures = new ArrayList<>(4);
         final List<MaterialSet> users = new ArrayList<>();
 
@@ -204,6 +246,9 @@ public final class SceneResources implements AutoCloseable {
         final AssetRef<TextureData> ref;
         int slot = NONE;
         final List<MaterialEntry> users = new ArrayList<>();
+        boolean failed;
+        boolean preparing; // being made ready on the workers: its data stays held until it is
+        boolean dropped; // let go of while preparing
 
         TextureEntry(AssetRef<TextureData> ref) {
             this.ref = ref;
@@ -230,6 +275,112 @@ public final class SceneResources implements AutoCloseable {
 
     public Textures textures() {
         return textures;
+    }
+
+    /**
+     * Renderables take in assets as {@code mode} says ({@link Loading#STREAM} by default), unless an asset says
+     * otherwise ({@link #loading(AssetRef, Loading)}).
+     */
+    public SceneResources loading(Loading mode) {
+        this.loading = Objects.requireNonNull(mode, "mode");
+        return this;
+    }
+
+    /**
+     * Renderables take in {@code asset} (a mesh, material or texture) as {@code mode} says, whatever the default; null
+     * goes back to the default. Read as they are drawn: set it before the renderables using it come.
+     */
+    @AllowAllocation("set rarely")
+    public SceneResources loading(AssetRef<?> asset, Loading mode) {
+        Objects.requireNonNull(asset, "asset");
+        if (mode == null) {
+            loadingOf.remove(asset);
+        } else {
+            loadingOf.put(asset, mode);
+        }
+        return this;
+    }
+
+    /** How renderables take in {@code asset}: its own mode, or the default. */
+    public Loading loadingOf(AssetRef<?> asset) {
+        Loading mode = loadingOf.get(asset);
+        return mode == null ? loading : mode;
+    }
+
+    /**
+     * Makes meshes and textures ready for the GPU on {@code lane}'s threads (their data copied into staging memory)
+     * from now on, handed over as the scheduler drains, instead of on the main thread as they arrive; null goes back
+     * to the main thread. Costs a frame of latency, saves the main thread milliseconds per large asset.
+     */
+    public SceneResources prepareOn(Lane lane) {
+        this.workers = lane;
+        return this;
+    }
+
+    /**
+     * How many assets the scenes use are not on the GPU yet: loading in the cache, being made ready, or waiting for
+     * the material table. Failed ones do not count.
+     */
+    public int loadingCount() {
+        int count = preparing;
+        for (Mesh mesh : meshes.values()) {
+            count += mesh.uploaded() || mesh.preparing || mesh.failed ? 0 : 1;
+        }
+        for (MaterialEntry entry : materialEntries.values()) {
+            count += entry.data != null || entry.failed ? 0 : 1;
+        }
+        for (TextureEntry entry : textureEntries.values()) {
+            count += entry.slot != NONE || entry.preparing || entry.failed ? 0 : 1;
+        }
+        return count;
+    }
+
+    /**
+     * Blocks until every asset the scenes use is on the GPU (or failed), draining {@code tasks} (the asset cache's
+     * scheduler) on this thread, the main one, as loads finish: for loading screens and tests. Update the scenes before,
+     * so they have acquired what they use, and after, to draw what came. Returns whether everything came within
+     * {@code timeout}.
+     */
+    public boolean awaitLoaded(TaskScheduler tasks, Duration timeout) {
+        checkOpen();
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            tasks.drainCompleted();
+            flush();
+            if (loadingCount() == 0) {
+                return true;
+            }
+            if (System.nanoTime() - deadline > 0) {
+                return false;
+            }
+            LockSupport.parkNanos(200_000);
+        }
+    }
+
+    /**
+     * Whether a renderable of {@code mesh} with materials {@code set} may draw: the assets of it that are waited for
+     * ({@link Loading#WHOLE}) are on the GPU or failed. Allocates nothing.
+     */
+    boolean ready(MaterialSet set) {
+        for (int s = 0; s < set.entries.length; s++) {
+            MaterialEntry entry = set.entries[s];
+            if (entry == null || entry.failed) {
+                continue;
+            }
+            if (entry.data == null) {
+                if (loadingOf(entry.ref) == Loading.WHOLE) {
+                    return false;
+                }
+                continue;
+            }
+            for (int t = 0; t < entry.textures.size(); t++) {
+                TextureEntry texture = entry.textures.get(t);
+                if (texture.slot == NONE && !texture.failed && loadingOf(texture.ref) == Loading.WHOLE) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /** How many distinct meshes views use, uploaded or loading. */
@@ -260,13 +411,6 @@ public final class SceneResources implements AutoCloseable {
         return textureEntries.size();
     }
 
-    /**
-     * Loaded meshes waiting for room in the geometry pool: they draw once it has room, e.g. when removed meshes have
-     * left the frames in flight.
-     */
-    public int waitingForRoomCount() {
-        return waitingForRoom.size();
-    }
 
     // ---------------------------------------------------------------- meshes
 
@@ -300,31 +444,63 @@ public final class SceneResources implements AutoCloseable {
             meshes.remove(mesh.ref);
             if (mesh.uploaded()) {
                 pool.remove(mesh.id);
-            } else {
-                waitingForRoom.remove(mesh);
             }
+            if (mesh.preparing) {
+                mesh.dropped = true; // released once the workers are done with its data
+            } else {
+                assets.release(mesh.ref);
+            }
+        }
+    }
+
+    /** Puts {@code mesh}, loaded from {@code data}, in the pool: made ready on the workers first, if there are. */
+    @AllowAllocation("a mesh arrived")
+    private void upload(Mesh mesh, MeshData data) {
+        mesh.data = data;
+        if (workers == null) {
+            placed(mesh, pool.tryAdd(data));
+            return;
+        }
+        mesh.preparing = true;
+        preparing++;
+        workers.task(() -> pool.prepare(data)).deliver(done -> prepared(mesh, done)).submit();
+    }
+
+    /** {@code mesh} made ready on the workers: placed in the pool, unless it was let go of meanwhile. */
+    private void prepared(Mesh mesh, Task<GeometryPool.Prepared> done) {
+        preparing--;
+        mesh.preparing = false;
+        if (done.state() != TaskState.SUCCEEDED) {
+            mesh.failed = true;
+            LOG.warn("Could not prepare {}", mesh.ref, done.failure());
+            diagnostics.assetFailed(mesh.ref, done.failure());
+        } else if (mesh.dropped || closed) {
+            done.result().close();
+        } else {
+            placed(mesh, pool.tryAdd(done.result()));
+            if (!mesh.uploaded()) {
+                done.result().close();
+            }
+        }
+        if (mesh.dropped) {
             assets.release(mesh.ref);
         }
     }
 
-    @AllowAllocation("growing the list of meshes waiting for room")
-    private void upload(Mesh mesh, MeshData data) {
-        mesh.data = data;
-        if (!tryUpload(mesh)) {
-            waitingForRoom.add(mesh);
+    /** {@code mesh} is pool mesh {@code id} now: its users hear of it. -1: the pool cannot hold it. */
+    @AllowAllocation("reporting a mesh the pool cannot hold")
+    private void placed(Mesh mesh, int id) {
+        if (id == NONE) {
+            String problem = mesh.ref + " has more than " + GeometryPool.MAX_LEVELS + " detail levels: not drawn";
+            LOG.warn(problem);
+            mesh.failed = true;
+            diagnostics.assetFailed(mesh.ref, new IllegalArgumentException(problem));
+            return;
         }
-    }
-
-    /** Puts {@code mesh} in the pool if it has room, and tells its users. Allocates nothing. */
-    private boolean tryUpload(Mesh mesh) {
-        mesh.id = pool.tryAdd(mesh.data);
-        if (mesh.id == NONE) {
-            return false;
-        }
+        mesh.id = id;
         for (int i = 0; i < mesh.users.size(); i++) {
             mesh.users.get(i).uploaded(mesh);
         }
-        return true;
     }
 
     // ---------------------------------------------------------------- materials and textures
@@ -402,18 +578,8 @@ public final class SceneResources implements AutoCloseable {
         return false;
     }
 
-    /**
-     * Brings the GPU up to date, called by views as they update: meshes waiting for room go in where it has freed, and
-     * material blocks whose materials or textures arrived are written.
-     */
+    /** Brings the GPU up to date, called by views as they update: blocks whose materials or textures came are written. */
     void flush() {
-        for (int i = 0; i < waitingForRoom.size(); ) { // the longest waiting first
-            if (tryUpload(waitingForRoom.get(i))) {
-                waitingForRoom.remove(i);
-            } else {
-                i++;
-            }
-        }
         for (int i = 0; i < dirtySets.size(); i++) {
             MaterialSet set = dirtySets.get(i);
             set.dirty = false;
@@ -455,7 +621,11 @@ public final class SceneResources implements AutoCloseable {
                 if (texture.slot != NONE) {
                     textures.remove(texture.slot);
                 }
-                assets.release(texture.ref);
+                if (texture.preparing) {
+                    texture.dropped = true; // released once the workers are done with its texels
+                } else {
+                    assets.release(texture.ref);
+                }
             }
         }
         assets.release(entry.ref);
@@ -481,10 +651,42 @@ public final class SceneResources implements AutoCloseable {
         markDirty(entry);
     }
 
+    @AllowAllocation("a texture arrived")
     private void textureLoaded(TextureEntry entry, TextureData data) {
-        entry.slot = data.colorSpace() == TextureData.ColorSpace.SRGB
-            ? textures.color(data.width(), data.height(), data.texels())
-            : textures.data(data.width(), data.height(), data.texels());
+        boolean srgb = data.colorSpace() == TextureData.ColorSpace.SRGB;
+        if (workers == null) {
+            entry.slot = srgb ? textures.color(data.width(), data.height(), data.texels())
+                : textures.data(data.width(), data.height(), data.texels());
+            textureArrived(entry);
+            return;
+        }
+        entry.preparing = true;
+        preparing++;
+        workers.task(() -> srgb ? textures.prepareColor(data.width(), data.height(), data.texels())
+                : textures.prepareData(data.width(), data.height(), data.texels()))
+            .deliver(done -> texturePrepared(entry, done)).submit();
+    }
+
+    /** {@code entry} made ready on the workers: added, unless it was let go of meanwhile. */
+    private void texturePrepared(TextureEntry entry, Task<Textures.Prepared> done) {
+        preparing--;
+        entry.preparing = false;
+        if (done.state() != TaskState.SUCCEEDED) {
+            entry.failed = true;
+            LOG.warn("Could not prepare {}", entry.ref, done.failure());
+            diagnostics.assetFailed(entry.ref, done.failure());
+        } else if (entry.dropped || closed) {
+            done.result().close();
+        } else {
+            entry.slot = textures.add(done.result());
+            textureArrived(entry);
+        }
+        if (entry.dropped) {
+            assets.release(entry.ref);
+        }
+    }
+
+    private void textureArrived(TextureEntry entry) {
         for (MaterialEntry material : entry.users) {
             markDirty(material);
         }
@@ -672,7 +874,19 @@ public final class SceneResources implements AutoCloseable {
 
         @Override
         public void failed(AssetRef<?> ref, Throwable cause) {
-            if (meshes.containsKey(ref) || materialEntries.containsKey(ref) || textureEntries.containsKey(ref)) {
+            MaterialEntry material = materialEntries.get(ref);
+            TextureEntry texture = textureEntries.get(ref);
+            Mesh mesh = meshes.get(ref);
+            if (mesh != null) {
+                mesh.failed = true;
+            }
+            if (material != null) {
+                material.failed = true; // not waited for
+            }
+            if (texture != null) {
+                texture.failed = true;
+            }
+            if (mesh != null || material != null || texture != null) {
                 diagnostics.assetFailed(ref, cause); // one a scene uses
             }
         }
