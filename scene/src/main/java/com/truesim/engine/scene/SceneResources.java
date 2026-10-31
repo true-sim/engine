@@ -263,6 +263,7 @@ public final class SceneResources implements AutoCloseable {
         this.pool = Objects.requireNonNull(pool, "pool");
         this.materials = Objects.requireNonNull(materials, "materials");
         this.textures = Objects.requireNonNull(textures, "textures");
+        textures.namedBy(materials); // removing a texture a material still names is a bug here, refused
         assets.addListener(listener);
     }
 
