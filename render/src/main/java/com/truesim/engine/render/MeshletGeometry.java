@@ -10,6 +10,7 @@ import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Load;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Store;
+import com.truesim.engine.graph.ViewPort;
 import java.util.Objects;
 
 /**
@@ -37,8 +38,11 @@ public final class MeshletGeometry implements GeometryProvider {
         }
         RenderView view = draw.view();
         Camera camera = draw.camera();
-        MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)).add(view, draw.occlusion(),
-            camera == null ? null : () -> view.set(camera, 1, MeshletRenderer.MODE_LIT));
+        // A light's camera set each frame; a view's own draw's detail chosen at the size it renders this frame.
+        ViewPort region = targets.region();
+        Runnable before = camera != null ? () -> view.set(camera, 1, MeshletRenderer.MODE_LIT)
+            : region != null ? () -> view.detail(region.renderScale()) : null;
+        MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)).add(view, draw.occlusion(), before);
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         GraphBuilder.PassBuilder pass = culling.drawing(scene.read(targets.inRegion(g.pass(name(draw,
             draw.occlusion() ? " early" : ""))), BufferAccess.DRAW_READ), view);

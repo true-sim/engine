@@ -1107,6 +1107,29 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void detailFollowsTheRenderScale() {
+        // The hill near the camera: fewer, coarser meshlets for the pixels a smaller render scale draws.
+        int field = pool.add(MeshletRendererTest.grid(24, 0.12f, true, VertexFormat.POSITIONS_ONLY)); // 1,152 triangles
+        scene.set(0, field, 0, -0.3f, -1.5f, 0, 0, 0, 1, 1, 1, 1);
+        scene.removeFrom(1);
+        Camera camera = new Camera().set(0, -0.3, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        view.set(camera, 0.5f, MeshletRenderer.MODE_LIT);
+        graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.MIN_SCALE, 0.25f);
+        SceneView main = main(camera);
+        main.port().add(MeshletBenchmark.forward(main)).output(Keys.SCENE_COLOR, output);
+        frame();
+        frame();
+        int full = view.visibleMeshlets();
+        assertThat(view.detail()).isEqualTo(1);
+        main.port().renderScale(0.25f);
+        frame();
+        frame();
+        assertThat(view.detail()).isEqualTo(0.25f);
+        assertThat(view.visibleMeshlets()).as("against %d at full size", full).isLessThan(full);
+        assertThatIllegalArgumentException().isThrownBy(() -> view.detail(0));
+    }
+
+    @Test
     void aViewSetOnceFollowsItsCameraAsItMoves() {
         // A wall ahead and 8 quads behind it; the camera is set on the view once, blank, and moved afterwards only.
         scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);
