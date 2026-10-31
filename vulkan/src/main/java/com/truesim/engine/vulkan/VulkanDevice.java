@@ -137,7 +137,9 @@ public final class VulkanDevice implements AutoCloseable {
     /** Whether the driver can say what went wrong when the device is lost (VK_EXT_device_fault). */
     private final boolean faults;
     private final boolean hdrMetadata;
-    private final Map<Queue, OneOff> oneOffs = new java.util.IdentityHashMap<>(); // submitAndWait's, per queue
+    // submitAndWait's command pools and fences, per queue: idle ones, and all ever made (destroyed on close).
+    private final Map<Queue, java.util.ArrayDeque<OneOff>> oneOffs = new java.util.IdentityHashMap<>();
+    private final java.util.List<OneOff> allOneOffs = new java.util.ArrayList<>();
     /** Whether a call checked by {@link #check} found the device lost: only then may the driver be asked why. */
     private volatile boolean lost;
     /** With validation on, the buffers and images made on the device and not closed, with where each was made. */
@@ -765,29 +767,31 @@ public final class VulkanDevice implements AutoCloseable {
     /**
      * Records commands with {@code commands} and runs them on {@code queue}, waiting until they completed: for setup
      * work such as uploads, not for frames. Each queue keeps a command pool and a fence for it, reset each time: waiting
-     * for a fence just made took 8 ms on an RX 9070 XT, a reused one 0.06 ms. Calls from other threads wait their turn;
-     * one made from inside {@code commands} records into a pool and fence of its own.
+     * for a fence just made took 8 ms on an RX 9070 XT, a reused one 0.06 ms. Each call takes an idle one of the queue's
+     * (made the first time more are needed at once: calls from several threads, or one from inside {@code commands}),
+     * so threads wait for their own work only, and gives it back.
      */
     public void submitAndWait(Queue queue, Consumer<VkCommandBuffer> commands) {
-        OneOff oneOff = oneOff(queue);
-        synchronized (oneOff) {
-            if (!oneOff.busy) {
-                oneOff.busy = true;
-                try {
-                    oneOff.run(queue, commands);
-                } finally {
-                    oneOff.busy = false;
-                }
-                return;
+        OneOff oneOff = takeOneOff(queue);
+        try {
+            oneOff.run(queue, commands);
+        } finally {
+            synchronized (oneOffs) {
+                oneOffs.get(queue).push(oneOff);
             }
         }
-        submitAndWaitAlone(queue, commands); // nested: the queue's command buffer is being recorded
     }
 
-    /** The command pool, buffer and fence {@link #submitAndWait} reuses on {@code queue}, made at first use. */
-    private OneOff oneOff(Queue queue) {
+    /** An idle command pool, buffer and fence of {@code queue}'s for {@link #submitAndWait}, made if none is idle. */
+    private OneOff takeOneOff(Queue queue) {
         synchronized (oneOffs) {
-            return oneOffs.computeIfAbsent(queue, q -> new OneOff(q.family()));
+            OneOff idle = oneOffs.computeIfAbsent(queue, q -> new java.util.ArrayDeque<>()).poll();
+            if (idle != null) {
+                return idle;
+            }
+            OneOff made = new OneOff(queue.family());
+            allOneOffs.add(made);
+            return made;
         }
     }
 
@@ -796,7 +800,6 @@ public final class VulkanDevice implements AutoCloseable {
         final long pool;
         final VkCommandBuffer commands;
         final long fence;
-        boolean busy; // recording or waiting: a nested call makes its own
 
         OneOff(int family) {
             try (MemoryStack stack = stackPush()) {
@@ -844,44 +847,6 @@ public final class VulkanDevice implements AutoCloseable {
         }
     }
 
-    /** {@link #submitAndWait} with a command pool and fence of its own, destroyed after. */
-    private void submitAndWaitAlone(Queue queue, Consumer<VkCommandBuffer> commands) {
-        try (MemoryStack stack = stackPush()) {
-            LongBuffer pool = stack.mallocLong(1);
-            Vulkan.check(vkCreateCommandPool(handle, VkCommandPoolCreateInfo.calloc(stack)
-                .sType(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO)
-                .flags(VK_COMMAND_POOL_CREATE_TRANSIENT_BIT)
-                .queueFamilyIndex(queue.family()), null, pool), "Could not create a command pool");
-            LongBuffer fence = stack.callocLong(1); // 0 until created: destroying 0 does nothing
-            try {
-                PointerBuffer buffer = stack.mallocPointer(1);
-                Vulkan.check(vkAllocateCommandBuffers(handle, VkCommandBufferAllocateInfo.calloc(stack)
-                    .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
-                    .commandPool(pool.get(0))
-                    .level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
-                    .commandBufferCount(1), buffer), "Could not allocate a command buffer");
-                VkCommandBuffer commandBuffer = new VkCommandBuffer(buffer.get(0), handle);
-                Vulkan.check(vkBeginCommandBuffer(commandBuffer, VkCommandBufferBeginInfo.calloc(stack)
-                    .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
-                    .flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)), "Could not begin recording");
-                commands.accept(commandBuffer);
-                Vulkan.check(vkEndCommandBuffer(commandBuffer), "Could not finish recording");
-                Vulkan.check(vkCreateFence(handle, VkFenceCreateInfo.calloc(stack)
-                    .sType(VK_STRUCTURE_TYPE_FENCE_CREATE_INFO), null, fence), "Could not create a fence");
-                VkSubmitInfo2.Buffer submit = VkSubmitInfo2.calloc(1, stack)
-                    .sType(VK_STRUCTURE_TYPE_SUBMIT_INFO_2)
-                    .pCommandBufferInfos(VkCommandBufferSubmitInfo.calloc(1, stack)
-                        .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO)
-                        .commandBuffer(commandBuffer));
-                queue.submit(submit, fence.get(0));
-                check(vkWaitForFences(handle, fence, true, Long.MAX_VALUE), "Could not wait for the commands");
-            } finally {
-                vkDestroyFence(handle, fence.get(0), null);
-                vkDestroyCommandPool(handle, pool.get(0), null);
-            }
-        }
-    }
-
     /** Waits for the device and destroys it; close resources created on it first. */
     @Override
     public void close() {
@@ -898,9 +863,10 @@ public final class VulkanDevice implements AutoCloseable {
             }
         }
         synchronized (oneOffs) {
-            for (OneOff oneOff : oneOffs.values()) {
+            for (OneOff oneOff : allOneOffs) {
                 oneOff.destroy();
             }
+            allOneOffs.clear();
             oneOffs.clear();
         }
         pipelineCache.close();

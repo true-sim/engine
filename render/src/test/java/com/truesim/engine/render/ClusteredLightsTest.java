@@ -148,8 +148,8 @@ class ClusteredLightsTest {
             }
         }
         assertThat(full).as("clusters holding the 11 lights in one spot").isPositive();
-        // The sun and the 11, and the spot light: its depth slice is long that far away.
-        assertThat(gpu[2][0]).as("the most lights a cluster wanted").isEqualTo(13);
+        // The sun and the 11: the spot light's cone (its sphere, not its range's) no longer reaches their cluster.
+        assertThat(gpu[2][0]).as("the most lights a cluster wanted").isEqualTo(12);
         for (int c = 0; c < request.clusters(); c++) {
             assertThat(gpu[0][c]).isLessThanOrEqualTo(8);
         }
@@ -265,7 +265,7 @@ class ClusteredLightsTest {
         return switch (light) {
             case 1 -> new double[] {0, 0, -10};
             case 2 -> new double[] {30, 0, -10};
-            case 3 -> new double[] {-3, 1, -30};
+            case 3 -> new double[] {-3, 1, -30 - spotRadius()}; // the sphere around its cone, along -z
             case 4 -> new double[] {0.2, 0.1, -3};
             default -> new double[] {0.5, 0.5, -50};
         };
@@ -275,10 +275,15 @@ class ClusteredLightsTest {
         return switch (light) {
             case 1 -> 2;
             case 2 -> 1;
-            case 3 -> 5;
+            case 3 -> spotRadius();
             case 4 -> 0.5;
             default -> 0.2;
         };
+    }
+
+    /** The spot light's (range 5, 0.5 radians out): the sphere around a cone that narrow, ahead of the light. */
+    private static double spotRadius() {
+        return 5 / (2 * Math.cos(0.5));
     }
 
     private static boolean reaches(double[] center, double radius, double[] lo, double[] hi) {
