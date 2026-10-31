@@ -100,14 +100,14 @@ class FrameUploadsTest {
              GpuBuffer target = GpuBuffer.deviceLocal(device, 16, TARGET)) {
             FrameSlots slots = new FrameSlots(2);
             try (FrameUploads uploads = new FrameUploads(device, slots)) {
-                uploads.flushInPasses();
-                uploads.flushInPasses(); // once is enough
+                uploads.uploadInPasses();
+                uploads.uploadInPasses(); // once is enough
                 uploads.write(target, 0, arena.allocateFrom(ValueLayout.JAVA_INT, 4, 5, 6, 7));
                 slots.begin(0);
                 device.submitAndWait(device.graphics(), slots::recordStart);
                 assertThat(uploads.pendingCount()).as("the frame's start leaves them to the pass").isEqualTo(1);
                 device.submitAndWait(device.graphics(), commands -> {
-                    uploads.flushInPass(commands);
+                    uploads.uploadInPass(commands);
                     // What a graph places from the pass's declared write and the reader's read.
                     Barriers.memory(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                         VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);

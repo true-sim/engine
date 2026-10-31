@@ -492,7 +492,7 @@ public final class RayTracing implements AutoCloseable {
                     .queryCount(1), null, queryPool), "Could not create a query pool");
                 LongBuffer handles = stack.longs(built.handle());
                 device.submitAndWait(device.graphics(), commands -> {
-                    pool.uploads().flush(commands); // the mesh's positions, if added since the last frame
+                    pool.uploads().upload(commands); // the mesh's positions, if added since the last frame
                     vkCmdResetQueryPool(commands, queryPool.get(0), 0, 1);
                     vkCmdBuildAccelerationStructuresKHR(commands, info, ranges);
                     Barriers.memory(commands, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,

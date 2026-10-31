@@ -27,9 +27,10 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  * <pre>{@code
  * GpuScene scene = new GpuScene(device, pool, 100_000, graph.frameSlots());
  * scene.setMaterials(materials);
- * int car = scene.add(carMesh, carMaterials, 1, true, x, y, z, qx, qy, qz, qw, 1, 1, 1);   // the lowest free id
- * scene.set(car, carMesh, carMaterials, 1, true, x2, y2, z2, qx, qy, qz, qw, 1, 1, 1);     // moved
- * scene.remove(car);                                                                      // a hole until reused
+ * GpuScene.Instance car = new GpuScene.Instance().mesh(carMesh).material(carMaterials).position(x, y, z);
+ * int id = scene.add(car);                                 // the lowest free id
+ * scene.set(id, car.position(x2, y2, z2).rotation(qx, qy, qz, qw)); // moved: the same description, reused
+ * scene.remove(id);                                        // a hole until reused
  * }</pre>
  *
  * <p>Ids are stable: removing an instance leaves a hole the culling skips, and ids are taken lowest first, so whatever
@@ -97,6 +98,102 @@ public final class GpuScene implements AutoCloseable {
         used = new long[(capacity + 63) / 64];
         defaultMaterials = new Materials(device, 1);
         materials = defaultMaterials;
+    }
+
+    /**
+     * What an instance is ({@link #add(Instance)}, {@link #set(int, Instance)}): its mesh, materials from
+     * {@code material} on, layers, whether it casts shadows, world position (doubles), rotation and scale; by name, not
+     * fifteen numbers in a row. Mutable and reused: setting it allocates nothing. By default material 0, layer 0,
+     * casting shadows, at the origin, not turned, scale 1.
+     */
+    public static final class Instance {
+        private int mesh = -1;
+        private int material;
+        private int layers = DEFAULT_LAYERS;
+        private boolean castsShadows = true;
+        private double x;
+        private double y;
+        private double z;
+        private float qx;
+        private float qy;
+        private float qz;
+        private float qw = 1;
+        private float sx = 1;
+        private float sy = 1;
+        private float sz = 1;
+
+        /** The pool's mesh it draws. */
+        public Instance mesh(int mesh) {
+            this.mesh = mesh;
+            return this;
+        }
+
+        /** Its first material: submesh s takes material {@code material + s}. */
+        public Instance material(int material) {
+            this.material = material;
+            return this;
+        }
+
+        /** The layers it is on, a bit each (bit n: layer n): drawn in views of any of them. */
+        public Instance layers(int layers) {
+            this.layers = layers;
+            return this;
+        }
+
+        /** Whether it casts shadows: shadow views and shadow rays leave out those that do not. */
+        public Instance castsShadows(boolean castsShadows) {
+            this.castsShadows = castsShadows;
+            return this;
+        }
+
+        /** Its world position. */
+        public Instance position(double x, double y, double z) {
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            return this;
+        }
+
+        /** Its rotation, a unit quaternion. */
+        public Instance rotation(float qx, float qy, float qz, float qw) {
+            this.qx = qx;
+            this.qy = qy;
+            this.qz = qz;
+            this.qw = qw;
+            return this;
+        }
+
+        /** Its scale along its axes. */
+        public Instance scale(float sx, float sy, float sz) {
+            this.sx = sx;
+            this.sy = sy;
+            this.sz = sz;
+            return this;
+        }
+
+        /** Its scale, the same along every axis. */
+        public Instance scale(float s) {
+            return scale(s, s, s);
+        }
+    }
+
+    /** Adds an instance as {@code instance} describes, under the lowest free id, and returns it. Allocates nothing. */
+    public int add(Instance instance) {
+        int id = freeId();
+        set(id, instance);
+        return id;
+    }
+
+    /** Sets instance {@code id} as {@code instance} describes (taking the id if free). Allocates nothing. */
+    public void set(int id, Instance instance) {
+        set(id, instance.mesh, instance.material, instance.layers, instance.castsShadows, instance.x, instance.y,
+            instance.z, instance.qx, instance.qy, instance.qz, instance.qw, instance.sx, instance.sy, instance.sz);
+    }
+
+    /** Writes the instance of entry {@code entry} ({@link #claim}) as {@code instance} describes. */
+    public void write(int entry, Instance instance) {
+        write(entry, instance.mesh, instance.material, instance.layers, instance.castsShadows, instance.x, instance.y,
+            instance.z, instance.qx, instance.qy, instance.qz, instance.qw, instance.sx, instance.sy, instance.sz);
     }
 
     public GeometryPool pool() {

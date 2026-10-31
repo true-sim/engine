@@ -607,6 +607,28 @@ class MeshletRendererTest {
     }
 
     @Test
+    void instancesAreDescribedByName() {
+        lookForward(1, MeshletRenderer.MODE_WHITE);
+        scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
+        scene.removeFrom(1);
+        render();
+        int expected = covered();
+        scene.removeFrom(0);
+        GpuScene.Instance ahead = new GpuScene.Instance().mesh(quad).position(0, 0, -5).rotation(HALF, 0, 0, HALF);
+        assertThat(scene.add(ahead)).isZero();
+        render();
+        assertThat(covered()).as("as the numbers in a row draw it").isEqualTo(expected);
+        scene.set(0, ahead.position(100, 0, -5)); // reused: moved out of sight
+        render();
+        assertThat(covered()).isZero();
+        scene.set(0, ahead.position(0, 0, -5).scale(0.5f).layers(1).castsShadows(false).material(0));
+        render();
+        assertThat(covered()).as("half the size each way").isCloseTo(expected / 4,
+            org.assertj.core.data.Percentage.withPercentage(15));
+        scene.removeFrom(0);
+    }
+
+    @Test
     void instancesTakeTheLowestFreeId() {
         try (GpuScene small = new GpuScene(device, pool, 3)) {
             assertThat(small.pool()).isSameAs(pool);

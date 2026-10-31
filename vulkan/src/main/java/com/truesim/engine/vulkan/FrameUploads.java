@@ -81,7 +81,7 @@ public final class FrameUploads implements AutoCloseable {
     private final VulkanDevice device;
     private final FrameSlots slots;
     private final boolean deferred;
-    private final FrameSlots.FrameStart start = this::flush;
+    private final FrameSlots.FrameStart start = this::upload;
     private final List<Pending> pending = new ArrayList<>();
     // The staging buffers the waiting uploads are in, the last one still being filled; reusable ones wait in free.
     private final List<Chunk> filling = new ArrayList<>();
@@ -278,16 +278,16 @@ public final class FrameUploads implements AutoCloseable {
      * everything after. Frames do it first (registered with the frame slots); work outside frames that needs what was
      * uploaded (a build reading it, say) calls it on the graphics queue first. Allocates nothing without uploads.
      */
-    public void flush(VkCommandBuffer commands) {
-        flush(commands, true);
+    public void upload(VkCommandBuffer commands) {
+        upload(commands, true);
     }
 
     /**
-     * From now on, a pass declaring that it writes the targets records the uploads ({@link #flushInPass}), as a frame
+     * From now on, a pass declaring that it writes the targets records the uploads ({@link #uploadInPass}), as a frame
      * graph's scene upload pass does: the frames' starts no longer do. Frames recorded otherwise keep calling
-     * {@link #flush}. For buffer writes: uploads with records (images) bring their own barriers.
+     * {@link #upload}. For buffer writes: uploads with records (images) bring their own barriers.
      */
-    public void flushInPasses() {
+    public void uploadInPasses() {
         if (deferred && !inPasses) {
             inPasses = true;
             slots.unregister(start);
@@ -295,14 +295,14 @@ public final class FrameUploads implements AutoCloseable {
     }
 
     /**
-     * Like {@link #flush}, without its barriers: for a pass that declares it writes the targets (as a transfer
+     * Like {@link #upload}, without its barriers: for a pass that declares it writes the targets (as a transfer
      * destination) to a graph, which orders it with what reads them.
      */
-    public void flushInPass(VkCommandBuffer commands) {
-        flush(commands, false);
+    public void uploadInPass(VkCommandBuffer commands) {
+        upload(commands, false);
     }
 
-    private void flush(VkCommandBuffer commands, boolean barriers) {
+    private void upload(VkCommandBuffer commands, boolean barriers) {
         retiring.release();
         if (pending.isEmpty()) {
             return;
