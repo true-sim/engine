@@ -177,14 +177,17 @@ public final class MeshletRenderer implements AutoCloseable {
     private Path path = Path.AUTO;
     private boolean closed;
 
-    /** A renderer of {@code scene} into {@code colorFormat} and {@code depthFormat} attachments, one copy of its views. */
+    /**
+     * A renderer of {@code scene} into {@code colorFormat} and {@code depthFormat} attachments, its views keeping a copy
+     * per frame of the scene's frame slots.
+     */
     public MeshletRenderer(VulkanDevice device, GpuScene scene, int colorFormat, int depthFormat) {
-        this(device, scene, colorFormat, depthFormat, FrameSlots.single());
+        this(device, scene, colorFormat, depthFormat, scene.frameSlots());
     }
 
     /**
-     * A renderer whose views keep a copy per frame of {@code slots} (a frame graph's, as {@code scene}'s), so they may
-     * change every frame while earlier frames are still drawn.
+     * A renderer whose views keep a copy per frame of {@code slots}, which must be {@code scene}'s (a frame graph's), so
+     * they may change every frame while earlier frames are still drawn.
      */
     public MeshletRenderer(VulkanDevice device, GpuScene scene, int colorFormat, int depthFormat, FrameSlots slots) {
         this(device, scene, colorFormat, depthFormat, slots, MAX_CHUNKS);
@@ -201,6 +204,10 @@ public final class MeshletRenderer implements AutoCloseable {
         this.pool = scene.pool();
         this.bindless = device.bindless();
         this.slots = Objects.requireNonNull(slots, "slots");
+        if (slots != scene.frameSlots()) {
+            throw new IllegalArgumentException("A renderer's frame slots are its scene's: views and instances change "
+                + "with the same frames in flight");
+        }
         this.maxChunks = chunks;
         this.retiring = new Retiring(slots);
         try (ShaderModule instanceShader = ShaderModule.load(device, "shaders/meshlets/instances.spv");

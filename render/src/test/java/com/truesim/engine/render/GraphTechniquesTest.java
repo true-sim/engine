@@ -943,15 +943,22 @@ class GraphTechniquesTest {
         SceneGeometry geometry = SceneGeometry.meshlets(renderer);
         assertThat(geometry.provider(MeshletGeometry.class).renderer()).isSameAs(renderer);
         assertThat(geometry.provider(GeometryProvider.class)).isNotNull();
-        assertThat(new SceneGeometry(new GeometryProvider() {
+        GeometryProvider own = new GeometryProvider() { // a kind of geometry of its own: drawn through the renderer
+            @Override
+            public MeshletRenderer renderer() {
+                return renderer;
+            }
+
             @Override
             public void drawFirst(GraphBuilder g, SceneDraw draw, SceneDraw.Targets targets, boolean load) {
             }
-        }).provider(MeshletGeometry.class)).isNull();
+        };
+        assertThat(new SceneGeometry(own).provider(MeshletGeometry.class)).isNull();
+        assertThat(new SceneGeometry(own).renderer()).isSameAs(renderer);
         scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 1, 1, 1);
         scene.removeFrom(1);
         Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
-        geometry.setView(view, camera, 1, MeshletRenderer.MODE_WHITE);
+        view.set(camera, 1, MeshletRenderer.MODE_WHITE);
         // Two techniques asking for the same depth-only draw of the camera, with occlusion culling: drawn once.
         Key<Image> first = Key.image("test.first");
         Key<Image> second = Key.image("test.second");

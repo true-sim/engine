@@ -346,7 +346,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         scene.read(g.pass(name + " selection"), BufferAccess.STORAGE_READ).write(list, BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
                 if (camera != null) {
-                    view.set(camera, casterDetail, MeshletRenderer.MODE_LIT);
+                    view.camera(camera, casterDetail); // the view's mode kept
                 } else if (region != null) {
                     view.detail(region.renderScale()); // detail for the size it renders this frame
                 }

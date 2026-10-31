@@ -71,6 +71,7 @@ public final class GpuScene implements AutoCloseable {
     private final List<Runnable> growth = new ArrayList<>(); // what follows the table's size: views' buffers
     private long[] used;
     private int firstFreeWord; // every word of used before it is full: the search for a free id starts here
+    private final FrameSlots slots;
     private final Materials defaultMaterials;
     private Materials materials;
     private int count;
@@ -78,9 +79,9 @@ public final class GpuScene implements AutoCloseable {
     private int highWater;
     private boolean closed;
 
-    /** Room for {@code capacity} instances of {@code pool}'s meshes to start with: for frames the caller waits for. */
+    /** Room for {@code capacity} instances of {@code pool}'s meshes to start with, for the frames of the pool's slots. */
     public GpuScene(VulkanDevice device, GeometryPool pool, int capacity) {
-        this(device, pool, capacity, FrameSlots.single());
+        this(device, pool, capacity, pool.frameSlots());
     }
 
     /** Room for {@code capacity} instances to start with, for the frames of {@code slots} (a frame graph's). */
@@ -90,6 +91,7 @@ public final class GpuScene implements AutoCloseable {
         }
         this.pool = Objects.requireNonNull(pool, "pool");
         this.capacity = capacity;
+        this.slots = Objects.requireNonNull(slots, "slots");
         instances = new RecordBuffer(device, INSTANCE_BYTES, capacity, slots); // zeros: every id a hole
         graphBuffer = new ExternalBuffer("instances", instances.buffer());
         used = new long[(capacity + 63) / 64];
@@ -99,6 +101,11 @@ public final class GpuScene implements AutoCloseable {
 
     public GeometryPool pool() {
         return pool;
+    }
+
+    /** The frames its instances keep a copy per frame for: what renderers of it are made for too. */
+    public FrameSlots frameSlots() {
+        return slots;
     }
 
     /** How many ids the table has room for now; it grows when one past it is taken. */
@@ -140,6 +147,11 @@ public final class GpuScene implements AutoCloseable {
      */
     public void setMaterials(Materials table) {
         this.materials = table == null ? defaultMaterials : table;
+    }
+
+    /** Whether instances take their materials from a table set ({@link #setMaterials}), not the default one only. */
+    public boolean drawsMaterials() {
+        return materials != defaultMaterials;
     }
 
     public Materials materials() {

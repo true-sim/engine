@@ -138,6 +138,14 @@ public final class RenderView implements AutoCloseable {
     }
 
     /**
+     * Looks through {@code camera} with {@code errorPixels} of error allowed, keeping the view's mode: how a draw through
+     * a camera of its own (a light's) binds it each frame. Allocates nothing.
+     */
+    public synchronized RenderView camera(Camera camera, float errorPixels) {
+        return set(camera, errorPixels, mode);
+    }
+
+    /**
      * Reads the camera last {@link #set} again where it changed since it was read (moved, turned, resized): when a frame
      * culls the view, so the frame draws from where the camera is then. Allocates nothing.
      */

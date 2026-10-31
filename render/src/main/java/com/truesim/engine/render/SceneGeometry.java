@@ -22,6 +22,11 @@ public final class SceneGeometry {
         if (providers.length == 0) {
             throw new IllegalArgumentException("A scene draws at least one kind of geometry");
         }
+        for (GeometryProvider provider : providers) {
+            if (provider.renderer() != providers[0].renderer()) {
+                throw new IllegalArgumentException("A scene's kinds of geometry draw one renderer's scene and views");
+            }
+        }
         this.providers = List.of(providers);
     }
 
@@ -34,11 +39,6 @@ public final class SceneGeometry {
         return providers;
     }
 
-    /** Sets {@code view}'s camera ({@link RenderView#set}); read when the frame runs. Allocates nothing. */
-    public SceneGeometry setView(RenderView view, Camera camera, float errorPixels, int mode) {
-        view.set(camera, errorPixels, mode);
-        return this;
-    }
 
     /**
      * A new view of the geometry's instances, with lists and history as {@code options} say: the renderer's of its
@@ -59,15 +59,7 @@ public final class SceneGeometry {
 
     /** The renderer whose scene and views the providers draw. */
     public MeshletRenderer renderer() {
-        for (GeometryProvider provider : providers) {
-            if (provider instanceof MeshletGeometry meshlets) {
-                return meshlets.renderer();
-            }
-            if (provider instanceof ClassicLodGeometry classic) {
-                return classic.renderer();
-            }
-        }
-        throw new IllegalStateException("No provider of the geometry draws a renderer's views");
+        return providers.getFirst().renderer();
     }
 
     /** The provider of type {@code type}, e.g. for a technique needing what only it can give; null if none. */
