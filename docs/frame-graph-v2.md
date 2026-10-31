@@ -856,7 +856,10 @@ is released.
   or the app's; one top level per frame relative to a movable origin, built only when instances change; shadow tables
   and cascades per view; window settings; the `Presenter` with several windows; engine settings; HDR output with tone
   mapping per window; VR through OpenXR (`engine-xr`: eyes as views, a desktop mirror, input) in 0.67 to 0.72. Left:
-  multiview (both eyes in one pass) and a run with a headset.
+  multiview (both eyes in one pass) and a run with a headset. Multiview measured first (2026-10-31, `StereoBench`, RX
+  9070 XT, 2064 x 2208 per eye): both eyes take 0.34 to 1.17 ms in all (800 or 20,000 rocks, forward or visibility
+  buffer); culling already runs once for every view, and shading per pixel stays the same with multiview, so it could
+  save part of the second eye's geometry work only, 0.03 to 0.15 ms. Deferred until a heavier scene shows more.
 - **Phase 5 status (2026-10-31):** the graph's part landed in 0.75: the view's size apart from its images' size, a
   render scale, dynamic resolution with headroom, shrinking and per-frame regions (`pass.region()`,
   `ctx.regionWidth(image)`), and outputs scaled from the region. Without a shader in the graph, a partial region is

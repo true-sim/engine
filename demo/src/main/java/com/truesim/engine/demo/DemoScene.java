@@ -22,7 +22,7 @@ import java.util.SplittableRandom;
 final class DemoScene implements AutoCloseable {
 
     static final int TERRAIN_SIZE = 256;
-    private static final int ROCKS = 800;
+    private static final int ROCKS = Integer.getInteger("truesim.demo.rocks", 800); // more for benchmarks
     private static final int POINT_LIGHTS = 6;
 
     private final GeometryPool pool;
