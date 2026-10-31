@@ -1989,6 +1989,95 @@ class FrameGraphTest {
         assertThat(frame()[0]).isIn(RED, BLUE);
     }
 
+    /**
+     * Clears an image of its view's size blue, all of it, then red within the render region; provides it as
+     * {@code OUT} and notes the region's width in it.
+     */
+    private static Technique regionFill(int[] regionWidth) {
+        return new Lambda(List.of(OUT), g -> {
+            ViewPort view = g.view();
+            Image image = g.create("color", ImageDesc.of(Format.R8G8B8A8_UNORM, view.width(), view.height()));
+            g.pass("blue").write(image, Access.TRANSFER_DST).record(ctx -> clear(ctx, image, 0, 0, 1, 1));
+            g.pass("red region").attach(image, Load.LOAD, Store.STORE).region().record(ctx -> {
+                regionWidth[0] = ctx.regionWidth(image);
+                assertThat(ctx.view()).isSameAs(view);
+            });
+            g.pass("red").attach(image, Clear.color(1, 0, 0, 1)).region().record(ctx -> { });
+            g.provide(OUT, image);
+        });
+    }
+
+    @Test
+    void viewsRenderAtAScaleOfTheirSize() {
+        int[] region = {0};
+        graph.settings().set(ResolutionSettings.SCALE, 0.5f);
+        ViewPort view = graph.addView("half").size(SIZE, SIZE).add(regionFill(region)).output(OUT, output);
+        assertThat(frame()).as("scaled up to the target").containsOnly(RED);
+        assertThat(view.width()).isEqualTo(SIZE / 2);
+        assertThat(view.outputWidth()).isEqualTo(SIZE);
+        assertThat(region[0]).as("all of the images at a fixed resolution").isEqualTo(SIZE / 2);
+        assertThat(view.dynamic()).isFalse();
+        assertThat(view.renderScale(0.25f).renderScale()).as("fixed: ignored").isEqualTo(0.5f);
+        int builds = graph.builds();
+        graph.settings().set(ResolutionSettings.SCALE, 1f);
+        assertThat(frame()).containsOnly(RED);
+        assertThat(graph.builds()).as("a new scale rebuilds").isEqualTo(builds + 1);
+        assertThat(view.width()).isEqualTo(SIZE);
+        // A view's own setting wins over the graph's.
+        view.ownSettings().set(ResolutionSettings.SCALE, 0.25f);
+        assertThat(frame()).containsOnly(RED);
+        assertThat(view.height()).isEqualTo(SIZE / 4);
+    }
+
+    @Test
+    void dynamicResolutionMovesTheRenderRegionWithoutARebuild() {
+        int[] region = {0};
+        graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.MIN_SCALE, 0.25f)
+            .set(ResolutionSettings.HEADROOM, 1.25f).set(ResolutionSettings.SHRINK_FRAMES, 3);
+        ViewPort view = graph.addView("dynamic").size(SIZE, SIZE).add(regionFill(region)).output(OUT, output);
+        assertThat(frame()).as("the region scaled into the target, never the blue around it").containsOnly(RED);
+        assertThat(view.dynamic()).isTrue();
+        assertThat(view.width()).as("allocated with headroom").isEqualTo(20);
+        assertThat(region[0]).isEqualTo(SIZE);
+        assertThat(graph.passes()).as("copied, never drawn into the target straight").contains("output target");
+        int builds = graph.builds();
+        view.renderScale(0.5f);
+        assertThat(frame()).containsOnly(RED);
+        assertThat(region[0]).isEqualTo(SIZE / 2);
+        assertThat(view.regionWidth()).isEqualTo(SIZE / 2);
+        assertThat(view.previousRegionWidth()).isEqualTo(SIZE);
+        assertThat(view.renderScale()).isEqualTo(0.5f);
+        view.renderScale(0.1f); // kept above the minimum
+        assertThat(frame()).containsOnly(RED);
+        assertThat(view.regionHeight()).isEqualTo(SIZE / 4);
+        view.renderScale(3); // and below the maximum
+        assertThat(frame()).containsOnly(RED);
+        assertThat(view.regionWidth()).isEqualTo(SIZE);
+        // A size that fits the images moves the region only.
+        view.size(18, 18);
+        assertThat(frame()).containsOnly(RED);
+        assertThat(view.regionWidth()).isEqualTo(18);
+        assertThat(graph.builds()).as("no rebuild").isEqualTo(builds);
+        // One that does not: allocated anew, with headroom.
+        view.size(24, 24);
+        assertThat(frame()).containsOnly(RED);
+        assertThat(view.width()).isEqualTo(30);
+        assertThat(graph.builds()).isEqualTo(builds + 1);
+        // Much smaller for a while: shrinks.
+        view.size(8, 8);
+        for (int i = 0; i < 4; i++) {
+            assertThat(frame()).containsOnly(RED);
+        }
+        assertThat(view.width()).isEqualTo(10);
+        assertThat(graph.builds()).isEqualTo(builds + 2);
+        assertThatIllegalArgumentException().isThrownBy(() -> view.renderScale(0));
+        // Back to a fixed resolution.
+        graph.settings().set(ResolutionSettings.DYNAMIC, false);
+        view.size(SIZE, SIZE);
+        assertThat(frame()).containsOnly(RED);
+        assertThat(view.width()).isEqualTo(SIZE);
+    }
+
     @Test
     void techniquesAreRemovedById() {
         com.truesim.common.graph.Id<Fill> redId = com.truesim.common.graph.Id.of("test.red", Fill.class);

@@ -77,7 +77,11 @@ final class GraphCompiler {
             // A target whose contents outlive the frame (a texture) is copied into, so a frame its view is skipped
             // leaves it as it was: drawn into straight, its passes would discard it.
             boolean copied = g.copied.contains(target);
-            boolean fits = !copied && target.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED && targetsOf.get(result) == 1
+            // A view at a dynamic resolution renders a region of its images, scaled into its targets.
+            boolean dynamic = output.getKey() instanceof GraphBuilder.Scoped scoped && scoped.view() != null
+                && scoped.view().dynamic();
+            boolean fits = !copied && !dynamic && target.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED
+                && targetsOf.get(result) == 1
                 && info.external == null && substitute[result.id] < 0 && result.width == target.width
                 && result.height == target.height && result.format == target.format && result.desc.flat()
                 && result.mips == 1

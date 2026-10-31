@@ -36,8 +36,23 @@ public final class ViewPort {
     final List<Technique> techniques = new ArrayList<>();
     final Map<Key<Image>, List<ExternalImage>> outputs = new LinkedHashMap<>(); // each key into one target or more
     private final List<AutoCloseable> owned = new ArrayList<>();
-    private int width;
+    private int outputWidth; // the size it shows at
+    private int outputHeight;
+    private int width; // its images': the render size, or dynamic resolution's allocation
     private int height;
+    private int regionWidth; // this frame's render region
+    private int regionHeight;
+    private int previousRegionWidth; // the one of the frame it last ran in
+    private int previousRegionHeight;
+    // The resolution settings as of the last build (ResolutionSettings), and the dynamic scale asked for.
+    private boolean dynamic;
+    private float scale = 1;
+    private float minScale = 1;
+    private float maxScale = 1;
+    private float headroom = 1;
+    private int shrinkFrames = 1;
+    private float renderScale = Float.NaN; // none asked for: the settings' scale
+    private int oversized; // frames in a row its allocation was larger than needed, with headroom
     private boolean enabled = true;
     private int rate = 1;
     private int skipped; // frames skipped since it last ran, while enabled
@@ -68,31 +83,180 @@ public final class ViewPort {
     }
 
     /**
-     * Sets the size of the view's images, which its techniques read when they build (none until set); the graph
-     * rebuilds on its next frame when it changes.
+     * Sets the size the view shows at (none until set): its images are that size times the render scale
+     * ({@link ResolutionSettings}), which its techniques read when they build. The graph rebuilds on its next frame
+     * when the images' size changes; under dynamic resolution, a size that still fits its images only moves the render
+     * region.
      */
     public ViewPort size(int width, int height) {
         if (width < 1 || height < 1) {
             throw new IllegalArgumentException("A view has a size: " + width + " x " + height);
         }
-        if (width != this.width || height != this.height) {
-            this.width = width;
-            this.height = height;
-            graph.changed();
+        if (width != outputWidth || height != outputHeight) {
+            outputWidth = width;
+            outputHeight = height;
+            if (allocate(false)) {
+                graph.changed();
+            }
         }
         return this;
     }
 
-    /** The width of the view's images ({@link #size}). */
+    /**
+     * Allocates the view's images for its size and settings: the size times the scale, or dynamic resolution's maximum
+     * with headroom, kept while it fits (and, with {@code shrink}, while it is not larger than needed). Whether that
+     * changed their size.
+     */
+    private boolean allocate(boolean shrink) {
+        int newWidth;
+        int newHeight;
+        if (dynamic) {
+            int needWidth = scaled(outputWidth, maxScale);
+            int needHeight = scaled(outputHeight, maxScale);
+            boolean fits = width >= needWidth && height >= needHeight;
+            boolean larger = width > scaled(needWidth, headroom) || height > scaled(needHeight, headroom);
+            if (fits && !(shrink && larger)) {
+                return false;
+            }
+            newWidth = scaled(needWidth, headroom);
+            newHeight = scaled(needHeight, headroom);
+        } else {
+            newWidth = scaled(outputWidth, scale);
+            newHeight = scaled(outputHeight, scale);
+        }
+        oversized = 0;
+        if (newWidth == width && newHeight == height) {
+            return false;
+        }
+        width = newWidth;
+        height = newHeight;
+        regionWidth = Math.min(regionWidth == 0 ? width : regionWidth, width);
+        regionHeight = Math.min(regionHeight == 0 ? height : regionHeight, height);
+        if (!dynamic) {
+            regionWidth = width;
+            regionHeight = height;
+        }
+        previousRegionWidth = Math.min(previousRegionWidth == 0 ? width : previousRegionWidth, width);
+        previousRegionHeight = Math.min(previousRegionHeight == 0 ? height : previousRegionHeight, height);
+        return true;
+    }
+
+    /** {@code size} times {@code factor}, rounded up, at least 1. */
+    private static int scaled(int size, float factor) {
+        return Math.max(1, (int) Math.ceil(size * (double) factor - 1e-4));
+    }
+
+    /**
+     * Reads the resolution settings for the build under way, the view's own where set, noting their names in
+     * {@code read} (a change rebuilds), and allocates the images for them.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    void resolve(com.truesim.engine.settings.EngineSettings settings, java.util.Set<String> read) {
+        com.truesim.engine.settings.EngineSettings own = settings.scoped("view." + name);
+        boolean wasDynamic = dynamic;
+        dynamic = resolution(settings, own, ResolutionSettings.DYNAMIC, read);
+        scale = resolution(settings, own, ResolutionSettings.SCALE, read);
+        minScale = resolution(settings, own, ResolutionSettings.MIN_SCALE, read);
+        maxScale = Math.max(minScale, resolution(settings, own, ResolutionSettings.MAX_SCALE, read));
+        headroom = resolution(settings, own, ResolutionSettings.HEADROOM, read);
+        shrinkFrames = resolution(settings, own, ResolutionSettings.SHRINK_FRAMES, read);
+        if (outputWidth > 0) {
+            if (dynamic != wasDynamic) {
+                width = 0; // allocated anew for the other mode
+                height = 0;
+            }
+            allocate(oversized >= shrinkFrames);
+            if (dynamic) {
+                updateRegion(); // within the images as allocated now
+            }
+        }
+    }
+
+    private static <T> T resolution(com.truesim.engine.settings.EngineSettings settings,
+        com.truesim.engine.settings.EngineSettings own, com.truesim.engine.settings.Setting<T> setting,
+        java.util.Set<String> read) {
+        read.add(settings.nameOf(setting));
+        read.add(own.nameOf(setting));
+        return own.isSet(setting) ? own.get(setting) : settings.get(setting);
+    }
+
+    /** The width of the view's images: {@link #size} times the render scale, or dynamic resolution's allocation. */
     public int width() {
         checkSized();
         return width;
     }
 
-    /** The height of the view's images ({@link #size}). */
+    /** The height of the view's images. */
     public int height() {
         checkSized();
         return height;
+    }
+
+    /** The width the view shows at ({@link #size}). */
+    public int outputWidth() {
+        checkSized();
+        return outputWidth;
+    }
+
+    /** The height the view shows at. */
+    public int outputHeight() {
+        checkSized();
+        return outputHeight;
+    }
+
+    /** Whether the view renders at a dynamic resolution ({@link ResolutionSettings#DYNAMIC}), as of the last build. */
+    public boolean dynamic() {
+        return dynamic;
+    }
+
+    /**
+     * Asks for a render scale from the next frame on, under dynamic resolution: the render region is the view's size
+     * times {@code factor}, kept between the settings' minimum and maximum. No rebuild; ignored at a fixed resolution.
+     * Allocates nothing.
+     */
+    public ViewPort renderScale(float factor) {
+        if (!(factor > 0)) {
+            throw new IllegalArgumentException("A render scale is positive: " + factor);
+        }
+        renderScale = factor;
+        return this;
+    }
+
+    /** The render scale of the frame being recorded: the region's width over the width the view shows at. */
+    public float renderScale() {
+        return outputWidth == 0 ? 1 : regionWidth / (float) outputWidth;
+    }
+
+    /**
+     * The width of the render region of the frame being recorded: the part of the view's images, from their top left
+     * corner, that its passes render into ({@link GraphBuilder.PassBuilder#region()}); all of them at a fixed
+     * resolution.
+     */
+    public int regionWidth() {
+        return regionWidth;
+    }
+
+    /** The height of the render region of the frame being recorded. */
+    public int regionHeight() {
+        return regionHeight;
+    }
+
+    /** The width of the render region of the last frame the view ran in before this one: for temporal work. */
+    public int previousRegionWidth() {
+        return previousRegionWidth;
+    }
+
+    /** The height of the render region of the last frame the view ran in before this one. */
+    public int previousRegionHeight() {
+        return previousRegionHeight;
+    }
+
+    /** The render region for the scale asked for, within the images. Allocates nothing. */
+    private void updateRegion() {
+        float factor = Float.isNaN(renderScale) ? scale : renderScale;
+        factor = Math.min(maxScale, Math.max(minScale, factor));
+        regionWidth = Math.min(width, scaled(outputWidth, factor));
+        regionHeight = Math.min(height, scaled(outputHeight, factor));
     }
 
     private void checkSized() {
@@ -146,6 +310,19 @@ public final class ViewPort {
         active = enabled && ++skipped >= rate && !allHeld(); // held while due: runs when it may again
         if (active) {
             skipped = 0;
+            previousRegionWidth = regionWidth;
+            previousRegionHeight = regionHeight;
+            if (dynamic) {
+                updateRegion();
+            }
+        }
+        if (dynamic && outputWidth > 0) {
+            int needWidth = scaled(scaled(outputWidth, maxScale), headroom);
+            int needHeight = scaled(scaled(outputHeight, maxScale), headroom);
+            oversized = width > needWidth || height > needHeight ? oversized + 1 : 0;
+            if (oversized == shrinkFrames) {
+                graph.changed(); // larger than needed for long enough: shrinks when it rebuilds
+            }
         }
     }
 

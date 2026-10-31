@@ -649,6 +649,15 @@ that declare how they use each image. The graph does the rest:
   windows are not touched (not acquired, not presented), and its histories keep what the last frame it ran wrote. Shared work that serves several
   views leaves out a skipped one's part by asking `g.running()` at record time: the renderer's culling culls only the
   views that run.
+- **Resolution:** `view.size(w, h)` is the size a view shows at; its images, which techniques size themselves by
+  (`view.width()`), are that times `resolution.scale` (`ResolutionSettings`, the graph's or the view's own). With
+  `resolution.dynamic` on, the images are allocated for `resolution.maxScale` with `resolution.headroom` to spare, and
+  each frame renders into a region of them: `view.renderScale(0.7f)` moves it from the next frame, between
+  `resolution.minScale` and the maximum, and a new size that still fits moves it too. Neither rebuilds; an allocation
+  larger than needed for `resolution.shrinkFrames` frames shrinks. Passes that render within the region say so
+  (`pass.region()`: the graph sets the rendering area, viewport and scissor to the region's share of their attachments),
+  and compute work reads `ctx.regionWidth(image)` and `ctx.regionHeight(image)` while recording. The view's outputs
+  are scaled from the region into their targets.
 - **Switches:** `technique.when(setting)` (a `Switch`) runs the technique only while a boolean setting is on, read
   every frame: no rebuild. An in-place effect switched off leaves its image as it was; a producer gives a fallback for
   each image others sample (`fallback(key, Fallback.constant(format, value))`), read instead while it is off. A view's

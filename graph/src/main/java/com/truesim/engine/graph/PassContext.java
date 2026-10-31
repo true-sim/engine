@@ -325,6 +325,34 @@ public final class PassContext {
      * {@link Access#TRANSFER_DST}), scaled to fit, with {@code linear} filtering or the nearest texels.
      */
     public void blit(Subresource from, Subresource to, boolean linear) {
+        blit(from, Math.max(1, from.image().width >> from.baseMip()), Math.max(1, from.image().height >> from.baseMip()),
+            to, linear);
+    }
+
+    /**
+     * The width of the pass's render region in {@code image} ({@link GraphBuilder.PassBuilder#region()}): the region's
+     * share of an image of its view's size, all of {@code image} in a pass of no one view or at a fixed resolution.
+     * Changes every frame under dynamic resolution, so read it while recording, for dispatch sizes and push constants.
+     */
+    public int regionWidth(Image image) {
+        return FrameGraph.regionWidth(pass.view, image);
+    }
+
+    /** The height of the pass's render region in {@code image}. */
+    public int regionHeight(Image image) {
+        return FrameGraph.regionHeight(pass.view, image);
+    }
+
+    /** The pass's view ({@link GraphBuilder#view()} of its technique), or null: the frame's, or shared work. */
+    public ViewPort view() {
+        return pass.view;
+    }
+
+    /**
+     * Blits the top left {@code width} x {@code height} texels of {@code from} (a render region) into all of
+     * {@code to}, filtered if {@code linear}.
+     */
+    public void blit(Subresource from, int width, int height, Subresource to, boolean linear) {
         oneMip("Blitting from", from);
         oneMip("Blitting into", to);
         if (from.layerCount() != to.layerCount()) {
@@ -334,7 +362,9 @@ public final class PassContext {
             long region = stack.ncalloc(VkImageBlit2.ALIGNOF, 1, VkImageBlit2.SIZEOF);
             memPutInt(region + VkImageBlit2.STYPE, VK_STRUCTURE_TYPE_IMAGE_BLIT_2);
             layers(region + VkImageBlit2.SRCSUBRESOURCE, from);
-            corner(region + VkImageBlit2.SRCOFFSETS + 12, from); // offsets[1]; offsets[0] stays at the origin
+            memPutInt(region + VkImageBlit2.SRCOFFSETS + 12, width); // offsets[1]; offsets[0] stays at the origin
+            memPutInt(region + VkImageBlit2.SRCOFFSETS + 16, height);
+            memPutInt(region + VkImageBlit2.SRCOFFSETS + 20, 1);
             layers(region + VkImageBlit2.DSTSUBRESOURCE, to);
             corner(region + VkImageBlit2.DSTOFFSETS + 12, to);
             long info = stack.ncalloc(VkBlitImageInfo2.ALIGNOF, 1, VkBlitImageInfo2.SIZEOF);

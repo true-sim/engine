@@ -857,6 +857,11 @@ is released.
   and cascades per view; window settings; the `Presenter` with several windows; engine settings; HDR output with tone
   mapping per window; VR through OpenXR (`engine-xr`: eyes as views, a desktop mirror, input) in 0.67 to 0.72. Left:
   multiview (both eyes in one pass) and a run with a headset.
+- **Phase 5 status (2026-10-31):** the graph's part landed in 0.75: the view's size apart from its images' size, a
+  render scale, dynamic resolution with headroom, shrinking and per-frame regions (`pass.region()`,
+  `ctx.regionWidth(image)`), and outputs scaled from the region. Without a shader in the graph, a partial region is
+  scaled unfiltered; a technique scales it up filtered within its bounds. Left: the render techniques reading the
+  region, and a controller choosing the scale from GPU time.
 - **Phase 6 status (2026-10-31):** switches with fallbacks landed in 0.73.
 - **Phase 7 status (2026-10-31):** landed by 0.74: imported buffers on async queues and buffers swapped without a
   rebuild (earlier), persistent images and buffers (`g.persistent`, `g.persistentBuffer`) and history buffers
