@@ -188,6 +188,8 @@ public final class FrameGraph implements AutoCloseable {
     private ReadbackPlan[] readbacks = new ReadbackPlan[0];
     private ReadbackPlan[] retiredReadbacks = new ReadbackPlan[0]; // an earlier build's, pending in frames in flight
     private int retiredCount;
+    private boolean historiesSwapped;
+    Object currentBuild; // the last build's builder: images and buffers of others are refused (PassContext) // by the frame being submitted: swapped back if it is dropped
     private boolean timingsOn;
     private GpuTimings timings;
     private Arena labelArena;
@@ -678,7 +680,11 @@ public final class FrameGraph implements AutoCloseable {
             // that failed to build builds again then).
             if (!submitted) {
                 execution.abandon();
+                if (historiesSwapped) {
+                    swapHistories(); // back: the frame dropped wrote none, so last frame's stay the previous ones
+                }
             }
+            historiesSwapped = false;
             if (ownsSlots) {
                 frameSlots.end();
             }
@@ -692,6 +698,9 @@ public final class FrameGraph implements AutoCloseable {
      * slot 0: the caller waits for the GPU before recording the next frame.
      */
     public void record(VkCommandBuffer commands) {
+        if (execution != null && !execution.begun) {
+            execution.waitIdle(); // frames submitted before: slot 0's data is rewritten now, so they finish first
+        }
         // Outside beginFrame and submit, frames are the caller's to wait for: their data is slot 0's.
         boolean open = frameSlots.current() < 0;
         if (open) {
@@ -710,12 +719,8 @@ public final class FrameGraph implements AutoCloseable {
         }
     }
 
-    private void prepare() {
-        for (int v = 0; v < views.size(); v++) {
-            views.get(v).startFrame();
-        }
-        // A new frame: last frame's current images are this frame's previous ones, also when the graph rebuilds (the
-        // pairs it keeps carry their contents over). A skipped view's stay as they are.
+    /** Swaps each running history pair's current and previous images, and the buffer histories alike. */
+    private void swapHistories() {
         for (int h = 0; h < activeHistories.length; h++) {
             if (historyRuns(h)) {
                 activeHistories[h].current.swap(activeHistories[h].previous);
@@ -726,6 +731,16 @@ public final class FrameGraph implements AutoCloseable {
                 bufferHistories[h].swap();
             }
         }
+    }
+
+    private void prepare() {
+        for (int v = 0; v < views.size(); v++) {
+            views.get(v).startFrame();
+        }
+        // A new frame: last frame's current images are this frame's previous ones, also when the graph rebuilds (the
+        // pairs it keeps carry their contents over). A skipped view's stay as they are.
+        swapHistories();
+        historiesSwapped = true;
         if (dirty || externalsResized() || techniquesChanged()) {
             build();
         }
@@ -1556,6 +1571,7 @@ public final class FrameGraph implements AutoCloseable {
         startHistories(pairs, keptPair, compiled);
         startPersistents(g);
         dirty = false;
+        currentBuild = g; // the build images and buffers resolved in passes must be of
         built = g.techniques().toArray(new Technique[0]);
         builtVersions = new long[built.length];
         for (int i = 0; i < builtVersions.length; i++) {

@@ -8,11 +8,17 @@ package com.truesim.engine.graph;
 public final class Buffer {
 
     final int id;
+    final Object build; // the build it is of, as an image's
     final String name;
     final long size;
 
     Buffer(int id, String name, long size) {
+        this(id, name, size, null);
+    }
+
+    Buffer(int id, String name, long size, Object build) {
         this.id = id;
+        this.build = build;
         this.name = name;
         this.size = size;
     }

@@ -1059,6 +1059,23 @@ class FrameGraphTest {
     }
 
     @Test
+    void imagesOfAnEarlierBuildAreRefused() {
+        // A technique keeping the image of its first build and using it in the next: the id may name another image
+        // there, so it is refused rather than resolved.
+        Image[] kept = new Image[1];
+        graph.add(new Mod(List.of(OUT), List.of(), g -> {
+            Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            Image used = kept[0] == null ? image : kept[0];
+            kept[0] = image;
+            g.pass("fill").write(image, Access.TRANSFER_DST).record(ctx -> clear(ctx, used, 1, 0, 0, 1));
+            g.provide(OUT, image);
+        })).output(OUT, output);
+        assertThat(frame()[0]).isEqualTo(RED);
+        graph.invalidate();
+        assertThatIllegalStateException().isThrownBy(this::frame).withMessageContaining("of an earlier build");
+    }
+
+    @Test
     void aFrameThatThrowsLeavesTheGraphUsable() {
         // A pass that throws while recording, then a technique that fails to build: each frame is dropped, the next
         // begins, and once they are gone the graph draws.

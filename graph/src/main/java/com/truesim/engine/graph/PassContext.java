@@ -130,6 +130,9 @@ public final class PassContext {
 
     /** {@code image}, after checking (with validation on) that the recording pass declared it. */
     Image declared(Image image) {
+        if (image.build != null && image.build != graph.currentBuild) {
+            throw new IllegalStateException(image + " is of an earlier build: take it again as the graph builds");
+        }
         if (pass != null && graph.checkDeclared && !contains(pass.images, image.id)) {
             throw new IllegalStateException(pass.name + " uses " + image + " without declaring it");
         }
@@ -138,6 +141,9 @@ public final class PassContext {
 
     /** {@code buffer}, after checking (with validation on) that the recording pass declared it. */
     Buffer declared(Buffer buffer) {
+        if (buffer.build != null && buffer.build != graph.currentBuild) {
+            throw new IllegalStateException(buffer + " is of an earlier build: take it again as the graph builds");
+        }
         if (pass != null && graph.checkDeclared && !contains(pass.buffers, buffer.id)) {
             throw new IllegalStateException(pass.name + " uses " + buffer + " without declaring it");
         }
