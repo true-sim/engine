@@ -163,6 +163,7 @@ public final class MeshletRenderer implements AutoCloseable {
     private final ExternalBuffer chunksImport;
     private final ExternalBuffer chunkCommandImport;
     private final Retiring retiring; // the old tables, rows and view lists, until no frame reads them
+    private final Runnable followScene = this::followScene;
     // Read only: a frame graph may record passes on several threads at once, so recording changes no field.
     private static final boolean[] NOT_EARLY = {false};
     private static final boolean[] EARLY = {true};
@@ -259,6 +260,7 @@ public final class MeshletRenderer implements AutoCloseable {
         chunkCommand = GpuBuffer.deviceLocal(device, 16,
             storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         views = new RenderViews(device, slots, retiring);
+        scene.onGrow(followScene);
         chunksImport = new ExternalBuffer("meshlet chunks", this.chunks);
         chunkCommandImport = new ExternalBuffer("chunk command", chunkCommand);
     }
@@ -283,6 +285,13 @@ public final class MeshletRenderer implements AutoCloseable {
     @AllowAllocation("closing a view")
     void removeView(RenderView view) {
         views.remove(view);
+    }
+
+    /** Grows the views' per-instance buffers as the scene grows. */
+    private void followScene() {
+        for (RenderView view : views.open()) {
+            view.followInstances();
+        }
     }
 
     /** Has {@code resource} freed once no frame in flight reads it. */
@@ -684,6 +693,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 if (early != null) {
                     Commands.fillBuffer(commands, v.drawCount().handle(), 0, VK_WHOLE_SIZE, 0); // counts, indices wanted
                 }
+                v.clearGrownVisibility(commands);
                 Commands.updateBuffer(commands, v.expandCommand().handle(), 0, 16 * BINS, dispatches);
                 Commands.updateBuffer(commands, v.drawCommand().handle(), 0, 24 * BINS, draws);
             }
@@ -873,6 +883,7 @@ public final class MeshletRenderer implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
+            scene.stopFollowing(followScene);
             instancesPass.close();
             cull.close();
             expand.close();

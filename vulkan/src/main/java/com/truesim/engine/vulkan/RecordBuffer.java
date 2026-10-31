@@ -8,9 +8,13 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_READ_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.vulkan.layout.ScatterPush;
@@ -20,6 +24,7 @@ import java.lang.foreign.ValueLayout;
 import java.util.Arrays;
 import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkBufferCopy;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
@@ -47,13 +52,19 @@ public final class RecordBuffer implements AutoCloseable {
 
     private static final int SCATTER_PUSH = ScatterPush.BYTES;
     private static final int MAX_GROUPS = 65_535;
+    // Copied from by readbacks and as they grow, copied into as they grow.
+    private static final int RECORDS_USAGE = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+        | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     /** Records an upload buffer holds at first; it grows (to the capacity at most) when more change in a frame. */
     static final int FIRST_UPLOAD_RECORDS = 256;
 
     private final VulkanDevice device;
     private final int recordBytes;
-    private final int capacity;
+    private int capacity;
     private final FrameSlots slots;
+    // The buffer the records were in before they grew, and its size: copied into the new one at the next upload.
+    private GpuBuffer grownFrom;
     private final Retiring retiring; // upload buffers replaced by bigger ones, until their frames finish
     // Set once while constructing; null until made, so a constructor that fails frees what it made.
     private GpuBuffer records;
@@ -61,9 +72,9 @@ public final class RecordBuffer implements AutoCloseable {
     private final FrameSlots.FrameStart start = this::upload;
     // The changes since the last upload: entry e is record indices[e], its bytes at e * recordBytes of changes.
     private final Arena arena = Arena.ofShared();
-    private final MemorySegment indices;
-    private final MemorySegment changes;
-    private final int[] entryOf;
+    private MemorySegment indices;
+    private MemorySegment changes;
+    private int[] entryOf;
     private int pending;
     // Per frame slot, the upload buffer (indices, then records) and where in it the next upload goes: frames upload
     // once or a few times each, the next frame of the slot starting over (with one slot, where the last one ended).
@@ -94,8 +105,7 @@ public final class RecordBuffer implements AutoCloseable {
         uploads = new GpuBuffer[slots.count()];
         uploadCapacity = new int[uploads.length];
         try {
-            records = GpuBuffer.deviceLocal(device, (long) recordBytes * capacity, storage
-                | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT); // copied from: readbacks
+            records = GpuBuffer.deviceLocal(device, (long) recordBytes * capacity, RECORDS_USAGE);
             device.submitAndWait(device.graphics(), commands -> Commands.fillBuffer(commands, records.handle(), 0,
                 records.size(), 0));
             try (ShaderModule shader = ShaderModule.load(device, "shaders/records/scatter.spv")) {
@@ -125,6 +135,34 @@ public final class RecordBuffer implements AutoCloseable {
 
     public int capacity() {
         return capacity;
+    }
+
+    /**
+     * Room for {@code capacity} records from now on: a bigger device-local buffer, the records copied into it (the rest
+     * zeros) at the next upload, before its changes scatter; the old buffer is freed once no frame reads it. Frames
+     * recorded from now on read the new one ({@link #deviceAddress}, {@link #buffer}). Changes claimed so far stay.
+     */
+    @AllowAllocation("growing, rarely")
+    public synchronized void grow(int capacity) {
+        if (capacity <= this.capacity || (long) capacity * (recordBytes / 16) > (long) Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("Grows to more than " + this.capacity + " records: " + capacity);
+        }
+        GpuBuffer bigger = GpuBuffer.deviceLocal(device, (long) recordBytes * capacity, RECORDS_USAGE);
+        if (grownFrom == null) {
+            grownFrom = records;
+        } else {
+            records.close(); // grown twice before an upload: no frame read it, the first one holds the records
+        }
+        records = bigger;
+        MemorySegment moreIndices = arena.allocate(4L * capacity, 64);
+        MemorySegment moreChanges = arena.allocate((long) recordBytes * capacity, 64);
+        MemorySegment.copy(indices, 0, moreIndices, 0, 4L * pending);
+        MemorySegment.copy(changes, 0, moreChanges, 0, (long) recordBytes * pending);
+        indices = moreIndices;
+        changes = moreChanges;
+        entryOf = Arrays.copyOf(entryOf, capacity);
+        Arrays.fill(entryOf, this.capacity, capacity, -1);
+        this.capacity = capacity;
     }
 
     /** The records, for shaders: record i at {@code deviceAddress() + i * recordBytes()}, after the frame's upload. */
@@ -207,6 +245,9 @@ public final class RecordBuffer implements AutoCloseable {
     }
 
     private void upload(VkCommandBuffer commands, boolean barriers) {
+        if (grownFrom != null) {
+            copyGrown(commands);
+        }
         if (pending == 0) {
             return;
         }
@@ -269,6 +310,26 @@ public final class RecordBuffer implements AutoCloseable {
         pending = 0;
     }
 
+    /**
+     * Copies the records from the buffer they grew out of into the new one, zeros past them, with barriers of its own:
+     * after whatever wrote the old one, before the scatter and whatever reads the new one.
+     */
+    private void copyGrown(VkCommandBuffer commands) {
+        GpuBuffer old = grownFrom;
+        grownFrom = null;
+        Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        try (MemoryStack stack = stackPush()) {
+            long region = stack.ncalloc(VkBufferCopy.ALIGNOF, 1, VkBufferCopy.SIZEOF);
+            memPutLong(region + VkBufferCopy.SIZE, old.size());
+            Commands.copyBuffer(commands, old.handle(), records.handle(), 1, region);
+        }
+        Commands.fillBuffer(commands, records.handle(), old.size(), records.size() - old.size(), 0);
+        Barriers.memory(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        retiring.add(old); // this frame reads it too
+    }
+
     /** An upload buffer for {@code entries} changed records: their indices, then their bytes. */
     private GpuBuffer uploadBuffer(int entries) {
         return GpuBuffer.hostWritten(device, changesOffset(entries) + (long) recordBytes * entries,
@@ -293,6 +354,9 @@ public final class RecordBuffer implements AutoCloseable {
     /** Frees the buffers, pipeline and memory made. */
     private void free() {
         retiring.close();
+        if (grownFrom != null) {
+            grownFrom.close();
+        }
         if (records != null) {
             records.close();
         }

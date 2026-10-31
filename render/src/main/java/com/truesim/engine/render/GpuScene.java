@@ -1,6 +1,7 @@
 package com.truesim.engine.render;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.graph.ExternalBuffer;
 import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.InstanceLayout;
 import com.truesim.engine.vulkan.FrameSlots;
@@ -10,6 +11,9 @@ import com.truesim.engine.vulkan.VulkanDevice;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
@@ -37,6 +41,10 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  * per instance changed, and frames in flight keep no copies. Given a frame graph's {@link FrameSlots} instances may
  * change every frame; otherwise change them only once the frames using them have finished.
  *
+ * <p>The table grows as instances come: the capacity it is made with is where it starts. Taking an id past it doubles
+ * the table (or more); the instances are copied over on the GPU in the next frame and the old buffer is freed once no
+ * frame reads it. Views' per-instance buffers grow with it, and a frame graph rebuilds once for the new size.
+ *
  * <p>Custom passes may read the instances ({@link #instanceAddress}, {@link #instanceBuffer}), laid out as
  * {@code meshlets/common.slang}'s {@code Instance}: {@link #INSTANCE_BYTES} bytes per id, a hole's mesh word 0.
  * Allocates nothing once created.
@@ -57,9 +65,11 @@ public final class GpuScene implements AutoCloseable {
     private static final int DEFAULT_LAYERS = 1;
 
     private final GeometryPool pool;
-    private final int capacity;
+    private int capacity;
     private final RecordBuffer instances; // the GPU's, device-local, uploading at the start of each frame
-    private final long[] used;
+    private final ExternalBuffer graphBuffer; // the instances as a frame graph imports them, set anew as they grow
+    private final List<Runnable> growth = new ArrayList<>(); // what follows the table's size: views' buffers
+    private long[] used;
     private int firstFreeWord; // every word of used before it is full: the search for a free id starts here
     private final Materials defaultMaterials;
     private Materials materials;
@@ -68,12 +78,12 @@ public final class GpuScene implements AutoCloseable {
     private int highWater;
     private boolean closed;
 
-    /** Room for {@code capacity} instances of {@code pool}'s meshes, one copy: for frames the caller waits for. */
+    /** Room for {@code capacity} instances of {@code pool}'s meshes to start with: for frames the caller waits for. */
     public GpuScene(VulkanDevice device, GeometryPool pool, int capacity) {
         this(device, pool, capacity, FrameSlots.single());
     }
 
-    /** Room for {@code capacity} instances, a copy per frame of {@code slots} (a frame graph's). */
+    /** Room for {@code capacity} instances to start with, for the frames of {@code slots} (a frame graph's). */
     public GpuScene(VulkanDevice device, GeometryPool pool, int capacity, FrameSlots slots) {
         if (capacity < 1) {
             throw new IllegalArgumentException("Room for instances: " + capacity);
@@ -81,6 +91,7 @@ public final class GpuScene implements AutoCloseable {
         this.pool = Objects.requireNonNull(pool, "pool");
         this.capacity = capacity;
         instances = new RecordBuffer(device, INSTANCE_BYTES, capacity, slots); // zeros: every id a hole
+        graphBuffer = new ExternalBuffer("instances", instances.buffer());
         used = new long[(capacity + 63) / 64];
         defaultMaterials = new Materials(device, 1);
         materials = defaultMaterials;
@@ -90,8 +101,37 @@ public final class GpuScene implements AutoCloseable {
         return pool;
     }
 
+    /** How many ids the table has room for now; it grows when one past it is taken. */
     public int capacity() {
         return capacity;
+    }
+
+    /** Grows the table to {@code atLeast} ids, doubling at least, and tells what follows its size. */
+    @AllowAllocation("growing, rarely")
+    private void grow(int atLeast) {
+        int grown = (int) Math.min(Integer.MAX_VALUE - 64, Math.max(2L * capacity, atLeast));
+        instances.grow(grown);
+        used = Arrays.copyOf(used, (grown + 63) / 64);
+        capacity = grown;
+        graphBuffer.set(instances.buffer());
+        for (Runnable follower : growth) {
+            follower.run();
+        }
+    }
+
+    /** Runs {@code follower} whenever the table grows (a renderer growing its views' per-instance buffers). */
+    @AllowAllocation("once per renderer")
+    void onGrow(Runnable follower) {
+        growth.add(follower);
+    }
+
+    void stopFollowing(Runnable follower) {
+        growth.remove(follower);
+    }
+
+    /** The instances as a frame graph imports them: set anew as the table grows, so the graph rebuilds for its size. */
+    ExternalBuffer graphBuffer() {
+        return graphBuffer;
     }
 
     /**
@@ -108,15 +148,13 @@ public final class GpuScene implements AutoCloseable {
 
     /**
      * Adds an instance (see {@link #set(int, int, int, int, boolean, double, double, double, float, float, float,
-     * float, float, float, float)}) under the lowest free id and returns it, or -1 when the table is full.
-     * Allocates nothing.
+     * float, float, float, float)}) under the lowest free id and returns it; the table grows if it is full.
+     * Allocates nothing, unless it grows.
      */
     public int add(int mesh, int material, int layers, boolean castsShadows, double x, double y, double z, float qx,
         float qy, float qz, float qw, float sx, float sy, float sz) {
-        int id = lowestFree();
-        if (id >= 0) {
-            set(id, mesh, material, layers, castsShadows, x, y, z, qx, qy, qz, qw, sx, sy, sz);
-        }
+        int id = freeId();
+        set(id, mesh, material, layers, castsShadows, x, y, z, qx, qy, qz, qw, sx, sy, sz);
         return id;
     }
 
@@ -146,11 +184,12 @@ public final class GpuScene implements AutoCloseable {
      * {@code y}, {@code z}), rotated by quaternion ({@code qx}, {@code qy}, {@code qz}, {@code qw}) and scaled, its
      * submeshes with materials from {@code material} on, on the layers of {@code layers} (bit n: layer n; drawn in views
      * of any of them) and casting shadows or not (shadow views and shadow rays leave out those that do not). Each view
-     * draws it relative to its camera, so it is written once, not as cameras move. Allocates nothing.
+     * draws it relative to its camera, so it is written once, not as cameras move. An id past the capacity grows the
+     * table. Allocates nothing, unless it grows.
      */
     public void set(int id, int mesh, int material, int layers, boolean castsShadows, double x, double y, double z,
         float qx, float qy, float qz, float qw, float sx, float sy, float sz) {
-        if (id < 0 || id >= capacity) {
+        if (id < 0) {
             throw new IllegalArgumentException("No instance " + id);
         }
         check(mesh, material);
@@ -163,7 +202,12 @@ public final class GpuScene implements AutoCloseable {
      * the thread changing the scene; write before the next upload. Allocates nothing.
      */
     public int claim(int id) {
-        Objects.checkIndex(id, capacity);
+        if (id < 0) {
+            throw new IndexOutOfBoundsException("No instance " + id);
+        }
+        if (id >= capacity) {
+            grow(id + 1);
+        }
         version++;
         if (!contains(id)) {
             used[id >>> 6] |= 1L << id;
@@ -250,9 +294,10 @@ public final class GpuScene implements AutoCloseable {
         return highWater;
     }
 
-    /** The lowest free id, which {@link #add} takes next, or -1 when the table is full. */
+    /** The lowest free id, which {@link #add} takes next: the capacity when the table is full (it grows then). */
     public int freeId() {
-        return lowestFree();
+        int id = lowestFree();
+        return id < 0 ? capacity : id;
     }
 
     private int lowestFree() {
