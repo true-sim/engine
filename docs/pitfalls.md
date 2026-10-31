@@ -200,6 +200,14 @@ conditions instead of adding to it; two results ("never fails") came from runs w
 - Proof: the rerun in [#151](https://github.com/true-sim/engine/issues/151) with a script that checks.
 - Rule: experiment scripts warn when a change changed nothing and when the setup is missing.
 
+**A benchmark that never fitted its cascades.** `StereoBench` added `CascadedShadowMaps` per eye without calling
+`update()` each frame, so the cascades kept their unfitted cameras and shading barely sampled them: with 20,000 rocks
+the camera draws read 0.06 ms an eye, cheaper than with 800, and the frame 0.34 ms instead of 2.4.
+- Proof: the same benchmark with `update()` every frame (true-sim/engine#216), and the inverted numbers in the stereo
+  benchmark's first report (#214) against the fitted ones.
+- Rule: a benchmark sets up techniques as an application must (cameras set, `update()`s called); numbers that go the
+  wrong way (more work, less time) are a setup bug until shown otherwise.
+
 ## Java
 
 **A record's components are its accessors.** A method named like a component must return the component's type:

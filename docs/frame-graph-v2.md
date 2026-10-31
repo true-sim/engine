@@ -860,6 +860,10 @@ is released.
   9070 XT, 2064 x 2208 per eye): both eyes take 0.34 to 1.17 ms in all (800 or 20,000 rocks, forward or visibility
   buffer); culling already runs once for every view, and shading per pixel stays the same with multiview, so it could
   save part of the second eye's geometry work only, 0.03 to 0.15 ms. Deferred until a heavier scene shows more.
+  Correction (same day): the benchmark never fitted its cascades (`update()`), which made shadowed shading cheap. Fitted,
+  20,000 rocks take 2.4 ms for both eyes in forward (camera draws 0.82, cascades 0.92, culling 0.30); multiview would
+  still save part of the second eye's 0.4 ms of draws only, while shared cascades (`share()`) and coarser casters
+  (`shadows.casterDetail`) save more for less.
 - **Phase 5 status (2026-10-31):** the graph's part landed in 0.75: the view's size apart from its images' size, a
   render scale, dynamic resolution with headroom, shrinking and per-frame regions (`pass.region()`,
   `ctx.regionWidth(image)`), and outputs scaled from the region. Without a shader in the graph, a partial region is

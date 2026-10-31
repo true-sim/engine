@@ -37,7 +37,8 @@ import java.util.Map;
  * 3's eye size, offscreen, passes timed and averaged over many frames, then grouped by what they do (which work each
  * eye repeats). {@code ./gradlew :engine-demo:stereoBench}; {@code --args="visibility"} shades through the visibility
  * buffer, {@code shared} gives both eyes one set of shadow cascades, {@code rebuild} times what rebuilds cost the
- * render thread.
+ * render thread, {@code capture} writes frame 100 for RenderDoc (launched through {@code renderdoccmd capture}), {@code noshadows}
+ * leaves the sun's cascades out.
  */
 public final class StereoBench {
 
@@ -52,15 +53,19 @@ public final class StereoBench {
         boolean visibility = List.of(args).contains("visibility");
         boolean shared = List.of(args).contains("shared"); // one set of cascades for both eyes
         boolean rebuilds = List.of(args).contains("rebuild"); // what a rebuild costs the render thread
+        boolean capture = List.of(args).contains("capture"); // one frame for RenderDoc, launched by renderdoccmd
+        boolean shadows = !List.of(args).contains("noshadows"); // without the sun's cascades: what they cost shading
         int color = VK_FORMAT_R16G16B16A16_SFLOAT;
         int depth = VK_FORMAT_D32_SFLOAT;
         try (VulkanInstance instance = VulkanInstance.builder().applicationName("stereo bench").surfaces(false)
+                 .validation(List.of(args).contains("capture")) // for its debug labels: passes named in the capture
                  .build();
              VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
              FrameGraph graph = new FrameGraph(device, 2).timings(true);
              DemoScene world = new DemoScene(device, graph.frameSlots(), color, depth)) {
             int usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
             List<AutoCloseable> owned = new ArrayList<>();
+            List<GpuImage> targets = new ArrayList<>();
             Camera[] eyes = {new Camera(), new Camera()};
             List<ViewPort> ports = new ArrayList<>();
             if (rebuilds) {
@@ -75,20 +80,28 @@ public final class StereoBench {
                 GpuImage target = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage,
                     VK_IMAGE_ASPECT_COLOR_BIT);
                 owned.add(target);
+                targets.add(target);
                 ViewPort port = graph.addView(e == 0 ? "left" : "right").size(WIDTH, HEIGHT);
                 ports.add(port);
                 SceneView view = world.geometry().createView(port, eyes[e], ViewOptions.of(1 << 14, 1 << 22)
                     .withOcclusion(true)).set(1, MeshletRenderer.MODE_LIT);
                 port.add(visibility ? new VisibilityBufferShading(world.geometry(), view, color, depth)
                         : new ClusteredForwardShading(world.geometry(), view, color, depth))
-                    .add(new ClusteredLights(world.lights(), view))
-                    .add(shared ? (e == 0 ? sharedCascades : sharedCascades.share()) : add(cascades, new CascadedShadowMaps(world.geometry(),
-                        world.lights(), 0, 0, view, 3, 2048, ViewOptions.shadow(1 << 16, 1 << 22), 150)))
-                    .output(Keys.SCENE_COLOR, new ExternalImage("eye " + e, WIDTH, HEIGHT, Format.R8G8B8A8_UNORM,
+                    .add(new ClusteredLights(world.lights(), view));
+                if (shadows) {
+                    port.add(shared ? (e == 0 ? sharedCascades : sharedCascades.share()) : add(cascades,
+                        new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, view, 3, 2048,
+                            ViewOptions.shadow(1 << 16, 1 << 22), 150)));
+                }
+                port.output(Keys.SCENE_COLOR, new ExternalImage("eye " + e, WIDTH, HEIGHT, Format.R8G8B8A8_UNORM,
                         usage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
                         .set(target.handle(), target.view()));
             }
             Map<String, double[]> sums = new LinkedHashMap<>(); // per pass: total, frames timed
+            RenderDocCapture renderDoc = capture ? RenderDocCapture.attach(instance.handle().address()) : null;
+            if (capture && renderDoc == null) {
+                System.out.println("RenderDoc is not loaded: launch with renderdoccmd capture");
+            }
             for (int frame = 0; frame < FRAMES; frame++) {
                 world.update(frame / 72.0);
                 for (int e = 0; e < 2; e++) {
@@ -114,8 +127,16 @@ public final class StereoBench {
                     }
                 }
                 long started = System.nanoTime();
+                boolean captured = renderDoc != null && frame == 100;
+                if (captured) {
+                    renderDoc.start();
+                }
                 graph.beginFrame();
                 graph.submit(0, 0);
+                if (captured) {
+                    device.waitIdle();
+                    System.out.println("RenderDoc capture written: " + renderDoc.end());
+                }
                 if (rebuilds && frame > 30) {
                     cpu[2 * kind] += (System.nanoTime() - started) / 1e6;
                     cpu[2 * kind + 1]++;
@@ -136,6 +157,10 @@ public final class StereoBench {
                 }
             }
             device.waitIdle();
+            String png = System.getProperty("truesim.demo.png");
+            if (png != null) {
+                writePng(device, targets.getFirst(), java.nio.file.Path.of(png));
+            }
             if (rebuilds) {
                 System.out.printf(Locale.ROOT, "CPU ms per frame, beginFrame and submit: ordinary %.3f, rebuilt as it "
                     + "is %.3f, resized (new images) %.3f%n", cpu[0] / cpu[1], cpu[2] / cpu[3], cpu[4] / cpu[5]);
@@ -147,6 +172,33 @@ public final class StereoBench {
             }
         } catch (Exception e) {
             throw new IllegalStateException(e);
+        }
+    }
+
+    /** Writes the left eye's image (left in the transfer-source layout by the graph) to a PNG file. */
+    private static void writePng(VulkanDevice device, GpuImage image, java.nio.file.Path file) throws Exception {
+        try (com.truesim.engine.vulkan.GpuBuffer pixels = com.truesim.engine.vulkan.GpuBuffer.hostVisible(device,
+            4L * WIDTH * HEIGHT, org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+            device.submitAndWait(device.graphics(), commands -> {
+                try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+                    org.lwjgl.vulkan.VkBufferImageCopy.Buffer region = org.lwjgl.vulkan.VkBufferImageCopy.calloc(1,
+                        stack);
+                    region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).layerCount(1);
+                    region.imageExtent().set(WIDTH, HEIGHT, 1);
+                    org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer(commands, image.handle(),
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pixels.handle(), region);
+                }
+            });
+            java.awt.image.BufferedImage out = new java.awt.image.BufferedImage(WIDTH, HEIGHT,
+                java.awt.image.BufferedImage.TYPE_INT_RGB);
+            for (int y = 0; y < HEIGHT; y++) {
+                for (int x = 0; x < WIDTH; x++) {
+                    int rgba = pixels.memory().getAtIndex(java.lang.foreign.ValueLayout.JAVA_INT, y * WIDTH + x);
+                    out.setRGB(x, y, (rgba & 0xff) << 16 | (rgba & 0xff00) | (rgba >> 16 & 0xff));
+                }
+            }
+            javax.imageio.ImageIO.write(out, "png", file.toFile());
+            System.out.println("Left eye written to " + file);
         }
     }
 

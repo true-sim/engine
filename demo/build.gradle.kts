@@ -32,4 +32,5 @@ tasks.register<JavaExec>("stereoBench") {
     mainClass = "com.truesim.engine.demo.StereoBench"
     jvmArgs("--enable-native-access=ALL-UNNAMED")
     providers.gradleProperty("rocks").orNull?.let { systemProperty("truesim.demo.rocks", it) }
+    providers.gradleProperty("png").orNull?.let { systemProperty("truesim.demo.png", it) }
 }
