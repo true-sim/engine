@@ -592,7 +592,7 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     /** Whether any of {@code views} runs this frame; null: the frame's, always. */
-    private static boolean runs(ViewPort[] views) {
+    static boolean runs(ViewPort[] views) {
         if (views == null) {
             return true;
         }
@@ -1308,6 +1308,7 @@ public final class FrameGraph implements AutoCloseable {
      */
     @AllowAllocation("building the graph, when it changes")
     private void startViews(GraphBuilder g, int historyCount) {
+        g.finishRunning();
         passViews = new ViewPort[order.length][];
         passSkipped = new boolean[order.length];
         historyView = new ViewPort[historyCount];

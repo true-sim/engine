@@ -246,9 +246,10 @@ As built (engine 0.56):
   for; only its body is left out. The exception is the barriers on a skipped view's histories: they go with the swap,
   so the pair is untouched. A pair whose view is skipped on the frame the graph rebuilds takes its seam layouts by the
   roles it will have when the view next runs.
-- **Not yet.** Shared work that serves several views still does all of their work while some are skipped (the
-  renderer's culling culls every view it was given), and a skipped view's outputs are undefined until `Texture` outputs
-  keep theirs.
+- **Shared work.** A pass serving several views runs while any of them does; `g.running()`, taken while building and
+  read when recording, says whether the building technique's or request's views run, so it can leave out a skipped
+  one's part. The renderer's culling does (engine 0.57): a skipped view's lists and occlusion history stay as they are.
+- **Not yet.** A skipped view's outputs are undefined until `Texture` outputs keep theirs.
 
 ### 4.6 Resolution and dynamic resolution (#91)
 
