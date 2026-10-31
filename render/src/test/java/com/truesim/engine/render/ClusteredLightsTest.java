@@ -2,6 +2,7 @@ package com.truesim.engine.render;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
@@ -23,6 +24,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -33,6 +35,7 @@ import java.lang.foreign.ValueLayout;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Function;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,6 +55,7 @@ class ClusteredLightsTest {
     private VulkanInstance instance;
     private VulkanDevice device;
     private Lights lights;
+    private ClusteredLights made; // by the last run
 
     @BeforeEach
     void start() {
@@ -98,9 +102,9 @@ class ClusteredLightsTest {
             lights.point(i, 0.5f, 0.5f, -50, 0.2f, 1, 1, 1);
         }
         lights.setCount(16);
-        ClusteredLights request = new ClusteredLights(lights, camera, WIDTH, HEIGHT, 64, 8, 0.5f, 100, 8);
+        int[][] gpu = run(port -> new ClusteredLights(lights, port, camera, 64, 8, 0.5f, 100, 8));
+        ClusteredLights request = made;
         assertThat(request.clusters()).isEqualTo(4 * 2 * 8);
-        int[][] gpu = run(request);
         float[] m = camera.viewProjection();
         double[] across = {m[0], m[4], m[8]};
         double[] down = {m[1], m[5], m[9]};
@@ -166,7 +170,7 @@ class ClusteredLightsTest {
                 .spot(2, w[0] - 3, w[1] + 1, w[2] - 30, 5, 10, 10, 10, 0, 0, -1, 0.3, 0.5)
                 .setCount(3);
             assertThat(lights.position(1, 0)).isEqualTo(w[0] + 6);
-            runs[run] = run(new ClusteredLights(lights, camera, WIDTH, HEIGHT, 64, 8, 0.5f, 100, 8));
+            runs[run] = run(port -> new ClusteredLights(lights, port, camera, 64, 8, 0.5f, 100, 8));
         }
         assertThat(runs[1][0]).isEqualTo(runs[0][0]);
         assertThat(runs[1][1]).isEqualTo(runs[0][1]);
@@ -176,17 +180,34 @@ class ClusteredLightsTest {
     @Test
     void misuseIsReported() {
         Camera any = new Camera();
-        assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, any, 0, 1));
-        assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, any, 1, 1, 64, 8, 1, 1,
-            8));
-        assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, any, 1, 1, 64, 8, 0, 1,
-            8));
-        assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, any, 1, 1, 0, 8, 0.1f, 1,
-            8));
-        assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, any, 1, 1, 64, 0, 0.1f,
-            1, 8));
-        assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, any, 1, 1, 64, 8, 0.1f,
-            1, 0));
+        try (FrameGraph graph = new FrameGraph(device, 2)) {
+            ViewPort port = graph.addView("main").size(1, 1);
+            assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, port, any, 64, 8, 1, 1,
+                8));
+            assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, port, any, 64, 8, 0, 1,
+                8));
+            assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, port, any, 0, 8, 0.1f,
+                1, 8));
+            assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, port, any, 64, 0, 0.1f,
+                1, 8));
+            assertThatIllegalArgumentException().isThrownBy(() -> new ClusteredLights(lights, port, any, 64, 8, 0.1f,
+                1, 0));
+            // Its keys and size are its view's: built in the frame, it says so.
+            graph.add(new ClusteredLights(lights, port, any)).add(new Technique() {
+                @Override
+                public List<Key<?>> provides() {
+                    return List.of(OUT);
+                }
+
+                @Override
+                public void build(GraphBuilder g) {
+                    g.require(Keys.LIGHT_LIST);
+                }
+            }).output(OUT, new ExternalImage("target", 1, 1, Format.R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL));
+            assertThatIllegalStateException().isThrownBy(() -> device.submitAndWait(device.graphics(), graph::record))
+                .withMessageContaining("ClusteredLights of view main was added to the frame");
+        }
         assertThatIllegalArgumentException().isThrownBy(() -> new Lights(device, 0, 1));
         assertThatIllegalArgumentException().isThrownBy(() -> new Lights(device, 1, 0));
         assertThatIllegalArgumentException().isThrownBy(() -> lights.setCount(65));
@@ -234,17 +255,29 @@ class ClusteredLightsTest {
         return Math.sqrt(dot(a, a));
     }
 
-    /** Clusters the lights through a graph and reads the light list back: counts per cluster, slots, and {overflow}. */
-    private int[][] run(ClusteredLights clustered) {
+    /**
+     * Clusters the lights through a graph, with the clustering {@code make} makes for a view of {@value #WIDTH} by
+     * {@value #HEIGHT} (kept in {@link #made}), and reads the light list back: counts per cluster, slots, and
+     * {overflow}.
+     */
+    private int[][] run(Function<ViewPort, ClusteredLights> make) {
+        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        try (FrameGraph graph = new FrameGraph(device, 2)) {
+            ViewPort port = graph.addView("main").size(WIDTH, HEIGHT);
+            ClusteredLights clustered = make.apply(port);
+            made = clustered;
+            return run(graph, port, clustered, usage);
+        }
+    }
+
+    private int[][] run(FrameGraph graph, ViewPort port, ClusteredLights clustered, int usage) {
         int clusters = clustered.clusters();
         long bytes = ClusteredLights.HEADER_BYTES + 4L * clusters * (1 + clustered.maxPerCluster());
-        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         try (GpuBuffer list = GpuBuffer.hostVisible(device, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-             GpuImage target = new GpuImage(device, 4, 4, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
-             FrameGraph graph = new FrameGraph(device, 2)) {
+             GpuImage target = new GpuImage(device, 4, 4, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT)) {
             ExternalImage output = new ExternalImage("target", 4, 4, Format.R8G8B8A8_UNORM, usage,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
-            graph.add(clustered).add(new Technique() {
+            port.add(clustered).add(new Technique() {
                 @Override
                 public List<Key<?>> provides() {
                     return List.of(OUT);

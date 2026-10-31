@@ -1,5 +1,6 @@
 package com.truesim.engine.render;
 
+import com.truesim.engine.graph.ViewPort;
 import java.util.List;
 
 /**
@@ -8,9 +9,9 @@ import java.util.List;
  *
  * <pre>{@code
  * SceneGeometry geometry = new SceneGeometry(new MeshletGeometry(renderer));
- * RenderView view = geometry.createView(ViewOptions.of(1 << 18, 1 << 22));
- * geometry.setView(view, camera, 1, MeshletRenderer.MODE_LIT);
- * graph.add(new ClusteredForwardShading(geometry, view, width, height, colorFormat, depthFormat));
+ * ViewPort port = graph.addView("main").size(width, height);
+ * SceneView view = geometry.createView(port, camera, ViewOptions.of(1 << 18, 1 << 22)).set(1, MeshletRenderer.MODE_LIT);
+ * port.add(new ClusteredForwardShading(geometry, view, colorFormat, depthFormat));
  * }</pre>
  */
 public final class SceneGeometry {
@@ -45,6 +46,14 @@ public final class SceneGeometry {
      */
     public RenderView createView(ViewOptions options) {
         return renderer().createView(options);
+    }
+
+    /**
+     * A new view of the geometry's instances ({@link #createView(ViewOptions)}) for {@code port}, looking through
+     * {@code camera}: what the scene's techniques of the port take.
+     */
+    public SceneView createView(ViewPort port, Camera camera, ViewOptions options) {
+        return new SceneView(port, createView(options), camera);
     }
 
     /** The renderer whose scene and views the providers draw. */

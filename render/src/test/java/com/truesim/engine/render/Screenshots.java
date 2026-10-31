@@ -155,9 +155,10 @@ class Screenshots {
                 com.truesim.engine.graph.Technique map = new com.truesim.engine.render.shadows.ShadowMapShadows(
                     geometry, lights, 0, 0, MeshletBenchmark.sun(extent, groundY, size), size,
                     geometry.createView(ViewOptions.shadow(1 << 18, 1 << 24)), MeshletBenchmark.sunBias(extent, size));
-                graph.add(new VisibilityBufferShading(geometry, MeshletBenchmark.mainView(renderer), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
-                    VK_FORMAT_D32_SFLOAT)).add(new ClusteredLights(lights, camera, WIDTH, HEIGHT)).add(map)
-                    .output(Keys.SCENE_COLOR, external);
+                com.truesim.engine.graph.ViewPort port = graph.addView("main").size(WIDTH, HEIGHT);
+                SceneView main = new SceneView(port, MeshletBenchmark.mainView(renderer), camera);
+                port.add(new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
+                    .add(new ClusteredLights(lights, main)).add(map).output(Keys.SCENE_COLOR, external);
                 capture(device, graph, target, pixels); // the first frame's late phase draws everything
                 mapped = capture(device, graph, target, pixels);
                 write(mapped, out.resolve("shadows-mapped.png"));
@@ -166,15 +167,15 @@ class Screenshots {
                     new com.truesim.engine.render.shadows.CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, size,
                         ViewOptions.shadow(1 << 18, 1 << 24), 150);
                 cascades.update();
-                graph.remove(map).add(cascades);
+                port.remove(map).add(cascades);
                 capture(device, graph, target, pixels);
                 cascaded = capture(device, graph, target, pixels);
                 write(cascaded, out.resolve("shadows-cascaded.png"));
-                graph.remove(cascades).add(map);
+                port.remove(cascades).add(map);
                 if (rayTracing != null) {
                     rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
                     rayTracing.add(ground, terrainMesh, terrainMesh.levels().size() - 1);
-                    graph.remove(map).add(new com.truesim.engine.render.shadows.InlineRayShadows(
+                    port.remove(map).add(new com.truesim.engine.render.shadows.InlineRayShadows(
                         rayTracing, MeshletBenchmark.mainView(renderer), lights, 0, 0));
                     capture(device, graph, target, pixels);
                     traced = capture(device, graph, target, pixels);
@@ -255,17 +256,18 @@ class Screenshots {
                 WIDTH, HEIGHT, com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-            ClusteredForwardShading scene = new ClusteredForwardShading(geometry, MeshletBenchmark.mainView(renderer), WIDTH, HEIGHT,
-                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.02f, 0.05f);
             int[] forward;
             int[] visibility;
             try (com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
-                graph.add(scene).add(new ClusteredLights(lights, camera, WIDTH, HEIGHT))
-                    .output(Keys.SCENE_COLOR, external);
+                SceneView main = new SceneView(graph.addView("main").size(WIDTH, HEIGHT),
+                    MeshletBenchmark.mainView(renderer), camera);
+                ClusteredForwardShading scene = new ClusteredForwardShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.02f, 0.05f);
+                main.port().add(scene).add(new ClusteredLights(lights, main)).output(Keys.SCENE_COLOR, external);
                 capture(device, graph, target, pixels); // the first frame's late phase draws everything
                 forward = capture(device, graph, target, pixels);
                 write(forward, out.resolve("lights-forward.png"));
-                graph.replace(new VisibilityBufferShading(geometry, MeshletBenchmark.mainView(renderer), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                main.port().replace(new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
                     VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.02f, 0.05f));
                 capture(device, graph, target, pixels);
                 visibility = capture(device, graph, target, pixels);
@@ -327,7 +329,9 @@ class Screenshots {
                 MeshletBenchmark.mainView(renderer).set(camera, 1, image == 2 ? MeshletRenderer.MODE_LIT : MeshletRenderer.MODE_MESHLETS);
                 SceneGeometry geometry = meshlets ? SceneGeometry.meshlets(renderer) : new SceneGeometry(classic);
                 try (com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
-                    graph.add(new ClusteredForwardShading(geometry, MeshletBenchmark.mainView(renderer), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                    SceneView main = new SceneView(graph.addView("main").size(WIDTH, HEIGHT),
+                        MeshletBenchmark.mainView(renderer), camera);
+                    main.port().add(new ClusteredForwardShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
                         VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.02f, 0.05f)).output(Keys.SCENE_COLOR, external);
                     capture(device, graph, target, pixels); // the first frame's late phase draws everything
                     write(capture(device, graph, target, pixels), out.resolve(names[image]));

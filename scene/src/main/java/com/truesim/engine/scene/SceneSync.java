@@ -31,12 +31,14 @@ import java.util.Objects;
  * SceneSync sync = new SceneSync(resources, renderables, gpu);
  * MeshletRenderer renderer = new MeshletRenderer(device, gpu, colorFormat, depthFormat, slots);
  * SceneGeometry geometry = SceneGeometry.meshlets(renderer);
- * RenderView view = geometry.createView(ViewOptions.of(1 << 18, 1 << 22).withOcclusion(true));
- * graph.add(new ClusteredForwardShading(geometry, view, width, height, colorFormat, depthFormat));
+ * ViewPort port = graph.addView("main").size(width, height);
+ * SceneView view = geometry.createView(port, camera, ViewOptions.of(1 << 18, 1 << 22).withOcclusion(true));
+ * port.add(new ClusteredForwardShading(geometry, view, colorFormat, depthFormat));
  *
  * // every frame, after the frame boundary (tasks.drainCompleted()), scene.update() and renderables.update():
  * sync.update();                               // the instances that changed
- * view.set(camera.position(cameraX, cameraY, cameraZ), 1, MeshletRenderer.MODE_LIT);
+ * camera.position(cameraX, cameraY, cameraZ);
+ * view.set(1, MeshletRenderer.MODE_LIT);
  * }</pre>
  *
  * <p>Several scenes may fill one {@link GpuScene} (a world and an editor's gizmos), each with a sync of its own and the

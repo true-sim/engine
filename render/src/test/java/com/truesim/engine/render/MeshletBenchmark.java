@@ -85,6 +85,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.SplittableRandom;
+import java.util.function.Function;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.lwjgl.system.MemoryStack;
@@ -550,16 +551,15 @@ class MeshletBenchmark {
             for (int count : new int[] {0, 256, 4096}) {
                 scatterLights(lights, count, groundY, 20);
                 SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-                ClusteredLights clustered = new ClusteredLights(lights, camera, WIDTH, HEIGHT);
                 for (boolean forward : new boolean[] {true, false}) {
                     try (FrameGraph graph = new FrameGraph(device, 2)) {
-                        graph.add(forward ? new ClusteredForwardShading(geometry, mainView(renderer), WIDTH, HEIGHT,
-                            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
-                            : new VisibilityBufferShading(geometry, mainView(renderer), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
-                                VK_FORMAT_D32_SFLOAT))
+                        SceneView main = main(graph, mainView(renderer), camera);
+                        main.port().add(forward ? new ClusteredForwardShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_FORMAT_D32_SFLOAT)
+                            : new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
                             .output(Keys.SCENE_COLOR, target);
                         if (count > 0) {
-                            graph.add(clustered);
+                            main.port().add(new ClusteredLights(lights, main));
                         }
                         System.out.printf(Locale.ROOT, "  30,000 rocks on the terrain, %s, %s: %.3f ms median%n",
                             count == 0 ? "the sun" : String.format(Locale.ROOT, "%,d point lights", count),
@@ -573,9 +573,14 @@ class MeshletBenchmark {
     }
 
     /** Clustered forward shading of {@code view}'s renderer's meshlets, as {@code view} sees them, into RGBA8 and D32. */
-    static ClusteredForwardShading forward(RenderView view, int width, int height) {
-        return new ClusteredForwardShading(SceneGeometry.meshlets(view.renderer()), view, width, height,
+    static ClusteredForwardShading forward(SceneView view) {
+        return new ClusteredForwardShading(SceneGeometry.meshlets(view.view().renderer()), view,
             VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+    }
+
+    /** {@code view} seen through {@code camera}, in a new view "main" of {@code graph}, {@link #WIDTH} x {@link #HEIGHT}. */
+    private static SceneView main(FrameGraph graph, RenderView view, Camera camera) {
+        return new SceneView(graph.addView("main").size(WIDTH, HEIGHT), view, camera);
     }
 
     /** {@code renderer} with the camera's view, room for {@code triangles} on the indexed path, with occlusion. */
@@ -658,9 +663,7 @@ class MeshletBenchmark {
                 org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shaded.handle(), 0);
             lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
-            ClusteredLights sun = new ClusteredLights(lights, camera, WIDTH, HEIGHT);
             cascadeLights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
-            ClusteredLights cascadeSun = new ClusteredLights(cascadeLights, camera, WIDTH, HEIGHT);
             if (rayTracing != null) {
                 long t0 = System.nanoTime();
                 rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
@@ -677,39 +680,50 @@ class MeshletBenchmark {
             CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, cascadeLights, 0, 0, camera, 3, 2048,
                 ViewOptions.shadow(1 << 18, 1 << 24), 300);
             for (boolean forward : new boolean[] {true, false}) {
-                Technique shading = forward ? forward(mainView(renderer), WIDTH, HEIGHT) : new VisibilityBufferShading(
-                    geometry, mainView(renderer), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
+                Function<SceneView, Technique> shading = main -> forward ? forward(main)
+                    : new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
                 String scene = "30,000 rocks on the terrain, from above, "
                     + (forward ? "forward" : "visibility buffer");
-                time(device, color, depth, queries, period, scene + ", the sun unshadowed", target, shading, sun);
+                RenderView view = mainView(renderer);
+                time(device, color, depth, queries, period, scene + ", the sun unshadowed", target, view, camera,
+                    main -> List.of(shading.apply(main), new ClusteredLights(lights, main)));
                 for (int size : new int[] {2048, 4096}) {
+                    ShadowMapShadows shadows = new ShadowMapShadows(geometry, lights, 0, 0, sun(extent, groundY, size),
+                        size, sunView, sunBias(extent, size));
                     time(device, color, depth, queries, period, scene + ", shadow map " + size + " x " + size, target,
-                        shading, sun, new ShadowMapShadows(geometry, lights, 0, 0, sun(extent, groundY, size), size,
-                            sunView, sunBias(extent, size)));
+                        view, camera, main -> List.of(shading.apply(main), new ClusteredLights(lights, main), shadows));
                 }
                 cascades.update();
                 time(device, color, depth, queries, period, scene + ", 3 cascades of 2048 x 2048 to 300 units", target,
-                    shading, cascadeSun, cascades);
+                    view, camera,
+                    main -> List.of(shading.apply(main), new ClusteredLights(cascadeLights, main), cascades));
                 if (rayTracing != null) {
-                    time(device, color, depth, queries, period, scene + ", ray-traced mask", target, shading, sun,
-                        new RayTracedShadows(rayTracing, lights, 0, 0, forward ? depthOnly : ids, camera));
+                    time(device, color, depth, queries, period, scene + ", ray-traced mask", target, view, camera,
+                        main -> List.of(shading.apply(main), new ClusteredLights(lights, main),
+                            new RayTracedShadows(rayTracing, lights, 0, 0, forward ? depthOnly : ids, camera)));
                     if (!forward) {
-                        time(device, color, depth, queries, period, scene + ", inline rays", target, shading, sun,
-                            new InlineRayShadows(rayTracing, mainView(renderer), lights, 0, 0));
+                        time(device, color, depth, queries, period, scene + ", inline rays", target, view, camera,
+                            main -> List.of(shading.apply(main), new ClusteredLights(lights, main),
+                                new InlineRayShadows(rayTracing, view, lights, 0, 0)));
                     }
                 }
             }
         }
     }
 
-    /** Times a graph of {@code techniques} outputting the scene's color into {@code target}, and prints it. */
+    /**
+     * Times a graph of the techniques {@code techniques} makes for its view of {@code view} through {@code camera}
+     * ({@link #main}), outputting the scene's color into {@code target}, and prints it.
+     */
     private static void time(VulkanDevice device, GpuImage color, GpuImage depth, long queries, double period,
-        String what, ExternalImage target, Technique... techniques) {
+        String what, ExternalImage target, RenderView view, Camera camera,
+        Function<SceneView, List<Technique>> techniques) {
         try (FrameGraph graph = new FrameGraph(device, 2)) {
-            for (Technique technique : techniques) {
-                graph.add(technique);
+            SceneView main = main(graph, view, camera);
+            for (Technique technique : techniques.apply(main)) {
+                main.port().add(technique);
             }
-            graph.output(Keys.SCENE_COLOR, target);
+            main.port().output(Keys.SCENE_COLOR, target);
             System.out.printf(Locale.ROOT, "  %s: %.3f ms median%n", what,
                 time(device, color, depth, queries, period, BATCH, graph::record));
         }
@@ -737,8 +751,8 @@ class MeshletBenchmark {
             renderer.scene().removeFrom(wall ? count + 1 : count);
             for (boolean occlusion : new boolean[] {false, true}) {
                 try (FrameGraph graph = new FrameGraph(device, 2)) {
-                    graph.add(forward(mainView(renderer), WIDTH, HEIGHT)
-                        .occlusion(occlusion)).output(Keys.SCENE_COLOR, target);
+                    SceneView main = main(graph, mainView(renderer), camera);
+                    main.port().add(forward(main).occlusion(occlusion)).output(Keys.SCENE_COLOR, target);
                     double time = time(device, color, depth, queries, period, BATCH, graph::record);
                     System.out.printf(Locale.ROOT, "  %,d rocks%s, through the graph, occlusion culling %s: %.3f ms "
                         + "median, %,d meshlets drawn%n", count, wall ? " behind a wall" : "", occlusion ? "on" : "off",
@@ -775,8 +789,8 @@ class MeshletBenchmark {
                 time(device, color, depth, queries, period, String.format(Locale.ROOT, "%,d rocks, through the graph, "
                     + "%s", count, mesh == rock ? "meshlets, cluster hierarchy" : mesh == rockLod
                     ? "meshlets, discrete LODs" : "classic LOD (discrete LODs, a level per instance)"), target,
-                    new ClusteredForwardShading(geometry, mainView(renderer), WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
-                        VK_FORMAT_D32_SFLOAT).occlusion(false));
+                    mainView(renderer), camera, main -> List.of(new ClusteredForwardShading(geometry, main,
+                        VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).occlusion(false)));
             }
         }
     }

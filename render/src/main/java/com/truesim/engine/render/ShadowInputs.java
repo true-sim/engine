@@ -8,6 +8,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
+import com.truesim.engine.graph.ViewPort;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -17,12 +18,15 @@ import java.util.function.Consumer;
  * What the frame's shadow techniques made for shading, gathered while the graph builds: the images shading samples
  * (shadow maps, masks), buffers it must wait for (a scene's top level), and setups that fill their lights' shadow table
  * entries when the frame is recorded (with the images' slots). A shared request: every shadow technique adds to the
- * same set, and every shading technique reads all of it, so a new shadow technique needs no change to shading.
+ * same set, and every shading technique reads all of it, so a new shadow technique needs no change to shading. Each
+ * {@link ViewPort} has a set of its own, as it has a light list: its shadow techniques add to its set.
  *
  * <p>Shadow techniques {@link com.truesim.engine.graph.Technique#modifies() modify} {@link Keys#LIGHT_LIST}: they are
  * built whenever shading requires the light list, before shading adds its passes.
+ *
+ * @param view the view whose shading reads the set ({@link GraphBuilder#view()}); null: the frame's
  */
-public record ShadowInputs() implements Request<ShadowInputs.Set> {
+public record ShadowInputs(ViewPort view) implements Request<ShadowInputs.Set> {
 
     @Override
     @AllowAllocation("building the graph, when it changes")

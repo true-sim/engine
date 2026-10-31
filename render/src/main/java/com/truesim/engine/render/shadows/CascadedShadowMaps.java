@@ -236,7 +236,7 @@ public final class CascadedShadowMaps implements Technique {
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
         g.modify(Keys.LIGHT_LIST);
-        ShadowInputs.Set inputs = g.request(new ShadowInputs());
+        ShadowInputs.Set inputs = g.request(new ShadowInputs(g.view()));
         Image[] maps = new Image[cascades];
         for (int i = 0; i < cascades; i++) {
             maps[i] = g.request(new SceneDraw(geometry, views[i], cameras[i], SurfaceOutput.depth(),

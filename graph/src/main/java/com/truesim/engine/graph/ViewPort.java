@@ -16,8 +16,8 @@ import java.util.Objects;
  * request, whichever view makes them: one that reads a view's keys names its view among its values.
  *
  * <pre>{@code
- * ViewPort main = graph.addView("main").add(new ForwardShading(...)).output(SCENE_COLOR, window);
- * ViewPort mirror = graph.addView("mirror").add(new ForwardShading(...)).output(SCENE_COLOR, mirrorTarget);
+ * ViewPort main = graph.addView("main").size(1920, 1080).add(new ForwardShading(...)).output(SCENE_COLOR, window);
+ * ViewPort mirror = graph.addView("mirror").size(512, 512).add(new ForwardShading(...)).output(SCENE_COLOR, mirrorTarget);
  * }</pre>
  */
 @AllowAllocation("set up rarely")
@@ -27,6 +27,8 @@ public final class ViewPort {
     private final String name;
     final List<Technique> techniques = new ArrayList<>();
     final Map<Key<Image>, ExternalImage> outputs = new LinkedHashMap<>();
+    private int width;
+    private int height;
 
     ViewPort(FrameGraph graph, String name) {
         this.graph = graph;
@@ -36,6 +38,40 @@ public final class ViewPort {
     /** The view's name, unique in its graph: in errors, and qualifying its histories' names. */
     public String name() {
         return name;
+    }
+
+    /**
+     * Sets the size of the view's images, which its techniques read when they build (none until set); the graph
+     * rebuilds on its next frame when it changes.
+     */
+    public ViewPort size(int width, int height) {
+        if (width < 1 || height < 1) {
+            throw new IllegalArgumentException("A view has a size: " + width + " x " + height);
+        }
+        if (width != this.width || height != this.height) {
+            this.width = width;
+            this.height = height;
+            graph.changed();
+        }
+        return this;
+    }
+
+    /** The width of the view's images ({@link #size}). */
+    public int width() {
+        checkSized();
+        return width;
+    }
+
+    /** The height of the view's images ({@link #size}). */
+    public int height() {
+        checkSized();
+        return height;
+    }
+
+    private void checkSized() {
+        if (width == 0) {
+            throw new IllegalStateException(this + " has no size: set one with size(width, height)");
+        }
     }
 
     /** Adds a technique of this view; the graph rebuilds on its next frame. */
@@ -49,6 +85,16 @@ public final class ViewPort {
         techniques.add(technique);
         graph.changed();
         return this;
+    }
+
+    /**
+     * Swaps in {@code technique} for this view's techniques providing any of its keys, e.g. one shading technique for
+     * another; removes nothing if none does. The graph rebuilds on its next frame.
+     */
+    public ViewPort replace(Technique technique) {
+        List<Key<?>> keys = technique.provides();
+        techniques.removeIf(t -> t.provides().stream().anyMatch(keys::contains));
+        return add(technique);
     }
 
     /** Removes a technique of this view, if it is one; the graph rebuilds on its next frame. */

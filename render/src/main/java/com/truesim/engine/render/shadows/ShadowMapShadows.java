@@ -75,7 +75,7 @@ public final class ShadowMapShadows implements Technique {
         view.filter(-1, true); // the map holds the casters only
         Image map = g.request(new SceneDraw(geometry, view, camera, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT,
             size, size, false)).depth();
-        g.request(new ShadowInputs()).sample(map).setup(ctx -> {
+        g.request(new ShadowInputs(g.view())).sample(map).setup(ctx -> {
             lights.shadowMap(entry, camera, ctx.sampled(map), size, bias, Float.MAX_VALUE);
             lights.shadows(light, entry, 1);
         });

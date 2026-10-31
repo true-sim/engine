@@ -91,7 +91,7 @@ public final class RayTracedShadows implements Technique {
             .write(mask, Access.STORAGE_WRITE)
             .async()
             .record(ctx -> trace(ctx, pipeline, depth, mask, push));
-        g.request(new ShadowInputs()).sample(mask).setup(ctx -> {
+        g.request(new ShadowInputs(g.view())).sample(mask).setup(ctx -> {
             lights.shadowMask(entry, ctx.sampled(mask), 0);
             lights.shadows(light, entry, 1);
         });
