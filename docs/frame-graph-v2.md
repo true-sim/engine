@@ -238,6 +238,18 @@ indirect arguments of zero, without barrier changes.
 
 A skipped view keeps its histories as they are: no swap, no invalidation.
 
+As built (engine 0.56):
+- **Which passes skip.** Each pass runs for the views of what recorded it: a view's technique for its view, an
+  output's copy for its view, and a request for every view that asked for it. A request the frame asked for, and every
+  frame technique's pass, always run.
+- **Barriers.** A skipped pass keeps its barriers, so every later pass finds the layouts and ordering it was compiled
+  for; only its body is left out. The exception is the barriers on a skipped view's histories: they go with the swap,
+  so the pair is untouched. A pair whose view is skipped on the frame the graph rebuilds takes its seam layouts by the
+  roles it will have when the view next runs.
+- **Not yet.** Shared work that serves several views still does all of their work while some are skipped (the
+  renderer's culling culls every view it was given), and a skipped view's outputs are undefined until `Texture` outputs
+  keep theirs.
+
 ### 4.6 Resolution and dynamic resolution (#91)
 
 - Techniques take no sizes; sizes come from the view.

@@ -1495,6 +1495,92 @@ class FrameGraphTest {
         }
     }
 
+    /** Shared work counting the frames it runs in: one pass, whichever views ask for it. */
+    record Shared(int[] runs) implements Request<Boolean> {
+        @Override
+        public Boolean build(GraphBuilder g) {
+            g.pass("shared").sideEffects().record(ctx -> runs[0]++);
+            return true;
+        }
+    }
+
+    /** {@code inner}, asking for {@code request} too. */
+    record Asking(Request<?> request, Technique inner) implements Technique {
+        @Override
+        public List<Key<?>> provides() {
+            return inner.provides();
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            g.request(request);
+            inner.build(g);
+        }
+    }
+
+    @Test
+    void viewsAreSkippedOrRunLessOftenWithoutARebuildAndKeepTheirHistories() {
+        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        try (GpuImage second = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage,
+            VK_IMAGE_ASPECT_COLOR_BIT)) {
+            ExternalImage mirror = new ExternalImage("mirror", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(second.handle(), second.view());
+            int[] shared = {0};
+            Remember remember = new Remember(); // each frame it runs: shows last frame's color, writes the other one
+            ViewPort main = graph.addView("main").add(new Asking(new Shared(shared), remember)).output(OUT, output);
+            ViewPort side = graph.addView("side").add(new Asking(new Shared(shared), new Fill(OUT, SIZE, 1, 0, 0, 1)))
+                .output(OUT, mirror);
+            assertThat(frame()[0]).isEqualTo(0xffffffff);
+            assertThat(frame()[0]).isEqualTo(BLUE);
+            assertThat(shared[0]).as("shared work, once a frame").isEqualTo(2);
+            int builds = graph.builds();
+            // Off: none of its passes run, its history stays as the last frame it ran left it.
+            main.enabled(false);
+            frame();
+            assertThat(main.active()).isFalse();
+            assertThat(remember.frames).as("skipped").isEqualTo(2);
+            assertThat(firstTexel(second)).as("the other view runs").isEqualTo(RED);
+            assertThat(shared[0]).as("still asked for by the other view").isEqualTo(3);
+            side.enabled(false);
+            frame();
+            assertThat(shared[0]).as("no view asking for it runs").isEqualTo(3);
+            main.enabled(true);
+            assertThat(frame()[0]).as("what it wrote the last frame it ran").isEqualTo(RED);
+            assertThat(shared[0]).isEqualTo(4);
+            // Every 3rd frame, starting with the next.
+            main.rate(3);
+            assertThat(frame()[0]).isEqualTo(BLUE);
+            frame();
+            frame();
+            assertThat(remember.frames).as("ran once in three frames").isEqualTo(4);
+            assertThat(frame()[0]).isEqualTo(RED);
+            assertThat(remember.frames).isEqualTo(5);
+            assertThat(graph.builds()).as("no rebuild").isEqualTo(builds);
+            // Rebuilt while skipped: the history keeps what it held.
+            graph.invalidate();
+            frame();
+            assertThat(remember.frames).isEqualTo(5);
+            main.rate(1);
+            assertThat(frame()[0]).isEqualTo(BLUE);
+            assertThat(main.rate()).isEqualTo(1);
+            assertThatIllegalArgumentException().isThrownBy(() -> main.rate(0));
+        }
+    }
+
+    @Test
+    void aViewSkippedFromItsStartHasNoLastFrameUntilItRuns() {
+        ViewPort late = graph.addView("late").add(new Remember()).output(OUT, output).enabled(false);
+        assertThat(late.enabled()).isFalse();
+        frame();
+        submitted(2);
+        late.enabled(true);
+        assertThat(frame()[0]).as("no last frame yet").isEqualTo(0xffffffff);
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        // Submitted with frames in flight, every other frame: what the last frame it ran wrote.
+        late.rate(2);
+        assertThat(submitted(4)[0]).isIn(RED, BLUE);
+    }
+
     @Test
     void historiesWrittenFirstOnTheComputeQueueAreJoinedAhead() {
         int[] frames = {0};

@@ -19,7 +19,13 @@ import java.util.Objects;
  * <pre>{@code
  * ViewPort main = graph.addView("main").size(1920, 1080).add(new ForwardShading(...)).output(SCENE_COLOR, window);
  * ViewPort mirror = graph.addView("mirror").size(512, 512).add(new ForwardShading(...)).output(SCENE_COLOR, mirrorTarget);
+ * mirror.enabled(mirrorVisible);   // from the next frame, without a rebuild
+ * security.rate(4);                // a security camera: every 4th frame
  * }</pre>
+ *
+ * <p>A view skipped in a frame ({@link #enabled}, {@link #rate}) runs none of its passes, nor shared work only it asked
+ * for, and its outputs are left undefined: present only frames it ran in. Its histories stay as they are, so its next
+ * frame reads what its last one wrote.
  */
 @AllowAllocation("set up rarely")
 public final class ViewPort {
@@ -31,6 +37,10 @@ public final class ViewPort {
     private final List<AutoCloseable> owned = new ArrayList<>();
     private int width;
     private int height;
+    private boolean enabled = true;
+    private int rate = 1;
+    private int skipped; // frames skipped since it last ran, while enabled
+    boolean active; // runs this frame: set when the frame starts
 
     ViewPort(FrameGraph graph, String name) {
         this.graph = graph;
@@ -73,6 +83,54 @@ public final class ViewPort {
     private void checkSized() {
         if (width == 0) {
             throw new IllegalStateException(this + " has no size: set one with size(width, height)");
+        }
+    }
+
+    /**
+     * Turns the view on or off from the next frame, without a rebuild: off, it runs nothing. Turned on, it runs that
+     * frame, whatever its {@link #rate}.
+     */
+    public ViewPort enabled(boolean on) {
+        if (on && !enabled) {
+            skipped = rate; // due
+        }
+        enabled = on;
+        return this;
+    }
+
+    /** Whether the view is on ({@link #enabled(boolean)}). */
+    public boolean enabled() {
+        return enabled;
+    }
+
+    /**
+     * Runs the view every {@code frames}th frame (1: every frame), without a rebuild; the next frame it runs in is the
+     * next one.
+     */
+    public ViewPort rate(int frames) {
+        if (frames < 1) {
+            throw new IllegalArgumentException("A view runs every 1st frame or less often: " + frames);
+        }
+        rate = frames;
+        skipped = frames; // due
+        return this;
+    }
+
+    /** How often the view runs: every {@code rate()}th frame. */
+    public int rate() {
+        return rate;
+    }
+
+    /** Whether the view runs in the frame being recorded, or for a pass body, the one it records. */
+    public boolean active() {
+        return active;
+    }
+
+    /** Starts a frame: whether the view runs in it. */
+    void startFrame() {
+        active = enabled && ++skipped >= rate;
+        if (active) {
+            skipped = 0;
         }
     }
 
