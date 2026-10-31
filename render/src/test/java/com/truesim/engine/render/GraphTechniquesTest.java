@@ -9,6 +9,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
@@ -43,6 +45,8 @@ import com.truesim.engine.render.materials.CarPaintParameters;
 import com.truesim.engine.render.materials.ClearcoatParameters;
 import com.truesim.engine.render.materials.Glow;
 import com.truesim.engine.render.materials.GlowParameters;
+import com.truesim.engine.render.materials.Tinted;
+import com.truesim.engine.render.materials.TintedParameters;
 import com.truesim.engine.render.materials.MetallicRoughnessMaterial;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -822,6 +826,86 @@ class GraphTechniquesTest {
             graph.settings().set(ResolutionSettings.DYNAMIC, false);
             scene.setMaterials(null);
         }
+    }
+
+    @Test
+    void materialsNameBuffersTheHostOrTheGraphWrites() {
+        assumeThat(device.primitiveIds()).as("primitive IDs in fragment shaders").isTrue();
+        scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+        scene.removeFrom(2);
+        Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+            | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        try (Materials materials = new Materials(device, 4);
+             GpuBuffer green = GpuBuffer.hostVisible(device, 16, usage);
+             GpuBuffer written = GpuBuffer.deviceLocal(device, 16, usage)) {
+            // The host's: green, written once.
+            green.memory().copyFrom(java.lang.foreign.MemorySegment.ofArray(new float[] {0, 1, 0, 1}));
+            materials.register(Tinted.TYPE);
+            int quadMaterial = materials.add(new Material(TintedParameters.DEFAULTS.withTint(green)));
+            scene.setMaterials(materials);
+            scene.set(1, quad, quadMaterial, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+            SceneView main = main(camera);
+            main.port().add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f));
+            // A game's pass writing blue into a buffer of the graph every frame, after the shading: the next frame's
+            // shading reads it, ordered by the graph, as the passes reading scene data read it.
+            com.truesim.engine.graph.ExternalBuffer tint = new com.truesim.engine.graph.ExternalBuffer("tint", written);
+            main.port().add(new Technique() {
+                @Override
+                public List<Key<?>> provides() {
+                    return List.of();
+                }
+
+                @Override
+                public List<Key<?>> modifies() {
+                    return List.of(Keys.SCENE_COLOR);
+                }
+
+                @Override
+                public void build(GraphBuilder g) {
+                    g.modify(Keys.SCENE_COLOR);
+                    com.truesim.engine.graph.Buffer buffer = g.importBuffer(tint);
+                    g.pass("tint").write(buffer, com.truesim.engine.graph.BufferAccess.TRANSFER_DST).record(ctx ->
+                        org.lwjgl.vulkan.VK10.vkCmdUpdateBuffer(ctx.unsafe().commands(), written.handle(), 0,
+                            new float[] {0, 0, 1, 1}));
+                }
+            }).output(Keys.SCENE_COLOR, output);
+            frame();
+            frame();
+            assertThat(tinted(0xff00ff00)).as("green, the host's buffer").isGreaterThan(SIZE * SIZE / 40);
+            assertThat(materials.graphBuffers()).isEmpty();
+            int builds = graph.builds();
+            materials.update(quadMaterial, TintedParameters.TINT, tint);
+            assertThat(materials.graphBuffers()).containsExactly(tint);
+            frame();
+            frame();
+            assertThat(graph.builds()).as("rebuilt to import it").isEqualTo(builds + 1);
+            assertThat(tinted(0xffff0000)).as("blue, the graph's").isGreaterThan(SIZE * SIZE / 40);
+            assertThat(graph.passes()).containsSubsequence("visibility shading", "tint");
+            // Set anew without it: no longer imported.
+            materials.set(quadMaterial, new Material(TintedParameters.DEFAULTS));
+            assertThat(materials.graphBuffers()).isEmpty();
+            frame();
+            assertThat(tinted(0xffff0000)).as("no buffer: black").isZero();
+            assertThatIllegalArgumentException().as("not a buffer field")
+                .isThrownBy(() -> materials.update(quadMaterial, TintedParameters.STRENGTH, tint));
+            scene.setMaterials(null);
+        }
+    }
+
+    /** How many pixels are {@code abgr}, to a few levels. */
+    private int tinted(int abgr) {
+        int count = 0;
+        for (int pixel : pixels.memory().toArray(ValueLayout.JAVA_INT)) {
+            boolean near = true;
+            for (int shift = 0; shift < 24; shift += 8) {
+                near &= Math.abs((pixel >> shift & 0xff) - (abgr >> shift & 0xff)) <= 5;
+            }
+            count += near ? 1 : 0;
+        }
+        return count;
     }
 
     @Test
