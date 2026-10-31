@@ -12,7 +12,9 @@ import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_ACCESS_ACCELERATION_S
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR;
@@ -123,6 +125,9 @@ public final class RayTracing implements AutoCloseable {
 
     private static final int AS_INSTANCE_BYTES = 64; // VkAccelerationStructureInstanceKHR
     private static final int PUSH_BYTES = InstancesPush.BYTES;
+    /** The top level's build: fast to trace, and refittable as instances move. */
+    private static final int TOP_FLAGS = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+        | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
 
     private final VulkanDevice device;
     private final GeometryPool pool;
@@ -202,6 +207,11 @@ public final class RayTracing implements AutoCloseable {
     // What the top level was last built from: it stands while they are the same (bottom levels: none added since).
     private GpuScene builtScene;
     private long builtVersion;
+    private int builtCount; // the instances of the last build: a refit keeps their number
+    private int refits; // since the last full build: refits loosen the tree, so a build comes every MAX_REFITS
+    private long topLevelRefits;
+    /** Refits between full builds of the top level while only instances move. */
+    private static final int MAX_REFITS = 60;
     private double builtX;
     private double builtY;
     private double builtZ;
@@ -272,10 +282,10 @@ public final class RayTracing implements AutoCloseable {
         try (MemoryStack stack = stackPush()) {
             VkAccelerationStructureGeometryKHR.Buffer geometry = instancesGeometry(stack, instancesAddress);
             VkAccelerationStructureBuildGeometryInfoKHR info = buildInfo(stack, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
-                VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR, geometry);
+                TOP_FLAGS, geometry);
             VkAccelerationStructureBuildSizesInfoKHR sizes = sizes(stack, info, count);
             top = create(sizes.accelerationStructureSize(), VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR);
-            topScratch = scratch(sizes.buildScratchSize());
+            topScratch = scratch(Math.max(sizes.buildScratchSize(), sizes.updateScratchSize()));
         }
         topSlot = bindless.addAccelerationStructure(top.handle());
         maxInstances = count;
@@ -810,6 +820,11 @@ public final class RayTracing implements AutoCloseable {
         buildTopLevel(commands, renderer, false);
     }
 
+    /** Of {@link #topLevelBuilds}, how many refitted the top level rather than building it anew: instances moved only. */
+    public long topLevelRefits() {
+        return topLevelRefits;
+    }
+
     /** How many times the top level was built: frames whose instances, origin and bottom levels stayed build none. */
     public long topLevelBuilds() {
         return topLevelBuilds;
@@ -845,6 +860,13 @@ public final class RayTracing implements AutoCloseable {
             && originZ == builtZ && !bottomAdded) {
             return; // nothing it was built from changed
         }
+        // Instances moved (or changed), the same number of them, the same bottom levels and origin: refitted, the tree
+        // kept, unless enough refits have loosened it. Else built anew.
+        boolean refit = scene == builtScene && count == builtCount && originX == builtX && originY == builtY
+            && originZ == builtZ && !bottomAdded && refits < MAX_REFITS;
+        refits = refit ? refits + 1 : 0;
+        topLevelRefits += refit ? 1 : 0;
+        builtCount = count;
         builtScene = scene;
         builtVersion = scene.version();
         builtX = originX;
@@ -893,10 +915,12 @@ public final class RayTracing implements AutoCloseable {
                 VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR);
             memPutInt(info + VkAccelerationStructureBuildGeometryInfoKHR.TYPE,
                 VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR);
-            memPutInt(info + VkAccelerationStructureBuildGeometryInfoKHR.FLAGS,
-                VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
+            memPutInt(info + VkAccelerationStructureBuildGeometryInfoKHR.FLAGS, TOP_FLAGS);
             memPutInt(info + VkAccelerationStructureBuildGeometryInfoKHR.MODE,
-                VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
+                refit ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
+            if (refit) { // in place
+                memPutLong(info + VkAccelerationStructureBuildGeometryInfoKHR.SRCACCELERATIONSTRUCTURE, top.handle());
+            }
             memPutLong(info + VkAccelerationStructureBuildGeometryInfoKHR.DSTACCELERATIONSTRUCTURE, top.handle());
             memPutInt(info + VkAccelerationStructureBuildGeometryInfoKHR.GEOMETRYCOUNT, 1);
             memPutAddress(info + VkAccelerationStructureBuildGeometryInfoKHR.PGEOMETRIES, geometry);
