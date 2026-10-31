@@ -948,7 +948,8 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
 - `--args="--validation"` turns Vulkan validation on and prints the error count at exit; `--seconds=10` quits by
   itself; `--probe` prints what the main view's scene color holds now and then.
 - `./gradlew :engine-demo:stereoBench` times the scene drawn for two eyes at a Quest 3's eye size, offscreen, pass by
-  pass and grouped by kind (`--args="visibility"` for the visibility buffer, `-Procks=20000` for more rocks).
+  pass and grouped by kind (`--args="visibility"` for the visibility buffer, `-Procks=20000` for more rocks,
+  `shared` for one set of shadow cascades, `rebuild` for what rebuilds and resizes cost the render thread).
 - Keys: `1`/`2` forward or visibility buffer shading, `H` HDR, `T` tone curve, `[`/`]` exposure, `V` present mode,
   `F`/`F11` window mode, `R` dynamic resolution, `-`/`=` render scale, `G` GPU-timed dynamic resolution (`,`/`.` its
   target), `O` occlusion culling, `N` a second window, `F5` save.

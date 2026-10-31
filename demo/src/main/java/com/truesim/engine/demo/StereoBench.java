@@ -36,7 +36,8 @@ import java.util.Map;
  * Where a stereo frame's GPU time goes: the demo's scene from two eyes 64 mm apart, each a view of its own at a Quest
  * 3's eye size, offscreen, passes timed and averaged over many frames, then grouped by what they do (which work each
  * eye repeats). {@code ./gradlew :engine-demo:stereoBench}; {@code --args="visibility"} shades through the visibility
- * buffer, {@code shared} gives both eyes one set of shadow cascades.
+ * buffer, {@code shared} gives both eyes one set of shadow cascades, {@code rebuild} times what rebuilds cost the
+ * render thread.
  */
 public final class StereoBench {
 
@@ -50,6 +51,7 @@ public final class StereoBench {
     public static void main(String[] args) {
         boolean visibility = List.of(args).contains("visibility");
         boolean shared = List.of(args).contains("shared"); // one set of cascades for both eyes
+        boolean rebuilds = List.of(args).contains("rebuild"); // what a rebuild costs the render thread
         int color = VK_FORMAT_R16G16B16A16_SFLOAT;
         int depth = VK_FORMAT_D32_SFLOAT;
         try (VulkanInstance instance = VulkanInstance.builder().applicationName("stereo bench").surfaces(false)
@@ -60,6 +62,11 @@ public final class StereoBench {
             int usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
             List<AutoCloseable> owned = new ArrayList<>();
             Camera[] eyes = {new Camera(), new Camera()};
+            List<ViewPort> ports = new ArrayList<>();
+            if (rebuilds) {
+                graph.timings(false); // timings make a rebuild wait for the GPU
+            }
+            double[] cpu = new double[6]; // ordinary, rebuilt as is, resized: total ms, count
             List<CascadedShadowMaps> cascades = new ArrayList<>();
             CascadedShadowMaps sharedCascades = new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, eyes[0],
                 3, 2048, ViewOptions.shadow(1 << 16, 1 << 22), 150).margin(0.064f);
@@ -69,6 +76,7 @@ public final class StereoBench {
                     VK_IMAGE_ASPECT_COLOR_BIT);
                 owned.add(target);
                 ViewPort port = graph.addView(e == 0 ? "left" : "right").size(WIDTH, HEIGHT);
+                ports.add(port);
                 SceneView view = world.geometry().createView(port, eyes[e], ViewOptions.of(1 << 14, 1 << 22)
                     .withOcclusion(true)).set(1, MeshletRenderer.MODE_LIT);
                 port.add(visibility ? new VisibilityBufferShading(world.geometry(), view, color, depth)
@@ -94,8 +102,24 @@ public final class StereoBench {
                 for (CascadedShadowMaps each : cascades) {
                     each.update(); // fitted to its eye, every frame
                 }
+                int kind = 0;
+                if (rebuilds && frame > 30 && frame % 20 == 0) {
+                    kind = frame % 40 == 0 ? 1 : 2;
+                    for (ViewPort port : ports) {
+                        if (kind == 1) {
+                            graph.invalidate();
+                        } else {
+                            port.size(port.outputWidth() == WIDTH ? WIDTH - 16 : WIDTH, HEIGHT); // new images
+                        }
+                    }
+                }
+                long started = System.nanoTime();
                 graph.beginFrame();
                 graph.submit(0, 0);
+                if (rebuilds && frame > 30) {
+                    cpu[2 * kind] += (System.nanoTime() - started) / 1e6;
+                    cpu[2 * kind + 1]++;
+                }
                 GpuTimings timings = graph.timings();
                 if (frame > 30 && timings != null) {
                     Map<String, Integer> seen = new java.util.HashMap<>(); // both eyes have passes of one name
@@ -112,7 +136,12 @@ public final class StereoBench {
                 }
             }
             device.waitIdle();
-            report(sums, visibility);
+            if (rebuilds) {
+                System.out.printf(Locale.ROOT, "CPU ms per frame, beginFrame and submit: ordinary %.3f, rebuilt as it "
+                    + "is %.3f, resized (new images) %.3f%n", cpu[0] / cpu[1], cpu[2] / cpu[3], cpu[4] / cpu[5]);
+            } else {
+                report(sums, visibility);
+            }
             for (AutoCloseable resource : owned) {
                 resource.close();
             }

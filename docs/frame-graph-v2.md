@@ -868,6 +868,12 @@ is released.
   `DisplayTransform` scales it up filtered, and `DynamicResolution` chooses the scale from GPU time. Left: the previous
   region and a clamp rectangle in view constants, for TAA and upscalers that sample by UV.
 - **Phase 6 status (2026-10-31):** switches with fallbacks landed in 0.73.
+- **Phases 9 and 10 measured (2026-10-31, `StereoBench`, RX 9070 XT, two eyes of 2064 x 2208):** a rebuild costs its
+  frame 2.2 ms on the render thread (0.65 ms otherwise; technique builds 0.6 to 1.0 ms, the compiler 0.4 to 0.6 ms) and
+  a resize with new images 3.6 ms, still well inside a 90 Hz frame (11.1 ms), on rare events: background rebuilds are
+  deferred. Transient images take 147 MB in slots for forward shading, as much as the peak of images alive at once,
+  and 184 MB against a 160 MB peak for the visibility buffer: aliasing could save 24 MB at most there, so it is
+  deferred too.
 - **Phase 7 status (2026-10-31):** landed by 0.74: imported buffers on async queues and buffers swapped without a
   rebuild (earlier), persistent images and buffers (`g.persistent`, `g.persistentBuffer`) and history buffers
   (`g.historyBuffer`). A persistent image is one layer, mip level and sample for now.
