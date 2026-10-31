@@ -904,6 +904,57 @@ class MeshletRendererTest {
     }
 
     @Test
+    void texturesComeInOtherFormatsWithTheirMipChains() {
+        int quadMesh = pool.add(texturedQuad());
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8)) {
+            // Red at every level, the chain given: 8 x 8, 4 x 4, 2 x 2 and 1 x 1 texels.
+            java.lang.foreign.MemorySegment chain = java.lang.foreign.Arena.ofAuto()
+                .allocate(TextureFormat.RGBA8_SRGB.chainBytes(8, 8, 4), 4);
+            for (long i = 0; i < chain.byteSize() / 4; i++) {
+                chain.setAtIndex(ValueLayout.JAVA_INT, i, 0xff0000ff);
+            }
+            assertThat(chain.byteSize()).isEqualTo(4L * (64 + 16 + 4 + 1));
+            int given = textures.add(TextureFormat.RGBA8_SRGB, 8, 8, 4, chain);
+            assertThat(textures.bytes()).isEqualTo(chain.byteSize());
+            expectRedLeft(textures, materials, quadMesh, given);
+            if (textures.supports(TextureFormat.BC1_SRGB)) {
+                // BC1: one 8-byte block per 4 x 4 texels, both end colors red (RGB 565), every index 0.
+                long bytes = TextureFormat.BC1_SRGB.chainBytes(8, 8, 4);
+                assertThat(bytes).as("4 blocks, then one per smaller level").isEqualTo(8L * (4 + 1 + 1 + 1));
+                java.lang.foreign.MemorySegment blocks = java.lang.foreign.Arena.ofAuto().allocate(bytes, 4);
+                for (long block = 0; block < bytes / 8; block++) {
+                    blocks.set(ValueLayout.JAVA_INT_UNALIGNED, 8 * block, 0xf800f800);
+                }
+                assertThatIllegalArgumentException().as("compressed: the chain comes with it")
+                    .isThrownBy(() -> textures.add(TextureFormat.BC1_SRGB, 8, 8, Textures.GENERATE, blocks));
+                expectRedLeft(textures, materials, quadMesh, textures.add(TextureFormat.BC1_SRGB, 8, 8, 4, blocks));
+            }
+            assertThatIllegalArgumentException().as("a level short")
+                .isThrownBy(() -> textures.add(TextureFormat.RGBA8_SRGB, 8, 8, 4, chain.asSlice(4)));
+            assertThatIllegalArgumentException().as("more levels than 8 x 8 has")
+                .isThrownBy(() -> textures.add(TextureFormat.RGBA8_SRGB, 8, 8, 5, chain));
+            assertThat(textures.generatesMips(TextureFormat.RGBA8_SRGB)).isTrue();
+            assertThat(textures.generatesMips(TextureFormat.BC7)).isFalse();
+        }
+    }
+
+    /** The textured quad's left half drawn with {@code texture} as base color: red. */
+    private void expectRedLeft(Textures textures, Materials materials, int quadMesh, int texture) {
+        int first = materials.add(new Material(MR.withBaseColor(new Color(1, 1, 1, 1)).withBaseColorTexture(texture)
+            .withRoughness(1)));
+        materials.add(new Material(GREEN));
+        scene.setMaterials(materials);
+        scene.set(0, quadMesh, first, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1);
+        scene.removeFrom(1);
+        lookForward(1, MeshletRenderer.MODE_LIT);
+        render();
+        int from = SIZE / 2 - 18;
+        int to = SIZE / 2 - 2;
+        assertThat(channel(0, from, to)).as("red").isGreaterThan(2 * channel(8, from, to) + 10)
+            .isGreaterThan(2 * channel(16, from, to) + 10);
+    }
+
+    @Test
     void materialsShadeEachSubmeshWithItsTextures() {
         int quadMesh = pool.add(texturedQuad());
         try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8)) {

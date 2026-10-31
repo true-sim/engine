@@ -131,6 +131,8 @@ public final class VulkanDevice implements AutoCloseable {
     private final boolean rayTracing;
     private final boolean anisotropic;
     private final boolean cubeArrays;
+    private final boolean bcTextures;
+    private final boolean astcTextures;
     private final boolean primitiveIds;
     private final float maxAnisotropy;
     private final boolean swapchains;
@@ -172,6 +174,9 @@ public final class VulkanDevice implements AutoCloseable {
             vkGetPhysicalDeviceProperties(gpu.handle(), properties);
             this.anisotropic = core.samplerAnisotropy();
             this.cubeArrays = core.imageCubeArray();
+            // Compressed textures where the GPU takes them: BC on desktop GPUs, ASTC on mobile ones.
+            this.bcTextures = core.textureCompressionBC();
+            this.astcTextures = core.textureCompressionASTC_LDR();
             this.primitiveIds = core.geometryShader();
             this.maxAnisotropy = Math.min(16, properties.limits().maxSamplerAnisotropy());
             // Every 1.4 feature the GPU supports is enabled: the queried struct goes into the create chain as it is.
@@ -305,7 +310,7 @@ public final class VulkanDevice implements AutoCloseable {
             features.features().shaderInt64(true).shaderInt16(true).multiDrawIndirect(true)
                 .drawIndirectFirstInstance(true).shaderStorageImageReadWithoutFormat(true)
                 .shaderStorageImageWriteWithoutFormat(true).samplerAnisotropy(anisotropic).imageCubeArray(cubeArrays)
-                .geometryShader(primitiveIds);
+                .geometryShader(primitiveIds).textureCompressionBC(bcTextures).textureCompressionASTC_LDR(astcTextures);
             VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
                 .pNext(features.address())
@@ -671,6 +676,16 @@ public final class VulkanDevice implements AutoCloseable {
     /** Whether images may hold several cube maps (imageCubeArray): nearly every GPU can. */
     public boolean cubeArrays() {
         return cubeArrays;
+    }
+
+    /** Whether images may be BC compressed (textureCompressionBC): desktop GPUs can. */
+    public boolean bcTextures() {
+        return bcTextures;
+    }
+
+    /** Whether images may be ASTC compressed (textureCompressionASTC_LDR): mobile GPUs can, few desktop ones. */
+    public boolean astcTextures() {
+        return astcTextures;
     }
 
     /** Whether samplers may filter anisotropically (samplerAnisotropy): nearly every GPU can. */
