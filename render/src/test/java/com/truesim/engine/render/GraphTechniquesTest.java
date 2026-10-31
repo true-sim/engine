@@ -508,14 +508,15 @@ class GraphTechniquesTest {
             graph.beginFrame();
             graph.submit(0, 0);
             device.waitIdle();
-            assertThat(drawing.wantedChunks()).isEqualTo(3);
-            assertThat(drawing.chunksOverflowed()).as("one of three fitted").isFalse(); // grown as the frame ended
-            assertThat(drawing.chunkCapacity()).isGreaterThanOrEqualTo(3);
+            assertThat(drawing.wantedChunks()).as("one of three fitted").isEqualTo(3);
+            // Grown as a frame ends once the GPU has said what it wanted: that frame's, or the next one's.
             for (int frame = 0; frame < 3; frame++) {
                 graph.beginFrame();
                 graph.submit(0, 0);
             }
             device.waitIdle();
+            assertThat(drawing.chunkCapacity()).isGreaterThanOrEqualTo(3);
+            assertThat(drawing.chunksOverflowed()).isFalse();
             assertThat(fewView.view().visibleMeshlets()).as("all three found").isEqualTo(3);
         } finally {
             device.waitIdle();
