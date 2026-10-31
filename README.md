@@ -661,6 +661,15 @@ that declare how they use each image. The graph does the rest:
   frame. `PresentSettings` (vsync: the present mode) changes while running (`target.apply(settings)`) and saves and
   loads like `WindowSettings`; closing a window or its target stops presenting to it.
 
+- **HDR and tone mapping:** shading writes linear scene color (a float format), and each window's output pass tone
+  maps and encodes it for the display that window is on, which its swapchain tells: SDR (sRGB), HDR10 (Rec. 2020,
+  PQ) or scRGB (linear floats). `presenter.outputTransform(new DisplayTransform())` turns it on; `PresentSettings.HDR`
+  asks for HDR where the display offers it, and a window moved to another display, or HDR toggled, is encoded again.
+  `DisplayTransform`'s settings change while running, without a rebuild: the tone curve (`NONE`, `REINHARD`, `ACES`),
+  exposure, paper white (how bright SDR white and UI show in HDR, 200 nits) and the display's peak brightness (1000
+  nits). In SDR the curve maps into 0 to 1; in HDR scene color 1.0 shows at paper white and brighter colors roll off
+  towards the peak.
+
 ```java
 try (Presenter presenter = new Presenter(graph, instance)) {
     for (int i = 0; i < screens.size(); i++) {           // one window per monitor, each its own view

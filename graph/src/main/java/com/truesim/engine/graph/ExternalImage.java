@@ -12,7 +12,7 @@ import java.util.Objects;
 public final class ExternalImage {
 
     final String name;
-    final Format format;
+    Format format;
     final int usage;
     final int initialLayout;
     final int finalLayout;
@@ -43,6 +43,14 @@ public final class ExternalImage {
         this.handle = image;
         this.view = imageView;
         return this;
+    }
+
+    /** A new format (a swapchain's, rebuilt for HDR): the graph rebuilds on its next frame. */
+    void reformat(Format newFormat) {
+        if (newFormat != format) {
+            format = newFormat;
+            version++;
+        }
     }
 
     /** A new size: the graph rebuilds on its next frame. */
