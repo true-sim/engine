@@ -87,7 +87,7 @@ public final class Lights implements AutoCloseable {
         this.slots = slots;
         this.families = new int[] {graphics, compute};
         this.retiring = new Retiring(slots);
-        tables.put(null, new ShadowTable(device, shadowCapacity, usage, slots, families));
+        tables.put(null, new ShadowTable(device, shadowCapacity, capacity, usage, slots, families));
     }
 
     /**
@@ -100,7 +100,7 @@ public final class Lights implements AutoCloseable {
     public ShadowTable shadowTable(ViewPort view) {
         ShadowTable table = tables.get(view);
         if (table == null) {
-            table = new ShadowTable(device, shadowCapacity, usage, slots, families);
+            table = new ShadowTable(device, shadowCapacity, capacity, usage, slots, families);
             tables.put(view, table);
             if (view != null) {
                 view.own(() -> retire(view));
@@ -167,7 +167,7 @@ public final class Lights implements AutoCloseable {
         lights.putFloat(o + 40, dz * scale);
         lights.putFloat(o + 44, cosOuter);
         lights.putFloat(o + 48, cosInner);
-        lights.putInt(o + 52, -1); // no shadows until shadows() says so
+        lights.putInt(o + 52, -1); // unused: each view's shadow table says which entries a light's shadows are
         lights.putInt(o + 56, 0);
         return this;
     }
@@ -188,17 +188,6 @@ public final class Lights implements AutoCloseable {
         buffer.putFloat(o + lowOffset + 8, (float) (z - hz));
     }
 
-    /** Light {@code index} casts shadows through shadow table entries {@code first} to {@code first + count - 1}. */
-    public Lights shadows(int index, int first, int count) {
-        if (first < 0 || count < 1 || first + count > shadowCapacity) {
-            throw new IllegalArgumentException("Shadow entries " + first + " to " + (first + count - 1) + " of "
-                + shadowCapacity);
-        }
-        long o = light(index);
-        lights.putInt(o + 52, first);
-        lights.putInt(o + 56, count);
-        return this;
-    }
 
     /** Light {@code index}'s offset. */
     private long light(int index) {

@@ -348,7 +348,7 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
                 table.shadowMap(firstEntry + i, cameras[i], ctx.sampled(maps[i]), size, biases[i], splits[i + 1],
                     normalOffsets[i]);
             }
-            lights.shadows(light, firstEntry, cascades);
+            table.light(light, firstEntry, cascades); // in its view's table: other views may shadow it otherwise
         });
     }
 }

@@ -71,7 +71,7 @@ public final class InlineRayShadows implements Technique {
             table.shadowRay(entry, rayTracing.slot(), offset != null ? offset : settings.get(ShadowSettings.RAY_OFFSET),
                 rayTracing.origin(0), rayTracing.origin(1),
                 rayTracing.origin(2)); // the top level is relative to the origin
-            lights.shadows(light, entry, 1);
+            table.light(light, entry, 1);
         });
     }
 }

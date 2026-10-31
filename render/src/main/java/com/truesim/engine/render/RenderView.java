@@ -67,6 +67,15 @@ public final class RenderView implements AutoCloseable {
     private final double[] position = new double[3];
     private final float[] viewProjection = new float[16]; // as last set, to be the next frame's previous one
     private boolean wasSet;
+    // The frame before's camera, taken at a frame's first write: writes again in the frame (a pass refreshing it after
+    // another, a draw setting it twice) keep it, rather than taking the frame's own as the frame before's.
+    private final FrameSlots slots;
+    private final float[] before = new float[16];
+    private final double[] beforePosition = new double[3];
+    private float beforeJitterX;
+    private float beforeJitterY;
+    private boolean beforeSet;
+    private long writtenFrame = -1;
     private Camera camera; // as last set: read again when the frame culls, if it moved since
     private float errorPixels;
     private int mode;
@@ -83,6 +92,7 @@ public final class RenderView implements AutoCloseable {
         this.renderer = renderer;
         this.options = Objects.requireNonNull(options, "options");
         this.index = index;
+        this.slots = slots;
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         int commandUsage = storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         this.base = (long) index * BYTES;
@@ -122,7 +132,7 @@ public final class RenderView implements AutoCloseable {
      * culls the view if it changed since: setting it once is enough for a camera that moves (a headset's eyes, located
      * just before the frame records). Allocates nothing.
      */
-    public RenderView set(Camera camera, float errorPixels, int mode) {
+    public synchronized RenderView set(Camera camera, float errorPixels, int mode) {
         checkOpen();
         this.camera = camera;
         this.errorPixels = errorPixels;
@@ -134,9 +144,9 @@ public final class RenderView implements AutoCloseable {
      * Reads the camera last {@link #set} again where it changed since it was read (moved, turned, resized): when a frame
      * culls the view, so the frame draws from where the camera is then. Allocates nothing.
      */
-    void refresh() {
+    synchronized void refresh() {
         if (camera == null || !changed(camera)) {
-            return;
+            return; // refreshed already this frame, maybe by another pass on another thread
         }
         write(camera);
     }
@@ -174,16 +184,42 @@ public final class RenderView implements AutoCloseable {
         return from.position(0) != position[0] || from.position(1) != position[1] || from.position(2) != position[2];
     }
 
-    /** Writes {@code camera} as this frame's, the one held before as the frame before's. */
-    private RenderView write(Camera camera) {
+    /**
+     * The frame a write is for: the one recording, or between frames the next. With one frame slot, which counts no
+     * frames, each write is a frame's.
+     */
+    private long frameOfWrite() {
+        return slots.current() >= 0 ? slots.frames() : slots.frames() + 1;
+    }
+
+    /**
+     * Writes {@code camera} as this frame's, the frame before's as held at the frame's first write. Synchronized with
+     * the camera too: passes of several views may refresh on several threads, and cameras keep scratch arrays.
+     */
+    private synchronized RenderView write(Camera camera) {
+        synchronized (camera) {
+            return writeLocked(camera);
+        }
+    }
+
+    private RenderView writeLocked(Camera camera) {
+        long frame = frameOfWrite();
+        if (slots.isSingle() || frame != writtenFrame) { // what the view holds is the frame before's
+            writtenFrame = frame;
+            System.arraycopy(viewProjection, 0, before, 0, 16);
+            System.arraycopy(position, 0, beforePosition, 0, 3);
+            beforeJitterX = getFloat(ViewLayout.JITTER);
+            beforeJitterY = getFloat(ViewLayout.JITTER + 4);
+            beforeSet = wasSet;
+        }
         float[] matrix = camera.viewProjection();
         // The frame before's matrix, from positions relative to this frame's camera: moved by how far the camera did
         // (column-major: the last column takes the move), so motion vectors need no positions of the frame before.
         // The first time, this frame's.
-        double dx = wasSet ? camera.position(0) - position[0] : 0;
-        double dy = wasSet ? camera.position(1) - position[1] : 0;
-        double dz = wasSet ? camera.position(2) - position[2] : 0;
-        float[] previous = wasSet ? viewProjection : matrix;
+        double dx = beforeSet ? camera.position(0) - beforePosition[0] : 0;
+        double dy = beforeSet ? camera.position(1) - beforePosition[1] : 0;
+        double dz = beforeSet ? camera.position(2) - beforePosition[2] : 0;
+        float[] previous = beforeSet ? before : matrix;
         for (int row = 0; row < 4; row++) {
             for (int column = 0; column < 3; column++) {
                 putFloat(ViewLayout.PREVIOUS_VIEW_PROJECTION + 4L * (4 * column + row), previous[4 * column + row]);
@@ -218,8 +254,8 @@ public final class RenderView implements AutoCloseable {
             putFloat(ViewLayout.EYE + 4L * axis, (float) camera.eye(axis));
         }
         // The jitter of the frame before; this frame's stays until set again.
-        putFloat(ViewLayout.PREVIOUS_JITTER, getFloat(ViewLayout.JITTER));
-        putFloat(ViewLayout.PREVIOUS_JITTER + 4, getFloat(ViewLayout.JITTER + 4));
+        putFloat(ViewLayout.PREVIOUS_JITTER, beforeJitterX);
+        putFloat(ViewLayout.PREVIOUS_JITTER + 4, beforeJitterY);
         putFloat(ViewLayout.JITTER, jitterX);
         putFloat(ViewLayout.JITTER + 4, jitterY);
         wasSet = true;

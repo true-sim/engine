@@ -2,6 +2,7 @@ package com.truesim.engine.render;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatIndexOutOfBoundsException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
@@ -92,10 +93,9 @@ class ClusteredLightsTest {
             .point(1, 0, 0, -10, 2, 10, 10, 10)
             .point(2, 30, 0, -10, 1, 10, 10, 10)           // off to the right: in no cluster
             .spot(3, -3, 1, -30, 5, 10, 10, 10, 0, 0, -1, 0.3, 0.5)
-            .shadows(3, 0, 1)
             .point(4, 0.2f, 0.1f, -3, 0.5f, 1, 1, 1);
         lights.shadowTable(null).shadowMap(0, camera, 0, 1024, 1e-3f, 0).shadowMask(1, 0, 0)
-            .shadowRay(2, 0, 2e-3f, 0, 0, 0).clear(3);
+            .shadowRay(2, 0, 2e-3f, 0, 0, 0).clear(3).light(3, 0, 1);
         assertThat(lights.shadowTable(null).capacity()).isEqualTo(4);
         // Many small lights in one spot: more than a cluster holds.
         for (int i = 5; i < 16; i++) {
@@ -252,9 +252,12 @@ class ClusteredLightsTest {
         assertThatIllegalArgumentException().isThrownBy(() -> new Lights(device, 1, 0));
         assertThatIllegalArgumentException().isThrownBy(() -> lights.setCount(65));
         assertThatIllegalArgumentException().isThrownBy(() -> lights.setCount(-1));
-        assertThatIllegalArgumentException().isThrownBy(() -> lights.shadows(0, 3, 2));
-        assertThatIllegalArgumentException().isThrownBy(() -> lights.shadows(0, -1, 1));
-        assertThatIllegalArgumentException().isThrownBy(() -> lights.shadows(0, 0, 0));
+        ShadowTable table = lights.shadowTable(null);
+        assertThatIllegalArgumentException().isThrownBy(() -> table.light(0, 3, 2));
+        assertThatIllegalArgumentException().isThrownBy(() -> table.light(0, -1, 1));
+        assertThatIllegalArgumentException().isThrownBy(() -> table.light(0, 0, 0));
+        assertThatIndexOutOfBoundsException().isThrownBy(() -> table.light(64, 0, 1));
+        table.light(0, 0, 1).noShadows(0);
         assertThat(lights.count()).isZero();
     }
 

@@ -79,7 +79,7 @@ public final class ShadowMapShadows implements Technique {
         ShadowTable table = lights.shadowTable(g.view()); // the map serves every view; each view's table names it
         g.request(new ShadowInputs(g.view())).sample(map).setup(ctx -> {
             table.shadowMap(entry, camera, ctx.sampled(map), size, bias, Float.MAX_VALUE);
-            lights.shadows(light, entry, 1);
+            table.light(light, entry, 1);
         });
     }
 }
