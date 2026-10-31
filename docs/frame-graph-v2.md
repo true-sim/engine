@@ -845,6 +845,11 @@ is released.
   push writers, labels, timings, readbacks, the view constants array, the purity contract and its check). Left for
   later phases: typed addresses, open `Access` and queue capabilities, and a graph-level `ctx.viewConstants()` (with
   views in phase 4).
+- **Phase 4 status (2026-10-31):** landed in engine 0.53 to 0.66: views with their own keys, sizes, histories and
+  per-view techniques (`SceneView`, `SceneViews`); view enable and rate without a rebuild; `Texture` outputs, graph's
+  or the app's; one top level per frame relative to a movable origin, built only when instances change; shadow tables
+  and cascades per view; window settings; the `Presenter` with several windows. Left: stereo (multiview) and HDR
+  output.
 - **Phase 2 is large.** It lands as several PRs that are released once. Its design decisions (graph-owned scopes, view
   constants as an array, open `Access`, the purity contract) are the ones that would be expensive to change later.
 - **After phase 4,** phases 5 to 10 can be reordered by need.
