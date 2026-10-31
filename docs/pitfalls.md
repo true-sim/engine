@@ -225,6 +225,14 @@ the camera draws read 0.06 ms an eye, cheaper than with 800, and the frame 0.34 
 - Rule: a benchmark sets up techniques as an application must (cameras set, `update()`s called); numbers that go the
   wrong way (more work, less time) are a setup bug until shown otherwise.
 
+**A test that counted on the GPU finishing by a frame's end.** `chunksGrowBetweenFramesToWhatFramesWanted` checked
+that the chunks had grown as the first frame ended. On the developer's GPU that frame had finished by then; on CI's
+software renderer it had not, so the growth came a frame later and the test failed there only.
+- Proof: true-sim/engine#246's first CI run (`Expecting value to be false but was true`), green locally; green on CI
+  once the test waited for the frames after.
+- Rule: what reads the GPU's results at a frame's end (counters, readbacks) sees them a frame or more late; a test
+  asserts after enough frames and `waitIdle`, not at the frame that wrote them.
+
 ## Java
 
 **A record's components are its accessors.** A method named like a component must return the component's type:
