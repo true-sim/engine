@@ -297,7 +297,8 @@ public final class VulkanDevice implements AutoCloseable {
                 .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES)
                 .pNext(features12.address())
                 .storageBuffer16BitAccess(true)
-                .shaderDrawParameters(true);
+                .shaderDrawParameters(true)
+                .multiview(true); // one pass drawing several views (a headset's eyes): Vulkan 1.1 requires it
             VkPhysicalDeviceFeatures2 features = VkPhysicalDeviceFeatures2.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
                 .pNext(features11.address());
@@ -456,6 +457,7 @@ public final class VulkanDevice implements AutoCloseable {
         List<String> missing = new ArrayList<>();
         // Shaders read data through 64-bit pointers, as 8, 16 and 32-bit values (meshlet indices, quantized vertices).
         check(missing, features.features().shaderInt64(), "shaderInt64");
+        check(missing, features11.multiview(), "multiview");
         check(missing, features.features().shaderInt16(), "shaderInt16");
         check(missing, features11.storageBuffer16BitAccess(), "storageBuffer16BitAccess");
         check(missing, features11.shaderDrawParameters(), "shaderDrawParameters"); // vertex and draw indices

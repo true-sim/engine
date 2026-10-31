@@ -98,6 +98,50 @@ class RenderingTest {
     }
 
     @Test
+    void graphicsPipelinesTakeTheirStateAsAsked() {
+        // Every state a graphics pipeline takes, made under validation: blending, multisampling, two views at once,
+        // another topology, depth tested otherwise and biased, clockwise fronts, and a stencil test.
+        try (VulkanInstance instance = instance(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             ShaderModule shaders = ShaderModule.load(device, "shaders/test/triangle.spv")) {
+            int depthStencil = depthStencilFormat(device); // D32S8 or D24S8: a device has one of them at least
+            for (Pipeline.Blend blend : Pipeline.Blend.values()) {
+                Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, "vertexMain")
+                    .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, "fragmentMain").color(VK_FORMAT_R8G8B8A8_UNORM)
+                    .blend(0, blend).pushConstants(24).build().close();
+            }
+            Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, "vertexMain")
+                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, "fragmentMain").color(VK_FORMAT_R8G8B8A8_UNORM)
+                .depth(depthStencil)
+                .samples(org.lwjgl.vulkan.VK10.VK_SAMPLE_COUNT_4_BIT)
+                .viewMask(0b11)
+                .topology(org.lwjgl.vulkan.VK10.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP)
+                .depthTest(org.lwjgl.vulkan.VK10.VK_COMPARE_OP_LESS, false)
+                .depthBias(1.25f, 1.75f)
+                .clockwise()
+                .stencil(depthStencil, org.lwjgl.vulkan.VK10.VK_COMPARE_OP_EQUAL,
+                    org.lwjgl.vulkan.VK10.VK_STENCIL_OP_REPLACE, 1)
+                .pushConstants(24).build().close();
+            assertThat(instance.validationErrors()).as("validation errors").isZero();
+        }
+    }
+
+    /** A combined depth and stencil format the device can attach. */
+    private static int depthStencilFormat(VulkanDevice device) {
+        try (MemoryStack stack = stackPush()) {
+            for (int format : new int[] {org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT_S8_UINT,
+                org.lwjgl.vulkan.VK10.VK_FORMAT_D24_UNORM_S8_UINT}) {
+                org.lwjgl.vulkan.VkFormatProperties properties = org.lwjgl.vulkan.VkFormatProperties.calloc(stack);
+                org.lwjgl.vulkan.VK10.vkGetPhysicalDeviceFormatProperties(device.gpu().handle(), format, properties);
+                if ((properties.optimalTilingFeatures()
+                    & org.lwjgl.vulkan.VK10.VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) {
+                    return format;
+                }
+            }
+        }
+        throw new IllegalStateException("No depth and stencil format");
+    }
+
+    @Test
     void graphicsPipelinesPullVerticesAndRenderOffscreen() {
         try (VulkanInstance instance = instance(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
              ShaderModule shaders = ShaderModule.load(device, "shaders/test/triangle.spv");
