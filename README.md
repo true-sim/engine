@@ -727,6 +727,12 @@ try (Presenter presenter = new Presenter(graph, instance)) {
 - **History:** `g.history(name, desc)` keeps an image from frame to frame: this frame writes
   `current()`, and `previous()` holds what the frame before wrote (`ctx.historyValid(history)` says whether there
   was one). The graph swaps the two images' roles every frame and carries their state across the frame boundary.
+- **Persistent resources:** `g.persistent(name, desc)` is one image the graph keeps from frame to frame and build to
+  build, read and written in place (an accumulation, a cache filled over frames): sampled, a storage image where the
+  format allows, an attachment or copied. `g.persistentBuffer(name, size)` is the same for a buffer, and
+  `g.historyBuffer(name, size)` is a history of buffers: `current()` to write, `previous()` to read, swapped every
+  frame (`ctx.historyValid(history)`). They start zeroed, keep their contents while builds ask for them by the same
+  name and description, start over for a new one, and are freed once no build asks for them. A view's are its own.
 - **Readbacks:** `g.readback(name, buffer, offset, bytes, receiver)` or `g.readback(name, image.mip(0), receiver)` copies
   off the GPU each frame; the receiver gets the bytes on the render thread once the GPU finished that frame (in the
   next `beginFrame` of its slot, or the next `record`), with nothing to invalidate.

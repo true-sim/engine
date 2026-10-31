@@ -120,6 +120,9 @@ public final class GraphBuilder {
     final List<ImageInfo> images = new ArrayList<>();
     final List<BufferInfo> buffers = new ArrayList<>();
     final List<History> histories = new ArrayList<>();
+    final List<BufferHistory> bufferHistories = new ArrayList<>();
+    final List<ViewPort> bufferHistoryViews = new ArrayList<>(); // each buffer history's view, or null
+    private final Set<String> persistentKeys = new HashSet<>();
     final List<PassInfo> passes = new ArrayList<>();
     private final List<PassBuilder> openPasses = new ArrayList<>();
     final List<ReadbackPlan> readbacks = new ArrayList<>();
@@ -574,6 +577,58 @@ public final class GraphBuilder {
         images.get(previous.id).previous = true;
         histories.add(history);
         return history;
+    }
+
+    /**
+     * An image kept by the graph from frame to frame and build to build, as {@code desc} describes it (one 2D layer, mip
+     * level and sample): what a frame writes, the next reads, in any pass and any build that asks for it by the same name
+     * and descriptor. Unlike a {@link #history}, there is one image: a pass reads and writes it in place (an
+     * accumulation, a cache filled over frames, a simulation's state). It starts zeroed, keeps its contents while builds
+     * ask for it, is made anew (zeroed) for a new descriptor and freed once a build no longer asks for it. It may be
+     * sampled, a storage image where its format allows, an attachment and copied. A view's are its own: their names are
+     * qualified by the view's.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public Image persistent(String name, ImageDesc desc) {
+        Objects.requireNonNull(desc, "desc");
+        Persistent kept = graph.persistent(persistentKey("image", name), desc, 0, 0);
+        return external(kept.image);
+    }
+
+    /**
+     * A buffer of {@code size} bytes kept by the graph from frame to frame and build to build, as a
+     * {@link #persistent persistent image} is: zeroed at first, reachable by device address, shared by the graphics and
+     * async compute queues. Its writes are always kept: the next frame reads them.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public Buffer persistentBuffer(String name, long size) {
+        Persistent kept = graph.persistent(persistentKey("buffer", name), null, size, 1);
+        return importBuffer(kept.buffers[0]);
+    }
+
+    /**
+     * Two buffers of {@code size} bytes kept from frame to frame, this frame's to write and last frame's to read, as a
+     * {@link #history} keeps images: the graph swaps them every frame their view runs. Kept, made anew and freed as
+     * {@link #persistentBuffer persistent buffers} are.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public BufferHistory historyBuffer(String name, long size) {
+        Persistent pair = graph.persistent(persistentKey("buffer history", name), null, size, 2);
+        BufferHistory history = new BufferHistory(pair, importBuffer(pair.buffers[0]), importBuffer(pair.buffers[1]));
+        bufferHistories.add(history);
+        bufferHistoryViews.add(view());
+        return history;
+    }
+
+    /** The graph-wide key of a persistent resource of this build: unique, qualified by the view's name. */
+    private String persistentKey(String kind, String name) {
+        Objects.requireNonNull(name, "name");
+        ViewPort view = view();
+        String key = kind + " " + (view == null ? name : view.name() + ": " + name);
+        if (!persistentKeys.add(key)) {
+            throw new IllegalStateException("Two persistent resources are named " + key);
+        }
+        return key;
     }
 
     /**

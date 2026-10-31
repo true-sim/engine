@@ -1896,6 +1896,100 @@ class FrameGraphTest {
     }
 
     @Test
+    void persistentImagesKeepTheirContentsAcrossFramesAndRebuilds() {
+        int[] frames = {0};
+        ImageDesc[] desc = {ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE)};
+        boolean[] used = {true};
+        int[] slots = {-1, -1};
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            if (!used[0]) {
+                g.pass("clear").write(out, Access.TRANSFER_DST).record(ctx -> clear(ctx, out, 0, 1, 0, 1));
+                g.provide(OUT, out);
+                return;
+            }
+            Image kept = g.persistent("accumulated", desc[0]);
+            // Read, then written: nothing in the frame reads the write, which is kept for the next frame.
+            g.pass("recall").read(kept, Access.TRANSFER_SRC).write(out, Access.TRANSFER_DST)
+                .record(ctx -> copy(ctx, kept, out, 0, SIZE));
+            g.pass("touch").write(kept, Access.STORAGE_WRITE).record(ctx -> {
+                slots[0] = ctx.storage(kept);
+                slots[1] = ctx.sampled(kept.whole());
+            });
+            g.pass("remember").write(kept, Access.TRANSFER_DST)
+                .record(ctx -> clear(ctx, kept, frames[0] % 2, 0, 1 - frames[0]++ % 2, 1));
+            g.provide(OUT, out);
+        })).output(OUT, output);
+        assertThat(frame()[0]).as("starts zeroed").isZero();
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        assertThat(frame()[0]).isEqualTo(RED);
+        assertThat(slots).as("sampled and a storage image").doesNotContain(-1);
+        assertThat(graph.passes()).contains("remember");
+        assertThat(submitted(3)[0]).isIn(RED, BLUE);
+        graph.invalidate();
+        int afterRebuild = frame()[0];
+        assertThat(afterRebuild).as("kept across the rebuild").isIn(RED, BLUE);
+        assertThat(graph.persistentCount()).isEqualTo(1);
+        // Another descriptor: made anew, zeroed.
+        desc[0] = ImageDesc.of(Format.B8G8R8A8_UNORM, SIZE, SIZE);
+        graph.invalidate();
+        assertThat(frame()[0]).isZero();
+        assertThat(graph.persistentCount()).isEqualTo(1);
+        // No longer asked for: freed.
+        used[0] = false;
+        graph.invalidate();
+        assertThat(frame()[0]).isEqualTo(GREEN);
+        assertThat(graph.persistentCount()).isZero();
+        rejects(List.of(OUT), g -> {
+            g.persistent("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4));
+            g.persistent("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4));
+        }, "Two persistent resources are named image x");
+        rejects(List.of(OUT), g -> g.persistent("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4).mips(2)),
+            "one 2D layer, mip level and sample");
+        rejects(List.of(OUT), g -> g.persistentBuffer("x", 0), "Buffer size must be positive");
+    }
+
+    @Test
+    void historyBuffersSwapEveryFrameAndPersistentBuffersKeepTheirWrites() {
+        int[] frames = {0};
+        long[] size = {4L * SIZE * SIZE};
+        graph.add(new Lambda(List.of(OUT), g -> {
+            BufferHistory history = g.historyBuffer("state", size[0]);
+            assertThat(history.toString()).contains("state");
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("recall").read(history.previous(), BufferAccess.TRANSFER_SRC).write(out, Access.TRANSFER_DST)
+                .record(ctx -> {
+                    if (ctx.historyValid(history)) {
+                        unpack(ctx, history.previous(), out);
+                    } else {
+                        clear(ctx, out, 1, 1, 1, 1);
+                    }
+                });
+            g.pass("remember").write(history.current(), BufferAccess.TRANSFER_DST)
+                .record(ctx -> ctx.fill(history.current(), frames[0]++ % 2 == 0 ? BLUE : RED));
+            Buffer counter = g.persistentBuffer("counter", 64);
+            g.pass("count").write(counter, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(counter, 1));
+            g.provide(OUT, out);
+        })).output(OUT, output);
+        assertThat(frame()[0]).as("no last frame yet").isEqualTo(0xffffffff);
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        assertThat(frame()[0]).isEqualTo(RED);
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        assertThat(graph.passes()).as("a persistent buffer's writes are kept").contains("count");
+        assertThat(graph.persistentCount()).isEqualTo(2);
+        assertThat(submitted(3)[0]).isIn(RED, BLUE);
+        graph.invalidate();
+        int afterRebuild = frame()[0];
+        assertThat(afterRebuild).as("kept across the rebuild").isIn(RED, BLUE);
+        assertThat(frame()[0]).isIn(RED, BLUE).isNotEqualTo(afterRebuild);
+        // Another size: made anew, no last frame again.
+        size[0] = 8L * SIZE * SIZE;
+        graph.invalidate();
+        assertThat(frame()[0]).isEqualTo(0xffffffff);
+        assertThat(frame()[0]).isIn(RED, BLUE);
+    }
+
+    @Test
     void techniquesAreRemovedById() {
         com.truesim.common.graph.Id<Fill> redId = com.truesim.common.graph.Id.of("test.red", Fill.class);
         graph.add(new Technique() {

@@ -121,6 +121,12 @@ final class GraphCompiler {
         for (History history : g.histories) {
             nodes.keep(history.current.id); // the next frame reads it
         }
+        for (int image = 0; image < imageCount; image++) {
+            ExternalImage external = g.images.get(image).external;
+            if (external != null && external.kept) {
+                nodes.keep(image); // a persistent image: the next frame reads it
+            }
+        }
         for (PassInfo pass : passes) {
             int node = nodes.node();
             if (pass.sideEffects) {
@@ -221,11 +227,14 @@ final class GraphCompiler {
                     throw new IllegalStateException("External image " + external.name + " is used beyond the usage "
                         + "it was created with");
                 }
-                // A texture has a sampled slot; other external images have no slots, so neither use is open to them.
-                int unslotted = VK_IMAGE_USAGE_STORAGE_BIT | (external.sampled < 0 ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
+                // A texture has a sampled slot, a persistent image a storage one too; other external images have no
+                // slots, so neither use is open to them.
+                int unslotted = (external.storage < 0 ? VK_IMAGE_USAGE_STORAGE_BIT : 0)
+                    | (external.sampled < 0 ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
                 if ((info.usage & unslotted) != 0) {
                     throw new IllegalStateException("External image " + external.name + " is sampled or a storage "
-                        + "image; only attachment and transfer uses are supported, and sampling a texture");
+                        + "image; only attachment and transfer uses are supported, sampling a texture, and sampling "
+                        + "or storing a persistent image");
                 }
                 int index = newExternals.indexOf(external);
                 if (index < 0) {

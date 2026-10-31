@@ -21,7 +21,9 @@ public final class ExternalImage {
     int version;
     long handle;
     long view;
-    int sampled = -1; // its sampled slot in the bindless set, if it has one (a texture's)
+    int sampled = -1; // its sampled slot in the bindless set, if it has one (a texture's, a persistent image's)
+    int storage = -1; // its storage slot, if it has one (a persistent image's)
+    boolean kept; // its contents outlive the frame, read by the next (a persistent image): its writes are kept
     Texture texture; // the texture it is, or null
     volatile boolean held; // this frame: untouched (not acquired)
 
