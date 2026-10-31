@@ -109,8 +109,7 @@ public final class SceneResources implements AutoCloseable {
 
     /**
      * Hears what keeps a scene from drawing as its data says, which is otherwise only logged: games show it, count it
-     * or fail a test on it. Every method does nothing by default. Room in the material table running out is not
-     * reported here: it is waited out, see {@link SceneSync#waitingCount()}.
+     * or fail a test on it. Every method does nothing by default.
      */
     public interface Diagnostics {
 
@@ -318,8 +317,8 @@ public final class SceneResources implements AutoCloseable {
     }
 
     /**
-     * How many assets the scenes use are not on the GPU yet: loading in the cache, being made ready, or waiting for
-     * the material table. Failed ones do not count.
+     * How many assets the scenes use are not on the GPU yet: loading in the cache or being made ready. Failed ones do
+     * not count.
      */
     public int loadingCount() {
         int count = preparing;
@@ -507,8 +506,7 @@ public final class SceneResources implements AutoCloseable {
 
     /**
      * Holds the block of material ids for {@code materials} on a mesh of {@code slots} submeshes: made and filled the
-     * first time; null while the material table has no room for it (try again later). Allocates nothing when the
-     * block exists.
+     * first time (the table grows if it is full). Allocates nothing when the block exists.
      */
     MaterialSet acquireSet(List<AssetRef<MaterialData>> materials, int slots) {
         checkOpen();
@@ -517,9 +515,6 @@ public final class SceneResources implements AutoCloseable {
         MaterialSet set = sets.get(lookup);
         lookup.materials = List.of(); // the probe holds no list
         if (set == null) {
-            if (!this.materials.hasRoom(slots)) {
-                return null; // checked first: a block waiting for room is not built every update
-            }
             set = newSet(new MaterialKey(materials, slots));
         }
         set.holders++;

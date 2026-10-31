@@ -8,6 +8,7 @@ import com.truesim.engine.render.layout.MaterialLayout;
 import com.truesim.engine.render.materials.MetallicRoughnessMaterial;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
+import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -31,6 +32,10 @@ import java.util.Set;
  *
  * <p>Materials are read when the frame's commands run. Given a frame graph's {@link FrameSlots}, the table keeps a copy
  * per frame in flight; otherwise change a material only once the frames using it have finished.
+ *
+ * <p>The table grows as materials come: the capacity it is made with is where it starts. Without ids in a row or room
+ * for blocks, a table twice the size (or more) takes its place, holding what the old one holds (values changed in place
+ * too); frames in flight keep reading the old one until they finish.
  */
 @AllowAllocation("created rarely")
 public final class Materials implements AutoCloseable {
@@ -46,24 +51,28 @@ public final class Materials implements AutoCloseable {
     /** Feature sections a slot has room for. */
     private static final int MAX_FEATURE_SECTIONS = 3;
 
-    private final FrameBuffer table;
-    private final int capacity;
-    private final long heapStart;
+    private static final int USAGE = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+
+    private final VulkanDevice device;
+    private FrameBuffer table;
+    private final Retiring oldTables; // replaced by bigger ones, until no frame in flight reads them
+    private int capacity;
+    private long heapStart;
     /** Ids in contiguous blocks: an add takes one, {@link #addAll} as many as materials. */
     private final RangeAllocator ids;
     /** The blocks, in units of {@link #ALIGNMENT} bytes. */
     private final RangeAllocator heap;
     /** Per id: the length of the block of ids starting there (0: not a block's start), and whether it is in use. */
-    private final int[] blockLength;
-    private final boolean[] used;
+    private int[] blockLength;
+    private boolean[] used;
     /** Per id: its material, and its blocks (units of the heap; -1: none). */
-    private final Material[] materials;
-    private final long[] heapUnit;
-    private final int[] heapUnits;
+    private Material[] materials;
+    private long[] heapUnit;
+    private int[] heapUnits;
     private int live;
     // Removed ids waiting for the frames that may read them: their first ids and when they are free.
-    private final int[] retiring;
-    private final long[] retireAt;
+    private int[] retiring;
+    private long[] retireAt;
     private int retiringCount;
     private final List<MaterialType> types = new ArrayList<>();
     /** The type of each parameters' record, where one type takes it. */
@@ -73,17 +82,17 @@ public final class Materials implements AutoCloseable {
     private MemorySegment scratch;
 
     /**
-     * A table of up to {@code capacity} materials, the default one included, in one copy: for frames the caller waits
-     * for before changing materials.
+     * A table starting with room for {@code capacity} materials, the default one included, in one copy: for frames the
+     * caller waits for before changing materials.
      */
     public Materials(VulkanDevice device, int capacity) {
         this(device, capacity, FrameSlots.single());
     }
 
     /**
-     * A table of up to {@code capacity} materials, the default one included, a copy per frame of {@code slots} (a frame
-     * graph's), so materials may change while earlier frames are drawn. Room for {@link #BLOCK_BYTES_PER_MATERIAL}
-     * bytes of blocks per material.
+     * A table starting with room for {@code capacity} materials, the default one included, a copy per frame of
+     * {@code slots} (a frame graph's), so materials may change while earlier frames are drawn. Room for
+     * {@link #BLOCK_BYTES_PER_MATERIAL} bytes of blocks per material to start with.
      */
     public Materials(VulkanDevice device, int capacity, FrameSlots slots) {
         this(device, capacity, (long) BLOCK_BYTES_PER_MATERIAL * capacity, slots);
@@ -97,6 +106,8 @@ public final class Materials implements AutoCloseable {
         if (blockBytes < ALIGNMENT) {
             throw new IllegalArgumentException("Room for blocks: " + blockBytes);
         }
+        this.device = java.util.Objects.requireNonNull(device, "device");
+        this.oldTables = new Retiring(slots);
         this.capacity = capacity;
         ids = new RangeAllocator(capacity);
         heapStart = (long) SLOT_BYTES * capacity;
@@ -111,8 +122,7 @@ public final class Materials implements AutoCloseable {
         retiring = new int[capacity];
         retireAt = new long[capacity];
         scratch = arena.allocate(1024, ALIGNMENT);
-        table = FrameBuffer.create(device, heapStart + units * ALIGNMENT,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, slots);
+        table = FrameBuffer.create(device, heapStart + units * ALIGNMENT, USAGE, slots);
         register(MetallicRoughnessMaterial.TYPE);
         add(Material.DEFAULT);
     }
@@ -189,17 +199,11 @@ public final class Materials implements AutoCloseable {
 
     /**
      * Adds {@code material} and returns its id: the lowest free one, ids of removed materials once no frame in
-     * flight reads them.
+     * flight reads them. The table grows if it is full.
      */
     public int add(Material material) {
         int id = take(1);
-        if (id < 0) {
-            throw new IllegalStateException("The material table holds " + capacity + " materials: no room");
-        }
-        if (!write(id, material)) {
-            release(id);
-            throw new IllegalStateException("The material table has no room for the blocks of " + material);
-        }
+        write(id, material);
         return id;
     }
 
@@ -208,50 +212,23 @@ public final class Materials implements AutoCloseable {
      * instance names by the first: submesh s takes the first id plus s. {@link #remove} of the first removes them all.
      */
     public int addAll(List<Material> materials) {
-        int first = tryAddAll(materials);
-        if (first < 0) {
-            throw new IllegalStateException("The material table holds " + capacity + " materials: no room for "
-                + materials.size() + " more in a row, with their blocks");
-        }
-        return first;
-    }
-
-    /**
-     * Like {@link #addAll}, or returns -1 if the table has no room for them in a row now, with their blocks: room may
-     * come back as removed ids leave the frames in flight. Allocates nothing when there is no room.
-     */
-    public int tryAddAll(List<Material> materials) {
         if (materials.isEmpty()) {
             throw new IllegalArgumentException("No materials to add");
         }
         int first = take(materials.size());
-        if (first < 0) {
-            return -1;
-        }
         for (int i = 0; i < materials.size(); i++) {
-            if (!write(first + i, materials.get(i))) {
-                release(first);
-                return -1;
-            }
+            write(first + i, materials.get(i));
         }
         return first;
     }
 
-    /**
-     * Whether {@link #tryAddAll} would find {@code length} ids in a row now, counting removed ids no frame in flight
-     * reads any more. Allocates nothing.
-     */
-    public boolean hasRoom(int length) {
-        releaseRetired();
-        return ids.fits(length);
-    }
-
-    /** The first of {@code length} free ids in a row, taken, or -1 with no room. */
+    /** The first of {@code length} free ids in a row, taken: the table grows if it has none. */
     private int take(int length) {
         releaseRetired();
         long first = ids.allocate(length, 1);
         if (first < 0) {
-            return -1;
+            grow(Math.max(2L * capacity, (long) capacity + length), heap.capacity());
+            first = ids.allocate(length, 1); // the free end joins the new room
         }
         int id = (int) first;
         blockLength[id] = length;
@@ -262,16 +239,57 @@ public final class Materials implements AutoCloseable {
         return id;
     }
 
-    /** Gives back the ids taken at {@code id} at once, with their blocks: never drawn. */
-    private void release(int id) {
-        int length = blockLength[id];
-        for (int i = id; i < id + length; i++) {
-            used[i] = false;
-            freeBlocks(i);
+    /**
+     * A table of {@code ids} ids and {@code units} units of blocks in this one's place, holding what it holds: the slots
+     * as they are, the blocks too, moved up past the new slots (their offsets with them). The old table goes once no
+     * frame in flight reads it.
+     */
+    @AllowAllocation("growing, rarely")
+    private void grow(long ids, long units) {
+        if (ids > Integer.MAX_VALUE / SLOT_BYTES) {
+            throw new IllegalStateException("A material table holds at most " + Integer.MAX_VALUE / SLOT_BYTES
+                + " materials");
         }
-        live -= length;
-        ids.release(id, length);
-        blockLength[id] = 0;
+        int more = (int) ids;
+        long start = (long) SLOT_BYTES * more;
+        long shift = start - heapStart;
+        FrameBuffer old = table;
+        FrameBuffer grown = FrameBuffer.create(device, start + units * ALIGNMENT, USAGE, old.slots());
+        grown.copyFrom(old, 0, 0, heapStart);
+        grown.copyFrom(old, heapStart, start, old.size() - heapStart);
+        for (int id = 0; id < capacity; id++) {
+            if (!used[id]) {
+                continue; // removed: frames recorded from now on read it no more
+            }
+            long slot = (long) SLOT_BYTES * id;
+            long parameters = slot + MaterialLayout.PARAMETERS;
+            grown.putInt(parameters, (int) (grown.getInt(parameters) + shift));
+            for (int s = 0; s < MAX_FEATURE_SECTIONS; s++) {
+                long at = slot + MaterialLayout.FEATURES + 4L * s;
+                int offset = grown.getInt(at);
+                if (offset != 0) {
+                    grown.putInt(at, (int) (offset + shift));
+                }
+            }
+        }
+        oldTables.add(old);
+        table = grown;
+        if (more > capacity) {
+            this.ids.grow(more);
+            blockLength = Arrays.copyOf(blockLength, more);
+            used = Arrays.copyOf(used, more);
+            materials = Arrays.copyOf(materials, more);
+            heapUnit = Arrays.copyOf(heapUnit, more);
+            Arrays.fill(heapUnit, capacity, more, -1);
+            heapUnits = Arrays.copyOf(heapUnits, more);
+            retiring = Arrays.copyOf(retiring, more);
+            retireAt = Arrays.copyOf(retireAt, more);
+            capacity = more;
+        }
+        if (units > heap.capacity()) {
+            heap.grow(units);
+        }
+        heapStart = start;
     }
 
     /** Replaces material {@code id} with {@code material}; any id of a block. */
@@ -279,9 +297,7 @@ public final class Materials implements AutoCloseable {
         if (!contains(id)) {
             throw new IllegalArgumentException("No material " + id);
         }
-        if (!write(id, material)) {
-            throw new IllegalStateException("The material table has no room for the blocks of " + material);
-        }
+        write(id, material);
     }
 
     /**
@@ -407,7 +423,7 @@ public final class Materials implements AutoCloseable {
     }
 
     /** Writes {@code material}'s blocks and slot under {@code id}; false (and nothing changed) without heap room. */
-    private boolean write(int id, Material material) {
+    private void write(int id, Material material) {
         int typeId = typeId(material);
         if (material.features().size() > MAX_FEATURE_SECTIONS) {
             throw new IllegalArgumentException("A material shows at most " + MAX_FEATURE_SECTIONS + " features");
@@ -421,7 +437,8 @@ public final class Materials implements AutoCloseable {
         if (unit < 0 || heapUnits[id] != units) {
             long fresh = heap.allocate(units, 1);
             if (fresh < 0) {
-                return false;
+                grow(capacity, Math.max(2 * heap.capacity(), heap.capacity() + units));
+                fresh = heap.allocate(units, 1); // the free end joins the new room
             }
             if (unit >= 0) {
                 heap.release(unit, heapUnits[id]);
@@ -452,7 +469,6 @@ public final class Materials implements AutoCloseable {
         table.putFloat(slot + MaterialLayout.MASK_ALPHA, material.parameters().maskAlpha());
         table.putInt(slot + MaterialLayout.GEOMETRY, 0);
         materials[id] = material;
-        return true;
     }
 
     /** How many materials the table holds, the default one included. */
@@ -471,6 +487,7 @@ public final class Materials implements AutoCloseable {
     @Override
     public void close() {
         table.close();
+        oldTables.close();
         arena.close();
     }
 }
