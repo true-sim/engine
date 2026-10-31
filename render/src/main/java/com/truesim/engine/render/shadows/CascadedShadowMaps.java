@@ -249,19 +249,21 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
         double tz = bx * ry - by * rx;
         float[] inverse = camera.inverseViewProjection();
         for (int i = 0; i < cascades; i++) {
-            // The sphere around the frustum's slice: its corners averaged, the farthest corner's distance.
+            // The sphere around the frustum's slice: its corners averaged, the farthest corner's distance. From a tenth
+            // of the slice before on: lights.slang's shadowFor dithers the last tenth of a cascade into the next.
+            double from = i == 0 ? splits[0] : splits[i] - 0.1 * (splits[i] - splits[i - 1]);
             center[0] = 0;
             center[1] = 0;
             center[2] = 0;
             for (int c = 0; c < 8; c++) {
-                corner(inverse, near, splits[i + (c >> 2)], (c & 1) * 2 - 1, (c >> 1 & 1) * 2 - 1);
+                corner(inverse, near, (c >> 2) == 0 ? from : splits[i + 1], (c & 1) * 2 - 1, (c >> 1 & 1) * 2 - 1);
                 center[0] += corner[0] / 8;
                 center[1] += corner[1] / 8;
                 center[2] += corner[2] / 8;
             }
             double radius = 0;
             for (int c = 0; c < 8; c++) {
-                corner(inverse, near, splits[i + (c >> 2)], (c & 1) * 2 - 1, (c >> 1 & 1) * 2 - 1);
+                corner(inverse, near, (c >> 2) == 0 ? from : splits[i + 1], (c & 1) * 2 - 1, (c >> 1 & 1) * 2 - 1);
                 double ex = corner[0] - center[0];
                 double ey = corner[1] - center[1];
                 double ez = corner[2] - center[2];

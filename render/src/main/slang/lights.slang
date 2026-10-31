@@ -247,18 +247,21 @@ public struct PcfShadow : IShadow
             return 1;
         }
         int2 texel = int2(floor(uv * s.size));
-        int last = int(s.size) - 1;
         uint map = NonUniformResourceIndex(s.map); // neighbours may read other cascades and lights
-        float lit = 0;
-        for (int y = -1; y <= 1; y++)
-        {
-            for (int x = -1; x <= 1; x++)
-            {
-                float nearest = textures[map].Load(int3(clamp(texel + int2(x, y), 0, last), 0)).r;
-                lit += p.z + s.bias >= nearest ? 1 : 0;
-            }
-        }
-        return lit / 9;
+        // The 3 x 3 texels around, in four gathers of 2 x 2 rather than nine loads: each taken at a texel corner (in
+        // texels, c: its 2 x 2 is c - 1 and c each way, as bilinear filtering would read there), edges clamped by the
+        // sampler. Gathered as (x: left bottom, y: right bottom, z: right top, w: left top), top the lower row.
+        float depth = p.z + s.bias;
+        float texelSize = 1.0 / s.size;
+        float4 a = textures[map].GatherRed(samplers[NEAREST_CLAMP], float2(texel) * texelSize);
+        float4 b = textures[map].GatherRed(samplers[NEAREST_CLAMP], float2(texel + int2(2, 0)) * texelSize);
+        float4 c = textures[map].GatherRed(samplers[NEAREST_CLAMP], float2(texel + int2(0, 2)) * texelSize);
+        float4 d = textures[map].GatherRed(samplers[NEAREST_CLAMP], float2(texel + int2(2, 2)) * texelSize);
+        float4 litA = step(a, depth);          // texels (-1, -1) to (0, 0): all four
+        float2 litB = step(float2(b.w, b.x), depth); // (1, -1), (1, 0)
+        float2 litC = step(float2(c.w, c.z), depth); // (-1, 1), (0, 1)
+        float litD = step(d.w, depth);         // (1, 1)
+        return (dot(litA, 1) + litB.x + litB.y + litC.x + litC.y + litD) / 9;
     }
 }
 
@@ -305,8 +308,18 @@ public float shadowVisibility<R : IShadowRays>(R rays, Shadow s, ShadowQuery q)
     }
 }
 
-/** The light's shadow map for a surface at `world`, `depth` from the viewer, or -1. */
-int shadowFor(Light light, Shadow* shadows, float3 world, float depth)
+/** Interleaved gradient noise (Jimenez 2014): a value in [0, 1) per pixel that neighbours spread evenly. */
+float dither(uint2 pixel)
+{
+    return frac(52.9829189 * frac(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)));
+}
+
+/**
+ * The light's shadow map for a surface at `world`, `depth` from the viewer, at `pixel`, or -1. Across the last tenth of
+ * a cascade's depths, pixels take the next cascade more and more (dithered by pixel): no seam where the texel size
+ * changes, for one lookup.
+ */
+int shadowFor(Light light, Shadow* shadows, float3 world, float depth, uint2 pixel)
 {
     if (light.shadowFirst < 0 || light.shadowCount == 0)
     {
@@ -314,12 +327,20 @@ int shadowFor(Light light, Shadow* shadows, float3 world, float depth)
     }
     if (light.type == DIRECTIONAL && light.shadowCount > 1) // cascades; a single entry covers every depth
     {
+        float start = 0;
         for (uint i = 0; i < light.shadowCount; i++)
         {
-            if (depth <= shadows[light.shadowFirst + i].split)
+            float split = shadows[light.shadowFirst + i].split;
+            if (depth <= split)
             {
+                float band = (split - start) * 0.1;
+                if (i + 1 < light.shadowCount && depth > split - band && dither(pixel) < (depth - split + band) / band)
+                {
+                    return light.shadowFirst + int(i) + 1; // the next one covers these depths too
+                }
                 return light.shadowFirst + int(i);
             }
+            start = split;
         }
         return -1; // past the last cascade: lit
     }
@@ -368,7 +389,7 @@ public float3 lightSurface<R : IShadowRays>(R rays, LightListHeader h, Light lig
     {
         return 0;
     }
-    int shadow = shadowFor(light, shadows, world, depth);
+    int shadow = shadowFor(light, shadows, world, depth, pixel);
     if (shadow >= 0)
     {
         Shadow entry = shadows[shadow];
