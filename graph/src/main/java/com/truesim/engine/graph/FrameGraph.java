@@ -638,24 +638,34 @@ public final class FrameGraph implements AutoCloseable {
         if (execution == null || !execution.begun) {
             throw new IllegalStateException("Begin the frame first: beginFrame()");
         }
-        prepare();
-        recordSlot = execution.slot;
-        slotFrame[recordSlot] = frame;
-        execution.ensureCommandBuffers();
-        if (jobs != null && chunkBatch.length > 1) {
-            frameStart = execution.commandBuffer(0, GRAPHICS);
-            bindless.bind(frameStart, true);
-            recordSeam(frameStart);
-            frameSlots.recordStart(frameStart);
-            Vulkan.check(Commands.endCommandBuffer(frameStart), "Could not finish recording");
-            jobs.parallelFor(chunkBatch.length, 1, recordChunks);
-        } else {
-            frameStart = null;
-            recordChunks(0, chunkBatch.length, 0);
-        }
-        execution.submit(acquired, acquiredCount, renderFinished, finishedCount);
-        if (ownsSlots) {
-            frameSlots.end();
+        boolean submitted = false;
+        try {
+            prepare();
+            recordSlot = execution.slot;
+            slotFrame[recordSlot] = frame;
+            execution.ensureCommandBuffers();
+            if (jobs != null && chunkBatch.length > 1) {
+                frameStart = execution.commandBuffer(0, GRAPHICS);
+                bindless.bind(frameStart, true);
+                recordSeam(frameStart);
+                frameSlots.recordStart(frameStart);
+                Vulkan.check(Commands.endCommandBuffer(frameStart), "Could not finish recording");
+                jobs.parallelFor(chunkBatch.length, 1, recordChunks);
+            } else {
+                frameStart = null;
+                recordChunks(0, chunkBatch.length, 0);
+            }
+            execution.submit(acquired, acquiredCount, renderFinished, finishedCount);
+            submitted = true;
+        } finally {
+            // A build or a pass that threw leaves the graph usable: the frame is dropped, the next one begins (a graph
+            // that failed to build builds again then).
+            if (!submitted) {
+                execution.abandon();
+            }
+            if (ownsSlots) {
+                frameSlots.end();
+            }
         }
     }
 
@@ -948,7 +958,9 @@ public final class FrameGraph implements AutoCloseable {
             long graphicsBase = graphicsValue;
             long computeBase = computeValue;
             boolean acquireWaited = acquiredCount == 0;
-            boolean bothQueues = computeBatches > 0;
+            // Both queues once the compute queue ever ran: a build without async passes still follows one with them,
+            // whose compute work of the frames in flight may use what this frame does (pooled images, histories).
+            boolean bothQueues = computeValue > 0;
             boolean firstGraphics = true;
             boolean firstCompute = true;
             for (int b = 0; b < batchQueue.length; b++) {
@@ -1019,6 +1031,14 @@ public final class FrameGraph implements AutoCloseable {
             computeValue += computeBatches;
             slotGraphicsValue[slot] = graphicsValue;
             slotComputeValue[slot] = computeValue;
+            begun = false;
+        }
+
+        /**
+         * Gives up the frame begun, after recording failed: nothing of it was submitted, its command buffers are reset
+         * when its slot comes again, and the next frame may begin.
+         */
+        void abandon() {
             begun = false;
         }
 
@@ -1377,21 +1397,33 @@ public final class FrameGraph implements AutoCloseable {
         return resources.pooledBuffers();
     }
 
-    /** Where {@code technique} (this instance) is: "the graph", "view <name>", or null. */
+    /**
+     * Where {@code technique} (this instance, whether switched or not: {@code t.when(s)} wraps t anew each call) is:
+     * "the graph", "view <name>", or null.
+     */
     String placeOf(Technique technique) {
+        Technique inner = unswitched(technique);
         for (Technique added : techniques) {
-            if (added == technique) {
+            if (unswitched(added) == inner) {
                 return "the graph";
             }
         }
         for (ViewPort view : views) {
             for (Technique added : view.techniques) {
-                if (added == technique) {
+                if (unswitched(added) == inner) {
                     return "view " + view.name();
                 }
             }
         }
         return null;
+    }
+
+    /** The technique a switch (or switches) wraps; {@code technique} itself if none. */
+    private static Technique unswitched(Technique technique) {
+        while (technique instanceof Switch switched) {
+            technique = switched.technique();
+        }
+        return technique;
     }
 
     /** How many times the graph was built. */

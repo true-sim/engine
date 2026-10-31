@@ -337,11 +337,16 @@ public final class VulkanDevice implements AutoCloseable {
             }
             this.allocator = pointer.get(0);
         }
+        Bindless made = null;
         try {
-            this.bindless = new Bindless(this);
+            made = new Bindless(this);
+            this.bindless = made;
             this.pipelineCache = new PipelineCache(this);
             this.direct = new DirectCalls(handle);
         } catch (RuntimeException | Error e) {
+            if (made != null) {
+                made.close(); // made before what failed
+            }
             vmaDestroyAllocator(allocator);
             vkDestroyDevice(handle, null);
             throw e;
@@ -743,9 +748,18 @@ public final class VulkanDevice implements AutoCloseable {
         return transfer;
     }
 
-    /** Waits until the device has finished all work, e.g. before destroying resources. */
+    /**
+     * Waits until the device has finished all work, e.g. before destroying resources. Holds every queue meanwhile, as
+     * Vulkan requires: submits from other threads wait.
+     */
     public void waitIdle() {
-        check(vkDeviceWaitIdle(handle), "Could not wait for the device");
+        synchronized (graphics) { // in one order, as no queue lock is taken in another
+            synchronized (compute) {
+                synchronized (transfer) {
+                    check(vkDeviceWaitIdle(handle), "Could not wait for the device");
+                }
+            }
+        }
     }
 
     /**

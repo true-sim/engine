@@ -24,13 +24,16 @@ import java.util.Objects;
  *
  * <p>The setting is read every frame: a view's technique from the view's own settings where set there
  * ({@link ViewPort#ownSettings()}), else from the graph's; a frame technique from the graph's. Only sampled reads of a
- * fallen-back image see the fallback: read otherwise (copied, as an attachment), it holds what it held.
+ * fallen-back image see the fallback: read otherwise (copied, as an attachment), its contents are undefined, as the
+ * skipped passes made none (an image the technique modifies in place keeps the producer's). Passes of requests the
+ * technique makes run on while it is off: other techniques may share them.
  */
 public final class Switch implements Technique {
 
     private final Setting<Boolean> setting;
     private final Technique technique;
     private final Map<Key<Image>, Fallback> fallbacks = new LinkedHashMap<>();
+    private long fallbackVersion; // changes as fallbacks are set: the graph rebuilds
     boolean on = true; // this frame: set when the frame starts
 
     private Switch(Setting<Boolean> setting, Technique technique) {
@@ -50,6 +53,7 @@ public final class Switch implements Technique {
     @AllowAllocation("set up rarely")
     public Switch fallback(Key<Image> key, Fallback fallback) {
         fallbacks.put(Objects.requireNonNull(key, "key"), Objects.requireNonNull(fallback, "fallback"));
+        fallbackVersion++;
         return this;
     }
 
@@ -104,9 +108,10 @@ public final class Switch implements Technique {
         return technique.order();
     }
 
+    /** The technique's, plus the fallbacks set: a new fallback rebuilds the graph as the technique changing does. */
     @Override
     public long buildVersion() {
-        return technique.buildVersion();
+        return technique.buildVersion() + fallbackVersion;
     }
 
     @Override

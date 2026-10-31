@@ -712,6 +712,9 @@ public final class Platform implements AutoCloseable {
      */
     public int pollEvents(PlatformListener listener) {
         checkThread();
+        for (int i = 0; i < windows.size(); i++) {
+            windows.get(i).applyPendingSettings(); // window settings changed on other threads
+        }
         int count = 0;
         while (SDL_PollEvent(event)) {
             count++;
@@ -892,6 +895,11 @@ public final class Platform implements AutoCloseable {
     }
 
     // ---------------------------------------------------------------- lifecycle
+
+    /** Whether the calling thread is the platform's. */
+    boolean onOwnerThread() {
+        return Thread.currentThread() == owner;
+    }
 
     void checkThread() {
         if (Thread.currentThread() != owner) {
