@@ -1642,6 +1642,17 @@ class FrameGraphTest {
         // Its next frames at a lower rate, submitted with frames in flight: still this frame's or the last one rendered.
         camera.rate(2);
         assertThat(submitted(3)[0]).isEqualTo(BLUE);
+        // Rendered once and its view gone, a texture keeps its image: a one-shot render.
+        graph.removeView(camera);
+        assertThat(frame()[0]).as("kept after its view went").isEqualTo(BLUE);
+        // Removed, it is freed once no frame in flight samples it; outputs into it go, and reading it fails.
+        assertThat(graph.textures()).contains(screen, green, mirror);
+        graph.removeTexture(mirror).removeTexture(mirror);
+        assertThat(graph.textures()).doesNotContain(mirror);
+        frame();
+        assertThat(graph.passes()).doesNotContain("output mirror");
+        graph.removeTexture(screen);
+        assertThatIllegalStateException().isThrownBy(this::frame).withMessageContaining("texture screen was removed");
     }
 
     @Test

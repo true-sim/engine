@@ -42,7 +42,7 @@ import java.util.Objects;
  * sunShadows.update();                           // from the camera's world position: cascades snap in world space
  * }</pre>
  */
-public final class CascadedShadowMaps implements Technique {
+public final class CascadedShadowMaps implements Technique, AutoCloseable {
 
     private final SceneGeometry geometry;
     private final Lights lights;
@@ -101,15 +101,21 @@ public final class CascadedShadowMaps implements Technique {
     /**
      * Like {@link #CascadedShadowMaps(SceneGeometry, Lights, int, int, Camera, int, int, ViewOptions, float)}, for
      * {@code view}: its camera, its own entries (its view's {@link Lights#shadowTable shadow table}), and its cascades'
-     * views owned by its port, closed with it. One per view, e.g. from {@code SceneViews.addPerView}; each needs its
-     * {@link #update} every frame.
+     * views closed with it: the technique is owned by its port. One per view, e.g. from {@code SceneViews.addPerView};
+     * each needs its {@link #update} every frame.
      */
     @AllowAllocation("created rarely")
     public CascadedShadowMaps(SceneGeometry geometry, Lights lights, int light, int firstEntry, SceneView view,
         int cascades, int size, ViewOptions options, float maxDistance) {
         this(geometry, lights, light, firstEntry, view.camera(), cascades, size, options, maxDistance);
+        view.port().own(this);
+    }
+
+    /** Closes the cascades' views: their buffers go once no frame in flight reads them. */
+    @Override
+    public void close() {
         for (RenderView cascade : views) {
-            view.port().own(cascade);
+            cascade.close();
         }
     }
 

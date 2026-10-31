@@ -323,6 +323,13 @@ class ShadowsTest {
                 .isLessThan((int) (lit * shadowRatio));
             assertThat(floor(falling, this, shadow[0], shadow[1])).as("cascades short of the floor: lit")
                 .isGreaterThan((int) (floor(falling, this, 3, -2) * 0.8));
+            // A view removed: its shadow table and its cascades' views go with it.
+            int tables = lights.shadowTableCount();
+            int views = renderer.views().size();
+            graph.removeView(near.port());
+            frame(colorTarget, 4);
+            assertThat(lights.shadowTableCount()).as("freed once no frame reads it").isEqualTo(tables - 1);
+            assertThat(renderer.views()).as("its render view and its 3 cascades'").hasSize(views - 4);
             device.waitIdle();
         }
     }

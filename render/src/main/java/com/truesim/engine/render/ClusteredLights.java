@@ -148,6 +148,7 @@ public final class ClusteredLights implements Technique {
             memPutInt(data + 8, 0); // overflow: the most lights a cluster wanted
             memPutLong(data + 16, lights.lightsAddress());
             memPutLong(data + 24, lights.shadowTable(port).address()); // its view's entries
+            lights.releaseRetired(); // once a frame: tables of views gone that no frame reads any more
             memPutLong(data + 32, counts);
             memPutLong(data + 40, counts + 4L * clusters);
             memPutInt(data + 48, across);

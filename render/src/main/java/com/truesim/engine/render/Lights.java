@@ -9,6 +9,7 @@ import com.truesim.engine.render.layout.LightsConstants;
 import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
+import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
 import java.util.HashMap;
 import java.util.Map;
@@ -53,6 +54,7 @@ public final class Lights implements AutoCloseable {
     private final int usage;
     private final FrameSlots slots;
     private final int[] families;
+    private final Retiring retiring; // the tables of views gone, until no frame in flight reads them
     private final int capacity;
     private final int shadowCapacity;
     private int count;
@@ -84,17 +86,45 @@ public final class Lights implements AutoCloseable {
         this.usage = usage;
         this.slots = slots;
         this.families = new int[] {graphics, compute};
+        this.retiring = new Retiring(slots);
         tables.put(null, new ShadowTable(device, shadowCapacity, usage, slots, families));
     }
 
     /**
      * {@code view}'s shadow table (null: the frame's), made the first time it is asked for: the entries its shadow
      * techniques write and its light list points its shading at. Every view's has the same {@code shadowCapacity}
-     * entries, numbered alike. Closed with the lights.
+     * entries, numbered alike. A view's goes with the view (removed, or its graph closed), freed once no frame in flight
+     * reads it; the frame's closes with the lights.
      */
     @AllowAllocation("a view's first, when the graph builds")
     public ShadowTable shadowTable(ViewPort view) {
-        return tables.computeIfAbsent(view, v -> new ShadowTable(device, shadowCapacity, usage, slots, families));
+        ShadowTable table = tables.get(view);
+        if (table == null) {
+            table = new ShadowTable(device, shadowCapacity, usage, slots, families);
+            tables.put(view, table);
+            if (view != null) {
+                view.own(() -> retire(view));
+            }
+        }
+        return table;
+    }
+
+    /** Lets {@code view}'s table go: freed once no frame in flight reads it (at once, the lights closed). */
+    private void retire(ViewPort view) {
+        ShadowTable table = tables.remove(view);
+        if (table != null) {
+            retiring.add(table);
+        }
+    }
+
+    /** Frees the tables of views gone that no frame in flight reads any more: from each frame's light list. */
+    void releaseRetired() {
+        retiring.release();
+    }
+
+    /** The shadow tables held: in use, and of views gone that frames in flight may still read. */
+    int shadowTableCount() {
+        return tables.size() + retiring.count();
     }
 
     /**
@@ -214,5 +244,6 @@ public final class Lights implements AutoCloseable {
             table.close();
         }
         tables.clear();
+        retiring.close(); // frames are done: the retired tables go now
     }
 }

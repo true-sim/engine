@@ -536,7 +536,8 @@ interface:
   its entries once, and each view's techniques fill them in its table, which its light list points shading at. So each
   view's cascades fit its own camera (`new CascadedShadowMaps(geometry, lights, light, entry, sceneView, ...)`, one per
   view through `addPerView`, each `update()`d every frame), and a ray-traced mask is of its view's pixels. An entry no
-  technique of the view filled reads as lit.
+  technique of the view filled reads as lit. A view's table and its cascades' views go with the view, freed once no
+  frame in flight reads them.
 - **Ray tracing is a generic parameter** (`IShadowRays`): shading pipelines that cannot trace use `NoRays`, so only the
   visibility buffer's traced variant (`shadeTraced.slang`) needs ray queries. Forward shading counts inline ray
   shadows as lit; a ray-traced mask works with any shading.
@@ -612,7 +613,9 @@ that declare how they use each image. The graph does the rest:
   by shaders, with a bindless slot that never changes (`texture.slot()`). A view renders into it with
   `view.output(key, texture)` (a mirror, a security camera's screen), and a frame the view is skipped leaves it as it
   was. A technique of another view reads it with `g.texture(texture)`, which orders its pass after the copy into it,
-  and samples it at its slot (`ctx.sampled(image)`).
+  and samples it at its slot (`ctx.sampled(image)`). It belongs to the graph, not to the view: rendered once and its
+  view turned off or removed, it keeps its image. `graph.removeTexture(texture)` frees it once no frame in flight
+  samples it; otherwise it closes with the graph.
 - **Culled:** walking back from the outputs, passes whose images and buffers nothing needs are dropped.
 - **Synchronized:** barriers and layout transitions come from the declared accesses, batched into one call per pass,
   with none between reads.
