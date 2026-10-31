@@ -344,7 +344,11 @@ public final class RayTracing implements AutoCloseable {
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
         MemorySegment.copy(old.memory(), 0, bottomTable.memory(), 0, old.size());
         bottomTable.memory().asSlice(old.size()).fill((byte) 0);
-        retired.add(new Retired(old::close, slots.retireAt())); // frames in flight read it
+        if (deferred) {
+            retired.add(new Retired(old::close, slots.retireAt())); // frames in flight read it
+        } else {
+            old.close(); // no frames in flight: the caller waits for them
+        }
     }
 
     /** Whether bottom levels read the pool's quantized positions as they are (else decoded copies). */

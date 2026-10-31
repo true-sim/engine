@@ -395,6 +395,7 @@ public final class Materials implements AutoCloseable {
 
     /** Gives removed ids no frame in flight reads back, oldest first. */
     private void releaseRetired() {
+        oldTables.release(); // tables outgrown, once no frame in flight reads them
         int kept = 0;
         for (int i = 0; i < retiringCount; i++) {
             int id = retiring[i];

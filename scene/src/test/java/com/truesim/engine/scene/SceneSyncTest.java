@@ -776,11 +776,115 @@ class SceneSyncTest {
     }
 
     @Test
+    void drawnRenderablesKeepTheirIdsAndLooksUntilWhatTheyChangeToArrives() throws InterruptedException {
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        resources.loading(SceneResources.Loading.WHOLE);
+        long node = facing(scene, 0, 0, -3);
+        renderables.set(node, SQUARE, List.of(RED));
+        for (int round = 0; round < 4 && sync.slotOf(node) < 0; round++) {
+            update(scene, renderables, sync);
+            load();
+        }
+        update(scene, renderables, sync);
+        int slot = sync.slotOf(node);
+        int redBlock = sync.firstMaterialOf(node);
+        int square = sync.meshOf(node);
+        assertThat(slot).isNotNegative();
+        // A textured material, waited for whole: drawn red, in its id, until the material and its texture are there.
+        AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 61);
+        renderables.setMaterials(node, List.of(textured(white, 61)));
+        scene.update();
+        renderables.update();
+        sync.update(); // nothing loaded yet
+        assertThat(sync.slotOf(node)).isEqualTo(slot);
+        assertThat(sync.firstMaterialOf(node)).as("red until the new one is whole").isEqualTo(redBlock);
+        for (int round = 0; round < 4 && sync.firstMaterialOf(node) == redBlock; round++) {
+            load();
+            update(scene, renderables, sync);
+        }
+        assertThat(sync.firstMaterialOf(node)).isNotEqualTo(redBlock);
+        assertThat(sync.slotOf(node)).as("the same instance").isEqualTo(slot);
+        // Another mesh: the square drawn, in the id, until the small one is on the GPU; then the small one there.
+        renderables.setMesh(node, SMALL);
+        scene.update();
+        renderables.update();
+        sync.update();
+        assertThat(sync.slotOf(node)).isEqualTo(slot);
+        assertThat(sync.meshOf(node)).as("the square until the new mesh comes").isEqualTo(square);
+        for (int round = 0; round < 4 && sync.meshOf(node) == square; round++) {
+            load();
+            update(scene, renderables, sync);
+        }
+        assertThat(sync.meshOf(node)).isNotEqualTo(square);
+        assertThat(sync.slotOf(node)).as("the same instance, the occlusion history with it").isEqualTo(slot);
+        assertThat(sync.instanceCount()).isEqualTo(1);
+        renderables.remove(node);
+        update(scene, renderables, sync);
+        assertThat(resources.meshCount()).isZero();
+        assertThat(resources.materialSetCount()).isZero();
+    }
+
+    @Test
+    void assetsThatCannotGoOnTheGpuAreReportedNotWaitedFor() throws InterruptedException {
+        // A pool closed under its resources: the mesh's upload throws. Reported, failed, not thrown into the cache.
+        List<AssetRef<?>> failed = new ArrayList<>();
+        GeometryPool closedPool = new GeometryPool(device, slots);
+        SceneResources broken = new SceneResources(assets, closedPool, materials, textures)
+            .diagnostics(new SceneResources.Diagnostics() {
+                @Override
+                public void assetFailed(AssetRef<?> asset, Throwable cause) {
+                    failed.add(asset);
+                }
+            });
+        closedPool.close();
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        try (SceneSync sync = new SceneSync(broken, renderables, new GpuScene(device, closedPool, 4, slots))) {
+            AssetRef<MeshData> lost = AssetRef.generated(RenderAssets.MESH, SQUARES, new Square(7), 1);
+            renderables.set(facing(scene, 0, 0, -3), lost, List.of());
+            update(scene, renderables, sync);
+            assertThat(broken.awaitLoaded(tasks, Duration.ofSeconds(10))).as("not waited for forever").isTrue();
+            assertThat(failed).containsExactly(lost);
+            assertThat(broken.loadingCount()).isZero();
+            assertThat(sync.instanceCount()).isZero();
+        } finally {
+            broken.close();
+        }
+        // Failed in the cache before these resources asked (another holder asked first): failed here too.
+        AssetRef<TextureData> missing = AssetRef.generated(RenderAssets.TEXTURE, (Generator<Plain, TextureData>)
+            (plain, seed) -> {
+                throw new IllegalStateException("no such texture");
+            }, new Plain(0), 62);
+        assets.acquire(missing);
+        load();
+        resources.loading(SceneResources.Loading.WHOLE);
+        SceneGraph other = new SceneGraph(new ChangeClock());
+        Renderables using = new Renderables(other);
+        SceneSync sync = closing(new SceneSync(resources, using, gpu()));
+        long node = facing(other, 0, 0, -3);
+        using.set(node, SQUARE, List.of(textured(missing, 62)));
+        update(other, using, sync);
+        assertThat(resources.awaitLoaded(tasks, Duration.ofSeconds(10))).isTrue();
+        update(other, using, sync);
+        assertThat(sync.slotOf(node)).as("drawn untextured, not waiting").isNotNegative();
+        assets.release(missing);
+        // Misuse: a mode for a mesh, and waiting on a scheduler other than the one preparing.
+        assertThatIllegalArgumentException().isThrownBy(() -> resources.loading(SQUARE, SceneResources.Loading.WHOLE));
+        resources.prepareOn(tasks, 1);
+        try (com.truesim.common.jobs.TaskScheduler elsewhere = new com.truesim.common.jobs.TaskScheduler()) {
+            assertThatIllegalArgumentException().isThrownBy(() -> resources.awaitLoaded(elsewhere, Duration.ZERO));
+        }
+        resources.prepareOn(tasks, 0);
+    }
+
+    @Test
     void assetsPreparedOnWorkersAreAwaitedWhole() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Renderables renderables = new Renderables(scene);
         SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
-        resources.prepareOn(tasks.platformLane("gpu prepare", 2)).loading(SceneResources.Loading.WHOLE);
+        resources.prepareOn(tasks, 2).loading(SceneResources.Loading.WHOLE);
         AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 51);
         long node = facing(scene, 0, 0, -3);
         renderables.set(node, SQUARE, List.of(textured(white, 51)));
@@ -811,7 +915,7 @@ class SceneSyncTest {
         update(scene, renderables, sync);
         assertThat(resources.meshCount()).isEqualTo(1);
         assertThat(resources.loadingCount()).isZero();
-        resources.prepareOn(null);
+        resources.prepareOn(tasks, 0);
     }
 
     @Test
