@@ -313,44 +313,55 @@ public final class Platform implements AutoCloseable {
     @AllowAllocation("a snapshot")
     public String displayKey(int id) {
         checkThread();
-        String name = SDL_GetDisplayName(id);
-        if (name == null) {
+        return key(id, displays());
+    }
+
+    /** Display {@code id}'s key among {@code displays} ({@link #displayKey}); empty if it is not among them. */
+    @AllowAllocation("a snapshot")
+    static String key(int id, List<Display> displays) {
+        Display of = null;
+        List<Display> same = new ArrayList<>();
+        for (Display display : displays) {
+            of = display.id() == id ? display : of;
+        }
+        if (of == null || of.name() == null) {
             return "";
         }
-        List<Display> same = new ArrayList<>();
-        for (Display display : displays()) {
-            if (name.equals(display.name())) {
+        for (Display display : displays) {
+            if (of.name().equals(display.name())) {
                 same.add(display);
             }
         }
-        if (same.size() < 2) {
-            return name;
+        if (same.size() == 1) {
+            return of.name();
         }
         same.sort(java.util.Comparator.comparingInt((Display d) -> d.bounds().x()).thenComparingInt(d -> d.bounds().y()));
-        for (int i = 0; i < same.size(); i++) {
-            if (same.get(i).id() == id) {
-                return name + " #" + (i + 1);
-            }
-        }
-        return name;
+        return of.name() + " #" + (same.indexOf(of) + 1);
     }
 
     /** The id of the display {@code key} names ({@link #displayKey}): the primary one if empty or none has it. */
     @AllowAllocation("a snapshot")
     int displayNamed(String key) {
-        if (!key.isEmpty()) {
-            for (Display display : displays()) {
-                if (key.equals(displayKey(display.id()))) {
-                    return display.id();
-                }
-            }
-            for (Display display : displays()) { // a monitor of that name, wherever it went
-                if (key.startsWith(display.name())) {
-                    return display.id();
-                }
+        return named(key, displays(), SDL_GetPrimaryDisplay());
+    }
+
+    /** The id of the display {@code key} names among {@code displays}: {@code primary} if empty or none has it. */
+    @AllowAllocation("a snapshot")
+    static int named(String key, List<Display> displays, int primary) {
+        if (key.isEmpty()) {
+            return primary;
+        }
+        for (Display display : displays) {
+            if (key.equals(key(display.id(), displays))) {
+                return display.id();
             }
         }
-        return SDL_GetPrimaryDisplay();
+        for (Display display : displays) { // a monitor of that name, wherever it went
+            if (display.name() != null && key.startsWith(display.name())) {
+                return display.id();
+            }
+        }
+        return primary;
     }
 
     // ---------------------------------------------------------------- cursor and screen

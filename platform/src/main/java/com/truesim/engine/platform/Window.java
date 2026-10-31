@@ -548,7 +548,8 @@ public final class Window implements AutoCloseable {
 
     /**
      * Changes the window to {@code settings}, as far as the system allows: in its mode on its display (by name; the
-     * primary if none has it), its windowed size and position kept for when it is windowed again. Takes effect at once
+     * primary if none has it), its windowed size and position kept for when it is windowed again; exclusive fullscreen
+     * where the display has no such mode is borderless. Takes effect at once
      * or, on some systems, shortly after ({@link #sync()}); {@link #settings()} tells what took.
      */
     @AllowAllocation("changing settings, rarely")
@@ -587,8 +588,12 @@ public final class Window implements AutoCloseable {
                 int width = settings.fullscreenWidth() > 0 ? settings.fullscreenWidth() : desktop.width();
                 int height = settings.fullscreenHeight() > 0 ? settings.fullscreenHeight() : desktop.height();
                 float rate = settings.refreshRate() > 0 ? settings.refreshRate() : desktop.refreshRate();
-                exclusiveFullscreen(new DisplayMode(display, width, height, desktop.pixelDensity(), rate, 0, 0,
-                    desktop.format()));
+                try {
+                    exclusiveFullscreen(new DisplayMode(display, width, height, desktop.pixelDensity(), rate, 0, 0,
+                        desktop.format()));
+                } catch (PlatformException e) { // a display without fullscreen modes: covered at its desktop's
+                    borderlessFullscreen();
+                }
             }
         }
         setMouseGrab(settings.mouseGrab());

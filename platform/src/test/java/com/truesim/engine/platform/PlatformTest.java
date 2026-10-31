@@ -4,6 +4,7 @@ import static com.truesim.testing.AllocationAssertions.assertAllocationFree;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_DISPLAY_ADDED;
@@ -455,9 +456,43 @@ class PlatformTest {
         assertThat(loaded).isEqualTo(defaults.withWidth(1024));
         assertThat(WindowSettings.fromMap(Map.of("width", "0"))).as("out of range: the default")
             .isEqualTo(defaults);
-        assertThatIllegalArgumentException().isThrownBy(() -> defaults.withWidth(0));
-        assertThatIllegalArgumentException().isThrownBy(() -> defaults.withOpacity(1.5f));
-        assertThatIllegalArgumentException().isThrownBy(() -> defaults.withMinAspect(-1));
+        assertThat(WindowSettings.fromMap(defaults.toMap())).isEqualTo(defaults);
+        for (java.util.function.Supplier<WindowSettings> invalid : List.<java.util.function.Supplier<WindowSettings>>of(
+            () -> defaults.withWidth(0), () -> defaults.withHeight(0), () -> defaults.withOpacity(1.5f),
+            () -> defaults.withOpacity(-0.1f), () -> defaults.withOpacity(Float.NaN),
+            () -> defaults.withFullscreenWidth(-1), () -> defaults.withFullscreenHeight(-1),
+            () -> defaults.withRefreshRate(-1), () -> defaults.withMinWidth(-1), () -> defaults.withMinHeight(-1),
+            () -> defaults.withMaxWidth(-1), () -> defaults.withMaxHeight(-1), () -> defaults.withMinAspect(-1),
+            () -> defaults.withMaxAspect(-1))) {
+            assertThatIllegalArgumentException().isThrownBy(invalid::get);
+        }
+        assertThatNullPointerException().isThrownBy(() -> defaults.withMode(null));
+        assertThatNullPointerException().isThrownBy(() -> defaults.withDisplay(null));
+    }
+
+    @Test
+    void displayKeysNumberIdenticalMonitors() {
+        // Three identical monitors side by side (named by their place left to right), another below, one unnamed.
+        List<Display> displays = List.of(display(1, "DELL", 0, 0), display(2, "DELL", 2560, 0),
+            display(3, "DELL", -2560, 0), display(4, "LG", 0, 1440), display(5, null, 0, -1440),
+            display(6, "LG TV", 0, 2880));
+        assertThat(Platform.key(3, displays)).isEqualTo("DELL #1");
+        assertThat(Platform.key(1, displays)).isEqualTo("DELL #2");
+        assertThat(Platform.key(2, displays)).isEqualTo("DELL #3");
+        assertThat(Platform.key(4, displays)).isEqualTo("LG");
+        assertThat(Platform.key(5, displays)).as("unnamed").isEmpty();
+        assertThat(Platform.key(99, displays)).as("gone").isEmpty();
+        assertThat(Platform.named("DELL #3", displays, 4)).isEqualTo(2);
+        assertThat(Platform.named("LG", displays, 1)).isEqualTo(4);
+        assertThat(Platform.named("DELL #7", displays, 4)).as("a monitor of that name").isEqualTo(1);
+        assertThat(Platform.named("", displays, 4)).as("the primary").isEqualTo(4);
+        assertThat(Platform.named("Sony", displays, 4)).as("none: the primary").isEqualTo(4);
+    }
+
+    private static Display display(int id, String name, int x, int y) {
+        DisplayMode mode = new DisplayMode(id, 2560, 1440, 1, 60, 60, 1, 0);
+        return new Display(id, name, new Bounds(x, y, 2560, 1440), new Bounds(x, y, 2560, 1400), 1, mode, mode,
+            List.of(mode), id == 1);
     }
 
     @Test
@@ -520,6 +555,24 @@ class PlatformTest {
         window.restore();
         window.sync();
         assertThat(window.isMinimized()).isFalse();
+        // Maximized through settings, and exclusive fullscreen where it switches no real monitor.
+        window.apply(window.settings().withMaximized(true));
+        window.sync();
+        window.apply(window.settings().withMaximized(false));
+        if (!full) {
+            window.apply(window.settings().withMode(WindowMode.EXCLUSIVE_FULLSCREEN));
+            window.sync();
+            assertThat(window.settings().mode()).as("exclusive, or borderless without fullscreen modes")
+                .isIn(WindowMode.EXCLUSIVE_FULLSCREEN, WindowMode.BORDERLESS_FULLSCREEN);
+            window.apply(window.settings().withMode(WindowMode.EXCLUSIVE_FULLSCREEN).withFullscreenWidth(640)
+                .withFullscreenHeight(480).withRefreshRate(60));
+            window.apply(window.settings().withMode(WindowMode.WINDOWED));
+            window.sync();
+        }
+        platform.setCursorVisible(false);
+        platform.setCursorVisible(true);
+        assertThatThrownBy(() -> window.createVulkanSurface(0)).as("a window made without Vulkan")
+            .isInstanceOf(PlatformException.class);
         window.flash(false);
         window.flash(true);
         window.flash(null);
@@ -530,6 +583,10 @@ class PlatformTest {
         try {
             window.setIcon(2, 2, icon);
             assertThatIllegalArgumentException().isThrownBy(() -> window.setIcon(4, 4, icon));
+            assertThatIllegalArgumentException().isThrownBy(() -> window.setIcon(0, 2, icon));
+            assertThatIllegalArgumentException().isThrownBy(() -> window.setIcon(2, 0, icon));
+            assertThatIllegalArgumentException().isThrownBy(() -> window.setIcon(2, 2,
+                java.nio.ByteBuffer.allocate(16)));
         } finally {
             org.lwjgl.system.MemoryUtil.memFree(icon);
         }
