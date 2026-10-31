@@ -95,9 +95,15 @@ public final class Bindless implements AutoCloseable {
     public static final int LINEAR_REPEAT = 2;
     /** Trilinear and anisotropic (as far as the device goes, up to 16), repeating: for material textures. */
     public static final int MATERIAL = 3;
+    /** {@link #MATERIAL}, clamped to the edge. */
+    public static final int MATERIAL_CLAMP = 4;
+    /** {@link #MATERIAL}, repeating mirrored. */
+    public static final int MATERIAL_MIRROR = 5;
+    /** Nearest texel of the nearest level, repeating: for material textures meant blocky (pixel art). */
+    public static final int MATERIAL_NEAREST = 6;
 
     private final VulkanDevice device;
-    private final long[] samplers = new long[4];
+    private final long[] samplers = new long[7];
     // Set once while constructing; 0 until made, so a constructor that fails frees what it made (destroying 0 is a
     // no-op).
     private long setLayout;
@@ -151,6 +157,11 @@ public final class Bindless implements AutoCloseable {
             samplers[NEAREST_CLAMP] = sampler(stack, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
             samplers[LINEAR_REPEAT] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, false);
             samplers[MATERIAL] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, device.anisotropic());
+            samplers[MATERIAL_CLAMP] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                device.anisotropic());
+            samplers[MATERIAL_MIRROR] = sampler(stack, VK_FILTER_LINEAR,
+                org.lwjgl.vulkan.VK10.VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT, device.anisotropic());
+            samplers[MATERIAL_NEAREST] = sampler(stack, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT, false);
             boolean traced = device.rayTracing();
             int count = traced ? 4 : 3;
             VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(count, stack);

@@ -58,7 +58,9 @@ import org.lwjgl.vulkan.VkImageSubresourceRange;
  * from a {@link Material}. The chain comes with the texels or is made on the GPU ({@link #GENERATE}: each level a
  * linear downsample of the one before). Colors are sRGB ({@link #color}): the sampler returns them linear. Data such as
  * normal maps and occlusion-roughness-metalness are linear ({@link #data}). Other formats, high dynamic range and block
- * compressed ones among them, go through {@link #add(TextureFormat, int, int, int, MemorySegment)}.
+ * compressed ones among them, go through {@link #add(TextureFormat, int, int, int, MemorySegment)}. Each texture keeps
+ * the sampler it was added with ({@link TextureSampler}, repeating unless named), in the bits above its slot: what
+ * materials name is that whole number.
  *
  * <pre>{@code
  * try (Textures textures = new Textures(device)) {
@@ -155,8 +157,17 @@ public final class Textures implements AutoCloseable {
      * {@link #GENERATE}, level 0 only, the full chain made on the GPU (where {@link #generatesMips}).
      */
     public int add(TextureFormat format, int width, int height, int mips, MemorySegment texels) {
+        return add(format, width, height, mips, texels, TextureSampler.REPEAT);
+    }
+
+    /**
+     * {@link #add(TextureFormat, int, int, int, MemorySegment)}, sampled by materials with {@code sampler}: the texture
+     * as materials name it, its slot and sampler.
+     */
+    public int add(TextureFormat format, int width, int height, int mips, MemorySegment texels,
+        TextureSampler sampler) {
         checkOpen();
-        Upload upload = upload(format, width, height, mips, texels);
+        Upload upload = upload(format, width, height, mips, texels, sampler);
         boolean[] gone = new boolean[1];
         try {
             uploads.record(texels, (commands, staging, offset) -> {
@@ -172,7 +183,8 @@ public final class Textures implements AutoCloseable {
     }
 
     /** A texture's image and how its levels arrive, its arguments checked. */
-    private record Upload(GpuImage image, TextureFormat format, int width, int height, int mips, boolean generate) {
+    private record Upload(GpuImage image, TextureFormat format, int width, int height, int mips, boolean generate,
+        TextureSampler sampler) {
 
         /** Its levels from the staging buffer at {@code offset}, all left shader-readable. */
         void record(VkCommandBuffer commands, GpuBuffer staging, long offset) {
@@ -188,7 +200,9 @@ public final class Textures implements AutoCloseable {
         }
     }
 
-    private Upload upload(TextureFormat format, int width, int height, int mips, MemorySegment texels) {
+    private Upload upload(TextureFormat format, int width, int height, int mips, MemorySegment texels,
+        TextureSampler sampler) {
+        java.util.Objects.requireNonNull(sampler, "sampler");
         if (!supports(format)) {
             throw new IllegalArgumentException("This GPU does not sample " + format + " textures");
         }
@@ -215,7 +229,7 @@ public final class Textures implements AutoCloseable {
             | (generate ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
         GpuImage image = GpuImage.mipmapped(device, width, height, format.vulkan(), usage, VK_IMAGE_ASPECT_COLOR_BIT,
             levels);
-        return new Upload(image, format, width, height, levels, generate);
+        return new Upload(image, format, width, height, levels, generate, sampler);
     }
 
     /**
@@ -259,7 +273,13 @@ public final class Textures implements AutoCloseable {
      * {@link #add(Prepared)} on the frame's thread.
      */
     public Prepared prepare(TextureFormat format, int width, int height, int mips, MemorySegment texels) {
-        Upload upload = upload(format, width, height, mips, texels);
+        return prepare(format, width, height, mips, texels, TextureSampler.REPEAT);
+    }
+
+    /** {@link #prepare(TextureFormat, int, int, int, MemorySegment)}, sampled by materials with {@code sampler}. */
+    public Prepared prepare(TextureFormat format, int width, int height, int mips, MemorySegment texels,
+        TextureSampler sampler) {
+        Upload upload = upload(format, width, height, mips, texels, sampler);
         GpuBuffer staging;
         try {
             staging = FrameUploads.staging(device, texels.byteSize());
@@ -307,7 +327,7 @@ public final class Textures implements AutoCloseable {
         sizes.put(slot, size);
         freed.put(slot, gone);
         bytes += size;
-        return slot;
+        return upload.sampler.of(slot);
     }
 
     /** Each level from the staging buffer, from {@code offset} on, level after level, all left shader-readable. */
@@ -424,13 +444,14 @@ public final class Textures implements AutoCloseable {
     }
 
     /**
-     * Removes the texture in sampled slot {@code slot}: materials must no longer name it from the next frame on. Its
-     * image and slot are freed once no frame in flight can sample it, at the next add or remove.
+     * Removes texture {@code texture} (as added, with any sampler): materials must no longer name it from the next frame
+     * on. Its image and slot are freed once no frame in flight can sample it, at the next add or remove.
      */
-    public void remove(int slot) {
-        GpuImage image = images.remove(slot);
+    public void remove(int texture) {
+        int slot = texture & 0xffff;
+        GpuImage image = texture < 0 ? null : images.remove(slot);
         if (image == null) {
-            throw new IllegalArgumentException("No texture in slot " + slot);
+            throw new IllegalArgumentException("No texture " + texture);
         }
         bytes -= sizes.remove(slot);
         boolean[] gone = freed.remove(slot);
@@ -443,9 +464,9 @@ public final class Textures implements AutoCloseable {
         retiring.release();
     }
 
-    /** Whether sampled slot {@code slot} holds one of these textures. */
-    public boolean contains(int slot) {
-        return images.containsKey(slot);
+    /** Whether {@code texture} (with any sampler) is one of these textures. */
+    public boolean contains(int texture) {
+        return texture >= 0 && images.containsKey(texture & 0xffff);
     }
 
     /** How many textures there are. */
