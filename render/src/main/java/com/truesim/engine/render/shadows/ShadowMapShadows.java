@@ -14,6 +14,7 @@ import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.SceneDraw;
 import com.truesim.engine.render.SceneGeometry;
 import com.truesim.engine.render.ShadowInputs;
+import com.truesim.engine.render.ShadowTable;
 import com.truesim.engine.render.SurfaceOutput;
 import java.util.List;
 import java.util.Objects;
@@ -75,8 +76,9 @@ public final class ShadowMapShadows implements Technique {
         view.filter(-1, true); // the map holds the casters only
         Image map = g.request(new SceneDraw(geometry, view, camera, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT,
             size, size, false)).depth();
+        ShadowTable table = lights.shadowTable(g.view()); // the map serves every view; each view's table names it
         g.request(new ShadowInputs(g.view())).sample(map).setup(ctx -> {
-            lights.shadowMap(entry, camera, ctx.sampled(map), size, bias, Float.MAX_VALUE);
+            table.shadowMap(entry, camera, ctx.sampled(map), size, bias, Float.MAX_VALUE);
             lights.shadows(light, entry, 1);
         });
     }

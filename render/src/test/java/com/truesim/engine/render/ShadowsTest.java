@@ -291,6 +291,43 @@ class ShadowsTest {
     }
 
     @Test
+    void eachViewCastsThroughCascadesOfItsOwn() {
+        // Two views through the same camera, each with cascades of its own in its own shadow table: one reaching 50
+        // units, the other 1, short of the floor. Sharing one table, the last one written would serve both.
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
+        double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
+        try (Lights lights = new Lights(device, 4, 4); GpuImage shortTarget = new GpuImage(device, SIZE, SIZE,
+            VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            SceneView far = newGraph();
+            SceneView near = geometry.createView(graph.addView("short").size(SIZE, SIZE), camera,
+                ViewOptions.of(256, 1 << 12).withOcclusion(true)).set(1, MeshletRenderer.MODE_LIT);
+            CascadedShadowMaps farCascades = new CascadedShadowMaps(geometry, lights, 0, 0, far, 3, 1024,
+                ViewOptions.shadow(256, 1 << 12), 50);
+            CascadedShadowMaps nearCascades = new CascadedShadowMaps(geometry, lights, 0, 0, near, 3, 1024,
+                ViewOptions.shadow(256, 1 << 12), 1);
+            far.port().add(forward(geometry).apply(far)).add(new ClusteredLights(lights, far)).add(farCascades)
+                .output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+            near.port().add(forward(geometry).apply(near)).add(new ClusteredLights(lights, near)).add(nearCascades)
+                .output(Keys.SCENE_COLOR, external(shortTarget, VK_FORMAT_R8G8B8A8_UNORM));
+            assertThat(lights.shadowTable(far.port())).isNotSameAs(lights.shadowTable(near.port()));
+            farCascades.update();
+            nearCascades.update();
+            frame(colorTarget, 4);
+            byte[] reaching = frame(colorTarget, 4);
+            byte[] falling = frame(shortTarget, 4);
+            int lit = floor(reaching, this, 3, -2);
+            assertThat(floor(reaching, this, shadow[0], shadow[1])).as("cascades reaching the floor: in shadow")
+                .isLessThan((int) (lit * shadowRatio));
+            assertThat(floor(falling, this, shadow[0], shadow[1])).as("cascades short of the floor: lit")
+                .isGreaterThan((int) (floor(falling, this, 3, -2) * 0.8));
+            device.waitIdle();
+        }
+    }
+
+    @Test
     void theTopLevelIsBuiltOnlyWhenInstancesTheOriginOrBottomLevelsChange() {
         assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
         SceneGeometry geometry = SceneGeometry.meshlets(renderer);

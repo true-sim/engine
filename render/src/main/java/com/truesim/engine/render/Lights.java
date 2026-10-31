@@ -6,22 +6,27 @@ import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.math.Maths;
 import com.truesim.engine.render.layout.LightsConstants;
+import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.VulkanDevice;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 
 /**
  * The scene's lights, as shaders read them (engine-render's {@code lights.slang}): point, spot and directional lights
  * at world positions (two floats per axis, as instances keep theirs: a light list hands them to shading relative to its
- * camera, so one set of lights serves every view), and the shadow maps they cast through. {@link ClusteredLights} bins them per cluster
- * of the view for shading.
+ * camera, so one set of lights serves every view), and the shadow tables they cast through. {@link ClusteredLights} bins
+ * them per cluster of the view for shading.
  *
  * <p>Shadows: a light names a range of consecutive entries of the shadow table, each of a kind evaluated its own way
- * ({@code lights.slang}'s {@code IShadow}), so lights may each use another technique: a {@link #shadowMap shadow map}
- * with its filter, a screen-space {@link #shadowMask mask}, or an inline {@link #shadowRay ray query}. A spot light
- * uses one entry; a directional light one per cascade (nearest first, each covering view depths up to its split); a
- * point light six, the cube faces +x, -x, +y, -y, +z, -z. Shadow techniques fill the entries of their lights.
+ * ({@code lights.slang}'s {@code IShadow}), so lights may each use another technique: a
+ * {@link ShadowTable#shadowMap shadow map} with its filter, a screen-space {@link ShadowTable#shadowMask mask}, or an
+ * inline {@link ShadowTable#shadowRay ray query}. A spot light uses one entry; a directional light one per cascade
+ * (nearest first, each covering view depths up to its split); a point light six, the cube faces +x, -x, +y, -y, +z, -z.
+ * Each graph view has a table of its own ({@link #shadowTable}), numbered alike: shadow techniques fill the entries of
+ * their lights in the table of the view they build in, so each view's cascades fit its own camera.
  *
  * <pre>{@code
  * lights.directional(0, -0.4f, -0.8f, -0.3f, 3, 3, 3);                  // the sun; its shadow technique sets entries
@@ -37,18 +42,17 @@ import java.util.Objects;
 public final class Lights implements AutoCloseable {
 
     static final int LIGHT_BYTES = 80;
-    static final int SHADOW_BYTES = 128;
-    /** Shadow kinds and map filters, as lights.slang numbers them. */
-    private static final int SHADOW_MAP = LightsConstants.SHADOW_MAP;
-    private static final int SHADOW_MASK = LightsConstants.SHADOW_MASK;
-    private static final int SHADOW_RAY = LightsConstants.SHADOW_RAY;
-    private static final int PCF = LightsConstants.PCF;
+    /** Light types, as lights.slang numbers them. */
     private static final int POINT = LightsConstants.POINT;
     private static final int SPOT = LightsConstants.SPOT;
     private static final int DIRECTIONAL = LightsConstants.DIRECTIONAL;
 
     private final FrameBuffer lights;
-    private final FrameBuffer shadows;
+    private final Map<ViewPort, ShadowTable> tables = new HashMap<>(); // by view; null: the frame's
+    private final VulkanDevice device;
+    private final int usage;
+    private final FrameSlots slots;
+    private final int[] families;
     private final int capacity;
     private final int shadowCapacity;
     private int count;
@@ -76,7 +80,21 @@ public final class Lights implements AutoCloseable {
         int graphics = device.graphics().family();
         int compute = device.compute().family();
         lights = FrameBuffer.create(device, (long) LIGHT_BYTES * capacity, usage, slots, graphics, compute);
-        shadows = FrameBuffer.create(device, (long) SHADOW_BYTES * shadowCapacity, usage, slots, graphics, compute);
+        this.device = device;
+        this.usage = usage;
+        this.slots = slots;
+        this.families = new int[] {graphics, compute};
+        tables.put(null, new ShadowTable(device, shadowCapacity, usage, slots, families));
+    }
+
+    /**
+     * {@code view}'s shadow table (null: the frame's), made the first time it is asked for: the entries its shadow
+     * techniques write and its light list points its shading at. Every view's has the same {@code shadowCapacity}
+     * entries, numbered alike. Closed with the lights.
+     */
+    @AllowAllocation("a view's first, when the graph builds")
+    public ShadowTable shadowTable(ViewPort view) {
+        return tables.computeIfAbsent(view, v -> new ShadowTable(device, shadowCapacity, usage, slots, families));
     }
 
     /**
@@ -152,71 +170,6 @@ public final class Lights implements AutoCloseable {
         return this;
     }
 
-    /**
-     * Shadow table entry {@code entry}, a shadow map filtered by 3 x 3 PCF: the depth map in sampled slot {@code map},
-     * {@code size} texels across, drawn from {@code camera} (its view-projection and world position: the map serves
-     * every view, and stays valid while the light camera stays), compared with {@code bias}; a cascade covers view
-     * depths up to {@code split} (others: any). Allocates nothing.
-     */
-    public Lights shadowMap(int entry, Camera camera, int map, int size, float bias, float split) {
-        return shadowMap(entry, camera, map, size, bias, split, 0);
-    }
-
-    /**
-     * Like {@link #shadowMap(int, Camera, int, int, float, float)}, looked up from the surface moved
-     * {@code normalOffset} units along its normal (about a texel's size in the world): against acne where the light
-     * grazes, beyond what the depth bias does. Allocates nothing.
-     */
-    public Lights shadowMap(int entry, Camera camera, int map, int size, float bias, float split, float normalOffset) {
-        long o = shadow(entry, SHADOW_MAP, PCF, map);
-        shadows.putFloat(o + 88, normalOffset);
-        float[] toShadow = camera.viewProjection();
-        for (int i = 0; i < 16; i++) {
-            shadows.putFloat(o + 4L * i, toShadow[i]);
-        }
-        shadows.putInt(o + 76, size);
-        shadows.putFloat(o + 80, bias);
-        shadows.putFloat(o + 84, split);
-        putPosition(shadows, o + 96, 16, camera.position(0), camera.position(1), camera.position(2));
-        return this;
-    }
-
-    /**
-     * Shadow table entry {@code entry}, a screen-space mask: channel {@code channel} of the image in sampled slot
-     * {@code mask}, the size of the shaded image, 1 lit and 0 in shadow per pixel. Allocates nothing.
-     */
-    public Lights shadowMask(int entry, int mask, int channel) {
-        long o = shadow(entry, SHADOW_MASK, 0, mask);
-        shadows.putFloat(o + 88, channel);
-        return this;
-    }
-
-    /**
-     * Shadow table entry {@code entry}, an inline ray query into the top level in acceleration structure slot
-     * {@code scene}, built relative to world position ({@code x}, {@code y}, {@code z}), from {@code offset} per unit of
-     * distance off the surface (the drawn surface may be a detail level within a pixel of the traced one). Shading
-     * that cannot trace counts it as lit. Allocates nothing.
-     */
-    public Lights shadowRay(int entry, int scene, float offset, double x, double y, double z) {
-        long o = shadow(entry, SHADOW_RAY, 0, scene);
-        shadows.putFloat(o + 88, offset);
-        putPosition(shadows, o + 96, 16, x, y, z);
-        return this;
-    }
-
-    /** Shadow table entry {@code entry}'s offset, its kind, filter and image set, the rest reset. */
-    private long shadow(int entry, int kind, int filter, int map) {
-        Objects.checkIndex(entry, shadowCapacity);
-        long o = (long) SHADOW_BYTES * entry;
-        shadows.putInt(o + 64, kind);
-        shadows.putInt(o + 68, filter);
-        shadows.putInt(o + 72, map);
-        shadows.putFloat(o + 84, Float.MAX_VALUE); // covers every depth, unless a cascade's split says otherwise
-        shadows.putFloat(o + 88, 0);
-        shadows.putFloat(o + 92, 0);
-        return o;
-    }
-
     /** Light {@code index}'s offset. */
     private long light(int index) {
         Objects.checkIndex(index, capacity);
@@ -254,13 +207,12 @@ public final class Lights implements AutoCloseable {
         return lights.deviceAddress();
     }
 
-    long shadowsAddress() {
-        return shadows.deviceAddress();
-    }
-
     @Override
     public void close() {
         lights.close();
-        shadows.close();
+        for (ShadowTable table : tables.values()) {
+            table.close();
+        }
+        tables.clear();
     }
 }
