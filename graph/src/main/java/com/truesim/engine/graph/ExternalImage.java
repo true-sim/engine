@@ -21,6 +21,7 @@ public final class ExternalImage {
     int version;
     long handle;
     long view;
+    int sampled = -1; // its sampled slot in the bindless set, if it has one (a texture's)
 
     /**
      * An external image of {@code width} by {@code height} {@code format} texels, created with {@code usage} (the
