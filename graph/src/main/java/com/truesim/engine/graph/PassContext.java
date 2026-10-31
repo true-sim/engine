@@ -96,6 +96,11 @@ public final class PassContext {
         return graph.historyValid(history.index);
     }
 
+    /** Whether {@code history}'s last frame buffer holds what that frame wrote: not on its first frame. */
+    public boolean historyValid(BufferHistory history) {
+        return graph.historyValid(history.pair);
+    }
+
     /** The storage slot of mip level {@code mip} of the image. */
     public int storage(Image image, int mip) {
         return graph.storageSlotOf(declared(image).id, mip);

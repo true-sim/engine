@@ -858,6 +858,9 @@ is released.
   mapping per window; VR through OpenXR (`engine-xr`: eyes as views, a desktop mirror, input) in 0.67 to 0.72. Left:
   multiview (both eyes in one pass) and a run with a headset.
 - **Phase 6 status (2026-10-31):** switches with fallbacks landed in 0.73.
+- **Phase 7 status (2026-10-31):** landed by 0.74: imported buffers on async queues and buffers swapped without a
+  rebuild (earlier), persistent images and buffers (`g.persistent`, `g.persistentBuffer`) and history buffers
+  (`g.historyBuffer`). A persistent image is one layer, mip level and sample for now.
 - **Phase 2 is large.** It lands as several PRs that are released once. Its design decisions (graph-owned scopes, view
   constants as an array, open `Access`, the purity contract) are the ones that would be expensive to change later.
 - **After phase 4,** phases 5 to 10 can be reordered by need.

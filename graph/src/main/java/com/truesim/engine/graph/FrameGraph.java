@@ -157,6 +157,12 @@ public final class FrameGraph implements AutoCloseable {
     private final Map<Object, AutoCloseable> cache = new LinkedHashMap<>();
     private final ResourcePool resources; // the images and buffers kept across builds
     private HistoryPair[] activeHistories = new HistoryPair[0];
+    // Persistent images and buffers by key, those a rebuild replaced (freed after it), and the buffer histories of the
+    // graph built with their views.
+    private final Map<String, Persistent> persistents = new HashMap<>();
+    private final List<Persistent> replaced = new ArrayList<>();
+    private Persistent[] bufferHistories = new Persistent[0];
+    private ViewPort[] bufferHistoryView = new ViewPort[0];
     private static final Physical[] NO_PHYSICALS = new Physical[0];
     // The seam: transitions joining the histories to a graph just built, recorded at the start of its first frame.
     private Physical[] seamImages = NO_PHYSICALS;
@@ -683,6 +689,11 @@ public final class FrameGraph implements AutoCloseable {
                 activeHistories[h].current.swap(activeHistories[h].previous);
             }
         }
+        for (int h = 0; h < bufferHistories.length; h++) {
+            if (bufferHistoryView[h] == null || bufferHistoryView[h].active) {
+                bufferHistories[h].swap();
+            }
+        }
         if (dirty || externalsResized() || techniquesChanged()) {
             build();
         }
@@ -692,6 +703,12 @@ public final class FrameGraph implements AutoCloseable {
             HistoryPair pair = activeHistories[h];
             if (!historyRuns(h) && pair.firstFrame >= frame) {
                 pair.firstFrame = frame + 1; // not written yet: the frame after it first is has a last frame
+            }
+        }
+        for (int h = 0; h < bufferHistories.length; h++) {
+            boolean runs = bufferHistoryView[h] == null || bufferHistoryView[h].active;
+            if (!runs && bufferHistories[h].firstFrame >= frame) {
+                bufferHistories[h].firstFrame = frame + 1;
             }
         }
         for (int s = 0; s < switches.length; s++) {
@@ -1250,12 +1267,20 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     int storageSlotOf(int image, int mip) {
-        int[] slots = physicals[targetOf[image]].storage;
+        int target = targetOf[image];
+        if (target < 0) {
+            return mip == 0 ? externals[~target].storage : -1;
+        }
+        int[] slots = physicals[target].storage;
         return mip < slots.length ? slots[mip] : -1;
     }
 
     int sampledSlotOf(int image, int mip) {
-        int[] slots = physicals[targetOf[image]].sampledMips;
+        int target = targetOf[image];
+        if (target < 0) {
+            return mip == 0 ? externals[~target].sampled : -1;
+        }
+        int[] slots = physicals[target].sampledMips;
         return mip < slots.length ? slots[mip] : -1;
     }
 
@@ -1444,6 +1469,7 @@ public final class FrameGraph implements AutoCloseable {
         chunkCommands = new VkCommandBuffer[chunkBatch.length];
         startTooling(g);
         startHistories(pairs, keptPair, compiled);
+        startPersistents(g);
         dirty = false;
         built = g.techniques().toArray(new Technique[0]);
         builtVersions = new long[built.length];
@@ -1654,6 +1680,62 @@ public final class FrameGraph implements AutoCloseable {
         seamImages = NO_PHYSICALS;
     }
 
+    /**
+     * The persistent image ({@code desc}) or {@code count} buffers of {@code size} bytes by {@code key}, for the build
+     * under way: kept from the builds before when they match, else made anew (the ones replaced are freed after the
+     * build).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    Persistent persistent(String key, ImageDesc desc, long size, int count) {
+        Persistent kept = persistents.get(key);
+        if (kept != null && !kept.is(desc, size, count)) {
+            replaced.add(kept);
+            kept = null;
+        }
+        if (kept == null) {
+            kept = desc != null ? new Persistent(device, key, desc)
+                : new Persistent(device, key, size, count, graphicsQueue.family(), computeQueue.family());
+            kept.firstFrame = frame + 1; // the frame being built is its first
+            persistents.put(key, kept);
+        }
+        kept.built = builds + 1L;
+        return kept;
+    }
+
+    /**
+     * The persistent resources of the graph just built: its buffer histories, to swap each frame; those no build asks
+     * for any more, and those replaced, are freed once no frame in flight uses them.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    private void startPersistents(GraphBuilder g) {
+        bufferHistories = new Persistent[g.bufferHistories.size()];
+        for (int h = 0; h < bufferHistories.length; h++) {
+            bufferHistories[h] = g.bufferHistories.get(h).pair;
+        }
+        bufferHistoryView = g.bufferHistoryViews.toArray(new ViewPort[0]);
+        for (java.util.Iterator<Persistent> it = persistents.values().iterator(); it.hasNext();) {
+            Persistent kept = it.next();
+            if (kept.built != builds + 1L) {
+                it.remove();
+                retiring.add(kept);
+            }
+        }
+        for (Persistent old : replaced) {
+            retiring.add(old);
+        }
+        replaced.clear();
+    }
+
+    /** How many persistent images and buffers the graph keeps. */
+    int persistentCount() {
+        return persistents.size();
+    }
+
+    /** Whether {@code history}'s last frame buffer holds what that frame wrote. */
+    boolean historyValid(Persistent history) {
+        return frame > history.firstFrame;
+    }
+
     /** Whether history {@code index}'s last frame image holds what that frame wrote. */
     boolean historyValid(int index) {
         return frame > activeHistories[index].firstFrame;
@@ -1708,6 +1790,16 @@ public final class FrameGraph implements AutoCloseable {
             texture.close();
         }
         textures.clear();
+        for (Persistent kept : persistents.values()) {
+            kept.close();
+        }
+        persistents.clear();
+        for (Persistent old : replaced) {
+            old.close();
+        }
+        replaced.clear();
+        bufferHistories = new Persistent[0];
+        bufferHistoryView = new ViewPort[0];
         settingsWatch.close();
         retiring.close(); // the frames are done: removed textures go now
         retiring = new Retiring(frameSlots); // for what is removed after, at once
