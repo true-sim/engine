@@ -938,6 +938,47 @@ class MeshletRendererTest {
         }
     }
 
+    @Test
+    void eachTextureKeepsItsSampler() {
+        int quadMesh = pool.add(texturedQuad());
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8)) {
+            // Red on the left half of the texture, blue on the right. The quad's left half spans u 0 to 2: repeating,
+            // u 1 to 2 shows red again; clamped, the edge's blue.
+            java.lang.foreign.MemorySegment halves = texels(8, (x, y) -> x < 4 ? 0xff0000ff : 0xffff0000);
+            int repeating = textures.add(TextureFormat.RGBA8_SRGB, 8, 8, Textures.GENERATE, halves);
+            int clamped = textures.add(TextureFormat.RGBA8_SRGB, 8, 8, Textures.GENERATE, halves,
+                TextureSampler.CLAMP);
+            assertThat(TextureSampler.from(repeating)).isEqualTo(TextureSampler.REPEAT);
+            assertThat(TextureSampler.from(clamped)).isEqualTo(TextureSampler.CLAMP);
+            assertThat(TextureSampler.CLAMP.of(repeating)).isNotEqualTo(repeating);
+            int from = SIZE / 2 - 8;
+            int to = SIZE / 2 - 2;
+            double redRepeating = redOf(materials, quadMesh, repeating, from, to);
+            double redClamped = redOf(materials, quadMesh, clamped, from, to);
+            assertThat(redClamped).as("clamped: blue past u 1").isLessThan(20);
+            assertThat(redRepeating).as("repeating: red again").isGreaterThan(redClamped + 30);
+            assertThat(redOf(materials, quadMesh, TextureSampler.CLAMP.of(repeating), from, to))
+                .as("the same image, named with another sampler").isLessThan(20);
+            assertThat(textures.contains(clamped)).isTrue();
+            textures.remove(clamped);
+            assertThat(textures.contains(clamped)).isFalse();
+            assertThat(textures.count()).isEqualTo(1);
+        }
+    }
+
+    /** The red channel over columns {@code from} to {@code to} of the textured quad drawn with {@code texture}. */
+    private double redOf(Materials materials, int quadMesh, int texture, int from, int to) {
+        int first = materials.add(new Material(MR.withBaseColor(new Color(1, 1, 1, 1)).withBaseColorTexture(texture)
+            .withRoughness(1)));
+        materials.add(new Material(GREEN));
+        scene.setMaterials(materials);
+        scene.set(0, quadMesh, first, 0, 0, -5, 0, 0, 0, 1, 1, 1, 1);
+        scene.removeFrom(1);
+        lookForward(1, MeshletRenderer.MODE_LIT);
+        render();
+        return channel(0, from, to);
+    }
+
     /** The textured quad's left half drawn with {@code texture} as base color: red. */
     private void expectRedLeft(Textures textures, Materials materials, int quadMesh, int texture) {
         int first = materials.add(new Material(MR.withBaseColor(new Color(1, 1, 1, 1)).withBaseColorTexture(texture)
