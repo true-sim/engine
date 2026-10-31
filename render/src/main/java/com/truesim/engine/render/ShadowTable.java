@@ -27,15 +27,24 @@ public final class ShadowTable implements AutoCloseable {
     private static final int SHADOW_NONE = LightsConstants.SHADOW_NONE;
     private static final int PCF = LightsConstants.PCF;
 
-    private final FrameBuffer shadows;
+    private FrameBuffer shadows; // replaced by a bigger one as the lights grow
     private final int capacity;
-    private final int lights;
+    private int lights;
 
     /**
      * {@code capacity} entries, then each of {@code lights} lights' range of them, 8 bytes (first, count; first -1:
      * none), where lights.slang's light list finds it past the entries.
      */
+    private final VulkanDevice device;
+    private final int usage;
+    private final FrameSlots slots;
+    private final int[] families;
+
     ShadowTable(VulkanDevice device, int capacity, int lights, int usage, FrameSlots slots, int... families) {
+        this.device = device;
+        this.usage = usage;
+        this.slots = slots;
+        this.families = families;
         this.capacity = capacity;
         this.lights = lights;
         shadows = FrameBuffer.create(device, (long) SHADOW_BYTES * capacity + 8L * lights, usage, slots, families);
@@ -68,6 +77,22 @@ public final class ShadowTable implements AutoCloseable {
         shadows.putInt(range(light), -1);
         shadows.putInt(range(light) + 4, 0);
         return this;
+    }
+
+    /**
+     * Room for {@code lights} lights' ranges, as the lights grew: the table copied into a bigger one (the new lights
+     * casting no shadows), the old one retired through {@code retiring}.
+     */
+    void growLights(int lights, com.truesim.engine.vulkan.Retiring retiring) {
+        FrameBuffer old = shadows;
+        int had = this.lights;
+        shadows = FrameBuffer.create(device, (long) SHADOW_BYTES * capacity + 8L * lights, usage, slots, families);
+        shadows.copyFrom(old);
+        retiring.add(old);
+        this.lights = lights;
+        for (int light = had; light < lights; light++) {
+            shadows.putInt(range(light), -1);
+        }
     }
 
     /** Where light {@code light}'s range lies: past the entries. */

@@ -87,6 +87,28 @@ class ClusteredLightsTest {
     }
 
     @Test
+    void lightsAreAddedRemovedAndGrow() {
+        try (Lights few = new Lights(device, 2, 4)) {
+            ShadowTable table = few.shadowTable(null);
+            int sun = few.add();
+            int lamp = few.add();
+            int third = few.add(); // past the room: grown, the shadow table's lights with it
+            assertThat(new int[] {sun, lamp, third}).containsExactly(0, 1, 2);
+            assertThat(few.capacity()).isEqualTo(4);
+            assertThat(few.count()).isEqualTo(3);
+            few.directional(sun, 0, -1, 0, 1, 1, 1).point(third, 1, 2, 3, 5, 1, 1, 1);
+            table.light(third, 0, 1); // its range in the grown table
+            assertThat(few.position(third, 1)).isEqualTo(2);
+            few.remove(lamp); // a hole: the count stays
+            assertThat(few.count()).isEqualTo(3);
+            few.remove(third);
+            assertThat(few.count()).as("past the holes").isEqualTo(1);
+            assertThat(few.add()).as("the lowest free id again").isEqualTo(1);
+            assertThatIllegalArgumentException().isThrownBy(() -> few.remove(2));
+        }
+    }
+
+    @Test
     void lightsGoWhereTheyReach() {
         Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
         lights.directional(0, -0.4f, -0.8f, -0.3f, 3, 3, 3)

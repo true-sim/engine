@@ -30,10 +30,15 @@ import java.util.Objects;
  * their lights in the table of the view they build in, so each view's cascades fit its own camera.
  *
  * <pre>{@code
- * lights.directional(0, -0.4f, -0.8f, -0.3f, 3, 3, 3);                  // the sun; its shadow technique sets entries
- * lights.point(1, x, y, z, 10, 20, 15, 10);                              // range 10, warm
- * lights.setCount(2);
+ * int sun = lights.add();                                                // the lowest free id; grows when full
+ * lights.directional(sun, -0.4f, -0.8f, -0.3f, 3, 3, 3);                // its shadow technique sets entries
+ * int lamp = lights.add();
+ * lights.point(lamp, x, y, z, 10, 20, 15, 10);                           // range 10, warm
+ * lights.remove(lamp);                                                   // off, its id free for the next add
  * }</pre>
+ *
+ * <p>Or by index, managing the count: {@code lights.point(1, ...)} and {@link #setCount}. Ids are stable: a removed
+ * light leaves an unlit hole until its id is taken again, so techniques may keep a light's id.
  *
  * <p>Lights are read when the frame's commands run. Given a frame graph's {@link FrameSlots}, they keep a copy per frame
  * in flight and may change every frame; otherwise change them only once the frames using them have finished.
@@ -48,16 +53,17 @@ public final class Lights implements AutoCloseable {
     private static final int SPOT = LightsConstants.SPOT;
     private static final int DIRECTIONAL = LightsConstants.DIRECTIONAL;
 
-    private final FrameBuffer lights;
+    private FrameBuffer lights; // replaced by a bigger one as lights are added past it
     private final Map<ViewPort, ShadowTable> tables = new HashMap<>(); // by view; null: the frame's
     private final VulkanDevice device;
     private final int usage;
     private final FrameSlots slots;
     private final int[] families;
     private final Retiring retiring; // the tables of views gone, until no frame in flight reads them
-    private final int capacity;
+    private int capacity;
     private final int shadowCapacity;
     private int count;
+    private boolean[] taken; // ids add() handed out and remove() did not take back
 
     /**
      * Room for {@code capacity} lights and {@code shadowCapacity} shadow maps, one copy of them: for frames the caller
@@ -77,6 +83,7 @@ public final class Lights implements AutoCloseable {
         }
         this.capacity = capacity;
         this.shadowCapacity = shadowCapacity;
+        this.taken = new boolean[capacity];
         int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         // Read by the graphics queue and by async compute (light clusters, ray-traced shadows): shared by both.
         int graphics = device.graphics().family();
@@ -100,7 +107,7 @@ public final class Lights implements AutoCloseable {
     public ShadowTable shadowTable(ViewPort view) {
         ShadowTable table = tables.get(view);
         if (table == null) {
-            table = new ShadowTable(device, shadowCapacity, capacity, usage, slots, families);
+            table = new ShadowTable(device, shadowCapacity, capacity, usage, slots, families); // grows with the lights
             tables.put(view, table);
             if (view != null) {
                 view.own(() -> retire(view));
@@ -207,6 +214,61 @@ public final class Lights implements AutoCloseable {
         out[0] = lights.getFloat(o + 32);
         out[1] = lights.getFloat(o + 36);
         out[2] = lights.getFloat(o + 40);
+    }
+
+    /**
+     * A light's id, the lowest free one, its light off until set ({@link #point}, {@link #spot}, {@link #directional}):
+     * the count follows the highest id taken. Room grows (twice) when every id is taken.
+     */
+    @AllowAllocation("growing, rarely")
+    public int add() {
+        int id = 0;
+        while (id < capacity && taken[id]) {
+            id++;
+        }
+        if (id == capacity) {
+            grow(2 * capacity);
+        }
+        taken[id] = true;
+        off(id);
+        count = Math.max(count, id + 1);
+        return id;
+    }
+
+    /** Turns light {@code id} ({@link #add}) off and frees its id for the next add; the count drops past holes. */
+    public void remove(int id) {
+        Objects.checkIndex(id, capacity);
+        if (!taken[id]) {
+            throw new IllegalArgumentException("No light " + id + " was added");
+        }
+        taken[id] = false;
+        off(id);
+        while (count > 0 && !taken[count - 1]) {
+            count--;
+        }
+    }
+
+    /** Light {@code id} lights nothing: a point light of no range and no color, casting no shadows. */
+    private void off(int id) {
+        set(id, POINT, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1);
+    }
+
+    /** Room for {@code more} lights: the lights and each view's shadow table copied into bigger ones. */
+    private void grow(int more) {
+        FrameBuffer old = lights;
+        lights = FrameBuffer.create(device, (long) LIGHT_BYTES * more, usage, slots, families);
+        lights.copyFrom(old);
+        retiring.add(old); // frames in flight read it
+        for (ShadowTable table : tables.values()) {
+            table.growLights(more, retiring);
+        }
+        taken = java.util.Arrays.copyOf(taken, more);
+        capacity = more;
+    }
+
+    /** How many lights there is room for now: it grows as lights are added ({@link #add}). */
+    public int capacity() {
+        return capacity;
     }
 
     /** How many lights, from 0, shine. */
