@@ -6,12 +6,14 @@ import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.ExternalBuffer;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Request;
+import java.util.List;
 import java.util.Objects;
 
 /**
  * A renderer's scene data on the GPU as buffers of the graph: its instances and its geometry pool's buffers, imported
  * once per build however many techniques request them. Passes reading them declare it ({@link Buffers#read}), so the
- * graph orders them after whatever writes them: the uploads, or a game's own passes writing instances.
+ * graph orders them after whatever writes them: the uploads, or a game's own passes writing instances. The frame graph
+ * buffers the scene's materials name ({@link Materials#graphBuffers}) are among them: a pass writing one comes first.
  *
  * <pre>{@code
  * SceneData.Buffers scene = g.request(new SceneData(renderer));
@@ -24,14 +26,18 @@ public record SceneData(MeshletRenderer renderer) implements Request<SceneData.B
         Objects.requireNonNull(renderer, "renderer");
     }
 
-    /** The imported buffers: the instances, then the pool's vertices and meshlets. */
+    /** The imported buffers: the instances, then the pool's vertices and meshlets, then the materials' buffers. */
     public record Buffers(Buffer instances, Buffer positions, Buffer attributes, Buffer meshlets,
-        Buffer meshletVertices, Buffer meshletTriangles, Buffer clusterLod) {
+        Buffer meshletVertices, Buffer meshletTriangles, Buffer clusterLod, java.util.List<Buffer> materials) {
 
         /** Declares that {@code pass} reads every one of them with {@code access}; returns {@code pass}. */
         public GraphBuilder.PassBuilder read(GraphBuilder.PassBuilder pass, BufferAccess access) {
-            return pass.read(instances, access).read(positions, access).read(attributes, access).read(meshlets, access)
+            pass.read(instances, access).read(positions, access).read(attributes, access).read(meshlets, access)
                 .read(meshletVertices, access).read(meshletTriangles, access).read(clusterLod, access);
+            for (Buffer buffer : materials) {
+                pass.read(buffer, access);
+            }
+            return pass;
         }
     }
 
@@ -46,9 +52,15 @@ public record SceneData(MeshletRenderer renderer) implements Request<SceneData.B
         GeometryPool pool = renderer.pool();
         GpuScene scene = renderer.scene();
         ExternalBuffer[] geometry = pool.graphBuffers(); // the pool's own: set anew as it grows
+        java.util.List<Buffer> named = new java.util.ArrayList<>();
+        if (scene.materials() != null) {
+            for (ExternalBuffer buffer : scene.materials().graphBuffers()) {
+                named.add(g.importBuffer(buffer));
+            }
+        }
         Buffers buffers = new Buffers(g.importBuffer(scene.graphBuffer()),
             g.importBuffer(geometry[0]), g.importBuffer(geometry[1]), g.importBuffer(geometry[2]),
-            g.importBuffer(geometry[3]), g.importBuffer(geometry[4]), g.importBuffer(geometry[5]));
+            g.importBuffer(geometry[3]), g.importBuffer(geometry[4]), g.importBuffer(geometry[5]), List.copyOf(named));
         pool.uploadInPasses();
         scene.uploadInPasses();
         g.pass("scene upload").write(buffers.instances, BufferAccess.STORAGE_WRITE)

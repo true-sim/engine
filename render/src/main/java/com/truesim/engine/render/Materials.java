@@ -70,6 +70,17 @@ public final class Materials implements AutoCloseable {
     private int[][] named; // per material id: the textures it names, as counted (-1: none; null: none at all)
     private final int[] textureUsers = new int[com.truesim.engine.vulkan.Bindless.SAMPLED_SLOTS]; // per texture slot
     private final Gather gather = new Gather();
+    // Per material id with buffer fields: where each lies in its block, its buffer, the address last written there.
+    private long[][] bufferAt;
+    private com.truesim.engine.vulkan.DeviceBuffer[][] buffersOf;
+    private long[][] bufferWritten;
+    private final java.util.BitSet withBuffers = new java.util.BitSet();
+    private final BufferGather bufferGather = new BufferGather();
+    // The frame graph's buffers materials name, by how many fields name each: imported by the passes reading scene
+    // data (SceneData), so they are ordered after the passes writing them. A new set rebuilds the graph.
+    private final Map<com.truesim.engine.graph.ExternalBuffer, int[]> graphBufferUsers = new java.util.IdentityHashMap<>();
+    private List<com.truesim.engine.graph.ExternalBuffer> graphBuffers = List.of();
+    private long graphBuffersVersion;
     private long[] heapUnit;
     private int[] heapUnits;
     private int live;
@@ -122,6 +133,9 @@ public final class Materials implements AutoCloseable {
         used = new boolean[capacity];
         materials = new Material[capacity];
         named = new int[capacity][];
+        bufferAt = new long[capacity][];
+        buffersOf = new com.truesim.engine.vulkan.DeviceBuffer[capacity][];
+        bufferWritten = new long[capacity][];
         heapUnit = new long[capacity];
         heapUnits = new int[capacity];
         Arrays.fill(heapUnit, -1);
@@ -397,6 +411,9 @@ public final class Materials implements AutoCloseable {
             used = Arrays.copyOf(used, more);
             materials = Arrays.copyOf(materials, more);
             named = Arrays.copyOf(named, more);
+            bufferAt = Arrays.copyOf(bufferAt, more);
+            buffersOf = Arrays.copyOf(buffersOf, more);
+            bufferWritten = Arrays.copyOf(bufferWritten, more);
             heapUnit = Arrays.copyOf(heapUnit, more);
             Arrays.fill(heapUnit, capacity, more, -1);
             heapUnits = Arrays.copyOf(heapUnits, more);
@@ -516,6 +533,143 @@ public final class Materials implements AutoCloseable {
         }
     }
 
+    /**
+     * {@link #update(int, MaterialField, float)} for a buffer field ({@code T*} in Slang): {@code buffer}'s address from
+     * now on, followed as it changes; null for none. {@link #material} keeps the material as it was set.
+     */
+    @AllowAllocation("a graph buffer named anew, rarely")
+    public void update(int id, MaterialField field, com.truesim.engine.vulkan.DeviceBuffer buffer) {
+        if (field.kind() != MaterialField.Kind.BUFFER) {
+            throw new IllegalArgumentException(field + " holds no buffer");
+        }
+        long offset = fieldOffset(id, field);
+        long at = offset - (heapStart + heapUnit[id] * ALIGNMENT);
+        long[] where = bufferAt[id];
+        for (int i = 0; where != null && i < where.length; i++) {
+            if (where[i] == at) {
+                countGraphBuffer(buffersOf[id][i], -1);
+                countGraphBuffer(buffer, 1);
+                buffersOf[id][i] = buffer;
+                bufferWritten[id][i] = addressOf(buffer);
+                table.putLong(offset, bufferWritten[id][i]);
+                return;
+            }
+        }
+        throw new IllegalStateException("Material " + id + "'s " + field + " was not gathered"); // the record lied
+    }
+
+    /**
+     * Writes the addresses of the buffers materials name where they changed since last written: a {@code FrameBuffer}'s
+     * open slot's copy, a buffer grown or set anew. Called as each frame records, before shading (the scene's upload).
+     * Allocates nothing.
+     */
+    void followBuffers() {
+        for (int id = withBuffers.nextSetBit(0); id >= 0; id = withBuffers.nextSetBit(id + 1)) {
+            long block = heapStart + heapUnit[id] * ALIGNMENT;
+            com.truesim.engine.vulkan.DeviceBuffer[] buffers = buffersOf[id];
+            for (int i = 0; i < buffers.length; i++) {
+                long address = addressOf(buffers[i]);
+                if (address != bufferWritten[id][i]) {
+                    table.putLong(block + bufferAt[id][i], address);
+                    bufferWritten[id][i] = address;
+                }
+            }
+        }
+    }
+
+    /**
+     * The frame graph's buffers ({@code ExternalBuffer}) materials name now: the passes reading scene data read them
+     * too ({@link SceneData}), so the graph orders those passes after the ones writing them.
+     */
+    public List<com.truesim.engine.graph.ExternalBuffer> graphBuffers() {
+        return graphBuffers;
+    }
+
+    /** Changes as the set of {@link #graphBuffers} does: techniques shading materials rebuild the graph for it. */
+    public long graphBuffersVersion() {
+        return graphBuffersVersion;
+    }
+
+    private static long addressOf(com.truesim.engine.vulkan.DeviceBuffer buffer) {
+        return buffer == null ? 0 : buffer.deviceAddress();
+    }
+
+    /** Material {@code id}'s buffer fields are those of {@code material} now, its block's addresses written. */
+    @AllowAllocation("adding or setting a material")
+    private void nameBuffers(int id, Material material) {
+        unnameBuffers(id);
+        bufferGather.count = 0;
+        material.parameters().buffers(0, bufferGather);
+        long o = align(material.parameters().bytes());
+        for (MaterialFeature feature : material.features()) {
+            feature.buffers(o, bufferGather);
+            o += align(feature.bytes());
+        }
+        int count = bufferGather.count;
+        if (count == 0) {
+            return;
+        }
+        bufferAt[id] = Arrays.copyOf(bufferGather.at, count);
+        buffersOf[id] = Arrays.copyOf(bufferGather.buffers, count);
+        bufferWritten[id] = new long[count];
+        long block = heapStart + heapUnit[id] * ALIGNMENT;
+        for (int i = 0; i < count; i++) {
+            countGraphBuffer(buffersOf[id][i], 1);
+            bufferWritten[id][i] = table.getLong(block + bufferAt[id][i]); // as the record wrote it
+        }
+        withBuffers.set(id);
+    }
+
+    /** Material {@code id} names no buffers. */
+    private void unnameBuffers(int id) {
+        com.truesim.engine.vulkan.DeviceBuffer[] buffers = buffersOf[id];
+        if (buffers != null) {
+            for (com.truesim.engine.vulkan.DeviceBuffer buffer : buffers) {
+                countGraphBuffer(buffer, -1);
+            }
+        }
+        bufferAt[id] = null;
+        buffersOf[id] = null;
+        bufferWritten[id] = null;
+        withBuffers.clear(id);
+    }
+
+    /** One more ({@code by} 1) or one fewer (-1) field names {@code buffer}: the graph's set follows. */
+    private void countGraphBuffer(com.truesim.engine.vulkan.DeviceBuffer buffer, int by) {
+        if (!(buffer instanceof com.truesim.engine.graph.ExternalBuffer external)) {
+            return;
+        }
+        int[] users = graphBufferUsers.get(external);
+        if (users == null) {
+            graphBufferUsers.put(external, users = new int[1]);
+        }
+        users[0] += by;
+        if (users[0] == 0 || users[0] == by) { // gone, or new: another set
+            if (users[0] == 0) {
+                graphBufferUsers.remove(external);
+            }
+            graphBuffers = List.copyOf(graphBufferUsers.keySet());
+            graphBuffersVersion++;
+        }
+    }
+
+    /** A material's buffer fields, gathered: reused, so naming allocates only the copies kept. */
+    private static final class BufferGather implements MaterialBuffers {
+        long[] at = new long[4];
+        com.truesim.engine.vulkan.DeviceBuffer[] buffers = new com.truesim.engine.vulkan.DeviceBuffer[4];
+        int count;
+
+        @Override
+        public void accept(long offset, com.truesim.engine.vulkan.DeviceBuffer buffer) {
+            if (count == at.length) {
+                at = Arrays.copyOf(at, 2 * count);
+                buffers = Arrays.copyOf(buffers, 2 * count);
+            }
+            at[count] = offset;
+            buffers[count++] = buffer;
+        }
+    }
+
     /** {@link #update(int, MaterialField, float)} for a vector or color field: its first {@code count()} values. */
     public void update(int id, MaterialField field, float x, float y, float z, float w) {
         if (field.kind() != MaterialField.Kind.FLOATS) {
@@ -612,6 +766,7 @@ public final class Materials implements AutoCloseable {
         }
         materials[id] = null;
         unname(id);
+        unnameBuffers(id);
     }
 
     private static long align(long bytes) {
@@ -666,6 +821,7 @@ public final class Materials implements AutoCloseable {
         table.putInt(slot + MaterialLayout.GEOMETRY, 0);
         materials[id] = material;
         name(id, material);
+        nameBuffers(id, material);
     }
 
     /** How many materials the table holds, the default one included. */

@@ -38,6 +38,13 @@ public final class ClusteredForwardShading implements Technique {
         this.depthFormat = depthFormat;
     }
 
+    /** The graph buffers the scene's materials name: one named anew rebuilds the graph, which orders its writers first. */
+    @Override
+    public long buildVersion() {
+        Materials materials = geometry.renderer().scene().materials();
+        return materials == null ? 0 : materials.graphBuffersVersion();
+    }
+
     /** The color behind everything; read when recording, so it may change every frame. */
     public ClusteredForwardShading clearColor(float r, float g, float b) {
         clear[0] = r;

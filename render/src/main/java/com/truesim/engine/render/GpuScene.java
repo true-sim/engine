@@ -440,7 +440,15 @@ public final class GpuScene implements AutoCloseable {
      * too, for frames recorded otherwise. Allocates nothing.
      */
     public void upload(VkCommandBuffer commands) {
+        followMaterialBuffers();
         instances.upload(commands);
+    }
+
+    /** The addresses of the buffers materials name, as they are for the frame recording ({@link Materials}). */
+    private void followMaterialBuffers() {
+        if (materials != null) {
+            materials.followBuffers();
+        }
     }
 
     /** From now on a frame graph's scene upload pass ({@link SceneData}) uploads the instances, not frame starts. */
@@ -450,6 +458,7 @@ public final class GpuScene implements AutoCloseable {
 
     /** Uploads the instances for that pass, which declares it writes them with compute. */
     void uploadInPass(VkCommandBuffer commands) {
+        followMaterialBuffers();
         instances.uploadInPass(commands);
     }
 
