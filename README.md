@@ -656,8 +656,12 @@ that declare how they use each image. The graph does the rest:
   `resolution.minScale` and the maximum, and a new size that still fits moves it too. Neither rebuilds; an allocation
   larger than needed for `resolution.shrinkFrames` frames shrinks. Passes that render within the region say so
   (`pass.region()`: the graph sets the rendering area, viewport and scissor to the region's share of their attachments),
-  and compute work reads `ctx.regionWidth(image)` and `ctx.regionHeight(image)` while recording. The view's outputs
-  are scaled from the region into their targets.
+  and compute work reads `ctx.regionWidth(image)` and `ctx.regionHeight(image)` while recording; shared work drawing
+  for one view names it (`pass.region(view)`). The engine's techniques all do: the scene's draws, occlusion culling and
+  its depth pyramid, light clusters, the visibility buffer's shading and ray-traced shadow masks. `DisplayTransform`
+  scales the region up to the size the view shows at, filtered within the region (`g.unscaled(image)` marks such a
+  result); other outputs are scaled from the region unfiltered. `new DynamicResolution(graph, view).update()` once a
+  frame picks the scale from the GPU time, aiming at `resolution.targetMillis`.
 - **Switches:** `technique.when(setting)` (a `Switch`) runs the technique only while a boolean setting is on, read
   every frame: no rebuild. An in-place effect switched off leaves its image as it was; a producer gives a fallback for
   each image others sample (`fallback(key, Fallback.constant(format, value))`), read instead while it is off. A view's

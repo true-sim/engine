@@ -204,6 +204,16 @@ public final class ViewPort {
         return outputHeight;
     }
 
+    /** The smallest render scale of its dynamic resolution, as of the last build. */
+    public float minScale() {
+        return minScale;
+    }
+
+    /** The largest render scale of its dynamic resolution, as of the last build. */
+    public float maxScale() {
+        return maxScale;
+    }
+
     /** Whether the view renders at a dynamic resolution ({@link ResolutionSettings#DYNAMIC}), as of the last build. */
     public boolean dynamic() {
         return dynamic;

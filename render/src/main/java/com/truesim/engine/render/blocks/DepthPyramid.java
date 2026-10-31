@@ -8,6 +8,7 @@ import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.graph.Subresource;
+import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.render.layout.PyramidPush;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
@@ -24,11 +25,19 @@ import java.util.Objects;
  * Image hzb = g.request(new DepthPyramid(depth));   // read it as Access.SAMPLED_COMPUTE, levels by textures[].Load
  * }</pre>
  */
-public record DepthPyramid(Image depth) implements Request<Image> {
+public record DepthPyramid(Image depth, ViewPort view) implements Request<Image> {
 
-
+    /**
+     * The pyramid of {@code depth}, all of it; with a {@code view} (nullable), of its render region in {@code depth}
+     * each frame (dynamic resolution): levels cover the region only, sized from it as from a depth image of its size.
+     */
     public DepthPyramid {
         Objects.requireNonNull(depth, "depth");
+    }
+
+    /** The pyramid of all of {@code depth}. */
+    public DepthPyramid(Image depth) {
+        this(depth, null);
     }
 
     @Override
@@ -39,13 +48,13 @@ public record DepthPyramid(Image depth) implements Request<Image> {
         int height = (depth.height() + 1) / 2;
         Image pyramid = g.create("depth pyramid of " + depth.name(),
             ImageDesc.of(Format.R32_SFLOAT, width, height).fullMips());
-        // A pass per level, each reading the level below as the one before wrote it: the graph orders them.
-        int sourceWidth = depth.width();
-        int sourceHeight = depth.height();
-        int levelWidth = width;
-        int levelHeight = height;
+        // A pass per level, each reading the level below as the one before wrote it: the graph orders them. Sizes come
+        // from the depth's render region each frame, as of an image of its size (levels halving, rounding down).
         for (int mip = 0; mip < pyramid.mips(); mip++) {
             GraphBuilder.PassBuilder pass = g.pass("depth pyramid of " + depth.name() + ", level " + mip);
+            if (view != null) {
+                pass.region(view);
+            }
             Subresource below = mip == 0 ? null : pyramid.mip(mip - 1); // made here: recording allocates nothing
             Subresource target = pyramid.mip(mip);
             if (below == null) {
@@ -53,20 +62,25 @@ public record DepthPyramid(Image depth) implements Request<Image> {
             } else {
                 pass.read(below, Access.STORAGE_READ);
             }
-            // What the level's size decides is set now; the slots, which a rebuild may change, each frame.
-            PyramidPush push = new PyramidPush().sourceSize(sourceWidth, sourceHeight).targetSize(levelWidth, levelHeight)
-                .fromDepth(below == null ? 1 : 0);
-            int groupsX = (levelWidth + 7) / 8;
-            int groupsY = (levelHeight + 7) / 8;
-            pass.write(target, Access.STORAGE_WRITE).record(ctx -> ctx.dispatch(pipeline, push
-                .source(below == null ? ctx.sampled(depth) : ctx.storage(below)).target(ctx.storage(target)), groupsX,
-                groupsY, 1));
-            sourceWidth = levelWidth;
-            sourceHeight = levelHeight;
-            levelWidth = Math.max(1, levelWidth / 2); // Vulkan's mip sizes
-            levelHeight = Math.max(1, levelHeight / 2);
+            PyramidPush push = new PyramidPush().fromDepth(below == null ? 1 : 0);
+            int level = mip;
+            pass.write(target, Access.STORAGE_WRITE).record(ctx -> {
+                int regionWidth = ctx.regionWidth(depth);
+                int regionHeight = ctx.regionHeight(depth);
+                int levelWidth = levelSize(regionWidth, level);
+                int levelHeight = levelSize(regionHeight, level);
+                ctx.dispatch(pipeline, push.sourceSize(level == 0 ? regionWidth : levelSize(regionWidth, level - 1),
+                    level == 0 ? regionHeight : levelSize(regionHeight, level - 1)).targetSize(levelWidth, levelHeight)
+                    .source(below == null ? ctx.sampled(depth) : ctx.storage(below)).target(ctx.storage(target)),
+                    (levelWidth + 7) / 8, (levelHeight + 7) / 8, 1);
+            });
         }
         return pyramid;
+    }
+
+    /** Level {@code mip}'s size along a depth image side of {@code size}: half of it rounded up, then halving down. */
+    static int levelSize(int size, int mip) {
+        return Math.max(1, ((size + 1) / 2) >> mip);
     }
 
 }

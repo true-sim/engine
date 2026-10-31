@@ -39,8 +39,17 @@ public final class ResolutionSettings {
     public static final Setting<Integer> SHRINK_FRAMES = Setting.integer("resolution.shrinkFrames", 300, 1, 1_000_000,
         "frames dynamic resolution keeps an allocation larger than needed before it shrinks");
 
+    /** The GPU time per frame a {@link DynamicResolution} aims for, in milliseconds. */
+    public static final Setting<Float> TARGET_MILLIS = Setting.decimal("resolution.targetMillis", 16.6f, 1, 1000,
+        "the GPU time per frame dynamic resolution aims for, in milliseconds");
+
+    /** How far a {@link DynamicResolution} moves towards the scale meeting its target each frame, 0 to 1. */
+    public static final Setting<Float> RESPONSE = Setting.decimal("resolution.response", 0.2f, 0.01f, 1,
+        "how far dynamic resolution moves towards the scale meeting its target each frame: higher reacts faster");
+
     /** Every resolution setting. */
-    public static final List<Setting<?>> ALL = List.of(SCALE, DYNAMIC, MIN_SCALE, MAX_SCALE, HEADROOM, SHRINK_FRAMES);
+    public static final List<Setting<?>> ALL = List.of(SCALE, DYNAMIC, MIN_SCALE, MAX_SCALE, HEADROOM, SHRINK_FRAMES,
+        TARGET_MILLIS, RESPONSE);
 
     private ResolutionSettings() {
     }

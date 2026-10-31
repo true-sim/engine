@@ -9,6 +9,7 @@ import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.OutputTransform;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.render.layout.EncodePush;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
@@ -92,8 +93,10 @@ public final class DisplayTransform implements OutputTransform {
         public void build(GraphBuilder g) {
             Pipeline pipeline = g.computeProgram("shaders/present/encode.spv", "encodeMain", EncodePush.BYTES);
             Image scene = g.require(source);
-            Image encoded = g.create("encoded for " + encoding,
-                ImageDesc.of(Format.R16G16B16A16_SFLOAT, scene.width(), scene.height()));
+            // At the size the view shows at, its scene color scaled up from what it rendered.
+            ViewPort view = g.view();
+            Image encoded = g.unscaled(g.create("encoded for " + encoding, ImageDesc.of(Format.R16G16B16A16_SFLOAT,
+                view == null ? scene.width() : view.outputWidth(), view == null ? scene.height() : view.outputHeight())));
             EncodePush push = new EncodePush().width(encoded.width()).height(encoded.height())
                 .encoding(switch (encoding) {
                     case SDR_SRGB -> ENCODE_SDR;
@@ -109,7 +112,8 @@ public final class DisplayTransform implements OutputTransform {
 
         private static void encode(PassContext ctx, Pipeline pipeline, EncodePush push, EngineSettings settings,
             Image scene, Image encoded) {
-            push.source(ctx.sampled(scene)).target(ctx.storage(encoded)).curve(settings.get(CURVE).ordinal())
+            push.source(ctx.sampled(scene)).target(ctx.storage(encoded)).sourceWidth(ctx.regionWidth(scene))
+                .sourceHeight(ctx.regionHeight(scene)).curve(settings.get(CURVE).ordinal())
                 .exposure(settings.get(EXPOSURE)).paperWhite(settings.get(PAPER_WHITE)).peak(settings.get(PEAK));
             ctx.dispatch(pipeline, push, (encoded.width() + 7) / 8, (encoded.height() + 7) / 8, 1);
         }

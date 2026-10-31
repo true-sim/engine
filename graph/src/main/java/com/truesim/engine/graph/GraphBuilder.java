@@ -44,6 +44,7 @@ public final class GraphBuilder {
         int usage;
         History history; // one of a history's images
         boolean previous; // its last frame's: read only
+        boolean unscaled; // written whole, not within a render region (GraphBuilder.unscaled)
 
         ImageInfo(Image image, Object owner, ExternalImage external) {
             this.image = image;
@@ -680,6 +681,16 @@ public final class GraphBuilder {
             .record(ctx -> graph.blit(ctx, result, image));
     }
 
+    /**
+     * Marks {@code image} as written whole every frame, at whatever size it has, rather than within its view's render
+     * region: an upscaler's result, at the size the view shows at. The view's outputs copy all of it, and
+     * {@link PassContext#regionWidth(Image)} is all of it.
+     */
+    public Image unscaled(Image image) {
+        images.get(image(image).id).unscaled = true;
+        return image;
+    }
+
     /** {@code external} as an image of this build, the same one each time. */
     public Image external(ExternalImage external) {
         return externals.computeIfAbsent(external, e -> {
@@ -754,6 +765,7 @@ public final class GraphBuilder {
         private boolean async;
         private boolean open;
         private boolean region;
+        private ViewPort regionView; // named by region(view), or null: the pass's own
         private int index = -1; // in the build's passes, once recorded
         private PassBody body;
         private String owner;
@@ -951,6 +963,17 @@ public final class GraphBuilder {
         }
 
         /**
+         * Like {@link #region()}, within {@code view}'s render region: for shared work drawing for one view (a request
+         * such as the camera's scene draw), whose passes belong to no view of their own. Compute passes name it too,
+         * for {@link PassContext#regionWidth(Image)}.
+         */
+        public PassBuilder region(ViewPort view) {
+            region = true;
+            regionView = Objects.requireNonNull(view, "view");
+            return this;
+        }
+
+        /**
          * The pass may run on the async compute queue, beside graphics work it does not depend on: compute, sampling,
          * storage and transfer accesses only (no attachments, no external images, no index buffers or draw shaders).
          * Where the device has no separate compute queue, or async compute is off, it runs on the graphics queue in its
@@ -1023,6 +1046,7 @@ public final class GraphBuilder {
                 attachments.toArray(new Attachment[0]), bufferIds, bufferAccesses.toArray(new BufferAccess[0]),
                 sideEffects, async, body);
             info.region = region;
+            info.view = regionView;
             return info;
         }
     }

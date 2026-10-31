@@ -108,7 +108,6 @@ public final class VisibilityBufferShading implements Technique {
             throw new IllegalStateException("The visibility buffer shades up to 65,535 pixels per side: " + width
                 + " x " + height);
         }
-        int size = width | height << 16;
         SceneDraw.Targets targets = g.request(new SceneDraw(geometry, view.view(), null, SurfaceOutput.ids(),
             depthFormat, width, height, (occlusion != null ? occlusion : g.setting(RenderSettings.OCCLUSION))
             && view.view().options().occlusion()));
@@ -134,7 +133,8 @@ public final class VisibilityBufferShading implements Technique {
         Image color = g.create("scene color", ImageDesc.of(Format.of(colorFormat), width, height));
         int tilesX = (width + TILE - 1) / TILE;
         int tilesY = (height + TILE - 1) / TILE;
-        // Per bin: its indirect dispatch (x, y, z), its tile count, then its tiles.
+        // Per bin: its indirect dispatch (x, y, z), its tile count, then its tiles; room for all of the images, and
+        // each frame, the tiles of the render region (dynamic resolution).
         long listBytes = 4L * (4 + (long) tilesX * tilesY);
         Buffer tiles = g.createBuffer("material tiles", listBytes * shade.length);
         SceneData.Buffers scene = g.request(new SceneData(renderer));
@@ -142,8 +142,9 @@ public final class VisibilityBufferShading implements Technique {
         scene.read(g.pass("material classification"), BufferAccess.STORAGE_READ)
             .read(ids, Access.STORAGE_READ)
             .write(tiles, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> ctx.dispatch(classify, push(classifyPush, ctx, ids, null, null, size, types.size(), 0,
-                ctx.address(tiles)), tilesX, tilesY, 1));
+            .record(ctx -> ctx.dispatch(classify, push(classifyPush, ctx, ids, null, null, size(ctx, ids), types.size(),
+                0, ctx.address(tiles)), (ctx.regionWidth(ids) + TILE - 1) / TILE,
+                (ctx.regionHeight(ids) + TILE - 1) / TILE, 1));
         GraphBuilder.PassBuilder pass = scene.read(g.pass("visibility shading"), BufferAccess.STORAGE_READ)
             .read(ids, Access.STORAGE_READ)
             .read(tiles, BufferAccess.INDIRECT)
@@ -164,12 +165,17 @@ public final class VisibilityBufferShading implements Technique {
                     continue;
                 }
                 long list = listBytes * bin;
-                ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, ids, color, lights, size, types.size(), bin,
-                    ctx.address(tiles) + list), tiles, list);
+                ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, ids, color, lights, size(ctx, ids), types.size(),
+                    bin, ctx.address(tiles) + list), tiles, list);
             }
         });
         g.provide(Keys.SCENE_COLOR, color);
         g.provide(Keys.SCENE_DEPTH, targets.depth());
+    }
+
+    /** The render region in {@code ids} this frame: width, and height in the high 16 bits (resolve.slang's size). */
+    private static int size(PassContext ctx, Image ids) {
+        return ctx.regionWidth(ids) | ctx.regionHeight(ids) << 16;
     }
 
     @AllowAllocation("building the graph, when it changes")

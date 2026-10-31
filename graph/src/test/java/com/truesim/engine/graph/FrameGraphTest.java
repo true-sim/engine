@@ -2079,6 +2079,40 @@ class FrameGraphTest {
     }
 
     @Test
+    void dynamicResolutionFollowsTheGpuTime() {
+        int[] region = {0};
+        graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.MIN_SCALE, 0.25f)
+            .set(ResolutionSettings.TARGET_MILLIS, 10f).set(ResolutionSettings.RESPONSE, 1f);
+        ViewPort view = graph.addView("dynamic").size(SIZE, SIZE).add(regionFill(region)).output(OUT, output);
+        assertThatIllegalArgumentException().isThrownBy(() -> new DynamicResolution(graph));
+        DynamicResolution resolution = new DynamicResolution(graph, view);
+        assertThat(resolution.scale()).isNaN();
+        assertThat(frame()).containsOnly(RED);
+        // Four times the target: half the scale each way, a quarter of the pixels.
+        resolution.update(40);
+        assertThat(resolution.scale()).isEqualTo(0.5f);
+        assertThat(frame()).containsOnly(RED);
+        assertThat(view.regionWidth()).isEqualTo(SIZE / 2);
+        resolution.update(1000); // kept above the minimum
+        assertThat(resolution.scale()).isEqualTo(0.25f);
+        resolution.update(0); // no time: nothing
+        assertThat(resolution.scale()).isEqualTo(0.25f);
+        // Halfway there, slower to react.
+        graph.settings().set(ResolutionSettings.RESPONSE, 0.5f);
+        resolution.update(2.5);
+        assertThat(resolution.scale()).isEqualTo(0.375f);
+        // Real frames, far under the target: back up to the maximum.
+        for (int i = 0; i < 20 && resolution.scale() < 1; i++) {
+            frame();
+            resolution.update();
+        }
+        assertThat(graph.timings()).isNotNull();
+        assertThat(resolution.scale()).isEqualTo(1f);
+        assertThat(view.maxScale()).isEqualTo(1f);
+        assertThat(view.minScale()).isEqualTo(0.25f);
+    }
+
+    @Test
     void techniquesAreRemovedById() {
         com.truesim.common.graph.Id<Fill> redId = com.truesim.common.graph.Id.of("test.red", Fill.class);
         graph.add(new Technique() {

@@ -226,6 +226,7 @@ public final class FrameGraph implements AutoCloseable {
     private Switch[] imageSwitch = new Switch[0];
     private int[] fallbackSlot = new int[0];
     private int[] targetOf = new int[0];
+    private boolean[] unscaled = new boolean[0]; // each image's: written whole, not within a render region
     private Physical[] physicals = new Physical[0];
     private ExternalImage[] externals = new ExternalImage[0];
     private int[] externalVersions = new int[0];
@@ -1417,6 +1418,10 @@ public final class FrameGraph implements AutoCloseable {
 
         order = compiled.order();
         targetOf = compiled.targetOf();
+        unscaled = new boolean[targetOf.length];
+        for (int image = 0; image < unscaled.length; image++) {
+            unscaled[image] = g.images.get(image).unscaled;
+        }
         physicals = newPhysicals;
         bufferTargetOf = compiled.bufferTargetOf();
         physicalBuffers = newPhysicalBuffers;
@@ -1551,7 +1556,9 @@ public final class FrameGraph implements AutoCloseable {
         historyView = new ViewPort[historyCount];
         boolean[] shared = new boolean[historyCount];
         for (int i = 0; i < order.length; i++) {
-            order[i].view = g.regionView(order[i].scope);
+            if (order[i].view == null) {
+                order[i].view = g.regionView(order[i].scope);
+            }
             passViews[i] = g.runsFor(order[i].scope);
             for (int image : order[i].images) {
                 History history = g.images.get(image).history;
@@ -1764,16 +1771,16 @@ public final class FrameGraph implements AutoCloseable {
      * The width of {@code view}'s render region in {@code image}: its share of an image of the view's size (null: all
      * of it).
      */
-    static int regionWidth(ViewPort view, Image image) {
-        if (view == null || !view.dynamic() || view.width() == view.regionWidth()) {
+    int regionWidth(ViewPort view, Image image) {
+        if (view == null || !view.dynamic() || view.width() == view.regionWidth() || unscaled[image.id]) {
             return image.width; // all of it at a fixed resolution
         }
         return Math.max(1, (int) (((long) image.width * view.regionWidth() + view.width() - 1) / view.width()));
     }
 
     /** The height of {@code view}'s render region in {@code image}. */
-    static int regionHeight(ViewPort view, Image image) {
-        if (view == null || !view.dynamic() || view.height() == view.regionHeight()) {
+    int regionHeight(ViewPort view, Image image) {
+        if (view == null || !view.dynamic() || view.height() == view.regionHeight() || unscaled[image.id]) {
             return image.height;
         }
         return Math.max(1, (int) (((long) image.height * view.regionHeight() + view.height() - 1) / view.height()));
