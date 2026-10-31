@@ -20,17 +20,23 @@ import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Images;
+import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkClearColorValue;
 import org.lwjgl.vulkan.VkImageSubresourceRange;
 
 /**
- * An image a {@link FrameGraph} keeps from frame to frame ({@link FrameGraph#texture}), for a view to render into
+ * An image kept from frame to frame, for a view to render into
  * ({@link ViewPort#output(Key, Texture)}) and any pass to sample by its {@link #slot()}, which never changes: a mirror,
  * a security camera's screen, a minimap. Between frames it rests readable by shaders; a frame its view is skipped
  * leaves it as it was. A build reads it with {@link GraphBuilder#texture}, after the view's copy into it. It starts
- * transparent black, and is freed when removed ({@link FrameGraph#removeTexture}) or its graph closes.
+ * transparent black.
+ *
+ * <p>Made with {@code new Texture(device, ...)}, it is the app's: any graph may render into it and read it, and it
+ * outlives them all (a one-shot render kept for later) until the app closes it, as it would lights or a scene. Made
+ * with {@link FrameGraph#texture}, its graph's: freed when removed ({@link FrameGraph#removeTexture}) or the graph
+ * closes. A graph rendering into or reading a closed texture fails when it builds.
  *
  * <pre>{@code
  * Texture screen = graph.texture("security screen", Format.R8G8B8A8_UNORM, 512, 512);
@@ -39,17 +45,24 @@ import org.lwjgl.vulkan.VkImageSubresourceRange;
  * pass.read(g.texture(screen), Access.SAMPLED_FRAGMENT);
  * }</pre>
  */
-public final class Texture {
+public final class Texture implements AutoCloseable {
 
     private final VulkanDevice device;
     private final GpuImage image;
     private final int slot;
     final ExternalImage external; // how frames see it: taken from and left in its resting layout, with its contents
     boolean removed; // from its graph: builds may no longer read it
+    private boolean closed;
 
+    /**
+     * A texture of {@code width} by {@code height} {@code format} texels on {@code device}, the app's to close. Waits
+     * for the GPU once, to clear it.
+     */
     @AllowAllocation("set up rarely")
-    Texture(VulkanDevice device, String name, Format format, int width, int height) {
-        this.device = device;
+    public Texture(VulkanDevice device, String name, Format format, int width, int height) {
+        this.device = java.util.Objects.requireNonNull(device, "device");
+        java.util.Objects.requireNonNull(name, "name");
+        java.util.Objects.requireNonNull(format, "format");
         int usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
             | (format.depth() ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
         image = new GpuImage(device, width, height, format.vk(), usage, format.aspect());
@@ -57,6 +70,7 @@ public final class Texture {
         external = new ExternalImage(name, width, height, format, usage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL).set(image.handle(), image.view());
         external.sampled = slot;
+        external.texture = this;
         device.submitAndWait(device.graphics(), commands -> {
             int aspect = format.aspect();
             if (format.depth()) {
@@ -101,8 +115,30 @@ public final class Texture {
         return slot;
     }
 
-    /** Frees it: from its graph's close, once the GPU is done. */
-    void close() {
+    /** Whether it was closed: graphs may no longer use it. */
+    public boolean closed() {
+        return closed;
+    }
+
+    /** Frees it now: once no frame in flight reads it (the GPU waited for). */
+    @Override
+    public void close() {
+        if (!closed) {
+            closed = true;
+            free();
+        }
+    }
+
+    /** Closes it, freeing it once no frame in flight of {@code retiring}'s frame slots reads it. */
+    @AllowAllocation("closing, rarely")
+    public void close(Retiring retiring) {
+        if (!closed) {
+            closed = true;
+            retiring.add(this::free);
+        }
+    }
+
+    private void free() {
         device.bindless().removeSampled(slot);
         image.close();
     }

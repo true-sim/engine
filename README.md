@@ -615,7 +615,10 @@ that declare how they use each image. The graph does the rest:
   was. A technique of another view reads it with `g.texture(texture)`, which orders its pass after the copy into it,
   and samples it at its slot (`ctx.sampled(image)`). It belongs to the graph, not to the view: rendered once and its
   view turned off or removed, it keeps its image. `graph.removeTexture(texture)` frees it once no frame in flight
-  samples it; otherwise it closes with the graph.
+  samples it; otherwise it closes with the graph. `new Texture(device, name, format, w, h)` is the app's instead: any
+  graph renders into and reads it, it outlives them (a one-shot render kept for later), and the app closes it
+  (`close()`, or `close(retiring)` to free it once no frame in flight reads it). A graph using a closed texture fails
+  when it builds.
 - **Culled:** walking back from the outputs, passes whose images and buffers nothing needs are dropped.
 - **Synchronized:** barriers and layout transitions come from the declared accesses, batched into one call per pass,
   with none between reads.

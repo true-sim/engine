@@ -1272,6 +1272,11 @@ public final class FrameGraph implements AutoCloseable {
                 targets.put(g.scoped(view, output.getKey()), output.getValue());
             }
         }
+        for (ExternalImage target : targets.values()) {
+            if (target.texture != null && target.texture.closed()) {
+                throw new IllegalStateException(target.texture + " was closed: remove the outputs into it first");
+            }
+        }
         CompiledGraph compiled = GraphCompiler.compile(g, targets, asyncCompute,
             graphicsQueue.family() != computeQueue.family(), grain, this::blit);
         // The slots' images and buffers, from the pool; histories keep theirs while their name and slot stay.

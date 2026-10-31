@@ -548,8 +548,8 @@ public final class GraphBuilder {
      */
     @AllowAllocation("building the graph, when it changes")
     public Image texture(Texture texture) {
-        if (texture.removed) {
-            throw new IllegalStateException(texture + " was removed from its graph");
+        if (texture.removed || texture.closed()) {
+            throw new IllegalStateException(texture + (texture.removed ? " was removed from its graph" : " was closed"));
         }
         ExternalImage target = texture.external;
         Image image = external(target);

@@ -1656,6 +1656,48 @@ class FrameGraphTest {
     }
 
     @Test
+    void appTexturesOutliveTheGraphsThatRenderIntoThem() {
+        try (Texture shot = new Texture(device, "shot", Format.R8G8B8A8_UNORM, SIZE, SIZE)) {
+            // One graph renders into it once, then closes.
+            graph.addView("camera").add(new Fill(OUT, SIZE, 0, 1, 0, 1)).output(OUT, shot);
+            graph.addView("main").add(new Fill(OUT, SIZE, 1, 0, 0, 1)).output(OUT, output);
+            assertThat(frame()[0]).isEqualTo(RED);
+            graph.close();
+            // Another reads it: the one-shot render is still there.
+            graph = new FrameGraph(device, 2);
+            graph.addView("main").add(new Lambda(List.of(OUT), g -> {
+                Image image = g.texture(shot);
+                Image out = g.create("shown", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+                g.pass("show").read(image, Access.TRANSFER_SRC).write(out, Access.TRANSFER_DST)
+                    .record(ctx -> copy(ctx, image, out, 0, SIZE));
+                g.provide(OUT, out);
+            })).output(OUT, output);
+            assertThat(frame()[0]).as("rendered by a graph closed since").isEqualTo(GREEN);
+            assertThat(graph.textures()).as("not this graph's").isEmpty();
+            // Closed, graphs may no longer use it.
+            shot.close();
+            assertThat(shot.closed()).isTrue();
+            graph.invalidate();
+            assertThatIllegalStateException().isThrownBy(this::frame).withMessageContaining("texture shot was closed");
+            graph.close();
+            graph = new FrameGraph(device, 2);
+            graph.addView("camera").add(new Fill(OUT, SIZE, 0, 1, 0, 1)).output(OUT, shot);
+            assertThatIllegalStateException().isThrownBy(this::frame)
+                .withMessageContaining("texture shot was closed: remove the outputs into it first");
+        }
+        // Closed through a Retiring: freed once no frame in flight reads it.
+        Texture later = new Texture(device, "later", Format.R8G8B8A8_UNORM, SIZE, SIZE);
+        try (com.truesim.engine.vulkan.Retiring retiring = new com.truesim.engine.vulkan.Retiring(
+            com.truesim.engine.vulkan.FrameSlots.single())) {
+            later.close(retiring);
+            later.close(retiring);
+            assertThat(retiring.count()).isEqualTo(1);
+            retiring.release();
+            assertThat(retiring.count()).isZero();
+        }
+    }
+
+    @Test
     void historiesWrittenFirstOnTheComputeQueueAreJoinedAhead() {
         int[] frames = {0};
         graph.asyncCompute(true).add(new Lambda(List.of(OUT), g -> {
