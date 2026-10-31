@@ -1773,6 +1773,71 @@ class FrameGraphTest {
         assertThat(frame()[0]).isEqualTo(BLUE);
     }
 
+    private static final com.truesim.engine.settings.Setting<Boolean> PAINTED =
+        com.truesim.engine.settings.Setting.bool("test.painted", true, "paints the result blue");
+    private static final com.truesim.engine.settings.Setting<Boolean> PRODUCED =
+        com.truesim.engine.settings.Setting.bool("test.produced", true, "produces the sampled image");
+
+    @Test
+    void switchesTurnTechniquesOnAndOffFromFrameToFrame() {
+        // An in-place effect, switched: off, the result is as its provider left it; no rebuild either way.
+        graph.add(new Fill(OUT, SIZE, 1, 0, 0, 1)).add(new Paint(OUT, 10, 0, SIZE, 0, 0, 1, 1).when(PAINTED))
+            .output(OUT, output);
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        int builds = graph.builds();
+        graph.settings().set(PAINTED, false);
+        assertThat(frame()[0]).as("switched off: the provider's red").isEqualTo(RED);
+        graph.settings().set(PAINTED, true);
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        assertThat(graph.builds()).as("never rebuilt").isEqualTo(builds);
+        graph.close();
+        // A producer with a fallback: off, passes sampling its image read the fallback's slot.
+        graph = new FrameGraph(device, 2);
+        int[] produced = {0};
+        int[] sampled = {-1, -1};
+        Switch producer = Switch.of(PRODUCED, new Lambda(List.of(A), g -> {
+            Image image = g.create("produced", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("produce").write(image, Access.TRANSFER_DST).record(ctx -> {
+                produced[0]++;
+                clear(ctx, image, 0, 1, 0, 1);
+            });
+            g.provide(A, image);
+        })).fallback(A, Fallback.constant(Format.R8G8B8A8_UNORM, 0.5f));
+        assertThat(producer.setting()).isEqualTo(PRODUCED);
+        assertThat(producer.technique()).isNotNull();
+        assertThat(producer).hasToString(producer.technique() + " when test.produced");
+        ViewPort view = graph.addView("main").add(producer).add(new Lambda(List.of(OUT), g -> {
+            Image a = g.require(A);
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("sample").read(a, Access.SAMPLED_COMPUTE).write(out, Access.TRANSFER_DST).record(ctx -> {
+                sampled[0] = ctx.sampled(a);
+                clear(ctx, out, 1, 0, 0, 1);
+            });
+            g.provide(OUT, out);
+        })).output(OUT, output);
+        frame();
+        int real = sampled[0];
+        assertThat(produced[0]).isEqualTo(1);
+        assertThat(producer.on()).isTrue();
+        graph.settings().set(PRODUCED, false);
+        frame();
+        assertThat(produced[0]).as("switched off: not produced").isEqualTo(1);
+        assertThat(sampled[0]).as("the fallback's slot").isNotEqualTo(real).isNotNegative();
+        int fallback = sampled[0];
+        // The view's own settings win over the graph's.
+        view.ownSettings().set(PRODUCED, true);
+        frame();
+        assertThat(sampled[0]).isEqualTo(real);
+        assertThat(produced[0]).isEqualTo(2);
+        view.ownSettings().set(PRODUCED, false);
+        graph.settings().set(PRODUCED, true);
+        frame();
+        assertThat(sampled[0]).as("off in the view, on elsewhere").isEqualTo(fallback);
+        assertThat(Fallback.constant(Format.R8_UNORM, 1)).isEqualTo(Fallback.constant(Format.R8_UNORM, 1, 0, 0, 1))
+            .hasSameHashCodeAs(Fallback.constant(Format.R8_UNORM, 1)).isNotEqualTo(Fallback.constant(Format.R8_UNORM));
+        assertThat(Fallback.constant(Format.R8_UNORM, 1).toString()).contains("R8_UNORM");
+    }
+
     @Test
     void historiesWrittenFirstOnTheComputeQueueAreJoinedAhead() {
         int[] frames = {0};

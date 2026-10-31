@@ -49,6 +49,14 @@ public final class ViewPort {
         this.name = name;
     }
 
+    /**
+     * The view's own settings: the graph's, scoped to {@code view.<name>}. A {@link Switch} of the view reads its
+     * setting here where it is set, else from the graph's.
+     */
+    public com.truesim.engine.settings.EngineSettings ownSettings() {
+        return graph.settings().scoped("view." + name);
+    }
+
     /** The settings of the view's graph ({@link FrameGraph#settings()}), as they are now. */
     public com.truesim.engine.settings.EngineSettings settings() {
         return graph.settings();

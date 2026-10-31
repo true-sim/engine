@@ -212,6 +212,13 @@ public final class FrameGraph implements AutoCloseable {
     // The view each external image is an output of, if not a texture (a window's image): untouched while the view does
     // not run, as the presentation engine may hold it.
     private ViewPort[] externalView = new ViewPort[0];
+    // Switches: each pass's (null: none), the switches of the build with their views, and each image's that falls
+    // back while its switch is off, with the fallback's sampled slot.
+    private Switch[] passSwitch = new Switch[0];
+    private Switch[] switches = new Switch[0];
+    private ViewPort[] switchViews = new ViewPort[0];
+    private Switch[] imageSwitch = new Switch[0];
+    private int[] fallbackSlot = new int[0];
     private int[] targetOf = new int[0];
     private Physical[] physicals = new Physical[0];
     private ExternalImage[] externals = new ExternalImage[0];
@@ -687,9 +694,13 @@ public final class FrameGraph implements AutoCloseable {
                 pair.firstFrame = frame + 1; // not written yet: the frame after it first is has a last frame
             }
         }
+        for (int s = 0; s < switches.length; s++) {
+            switches[s].on = switches[s].on(switchViews[s], settings);
+        }
         for (int i = 0; i < order.length; i++) {
             ExternalImage into = order[i].into;
-            passSkipped[i] = !runs(passViews[i]) || into != null && into.held;
+            Switch switched = passSwitch[i];
+            passSkipped[i] = !runs(passViews[i]) || into != null && into.held || switched != null && !switched.on;
         }
         if (resources.hasRetired()) {
             resources.release(false, frame);
@@ -1230,6 +1241,10 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     int sampledSlotOf(int image) {
+        Switch switched = imageSwitch[image];
+        if (switched != null && !switched.on) {
+            return fallbackSlot[image];
+        }
         int target = targetOf[image];
         return target >= 0 ? physicals[target].sampled : externals[~target].sampled;
     }
@@ -1441,6 +1456,46 @@ public final class FrameGraph implements AutoCloseable {
             physicals.length, bufferTargetOf.length, physicalBuffers.length, barrierTarget.length);
     }
 
+    /** The switches of the graph just built: each pass's, their views, and the images falling back with them. */
+    @AllowAllocation("building the graph, when it changes")
+    private void startSwitches(GraphBuilder g) {
+        passSwitch = new Switch[order.length];
+        List<Switch> all = new ArrayList<>();
+        for (int i = 0; i < order.length; i++) {
+            if (order[i].scope instanceof Switch switched) {
+                passSwitch[i] = switched;
+                if (!all.contains(switched)) {
+                    all.add(switched);
+                }
+            }
+        }
+        imageSwitch = new Switch[targetOf.length];
+        fallbackSlot = new int[targetOf.length];
+        for (Map.Entry<Integer, GraphBuilder.Fallen> entry : g.fallbacks.entrySet()) {
+            int image = entry.getKey();
+            Switch switched = entry.getValue().switched();
+            if (!all.contains(switched)) {
+                all.add(switched);
+            }
+            Image info = g.images.get(image).image;
+            Fallback fallback = entry.getValue().fallback();
+            Texture texture = cached(new FallbackKey(fallback, info.width, info.height),
+                d -> new Texture(d, fallback.toString(), fallback.format(), info.width, info.height, fallback.value()));
+            imageSwitch[image] = switched;
+            fallbackSlot[image] = texture.slot();
+        }
+        switches = all.toArray(new Switch[0]);
+        switchViews = new ViewPort[switches.length];
+        for (int s = 0; s < switches.length; s++) {
+            switchViews[s] = g.viewOf(switches[s]);
+            switches[s].on = switches[s].on(switchViews[s], settings);
+        }
+    }
+
+    /** A fallback texture's identity in the graph's cache: its value and size. */
+    private record FallbackKey(Fallback fallback, int width, int height) {
+    }
+
     /**
      * Which views the passes just built run for, and which view each history is of: the one view of every pass using
      * it, or none (it swaps every frame) if the frame's passes or several views' use it.
@@ -1458,6 +1513,7 @@ public final class FrameGraph implements AutoCloseable {
                 }
             }
         }
+        startSwitches(g);
         passViews = new ViewPort[order.length][];
         passSkipped = new boolean[order.length];
         historyView = new ViewPort[historyCount];

@@ -238,6 +238,12 @@ indirect arguments of zero, without barrier changes.
 
 A skipped view keeps its histories as they are: no swap, no invalidation.
 
+Switches as built (engine 0.73): `Switch.of(setting, technique)` / `technique.when(setting)` with a boolean engine
+setting, read when each frame starts (a view's own settings first, then the graph's): its passes are skipped while it
+is off, like a skipped view's, barriers kept. A producer's fallback is a constant texture of the image's size, cached by
+the graph; while off, `ctx.sampled(image)` returns the fallback's slot, so shading reads it without a rebuild. Only
+sampled reads fall back.
+
 As built (engine 0.56):
 - **Which passes skip.** Each pass runs for the views of what recorded it: a view's technique for its view, an
   output's copy for its view, and a request for every view that asked for it. A request the frame asked for, and every
@@ -848,8 +854,10 @@ is released.
 - **Phase 4 status (2026-10-31):** landed in engine 0.53 to 0.66: views with their own keys, sizes, histories and
   per-view techniques (`SceneView`, `SceneViews`); view enable and rate without a rebuild; `Texture` outputs, graph's
   or the app's; one top level per frame relative to a movable origin, built only when instances change; shadow tables
-  and cascades per view; window settings; the `Presenter` with several windows. Left: stereo (multiview) and HDR
-  output.
+  and cascades per view; window settings; the `Presenter` with several windows; engine settings; HDR output with tone
+  mapping per window; VR through OpenXR (`engine-xr`: eyes as views, a desktop mirror, input) in 0.67 to 0.72. Left:
+  multiview (both eyes in one pass) and a run with a headset.
+- **Phase 6 status (2026-10-31):** switches with fallbacks landed in 0.73.
 - **Phase 2 is large.** It lands as several PRs that are released once. Its design decisions (graph-owned scopes, view
   constants as an array, open `Access`, the purity contract) are the ones that would be expensive to change later.
 - **After phase 4,** phases 5 to 10 can be reordered by need.
