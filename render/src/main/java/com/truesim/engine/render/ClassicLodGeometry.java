@@ -277,10 +277,12 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             .record(ctx -> Commands.fillBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(list), 0, 16, 0));
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         com.truesim.engine.graph.ViewPort region = targets.region();
+        float casterDetail = camera != null
+            ? g.setting(com.truesim.engine.render.shadows.ShadowSettings.CASTER_DETAIL) : 1;
         scene.read(g.pass(name + " selection"), BufferAccess.STORAGE_READ).write(list, BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
                 if (camera != null) {
-                    view.set(camera, 1, MeshletRenderer.MODE_LIT);
+                    view.set(camera, casterDetail, MeshletRenderer.MODE_LIT);
                 } else if (region != null) {
                     view.detail(region.renderScale()); // detail for the size it renders this frame
                 }

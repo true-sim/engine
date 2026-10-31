@@ -1130,6 +1130,24 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void drawsThroughACameraOfTheirOwnTakeTheCasterDetail() {
+        // A depth draw through a camera of its own, as a shadow map's, of a bumpy grid: coarser at a larger error.
+        int field = pool.add(MeshletRendererTest.grid(24, 0.12f, true, VertexFormat.POSITIONS_ONLY));
+        scene.set(0, field, 0, -0.3f, -1.5f, 0, 0, 0, 1, 1, 1, 1);
+        scene.removeFrom(1);
+        Camera camera = new Camera().set(0, -0.3, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        SceneDraw draw = new SceneDraw(SceneGeometry.meshlets(renderer), view, camera, SurfaceOutput.depth(),
+            VK_FORMAT_D32_SFLOAT, SIZE, SIZE, false);
+        Key<Image> copied = Key.image("test.casterDepth");
+        graph.add(new DepthCopy(copied, draw)).output(copied, output);
+        frame();
+        int fine = view.visibleMeshlets();
+        graph.settings().set(com.truesim.engine.render.shadows.ShadowSettings.CASTER_DETAIL, 8f);
+        frame();
+        assertThat(view.visibleMeshlets()).as("against %d at 1 pixel", fine).isLessThan(fine);
+    }
+
+    @Test
     void aViewSetOnceFollowsItsCameraAsItMoves() {
         // A wall ahead and 8 quads behind it; the camera is set on the view once, blank, and moved afterwards only.
         scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);

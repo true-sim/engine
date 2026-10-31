@@ -580,7 +580,10 @@ interface:
   frame in flight reads them. Views close together, such as a headset's eyes, share one set: cascades fitted to one
   eye with a `margin(units)` covering the other, added to its view and `cascades.share()` to the other. Their maps draw
   once a frame and both tables point at them: half the cascade work of a stereo frame (`StereoBench --args=shared`).
-  A technique instance belongs to one view (or the frame): adding it to a second is refused.
+  A technique instance belongs to one view (or the frame): adding it to a second is refused. Casters choose detail
+  for `shadows.casterDetail` pixels of error (1, as a camera): coarser casters draw far fewer triangles (20,000 rocks,
+  two eyes: cascades 0.92 ms at 1, 0.56 at 2, 0.41 at 4) but shadow the finer surfaces they sit off in spots, so
+  raise `shadows.cascades.bias` with it.
 - **Ray tracing is a generic parameter** (`IShadowRays`): shading pipelines that cannot trace use `NoRays`, so only the
   visibility buffer's traced variant (`shadeTraced.slang`) needs ray queries. Forward shading counts inline ray
   shadows as lit; a ray-traced mask works with any shading.
@@ -949,7 +952,9 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
   itself; `--probe` prints what the main view's scene color holds now and then.
 - `./gradlew :engine-demo:stereoBench` times the scene drawn for two eyes at a Quest 3's eye size, offscreen, pass by
   pass and grouped by kind (`--args="visibility"` for the visibility buffer, `-Procks=20000` for more rocks,
-  `shared` for one set of shadow cascades, `rebuild` for what rebuilds and resizes cost the render thread).
+  `shared` for one set of shadow cascades, `rebuild` for what rebuilds and resizes cost the render thread, `noshadows`
+  without the sun's cascades, `-Ppng=<file>` to write the left eye). `capture` writes frame 100 for RenderDoc through its
+  in-application API, offscreen; launch the benchmark's `java` with `renderdoccmd capture -c <file>`.
 - Keys: `1`/`2` forward or visibility buffer shading, `H` HDR, `T` tone curve, `[`/`]` exposure, `V` present mode,
   `F`/`F11` window mode, `R` dynamic resolution, `-`/`=` render scale, `G` GPU-timed dynamic resolution (`,`/`.` its
   target), `O` occlusion culling, `N` a second window, `F5` save.
