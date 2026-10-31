@@ -127,6 +127,21 @@ class StreamingRayTracingTest {
                     graph.submit(0, 0);
                 }
                 assertThat(rayTracing.hasBottomLevel(again)).isTrue();
+                // More instances than the top level holds: it grows with the scene, between frames, in a new slot,
+                // and the old one is freed once no frame traces it.
+                int topSlot = rayTracing.slot();
+                long grownBuilds = rayTracing.topLevelBuilds();
+                for (int i = 1; i < 40; i++) {
+                    scene.set(i, again, 0, i, -3, 0, 0, 0, 1, 1, 1, 1);
+                }
+                assertThat(rayTracing.instanceCapacity()).isGreaterThanOrEqualTo(40);
+                assertThat(rayTracing.slot()).isNotEqualTo(topSlot);
+                for (int frame = 0; frame < 4; frame++) {
+                    graph.beginFrame();
+                    graph.submit(0, 0);
+                }
+                assertThat(rayTracing.topLevelBuilds()).as("the new one built").isGreaterThan(grownBuilds);
+                scene.removeFrom(1);
                 // A texture prepared on a loader thread, added while frames run: uploaded and mipmapped in a frame.
                 try (Textures textures = new Textures(device, graph.frameSlots())) {
                     MemorySegment texels = java.lang.foreign.Arena.ofAuto().allocate(4L * 512 * 512);

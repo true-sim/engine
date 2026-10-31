@@ -27,6 +27,7 @@ public record TopLevel(RayTracing rayTracing, MeshletRenderer renderer) implemen
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Buffer build(GraphBuilder g) {
+        rayTracing.follow(renderer.scene()); // grown with it, between frames
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         GraphBuilder.PassBuilder pass = g.pass("top level").read(scene.instances(), BufferAccess.STORAGE_READ);
         Buffer structure = rayTracing.declareTopLevelBuild(g, pass);
