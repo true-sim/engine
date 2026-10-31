@@ -23,3 +23,13 @@ tasks.named<JavaExec>("run") {
 coverage {
     minimum.set(0.0)
 }
+
+// Where a stereo frame's GPU time goes (StereoBench): ./gradlew :engine-demo:stereoBench [--args="visibility"]
+tasks.register<JavaExec>("stereoBench") {
+    group = "application"
+    description = "Times the demo's scene rendered for two eyes, per pass."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "com.truesim.engine.demo.StereoBench"
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
+    providers.gradleProperty("rocks").orNull?.let { systemProperty("truesim.demo.rocks", it) }
+}
