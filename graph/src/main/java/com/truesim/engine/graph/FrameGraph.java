@@ -186,6 +186,8 @@ public final class FrameGraph implements AutoCloseable {
     private int recordSlot;
     private long[] slotFrame;
     private ReadbackPlan[] readbacks = new ReadbackPlan[0];
+    private ReadbackPlan[] retiredReadbacks = new ReadbackPlan[0]; // an earlier build's, pending in frames in flight
+    private int retiredCount;
     private boolean timingsOn;
     private GpuTimings timings;
     private Arena labelArena;
@@ -575,6 +577,20 @@ public final class FrameGraph implements AutoCloseable {
         for (ReadbackPlan readback : readbacks) {
             readback.deliver(slot);
         }
+        int kept = 0;
+        for (int i = 0; i < retiredCount; i++) { // an earlier build's: delivered, then freed once none is pending
+            ReadbackPlan readback = retiredReadbacks[i];
+            readback.deliver(slot);
+            if (readback.pending()) {
+                retiredReadbacks[kept++] = readback;
+            } else {
+                readback.close();
+            }
+        }
+        for (int i = kept; i < retiredCount; i++) {
+            retiredReadbacks[i] = null;
+        }
+        retiredCount = kept;
     }
 
     /** The frame slot being recorded. */
@@ -1644,19 +1660,26 @@ public final class FrameGraph implements AutoCloseable {
      */
     @AllowAllocation("building the graph, when it changes")
     private void startTooling(GraphBuilder g) {
-        boolean pending = false;
-        for (ReadbackPlan readback : readbacks) {
-            pending |= readback.pending();
-        }
-        if (pending || timingsOn || timings != null) {
+        // Readbacks of frames in flight are delivered as their frames finish, by the build they were made in: kept till
+        // then, so a rebuild (a buffer grown while streaming) waits for no GPU. Timings are laid out by the build:
+        // collected first, waiting.
+        if (timingsOn || timings != null) {
             waitIdle();
             for (int slot = 0; slot < framesInFlight; slot++) {
                 finished(slot);
             }
         }
+        ReadbackPlan[] kept = Arrays.copyOf(retiredReadbacks, retiredCount + readbacks.length);
+        int keptCount = retiredCount;
         for (ReadbackPlan readback : readbacks) {
-            readback.close();
+            if (readback.pending()) {
+                kept[keptCount++] = readback;
+            } else {
+                readback.close();
+            }
         }
+        retiredReadbacks = kept;
+        retiredCount = keptCount;
         readbacks = g.readbacks.toArray(new ReadbackPlan[0]);
         for (ReadbackPlan readback : readbacks) {
             readback.allocate(device, framesInFlight, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -1906,6 +1929,11 @@ public final class FrameGraph implements AutoCloseable {
             readback.close();
         }
         readbacks = new ReadbackPlan[0];
+        for (int i = 0; i < retiredCount; i++) {
+            retiredReadbacks[i].close();
+        }
+        retiredReadbacks = new ReadbackPlan[0];
+        retiredCount = 0;
         Arrays.fill(slotFrame, -1);
         if (timings != null) {
             timings.close();

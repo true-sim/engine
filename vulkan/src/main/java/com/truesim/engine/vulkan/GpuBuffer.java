@@ -115,6 +115,12 @@ public final class GpuBuffer implements AutoCloseable {
         return new GpuBuffer(device, size, usage, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT);
     }
 
+    /** Like {@link #hostWritten(VulkanDevice, long, int)}, used by the queues of {@code families} at once. */
+    public static GpuBuffer hostWritten(VulkanDevice device, long size, int usage, int... families) {
+        return new GpuBuffer(device, size, usage, VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+            java.util.Arrays.stream(families).distinct().toArray());
+    }
+
     /** A buffer in fast GPU memory, filled by transfers. */
     public static GpuBuffer deviceLocal(VulkanDevice device, long size, int usage) {
         return new GpuBuffer(device, size, usage, false);
@@ -137,7 +143,7 @@ public final class GpuBuffer implements AutoCloseable {
     public static GpuBuffer upload(VulkanDevice device, MemorySegment data, int usage) {
         long bytes = data.byteSize();
         GpuBuffer target = deviceLocal(device, bytes, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        try (GpuBuffer staging = hostVisible(device, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+        try (GpuBuffer staging = hostWritten(device, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) { // written once, in order
             MemorySegment.copy(data, 0, staging.memory, 0, bytes);
             device.submitAndWait(device.graphics(), commands -> {
                 try (MemoryStack stack = stackPush()) {
@@ -167,7 +173,7 @@ public final class GpuBuffer implements AutoCloseable {
             MemorySegment.copy(data, 0, memory, offset, bytes);
             return;
         }
-        try (GpuBuffer staging = hostVisible(device, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+        try (GpuBuffer staging = hostWritten(device, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
             MemorySegment.copy(data, 0, staging.memory, 0, bytes);
             device.submitAndWait(device.graphics(), commands -> {
                 try (MemoryStack stack = stackPush()) {
