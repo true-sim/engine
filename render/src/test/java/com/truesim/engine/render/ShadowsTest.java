@@ -382,6 +382,44 @@ class ShadowsTest {
     }
 
     @Test
+    void viewsShadowOneLightThroughEntriesOfTheirOwn() {
+        // Two views shadowing the one sun through cascades of their own, at different entries of their tables: each
+        // view's table says which entries the light casts through there, so neither reads the other's numbers.
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
+        double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
+        try (Lights lights = new Lights(device, 4, 8); GpuImage rightTarget = new GpuImage(device, SIZE, SIZE,
+            VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            SceneView left = newGraph();
+            Camera rightCamera = new Camera().position(camera.position(0) + 0.064, camera.position(1),
+                camera.position(2));
+            rightCamera.set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+            SceneView right = geometry.createView(graph.addView("right").size(SIZE, SIZE), rightCamera,
+                ViewOptions.of(256, 1 << 12).withOcclusion(true)).set(1, MeshletRenderer.MODE_LIT);
+            CascadedShadowMaps leftCascades = new CascadedShadowMaps(geometry, lights, 0, 0, camera, 3, 1024,
+                ViewOptions.shadow(256, 1 << 12), 40);
+            CascadedShadowMaps rightCascades = new CascadedShadowMaps(geometry, lights, 0, 4, rightCamera, 3, 1024,
+                ViewOptions.shadow(256, 1 << 12), 40);
+            left.port().add(forward(geometry).apply(left)).add(new ClusteredLights(lights, left)).add(leftCascades)
+                .output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+            right.port().add(forward(geometry).apply(right)).add(new ClusteredLights(lights, right)).add(rightCascades)
+                .output(Keys.SCENE_COLOR, external(rightTarget, VK_FORMAT_R8G8B8A8_UNORM));
+            leftCascades.update();
+            rightCascades.update();
+            frame(colorTarget, 4);
+            byte[] leftColor = frame(colorTarget, 4);
+            byte[] rightColor = frame(rightTarget, 4);
+            assertThat(floor(leftColor, this, shadow[0], shadow[1])).as("the first view's floor, entries 0 to 2")
+                .isLessThan((int) (floor(leftColor, this, 3, -2) * shadowRatio));
+            assertThat(floor(rightColor, this, shadow[0], shadow[1])).as("the second view's, entries 4 to 6")
+                .isLessThan((int) (floor(rightColor, this, 3, -2) * shadowRatio));
+            device.waitIdle();
+        }
+    }
+
+    @Test
     void theTopLevelIsBuiltOnlyWhenInstancesTheOriginOrBottomLevelsChange() {
         assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
         SceneGeometry geometry = SceneGeometry.meshlets(renderer);

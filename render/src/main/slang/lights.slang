@@ -29,8 +29,8 @@ public struct Light
     public float3 direction;       // where it shines: spot and directional lights
     public float cosOuter;         // spot: no light beyond this angle's cosine
     public float cosInner;         // spot: full light within this
-    public int shadowFirst;        // its first shadow map in the shadow table, or -1
-    public uint shadowCount;
+    public int shadowFirst;        // its first entry in the shading view's shadow table, or -1: set as the view's
+    public uint shadowCount;       // light list hands it out (handOut), from that table's ranges
     public uint pad;
     public float3 positionLow;     // world position, the rest
     public uint pad1;
@@ -84,7 +84,7 @@ public struct LightListHeader
     public uint layout;            // CLUSTERS, ...
     public uint lightCount;
     public uint overflow;          // the most lights a bin wanted, beyond what it holds
-    public uint pad;
+    public uint shadowCapacity;    // the shadow table's entries: each light's range of them lies past them
     public Light* lights;
     public Shadow* shadows;
     public uint* data0;            // the layout's lists (clusters: a count per cluster)
@@ -105,6 +105,19 @@ public struct LightListHeader
         return r;
     }
 
+    /**
+     * Light `index` as this list's shading sees it: relative to the camera, casting shadows through the entries this
+     * view's shadow table names for it (its ranges, past the entries), whatever another view's say.
+     */
+    public Light handOut(uint index)
+    {
+        Light r = relativeTo(lights[index]);
+        int2 range = ((int2*)((uint64_t)shadows + 128 * uint64_t(shadowCapacity)))[index];
+        r.shadowFirst = range.x;
+        r.shadowCount = uint(range.y);
+        return r;
+    }
+
     /** What moves a position relative to the camera into shadow entry `s`'s. */
     public float3 toEntry(Shadow s)
     {
@@ -122,7 +135,7 @@ public LightListHeader loadHeader(LightListHeader* h)
     r.layout = h[0].layout;
     r.lightCount = h[0].lightCount;
     r.overflow = h[0].overflow;
-    r.pad = 0;
+    r.shadowCapacity = h[0].shadowCapacity;
     r.lights = h[0].lights;
     r.shadows = h[0].shadows;
     r.data0 = h[0].data0;
@@ -178,7 +191,7 @@ public struct ClusterLightList : ILightList
 
     public Light light(uint i)
     {
-        return header.relativeTo(header.lights[header.data1[cluster * asuint(header.floats.z) + i]]);
+        return header.handOut(header.data1[cluster * asuint(header.floats.z) + i]);
     }
 }
 

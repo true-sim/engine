@@ -99,7 +99,7 @@ public final class RayTracedShadows implements Technique {
         ShadowTable table = lights.shadowTable(g.view());
         g.request(new ShadowInputs(g.view())).sample(mask).setup(ctx -> {
             table.shadowMask(entry, ctx.sampled(mask), 0); // its view's: the mask is of its pixels
-            lights.shadows(light, entry, 1);
+            table.light(light, entry, 1);
         });
     }
 

@@ -66,7 +66,8 @@ public final class FrameSlots {
         return count;
     }
 
-    boolean isSingle() {
+    /** Whether these are {@link #single()}: one copy, no frames counted, the caller waiting for the GPU between frames. */
+    public boolean isSingle() {
         return single;
     }
 

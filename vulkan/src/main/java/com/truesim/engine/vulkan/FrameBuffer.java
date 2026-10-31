@@ -19,7 +19,8 @@ import java.nio.ByteOrder;
  * }</pre>
  *
  * <p>With {@link FrameSlots#single()} there is one copy and no master: writes go straight to the GPU. Allocates nothing
- * once created. Used from one thread at a time.
+ * once created. Distinct parts may be written from several threads at once (passes recording in parallel, each its
+ * view's entry); one part from one thread at a time.
  */
 @AllowAllocation("created rarely")
 public final class FrameBuffer implements AutoCloseable {
@@ -199,19 +200,24 @@ public final class FrameBuffer implements AutoCloseable {
         return Math.max(0, slots.last());
     }
 
-    /** Every copy but the open slot's missed [offset, offset + bytes). */
+    /**
+     * Every copy but the open slot's missed [offset, offset + bytes). Locked: passes recording on several threads may
+     * write distinct parts (several views' entries) at once, and a range lost would leave a copy stale.
+     */
     private void missed(int current, long offset, long bytes) {
         long end = offset + bytes;
-        for (int s = 0; s < dirtyStart.length; s++) {
-            if (s == current) {
-                continue;
-            }
-            if (dirtyStart[s] >= dirtyEnd[s]) {
-                dirtyStart[s] = offset;
-                dirtyEnd[s] = end;
-            } else {
-                dirtyStart[s] = Math.min(dirtyStart[s], offset);
-                dirtyEnd[s] = Math.max(dirtyEnd[s], end);
+        synchronized (dirtyStart) {
+            for (int s = 0; s < dirtyStart.length; s++) {
+                if (s == current) {
+                    continue;
+                }
+                if (dirtyStart[s] >= dirtyEnd[s]) {
+                    dirtyStart[s] = offset;
+                    dirtyEnd[s] = end;
+                } else {
+                    dirtyStart[s] = Math.min(dirtyStart[s], offset);
+                    dirtyEnd[s] = Math.max(dirtyEnd[s], end);
+                }
             }
         }
     }

@@ -9,10 +9,10 @@ import java.util.Objects;
 
 /**
  * One view's shadow table ({@link Lights#shadowTable}): the entries a light's shadows go through, each a shadow map
- * with its filter, a screen-space mask or an inline ray query. Every view's table has the same entry numbers (a light
- * names its first entry and count once, in {@link Lights#shadows}) and contents of its own, so each view's cascades,
- * fitted to its camera, or masks, of its pixels, never meet another's. An entry no technique of the view wrote reads
- * as lit.
+ * with its filter, a screen-space mask or an inline ray query, and per light which of them it casts through
+ * ({@link #light}). Every view's table has the same entry numbers and contents of its own, so each view's cascades,
+ * fitted to its camera, or masks, of its pixels, never meet another's, and two views may shadow one light by different
+ * techniques. An entry no technique of the view wrote reads as lit, as does a light no technique of the view named.
  *
  * <p>Written when frames record (from the shadow techniques' setups); a copy per frame in flight, as the lights.
  * Allocates nothing once made.
@@ -29,13 +29,50 @@ public final class ShadowTable implements AutoCloseable {
 
     private final FrameBuffer shadows;
     private final int capacity;
+    private final int lights;
 
-    ShadowTable(VulkanDevice device, int capacity, int usage, FrameSlots slots, int... families) {
+    /**
+     * {@code capacity} entries, then each of {@code lights} lights' range of them, 8 bytes (first, count; first -1:
+     * none), where lights.slang's light list finds it past the entries.
+     */
+    ShadowTable(VulkanDevice device, int capacity, int lights, int usage, FrameSlots slots, int... families) {
         this.capacity = capacity;
-        shadows = FrameBuffer.create(device, (long) SHADOW_BYTES * capacity, usage, slots, families);
+        this.lights = lights;
+        shadows = FrameBuffer.create(device, (long) SHADOW_BYTES * capacity + 8L * lights, usage, slots, families);
         for (int entry = 0; entry < capacity; entry++) {
             shadows.putInt((long) SHADOW_BYTES * entry + 64, SHADOW_NONE); // lit until a technique sets it
         }
+        for (int light = 0; light < lights; light++) {
+            shadows.putInt(range(light), -1); // no shadows until a technique names them
+        }
+    }
+
+    /**
+     * In this view, light {@code light} casts shadows through entries {@code first} to {@code first + count - 1}: a
+     * shadow technique's setup says so each frame, beside writing the entries. Allocates nothing.
+     */
+    public ShadowTable light(int light, int first, int count) {
+        Objects.checkIndex(light, lights);
+        if (first < 0 || count < 1 || first + count > capacity) {
+            throw new IllegalArgumentException("Shadow entries " + first + " to " + (first + count - 1) + " of "
+                + capacity);
+        }
+        shadows.putInt(range(light), first);
+        shadows.putInt(range(light) + 4, count);
+        return this;
+    }
+
+    /** In this view, light {@code light} casts no shadows (until named again). Allocates nothing. */
+    public ShadowTable noShadows(int light) {
+        Objects.checkIndex(light, lights);
+        shadows.putInt(range(light), -1);
+        shadows.putInt(range(light) + 4, 0);
+        return this;
+    }
+
+    /** Where light {@code light}'s range lies: past the entries. */
+    private long range(int light) {
+        return (long) SHADOW_BYTES * capacity + 8L * light;
     }
 
     /** How many entries it has. */
