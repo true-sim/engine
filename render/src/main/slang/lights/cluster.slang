@@ -65,8 +65,25 @@ void clusterMain(uint3 id : SV_DispatchThreadID, uint local : SV_GroupIndex)
         {
             Light light = h.relativeTo(h.lights[first + local]);
             float3 p = light.position;
+            float radius = light.range;
+            if (light.type == SPOT && light.cosOuter > 0)
+            {
+                // The sphere around its cone, not its range's: a narrow cone's sits ahead of the light, a wide one's
+                // on the cone's base.
+                float c = light.cosOuter;
+                if (c >= 0.70710678)
+                {
+                    radius = light.range / (2 * c);
+                    p += light.direction * radius;
+                }
+                else
+                {
+                    p += light.direction * (light.range * c);
+                    radius = light.range * sqrt(saturate(1 - c * c));
+                }
+            }
             spheres[local] = float4(dot(across, p), dot(down, p), dot(forward, p),
-                light.type == DIRECTIONAL ? -1.0 : light.range);
+                light.type == DIRECTIONAL ? -1.0 : radius);
         }
         GroupMemoryBarrierWithGroupSync();
         if (c >= clusters)

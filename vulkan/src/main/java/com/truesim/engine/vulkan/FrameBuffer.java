@@ -38,9 +38,11 @@ public final class FrameBuffer implements AutoCloseable {
     private final MemorySegment master;
     /** Whether there is a master apart from the GPU copies, which writes keep in step. */
     private final boolean mirrored;
-    /** Per slot, the range its copy missed: [dirtyStart, dirtyEnd), empty when start >= end. */
-    private final long[] dirtyStart;
-    private final long[] dirtyEnd;
+    /** Pages the copies track what they missed in: writes far apart cost their pages, not the bytes between. */
+    private static final int PAGE = 4096;
+    /** Per slot, the pages its copy missed, a bit each; and whether any. */
+    private final long[][] dirtyPages;
+    private final boolean[] dirty;
     private boolean closed;
 
     private FrameBuffer(VulkanDevice device, long size, int usage, FrameSlots slots, int... families) {
@@ -49,8 +51,8 @@ public final class FrameBuffer implements AutoCloseable {
         int count = slots.count();
         copies = new GpuBuffer[count];
         memory = new MemorySegment[count];
-        dirtyStart = new long[count];
-        dirtyEnd = new long[count];
+        dirtyPages = new long[count][(int) ((size + PAGE * 64L - 1) / (PAGE * 64L))];
+        dirty = new boolean[count];
         boolean copiesOnly = !slots.isSingle(); // mirrored: the CPU writes the copies, reading its master only
         try {
             for (int s = 0; s < count; s++) {
@@ -209,32 +211,46 @@ public final class FrameBuffer implements AutoCloseable {
      * write distinct parts (several views' entries) at once, and a range lost would leave a copy stale.
      */
     private void missed(int current, long offset, long bytes) {
-        long end = offset + bytes;
-        synchronized (dirtyStart) {
-            for (int s = 0; s < dirtyStart.length; s++) {
+        if (bytes <= 0) {
+            return;
+        }
+        long first = offset / PAGE;
+        long last = (offset + bytes - 1) / PAGE;
+        synchronized (dirtyPages) {
+            for (int s = 0; s < dirtyPages.length; s++) {
                 if (s == current) {
                     continue;
                 }
-                if (dirtyStart[s] >= dirtyEnd[s]) {
-                    dirtyStart[s] = offset;
-                    dirtyEnd[s] = end;
-                } else {
-                    dirtyStart[s] = Math.min(dirtyStart[s], offset);
-                    dirtyEnd[s] = Math.max(dirtyEnd[s], end);
+                long[] pages = dirtyPages[s];
+                for (long page = first; page <= last; page++) {
+                    pages[(int) (page >>> 6)] |= 1L << page;
                 }
+                dirty[s] = true;
             }
         }
     }
 
-    /** Slot {@code slot} opens: its copy takes the range it missed from the master. */
+    /** Slot {@code slot} opens: its copy takes the pages it missed from the master, runs of them a copy each. */
     void catchUp(int slot) {
-        long start = dirtyStart[slot];
-        long end = dirtyEnd[slot];
-        if (start < end) {
-            MemorySegment.copy(master, start, memory[slot], start, end - start);
-            dirtyStart[slot] = 0;
-            dirtyEnd[slot] = 0;
+        if (!dirty[slot]) {
+            return;
         }
+        long[] pages = dirtyPages[slot];
+        long run = -1; // the first page of the run being gathered
+        long pageCount = (size + PAGE - 1) / PAGE;
+        for (long page = 0; page <= pageCount; page++) {
+            boolean missed = page < pageCount && (pages[(int) (page >>> 6)] & 1L << page) != 0;
+            if (missed && run < 0) {
+                run = page;
+            } else if (!missed && run >= 0) {
+                long from = run * PAGE;
+                long to = Math.min(size, page * PAGE);
+                MemorySegment.copy(master, from, memory[slot], from, to - from);
+                run = -1;
+            }
+        }
+        java.util.Arrays.fill(pages, 0);
+        dirty[slot] = false;
     }
 
     @Override
