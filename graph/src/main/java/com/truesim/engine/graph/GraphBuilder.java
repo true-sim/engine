@@ -133,6 +133,11 @@ public final class GraphBuilder {
     private final List<Running> running = new ArrayList<>(); // handed out while building, resolved when it ends
     final Set<ExternalImage> copied = new HashSet<>(); // output targets copied into while building, for their readers
     final Set<String> settingsRead = new HashSet<>(); // full names of the settings read while building
+    final Map<Integer, Fallen> fallbacks = new HashMap<>(); // images switched techniques provide with a fallback
+
+    /** An image a switched technique provides, and what passes sample while it is off. */
+    record Fallen(Switch switched, Fallback fallback) {
+    }
     private final Map<Scoped, Scoped> interned = new HashMap<>();
     private final Map<ExternalImage, Image> externals = new IdentityHashMap<>();
     /** Imported buffers by Vulkan handle: every wrapper of one buffer is the same buffer of the build. */
@@ -509,6 +514,14 @@ public final class GraphBuilder {
         }
         resolution.put(resolve(view(), key),
             key.kind() == Image.class ? image((Image) result) : buffer((Buffer) result));
+        if (scope() instanceof Switch switched && switched.fallbackFor(key) != null) {
+            fallbacks.put(((Image) result).id, new Fallen(switched, switched.fallbackFor(key))); // while off
+        }
+    }
+
+    /** The view {@code technique} belongs to, or null: the frame's. */
+    ViewPort viewOf(Technique technique) {
+        return viewOf.get(technique);
     }
 
     /**

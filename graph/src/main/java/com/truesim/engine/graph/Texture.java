@@ -60,6 +60,12 @@ public final class Texture implements AutoCloseable {
      */
     @AllowAllocation("set up rarely")
     public Texture(VulkanDevice device, String name, Format format, int width, int height) {
+        this(device, name, format, width, height, new float[4]);
+    }
+
+    /** Like {@link #Texture(VulkanDevice, String, Format, int, int)}, starting filled with {@code rgba}. */
+    @AllowAllocation("set up rarely")
+    public Texture(VulkanDevice device, String name, Format format, int width, int height, float[] rgba) {
         this.device = java.util.Objects.requireNonNull(device, "device");
         java.util.Objects.requireNonNull(name, "name");
         java.util.Objects.requireNonNull(format, "format");
@@ -85,8 +91,11 @@ public final class Texture implements AutoCloseable {
             try (MemoryStack stack = stackPush()) {
                 VkImageSubresourceRange.Buffer range = VkImageSubresourceRange.calloc(1, stack)
                     .aspectMask(aspect).levelCount(1).layerCount(1);
-                vkCmdClearColorImage(commands, image.handle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    VkClearColorValue.calloc(stack), range);
+                VkClearColorValue clear = VkClearColorValue.calloc(stack);
+                for (int c = 0; c < 4; c++) {
+                    clear.float32(c, rgba[c]);
+                }
+                vkCmdClearColorImage(commands, image.handle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, clear, range);
             }
             Images.transition(commands, image.handle(), aspect, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,

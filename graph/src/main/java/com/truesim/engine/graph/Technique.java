@@ -67,6 +67,11 @@ public interface Technique {
         return 0;
     }
 
+    /** This technique, on while {@code setting} is, from one frame to the next ({@link Switch}). */
+    default Switch when(com.truesim.engine.settings.Setting<Boolean> setting) {
+        return Switch.of(setting, this);
+    }
+
     /**
      * Adds the technique's passes; called when the graph is (re)built, not per frame, so it may allocate (annotate it
      * {@code @AllowAllocation} in allocation-free modules). The pass bodies it creates run every frame and must not.

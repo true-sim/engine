@@ -649,6 +649,10 @@ that declare how they use each image. The graph does the rest:
   windows are not touched (not acquired, not presented), and its histories keep what the last frame it ran wrote. Shared work that serves several
   views leaves out a skipped one's part by asking `g.running()` at record time: the renderer's culling culls only the
   views that run.
+- **Switches:** `technique.when(setting)` (a `Switch`) runs the technique only while a boolean setting is on, read
+  every frame: no rebuild. An in-place effect switched off leaves its image as it was; a producer gives a fallback for
+  each image others sample (`fallback(key, Fallback.constant(format, value))`), read instead while it is off. A view's
+  own settings (`view.ownSettings()`) win over the graph's, so one view can turn an effect off.
 - **Textures:** `graph.texture(name, format, w, h)` is an image the graph keeps from frame to frame, resting readable
   by shaders, with a bindless slot that never changes (`texture.slot()`). A view renders into it with
   `view.output(key, texture)` (a mirror, a security camera's screen), and a frame the view is skipped leaves it as it
