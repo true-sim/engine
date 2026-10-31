@@ -1582,8 +1582,13 @@ class FrameGraphTest {
     void aViewSkippedFromItsStartHasNoLastFrameUntilItRuns() {
         ViewPort late = graph.addView("late").add(new Remember()).output(OUT, output).enabled(false);
         assertThat(late.enabled()).isFalse();
-        frame();
-        submitted(2);
+        // Off, it leaves its output untouched (never written: nothing to read back yet).
+        device.submitAndWait(device.graphics(), graph::record);
+        for (int i = 0; i < 2; i++) {
+            graph.beginFrame();
+            graph.submit(0, 0);
+        }
+        device.waitIdle();
         late.enabled(true);
         assertThat(frame()[0]).as("no last frame yet").isEqualTo(0xffffffff);
         assertThat(frame()[0]).isEqualTo(BLUE);

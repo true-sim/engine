@@ -136,6 +136,13 @@ materials and lighting doubled the mesh path's time.
 - Proof: [#143](https://github.com/true-sim/engine/issues/143).
 - Rule: a change to shared shading or vertex data reruns `MeshletBenchmark` and updates the tables, with the date.
 
+**Platform coverage depends on the video driver.** engine-platform passed its branch coverage locally on the Windows
+driver and failed it on CI's offscreen driver (0.70 against 0.80), which reaches fewer branches and has no input
+devices.
+- Proof: [the failed run of #187](https://github.com/true-sim/engine/actions/runs/41183986316).
+- Rule: before pushing platform changes, also run `SDL_VIDEO_DRIVER=offscreen ./gradlew :engine-platform:test
+  :engine-platform:jacocoTestReport`, and cover new code with tests that do not depend on the driver.
+
 **Waiting for loads once is not enough.** A load can start another only in a frame: a renderable's materials are asked
 for in the `sync.update()` after its mesh uploads. Tests that waited for the loads once, then recorded a few frames,
 failed whenever generating the material took longer than those frames (about one run in four).

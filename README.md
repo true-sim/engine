@@ -624,7 +624,7 @@ that declare how they use each image. The graph does the rest:
   factories, and `add(name, camera, options)` making the port, its render view and its techniques at once.
   `view.enabled(false)` skips a view from the next frame and `view.rate(4)` runs it every 4th frame, neither
   rebuilding the graph: a skipped view runs none of its passes, nor shared work only it asked for, its outputs into
-  windows are left undefined, and its histories keep what the last frame it ran wrote. Shared work that serves several
+  windows are not touched (not acquired, not presented), and its histories keep what the last frame it ran wrote. Shared work that serves several
   views leaves out a skipped one's part by asking `g.running()` at record time: the renderer's culling culls only the
   views that run.
 - **Textures:** `graph.texture(name, format, w, h)` is an image the graph keeps from frame to frame, resting readable
@@ -637,6 +637,24 @@ that declare how they use each image. The graph does the rest:
   graph renders into and reads it, it outlives them (a one-shot render kept for later), and the app closes it
   (`close()`, or `close(retiring)` to free it once no frame in flight reads it). A graph using a closed texture fails
   when it builds.
+- **Presenting:** a `Presenter` shows views of one graph in any number of windows, all from one frame:
+  `presenter.present(view, key, window, settings)` gives the window a swapchain and sizes the view to its pixels
+  (resized with it), and `presenter.render()` renders a frame and presents every window whose view ran. A window
+  whose view is off, between frames of its rate, or minimized is neither acquired nor presented, and keeps its last
+  frame. `PresentSettings` (vsync: the present mode) changes while running (`target.apply(settings)`) and saves and
+  loads like `WindowSettings`; closing a window or its target stops presenting to it.
+
+```java
+try (Presenter presenter = new Presenter(graph, instance)) {
+    for (int i = 0; i < screens.size(); i++) {           // one window per monitor, each its own view
+        presenter.present(views.get(i).port(), Keys.SCENE_COLOR, screens.get(i), PresentSettings.fromMap(saved));
+    }
+    while (running) {
+        platform.pollEvents(listener);
+        presenter.render();
+    }
+}
+```
 - **Culled:** walking back from the outputs, passes whose images and buffers nothing needs are dropped.
 - **Synchronized:** barriers and layout transitions come from the declared accesses, batched into one call per pass,
   with none between reads.

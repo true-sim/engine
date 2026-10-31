@@ -163,6 +163,8 @@ public final class FrameGraph implements AutoCloseable {
     private JobSystem jobs;
     private int grain = 4;
     private PassContext[] contexts = {new PassContext(this)};
+    private final long[] oneAcquired = new long[1]; // submit(long, long)'s, as arrays
+    private final long[] oneFinished = new long[1];
     private final JobSystem.RangeTask recordChunks = this::recordChunks;
     private Execution execution;
     private boolean dirty = true;
@@ -202,6 +204,9 @@ public final class FrameGraph implements AutoCloseable {
     private ViewPort[][] passViews = new ViewPort[0][];
     private boolean[] passSkipped = new boolean[0];
     private ViewPort[] historyView = new ViewPort[0];
+    // The view each external image is an output of, if not a texture (a window's image): untouched while the view does
+    // not run, as the presentation engine may hold it.
+    private ViewPort[] externalView = new ViewPort[0];
     private int[] targetOf = new int[0];
     private Physical[] physicals = new Physical[0];
     private ExternalImage[] externals = new ExternalImage[0];
@@ -566,6 +571,17 @@ public final class FrameGraph implements AutoCloseable {
      * nothing.
      */
     public void submit(long acquired, long renderFinished) {
+        oneAcquired[0] = acquired;
+        oneFinished[0] = renderFinished;
+        submit(oneAcquired, acquired == 0 ? 0 : 1, oneFinished, renderFinished == 0 ? 0 : 1);
+    }
+
+    /**
+     * Like {@link #submit(long, long)}, for several windows: the first batch using an external image waits for binary
+     * semaphores {@code acquired[0]} to {@code acquired[acquiredCount - 1]}, and the last graphics batch signals
+     * {@code renderFinished[0]} to {@code renderFinished[finishedCount - 1]}. Allocates nothing.
+     */
+    public void submit(long[] acquired, int acquiredCount, long[] renderFinished, int finishedCount) {
         if (execution == null || !execution.begun) {
             throw new IllegalStateException("Begin the frame first: beginFrame()");
         }
@@ -584,7 +600,7 @@ public final class FrameGraph implements AutoCloseable {
             frameStart = null;
             recordChunks(0, chunkBatch.length, 0);
         }
-        execution.submit(acquired, renderFinished);
+        execution.submit(acquired, acquiredCount, renderFinished, finishedCount);
         if (ownsSlots) {
             frameSlots.end();
         }
@@ -859,10 +875,10 @@ public final class FrameGraph implements AutoCloseable {
         }
 
         /** Submits the batches in order, each to its queue. Allocates nothing. */
-        void submit(long acquired, long renderFinished) {
+        void submit(long[] acquired, int acquiredCount, long[] renderFinished, int finishedCount) {
             long graphicsBase = graphicsValue;
             long computeBase = computeValue;
-            boolean acquireWaited = acquired == 0;
+            boolean acquireWaited = acquiredCount == 0;
             boolean bothQueues = computeBatches > 0;
             boolean firstGraphics = true;
             boolean firstCompute = true;
@@ -887,7 +903,8 @@ public final class FrameGraph implements AutoCloseable {
                     }
                     // Waits: the other queue's batch this one depends on (or, first on its queue, all the other queue
                     // did in the frame before, as images pass between queues), and the acquired image.
-                    long waits = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 2, VkSemaphoreSubmitInfo.SIZEOF);
+                    long waits = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 1 + acquiredCount,
+                        VkSemaphoreSubmitInfo.SIZEOF);
                     int waitCount = 0;
                     long otherBase = queue == GRAPHICS ? computeBase : graphicsBase;
                     long otherValue = batchWait[b] > 0 ? otherBase + batchWait[b] : 0;
@@ -902,17 +919,21 @@ public final class FrameGraph implements AutoCloseable {
                     }
                     boolean acquire = !acquireWaited && (batchAcquire[b] || b == lastGraphicsBatch);
                     if (acquire) {
-                        semaphore(waits + (long) waitCount * VkSemaphoreSubmitInfo.SIZEOF, acquired, 0);
-                        waitCount++;
+                        for (int a = 0; a < acquiredCount; a++) {
+                            semaphore(waits + (long) waitCount++ * VkSemaphoreSubmitInfo.SIZEOF, acquired[a], 0);
+                        }
                         acquireWaited = true;
                     }
-                    long signals = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 2, VkSemaphoreSubmitInfo.SIZEOF);
+                    long signals = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 1 + finishedCount,
+                        VkSemaphoreSubmitInfo.SIZEOF);
                     int signalCount = 1;
                     semaphore(signals, queue == GRAPHICS ? graphicsTimeline : computeTimeline,
                         (queue == GRAPHICS ? graphicsBase : computeBase) + batchOrdinal[b]);
-                    if (b == lastGraphicsBatch && renderFinished != 0) {
-                        semaphore(signals + VkSemaphoreSubmitInfo.SIZEOF, renderFinished, 0);
-                        signalCount++;
+                    if (b == lastGraphicsBatch) {
+                        for (int f = 0; f < finishedCount; f++) {
+                            semaphore(signals + (long) signalCount++ * VkSemaphoreSubmitInfo.SIZEOF, renderFinished[f],
+                                0);
+                        }
                     }
                     long submit = stack.ncalloc(VkSubmitInfo2.ALIGNOF, 1, VkSubmitInfo2.SIZEOF);
                     memPutInt(submit + VkSubmitInfo2.STYPE, VK_STRUCTURE_TYPE_SUBMIT_INFO_2);
@@ -1130,8 +1151,18 @@ public final class FrameGraph implements AutoCloseable {
         }
     }
 
-    /** Whether barrier {@code b}, of a pass {@code skipped} or not, is left out: it is on a skipped view's history. */
+    /**
+     * Whether barrier {@code b}, of a pass {@code skipped} or not, is left out: on a skipped view's history, or on the
+     * window image a view not running this frame outputs into (not acquired: the presentation engine may hold it).
+     */
     private boolean dropped(int b, boolean skipped) {
+        int target = barrierTarget[b];
+        if (barrierKind[b] == IMAGE && target < 0) {
+            ViewPort view = externalView[~target];
+            if (view != null && !view.active) {
+                return true;
+            }
+        }
         return skipped && barrierHistory[b] >= 0 && !historyRuns(barrierHistory[b]);
     }
 
@@ -1185,6 +1216,11 @@ public final class FrameGraph implements AutoCloseable {
 
     VulkanDevice device() {
         return device;
+    }
+
+    /** How many frames may be in flight: the frame slots {@link #beginFrame} returns. */
+    int framesInFlight() {
+        return framesInFlight;
     }
 
     @SuppressWarnings("unchecked")
@@ -1369,6 +1405,16 @@ public final class FrameGraph implements AutoCloseable {
     @AllowAllocation("building the graph, when it changes")
     private void startViews(GraphBuilder g, int historyCount) {
         g.finishRunning();
+        externalView = new ViewPort[externals.length];
+        for (ViewPort view : views) {
+            for (ExternalImage target : view.outputs.values()) {
+                for (int e = 0; e < externals.length; e++) {
+                    if (externals[e] == target && target.texture == null) {
+                        externalView[e] = view;
+                    }
+                }
+            }
+        }
         passViews = new ViewPort[order.length][];
         passSkipped = new boolean[order.length];
         historyView = new ViewPort[historyCount];

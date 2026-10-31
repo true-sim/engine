@@ -24,8 +24,9 @@ import java.util.Objects;
  * }</pre>
  *
  * <p>A view skipped in a frame ({@link #enabled}, {@link #rate}) runs none of its passes, nor shared work only it asked
- * for. Its outputs into a {@link Texture} keep what it last rendered; others are left undefined (present a window only
- * in frames it ran in). Its histories stay as they are, so its next frame reads what its last one wrote.
+ * for. Its outputs into a {@link Texture} keep what it last rendered; its other outputs (a window's image) are not
+ * touched at all that frame, as a window's image is not acquired then (a {@link Presenter} presents only frames it ran
+ * in). Its histories stay as they are, so its next frame reads what its last one wrote.
  */
 @AllowAllocation("set up rarely")
 public final class ViewPort {
@@ -41,6 +42,7 @@ public final class ViewPort {
     private int rate = 1;
     private int skipped; // frames skipped since it last ran, while enabled
     boolean active; // runs this frame: set when the frame starts
+    boolean suspended; // set by a presenter while its window cannot show it (minimized): runs no frame
 
     ViewPort(FrameGraph graph, String name) {
         this.graph = graph;
@@ -128,10 +130,15 @@ public final class ViewPort {
 
     /** Starts a frame: whether the view runs in it. */
     void startFrame() {
-        active = enabled && ++skipped >= rate;
+        active = enabled && ++skipped >= rate && !suspended; // suspended while due: runs when it may again
         if (active) {
             skipped = 0;
         }
+    }
+
+    /** Whether the view will run in the next frame to start, as {@link #startFrame} will find. */
+    boolean runsNextFrame() {
+        return enabled && skipped + 1 >= rate && !suspended;
     }
 
     /** Adds a technique of this view; the graph rebuilds on its next frame. */
