@@ -139,7 +139,12 @@ public final class VulkanDevice implements AutoCloseable {
     private final Map<Object, Throwable> children;
     private volatile boolean closed;
 
-    private VulkanDevice(Gpu gpu, boolean swapchains) {
+    private VulkanDevice(Gpu gpu, boolean swapchains, java.util.Collection<String> extra) {
+        for (String name : extra) {
+            if (!gpu.supports(name)) {
+                throw new VulkanException(gpu.name() + " lacks the device extension " + name);
+            }
+        }
         this.gpu = gpu;
         this.swapchains = swapchains;
         this.children = gpu.instance().validationEnabled() ? new IdentityHashMap<>() : null;
@@ -296,7 +301,8 @@ public final class VulkanDevice implements AutoCloseable {
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
                 .pNext(features.address())
                 .pQueueCreateInfos(queues.flip())
-                .ppEnabledExtensionNames(extensions(stack, swapchains, meshShaders, barycentrics, rayTracing, faults));
+                .ppEnabledExtensionNames(extensions(stack, swapchains, meshShaders, barycentrics, rayTracing, faults,
+                    extra));
             PointerBuffer device = stack.mallocPointer(1);
             Vulkan.check(vkCreateDevice(gpu.handle(), info, null, device), "Could not create a device on " + gpu.name());
             this.handle = new VkDevice(device.get(0), gpu.handle(), info, apiVersion);
@@ -365,36 +371,57 @@ public final class VulkanDevice implements AutoCloseable {
     }
 
     private static PointerBuffer extensions(MemoryStack stack, boolean swapchains, boolean meshShaders,
-        boolean barycentrics, boolean rayTracing, boolean faults) {
-        PointerBuffer names = stack.mallocPointer(7);
+        boolean barycentrics, boolean rayTracing, boolean faults, java.util.Collection<String> extra) {
+        PointerBuffer names = stack.mallocPointer(7 + extra.size());
+        List<String> engine = new ArrayList<>();
         if (faults) {
             names.put(stack.UTF8(VK_EXT_DEVICE_FAULT_EXTENSION_NAME));
+            engine.add(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         }
         if (swapchains) {
             names.put(stack.UTF8(VK_KHR_SWAPCHAIN_EXTENSION_NAME));
+            engine.add(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
         }
         if (meshShaders) {
             names.put(stack.UTF8(VK_EXT_MESH_SHADER_EXTENSION_NAME));
+            engine.add(VK_EXT_MESH_SHADER_EXTENSION_NAME);
         }
         if (barycentrics) {
             names.put(stack.UTF8(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME));
+            engine.add(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
         }
         if (rayTracing) {
             names.put(stack.UTF8(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME));
+            engine.add(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
             names.put(stack.UTF8(VK_KHR_RAY_QUERY_EXTENSION_NAME));
+            engine.add(VK_KHR_RAY_QUERY_EXTENSION_NAME);
             names.put(stack.UTF8(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME));
+            engine.add(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+        }
+        for (String name : extra) {
+            if (!engine.contains(name)) {
+                names.put(stack.UTF8(name));
+            }
         }
         return names.position() == 0 ? null : names.flip();
     }
 
     /** A device that can present to windows. */
     public static VulkanDevice create(Gpu gpu) {
-        return new VulkanDevice(gpu, true);
+        return new VulkanDevice(gpu, true, List.of());
+    }
+
+    /**
+     * A device that can present to windows, with {@code extensions} enabled besides the engine's, e.g. those an
+     * OpenXR runtime asks for: fails if the GPU lacks one.
+     */
+    public static VulkanDevice create(Gpu gpu, java.util.Collection<String> extensions) {
+        return new VulkanDevice(gpu, true, extensions);
     }
 
     /** A device for offscreen rendering and compute only, without swapchains. */
     public static VulkanDevice createHeadless(Gpu gpu) {
-        return new VulkanDevice(gpu, false);
+        return new VulkanDevice(gpu, false, List.of());
     }
 
     /** Throws unless the GPU has every feature the engine relies on. */
