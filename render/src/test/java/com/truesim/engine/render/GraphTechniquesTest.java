@@ -1107,6 +1107,30 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void aViewSetOnceFollowsItsCameraAsItMoves() {
+        // A wall ahead and 8 quads behind it; the camera is set on the view once, blank, and moved afterwards only.
+        scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);
+        for (int i = 1; i <= 8; i++) {
+            scene.set(i, quad, (i % 4 - 1.5f) * 2.5f, i <= 4 ? -1.5f : 1.5f, -10, HALF, 0, 0, HALF, 0.5f, 0.5f, 0.5f);
+        }
+        scene.removeFrom(9);
+        Camera camera = new Camera();
+        view.set(camera, 1, MeshletRenderer.MODE_WHITE); // before the camera is anywhere
+        SceneView main = main(camera);
+        main.port().add(MeshletBenchmark.forward(main).clearColor(0, 0, 1)).output(Keys.SCENE_COLOR, output);
+        camera.set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1);
+        frame();
+        frame();
+        frame();
+        assertThat(view.visibleMeshlets()).as("the wall, from where the camera is when the frames cull").isEqualTo(1);
+        assertThat(covered()).isEqualTo(SIZE * SIZE);
+        camera.position(100, 0, 0); // moved away: nothing ahead
+        frame();
+        assertThat(view.visibleMeshlets()).isZero();
+        assertThat(covered()).isZero();
+    }
+
+    @Test
     void occlusionCullingHidesWhatIsBehindAtADynamicResolution() {
         // A wall filling the view 5 units ahead, and 8 quads behind it, 10 units ahead.
         scene.set(0, quad, 0, 0, -5, HALF, 0, 0, HALF, 6, 6, 6);

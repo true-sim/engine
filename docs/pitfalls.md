@@ -44,6 +44,15 @@ frames of other slots read a copy the CPU rewrote while they were in flight.
 - Rule: never store a `FrameBuffer`'s address in GPU data once; index into the frame's own copy, or write the address
   each frame.
 
+**A render view copied its camera when set, though the docs said it was read when the frame runs.** The demo set its
+camera only in its loop, after `SceneView.set`: culling and drawing kept the blank camera's matrices and drew nothing,
+while the light clusters read the live camera. Every engine test set the camera first, so none showed it. A headset's
+eyes, located inside `Headset.render` just before the frame records, could not have been set in time at all.
+- Proof: `DemoSceneTest` and `GraphTechniquesTest.aViewSetOnceFollowsItsCameraAsItMoves` draw only sky without
+  `RenderView.refresh` (the culling reads the camera again where it changed), and the scene with it.
+- Rule: per-frame inputs that the docs say are read when the frame runs are read there, not copied when handed over;
+  test the order an app uses (set once, change later), not only set-then-draw.
+
 ## Shaders and the GPU
 
 **An instance's `mesh` word holds flag bits.** Indexing the mesh table with it unmasked read out of bounds and lost the

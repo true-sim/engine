@@ -929,6 +929,21 @@ try (Headset headset = Headset.connect("true-sim")) {
 }
 ```
 
+## Demo
+
+`./gradlew :engine-demo:run` opens rolling terrain with 800 rocks (some spinning, some glowing), the sun with cascaded
+shadows and colored lights circling the middle, to try what the engine does live: the keys print at start and the
+title shows the frame rate, GPU time, render size and display encoding. Settings persist in
+`~/.truesim/demo.properties`.
+
+- `--args="--vr"` adds a headset through OpenXR (SteamVR, Quest Link, ...): both eyes render the scene, the left
+  thumbstick walks, triggers buzz, `P` shows the left eye on the desktop for people watching.
+- `--args="--validation"` turns Vulkan validation on and prints the error count at exit; `--seconds=10` quits by
+  itself; `--probe` prints what the main view's scene color holds now and then.
+- Keys: `1`/`2` forward or visibility buffer shading, `H` HDR, `T` tone curve, `[`/`]` exposure, `V` present mode,
+  `F`/`F11` window mode, `R` dynamic resolution, `-`/`=` render scale, `G` GPU-timed dynamic resolution (`,`/`.` its
+  target), `O` occlusion culling, `N` a second window, `F5` save.
+
 ## Building
 
 Needs Java 27 and a Vulkan 1.3 driver (1.4 is used when present); the validation layers (Vulkan SDK) are

@@ -640,6 +640,9 @@ public final class MeshletRenderer implements AutoCloseable {
         int height, int mips, boolean declared) {
         retiring.release(); // culls of one frame may run on several threads: it locks
         scene.upload(commands);
+        for (int v = 0; v < count; v++) {
+            views[v].refresh(); // from where their cameras are now
+        }
         boolean meshShading = path() == Path.MESH_SHADERS;
         // Declared to a graph that orders everything it touches: the indexed path's index buffers too, where the build
         // declared them and the views have them (else, e.g. the path changed since, its own barriers).
