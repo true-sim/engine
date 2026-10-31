@@ -17,6 +17,7 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
 import com.truesim.common.jobs.TaskScheduler;
+import java.time.Duration;
 import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.ExternalImage;
@@ -712,6 +713,107 @@ class SceneSyncTest {
         sync.update();
     }
 
+    /** A material of one gray, textured with {@code texture}: one of its own per {@code seed}. */
+    private static AssetRef<MaterialData> textured(AssetRef<TextureData> texture, int seed) {
+        return AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>) (glow, s) ->
+            MaterialData.builder(MR).texture("baseColorTexture", texture).build(), new Glow(0.5f, 0.5f, 0.5f), seed);
+    }
+
+    @Test
+    void wholeRenderablesWaitForTheirAssetsStreamedOnesDoNot() throws InterruptedException {
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 41);
+        AssetRef<TextureData> late = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xff00ff00), 42);
+        AssetRef<MaterialData> whole = textured(white, 41);
+        AssetRef<MaterialData> streamed = textured(late, 42);
+        assertThat(resources.loadingOf(white)).as("the default").isEqualTo(SceneResources.Loading.STREAM);
+        resources.loading(SceneResources.Loading.WHOLE).loading(streamed, SceneResources.Loading.STREAM)
+            .loading(late, SceneResources.Loading.STREAM);
+        assertThat(resources.loadingOf(white)).isEqualTo(SceneResources.Loading.WHOLE);
+        assertThat(resources.loadingOf(late)).isEqualTo(SceneResources.Loading.STREAM);
+        long waits = facing(scene, 0, 0, -3);
+        long draws = facing(scene, 1, 0, -3);
+        renderables.set(waits, SQUARE, List.of(whole));
+        renderables.set(draws, SQUARE, List.of(streamed));
+        update(scene, renderables, sync);
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        while (tasks.pending() > 0) { // the mesh loaded, not handed over yet
+            assertThat(System.nanoTime()).isLessThan(deadline);
+            Thread.sleep(1);
+        }
+        tasks.drainCompleted(); // the mesh arrives: its renderables' materials are asked for
+        scene.update();
+        renderables.update();
+        sync.update(); // nothing more handed over meanwhile
+        assertThat(sync.slotOf(draws)).as("streamed: drawn with its mesh").isNotNegative();
+        assertThat(sync.slotOf(waits)).as("whole: waits for its material and texture").isEqualTo(-1);
+        assertThat(sync.waitingCount()).isEqualTo(1);
+        assertThat(resources.loadingCount()).isPositive();
+        for (int round = 0; round < 4 && sync.slotOf(waits) < 0; round++) {
+            load();
+            update(scene, renderables, sync);
+        }
+        assertThat(sync.slotOf(waits)).as("drawn once all of it is on the GPU").isNotNegative();
+        assertThat(sync.waitingCount()).isZero();
+        assertThat(resources.loadingCount()).isZero();
+        // A whole asset that fails is not waited for.
+        AssetRef<TextureData> broken = AssetRef.generated(RenderAssets.TEXTURE, (Generator<Plain, TextureData>)
+            (plain, seed) -> {
+                throw new IllegalStateException("no such texture");
+            }, new Plain(0), 43);
+        long failing = facing(scene, 2, 0, -3);
+        renderables.set(failing, SQUARE, List.of(textured(broken, 43)));
+        for (int round = 0; round < 4 && sync.slotOf(failing) < 0; round++) {
+            update(scene, renderables, sync);
+            load();
+        }
+        update(scene, renderables, sync);
+        assertThat(sync.slotOf(failing)).isNotNegative();
+        resources.loading(late, null);
+        assertThat(resources.loadingOf(late)).as("back to the default").isEqualTo(SceneResources.Loading.WHOLE);
+    }
+
+    @Test
+    void assetsPreparedOnWorkersAreAwaitedWhole() throws InterruptedException {
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        resources.prepareOn(tasks.platformLane("gpu prepare", 2)).loading(SceneResources.Loading.WHOLE);
+        AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 51);
+        long node = facing(scene, 0, 0, -3);
+        renderables.set(node, SQUARE, List.of(textured(white, 51)));
+        update(scene, renderables, sync);
+        assertThat(resources.loadingCount()).isPositive();
+        // A loading screen's wait: the mesh, its material and texture loaded, made ready on the workers and added.
+        assertThat(resources.awaitLoaded(tasks, Duration.ofSeconds(10))).isTrue();
+        assertThat(resources.loadingCount()).isZero();
+        assertThat(resources.uploadedMeshCount()).isEqualTo(1);
+        assertThat(textures.count()).isEqualTo(1);
+        update(scene, renderables, sync);
+        assertThat(sync.slotOf(node)).as("all of it drawn from the next frame").isNotNegative();
+        // Let go of while being made ready: freed once the workers are done, nothing leaks.
+        AssetRef<TextureData> gray = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xff808080), 52);
+        long brief = facing(scene, 1, 0, -3);
+        renderables.set(brief, SMALL, List.of(textured(gray, 52)));
+        update(scene, renderables, sync);
+        assertThat(resources.awaitLoaded(tasks, Duration.ZERO)).as("not at once").isFalse();
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        while (resources.meshCount() < 2 || tasks.pending() == 0 && resources.uploadedMeshCount() < 2) {
+            assertThat(System.nanoTime()).isLessThan(deadline);
+            Thread.sleep(1);
+            tasks.drainCompleted();
+        }
+        renderables.remove(brief);
+        update(scene, renderables, sync);
+        load();
+        update(scene, renderables, sync);
+        assertThat(resources.meshCount()).isEqualTo(1);
+        assertThat(resources.loadingCount()).isZero();
+        resources.prepareOn(null);
+    }
+
     @Test
     void renderablesBeyondTheTablesRoomGrowIt() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
@@ -839,7 +941,6 @@ class SceneSyncTest {
         update(scene, renderables, sync);
         load();
         update(scene, renderables, sync);
-        assertThat(resources.waitingForRoomCount()).isZero();
         assertThat(resources.uploadedMeshCount()).isEqualTo(meshes);
         assertThat(pool.meshCount()).isEqualTo(meshes);
         assertThat(pool.capacity().meshes()).isGreaterThanOrEqualTo(meshes);
@@ -1214,7 +1315,7 @@ class SceneSyncTest {
         assertThat(resources.pool()).isSameAs(pool);
         assertThat(resources.materials()).isSameAs(materials);
         assertThat(resources.textures()).isSameAs(textures);
-        assertThat(resources.waitingForRoomCount()).isZero();
+        assertThat(resources.loadingCount()).isZero();
         Renderables renderables = sync.renderables();
         renderables.set(scene.create(), SQUARE, List.of());
         assertThatIllegalStateException().isThrownBy(sync::update).withMessageContaining("closed");

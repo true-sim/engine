@@ -124,7 +124,9 @@ public final class SceneSync implements AutoCloseable {
         @Override
         public void uploaded(SceneResources.Mesh uploaded) {
             // Drawn at the end of the update, once the frame's changes are followed: a renderable may be gone already.
+            // Its materials are asked for now, so they load meanwhile (an awaitLoaded waits for them too).
             for (int item = firstItem; item != NONE; item = itemNext[item]) {
+                holdMaterials(item);
                 queue(item);
             }
         }
@@ -276,8 +278,8 @@ public final class SceneSync implements AutoCloseable {
     }
 
     /**
-     * Renderables ready to draw that the material table has no room for their materials for: they draw as room
-     * frees.
+     * Renderables whose meshes are on the GPU that do not draw yet: the material table has no room for their materials,
+     * or assets they wait for ({@link SceneResources.Loading#WHOLE}) have not arrived. They draw as those come.
      */
     public int waitingCount() {
         int count = 0;
@@ -375,7 +377,9 @@ public final class SceneSync implements AutoCloseable {
         }
         resources.releaseSet(itemSet[item]);
         itemSet[item] = set;
-        markMoved(item);
+        if (itemSlot[item] != NONE) {
+            markMoved(item);
+        }
     }
 
     private void sceneChanged(long node, int changes) {
@@ -460,31 +464,43 @@ public final class SceneSync implements AutoCloseable {
 
     /** Draws {@code item}, a live renderable's whose mesh is on the GPU: the lowest free instance id, its materials. */
     private boolean tryShow(int item) {
-        int slot = gpu.freeId(); // the table grows if it is full
-        SceneResources.Mesh mesh = itemMesh[item].mesh;
-        SceneResources.MaterialSet set = resources.acquireSet(renderables.materials(itemNode[item]),
-            mesh.data.materialSlots());
-        if (set == null) {
+        if (!holdMaterials(item)) {
             return false; // the material table is full: drawn when ids free
         }
-        itemSet[item] = set;
+        if (!resources.ready(itemSet[item])) {
+            return false; // assets it waits for are not on the GPU yet
+        }
+        int slot = gpu.freeId(); // the table grows if it is full
         instanceCount++;
         itemSlot[item] = slot;
         write(gpu.claim(slot), item); // takes the id
         return true;
     }
 
+    /**
+     * Holds {@code item}'s block of materials, from when its mesh is on the GPU, while it waits too: its materials and
+     * textures load. Whether it holds one: not while the material table has no room, nor once its renderable is gone.
+     */
+    private boolean holdMaterials(int item) {
+        if (itemSet[item] == null && renderables.has(itemNode[item])) {
+            itemSet[item] = resources.acquireSet(renderables.materials(itemNode[item]),
+                itemMesh[item].mesh.data.materialSlots());
+        }
+        return itemSet[item] != null;
+    }
+
     /** Stops drawing {@code item}: its id becomes a hole, free for the next renderable drawn. */
     private void hide(int item) {
         int slot = itemSlot[item];
-        if (slot == NONE) {
-            return;
+        if (slot != NONE) {
+            gpu.remove(slot);
+            instanceCount--;
+            itemSlot[item] = NONE;
         }
-        gpu.remove(slot);
-        instanceCount--;
-        itemSlot[item] = NONE;
-        resources.releaseSet(itemSet[item]);
-        itemSet[item] = null;
+        if (itemSet[item] != null) { // drawn, or waiting for its assets
+            resources.releaseSet(itemSet[item]);
+            itemSet[item] = null;
+        }
     }
 
     /** Has {@code item} drawn at the end of the update, once. */
