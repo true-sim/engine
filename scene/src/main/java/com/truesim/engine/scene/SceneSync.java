@@ -110,6 +110,14 @@ public final class SceneSync implements AutoCloseable {
     private int waitingCount;
     private boolean[] isWaiting = new boolean[64];
 
+    // Drawn items changing mesh or materials: the new ones held until what they wait for is on the GPU, then swapped
+    // in, the instance id kept; the old ones drawn meanwhile.
+    private ViewMesh[] pendingMesh = new ViewMesh[64];
+    private SceneResources.MaterialSet[] pendingSet = new SceneResources.MaterialSet[64];
+    private int[] swapping = new int[64];
+    private int swappingCount;
+    private boolean[] isSwapping = new boolean[64];
+
     private boolean rewriteAll = true;
 
     private final Map<AssetRef<MeshData>, ViewMesh> meshes = new HashMap<>();
@@ -196,7 +204,7 @@ public final class SceneSync implements AutoCloseable {
             // More changed nodes than half the instances (or more than the scene's log kept): rewriting every
             // instance costs less than following the changes.
             int changed = scene.changeCountSince(since);
-            if (changed < 0 || changed > instanceCount / 2) {
+            if (changed < 0 || changed > Math.max(instanceCount, itemCount) / 2) {
                 rewriteAll = true;
             } else {
                 scene.changesSince(since, onSceneChange);
@@ -212,6 +220,7 @@ public final class SceneSync implements AutoCloseable {
             }
         }
         resources.flush();
+        finishSwaps();
         drawWaiting();
         int count = 0;
         if (rewriteAll) {
@@ -338,22 +347,22 @@ public final class SceneSync implements AutoCloseable {
         List<AssetRef<MaterialData>> list = renderables.materials(node);
         if (itemNode[item] == node) {
             if (itemMesh[item].mesh.ref.equals(ref)) {
-                if (itemSet[item] != null && !SceneResources.sameMaterials(itemSet[item].key.materials(), list)) {
+                cancelPendingMesh(item); // changed back before the new one came
+                SceneResources.MaterialSet wanted = pendingSet[item] != null ? pendingSet[item] : itemSet[item];
+                if (wanted != null && !SceneResources.sameMaterials(wanted.key.materials(), list)) {
                     swapMaterials(item, list); // the mesh and the instance id stay
                 } else if (itemSlot[item] != NONE) {
                     markMoved(item); // whether it casts shadows, written with the instance
                 }
                 return;
             }
+            if (itemSlot[item] != NONE) {
+                changeMesh(item, ref, list); // drawn on as it is until the new mesh and materials are on the GPU
+                return;
+            }
             destroy(item);
         }
-        ViewMesh entry = meshes.get(ref);
-        if (entry == null) {
-            entry = new ViewMesh();
-            meshes.put(ref, entry);
-            entry.mesh = resources.acquireMesh(ref, entry); // may upload now: no items of it to show yet
-        }
-        entry.holders++;
+        ViewMesh entry = holdMesh(ref);
         itemNode[item] = node;
         itemMesh[item] = entry;
         itemCount++;
@@ -363,17 +372,138 @@ public final class SceneSync implements AutoCloseable {
         }
     }
 
+    /** {@code ref}'s entry, held once more: made, and the mesh acquired, the first time (before anything is put in). */
+    @AllowAllocation("a mesh used anew")
+    private ViewMesh holdMesh(AssetRef<MeshData> ref) {
+        ViewMesh entry = meshes.get(ref);
+        if (entry == null) {
+            entry = new ViewMesh();
+            entry.mesh = resources.acquireMesh(ref, entry); // may upload now: no items of it to show yet
+            meshes.put(ref, entry);
+        }
+        entry.holders++;
+        return entry;
+    }
+
+    /** Lets go of {@code entry} once: at no holders, of its mesh. */
+    private void releaseMesh(ViewMesh entry) {
+        if (--entry.holders == 0) {
+            meshes.remove(entry.mesh.ref);
+            resources.releaseMesh(entry.mesh, entry);
+        }
+    }
+
     /**
-     * Draws {@code item}, drawn now, with {@code materials} instead: the new set is taken before the old one goes, so
-     * materials both use stay on the GPU.
+     * Draws {@code item} with {@code materials} instead: the new set is taken before the old one goes, so materials both
+     * use stay on the GPU. Drawn now, it is swapped in once what it waits for is on the GPU ({@code WHOLE}): drawn as
+     * it was meanwhile.
      */
     private void swapMaterials(int item, List<AssetRef<MaterialData>> materials) {
-        SceneResources.MaterialSet set = resources.acquireSet(materials, itemMesh[item].mesh.data.materialSlots());
-        resources.releaseSet(itemSet[item]);
-        itemSet[item] = set;
-        if (itemSlot[item] != NONE) {
-            markMoved(item);
+        if (itemSlot[item] == NONE) { // not drawn yet: the set it waits with
+            SceneResources.MaterialSet set = resources.acquireSet(materials, itemMesh[item].mesh.data.materialSlots());
+            resources.releaseSet(itemSet[item]);
+            itemSet[item] = set;
+            return;
         }
+        if (pendingSet[item] != null) {
+            resources.releaseSet(pendingSet[item]);
+            pendingSet[item] = null;
+        }
+        if (pendingMesh[item] == null) {
+            pendingSet[item] = resources.acquireSet(materials, itemMesh[item].mesh.data.materialSlots());
+        } // else taken for the new mesh's submeshes once it is on the GPU
+        swapWhenReady(item);
+    }
+
+    /** Draws {@code item}, drawn now, with mesh {@code ref} once it and its materials are on the GPU; as it was till then. */
+    private void changeMesh(int item, AssetRef<MeshData> ref, List<AssetRef<MaterialData>> materials) {
+        if (pendingMesh[item] != null && pendingMesh[item].mesh.ref.equals(ref)) {
+            if (pendingSet[item] != null && !SceneResources.sameMaterials(pendingSet[item].key.materials(), materials)) {
+                resources.releaseSet(pendingSet[item]); // taken again with the new materials
+                pendingSet[item] = null;
+            }
+        } else {
+            cancelPendingMesh(item);
+            pendingMesh[item] = holdMesh(ref);
+        }
+        swapWhenReady(item);
+    }
+
+    /** Lets go of the mesh {@code item} was to change to, and the set taken for it. */
+    private void cancelPendingMesh(int item) {
+        if (pendingMesh[item] != null) {
+            releaseMesh(pendingMesh[item]);
+            pendingMesh[item] = null;
+            if (pendingSet[item] != null) {
+                resources.releaseSet(pendingSet[item]);
+                pendingSet[item] = null;
+            }
+        }
+    }
+
+    /** Swaps {@code item}'s pending mesh or materials in now if it can, else when an update finds them ready. */
+    @AllowAllocation("growing the list of swapping items")
+    private void swapWhenReady(int item) {
+        if (trySwap(item) || isSwapping[item]) {
+            return;
+        }
+        if (swappingCount == swapping.length) {
+            swapping = Arrays.copyOf(swapping, swappingCount * 2);
+        }
+        swapping[swappingCount++] = item;
+        isSwapping[item] = true;
+    }
+
+    /**
+     * Swaps in {@code item}'s pending mesh and materials, written into its instance id, if they are on the GPU; whether
+     * nothing is pending any more (a pending mesh that failed is dropped: the old one stays).
+     */
+    private boolean trySwap(int item) {
+        if (pendingMesh[item] == null && pendingSet[item] == null) {
+            return true;
+        }
+        ViewMesh mesh = pendingMesh[item] != null ? pendingMesh[item] : itemMesh[item];
+        if (!mesh.mesh.uploaded()) {
+            if (mesh.mesh.failed) {
+                cancelPendingMesh(item);
+                return true;
+            }
+            return false;
+        }
+        if (pendingSet[item] == null) {
+            pendingSet[item] = resources.acquireSet(renderables.materials(itemNode[item]),
+                mesh.mesh.data.materialSlots());
+        }
+        if (!resources.ready(pendingSet[item])) {
+            return false;
+        }
+        if (pendingMesh[item] != null) {
+            ViewMesh old = itemMesh[item];
+            unlink(old, item);
+            link(mesh, item);
+            itemMesh[item] = mesh;
+            pendingMesh[item] = null;
+            releaseMesh(old);
+        }
+        resources.releaseSet(itemSet[item]);
+        itemSet[item] = pendingSet[item];
+        pendingSet[item] = null;
+        markMoved(item);
+        return true;
+    }
+
+    /** Swaps in what drawn items waited for, where it came; those still waiting keep waiting. */
+    private void finishSwaps() {
+        int kept = 0;
+        for (int i = 0; i < swappingCount; i++) {
+            int item = swapping[i];
+            if (itemNode[item] != NodeHandle.NONE && !trySwap(item)) {
+                swapping[kept++] = item;
+            } else {
+                isSwapping[item] = false;
+            }
+        }
+        swappingCount = kept;
     }
 
     private void sceneChanged(long node, int changes) {
@@ -395,15 +525,17 @@ public final class SceneSync implements AutoCloseable {
 
     private void destroy(int item) {
         hide(item);
+        cancelPendingMesh(item);
+        if (pendingSet[item] != null) {
+            resources.releaseSet(pendingSet[item]);
+            pendingSet[item] = null;
+        }
         ViewMesh entry = itemMesh[item];
         unlink(entry, item);
         itemMesh[item] = null;
         itemNode[item] = NodeHandle.NONE;
         itemCount--;
-        if (--entry.holders == 0) {
-            meshes.remove(entry.mesh.ref);
-            resources.releaseMesh(entry.mesh, entry);
-        }
+        releaseMesh(entry);
     }
 
     private void link(ViewMesh entry, int item) {
@@ -439,6 +571,9 @@ public final class SceneSync implements AutoCloseable {
         itemPrevious = Arrays.copyOf(itemPrevious, length);
         moved = Arrays.copyOf(moved, length);
         isWaiting = Arrays.copyOf(isWaiting, length);
+        pendingMesh = Arrays.copyOf(pendingMesh, length);
+        pendingSet = Arrays.copyOf(pendingSet, length);
+        isSwapping = Arrays.copyOf(isSwapping, length);
         movedItems = Arrays.copyOf(movedItems, length);
         fillItems = new int[length];
         fillEntries = new int[length];

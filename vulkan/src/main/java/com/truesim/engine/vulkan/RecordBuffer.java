@@ -42,9 +42,9 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  * }</pre>
  *
  * <p>A record is in the changes at most once until they upload: claiming it again returns its entry, so the last
- * write wins. Claim on one thread; fill claimed entries from any (distinct entries), before the next upload. Records
- * start as zeros. Frames recorded by a frame graph upload first thing ({@link FrameSlots#recordStart}); frames recorded
- * otherwise call {@link #upload} before reading. Allocates nothing once created, except when more records change in a
+ * write wins. Claim on one thread; fill claimed entries from any (distinct entries), before the next upload or grow.
+ * Records start as zeros. Frames recorded by a frame graph upload first thing ({@link FrameSlots#recordStart}); frames
+ * recorded otherwise call {@link #upload} before reading. Allocates nothing once created, except when more records change in a
  * frame than ever before: the upload buffers grow then.
  */
 @AllowAllocation("created rarely")
@@ -71,7 +71,7 @@ public final class RecordBuffer implements AutoCloseable {
     private Pipeline scatter;
     private final FrameSlots.FrameStart start = this::upload;
     // The changes since the last upload: entry e is record indices[e], its bytes at e * recordBytes of changes.
-    private final Arena arena = Arena.ofShared();
+    private Arena arena = Arena.ofShared(); // the change list's memory: replaced, the old freed, as it grows
     private MemorySegment indices;
     private MemorySegment changes;
     private int[] entryOf;
@@ -151,13 +151,18 @@ public final class RecordBuffer implements AutoCloseable {
         if (grownFrom == null) {
             grownFrom = records;
         } else {
-            records.close(); // grown twice before an upload: no frame read it, the first one holds the records
+            // Grown twice before an upload: the first one holds the records; this one goes once no frame recorded
+            // since (a grow within a frame) can read it.
+            retiring.add(records);
         }
         records = bigger;
-        MemorySegment moreIndices = arena.allocate(4L * capacity, 64);
-        MemorySegment moreChanges = arena.allocate((long) recordBytes * capacity, 64);
+        Arena more = Arena.ofShared();
+        MemorySegment moreIndices = more.allocate(4L * capacity, 64);
+        MemorySegment moreChanges = more.allocate((long) recordBytes * capacity, 64);
         MemorySegment.copy(indices, 0, moreIndices, 0, 4L * pending);
         MemorySegment.copy(changes, 0, moreChanges, 0, (long) recordBytes * pending);
+        arena.close(); // the old change list: copied, and filled no more (grow excludes filling)
+        arena = more;
         indices = moreIndices;
         changes = moreChanges;
         entryOf = Arrays.copyOf(entryOf, capacity);

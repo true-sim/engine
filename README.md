@@ -875,13 +875,16 @@ renderers above, following the scene's change logs and asset cache:
 - **Streamed or whole, the application's choice and each asset's:** `resources.loading(Loading.STREAM)` (the default)
   draws a renderable as soon as its mesh is on the GPU, as above; `Loading.WHOLE` holds it back until its materials
   and their textures are there too, so nothing pops in. `resources.loading(asset, mode)` overrides the default for one
-  mesh, material or texture (a sky texture that may come late). Failed assets are never waited for.
-- **Blocking for a loading screen:** `resources.awaitLoaded(tasks, timeout)` drains the scheduler on the main thread
-  until every asset the scenes use is on the GPU; update the scenes before (to acquire) and after (to draw), and the
-  level draws whole from the next frame. `loadingCount()` tells how far it is, for a progress bar.
-- **Prepared on worker threads:** `resources.prepareOn(lane)` makes meshes and textures ready for the GPU
-  (`GeometryPool.prepare`, `Textures.prepareColor`) on the lane's threads, handed over as the scheduler drains, so the
-  main thread only places them: a frame of latency for milliseconds of main-thread time per large asset.
+  material or texture (a sky texture that may come late); meshes are always waited for. Failed assets, and assets that
+  cannot go on the GPU, are reported and never waited for. A drawn renderable changing mesh or materials keeps its
+  instance id and looks until the new ones are there.
+- **Loading screens and startup:** a loading screen keeps drawing frames until `resources.loaded()`
+  (`waitingCount()` for a progress bar); `resources.awaitLoaded(tasks, timeout)` instead blocks the main thread,
+  draining the scheduler, until everything waited for is on the GPU, for startup and tests. Update the scenes before
+  (to acquire) and after (to draw), and the level draws whole from the next frame.
+- **Prepared on worker threads:** `resources.prepareOn(tasks, threads)` makes meshes and textures ready for the GPU
+  (`GeometryPool.prepare`, `Textures.prepareColor`) on that many threads of the scheduler, handed over as it drains,
+  so the main thread only places them: a frame of latency for milliseconds of main-thread time per large asset.
 - `SceneSync` keeps a scene on the GPU: its renderables as instances of a `GpuScene` at their world positions,
   written once and again only where nodes moved or renderables changed. Given a `JobSystem`, many instances at once
   (most nodes moved) are claimed in order and written on its threads: 30,000 moving rocks in 0.5 ms on 4 threads
@@ -895,7 +898,7 @@ FrameSlots slots = new FrameSlots(2);                 // shared by every graph d
 SceneResources resources = new SceneResources(assets, new GeometryPool(device, slots),
     new Materials(device, 4096, slots), new Textures(device, slots))
     .loading(SceneResources.Loading.WHOLE)            // or STREAM, the default; per asset with loading(ref, mode)
-    .prepareOn(tasks.platformLane("gpu prepare", 2));
+    .prepareOn(tasks, 2);
 
 GpuScene worldGpu = new GpuScene(device, resources.pool(), 100_000, slots);
 SceneSync world = new SceneSync(resources, worldRenderables, worldGpu);
