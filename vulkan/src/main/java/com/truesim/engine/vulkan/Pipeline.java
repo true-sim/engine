@@ -5,7 +5,13 @@ import static org.lwjgl.vulkan.VK10.VK_COLOR_COMPONENT_A_BIT;
 import static org.lwjgl.vulkan.VK10.VK_COLOR_COMPONENT_B_BIT;
 import static org.lwjgl.vulkan.VK10.VK_COLOR_COMPONENT_G_BIT;
 import static org.lwjgl.vulkan.VK10.VK_COLOR_COMPONENT_R_BIT;
+import static org.lwjgl.vulkan.VK10.VK_BLEND_FACTOR_ONE;
+import static org.lwjgl.vulkan.VK10.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+import static org.lwjgl.vulkan.VK10.VK_BLEND_FACTOR_SRC_ALPHA;
+import static org.lwjgl.vulkan.VK10.VK_BLEND_OP_ADD;
 import static org.lwjgl.vulkan.VK10.VK_COMPARE_OP_GREATER_OR_EQUAL;
+import static org.lwjgl.vulkan.VK10.VK_FRONT_FACE_CLOCKWISE;
+import static org.lwjgl.vulkan.VK10.VK_STENCIL_OP_KEEP;
 import static org.lwjgl.vulkan.VK10.VK_CULL_MODE_BACK_BIT;
 import static org.lwjgl.vulkan.VK10.VK_CULL_MODE_NONE;
 import static org.lwjgl.vulkan.VK10.VK_DYNAMIC_STATE_SCISSOR;
@@ -203,6 +209,20 @@ public final class Pipeline implements AutoCloseable {
         private int depth = VK_FORMAT_UNDEFINED;
         private int pushBytes;
         private boolean cullBack = true;
+        private final List<Blend> blends = new ArrayList<>(); // per color attachment; NONE past the list
+        private int samples = VK_SAMPLE_COUNT_1_BIT;
+        private int viewMask;
+        private int topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        private int depthCompare = VK_COMPARE_OP_GREATER_OR_EQUAL; // reverse depth
+        private boolean depthWrite = true;
+        private boolean depthBias;
+        private float depthBiasConstant;
+        private float depthBiasSlope;
+        private boolean clockwise;
+        private int stencil = VK_FORMAT_UNDEFINED;
+        private int stencilCompare;
+        private int stencilPass = VK_STENCIL_OP_KEEP;
+        private int stencilReference;
 
         private Graphics(VulkanDevice device) {
             this.device = device;
@@ -240,6 +260,70 @@ public final class Pipeline implements AutoCloseable {
             return this;
         }
 
+        /** Clockwise triangles are front faces, rather than counter-clockwise ones. */
+        public Graphics clockwise() {
+            this.clockwise = true;
+            return this;
+        }
+
+        /** How color attachment {@code attachment}'s writes blend with what it holds: {@link Blend#NONE} by default. */
+        public Graphics blend(int attachment, Blend blend) {
+            Objects.requireNonNull(blend, "blend");
+            while (blends.size() <= attachment) {
+                blends.add(Blend.NONE);
+            }
+            blends.set(attachment, blend);
+            return this;
+        }
+
+        /** Rasterizes {@code count} samples a pixel (a {@code VK_SAMPLE_COUNT_*_BIT}), into multisampled attachments. */
+        public Graphics samples(int count) {
+            this.samples = count;
+            return this;
+        }
+
+        /** Draws once per view of {@code mask} (bit n: view n, multiview): a headset's eyes in one pass. */
+        public Graphics viewMask(int mask) {
+            this.viewMask = mask;
+            return this;
+        }
+
+        /** What its vertices make, a {@code VK_PRIMITIVE_TOPOLOGY_*}: triangle lists by default. */
+        public Graphics topology(int topology) {
+            this.topology = topology;
+            return this;
+        }
+
+        /**
+         * How depth is tested ({@code VK_COMPARE_OP_*}; {@code ALWAYS} for no test) and whether it is written: greater
+         * or equal (reverse depth) and written by default, with a depth attachment.
+         */
+        public Graphics depthTest(int compareOp, boolean write) {
+            this.depthCompare = compareOp;
+            this.depthWrite = write;
+            return this;
+        }
+
+        /** Moves its depths by {@code constant} units and {@code slope} times the triangle's slope, e.g. for shadows. */
+        public Graphics depthBias(float constant, float slope) {
+            this.depthBias = true;
+            this.depthBiasConstant = constant;
+            this.depthBiasSlope = slope;
+            return this;
+        }
+
+        /**
+         * A stencil attachment of {@code format} (the depth one's, for a combined format), tested with {@code compareOp}
+         * against {@code reference}; {@code passOp} where it passes. Both faces alike, all bits.
+         */
+        public Graphics stencil(int format, int compareOp, int passOp, int reference) {
+            this.stencil = format;
+            this.stencilCompare = compareOp;
+            this.stencilPass = passOp;
+            this.stencilReference = reference;
+            return this;
+        }
+
         public Pipeline build() {
             if (stages.isEmpty()) {
                 throw new IllegalStateException("A graphics pipeline needs shader stages");
@@ -261,14 +345,24 @@ public final class Pipeline implements AutoCloseable {
                     VkPipelineColorBlendAttachmentState.calloc(colors.size(), stack);
                 for (int i = 0; i < colors.size(); i++) {
                     colorFormats.put(i, colors.get(i));
+                    Blend blend = i < this.blends.size() ? this.blends.get(i) : Blend.NONE;
                     blends.get(i).colorWriteMask(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
-                        | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
+                        | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT)
+                        .blendEnable(blend != Blend.NONE)
+                        .srcColorBlendFactor(blend.source)
+                        .dstColorBlendFactor(blend.destination)
+                        .colorBlendOp(VK_BLEND_OP_ADD)
+                        .srcAlphaBlendFactor(blend == Blend.NONE ? 0 : VK_BLEND_FACTOR_ONE)
+                        .dstAlphaBlendFactor(blend.destination)
+                        .alphaBlendOp(VK_BLEND_OP_ADD);
                 }
                 VkPipelineRenderingCreateInfo rendering = VkPipelineRenderingCreateInfo.calloc(stack)
                     .sType(VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO)
+                    .viewMask(viewMask)
                     .colorAttachmentCount(colors.size())
                     .pColorAttachmentFormats(colorFormats)
-                    .depthAttachmentFormat(depth);
+                    .depthAttachmentFormat(depth)
+                    .stencilAttachmentFormat(stencil);
                 boolean meshShading = false;
                 for (Stage stage : stages) {
                     meshShading |= stage.stage == VK_SHADER_STAGE_MESH_BIT_EXT;
@@ -285,16 +379,19 @@ public final class Pipeline implements AutoCloseable {
                         .sType(VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO)
                         .polygonMode(VK_POLYGON_MODE_FILL)
                         .cullMode(cullBack ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE)
-                        .frontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE)
+                        .frontFace(clockwise ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE)
+                        .depthBiasEnable(depthBias)
+                        .depthBiasConstantFactor(depthBiasConstant)
+                        .depthBiasSlopeFactor(depthBiasSlope)
                         .lineWidth(1))
                     .pMultisampleState(VkPipelineMultisampleStateCreateInfo.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO)
-                        .rasterizationSamples(VK_SAMPLE_COUNT_1_BIT))
-                    .pDepthStencilState(VkPipelineDepthStencilStateCreateInfo.calloc(stack)
+                        .rasterizationSamples(samples))
+                    .pDepthStencilState(stencilState(VkPipelineDepthStencilStateCreateInfo.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO)
                         .depthTestEnable(depth != VK_FORMAT_UNDEFINED)
-                        .depthWriteEnable(depth != VK_FORMAT_UNDEFINED)
-                        .depthCompareOp(VK_COMPARE_OP_GREATER_OR_EQUAL))
+                        .depthWriteEnable(depth != VK_FORMAT_UNDEFINED && depthWrite)
+                        .depthCompareOp(depthCompare)))
                     .pColorBlendState(VkPipelineColorBlendStateCreateInfo.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO)
                         .pAttachments(blends))
@@ -307,7 +404,7 @@ public final class Pipeline implements AutoCloseable {
                             .sType(VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO))
                         .pInputAssemblyState(VkPipelineInputAssemblyStateCreateInfo.calloc(stack)
                             .sType(VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO)
-                            .topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST));
+                            .topology(topology));
                 }
                 LongBuffer pipeline = stack.mallocLong(1);
                 long cache = device.pipelineCache().handle();
@@ -315,6 +412,40 @@ public final class Pipeline implements AutoCloseable {
                     "Could not create a graphics pipeline from " + stages.getFirst().module.name());
                 return new Pipeline(device, pipeline.get(0), layout, VK_PIPELINE_BIND_POINT_GRAPHICS, pushBytes);
             }
+        }
+
+        /** {@code state} with the stencil test set, if there is a stencil attachment. */
+        private VkPipelineDepthStencilStateCreateInfo stencilState(VkPipelineDepthStencilStateCreateInfo state) {
+            if (stencil == VK_FORMAT_UNDEFINED) {
+                return state;
+            }
+            state.stencilTestEnable(true);
+            for (org.lwjgl.vulkan.VkStencilOpState face : new org.lwjgl.vulkan.VkStencilOpState[] {state.front(),
+                state.back()}) {
+                face.failOp(VK_STENCIL_OP_KEEP).passOp(stencilPass).depthFailOp(VK_STENCIL_OP_KEEP)
+                    .compareOp(stencilCompare).compareMask(0xff).writeMask(0xff).reference(stencilReference);
+            }
+            return state;
+        }
+    }
+
+    /** How a color attachment's writes blend with what it holds ({@link Graphics#blend}). */
+    public enum Blend {
+        /** Written over: no blending. */
+        NONE(0, 0),
+        /** Over, by the source's alpha: {@code src * a + dst * (1 - a)}. */
+        ALPHA(VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA),
+        /** Over, the source's color premultiplied by its alpha: {@code src + dst * (1 - a)}. */
+        PREMULTIPLIED(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA),
+        /** Added: {@code src + dst}, e.g. light or particles. */
+        ADDITIVE(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE);
+
+        final int source;
+        final int destination;
+
+        Blend(int source, int destination) {
+            this.source = source;
+            this.destination = destination;
         }
     }
 }
