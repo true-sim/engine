@@ -36,6 +36,41 @@ public interface PlatformListener {
     default void windowMinimized(int window, boolean minimized) {
     }
 
+    /** Maximized, or restored to its size and position (restored from minimized too: neither, then). */
+    default void windowMaximized(int window, boolean maximized) {
+    }
+
+    /** Shown, or hidden. */
+    default void windowShown(int window, boolean shown) {
+    }
+
+    /** Covered entirely by other windows (nothing seen: rendering may pause), or exposed again. */
+    default void windowOccluded(int window, boolean occluded) {
+    }
+
+    /** Its content scale changed (a display of another DPI, or the system's setting): sizes in points may change. */
+    default void windowScaleChanged(int window) {
+    }
+
+    /** The mouse came over the window, or left it. */
+    default void mouseEntered(int window, boolean entered) {
+    }
+
+    /** A file was dropped on the window at ({@code x}, {@code y}), its path. */
+    default void fileDropped(int window, String path, float x, float y) {
+    }
+
+    /**
+     * Text being composed by an input method, not yet typed ({@link #text} brings it once committed): {@code text},
+     * the cursor at {@code start} and {@code length} characters selected in it.
+     */
+    default void textEditing(int window, String text, int start, int length) {
+    }
+
+    /** Any other event, as SDL gives it ({@code SDL_Event} at {@code event}, of {@code type}): read it there. */
+    default void other(int type, long event) {
+    }
+
     default void windowFocusChanged(int window, boolean focused) {
     }
 
