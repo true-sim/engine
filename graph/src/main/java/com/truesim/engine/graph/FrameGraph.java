@@ -58,6 +58,7 @@ import com.truesim.engine.graph.ResourcePool.Physical;
 import com.truesim.engine.graph.ResourcePool.PhysicalBuffer;
 import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Bindless;
+import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.common.jobs.JobSystem;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -144,6 +145,7 @@ public final class FrameGraph implements AutoCloseable {
     private Technique[] built = new Technique[0]; // every technique of the last build, the views' too
     private long[] builtVersions = new long[0]; // each one's buildVersion() then
     private final Map<Key<Image>, ExternalImage> outputs = new LinkedHashMap<>();
+    private final List<Texture> textures = new ArrayList<>();
     private final Map<Class<?>, Implementation<?, ?>> implementations = new HashMap<>();
     private final Map<Object, AutoCloseable> cache = new LinkedHashMap<>();
     private final ResourcePool resources; // the images and buffers kept across builds
@@ -325,6 +327,29 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     /** Stops outputting {@code key}. */
+    /** Copies the frame's result {@code key} into {@code texture} every frame; the graph rebuilds on its next frame. */
+    public FrameGraph output(Key<Image> key, Texture texture) {
+        return output(key, texture.external);
+    }
+
+    /** The frame's outputs, by key. */
+    Map<Key<Image>, ExternalImage> frameOutputs() {
+        return outputs;
+    }
+
+    /**
+     * A new texture of {@code width} by {@code height} {@code format} texels, kept from frame to frame with a fixed
+     * bindless slot, for views to render into ({@link ViewPort#output(Key, Texture)}) and passes to sample; closed with
+     * the graph. Waits for the GPU once, to clear it.
+     */
+    @AllowAllocation("set up rarely")
+    public Texture texture(String name, Format format, int width, int height) {
+        Texture texture = new Texture(device, Objects.requireNonNull(name, "name"),
+            Objects.requireNonNull(format, "format"), width, height);
+        textures.add(texture);
+        return texture;
+    }
+
     public FrameGraph removeOutput(Key<Image> key) {
         dirty |= outputs.remove(key) != null;
         return this;
@@ -1110,7 +1135,8 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     int sampledSlotOf(int image) {
-        return physicals[targetOf[image]].sampled;
+        int target = targetOf[image];
+        return target >= 0 ? physicals[target].sampled : externals[~target].sampled;
     }
 
     int storageSlotOf(int image, int mip) {
@@ -1454,7 +1480,7 @@ public final class FrameGraph implements AutoCloseable {
         return frame > activeHistories[index].firstFrame;
     }
 
-    private void blit(PassContext ctx, Image from, Image to) {
+    void blit(PassContext ctx, Image from, Image to) {
         ctx.blit(from.whole(), to.whole(), from.width != to.width || from.height != to.height);
     }
 
@@ -1499,6 +1525,10 @@ public final class FrameGraph implements AutoCloseable {
             }
         }
         cache.clear();
+        for (Texture texture : textures) {
+            texture.close();
+        }
+        textures.clear();
         for (ReadbackPlan readback : readbacks) {
             readback.close();
         }

@@ -249,7 +249,11 @@ As built (engine 0.56):
 - **Shared work.** A pass serving several views runs while any of them does; `g.running()`, taken while building and
   read when recording, says whether the building technique's or request's views run, so it can leave out a skipped
   one's part. The renderer's culling does (engine 0.57): a skipped view's lists and occlusion history stay as they are.
-- **Not yet.** A skipped view's outputs are undefined until `Texture` outputs keep theirs.
+- **Outputs (engine 0.58).** A view's output into a `Texture` (`graph.texture(...)`, kept, resting in
+  `SHADER_READ_ONLY`, a fixed bindless slot) is always a copy, never drawn into straight: its barriers keep the
+  contents, so a skipped frame leaves what the view last rendered. Readers take it with `g.texture(texture)`, which
+  declares the copy then, so they order after it within the frame. Outputs into windows are undefined while skipped:
+  the presenter skips presenting them. Drawing straight into a texture, mips and previous-frame mode come later.
 
 ### 4.6 Resolution and dynamic resolution (#91)
 

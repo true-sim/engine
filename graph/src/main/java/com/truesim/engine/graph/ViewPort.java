@@ -24,8 +24,8 @@ import java.util.Objects;
  * }</pre>
  *
  * <p>A view skipped in a frame ({@link #enabled}, {@link #rate}) runs none of its passes, nor shared work only it asked
- * for, and its outputs are left undefined: present only frames it ran in. Its histories stay as they are, so its next
- * frame reads what its last one wrote.
+ * for. Its outputs into a {@link Texture} keep what it last rendered; others are left undefined (present a window only
+ * in frames it ran in). Its histories stay as they are, so its next frame reads what its last one wrote.
  */
 @AllowAllocation("set up rarely")
 public final class ViewPort {
@@ -212,6 +212,14 @@ public final class ViewPort {
         outputs.put(Objects.requireNonNull(key, "key"), Objects.requireNonNull(target, "target"));
         graph.changed();
         return this;
+    }
+
+    /**
+     * Copies the view's result {@code key} into {@code texture} every frame the view runs; a frame it is skipped leaves
+     * the texture as it was. The graph rebuilds on its next frame.
+     */
+    public ViewPort output(Key<Image> key, Texture texture) {
+        return output(key, texture.external);
     }
 
     /** Stops drawing {@code key} into a target. */

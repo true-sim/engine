@@ -1593,6 +1593,58 @@ class FrameGraphTest {
     }
 
     @Test
+    void viewsRenderIntoTexturesThatOthersReadAndThatKeepTheirContentsWhileSkipped() {
+        float[] color = {1, 0, 0, 1};
+        Texture screen = graph.texture("screen", Format.R8G8B8A8_UNORM, SIZE, SIZE);
+        Texture green = graph.texture("green", Format.R8G8B8A8_UNORM, SIZE, SIZE);
+        assertThat(screen.slot()).isNotNegative().isNotEqualTo(green.slot());
+        assertThat(screen).hasToString("texture screen");
+        assertThat(screen.width()).isEqualTo(SIZE);
+        // A security camera renders into one texture, the frame into another; the main view shows both.
+        ViewPort camera = graph.addView("camera").add(new Fill(OUT, SIZE, color)).output(OUT, screen);
+        graph.add(new Fill(A, SIZE, 0, 1, 0, 1)).output(A, green);
+        int[] slot = {-2};
+        graph.addView("main").add(new Lambda(List.of(OUT), g -> {
+            Image left = g.texture(screen);
+            Image right = g.texture(green);
+            assertThat(g.texture(screen)).isSameAs(left);
+            Image out = g.create("shown", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("show").read(left, Access.TRANSFER_SRC).read(right, Access.TRANSFER_SRC)
+                .write(out, Access.TRANSFER_DST).record(ctx -> {
+                    copy(ctx, left, out, 0, SIZE / 2);
+                    copy(ctx, right, out, SIZE / 2, SIZE / 2);
+                });
+            g.pass("peek").read(left, Access.SAMPLED_COMPUTE).sideEffects().record(ctx -> slot[0] = ctx.sampled(left));
+            g.provide(OUT, out);
+        })).output(OUT, output);
+        int[] texels = frame();
+        assertThat(texels[0]).as("this frame's, copied before it is read").isEqualTo(RED);
+        assertThat(texels[SIZE - 1]).isEqualTo(GREEN);
+        assertThat(slot[0]).as("sampled at its slot").isEqualTo(screen.slot());
+        assertThat(graph.passes()).containsOnlyOnce("output screen").containsOnlyOnce("output green");
+        // A view drawing its result as an attachment that would fit the texture still copies into it: drawn into
+        // straight, a frame it is skipped would discard the texture's contents.
+        Texture mirror = graph.texture("mirror", Format.R8G8B8A8_UNORM, SIZE, SIZE);
+        graph.addView("mirror").add(new Lambda(List.of(OUT), g -> {
+            Image drawn = g.create("drawn", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("draw mirror").attach(drawn, Clear.color(0, 1, 0, 1)).record(ctx -> { });
+            g.provide(OUT, drawn);
+        })).output(OUT, mirror);
+        frame();
+        assertThat(graph.passes()).contains("draw mirror", "output mirror");
+        // The camera off: the texture keeps the last frame it rendered.
+        color[0] = 0;
+        color[2] = 1;
+        camera.enabled(false);
+        assertThat(frame()[0]).isEqualTo(RED);
+        camera.enabled(true);
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        // Its next frames at a lower rate, submitted with frames in flight: still this frame's or the last one rendered.
+        camera.rate(2);
+        assertThat(submitted(3)[0]).isEqualTo(BLUE);
+    }
+
+    @Test
     void historiesWrittenFirstOnTheComputeQueueAreJoinedAhead() {
         int[] frames = {0};
         graph.asyncCompute(true).add(new Lambda(List.of(OUT), g -> {

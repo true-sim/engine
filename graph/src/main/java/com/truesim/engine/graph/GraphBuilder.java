@@ -128,6 +128,7 @@ public final class GraphBuilder {
     private final Map<Object, ViewPort> requestViews = new HashMap<>(); // the view each request was first made in
     private final Map<Object, List<Object>> requesters = new HashMap<>(); // the scopes making each request
     private final List<Running> running = new ArrayList<>(); // handed out while building, resolved when it ends
+    final Set<ExternalImage> copied = new HashSet<>(); // output targets copied into while building, for their readers
     private final Map<Scoped, Scoped> interned = new HashMap<>();
     private final Map<ExternalImage, Image> externals = new IdentityHashMap<>();
     /** Imported buffers by Vulkan handle: every wrapper of one buffer is the same buffer of the build. */
@@ -540,6 +541,45 @@ public final class GraphBuilder {
         return history;
     }
 
+    /**
+     * {@code texture} as an image of this build, for a pass to read, sampled at {@link Texture#slot()} or copied: after
+     * the copy of the result a view (or the frame) outputs into it, so this frame's while that view runs, else what it
+     * last rendered. Not written by passes of the build itself, but by that copy.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public Image texture(Texture texture) {
+        ExternalImage target = texture.external;
+        Image image = external(target);
+        if (copied.contains(target)) {
+            return image;
+        }
+        for (ViewPort view : views) {
+            for (Map.Entry<Key<Image>, ExternalImage> output : view.outputs.entrySet()) {
+                if (output.getValue() == target) {
+                    copyInto(view, output(scoped(view, output.getKey())), image);
+                    return image;
+                }
+            }
+        }
+        for (Map.Entry<Key<Image>, ExternalImage> output : graph.frameOutputs().entrySet()) {
+            if (output.getValue() == target) {
+                copyInto(null, output(output.getKey()), image);
+                return image;
+            }
+        }
+        return image; // no one renders into it in this graph: what it holds
+    }
+
+    /** Copies {@code result}, {@code view}'s (null: the frame's), into its output target {@code image}, once. */
+    private void copyInto(ViewPort view, Image result, Image image) {
+        ExternalImage target = images.get(image.id).external;
+        copied.add(target);
+        pass("output " + target.name).in(view)
+            .read(result, Access.TRANSFER_SRC)
+            .write(image, Access.TRANSFER_DST)
+            .record(ctx -> graph.blit(ctx, result, image));
+    }
+
     /** {@code external} as an image of this build, the same one each time. */
     public Image external(ExternalImage external) {
         return externals.computeIfAbsent(external, e -> {
@@ -617,6 +657,7 @@ public final class GraphBuilder {
         private PassBody body;
         private String owner;
         private Object scope;
+        private boolean scoped; // its scope set by in(), not by who records it
 
         private PassBuilder(String name) {
             this.name = name;
@@ -823,7 +864,7 @@ public final class GraphBuilder {
                 throw new IllegalStateException(name + " is recorded already");
             }
             this.body = Objects.requireNonNull(body, "body");
-            if (scope == null) {
+            if (!scoped) {
                 scope = scope();
             }
             owner = scope() == null ? "the graph" : name(scope());
@@ -837,6 +878,7 @@ public final class GraphBuilder {
         /** The pass is {@code view}'s (null: the frame's), whoever records it: an output's copy, say. */
         PassBuilder in(ViewPort view) {
             scope = view;
+            scoped = true;
             return this;
         }
 

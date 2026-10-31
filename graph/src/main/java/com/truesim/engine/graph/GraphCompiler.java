@@ -69,7 +69,11 @@ final class GraphCompiler {
             ExternalImage target = output.getValue();
             Image result = results.get(k++);
             ImageInfo info = g.images.get(result.id);
-            boolean fits = info.external == null && substitute[result.id] < 0 && result.width == target.width
+            // A target whose contents outlive the frame (a texture) is copied into, so a frame its view is skipped
+            // leaves it as it was: drawn into straight, its passes would discard it.
+            boolean copied = g.copied.contains(target);
+            boolean fits = !copied && target.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED
+                && info.external == null && substitute[result.id] < 0 && result.width == target.width
                 && result.height == target.height && result.format == target.format && result.desc.flat()
                 && result.mips == 1
                 && (info.usage & ~target.usage) == 0
@@ -78,7 +82,7 @@ final class GraphCompiler {
             if (fits) {
                 substitute = Arrays.copyOf(substitute, g.images.size());
                 substitute[result.id] = external.id;
-            } else {
+            } else if (!copied) {
                 g.pass("output " + target.name)
                     .in(output.getKey() instanceof GraphBuilder.Scoped scoped ? scoped.view() : null) // runs with it
                     .read(result, Access.TRANSFER_SRC)
@@ -211,9 +215,11 @@ final class GraphCompiler {
                     throw new IllegalStateException("External image " + external.name + " is used beyond the usage "
                         + "it was created with");
                 }
-                if ((info.usage & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT)) != 0) {
+                // A texture has a sampled slot; other external images have no slots, so neither use is open to them.
+                int unslotted = VK_IMAGE_USAGE_STORAGE_BIT | (external.sampled < 0 ? VK_IMAGE_USAGE_SAMPLED_BIT : 0);
+                if ((info.usage & unslotted) != 0) {
                     throw new IllegalStateException("External image " + external.name + " is sampled or a storage "
-                        + "image; only attachment and transfer uses are supported");
+                        + "image; only attachment and transfer uses are supported, and sampling a texture");
                 }
                 int index = newExternals.indexOf(external);
                 if (index < 0) {
