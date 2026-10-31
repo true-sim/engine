@@ -939,6 +939,33 @@ class MeshletRendererTest {
     }
 
     @Test
+    void aTextureAMaterialStillNamesIsNotRemoved() {
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8)) {
+            textures.namedBy(materials);
+            int red = textures.color(4, 4, texels(4, (x, y) -> 0xff0000ff));
+            int blue = textures.color(4, 4, texels(4, (x, y) -> 0xffff0000));
+            int clamped = TextureSampler.CLAMP.of(red);
+            int first = materials.add(new Material(MR.withBaseColorTexture(clamped).withNormalTexture(red)));
+            int second = materials.add(new Material(MR.withBaseColorTexture(red)));
+            assertThat(materials.textureUsers(red)).as("any sampler, each field").isEqualTo(3);
+            assertThatIllegalStateException().isThrownBy(() -> textures.remove(red))
+                .withMessageContaining("still named by 3 materials");
+            // Updated in place, set anew, removed: each lets go.
+            materials.update(first, com.truesim.engine.render.materials.MetallicRoughnessParameters.NORMAL_TEXTURE,
+                blue);
+            materials.set(second, new Material(MR));
+            assertThat(materials.textureUsers(red)).isEqualTo(1);
+            assertThat(materials.textureUsers(blue)).isEqualTo(1);
+            materials.remove(first);
+            assertThat(materials.textureUsers(red)).isZero();
+            assertThat(materials.textureUsers(blue)).isZero();
+            textures.remove(red);
+            textures.remove(blue);
+            assertThat(textures.count()).isZero();
+        }
+    }
+
+    @Test
     void eachTextureKeepsItsSampler() {
         int quadMesh = pool.add(texturedQuad());
         try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8)) {

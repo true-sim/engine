@@ -93,6 +93,7 @@ public final class Textures implements AutoCloseable {
     // Per live texture whose upload may still wait for a frame: set once it is freed, so the upload is dropped.
     private final Map<Integer, boolean[]> freed = new HashMap<>();
     private final Retiring retiring;
+    private final java.util.List<Materials> namers = new java.util.ArrayList<>(); // checked before a texture goes
     private long bytes;
     private boolean closed;
 
@@ -444,15 +445,33 @@ public final class Textures implements AutoCloseable {
     }
 
     /**
+     * Has {@link #remove} refuse a texture any material of {@code materials} still names
+     * ({@link Materials#textureUsers}): its slot, freed, would be another texture's next.
+     */
+    public Textures namedBy(Materials materials) {
+        if (!namers.contains(materials)) {
+            namers.add(java.util.Objects.requireNonNull(materials, "materials"));
+        }
+        return this;
+    }
+
+    /**
      * Removes texture {@code texture} (as added, with any sampler): materials must no longer name it from the next frame
-     * on. Its image and slot are freed once no frame in flight can sample it, at the next add or remove.
+     * on (those of {@link #namedBy} are checked). Its image and slot are freed once no frame in flight can sample it,
+     * at the next add or remove.
      */
     public void remove(int texture) {
         int slot = texture & 0xffff;
-        GpuImage image = texture < 0 ? null : images.remove(slot);
-        if (image == null) {
+        if (texture < 0 || !images.containsKey(slot)) {
             throw new IllegalArgumentException("No texture " + texture);
         }
+        for (int i = 0; i < namers.size(); i++) {
+            int users = namers.get(i).textureUsers(texture);
+            if (users > 0) {
+                throw new IllegalStateException("Texture " + texture + " is still named by " + users + " materials");
+            }
+        }
+        GpuImage image = images.remove(slot);
         bytes -= sizes.remove(slot);
         boolean[] gone = freed.remove(slot);
         Bindless bindless = device.bindless();

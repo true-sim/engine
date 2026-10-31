@@ -67,6 +67,9 @@ public final class Materials implements AutoCloseable {
     private boolean[] used;
     /** Per id: its material, and its blocks (units of the heap; -1: none). */
     private Material[] materials;
+    private int[][] named; // per material id: the textures it names, as counted (-1: none; null: none at all)
+    private final int[] textureUsers = new int[com.truesim.engine.vulkan.Bindless.SAMPLED_SLOTS]; // per texture slot
+    private final Gather gather = new Gather();
     private long[] heapUnit;
     private int[] heapUnits;
     private int live;
@@ -118,6 +121,7 @@ public final class Materials implements AutoCloseable {
         blockLength = new int[capacity];
         used = new boolean[capacity];
         materials = new Material[capacity];
+        named = new int[capacity][];
         heapUnit = new long[capacity];
         heapUnits = new int[capacity];
         Arrays.fill(heapUnit, -1);
@@ -392,6 +396,7 @@ public final class Materials implements AutoCloseable {
             blockLength = Arrays.copyOf(blockLength, more);
             used = Arrays.copyOf(used, more);
             materials = Arrays.copyOf(materials, more);
+            named = Arrays.copyOf(named, more);
             heapUnit = Arrays.copyOf(heapUnit, more);
             Arrays.fill(heapUnit, capacity, more, -1);
             heapUnits = Arrays.copyOf(heapUnits, more);
@@ -436,8 +441,79 @@ public final class Materials implements AutoCloseable {
             throw new IllegalArgumentException(field + " holds no integer");
         }
         long offset = fieldOffset(id, field);
+        if (field.texture()) {
+            renamed(id, table.getInt(offset), value);
+        }
         table.putInt(offset, value);
         followMasks(id, field, offset, 4);
+    }
+
+    /**
+     * How many materials name texture {@code texture} ({@link Textures}' number, any sampler): those whose
+     * {@code [Texture]} fields hold it, as added, set or updated. A texture is removed only at none
+     * ({@link Textures#namedBy}). Allocates nothing.
+     */
+    public int textureUsers(int texture) {
+        return texture < 0 ? 0 : textureUsers[texture & 0xffff];
+    }
+
+    /** Material {@code id} names the textures of {@code material} now, no longer those it named before. */
+    private void name(int id, Material material) {
+        unname(id);
+        gather.count = 0;
+        material.parameters().textures(gather);
+        for (MaterialFeature feature : material.features()) {
+            feature.textures(gather);
+        }
+        int[] textures = Arrays.copyOf(gather.textures, gather.count);
+        for (int texture : textures) {
+            count(texture, 1);
+        }
+        named[id] = textures;
+    }
+
+    /** Material {@code id} names no textures. */
+    private void unname(int id) {
+        int[] textures = named[id];
+        if (textures != null) {
+            for (int texture : textures) {
+                count(texture, -1);
+            }
+            named[id] = null;
+        }
+    }
+
+    /** One of material {@code id}'s texture fields went from {@code from} to {@code to}. Allocates nothing. */
+    private void renamed(int id, int from, int to) {
+        int[] textures = named[id];
+        for (int i = 0; textures != null && i < textures.length; i++) {
+            if (textures[i] == from) {
+                textures[i] = to;
+                count(from, -1);
+                count(to, 1);
+                return;
+            }
+        }
+    }
+
+    private void count(int texture, int by) {
+        if (texture >= 0) {
+            textureUsers[texture & 0xffff] += by;
+        }
+    }
+
+    /** The texture fields' values of a material, gathered: reused, so naming allocates only the copy kept. */
+    private static final class Gather implements java.util.function.IntConsumer {
+        int[] textures = new int[8];
+        int count;
+
+        @Override
+        public void accept(int texture) {
+            if (count == textures.length) {
+                textures = Arrays.copyOf(textures, 2 * count);
+            }
+            textures[count++] = texture;
+        }
     }
 
     /** {@link #update(int, MaterialField, float)} for a vector or color field: its first {@code count()} values. */
@@ -535,6 +611,7 @@ public final class Materials implements AutoCloseable {
             heapUnits[id] = 0;
         }
         materials[id] = null;
+        unname(id);
     }
 
     private static long align(long bytes) {
@@ -588,6 +665,7 @@ public final class Materials implements AutoCloseable {
         table.putFloat(slot + MaterialLayout.MASK_ALPHA, material.parameters().maskAlpha());
         table.putInt(slot + MaterialLayout.GEOMETRY, 0);
         materials[id] = material;
+        name(id, material);
     }
 
     /** How many materials the table holds, the default one included. */
