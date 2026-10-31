@@ -582,8 +582,9 @@ interface:
   once a frame and both tables point at them: half the cascade work of a stereo frame (`StereoBench --args=shared`).
   A technique instance belongs to one view (or the frame): adding it to a second is refused. Casters choose detail
   for `shadows.casterDetail` pixels of error (1, as a camera): coarser casters draw far fewer triangles (20,000 rocks,
-  two eyes: cascades 0.92 ms at 1, 0.56 at 2, 0.41 at 4) but shadow the finer surfaces they sit off in spots, so
-  raise `shadows.cascades.bias` with it.
+  two eyes: cascades 0.92 ms at 1, 0.56 at 2, 0.41 at 4); they sit up to so many texels off the finer surfaces they
+  shadow, so cascades add that much depth bias and those surfaces do not shadow themselves in spots. At 2 a sparse
+  scene looks the same (0.004 % of pixels change) and a dense one changes which rocks shadow which here and there.
 - **Ray tracing is a generic parameter** (`IShadowRays`): shading pipelines that cannot trace use `NoRays`, so only the
   visibility buffer's traced variant (`shadeTraced.slang`) needs ray queries. Forward shading counts inline ray
   shadows as lit; a ray-traced mask works with any shading.

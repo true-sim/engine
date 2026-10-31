@@ -33,4 +33,5 @@ tasks.register<JavaExec>("stereoBench") {
     jvmArgs("--enable-native-access=ALL-UNNAMED")
     providers.gradleProperty("rocks").orNull?.let { systemProperty("truesim.demo.rocks", it) }
     providers.gradleProperty("png").orNull?.let { systemProperty("truesim.demo.png", it) }
+    providers.gradleProperty("casterDetail").orNull?.let { systemProperty("truesim.demo.casterDetail", it) }
 }
