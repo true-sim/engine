@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 
 /**
@@ -126,6 +127,7 @@ public final class GraphBuilder {
     private final Set<Object> provided = new HashSet<>(); // every key provided, as scoped
     private final Map<Object, ViewPort> requestViews = new HashMap<>(); // the view each request was first made in
     private final Map<Object, List<Object>> requesters = new HashMap<>(); // the scopes making each request
+    private final List<Running> running = new ArrayList<>(); // handed out while building, resolved when it ends
     private final Map<Scoped, Scoped> interned = new HashMap<>();
     private final Map<ExternalImage, Image> externals = new IdentityHashMap<>();
     /** Imported buffers by Vulkan handle: every wrapper of one buffer is the same buffer of the build. */
@@ -875,6 +877,40 @@ public final class GraphBuilder {
             passes.set(pass.index, pass.info());
         }
         openPasses.clear();
+    }
+
+    /**
+     * Whether the building technique or request runs in the frame being recorded, for work at record time that its
+     * passes alone do not cover, such as a pass shared with other views leaving out this one's part: false while every
+     * view it runs for is skipped ({@link ViewPort#enabled}, {@link ViewPort#rate}); a frame technique's is always
+     * true. Known once the build ends; reading it allocates nothing.
+     */
+    public BooleanSupplier running() {
+        Running supplier = new Running(scope());
+        running.add(supplier);
+        return supplier;
+    }
+
+    /** Resolves what {@link #running} handed out: the build has ended. */
+    void finishRunning() {
+        for (Running supplier : running) {
+            supplier.views = runsFor(supplier.scope);
+        }
+    }
+
+    /** {@link #running}'s answer: whether any of the views its scope runs for runs this frame. */
+    private static final class Running implements BooleanSupplier {
+        private final Object scope;
+        private ViewPort[] views; // null: every frame
+
+        Running(Object scope) {
+            this.scope = scope;
+        }
+
+        @Override
+        public boolean getAsBoolean() {
+            return FrameGraph.runs(views);
+        }
     }
 
     /**

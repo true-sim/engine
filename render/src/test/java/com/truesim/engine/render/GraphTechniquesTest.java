@@ -1131,6 +1131,16 @@ class GraphTechniquesTest {
             assertThat(main.view().visibleMeshlets()).isEqualTo(1);
             assertThat(turned.view().visibleMeshlets()).as("the view looking away").isZero();
             assertThat(graph.passes()).containsOnlyOnce("meshlet culling");
+            // A view turned off is left out of the shared culling: turned to the quad, it finds nothing until on.
+            turned.camera().set(0, 0, -1, 0, 1, 0, Math.PI / 3, SIZE / 2, SIZE / 2, 0.1);
+            turned.set(1, MeshletRenderer.MODE_WHITE);
+            awayPort.enabled(false);
+            frame();
+            assertThat(turned.view().visibleMeshlets()).as("off: not culled").isZero();
+            assertThat(main.view().visibleMeshlets()).as("the camera, culled").isEqualTo(1);
+            awayPort.enabled(true);
+            frame();
+            assertThat(turned.view().visibleMeshlets()).as("on again").isEqualTo(1);
             // A view resized: the graph rebuilds at the new size.
             int builds = graph.builds();
             awayPort.removeOutput(Keys.SCENE_COLOR).size(SIZE / 4, SIZE / 4);

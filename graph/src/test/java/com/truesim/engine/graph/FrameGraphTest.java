@@ -1496,9 +1496,10 @@ class FrameGraphTest {
     }
 
     /** Shared work counting the frames it runs in: one pass, whichever views ask for it. */
-    record Shared(int[] runs) implements Request<Boolean> {
+    record Shared(int[] runs, java.util.function.BooleanSupplier[] running) implements Request<Boolean> {
         @Override
         public Boolean build(GraphBuilder g) {
+            running[0] = g.running();
             g.pass("shared").sideEffects().record(ctx -> runs[0]++);
             return true;
         }
@@ -1526,10 +1527,17 @@ class FrameGraphTest {
             ExternalImage mirror = new ExternalImage("mirror", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage,
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(second.handle(), second.view());
             int[] shared = {0};
+            java.util.function.BooleanSupplier[] running = new java.util.function.BooleanSupplier[1];
+            java.util.function.BooleanSupplier[] frameRunning = new java.util.function.BooleanSupplier[1];
             Remember remember = new Remember(); // each frame it runs: shows last frame's color, writes the other one
-            ViewPort main = graph.addView("main").add(new Asking(new Shared(shared), remember)).output(OUT, output);
-            ViewPort side = graph.addView("side").add(new Asking(new Shared(shared), new Fill(OUT, SIZE, 1, 0, 0, 1)))
-                .output(OUT, mirror);
+            ViewPort main = graph.addView("main").add(new Asking(new Shared(shared, running), remember))
+                .output(OUT, output);
+            ViewPort side = graph.addView("side")
+                .add(new Asking(new Shared(shared, running), new Copies(A, OUT))).output(OUT, mirror);
+            graph.add(new Lambda(List.of(A), g -> {
+                frameRunning[0] = g.running();
+                new Fill(A, SIZE, 1, 0, 0, 1).build(g); // red, for the side view
+            }));
             assertThat(frame()[0]).isEqualTo(0xffffffff);
             assertThat(frame()[0]).isEqualTo(BLUE);
             assertThat(shared[0]).as("shared work, once a frame").isEqualTo(2);
@@ -1541,9 +1549,12 @@ class FrameGraphTest {
             assertThat(remember.frames).as("skipped").isEqualTo(2);
             assertThat(firstTexel(second)).as("the other view runs").isEqualTo(RED);
             assertThat(shared[0]).as("still asked for by the other view").isEqualTo(3);
+            assertThat(running[0].getAsBoolean()).isTrue();
             side.enabled(false);
             frame();
             assertThat(shared[0]).as("no view asking for it runs").isEqualTo(3);
+            assertThat(running[0].getAsBoolean()).as("what records it knows").isFalse();
+            assertThat(frameRunning[0].getAsBoolean()).as("a frame technique's, always").isTrue();
             main.enabled(true);
             assertThat(frame()[0]).as("what it wrote the last frame it ran").isEqualTo(RED);
             assertThat(shared[0]).isEqualTo(4);
