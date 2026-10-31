@@ -1,5 +1,8 @@
 package com.truesim.engine.render;
 
+import static org.lwjgl.system.MemoryStack.stackPush;
+import static org.lwjgl.system.MemoryUtil.memPutInt;
+
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.Buffer;
@@ -11,10 +14,12 @@ import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.layout.ShadePush;
+import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
 import java.util.List;
 import java.util.Objects;
+import org.lwjgl.system.MemoryStack;
 
 /**
  * The scene shaded through a visibility buffer: provides {@link Keys#SCENE_COLOR} and {@link Keys#SCENE_DEPTH} from a
@@ -136,9 +141,29 @@ public final class VisibilityBufferShading implements Technique {
         // Per bin: its indirect dispatch (x, y, z), its tile count, then its tiles; room for all of the images, and
         // each frame, the tiles of the render region (dynamic resolution).
         long listBytes = 4L * (4 + (long) tilesX * tilesY);
-        Buffer tiles = g.createBuffer("material tiles", listBytes * shade.length);
+        // Lists only for bins with a variant (others get no pixels), after a table of each bin's list (resolve.slang's
+        // tileList); only the lists' headers cleared each frame.
+        int[] listOf = new int[shade.length];
+        int lists = 0;
+        for (int bin = 0; bin < shade.length; bin++) {
+            listOf[bin] = shade[bin] == null ? 0 : lists++;
+        }
+        int listCount = lists;
+        long tableBytes = 16L * ((shade.length + 3) / 4);
+        Buffer tiles = g.createBuffer("material tiles", tableBytes + listBytes * Math.max(1, listCount));
         SceneData.Buffers scene = g.request(new SceneData(renderer));
-        g.pass("material tiles reset").write(tiles, BufferAccess.TRANSFER_DST).record(ctx -> ctx.fill(tiles, 0));
+        g.pass("material tiles reset").write(tiles, BufferAccess.TRANSFER_DST).record(ctx -> {
+            try (MemoryStack stack = stackPush()) {
+                long table = stack.ncalloc(4, (int) (tableBytes / 4), 4);
+                for (int bin = 0; bin < listOf.length; bin++) {
+                    memPutInt(table + 4L * bin, listOf[bin]);
+                }
+                Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(tiles), 0, tableBytes, table);
+            }
+            for (int list = 0; list < listCount; list++) {
+                ctx.fill(tiles, tableBytes + listBytes * list, 16, 0); // its dispatch and count
+            }
+        });
         scene.read(g.pass("material classification"), BufferAccess.STORAGE_READ)
             .read(ids, Access.STORAGE_READ)
             .write(tiles, BufferAccess.STORAGE_WRITE)
@@ -165,7 +190,7 @@ public final class VisibilityBufferShading implements Technique {
                 if (shade[bin] == null) {
                     continue;
                 }
-                long list = listBytes * bin;
+                long list = tableBytes + listBytes * listOf[bin];
                 ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, ids, color, lights, size(ctx, ids), types.size(),
                     bin, ctx.address(tiles) + list), tiles, list);
             }
