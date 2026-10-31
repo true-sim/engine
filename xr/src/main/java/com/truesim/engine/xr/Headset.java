@@ -541,24 +541,45 @@ public final class Headset implements AutoCloseable {
             check(xrWaitFrame(session, XrFrameWaitInfo.calloc(stack).type$Default(), frame), "wait for a frame");
             check(xrBeginFrame(session, XrFrameBeginInfo.calloc(stack).type$Default()), "begin a frame");
             long time = frame.predictedDisplayTime();
-            input.update(time, state == XR_SESSION_STATE_FOCUSED);
-            boolean shown = frame.shouldRender() && locate(stack, time);
-            if (shown) {
-                for (int e = 0; e < 2; e++) {
-                    acquire(stack, e);
+            // Begun, the frame is ended whatever happens, its acquired images handed back: a frame left open, or an
+            // image held, would stop the session's next frames.
+            int acquired = 0;
+            boolean shown = false;
+            boolean rendered = false;
+            Throwable failure = null;
+            try {
+                input.update(time, state == XR_SESSION_STATE_FOCUSED);
+                shown = frame.shouldRender() && locate(stack, time);
+                if (shown) {
+                    for (int e = 0; e < 2; e++) {
+                        acquire(stack, e);
+                        acquired++;
+                    }
+                } else {
+                    holdEyes();
                 }
-            } else {
-                holdEyes();
+                renderGraph(presenter);
+                rendered = true;
+            } catch (RuntimeException | Error e) {
+                failure = e;
+                throw e;
+            } finally {
+                try {
+                    for (int e = 0; e < acquired; e++) {
+                        check(xrReleaseSwapchainImage(swapchains[e], XrSwapchainImageReleaseInfo.calloc(stack)
+                            .type$Default()), "hand the eye's image back");
+                    }
+                    endFrame(stack, time, shown && rendered); // no layers for a frame that failed
+                } catch (RuntimeException e) {
+                    if (failure == null) {
+                        throw e;
+                    }
+                    failure.addSuppressed(e);
+                }
             }
-            renderGraph(presenter);
             if (shown) {
-                for (int e = 0; e < 2; e++) {
-                    check(xrReleaseSwapchainImage(swapchains[e], XrSwapchainImageReleaseInfo.calloc(stack)
-                        .type$Default()), "hand the eye's image back");
-                }
                 frames++;
             }
-            endFrame(stack, time, shown);
             return shown;
         }
     }
@@ -580,7 +601,10 @@ public final class Headset implements AutoCloseable {
         }
     }
 
-    /** Locates the eyes for {@code time} and sets their cameras; false where tracking is lost. */
+    /**
+     * Locates the eyes for {@code time} and sets their cameras; false where their orientation is not known. With their
+     * orientation but not their position (positional tracking lost for a moment), the position stays as last known.
+     */
     private boolean locate(MemoryStack stack, long time) {
         XrViewState viewState = XrViewState.calloc(stack).type$Default();
         XrView.Buffer located = XrView.calloc(2, stack);
@@ -591,17 +615,20 @@ public final class Headset implements AutoCloseable {
         check(xrLocateViews(session, XrViewLocateInfo.calloc(stack).type$Default()
             .viewConfigurationType(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO).displayTime(time).space(space),
             viewState, count, located), "locate the eyes");
-        long valid = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
-        if ((viewState.viewStateFlags() & valid) != valid) {
+        long flags = viewState.viewStateFlags();
+        if ((flags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) == 0) {
             return false;
         }
+        boolean positioned = (flags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
         float near = graph.settings().get(XrSettings.NEAR);
         for (int e = 0; e < 2; e++) {
             XrView view = located.get(e);
             float[] pose = poses[e];
-            pose[0] = view.pose().position$().x();
-            pose[1] = view.pose().position$().y();
-            pose[2] = view.pose().position$().z();
+            if (positioned) {
+                pose[0] = view.pose().position$().x();
+                pose[1] = view.pose().position$().y();
+                pose[2] = view.pose().position$().z();
+            }
             pose[3] = view.pose().orientation().x();
             pose[4] = view.pose().orientation().y();
             pose[5] = view.pose().orientation().z();

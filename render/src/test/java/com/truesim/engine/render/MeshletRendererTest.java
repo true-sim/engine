@@ -444,6 +444,19 @@ class MeshletRendererTest {
                 assertThat(view.visibleMeshlets(2)).as("masked, %s", path).isPositive();
                 assertThat((double) covered() / front).as("half the texels masked, %s", path)
                     .isCloseTo(0.5, org.assertj.core.data.Offset.offset(0.1));
+                // Changed in place, the mask follows the fields it reads: no texture, then alpha 0.
+                for (int half = 0; half < 2; half++) {
+                    materials.update(masked + half, MetallicRoughnessParameters.BASE_COLOR_TEXTURE, -1);
+                }
+                render();
+                assertThat(covered()).as("untextured: nothing masked, %s", path).isEqualTo(front);
+                for (int half = 0; half < 2; half++) {
+                    materials.update(masked + half, MetallicRoughnessParameters.BASE_COLOR, 1, 1, 1, 0);
+                }
+                render();
+                assertThat(covered()).as("alpha 0: all of it masked, %s", path).isZero();
+                materials.set(masked, checkered);
+                materials.set(masked + 1, checkered);
                 scene.set(0, textured, masked, 0, 0, -5, 0, 1, 0, 0, 1, 1, 1);
                 render();
                 assertThat(covered()).as("masked one-sided back faces: not drawn, %s", path).isZero();
@@ -1073,7 +1086,7 @@ class MeshletRendererTest {
         assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer(device, scene,
             VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, com.truesim.engine.vulkan.FrameSlots.single(), 0));
         assertThatIllegalArgumentException().isThrownBy(() -> new MeshletRenderer(device, scene,
-            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, com.truesim.engine.vulkan.FrameSlots.single(), 65_536));
+            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, com.truesim.engine.vulkan.FrameSlots.single(), (1 << 24) + 1));
         // Each limit of the pool grows when reached: meshes, meshlets, triangles, meshlet vertices, attributes.
         MeshData small = grid(2, 1, false, VertexFormat.of(VertexAttribute.NORMAL));
         for (GeometryPool.Capacity limit : new GeometryPool.Capacity[] {

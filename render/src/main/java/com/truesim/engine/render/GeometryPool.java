@@ -509,17 +509,43 @@ public final class GeometryPool implements AutoCloseable {
         return id;
     }
 
+    /**
+     * The most meshlets the pool holds: the visibility buffer's ids give a meshlet 24 bits beside its triangle's 7 (the
+     * top bit tells classic triangles).
+     */
+    public static final long MAX_MESHLETS = 1L << 24;
+    /** The most attribute bytes: the mesh table keeps their offsets in 32 bits. */
+    public static final long MAX_ATTRIBUTE_BYTES = 1L << 32;
+
     /** A range of {@code length} from {@code ranges}, grown (and its buffers with it) if it has none free. */
     private long place(RangeAllocator ranges, long length, long alignment) {
         long start = ranges.allocate(length, alignment);
         if (start < 0) {
+            long limit = limit(ranges);
+            if (ranges.capacity() + length + alignment > limit) {
+                throw new IllegalStateException("The geometry pool holds at most " + limit + " of these units ("
+                    + "meshlets, vertices, bytes of attributes or triangles): no room for " + length + " more");
+            }
             // The free end merges with the new room, so this much more always holds it.
             long grown = Math.max(2 * ranges.capacity(), ranges.capacity() + length + alignment);
-            grow(ranges, (grown + 3) & ~3L);
+            grow(ranges, Math.min(limit, (grown + 3) & ~3L)); // whole words; the limits are
             start = ranges.allocate(length, alignment);
         }
         return start;
     }
+
+    /** How far {@code ranges} may grow: what the shaders' ids and offsets can name. */
+    private long limit(RangeAllocator ranges) {
+        if (ranges == meshletRanges) {
+            return MAX_MESHLETS;
+        }
+        if (ranges == attributeRanges || ranges == triangleRanges) {
+            return MAX_ATTRIBUTE_BYTES; // byte offsets in 32 bits
+        }
+        return Integer.MAX_VALUE & ~3L; // vertices and meshlet vertices: 32-bit indices
+    }
+
+
 
     /** Grows {@code ranges} to {@code units} and the buffers it places data in to match. */
     private void grow(RangeAllocator ranges, long units) {

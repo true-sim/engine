@@ -90,5 +90,11 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     {
         push.chunks[first + i] = Chunk(id.x, i * 64, v, phase);
     }
-    InterlockedMax(push.chunkCommand[0], min(first + chunks, push.maxChunks));
+    // The cull dispatch: rows of 65,535 workgroups, as many as the chunks written; and how many those are, for the
+    // workgroups of the last row past them. Past the room, the chunks wanted, for the CPU to grow the room to.
+    uint written = min(first + chunks, push.maxChunks);
+    InterlockedMax(push.chunkCommand[0], min(written, 65535));
+    InterlockedMax(push.chunkCommand[1], (written + 65534) / 65535);
+    InterlockedMax(push.chunkCommand[4], written);
+    InterlockedMax(push.chunkCommand[5], first + chunks);
 }

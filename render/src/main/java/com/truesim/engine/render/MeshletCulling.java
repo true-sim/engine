@@ -53,7 +53,7 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
         private BooleanSupplier[] running = new BooleanSupplier[0]; // whether each one's adder runs this frame
         private RenderView[] culled = new RenderView[0]; // those culled this frame
         private boolean[] culledEarly = new boolean[0];
-        private Runnable[] before = new Runnable[0];
+        private Runnable[] before = new Runnable[0]; // per view, aligned with views: null where none
 
         Views(MeshletRenderer renderer, GraphBuilder g, GraphBuilder.PassBuilder pass) {
             this.renderer = renderer;
@@ -84,10 +84,8 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
             running[running.length - 1] = g.running();
             culled = new RenderView[views.length];
             culledEarly = new boolean[views.length];
-            if (before != null) {
-                this.before = Arrays.copyOf(this.before, this.before.length + 1);
-                this.before[this.before.length - 1] = before;
-            }
+            this.before = Arrays.copyOf(this.before, this.before.length + 1);
+            this.before[this.before.length - 1] = before; // with its view: run only when the view is culled
             return this;
         }
 
@@ -98,8 +96,10 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
         }
 
         void cull(org.lwjgl.vulkan.VkCommandBuffer commands) {
-            for (Runnable runnable : before) {
-                runnable.run();
+            for (int i = 0; i < views.length; i++) {
+                if (before[i] != null && running[i].getAsBoolean()) {
+                    before[i].run(); // a skipped view's camera, detail and history are left as they were
+                }
             }
             int count = 0;
             for (int i = 0; i < views.length; i++) {

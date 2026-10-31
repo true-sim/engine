@@ -115,8 +115,13 @@ public final class MeshletRenderer implements AutoCloseable {
         MESH_SHADERS
     }
 
-    /** Chunks of 64 meshlets the views culled together share: the guaranteed dispatch size. */
+    /**
+     * Chunks of 64 meshlets the views culled together share, to start with: the buffer grows between frames when a frame
+     * wanted more (those past it are dropped that frame, and {@link #chunksOverflowed()} says so).
+     */
     public static final int MAX_CHUNKS = 65_535;
+    /** The most chunks the buffer grows to: 16 bytes each. */
+    private static final int CHUNK_LIMIT = 1 << 24;
     /** VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT: the same bit as the 32-bit stage. */
     private static final long MESH_SHADER_STAGE = VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
     /** Raster bins, as meshlets/common.slang has them: opaque, double-sided, masked. */
@@ -144,7 +149,9 @@ public final class MeshletRenderer implements AutoCloseable {
     private final GpuScene scene;
     private final GeometryPool pool;
     private final Bindless bindless;
-    private final int maxChunks;
+    private int maxChunks;
+    private final FrameSlots slots;
+    private final Runnable growChunks = this::growChunks;
     private final Pipeline instancesPass;
     private final Pipeline cull;
     private final Pipeline expand;
@@ -156,7 +163,7 @@ public final class MeshletRenderer implements AutoCloseable {
     private final Pipeline[] meshDepth;
     private final Pipeline[] idsDraw;
     private final Pipeline[] idsMesh;
-    private final GpuBuffer chunks;
+    private GpuBuffer chunks; // grown as frames want more (growChunks)
     private final GpuBuffer chunkCommand;
     private final RenderViews views; // the open views, their constants array and culled rows
     // The culling's buffers as imported buffers of the frame graph, which the culling passes declare.
@@ -186,14 +193,14 @@ public final class MeshletRenderer implements AutoCloseable {
     /** Like the others, with room for {@code chunks} chunks of 64 meshlets shared by views culled together. */
     public MeshletRenderer(VulkanDevice device, GpuScene scene, int colorFormat, int depthFormat, FrameSlots slots,
         int chunks) {
-        if (chunks < 1 || chunks > MAX_CHUNKS) {
-            throw new IllegalArgumentException("1 to 65,535 chunks: " + chunks);
+        if (chunks < 1 || chunks > CHUNK_LIMIT) {
+            throw new IllegalArgumentException("1 to " + CHUNK_LIMIT + " chunks: " + chunks);
         }
         this.device = device;
         this.scene = Objects.requireNonNull(scene, "scene");
         this.pool = scene.pool();
         this.bindless = device.bindless();
-        Objects.requireNonNull(slots, "slots");
+        this.slots = Objects.requireNonNull(slots, "slots");
         this.maxChunks = chunks;
         this.retiring = new Retiring(slots);
         try (ShaderModule instanceShader = ShaderModule.load(device, "shaders/meshlets/instances.spv");
@@ -257,10 +264,14 @@ public final class MeshletRenderer implements AutoCloseable {
         }
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         this.chunks = GpuBuffer.deviceLocal(device, 16L * chunks, storage);
-        chunkCommand = GpuBuffer.deviceLocal(device, 16,
+        // The cull dispatch (x, y, z), the chunks wanted this frame, the end of those written, and the most a frame
+        // ever wanted: never reset, read by the CPU as frames end to grow the chunks.
+        chunkCommand = GpuBuffer.hostVisible(device, 24,
             storage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        chunkCommand.memory().fill((byte) 0);
         views = new RenderViews(device, slots, retiring);
         scene.onGrow(followScene);
+        slots.onEnd(growChunks);
         chunksImport = new ExternalBuffer("meshlet chunks", this.chunks);
         chunkCommandImport = new ExternalBuffer("chunk command", chunkCommand);
     }
@@ -285,6 +296,39 @@ public final class MeshletRenderer implements AutoCloseable {
     @AllowAllocation("closing a view")
     void removeView(RenderView view) {
         views.remove(view);
+    }
+
+    /** The most chunks of 64 meshlets a frame wanted so far: what the views culled together needed. */
+    public int wantedChunks() {
+        return chunkCommand.memory().get(java.lang.foreign.ValueLayout.JAVA_INT, 20);
+    }
+
+    /** How many chunks there is room for now: it grows between frames to what frames wanted. */
+    public int chunkCapacity() {
+        return maxChunks;
+    }
+
+    /** Whether a frame wanted more chunks than there was room for: instances were left out of it, until it grew. */
+    public boolean chunksOverflowed() {
+        return wantedChunks() > maxChunks;
+    }
+
+    /**
+     * As a frame ends: room for the chunks frames wanted, half again for growth, when a frame wanted more than there
+     * was. The old buffer goes once no frame reads it; a graph rebuilds at its next frame for the new size.
+     */
+    @AllowAllocation("growing, rarely")
+    private void growChunks() {
+        int wanted = wantedChunks();
+        if (wanted <= maxChunks || maxChunks == CHUNK_LIMIT || closed) {
+            return;
+        }
+        int grown = (int) Math.min(CHUNK_LIMIT, Math.max(2L * maxChunks, wanted + wanted / 2L));
+        retiring.add(chunks);
+        chunks = GpuBuffer.deviceLocal(device, 16L * grown,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        chunksImport.set(chunks);
+        maxChunks = grown;
     }
 
     /** Grows the views' per-instance buffers as the scene grows. */
@@ -664,12 +708,13 @@ public final class MeshletRenderer implements AutoCloseable {
                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
         }
         try (MemoryStack stack = stackPush()) {
-            long reset = stack.nmalloc(4, 16); // the chunk command: no chunks yet, a dispatch of x by 1 by 1
+            long reset = stack.nmalloc(4, 20); // the chunk command: no chunks yet, a dispatch of x by 1 by 1
             memPutInt(reset, 0);
             memPutInt(reset + 4, 1);
             memPutInt(reset + 8, 1);
             memPutInt(reset + 12, 0);
-            Commands.updateBuffer(commands, chunkCommand.handle(), 0, 16, reset);
+            memPutInt(reset + 16, 0);
+            Commands.updateBuffer(commands, chunkCommand.handle(), 0, 20, reset); // the most ever wanted stays
             long dispatches = stack.nmalloc(4, 16 * BINS); // per raster bin: no meshlets, a dispatch of x by 1 by 1
             long draws = stack.ncalloc(4, 6 * BINS, 4); // per bin: no indices, one instance, from the bin's first
             for (int bin = 0; bin < BINS; bin++) {
@@ -736,6 +781,7 @@ public final class MeshletRenderer implements AutoCloseable {
             memPutLong(push + CullPush.CLUSTER_LOD, pool.clusterLod().deviceAddress());
             occlusion(push + CullPush.OCCLUSION, pyramid, width, height, mips);
             memPutLong(push + CullPush.MATERIALS, scene.materialsAddress()); // each meshlet's raster bin
+            memPutLong(push + CullPush.CHUNK_COMMAND, chunkCommand.deviceAddress()); // how many chunks were written
             cull.bind(commands);
             cull.push(commands, push, CullPush.BYTES);
             Commands.dispatchIndirect(commands, chunkCommand.handle(), 0);
@@ -884,6 +930,7 @@ public final class MeshletRenderer implements AutoCloseable {
         if (!closed) {
             closed = true;
             scene.stopFollowing(followScene);
+            slots.removeOnEnd(growChunks);
             instancesPass.close();
             cull.close();
             expand.close();

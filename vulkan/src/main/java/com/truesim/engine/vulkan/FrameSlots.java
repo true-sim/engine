@@ -3,6 +3,7 @@ package com.truesim.engine.vulkan;
 import com.truesim.annotations.AllowAllocation;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
@@ -35,6 +36,7 @@ public final class FrameSlots {
     private final boolean single;
     private final List<FrameBuffer> buffers = new ArrayList<>();
     private final List<FrameStart> starts = new ArrayList<>();
+    private final List<Runnable> ends = new ArrayList<>();
     private int current = -1;
     private int last = -1;
     private long frames;
@@ -90,11 +92,30 @@ public final class FrameSlots {
         frames++;
     }
 
-    /** Closes the open slot: the frame was submitted, and its copies are the GPU's until the slot opens again. */
+    /**
+     * Closes the open slot: the frame was submitted, and its copies are the GPU's until the slot opens again. Then runs
+     * what waits for the frame's end ({@link #onEnd}). Allocates nothing.
+     */
     public void end() {
         if (!single) {
             current = -1;
         }
+        for (int i = 0; i < ends.size(); i++) {
+            ends.get(i).run();
+        }
+    }
+
+    /**
+     * Runs {@code end} as each frame ends, between frames: where buffers may be replaced by bigger ones without a frame
+     * recording (a frame graph rebuilds for them at its next frame).
+     */
+    public void onEnd(Runnable end) {
+        ends.add(Objects.requireNonNull(end, "end"));
+    }
+
+    /** Stops running {@code end} as frames end. */
+    public void removeOnEnd(Runnable end) {
+        ends.remove(end);
     }
 
     /** The open slot, or -1 between frames. */

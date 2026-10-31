@@ -25,7 +25,8 @@ public final class ExternalImage {
     int storage = -1; // its storage slot, if it has one (a persistent image's)
     boolean kept; // its contents outlive the frame, read by the next (a persistent image): its writes are kept
     Texture texture; // the texture it is, or null
-    volatile boolean held; // this frame: untouched (not acquired)
+    volatile boolean held; // as set: untouched (not acquired), from the next frame
+    boolean heldThisFrame; // as the frame recording took it: one value for its copies and barriers alike
 
     /**
      * An external image of {@code width} by {@code height} {@code format} texels, created with {@code usage} (the
