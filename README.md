@@ -69,6 +69,24 @@ try (Platform platform = Platform.start()) {
 }
 ```
 
+**Window settings** (`WindowSettings`): every preference the platform can set on a window, as one value to save and
+load: mode, display, windowed size and position, the exclusive fullscreen mode, maximized, resizable, borders, always
+on top, focusable, opacity, size limits, aspect ratio, mouse and keyboard grab, relative mouse, cursor, keeping the
+screen on. `window.apply(settings)` changes a live window as far as the system allows, and `window.settings()` reads
+back what it is (its windowed size kept while fullscreen). `toMap()` and `fromMap(...)` save and load them as text:
+unknown keys are ignored and missing or out-of-range ones default, so settings saved by another version still load.
+Displays are named by `platform.displayKey(id)`: the monitor's name, numbered left to right when identical monitors
+share it. Beyond settings, a window can flash for attention, show progress on its task bar entry, take an icon, and
+be a (modal) child of another. SDL stays inside `engine-platform`: no SDL type or handle is part of its API, and
+Vulkan surfaces come from `window.createVulkanSurface(instance)`.
+
+```java
+WindowSettings saved = WindowSettings.fromMap(load("window"));
+Window window = platform.createWindow(WindowOptions.of("true-sim", 1280, 720), saved); // applied before it shows
+window.apply(window.settings().withMode(WindowMode.BORDERLESS_FULLSCREEN).withDisplay(platform.displayKey(id)));
+store("window", window.settings().toMap());
+```
+
 ## Vulkan
 
 Vulkan 1.3 is required: dynamic rendering, synchronization2, timeline semaphores, buffer device addresses and

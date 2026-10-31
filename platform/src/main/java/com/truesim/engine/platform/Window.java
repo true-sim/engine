@@ -1,6 +1,53 @@
 package com.truesim.engine.platform;
 
 import static org.lwjgl.sdl.SDLError.SDL_GetError;
+import static org.lwjgl.sdl.SDLMouse.SDL_CursorVisible;
+import static org.lwjgl.sdl.SDLMouse.SDL_GetWindowRelativeMouseMode;
+import static org.lwjgl.sdl.SDLMouse.SDL_SetWindowRelativeMouseMode;
+import static org.lwjgl.sdl.SDLPixels.SDL_PIXELFORMAT_ABGR8888;
+import static org.lwjgl.sdl.SDLSurface.SDL_CreateSurfaceFrom;
+import static org.lwjgl.sdl.SDLSurface.SDL_DestroySurface;
+import static org.lwjgl.sdl.SDLVideo.SDL_FLASH_BRIEFLY;
+import static org.lwjgl.sdl.SDLVideo.SDL_FLASH_CANCEL;
+import static org.lwjgl.sdl.SDLVideo.SDL_FLASH_UNTIL_FOCUSED;
+import static org.lwjgl.sdl.SDLVideo.SDL_FlashWindow;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetPrimaryDisplay;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetDesktopDisplayMode;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowAspectRatio;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowKeyboardGrab;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowMaximumSize;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowMinimumSize;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowMouseGrab;
+import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowOpacity;
+import static org.lwjgl.sdl.SDLVideo.SDL_MaximizeWindow;
+import static org.lwjgl.sdl.SDLVideo.SDL_MinimizeWindow;
+import static org.lwjgl.sdl.SDLVideo.SDL_PROGRESS_STATE_ERROR;
+import static org.lwjgl.sdl.SDLVideo.SDL_PROGRESS_STATE_INDETERMINATE;
+import static org.lwjgl.sdl.SDLVideo.SDL_PROGRESS_STATE_NONE;
+import static org.lwjgl.sdl.SDLVideo.SDL_PROGRESS_STATE_NORMAL;
+import static org.lwjgl.sdl.SDLVideo.SDL_PROGRESS_STATE_PAUSED;
+import static org.lwjgl.sdl.SDLVideo.SDL_RestoreWindow;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowAlwaysOnTop;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowAspectRatio;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowBordered;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowFocusable;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowIcon;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowKeyboardGrab;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowMaximumSize;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowMinimumSize;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowModal;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowMouseGrab;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowOpacity;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowParent;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowProgressState;
+import static org.lwjgl.sdl.SDLVideo.SDL_SetWindowProgressValue;
+import static org.lwjgl.sdl.SDLVideo.SDL_WINDOWPOS_CENTERED_DISPLAY;
+import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_ALWAYS_ON_TOP;
+import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_BORDERLESS;
+import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_MAXIMIZED;
+import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_MINIMIZED;
+import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_NOT_FOCUSABLE;
+import static org.lwjgl.sdl.SDLVulkan.nSDL_Vulkan_CreateSurface;
 import static org.lwjgl.sdl.SDLKeyboard.SDL_StartTextInput;
 import static org.lwjgl.sdl.SDLKeyboard.SDL_StopTextInput;
 import static org.lwjgl.sdl.SDLVideo.SDL_CreateWindow;
@@ -54,6 +101,7 @@ public final class Window implements AutoCloseable {
     /** What lives on this window, such as Vulkan surfaces, closed before it. */
     private final List<AutoCloseable> dependents = new ArrayList<>();
     private long handle;
+    private WindowSettings windowed; // as last applied or read: its windowed geometry while fullscreen or maximized
 
     @AllowAllocation("opening a window")
     Window(Platform platform, WindowOptions options) {
@@ -65,6 +113,8 @@ public final class Window implements AutoCloseable {
             throw new PlatformException("Could not open window: " + SDL_GetError());
         }
         this.id = SDL_GetWindowID(handle);
+        this.windowed = WindowSettings.defaults().withWidth(options.width()).withHeight(options.height())
+            .withResizable(options.resizable());
     }
 
     /** The id window events carry. */
@@ -72,8 +122,8 @@ public final class Window implements AutoCloseable {
         return id;
     }
 
-    /** The native SDL window, e.g. for creating a Vulkan surface. */
-    public long handle() {
+    /** The SDL window, inside the platform. */
+    long handle() {
         check();
         return handle;
     }
@@ -275,6 +325,334 @@ public final class Window implements AutoCloseable {
     public boolean sync() {
         check();
         return SDL_SyncWindow(handle);
+    }
+
+    // ---------------------------------------------------------------- more state
+
+    public void maximize() {
+        check();
+        SDL_MaximizeWindow(handle);
+    }
+
+    public void minimize() {
+        check();
+        SDL_MinimizeWindow(handle);
+    }
+
+    /** Back from maximized or minimized to its windowed size and position. */
+    public void restore() {
+        check();
+        SDL_RestoreWindow(handle);
+    }
+
+    public boolean isMaximized() {
+        return flag(SDL_WINDOW_MAXIMIZED);
+    }
+
+    public boolean isMinimized() {
+        return flag(SDL_WINDOW_MINIMIZED);
+    }
+
+    /** With or without decorations (title bar, borders). */
+    public void setBordered(boolean bordered) {
+        check();
+        SDL_SetWindowBordered(handle, bordered);
+    }
+
+    public boolean isBordered() {
+        return !flag(SDL_WINDOW_BORDERLESS);
+    }
+
+    public void setAlwaysOnTop(boolean onTop) {
+        check();
+        SDL_SetWindowAlwaysOnTop(handle, onTop);
+    }
+
+    public boolean isAlwaysOnTop() {
+        return flag(SDL_WINDOW_ALWAYS_ON_TOP);
+    }
+
+    /** Whether the window may take input focus (a tool window may not). */
+    public void setFocusable(boolean focusable) {
+        check();
+        SDL_SetWindowFocusable(handle, focusable);
+    }
+
+    public boolean isFocusable() {
+        return !flag(SDL_WINDOW_NOT_FOCUSABLE);
+    }
+
+    /** From 0 (transparent) to 1 (opaque); returns false where the system cannot. */
+    public boolean setOpacity(float opacity) {
+        check();
+        if (!(opacity >= 0 && opacity <= 1)) {
+            throw new IllegalArgumentException("Opacity is from 0 to 1: " + opacity);
+        }
+        return SDL_SetWindowOpacity(handle, opacity);
+    }
+
+    public float opacity() {
+        check();
+        float opacity = SDL_GetWindowOpacity(handle);
+        return opacity < 0 ? 1 : opacity;
+    }
+
+    /** The smallest size the user may resize the window to, in screen coordinates (0: no limit). */
+    public void setMinimumSize(int width, int height) {
+        check();
+        SDL_SetWindowMinimumSize(handle, width, height);
+    }
+
+    /** The largest size the user may resize the window to (0: no limit). */
+    public void setMaximumSize(int width, int height) {
+        check();
+        SDL_SetWindowMaximumSize(handle, width, height);
+    }
+
+    /** The minimum size: width at index 0, height at 1 (0: no limit). */
+    public int[] minimumSize() {
+        return limit(true);
+    }
+
+    /** The maximum size: width at index 0, height at 1 (0: no limit). */
+    public int[] maximumSize() {
+        return limit(false);
+    }
+
+    @AllowAllocation("a snapshot")
+    private int[] limit(boolean minimum) {
+        check();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            IntBuffer w = stack.mallocInt(1);
+            IntBuffer h = stack.mallocInt(1);
+            if (minimum) {
+                SDL_GetWindowMinimumSize(handle, w, h);
+            } else {
+                SDL_GetWindowMaximumSize(handle, w, h);
+            }
+            return new int[] {w.get(0), h.get(0)};
+        }
+    }
+
+    /** Keeps width over height between {@code min} and {@code max} while resizing (0: no limit). */
+    public void setAspectRatio(float min, float max) {
+        check();
+        SDL_SetWindowAspectRatio(handle, min, max);
+    }
+
+    /** The aspect ratio limits: minimum at index 0, maximum at 1 (0: no limit). */
+    @AllowAllocation("a snapshot")
+    public float[] aspectRatio() {
+        check();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            java.nio.FloatBuffer min = stack.mallocFloat(1);
+            java.nio.FloatBuffer max = stack.mallocFloat(1);
+            SDL_GetWindowAspectRatio(handle, min, max);
+            return new float[] {min.get(0), max.get(0)};
+        }
+    }
+
+    /** Confines the mouse to the window while it has focus. */
+    public void setMouseGrab(boolean grab) {
+        check();
+        SDL_SetWindowMouseGrab(handle, grab);
+    }
+
+    public boolean isMouseGrabbed() {
+        check();
+        return SDL_GetWindowMouseGrab(handle);
+    }
+
+    /** Takes system shortcuts, such as Alt+Tab, while the window has focus, where the system lets it. */
+    public void setKeyboardGrab(boolean grab) {
+        check();
+        SDL_SetWindowKeyboardGrab(handle, grab);
+    }
+
+    public boolean isKeyboardGrabbed() {
+        check();
+        return SDL_GetWindowKeyboardGrab(handle);
+    }
+
+    /** Hides the mouse and reports its motion only, unbounded by the screen: for mouse look. */
+    public void setRelativeMouse(boolean relative) {
+        check();
+        SDL_SetWindowRelativeMouseMode(handle, relative);
+    }
+
+    public boolean isRelativeMouse() {
+        check();
+        return SDL_GetWindowRelativeMouseMode(handle);
+    }
+
+    /** Asks for the user's attention: briefly, or until the window has focus; {@code null} stops asking. */
+    public void flash(Boolean untilFocused) {
+        check();
+        SDL_FlashWindow(handle, untilFocused == null ? SDL_FLASH_CANCEL
+            : untilFocused ? SDL_FLASH_UNTIL_FOCUSED : SDL_FLASH_BRIEFLY);
+    }
+
+    /** Shows a long task on the window's task bar entry: {@code done} from 0 to 1, where the state has a share. */
+    public void setProgress(WindowProgress state, float done) {
+        check();
+        SDL_SetWindowProgressState(handle, switch (state) {
+            case NONE -> SDL_PROGRESS_STATE_NONE;
+            case INDETERMINATE -> SDL_PROGRESS_STATE_INDETERMINATE;
+            case NORMAL -> SDL_PROGRESS_STATE_NORMAL;
+            case PAUSED -> SDL_PROGRESS_STATE_PAUSED;
+            case ERROR -> SDL_PROGRESS_STATE_ERROR;
+        });
+        SDL_SetWindowProgressValue(handle, Math.clamp(done, 0, 1));
+    }
+
+    /**
+     * The window's icon: {@code width} by {@code height} pixels, 4 bytes each (red, green, blue, alpha), row after row
+     * in {@code rgba}, a direct buffer.
+     */
+    public void setIcon(int width, int height, java.nio.ByteBuffer rgba) {
+        check();
+        if (width < 1 || height < 1 || rgba.remaining() < 4L * width * height || !rgba.isDirect()) {
+            throw new IllegalArgumentException("An icon of " + width + " x " + height + " needs " + 4L * width * height
+                + " bytes in a direct buffer");
+        }
+        org.lwjgl.sdl.SDL_Surface surface = SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_ABGR8888, rgba,
+            4 * width);
+        if (surface == null) {
+            throw new PlatformException("Could not make the icon: " + SDL_GetError());
+        }
+        try {
+            SDL_SetWindowIcon(handle, surface);
+        } finally {
+            SDL_DestroySurface(surface);
+        }
+    }
+
+    /** Makes the window a child of {@code parent} (null: none): it stays above it and closes with it. */
+    public void setParent(Window parent) {
+        check();
+        SDL_SetWindowParent(handle, parent == null ? 0 : parent.handle);
+    }
+
+    /** As a child window, blocks input to its parent while shown. */
+    public void setModal(boolean modal) {
+        check();
+        SDL_SetWindowModal(handle, modal);
+    }
+
+    private boolean flag(long flag) {
+        check();
+        return (SDL_GetWindowFlags(handle) & flag) != 0;
+    }
+
+    // ---------------------------------------------------------------- settings
+
+    /**
+     * Changes the window to {@code settings}, as far as the system allows: in its mode on its display (by name; the
+     * primary if none has it), its windowed size and position kept for when it is windowed again; exclusive fullscreen
+     * where the display has no such mode is borderless. Takes effect at once
+     * or, on some systems, shortly after ({@link #sync()}); {@link #settings()} tells what took.
+     */
+    @AllowAllocation("changing settings, rarely")
+    public void apply(WindowSettings settings) {
+        check();
+        windowed = settings;
+        setResizable(settings.resizable());
+        setBordered(settings.bordered());
+        setAlwaysOnTop(settings.alwaysOnTop());
+        setFocusable(settings.focusable());
+        SDL_SetWindowOpacity(handle, settings.opacity()); // where the system can
+        setMinimumSize(settings.minWidth(), settings.minHeight());
+        setMaximumSize(settings.maxWidth(), settings.maxHeight());
+        setAspectRatio(settings.minAspect(), settings.maxAspect());
+        int display = platform.displayNamed(settings.display());
+        switch (settings.mode()) {
+            case WINDOWED -> {
+                SDL_SetWindowFullscreen(handle, false);
+                if (settings.maximized()) {
+                    SDL_MaximizeWindow(handle);
+                } else {
+                    SDL_RestoreWindow(handle);
+                    setSize(settings.width(), settings.height());
+                    int position = SDL_WINDOWPOS_CENTERED_DISPLAY(display);
+                    setPosition(settings.centered() ? position : settings.x(),
+                        settings.centered() ? position : settings.y());
+                }
+            }
+            case BORDERLESS_FULLSCREEN -> {
+                int position = SDL_WINDOWPOS_CENTERED_DISPLAY(display); // onto its display first
+                SDL_SetWindowPosition(handle, position, position);
+                borderlessFullscreen();
+            }
+            case EXCLUSIVE_FULLSCREEN -> {
+                DisplayMode desktop = Platform.mode(SDL_GetDesktopDisplayMode(display));
+                int width = settings.fullscreenWidth() > 0 ? settings.fullscreenWidth() : desktop.width();
+                int height = settings.fullscreenHeight() > 0 ? settings.fullscreenHeight() : desktop.height();
+                float rate = settings.refreshRate() > 0 ? settings.refreshRate() : desktop.refreshRate();
+                try {
+                    exclusiveFullscreen(new DisplayMode(display, width, height, desktop.pixelDensity(), rate, 0, 0,
+                        desktop.format()));
+                } catch (PlatformException e) { // a display without fullscreen modes: covered at its desktop's
+                    borderlessFullscreen();
+                }
+            }
+        }
+        setMouseGrab(settings.mouseGrab());
+        setKeyboardGrab(settings.keyboardGrab());
+        setRelativeMouse(settings.relativeMouse());
+        platform.setCursorVisible(settings.cursorVisible());
+        platform.setKeepScreenOn(settings.keepScreenOn());
+    }
+
+    /**
+     * What the window is now, as settings to save: its mode and display, its windowed size and position (the last
+     * ones it had while windowed, when fullscreen or maximized), and the rest as the system reports them.
+     */
+    @AllowAllocation("a snapshot")
+    public WindowSettings settings() {
+        check();
+        WindowMode mode = mode();
+        boolean maximized = isMaximized();
+        WindowSettings s = windowed;
+        if (mode == WindowMode.WINDOWED && !maximized && !isMinimized()) {
+            s = s.withWidth(width()).withHeight(height()).withCentered(false).withX(x()).withY(y());
+        }
+        DisplayMode exclusive = fullscreenMode();
+        if (exclusive != null) {
+            s = s.withFullscreenWidth(exclusive.width()).withFullscreenHeight(exclusive.height())
+                .withRefreshRate(exclusive.refreshRate());
+        }
+        int display = display();
+        String key = display == SDL_GetPrimaryDisplay() ? "" : platform.displayKey(display);
+        int[] min = minimumSize();
+        int[] max = maximumSize();
+        float[] aspect = aspectRatio();
+        s = s.withMode(mode).withDisplay(key).withMaximized(maximized)
+            .withResizable(isResizable()).withBordered(isBordered()).withAlwaysOnTop(isAlwaysOnTop())
+            .withFocusable(isFocusable()).withOpacity(Math.clamp(opacity(), 0, 1)).withMinWidth(min[0])
+            .withMinHeight(min[1]).withMaxWidth(max[0]).withMaxHeight(max[1]).withMinAspect(Math.max(0, aspect[0]))
+            .withMaxAspect(Math.max(0, aspect[1])).withMouseGrab(isMouseGrabbed()).withKeyboardGrab(isKeyboardGrabbed())
+            .withRelativeMouse(isRelativeMouse()).withCursorVisible(SDL_CursorVisible())
+            .withKeepScreenOn(platform.keepScreenOn());
+        windowed = s;
+        return s;
+    }
+
+    // ---------------------------------------------------------------- rendering
+
+    /**
+     * A Vulkan surface on this window for Vulkan instance {@code instance} (a {@code VkInstance} handle), as a
+     * {@code VkSurfaceKHR} handle: the window must be made for Vulkan ({@link WindowOptions#vulkan()}). The caller
+     * destroys it, before the window ({@link #attach}).
+     */
+    public long createVulkanSurface(long instance) {
+        check();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            java.nio.LongBuffer surface = stack.mallocLong(1);
+            if (!nSDL_Vulkan_CreateSurface(handle, instance, 0, org.lwjgl.system.MemoryUtil.memAddress(surface))) {
+                throw new PlatformException("Could not create a Vulkan surface: " + SDL_GetError());
+            }
+            return surface.get(0);
+        }
     }
 
     private void check() {
