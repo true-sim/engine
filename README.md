@@ -590,6 +590,9 @@ that declare how they use each image. The graph does the rest:
   by id (`port.remove(id)`). A view owns what is made for it (`port.own(resource)`, its render view among them),
   closed when it is removed or the graph closes. `SceneViews` does both for the scene: `addPerView(view -> ...)`
   factories, and `add(name, camera, options)` making the port, its render view and its techniques at once.
+  `view.enabled(false)` skips a view from the next frame and `view.rate(4)` runs it every 4th frame, neither
+  rebuilding the graph: a skipped view runs none of its passes, nor shared work only it asked for, its outputs are left
+  undefined, and its histories keep what the last frame it ran wrote.
 - **Culled:** walking back from the outputs, passes whose images and buffers nothing needs are dropped.
 - **Synchronized:** barriers and layout transitions come from the declared accesses, batched into one call per pass,
   with none between reads.

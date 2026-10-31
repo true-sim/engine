@@ -65,7 +65,8 @@ final class GraphCompiler {
         Arrays.fill(substitute, -1);
         boolean[] needed = new boolean[g.images.size() + outputs.size()];
         int k = 0;
-        for (ExternalImage target : outputs.values()) {
+        for (Map.Entry<?, ExternalImage> output : outputs.entrySet()) {
+            ExternalImage target = output.getValue();
             Image result = results.get(k++);
             ImageInfo info = g.images.get(result.id);
             boolean fits = info.external == null && substitute[result.id] < 0 && result.width == target.width
@@ -79,6 +80,7 @@ final class GraphCompiler {
                 substitute[result.id] = external.id;
             } else {
                 g.pass("output " + target.name)
+                    .in(output.getKey() instanceof GraphBuilder.Scoped scoped ? scoped.view() : null) // runs with it
                     .read(result, Access.TRANSFER_SRC)
                     .write(external, Access.TRANSFER_DST)
                     .record(ctx -> copy.record(ctx, result, external));

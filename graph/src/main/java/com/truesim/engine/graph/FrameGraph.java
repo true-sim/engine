@@ -192,6 +192,12 @@ public final class FrameGraph implements AutoCloseable {
     private int[] barrierMipCount = new int[0];
     private int[] barrierBaseLayer = new int[0];
     private int[] barrierLayerCount = new int[0];
+    private int[] barrierHistory = new int[0]; // the history whose image each barrier is on, or -1
+    // Per-frame view control: the views each pass runs for (null: every frame), the passes skipped this frame, and the
+    // view each history is of (null: the frame's, or shared, so it swaps every frame).
+    private ViewPort[][] passViews = new ViewPort[0][];
+    private boolean[] passSkipped = new boolean[0];
+    private ViewPort[] historyView = new ViewPort[0];
     private int[] targetOf = new int[0];
     private Physical[] physicals = new Physical[0];
     private ExternalImage[] externals = new ExternalImage[0];
@@ -557,18 +563,50 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     private void prepare() {
+        for (int v = 0; v < views.size(); v++) {
+            views.get(v).startFrame();
+        }
         // A new frame: last frame's current images are this frame's previous ones, also when the graph rebuilds (the
-        // pairs it keeps carry their contents over).
-        for (HistoryPair pair : activeHistories) {
-            pair.current.swap(pair.previous);
+        // pairs it keeps carry their contents over). A skipped view's stay as they are.
+        for (int h = 0; h < activeHistories.length; h++) {
+            if (historyRuns(h)) {
+                activeHistories[h].current.swap(activeHistories[h].previous);
+            }
         }
         if (dirty || externalsResized() || techniquesChanged()) {
             build();
         }
         frame++;
+        for (int h = 0; h < activeHistories.length; h++) {
+            HistoryPair pair = activeHistories[h];
+            if (!historyRuns(h) && pair.firstFrame >= frame) {
+                pair.firstFrame = frame + 1; // not written yet: the frame after it first is has a last frame
+            }
+        }
+        for (int i = 0; i < order.length; i++) {
+            passSkipped[i] = !runs(passViews[i]);
+        }
         if (resources.hasRetired()) {
             resources.release(false, frame);
         }
+    }
+
+    /** Whether any of {@code views} runs this frame; null: the frame's, always. */
+    private static boolean runs(ViewPort[] views) {
+        if (views == null) {
+            return true;
+        }
+        for (ViewPort view : views) {
+            if (view.active) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether history {@code h} swaps and is written this frame: false while its view is skipped. */
+    private boolean historyRuns(int h) {
+        return historyView[h] == null || historyView[h].active;
     }
 
     /** Records chunks {@code from} to {@code to}, on worker {@code worker}: its own command buffers. */
@@ -598,10 +636,15 @@ public final class FrameGraph implements AutoCloseable {
             if (timed != null) {
                 timed.write(commands, recordSlot, i, false);
             }
-            barriers(commands, barrierStart[i], barrierStart[i + 1]);
+            // A skipped pass keeps its barriers, so every later one finds the layouts and ordering it was compiled
+            // for; only those on the histories of a skipped view go, which stay as they are.
+            boolean skipped = passSkipped[i];
+            barriers(commands, barrierStart[i], barrierStart[i + 1], skipped);
             PassInfo pass = order[i];
             context.pass = pass;
-            if (pass.attachments.length == 0) {
+            if (skipped) {
+                // its view's frame is skipped: nothing to record
+            } else if (pass.attachments.length == 0) {
                 pass.body.record(context);
             } else {
                 beginRendering(commands, pass.attachments);
@@ -617,7 +660,7 @@ public final class FrameGraph implements AutoCloseable {
         }
         context.pass = null;
         if (last) {
-            barriers(commands, barrierStart[order.length], barrierStart[order.length + 1]);
+            barriers(commands, barrierStart[order.length], barrierStart[order.length + 1], false);
         }
         context.commands = null;
     }
@@ -961,16 +1004,23 @@ public final class FrameGraph implements AutoCloseable {
         return target.whole() ? viewOf(target.image().id) : layerViewOf(target.image().id, target.baseLayer());
     }
 
-    private void barriers(VkCommandBuffer commands, int from, int to) {
+    /** Barriers {@code from} to {@code to}; of a {@code skipped} pass, without those on a skipped view's histories. */
+    private void barriers(VkCommandBuffer commands, int from, int to, boolean skipped) {
         if (from == to) {
             return;
         }
         try (MemoryStack stack = stackPush()) {
             int bufferCount = 0;
+            int imageCount = 0;
             for (int b = from; b < to; b++) {
-                bufferCount += barrierKind[b];
+                if (!dropped(b, skipped)) {
+                    bufferCount += barrierKind[b];
+                    imageCount += 1 - barrierKind[b];
+                }
             }
-            int imageCount = to - from - bufferCount;
+            if (bufferCount + imageCount == 0) {
+                return;
+            }
             long images = stack.ncalloc(VkImageMemoryBarrier2.ALIGNOF, Math.max(1, imageCount),
                 VkImageMemoryBarrier2.SIZEOF);
             long buffers = stack.ncalloc(VkBufferMemoryBarrier2.ALIGNOF, Math.max(1, bufferCount),
@@ -978,6 +1028,9 @@ public final class FrameGraph implements AutoCloseable {
             int image = 0;
             int buffer = 0;
             for (int b = from; b < to; b++) {
+                if (dropped(b, skipped)) {
+                    continue;
+                }
                 if (barrierKind[b] == BUFFER) {
                     long barrier = buffers + (long) buffer++ * VkBufferMemoryBarrier2.SIZEOF;
                     memPutInt(barrier + VkBufferMemoryBarrier2.STYPE, VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2);
@@ -1021,6 +1074,11 @@ public final class FrameGraph implements AutoCloseable {
             memPutAddress(dependency + VkDependencyInfo.PBUFFERMEMORYBARRIERS, buffers);
             Commands.pipelineBarrier2(commands, dependency);
         }
+    }
+
+    /** Whether barrier {@code b}, of a pass {@code skipped} or not, is left out: it is on a skipped view's history. */
+    private boolean dropped(int b, boolean skipped) {
+        return skipped && barrierHistory[b] >= 0 && !historyRuns(barrierHistory[b]);
     }
 
     long bufferHandle(int buffer) {
@@ -1203,6 +1261,17 @@ public final class FrameGraph implements AutoCloseable {
         barrierMipCount = barriers.mipCount();
         barrierBaseLayer = barriers.baseLayer();
         barrierLayerCount = barriers.layerCount();
+        int[] historyOf = new int[newPhysicals.length]; // each physical image's history, or -1
+        Arrays.fill(historyOf, -1);
+        for (int h = 0; h < plans.size(); h++) {
+            historyOf[plans.get(h).current()] = h;
+            historyOf[plans.get(h).previous()] = h;
+        }
+        barrierHistory = new int[barrierTarget.length];
+        for (int b = 0; b < barrierTarget.length; b++) {
+            barrierHistory[b] = barrierKind[b] == IMAGE && barrierTarget[b] >= 0 ? historyOf[barrierTarget[b]] : -1;
+        }
+        startViews(g, plans.size());
         CompiledGraph.Batches batches = compiled.batches();
         batchQueue = batches.queue();
         batchOrdinal = batches.ordinal();
@@ -1231,6 +1300,37 @@ public final class FrameGraph implements AutoCloseable {
         LOG.debug("Frame graph built: {} of {} passes in {} batches, {} images in {} pooled, {} buffers in {} pooled, "
             + "{} barriers", order.length, compiled.builtPasses(), batchQueue.length, targetOf.length,
             physicals.length, bufferTargetOf.length, physicalBuffers.length, barrierTarget.length);
+    }
+
+    /**
+     * Which views the passes just built run for, and which view each history is of: the one view of every pass using
+     * it, or none (it swaps every frame) if the frame's passes or several views' use it.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    private void startViews(GraphBuilder g, int historyCount) {
+        passViews = new ViewPort[order.length][];
+        passSkipped = new boolean[order.length];
+        historyView = new ViewPort[historyCount];
+        boolean[] shared = new boolean[historyCount];
+        for (int i = 0; i < order.length; i++) {
+            passViews[i] = g.runsFor(order[i].scope);
+            for (int image : order[i].images) {
+                History history = g.images.get(image).history;
+                if (history == null) {
+                    continue;
+                }
+                int h = history.index;
+                ViewPort[] runs = passViews[i];
+                ViewPort view = runs != null && runs.length == 1 ? runs[0] : null;
+                shared[h] |= view == null || historyView[h] != null && historyView[h] != view;
+                historyView[h] = view;
+            }
+        }
+        for (int h = 0; h < historyCount; h++) {
+            if (shared[h]) {
+                historyView[h] = null;
+            }
+        }
     }
 
     /**
@@ -1305,17 +1405,22 @@ public final class FrameGraph implements AutoCloseable {
         int[] to = new int[images.length];
         for (int h = 0; h < pairs.length; h++) {
             HistoryPair pair = pairs[h];
-            // Last frame's current image is this frame's previous one: it holds what the graph before left in it.
+            // Last frame's current image is this frame's previous one: it holds what the graph before left in it. A
+            // pair of a view skipped this frame does not swap: its current image is the one that becomes the previous
+            // one when the view next runs, so the two take the layouts their roles start that frame with.
+            boolean swapped = historyRuns(h);
+            Physical latest = swapped ? pair.previous : pair.current;
+            Physical other = swapped ? pair.current : pair.previous;
             int previousFrom = kept[h] ? pair.endCurrent : VK_IMAGE_LAYOUT_UNDEFINED;
             int startPrevious = compiled.historyStartPrevious()[h];
             int startCurrent = compiled.historyStartCurrent()[h];
             if (previousFrom != startPrevious) {
-                images[count] = pair.previous;
+                images[count] = latest;
                 from[count] = previousFrom;
                 to[count++] = startPrevious;
             }
             if (startCurrent != VK_IMAGE_LAYOUT_UNDEFINED) { // about to be written: contents do not matter
-                images[count] = pair.current;
+                images[count] = other;
                 from[count] = VK_IMAGE_LAYOUT_UNDEFINED;
                 to[count++] = startCurrent;
             }

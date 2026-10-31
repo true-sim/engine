@@ -14,6 +14,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -91,12 +92,14 @@ public final class GraphBuilder {
         final boolean sideEffects;
         final boolean async;
         final PassBody body;
+        final Object scope; // what recorded it (a technique or request), its view (an output's copy), or null: the graph
 
-        PassInfo(String name, String owner, int[] images, Access[] accesses, int[] ranges, boolean[] discards,
-            Attachment[] attachments, int[] buffers, BufferAccess[] bufferAccesses, boolean sideEffects, boolean async,
-            PassBody body) {
+        PassInfo(String name, String owner, Object scope, int[] images, Access[] accesses, int[] ranges,
+            boolean[] discards, Attachment[] attachments, int[] buffers, BufferAccess[] bufferAccesses,
+            boolean sideEffects, boolean async, PassBody body) {
             this.name = name;
             this.owner = owner;
+            this.scope = scope;
             this.images = images;
             this.accesses = accesses;
             this.ranges = ranges;
@@ -122,6 +125,7 @@ public final class GraphBuilder {
     private final Map<Technique, ViewPort> viewOf = new IdentityHashMap<>();
     private final Set<Object> provided = new HashSet<>(); // every key provided, as scoped
     private final Map<Object, ViewPort> requestViews = new HashMap<>(); // the view each request was first made in
+    private final Map<Object, List<Object>> requesters = new HashMap<>(); // the scopes making each request
     private final Map<Scoped, Scoped> interned = new HashMap<>();
     private final Map<ExternalImage, Image> externals = new IdentityHashMap<>();
     /** Imported buffers by Vulkan handle: every wrapper of one buffer is the same buffer of the build. */
@@ -490,6 +494,7 @@ public final class GraphBuilder {
     public <R> R request(Request<R> request) {
         Objects.requireNonNull(request, "request");
         requestViews.putIfAbsent(request, view()); // built in the view of whoever requests it first
+        requesters.computeIfAbsent(request, r -> new ArrayList<>()).add(scope());
         Implementation implementation = implementations.get(request.getClass());
         return resolution.request(request,
             () -> implementation == null ? request.build(this) : (R) implementation.build(request, this));
@@ -609,6 +614,7 @@ public final class GraphBuilder {
         private int index = -1; // in the build's passes, once recorded
         private PassBody body;
         private String owner;
+        private Object scope;
 
         private PassBuilder(String name) {
             this.name = name;
@@ -815,12 +821,21 @@ public final class GraphBuilder {
                 throw new IllegalStateException(name + " is recorded already");
             }
             this.body = Objects.requireNonNull(body, "body");
+            if (scope == null) {
+                scope = scope();
+            }
             owner = scope() == null ? "the graph" : name(scope());
             index = passes.size();
             passes.add(info());
             if (open) {
                 openPasses.add(this);
             }
+        }
+
+        /** The pass is {@code view}'s (null: the frame's), whoever records it: an output's copy, say. */
+        PassBuilder in(ViewPort view) {
+            scope = view;
+            return this;
         }
 
         /** Throws once the pass is recorded, unless it is {@link #open}. */
@@ -848,7 +863,7 @@ public final class GraphBuilder {
             for (int i = 0; i < bufferIds.length; i++) {
                 bufferIds[i] = usedBuffers.get(i).id;
             }
-            return new PassInfo(name, owner, ids, accesses.toArray(new Access[0]), ranges, discards,
+            return new PassInfo(name, owner, scope, ids, accesses.toArray(new Access[0]), ranges, discards,
                 attachments.toArray(new Attachment[0]), bufferIds, bufferAccesses.toArray(new BufferAccess[0]),
                 sideEffects, async, body);
         }
@@ -860,6 +875,37 @@ public final class GraphBuilder {
             passes.set(pass.index, pass.info());
         }
         openPasses.clear();
+    }
+
+    /**
+     * The views whose frames need what {@code scope} records, or null if every frame does: a technique's view, an
+     * output's view, or for a request every view that made it (null if the frame or the graph made it too).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    ViewPort[] runsFor(Object scope) {
+        Set<ViewPort> views = new LinkedHashSet<>();
+        return addViews(scope, views) ? views.toArray(new ViewPort[0]) : null;
+    }
+
+    /** Adds the views {@code scope} runs for to {@code views}; false if it runs every frame. */
+    @AllowAllocation("building the graph, when it changes")
+    private boolean addViews(Object scope, Set<ViewPort> views) {
+        ViewPort view = scope instanceof ViewPort port ? port
+            : scope instanceof Technique technique ? viewOf.get(technique) : null;
+        if (view != null) {
+            views.add(view);
+            return true;
+        }
+        List<Object> made = scope == null || scope instanceof Technique ? null : requesters.get(scope);
+        if (made == null) {
+            return false; // the graph's, or a frame technique's
+        }
+        for (Object requester : made) {
+            if (!addViews(requester, views)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     static String name(Object owner) {
