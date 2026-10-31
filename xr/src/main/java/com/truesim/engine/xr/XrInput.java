@@ -532,14 +532,8 @@ public final class XrInput implements AutoCloseable {
     }
 
     private boolean out(float[] pose, int at, double[] position, float[] orientation) {
-        double[] origin = headset.originRef();
-        position[0] = origin[0] + pose[at];
-        position[1] = origin[1] + pose[at + 1];
-        position[2] = origin[2] + pose[at + 2];
-        orientation[0] = pose[at + 3];
-        orientation[1] = pose[at + 4];
-        orientation[2] = pose[at + 5];
-        orientation[3] = pose[at + 6];
+        headset.toWorld(pose[at], pose[at + 1], pose[at + 2], position); // turned, scaled and moved by the origin
+        headset.toWorld(pose[at + 3], pose[at + 4], pose[at + 5], pose[at + 6], orientation, 0);
         return true;
     }
 

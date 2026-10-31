@@ -168,7 +168,7 @@ public final class Headset implements AutoCloseable {
     private boolean eyeGaze;
     private boolean handInteraction;
     private XrInput input;
-    private final double[] origin = new double[3];
+    private final TrackingOrigin origin = new TrackingOrigin();
     // The session, once started.
     private FrameGraph graph;
     private VulkanDevice device;
@@ -420,10 +420,9 @@ public final class Headset implements AutoCloseable {
         return input;
     }
 
-    /** The tracking space's origin, for the input's world positions. */
-    double[] originRef() {
-        return origin;
-    }
+    private final double[] eyeWorld = new double[3]; // scratch for locating the eyes
+    private final float[] eyeTurn = new float[4];
+
 
     private boolean hasStage(MemoryStack stack) {
         IntBuffer count = stack.mallocInt(1);
@@ -487,13 +486,49 @@ public final class Headset implements AutoCloseable {
 
     /**
      * Puts the tracking space's origin (the play area's floor center, or where a seated head started) at world
-     * position ({@code x}, {@code y}, {@code z}): the eyes' cameras move with it. Allocates nothing.
+     * position ({@code x}, {@code y}, {@code z}): the eyes' cameras move with it, as do the input's poses and joints.
+     * Its turn and scale stay. Allocates nothing.
      */
     public Headset origin(double x, double y, double z) {
-        origin[0] = x;
-        origin[1] = y;
-        origin[2] = z;
+        origin.position(x, y, z);
         return this;
+    }
+
+    /**
+     * Like {@link #origin(double, double, double)}, the tracking space also turned by {@code yaw} radians about the
+     * world's up (+y: a snap or smooth turn, a vehicle's heading) and scaled by {@code scale} world units per meter
+     * (a giant's or an ant's view of the world). Allocates nothing.
+     */
+    public Headset origin(double x, double y, double z, double yaw, double scale) {
+        origin.turn(yaw, scale);
+        origin.position(x, y, z);
+        return this;
+    }
+
+    /** The tracking space's turn about the world's up, in radians, as {@code origin} set it. */
+    public double originYaw() {
+        return origin.yaw();
+    }
+
+    /** The tracking space's scale, world units per meter. */
+    public double originScale() {
+        return origin.scale();
+    }
+
+    /**
+     * Where position ({@code x}, {@code y}, {@code z}) of the tracking space is in the world, into {@code world}: turned,
+     * scaled and moved by the origin. Allocates nothing.
+     */
+    void toWorld(double x, double y, double z, double[] world) {
+        origin.toWorld(x, y, z, world);
+    }
+
+    /**
+     * Orientation ({@code x}, {@code y}, {@code z}, {@code w}) of the tracking space, a unit quaternion, in the world:
+     * turned by the origin's yaw first, into {@code world} from {@code at}. Allocates nothing.
+     */
+    void toWorld(float x, float y, float z, float w, float[] world, int at) {
+        origin.toWorld(x, y, z, w, world, at);
     }
 
     /**
@@ -638,9 +673,11 @@ public final class Headset implements AutoCloseable {
             fov[1] = view.fov().angleRight();
             fov[2] = view.fov().angleUp();
             fov[3] = view.fov().angleDown();
-            cameras[e].position(origin[0] + pose[0], origin[1] + pose[1], origin[2] + pose[2])
-                .setFov(0, 0, 0, pose[3], pose[4], pose[5], pose[6], fov[0], fov[1], fov[2], fov[3], width, height,
-                    near);
+            toWorld(pose[0], pose[1], pose[2], eyeWorld);
+            toWorld(pose[3], pose[4], pose[5], pose[6], eyeTurn, 0);
+            cameras[e].position(eyeWorld[0], eyeWorld[1], eyeWorld[2])
+                .setFov(0, 0, 0, eyeTurn[0], eyeTurn[1], eyeTurn[2], eyeTurn[3], fov[0], fov[1], fov[2], fov[3], width,
+                    height, near);
         }
         return true;
     }
