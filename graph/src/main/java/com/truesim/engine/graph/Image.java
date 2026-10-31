@@ -10,6 +10,7 @@ import com.truesim.engine.vulkan.Format;
 public final class Image {
 
     final int id;
+    final Object build; // the build it is of: a pass resolving it in another (kept from an earlier build) is refused
     final String name;
     final ImageDesc desc;
     final int width;
@@ -19,7 +20,12 @@ public final class Image {
     private final Subresource whole;
 
     Image(int id, String name, ImageDesc desc) {
+        this(id, name, desc, null);
+    }
+
+    Image(int id, String name, ImageDesc desc, Object build) {
         this.id = id;
+        this.build = build;
         this.name = name;
         this.desc = desc;
         this.width = desc.width();

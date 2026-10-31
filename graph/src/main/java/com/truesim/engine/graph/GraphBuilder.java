@@ -558,7 +558,7 @@ public final class GraphBuilder {
      */
     public Image create(String name, ImageDesc desc) {
         Image image = new Image(images.size(), Objects.requireNonNull(name, "name"), Objects.requireNonNull(desc,
-            "desc"));
+            "desc"), this);
         images.add(new ImageInfo(image, scope(), null));
         return image;
     }
@@ -694,7 +694,7 @@ public final class GraphBuilder {
     /** {@code external} as an image of this build, the same one each time. */
     public Image external(ExternalImage external) {
         return externals.computeIfAbsent(external, e -> {
-            Image image = new Image(images.size(), e.name, ImageDesc.of(e.format, e.width, e.height));
+            Image image = new Image(images.size(), e.name, ImageDesc.of(e.format, e.width, e.height), this);
             images.add(new ImageInfo(image, null, e));
             return image;
         });
@@ -710,7 +710,7 @@ public final class GraphBuilder {
         if (size < 1) {
             throw new IllegalArgumentException("Buffer size must be positive: " + name + ", " + size);
         }
-        Buffer buffer = new Buffer(buffers.size(), Objects.requireNonNull(name, "name"), size);
+        Buffer buffer = new Buffer(buffers.size(), Objects.requireNonNull(name, "name"), size, this);
         buffers.add(new BufferInfo(buffer, scope()));
         return buffer;
     }
@@ -724,7 +724,7 @@ public final class GraphBuilder {
      */
     public Buffer importBuffer(ExternalBuffer external) {
         return externalBuffers.computeIfAbsent(external.handle, h -> {
-            Buffer buffer = new Buffer(buffers.size(), external.name, external.size);
+            Buffer buffer = new Buffer(buffers.size(), external.name, external.size, this);
             buffers.add(new BufferInfo(buffer, null, external));
             return buffer;
         });

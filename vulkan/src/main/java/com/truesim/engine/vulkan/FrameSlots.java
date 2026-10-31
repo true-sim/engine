@@ -150,7 +150,11 @@ public final class FrameSlots {
         return last;
     }
 
-    /** Commands recorded at the start of each frame, before its passes, on the graphics queue. */
+    /**
+     * Commands recorded at the start of each frame, before its passes, on the graphics queue: what the frame's graphics
+     * passes read lands first. A frame graph's async compute passes may run before them, on the other queue: what they
+     * read goes through a pass they depend on (as the scene's uploads do), not a frame start.
+     */
     @FunctionalInterface
     public interface FrameStart {
         /** Records what the frame needs first into {@code commands}; nothing if nothing is waiting. */

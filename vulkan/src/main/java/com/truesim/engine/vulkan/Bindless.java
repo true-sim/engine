@@ -119,8 +119,34 @@ public final class Bindless implements AutoCloseable {
         }
     }
 
+    /**
+     * Whether the device's limits for descriptors updated after bind hold the set: slots of each kind per stage and
+     * per set, and all of them per stage. Throws, naming the first limit short, where they do not.
+     */
+    private void checkLimits(MemoryStack stack) {
+        org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Properties limits = org.lwjgl.vulkan.VkPhysicalDeviceVulkan12Properties
+            .calloc(stack).sType$Default();
+        org.lwjgl.vulkan.VK11.vkGetPhysicalDeviceProperties2(device.gpu().handle(),
+            org.lwjgl.vulkan.VkPhysicalDeviceProperties2.calloc(stack).sType$Default().pNext(limits.address()));
+        limit("sampled images per stage", limits.maxPerStageDescriptorUpdateAfterBindSampledImages(), SAMPLED_SLOTS);
+        limit("sampled images per set", limits.maxDescriptorSetUpdateAfterBindSampledImages(), SAMPLED_SLOTS);
+        limit("storage images per stage", limits.maxPerStageDescriptorUpdateAfterBindStorageImages(), STORAGE_SLOTS);
+        limit("storage images per set", limits.maxDescriptorSetUpdateAfterBindStorageImages(), STORAGE_SLOTS);
+        limit("resources per stage", limits.maxPerStageUpdateAfterBindResources(),
+            SAMPLED_SLOTS + STORAGE_SLOTS + (device.rayTracing() ? STRUCTURE_SLOTS : 0) + samplers.length);
+    }
+
+    private static void limit(String what, int limit, long needs) {
+        long has = Integer.toUnsignedLong(limit); // Vulkan's uint32: unlimited ones read as -1 signed
+        if (has < needs) {
+            throw new IllegalStateException("The device's bindless set holds " + has + " " + what + " updated after "
+                + "bind, not the " + needs + " the engine's needs");
+        }
+    }
+
     private void create() {
         try (MemoryStack stack = stackPush()) {
+            checkLimits(stack);
             samplers[LINEAR_CLAMP] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
             samplers[NEAREST_CLAMP] = sampler(stack, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
             samplers[LINEAR_REPEAT] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, false);
