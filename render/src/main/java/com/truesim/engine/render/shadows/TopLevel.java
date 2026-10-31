@@ -30,7 +30,7 @@ public record TopLevel(RayTracing rayTracing, MeshletRenderer renderer) implemen
         rayTracing.follow(renderer.scene()); // grown with it, between frames
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         GraphBuilder.PassBuilder pass = g.pass("top level").read(scene.instances(), BufferAccess.STORAGE_READ);
-        Buffer structure = rayTracing.declareTopLevelBuild(g, pass);
+        Buffer structure = rayTracing.declareTopLevelBuild(g, pass, renderer.scene());
         pass.record(ctx -> rayTracing.buildTopLevel(ctx.unsafe().commands(), renderer, true));
         return structure;
     }
