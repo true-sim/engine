@@ -21,6 +21,7 @@ import static org.lwjgl.vulkan.KHRDeferredHostOperations.VK_KHR_DEFERRED_HOST_OP
 import static org.lwjgl.vulkan.KHRRayQuery.VK_KHR_RAY_QUERY_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRRayQuery.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
 import static org.lwjgl.vulkan.EXTMeshShader.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+import static org.lwjgl.vulkan.EXTHdrMetadata.VK_EXT_HDR_METADATA_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 import static org.lwjgl.vulkan.VK10.VK_ERROR_DEVICE_LOST;
 import static org.lwjgl.vulkan.VK10.VK_INCOMPLETE;
@@ -133,6 +134,7 @@ public final class VulkanDevice implements AutoCloseable {
     private final boolean swapchains;
     /** Whether the driver can say what went wrong when the device is lost (VK_EXT_device_fault). */
     private final boolean faults;
+    private final boolean hdrMetadata;
     /** Whether a call checked by {@link #check} found the device lost: only then may the driver be asked why. */
     private volatile boolean lost;
     /** With validation on, the buffers and images made on the device and not closed, with where each was made. */
@@ -263,6 +265,7 @@ public final class VulkanDevice implements AutoCloseable {
                 structures.pNext(features13.pNext());
                 features13.pNext(queries.address());
             }
+            this.hdrMetadata = swapchains && gpu.supports(VK_EXT_HDR_METADATA_EXTENSION_NAME);
             this.faults = gpu.supports(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
             if (faults) {
                 features13.pNext(VkPhysicalDeviceFaultFeaturesEXT.calloc(stack).sType$Default().deviceFault(true)
@@ -302,7 +305,7 @@ public final class VulkanDevice implements AutoCloseable {
                 .pNext(features.address())
                 .pQueueCreateInfos(queues.flip())
                 .ppEnabledExtensionNames(extensions(stack, swapchains, meshShaders, barycentrics, rayTracing, faults,
-                    extra));
+                    hdrMetadata, extra));
             PointerBuffer device = stack.mallocPointer(1);
             Vulkan.check(vkCreateDevice(gpu.handle(), info, null, device), "Could not create a device on " + gpu.name());
             this.handle = new VkDevice(device.get(0), gpu.handle(), info, apiVersion);
@@ -371,9 +374,14 @@ public final class VulkanDevice implements AutoCloseable {
     }
 
     private static PointerBuffer extensions(MemoryStack stack, boolean swapchains, boolean meshShaders,
-        boolean barycentrics, boolean rayTracing, boolean faults, java.util.Collection<String> extra) {
-        PointerBuffer names = stack.mallocPointer(7 + extra.size());
+        boolean barycentrics, boolean rayTracing, boolean faults, boolean hdrMetadata,
+        java.util.Collection<String> extra) {
+        PointerBuffer names = stack.mallocPointer(8 + extra.size());
         List<String> engine = new ArrayList<>();
+        if (hdrMetadata) {
+            names.put(stack.UTF8(VK_EXT_HDR_METADATA_EXTENSION_NAME));
+            engine.add(VK_EXT_HDR_METADATA_EXTENSION_NAME);
+        }
         if (faults) {
             names.put(stack.UTF8(VK_EXT_DEVICE_FAULT_EXTENSION_NAME));
             engine.add(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
@@ -617,6 +625,11 @@ public final class VulkanDevice implements AutoCloseable {
     }
 
     /** The Vulkan 1.4 features enabled on this device; {@link Vulkan14Features#NONE} on a 1.3 device. */
+    /** Whether HDR swapchains can tell displays about their content (VK_EXT_hdr_metadata): a presenting GPU has it. */
+    public boolean hdrMetadata() {
+        return hdrMetadata;
+    }
+
     /** Whether task and mesh shaders (VK_EXT_mesh_shader) are enabled: the GPU has them. */
     public boolean meshShaders() {
         return meshShaders;

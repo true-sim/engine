@@ -16,4 +16,12 @@ public interface OutputTransform {
      * into the image's format: sRGB-encoded for SDR, as they are for HDR10 and scRGB).
      */
     Technique transform(Key<Image> source, Key<Image> target, DisplayEncoding encoding);
+
+    /**
+     * What HDR windows tell their displays about the content, as {@code settings} (the graph's) say now: read again
+     * when they change. Null (the default): nothing, the display guesses.
+     */
+    default com.truesim.engine.vulkan.HdrMetadata metadata(com.truesim.engine.settings.EngineSettings settings) {
+        return null;
+    }
 }

@@ -61,6 +61,7 @@ public final class Presenter implements AutoCloseable {
     private long[] acquired = new long[0];
     private long[] finished = new long[0];
     private OutputTransform outputTransform; // or null: results copied as they are, in SDR
+    private EngineSettings.Subscription metadataWatch; // the graph's settings, for the transform's HDR metadata
     private boolean closed;
 
     /** Presents views of {@code graph} through surfaces of {@code instance} (made with surfaces). */
@@ -123,6 +124,18 @@ public final class Presenter implements AutoCloseable {
     @AllowAllocation("set up rarely")
     public Presenter outputTransform(OutputTransform transform) {
         this.outputTransform = transform;
+        if (metadataWatch != null) {
+            metadataWatch.close();
+            metadataWatch = null;
+        }
+        if (transform != null) {
+            // What HDR windows tell their displays follows the settings it is made from.
+            metadataWatch = graph.settings().onAnyChange(name -> {
+                for (Target target : targets) {
+                    target.tellMetadata();
+                }
+            });
+        }
         for (Target target : targets) {
             target.swapchain.setHdr(target.wantsHdr());
             target.sync();
@@ -173,6 +186,9 @@ public final class Presenter implements AutoCloseable {
         }
         for (Target target : List.copyOf(targets)) {
             target.close();
+        }
+        if (metadataWatch != null) {
+            metadataWatch.close();
         }
         closed = true;
     }
@@ -226,6 +242,16 @@ public final class Presenter implements AutoCloseable {
             window.attach(this); // closing the window stops presenting to it first
         }
 
+        /** Tells the window's display what the output transform says of the content now (HDR only). */
+        @AllowAllocation("when settings change")
+        void tellMetadata() {
+            com.truesim.engine.vulkan.HdrMetadata told = outputTransform == null ? null
+                : outputTransform.metadata(graph.settings());
+            if (!java.util.Objects.equals(told, swapchain.metadata())) {
+                swapchain.metadata(told);
+            }
+        }
+
         /** Whether its swapchain should be HDR: asked for, and an output transform to encode for it. */
         boolean wantsHdr() {
             return settings.hdr() && outputTransform != null;
@@ -237,6 +263,7 @@ public final class Presenter implements AutoCloseable {
          */
         @AllowAllocation("when the swapchain changes")
         void sync() {
+            tellMetadata();
             image.reformat(Format.of(swapchain.format()));
             if (transform != null && (outputTransform == null || transformed != swapchain.encoding())) {
                 view.remove(transform).removeOutput(shown, image);
@@ -299,6 +326,11 @@ public final class Presenter implements AutoCloseable {
 
         public PresentSettings settings() {
             return settings;
+        }
+
+        /** What the window's display is told about the content while HDR (the output transform's), or null. */
+        public com.truesim.engine.vulkan.HdrMetadata metadata() {
+            return swapchain.metadata();
         }
 
         /** How many frames were presented to the window. */

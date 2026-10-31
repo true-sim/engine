@@ -15,6 +15,7 @@ import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
 import com.truesim.engine.vulkan.DisplayEncoding;
 import com.truesim.engine.vulkan.Format;
+import com.truesim.engine.vulkan.HdrMetadata;
 import com.truesim.engine.vulkan.Pipeline;
 import java.util.List;
 import java.util.Objects;
@@ -72,6 +73,17 @@ public final class DisplayTransform implements OutputTransform {
     @Override
     public Technique transform(Key<Image> source, Key<Image> target, DisplayEncoding encoding) {
         return new Encode(source, target, encoding);
+    }
+
+    /**
+     * The content as the settings shape it: graded for the {@link #PEAK peak brightness}, which the tone curve rolls off
+     * to (the brightest pixel too), frames averaging around {@link #PAPER_WHITE paper white}.
+     */
+    @Override
+    @AllowAllocation("when settings change")
+    public HdrMetadata metadata(EngineSettings settings) {
+        float peak = settings.get(PEAK);
+        return new HdrMetadata(peak, 0.0001f, peak, Math.min(peak, settings.get(PAPER_WHITE)));
     }
 
     /** One window's transform: {@code source} encoded for {@code encoding} as {@code target}. */
