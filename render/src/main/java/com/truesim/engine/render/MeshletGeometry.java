@@ -43,7 +43,7 @@ public final class MeshletGeometry implements GeometryProvider {
         // it renders this frame.
         ViewPort region = targets.region();
         float casterDetail = camera != null ? g.setting(ShadowSettings.CASTER_DETAIL) : 1;
-        Runnable before = camera != null ? () -> view.set(camera, casterDetail, MeshletRenderer.MODE_LIT)
+        Runnable before = camera != null ? () -> view.camera(camera, casterDetail) // the view's mode kept
             : region != null ? () -> view.detail(region.renderScale()) : null;
         MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)).add(view, draw.occlusion(), before);
         SceneData.Buffers scene = g.request(new SceneData(renderer));

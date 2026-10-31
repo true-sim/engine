@@ -11,6 +11,9 @@ import com.truesim.engine.graph.Image;
  */
 public interface GeometryProvider {
 
+    /** The renderer whose scene and views it draws: every provider of a {@link SceneGeometry} draws the same one's. */
+    MeshletRenderer renderer();
+
     /**
      * Adds the passes drawing this geometry for {@code draw} into {@code targets}: all of it, or with occlusion culling
      * the first phase (what was visible last frame). {@code load}: the targets hold what providers before drew.

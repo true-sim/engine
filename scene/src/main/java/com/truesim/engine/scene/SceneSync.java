@@ -162,9 +162,12 @@ public final class SceneSync implements AutoCloseable {
             throw new IllegalArgumentException("The GPU scene holds another geometry pool's meshes than the resources "
                 + "fill");
         }
+        if (gpu.drawsMaterials() && gpu.materials() != resources.materials()) {
+            throw new IllegalArgumentException("The GPU scene draws another material table than the resources fill");
+        }
         this.scene = renderables.scene();
         this.clock = scene.clock();
-        gpu.setMaterials(resources.materials());
+        gpu.setMaterials(resources.materials()); // the resources' table: instances name its ids
     }
 
     private static int[] filled(int length) {

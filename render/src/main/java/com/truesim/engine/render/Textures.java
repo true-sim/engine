@@ -71,7 +71,7 @@ import org.lwjgl.vulkan.VkImageSubresourceRange;
 public final class Textures implements AutoCloseable {
 
     private final VulkanDevice device;
-    private final FrameSlots frames;
+    private final FrameSlots slots;
     private final FrameUploads uploads;
     // Live textures by bindless slot, and removed ones waiting for the frames that may sample them.
     private final Map<Integer, GpuImage> images = new HashMap<>();
@@ -87,12 +87,12 @@ public final class Textures implements AutoCloseable {
         this(device, FrameSlots.single());
     }
 
-    /** Textures whose removed images stay until no frame of {@code frames} (a frame graph's) can sample them. */
-    public Textures(VulkanDevice device, FrameSlots frames) {
+    /** Textures whose removed images stay until no frame of {@code slots} (a frame graph's) can sample them. */
+    public Textures(VulkanDevice device, FrameSlots slots) {
         this.device = device;
-        this.frames = frames;
-        this.uploads = new FrameUploads(device, frames);
-        this.retiring = new Retiring(frames);
+        this.slots = slots;
+        this.uploads = new FrameUploads(device, slots);
+        this.retiring = new Retiring(slots);
     }
 
     /** An sRGB color texture, {@code rgba} 4 bytes per texel; its sampled slot. */
