@@ -5,8 +5,10 @@ import static org.lwjgl.system.MemoryUtil.memPutAddress;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
 import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK10.VK_FILTER_LINEAR;
-import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_SRGB;
-import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_FEATURE_BLIT_DST_BIT;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_FEATURE_BLIT_SRC_BIT;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -18,6 +20,7 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.VK_QUEUE_FAMILY_IGNORED;
 import static org.lwjgl.vulkan.VK10.nvkCmdBlitImage;
 import static org.lwjgl.vulkan.VK10.nvkCmdCopyBufferToImage;
+import static org.lwjgl.vulkan.VK10.vkGetPhysicalDeviceFormatProperties;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_NONE;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_READ_BIT;
@@ -44,21 +47,26 @@ import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkBufferImageCopy;
 import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkDependencyInfo;
+import org.lwjgl.vulkan.VkFormatProperties;
 import org.lwjgl.vulkan.VkImageBlit;
 import org.lwjgl.vulkan.VkImageMemoryBarrier2;
 import org.lwjgl.vulkan.VkImageSubresourceLayers;
 import org.lwjgl.vulkan.VkImageSubresourceRange;
 
 /**
- * Material textures in the device's bindless set: each uploaded once with its full mip chain (made on the GPU, each
- * level a linear downsample of the one before), then sampled by slot, e.g. from a {@link Material}. Colors are sRGB
- * ({@link #color}): the sampler returns them linear. Data such as normal maps and occlusion-roughness-metalness are
- * linear ({@link #data}).
+ * Material textures in the device's bindless set: each uploaded once with its mip chain, then sampled by slot, e.g.
+ * from a {@link Material}. The chain comes with the texels or is made on the GPU ({@link #GENERATE}: each level a
+ * linear downsample of the one before). Colors are sRGB ({@link #color}): the sampler returns them linear. Data such as
+ * normal maps and occlusion-roughness-metalness are linear ({@link #data}). Other formats, high dynamic range and block
+ * compressed ones among them, go through {@link #add(TextureFormat, int, int, int, MemorySegment)}.
  *
  * <pre>{@code
  * try (Textures textures = new Textures(device)) {
  *     int albedo = textures.color(512, 512, rgba);      // 4 bytes per texel, rows top to bottom
  *     int normals = textures.data(512, 512, xyz);
+ *     if (textures.supports(TextureFormat.BC7_SRGB)) {  // with all 10 levels, as compressed textures come
+ *         int bark = textures.add(TextureFormat.BC7_SRGB, 512, 512, 10, blocks);
+ *     }
  * }
  * }</pre>
  *
@@ -70,7 +78,11 @@ import org.lwjgl.vulkan.VkImageSubresourceRange;
 @AllowAllocation("created rarely; adding textures uploads them")
 public final class Textures implements AutoCloseable {
 
+    /** As a texture's mip count: only level 0 given, the rest of the chain made on the GPU ({@link #generatesMips}). */
+    public static final int GENERATE = 0;
+
     private final VulkanDevice device;
+    private final int[] formatFeatures; // per format: what the GPU does with images of it (optimal tiling)
     private final FrameSlots slots;
     private final FrameUploads uploads;
     // Live textures by bindless slot, and removed ones waiting for the frames that may sample them.
@@ -93,35 +105,117 @@ public final class Textures implements AutoCloseable {
         this.slots = slots;
         this.uploads = new FrameUploads(device, slots);
         this.retiring = new Retiring(slots);
+        TextureFormat[] formats = TextureFormat.values();
+        formatFeatures = new int[formats.length];
+        try (MemoryStack stack = stackPush()) {
+            VkFormatProperties properties = VkFormatProperties.calloc(stack);
+            for (TextureFormat format : formats) {
+                boolean enabled = format.name().startsWith("BC") ? device.bcTextures()
+                    : !format.name().startsWith("ASTC") || device.astcTextures();
+                if (enabled) {
+                    vkGetPhysicalDeviceFormatProperties(device.gpu().handle(), format.vulkan(), properties);
+                    formatFeatures[format.ordinal()] = properties.optimalTilingFeatures();
+                }
+            }
+        }
     }
 
-    /** An sRGB color texture, {@code rgba} 4 bytes per texel; its sampled slot. */
+    /** Whether textures of {@code format} can be added: the GPU samples it, with linear filtering. */
+    public boolean supports(TextureFormat format) {
+        int needed = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        return (formatFeatures[format.ordinal()] & needed) == needed;
+    }
+
+    /**
+     * Whether textures of {@code format} can have their mip chain made on the GPU ({@link #GENERATE}): plain formats
+     * the GPU blits between with linear filtering, not compressed ones.
+     */
+    public boolean generatesMips(TextureFormat format) {
+        int needed = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+        return supports(format) && !format.compressed() && (formatFeatures[format.ordinal()] & needed) == needed;
+    }
+
+    /** An sRGB color texture, {@code rgba} 4 bytes per texel, its mip chain made on the GPU; its sampled slot. */
     public int color(int width, int height, MemorySegment rgba) {
-        return add(width, height, VK_FORMAT_R8G8B8A8_SRGB, rgba);
+        return add(TextureFormat.RGBA8_SRGB, width, height, GENERATE, rgba);
     }
 
-    /** A linear data texture (normals, occlusion-roughness-metalness), 4 bytes per texel; its sampled slot. */
+    /**
+     * A linear data texture (normals, occlusion-roughness-metalness), 4 bytes per texel, its mip chain made on the GPU;
+     * its sampled slot.
+     */
     public int data(int width, int height, MemorySegment rgba) {
-        return add(width, height, VK_FORMAT_R8G8B8A8_UNORM, rgba);
+        return add(TextureFormat.RGBA8, width, height, GENERATE, rgba);
     }
 
-    private int add(int width, int height, int format, MemorySegment texels) {
+    /**
+     * A {@code width} x {@code height} texture of {@code format}; its sampled slot. {@code texels} holds its first
+     * {@code mips} levels, level 0 first, each tightly packed ({@link TextureFormat#chainBytes}): sampled with those
+     * levels only, so give the full chain ({@link GpuImage#fullMipCount}) for textures seen from afar. With
+     * {@link #GENERATE}, level 0 only, the full chain made on the GPU (where {@link #generatesMips}).
+     */
+    public int add(TextureFormat format, int width, int height, int mips, MemorySegment texels) {
         checkOpen();
-        checkSize(width, height, texels);
-        int mips = GpuImage.fullMipCount(width, height);
-        GpuImage image = image(width, height, format, mips);
+        Upload upload = upload(format, width, height, mips, texels);
         boolean[] gone = new boolean[1];
         try {
             uploads.record(texels, (commands, staging, offset) -> {
                 if (!gone[0]) {
-                    upload(commands, staging, offset, image, width, height, mips);
+                    upload.record(commands, staging, offset);
                 }
             });
         } catch (RuntimeException e) {
-            image.close();
+            upload.image.close();
             throw e;
         }
-        return register(image, width, height, gone);
+        return register(upload, gone);
+    }
+
+    /** A texture's image and how its levels arrive, its arguments checked. */
+    private record Upload(GpuImage image, TextureFormat format, int width, int height, int mips, boolean generate) {
+
+        /** Its levels from the staging buffer at {@code offset}, all left shader-readable. */
+        void record(VkCommandBuffer commands, GpuBuffer staging, long offset) {
+            if (generate) {
+                generated(commands, staging, offset, image, width, height, mips);
+            } else {
+                given(commands, staging, offset, this);
+            }
+        }
+
+        long bytes() {
+            return format.chainBytes(width, height, mips);
+        }
+    }
+
+    private Upload upload(TextureFormat format, int width, int height, int mips, MemorySegment texels) {
+        if (!supports(format)) {
+            throw new IllegalArgumentException("This GPU does not sample " + format + " textures");
+        }
+        if (width < 1 || height < 1) {
+            throw new IllegalArgumentException("Texture sizes are positive: " + width + " x " + height);
+        }
+        int full = GpuImage.fullMipCount(width, height);
+        if (mips < GENERATE || mips > full) {
+            throw new IllegalArgumentException("A " + width + " x " + height + " texture has 1 to " + full
+                + " mip levels, or GENERATE: " + mips);
+        }
+        boolean generate = mips == GENERATE;
+        if (generate && !generatesMips(format)) {
+            throw new IllegalArgumentException("Mip chains of " + format + " textures are not made on this GPU: give "
+                + "them");
+        }
+        long bytes = format.chainBytes(width, height, generate ? 1 : mips);
+        if (texels.byteSize() != bytes) {
+            throw new IllegalArgumentException("A " + width + " x " + height + " " + format + " texture of "
+                + (generate ? 1 : mips) + " levels takes " + bytes + " bytes: " + texels.byteSize());
+        }
+        int levels = generate ? full : mips;
+        int usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+            | (generate ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
+        GpuImage image = GpuImage.mipmapped(device, width, height, format.vulkan(), usage, VK_IMAGE_ASPECT_COLOR_BIT,
+            levels);
+        return new Upload(image, format, width, height, levels, generate);
     }
 
     /**
@@ -130,19 +224,13 @@ public final class Textures implements AutoCloseable {
      * thread with {@link #add(Prepared)}; close it if it is not added.
      */
     public static final class Prepared implements AutoCloseable {
-        private final GpuImage image;
+        private final Upload upload;
         private final GpuBuffer staging;
-        private final int width;
-        private final int height;
-        private final int mips;
         private boolean taken;
 
-        private Prepared(GpuImage image, GpuBuffer staging, int width, int height, int mips) {
-            this.image = image;
+        private Prepared(Upload upload, GpuBuffer staging) {
+            this.upload = upload;
             this.staging = staging;
-            this.width = width;
-            this.height = height;
-            this.mips = mips;
         }
 
         /** Frees it, unless it was added. */
@@ -151,34 +239,36 @@ public final class Textures implements AutoCloseable {
             if (!taken) {
                 taken = true;
                 staging.close();
-                image.close();
+                upload.image.close();
             }
         }
     }
 
     /** {@link #color} made ready on any thread: add it with {@link #add(Prepared)} on the frame's thread. */
     public Prepared prepareColor(int width, int height, MemorySegment rgba) {
-        return prepare(width, height, VK_FORMAT_R8G8B8A8_SRGB, rgba);
+        return prepare(TextureFormat.RGBA8_SRGB, width, height, GENERATE, rgba);
     }
 
     /** {@link #data} made ready on any thread: add it with {@link #add(Prepared)} on the frame's thread. */
     public Prepared prepareData(int width, int height, MemorySegment rgba) {
-        return prepare(width, height, VK_FORMAT_R8G8B8A8_UNORM, rgba);
+        return prepare(TextureFormat.RGBA8, width, height, GENERATE, rgba);
     }
 
-    private Prepared prepare(int width, int height, int format, MemorySegment texels) {
-        checkSize(width, height, texels);
-        int mips = GpuImage.fullMipCount(width, height);
-        GpuImage image = image(width, height, format, mips);
+    /**
+     * {@link #add(TextureFormat, int, int, int, MemorySegment)} made ready on any thread: add it with
+     * {@link #add(Prepared)} on the frame's thread.
+     */
+    public Prepared prepare(TextureFormat format, int width, int height, int mips, MemorySegment texels) {
+        Upload upload = upload(format, width, height, mips, texels);
         GpuBuffer staging;
         try {
             staging = FrameUploads.staging(device, texels.byteSize());
         } catch (RuntimeException e) {
-            image.close();
+            upload.image.close();
             throw e;
         }
         MemorySegment.copy(texels, 0, staging.memory(), 0, texels.byteSize());
-        return new Prepared(image, staging, width, height, mips);
+        return new Prepared(upload, staging);
     }
 
     /**
@@ -191,17 +281,14 @@ public final class Textures implements AutoCloseable {
             throw new IllegalStateException("The prepared texture was added or closed already");
         }
         prepared.taken = true;
-        GpuImage image = prepared.image;
-        int width = prepared.width;
-        int height = prepared.height;
-        int mips = prepared.mips;
+        Upload upload = prepared.upload;
         boolean[] gone = new boolean[1];
         uploads.record(prepared.staging, (commands, staging, offset) -> {
             if (!gone[0]) {
-                upload(commands, staging, offset, image, width, height, mips);
+                upload.record(commands, staging, offset);
             }
         });
-        return register(image, width, height, gone);
+        return register(upload, gone);
     }
 
     private void checkOpen() {
@@ -210,23 +297,12 @@ public final class Textures implements AutoCloseable {
         }
     }
 
-    private static void checkSize(int width, int height, MemorySegment texels) {
-        if (width < 1 || height < 1 || texels.byteSize() != 4L * width * height) {
-            throw new IllegalArgumentException("A " + width + " x " + height + " texture takes " + 4L * width * height
-                + " bytes: " + texels.byteSize());
-        }
-    }
-
-    private GpuImage image(int width, int height, int format, int mips) {
-        return GpuImage.mipmapped(device, width, height, format, VK_IMAGE_USAGE_SAMPLED_BIT
-            | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, mips);
-    }
-
-    /** {@code image}'s sampled slot and bookkeeping, once its upload is queued. */
-    private int register(GpuImage image, int width, int height, boolean[] gone) {
+    /** {@code upload}'s sampled slot and bookkeeping, once it is queued. */
+    private int register(Upload upload, boolean[] gone) {
         retiring.release();
+        GpuImage image = upload.image;
         int slot = device.bindless().addSampled(image.view());
-        long size = 4L * width * height * 4 / 3;
+        long size = upload.bytes();
         images.put(slot, image);
         sizes.put(slot, size);
         freed.put(slot, gone);
@@ -234,11 +310,41 @@ public final class Textures implements AutoCloseable {
         return slot;
     }
 
+    /** Each level from the staging buffer, from {@code offset} on, level after level, all left shader-readable. */
+    private static void given(VkCommandBuffer commands, GpuBuffer staging, long offset, Upload upload) {
+        GpuImage image = upload.image();
+        int mips = upload.mips();
+        try (MemoryStack stack = stackPush()) {
+            barrier(commands, stack, image, 0, mips, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            long regions = stack.ncalloc(VkBufferImageCopy.ALIGNOF, mips, VkBufferImageCopy.SIZEOF);
+            long at = offset;
+            for (int mip = 0; mip < mips; mip++) {
+                int width = Math.max(1, upload.width() >> mip);
+                int height = Math.max(1, upload.height() >> mip);
+                long region = regions + (long) mip * VkBufferImageCopy.SIZEOF;
+                memPutLong(region + VkBufferImageCopy.BUFFEROFFSET, at);
+                layers(region + VkBufferImageCopy.IMAGESUBRESOURCE, mip);
+                memPutInt(region + VkBufferImageCopy.IMAGEEXTENT, width);
+                memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 4, height);
+                memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 8, 1);
+                at += upload.format().levelBytes(width, height);
+            }
+            nvkCmdCopyBufferToImage(commands, staging.handle(), image.handle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                mips, regions);
+            barrier(commands, stack, image, 0, mips, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        }
+    }
+
     /**
      * Level 0 from the staging buffer at {@code offset}, each further level blitted from the one before, all left
      * shader-readable.
      */
-    private static void upload(VkCommandBuffer commands, GpuBuffer staging, long offset, GpuImage image, int width,
+    private static void generated(VkCommandBuffer commands, GpuBuffer staging, long offset, GpuImage image, int width,
         int height, int mips) {
         try (MemoryStack stack = stackPush()) {
             barrier(commands, stack, image, 0, mips, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -347,7 +453,7 @@ public final class Textures implements AutoCloseable {
         return images.size();
     }
 
-    /** The GPU memory the textures take, mip chains included (about 4/3 of level 0). */
+    /** The GPU memory the textures' texels take, mip chains included (about 4/3 of level 0). */
     public long bytes() {
         return bytes;
     }
