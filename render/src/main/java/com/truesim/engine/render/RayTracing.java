@@ -233,6 +233,7 @@ public final class RayTracing implements AutoCloseable {
         this.pool = Objects.requireNonNull(pool, "pool");
         this.bindless = device.bindless();
         this.slots = pool.frameSlots();
+        pool.onRemove(forgetMesh);
         this.deferred = pool.uploads().deferred(); // frames in flight, whose uploads wait for the next frame
         this.pendingOf = new Pending[pool.capacity().meshes()];
         try (MemoryStack stack = stackPush()) {
@@ -343,6 +344,8 @@ public final class RayTracing implements AutoCloseable {
         scratchImport.set(topScratch);
         builtScene = null; // the new one is empty until built
     }
+
+    private final java.util.function.IntConsumer forgetMesh = this::remove;
 
     /** Room for as many meshes as the pool has grown to: the per-mesh table copied into a bigger one. */
     private void growMeshes() {
@@ -588,8 +591,9 @@ public final class RayTracing implements AutoCloseable {
 
     /**
      * Removes pool mesh {@code mesh}'s bottom level: its instances are left out of top levels built from now on, and it
-     * is freed once no frame in flight may trace it (at once without frame slots). Remove it before the mesh leaves the
-     * pool. Nothing without one.
+     * is freed once no frame in flight may trace it (at once without frame slots). Done as the mesh leaves the pool
+     * ({@link GeometryPool#remove}), so calling it is only for dropping the level while the mesh stays. Nothing without
+     * one.
      */
     @AllowAllocation("removing, once per mesh")
     public void remove(int mesh) {
@@ -1041,6 +1045,7 @@ public final class RayTracing implements AutoCloseable {
                 r.free().run();
             }
             retired.clear();
+            pool.stopFollowing(forgetMesh);
             for (GpuScene scene : followed) {
                 scene.stopFollowing(followScenes);
             }

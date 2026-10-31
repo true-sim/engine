@@ -268,7 +268,7 @@ try (GeometryPool pool = new GeometryPool(device, slots);              // starts
 - **Meshes come and go:** `pool.remove(mesh)` frees a mesh's ranges and number for later meshes, first fit and
   deterministic, once no frame in flight can draw it (given the graph's `frameSlots()`). `Materials.remove` and
   `Textures.remove` do the same for material ids and bindless texture slots, so streamed content can be unloaded.
-  Classic LOD data per mesh doesn't follow removals yet; ray tracing's does (`RayTracing.remove`).
+  Classic LOD data and ray tracing's bottom levels follow removals: a mesh leaving the pool leaves them too.
 - **Uploads without waiting:** given the graph's `frameSlots()`, `pool.add` and `Textures.color`/`data` stage their
   data at once and return; the copies (and a texture's mip chain) are recorded first thing in the next frame
   (`FrameUploads`, through `FrameSlots.recordStart`, which the frame graph calls), so what was added draws from the
