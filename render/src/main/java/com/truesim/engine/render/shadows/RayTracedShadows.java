@@ -105,7 +105,7 @@ public final class RayTracedShadows implements Technique {
 
     private void trace(PassContext ctx, Pipeline pipeline, Image depth, Image mask, TracedPush push) {
         push.inverseViewProjection(camera.inverseViewProjection()).depth(ctx.sampled(depth)).mask(ctx.storage(mask))
-            .scene(rayTracing.slot(depthSource.view().renderer().scene())).lights(lights.lightsAddress());
+            .scene(rayTracing.sceneAddress(depthSource.view().renderer().scene())).lights(lights.lightsAddress());
         // The way from the camera's positions into the top level's (built relative to the origin), and the light
         // relative to the camera: differences of world positions, small enough for floats.
         double x = camera.position(0);

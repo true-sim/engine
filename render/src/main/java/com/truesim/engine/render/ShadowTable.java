@@ -146,13 +146,15 @@ public final class ShadowTable implements AutoCloseable {
     }
 
     /**
-     * Entry {@code entry}, an inline ray query into the top level in acceleration structure slot {@code scene}, built
+     * Entry {@code entry}, an inline ray query into the top level whose {@code RayScene} lies at address {@code scene}
+     * ({@link RayTracing#sceneAddress}: its slot, and what alpha-tests masked triangles), built
      * relative to world position ({@code x}, {@code y}, {@code z}), from {@code offset} per unit of distance off the
      * surface (the drawn surface may be a detail level within a pixel of the traced one). Shading that cannot trace
      * counts it as lit. Allocates nothing.
      */
-    public ShadowTable shadowRay(int entry, int scene, float offset, double x, double y, double z) {
-        long o = shadow(entry, SHADOW_RAY, 0, scene);
+    public ShadowTable shadowRay(int entry, long scene, float offset, double x, double y, double z) {
+        long o = shadow(entry, SHADOW_RAY, 0, (int) scene);
+        shadows.putInt(o + 76, (int) (scene >>> 32)); // the address's high half, where maps keep their size
         shadows.putFloat(o + 88, offset);
         Lights.putPosition(shadows, o + 96, 16, x, y, z);
         return this;

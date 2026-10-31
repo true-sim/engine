@@ -292,8 +292,10 @@ try (GeometryPool pool = new GeometryPool(device, slots);              // starts
   lit as the front), masked ones without culling and with a fragment variant discarding masked texels and one-sided
   back faces. Every pass rasterizing them uses the same variants, so shadow maps, depth and the visibility buffer
   mask what the camera does; classic LOD draws through the same bins. A view's extra bins have room for a quarter of
-  its opaque bin by default (`ViewOptions.withBins`); `RenderView.visibleMeshlets(bin)` counts each. Not yet followed
-  by ray tracing: its shadow rays see masked surfaces as opaque.
+  its opaque bin by default (`ViewOptions.withBins`); `RenderView.visibleMeshlets(bin)` counts each. Ray tracing
+  follows them too: instances with a masked material enter the top level as non-opaque, and shadow rays alpha-test
+  their triangles (the triangle looked up in its meshlet, its texture coordinates interpolated) against the same
+  cutoff, at the finest texels.
 - **Two paths, one set of shaders:** a compute pass culls each chunk and lists the visible meshlets. With mesh shaders
   (`VK_EXT_mesh_shader`, enabled where the GPU has it), a mesh workgroup per listed meshlet emits its vertices and
   triangles straight from the pool. Without, an expansion pass writes their triangles into one index buffer, and one
@@ -939,8 +941,7 @@ The tests draw two scenes in step, one forward and one through a visibility buff
 
 Renderables keep their instance ids while drawn, are on their nodes' layers and cast shadows as they say; their
 materials' masked alpha and double-sidedness follow (blended alpha draws opaque until transparents come). Not
-followed yet: lights and cameras from the scene. Removed meshes are not yet followed by
-`ClassicLodGeometry` and ray tracing, so draw views with meshlets.
+followed yet: lights and cameras from the scene.
 
 ## VR
 
