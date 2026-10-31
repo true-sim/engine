@@ -106,16 +106,10 @@ public final class Textures implements AutoCloseable {
     }
 
     private int add(int width, int height, int format, MemorySegment texels) {
-        if (closed) {
-            throw new IllegalStateException("The textures are closed");
-        }
-        if (width < 1 || height < 1 || texels.byteSize() != 4L * width * height) {
-            throw new IllegalArgumentException("A " + width + " x " + height + " texture takes " + 4L * width * height
-                + " bytes: " + texels.byteSize());
-        }
+        checkOpen();
+        checkSize(width, height, texels);
         int mips = GpuImage.fullMipCount(width, height);
-        GpuImage image = GpuImage.mipmapped(device, width, height, format, VK_IMAGE_USAGE_SAMPLED_BIT
-            | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, mips);
+        GpuImage image = image(width, height, format, mips);
         boolean[] gone = new boolean[1];
         try {
             uploads.record(texels, (commands, staging, offset) -> {
@@ -127,6 +121,109 @@ public final class Textures implements AutoCloseable {
             image.close();
             throw e;
         }
+        return register(image, width, height, gone);
+    }
+
+    /**
+     * A texture made ready on any thread ({@link #prepareColor}, {@link #prepareData}): its image made and its texels
+     * staged, the costly part of adding one (16 MB copied for 2048 x 2048, and memory allocated). Add it on the frame's
+     * thread with {@link #add(Prepared)}; close it if it is not added.
+     */
+    public static final class Prepared implements AutoCloseable {
+        private final GpuImage image;
+        private final GpuBuffer staging;
+        private final int width;
+        private final int height;
+        private final int mips;
+        private boolean taken;
+
+        private Prepared(GpuImage image, GpuBuffer staging, int width, int height, int mips) {
+            this.image = image;
+            this.staging = staging;
+            this.width = width;
+            this.height = height;
+            this.mips = mips;
+        }
+
+        /** Frees it, unless it was added. */
+        @Override
+        public void close() {
+            if (!taken) {
+                taken = true;
+                staging.close();
+                image.close();
+            }
+        }
+    }
+
+    /** {@link #color} made ready on any thread: add it with {@link #add(Prepared)} on the frame's thread. */
+    public Prepared prepareColor(int width, int height, MemorySegment rgba) {
+        return prepare(width, height, VK_FORMAT_R8G8B8A8_SRGB, rgba);
+    }
+
+    /** {@link #data} made ready on any thread: add it with {@link #add(Prepared)} on the frame's thread. */
+    public Prepared prepareData(int width, int height, MemorySegment rgba) {
+        return prepare(width, height, VK_FORMAT_R8G8B8A8_UNORM, rgba);
+    }
+
+    private Prepared prepare(int width, int height, int format, MemorySegment texels) {
+        checkSize(width, height, texels);
+        int mips = GpuImage.fullMipCount(width, height);
+        GpuImage image = image(width, height, format, mips);
+        GpuBuffer staging;
+        try {
+            staging = FrameUploads.staging(device, texels.byteSize());
+        } catch (RuntimeException e) {
+            image.close();
+            throw e;
+        }
+        MemorySegment.copy(texels, 0, staging.memory(), 0, texels.byteSize());
+        return new Prepared(image, staging, width, height, mips);
+    }
+
+    /**
+     * Adds {@code prepared} ({@link #prepareColor}): on the frame's thread, as {@link #color}, but nothing is copied or
+     * allocated here; its sampled slot. The prepared texture is these textures' from now on.
+     */
+    public int add(Prepared prepared) {
+        checkOpen();
+        if (prepared.taken) {
+            throw new IllegalStateException("The prepared texture was added or closed already");
+        }
+        prepared.taken = true;
+        GpuImage image = prepared.image;
+        int width = prepared.width;
+        int height = prepared.height;
+        int mips = prepared.mips;
+        boolean[] gone = new boolean[1];
+        uploads.record(prepared.staging, (commands, staging, offset) -> {
+            if (!gone[0]) {
+                upload(commands, staging, offset, image, width, height, mips);
+            }
+        });
+        return register(image, width, height, gone);
+    }
+
+    private void checkOpen() {
+        if (closed) {
+            throw new IllegalStateException("The textures are closed");
+        }
+    }
+
+    private static void checkSize(int width, int height, MemorySegment texels) {
+        if (width < 1 || height < 1 || texels.byteSize() != 4L * width * height) {
+            throw new IllegalArgumentException("A " + width + " x " + height + " texture takes " + 4L * width * height
+                + " bytes: " + texels.byteSize());
+        }
+    }
+
+    private GpuImage image(int width, int height, int format, int mips) {
+        return GpuImage.mipmapped(device, width, height, format, VK_IMAGE_USAGE_SAMPLED_BIT
+            | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT, mips);
+    }
+
+    /** {@code image}'s sampled slot and bookkeeping, once its upload is queued. */
+    private int register(GpuImage image, int width, int height, boolean[] gone) {
         retiring.release();
         int slot = device.bindless().addSampled(image.view());
         long size = 4L * width * height * 4 / 3;

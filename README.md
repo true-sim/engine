@@ -251,12 +251,19 @@ try (GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 
 - **Meshes come and go:** `pool.remove(mesh)` frees a mesh's ranges and number for later meshes, first fit and
   deterministic, once no frame in flight can draw it (given the graph's `frameSlots()`). `Materials.remove` and
   `Textures.remove` do the same for material ids and bindless texture slots, so streamed content can be unloaded.
-  Classic LOD and ray tracing data per mesh don't follow removals yet.
+  Classic LOD data per mesh doesn't follow removals yet; ray tracing's does (`RayTracing.remove`).
 - **Uploads without waiting:** given the graph's `frameSlots()`, `pool.add` and `Textures.color`/`data` stage their
   data at once and return; the copies (and a texture's mip chain) are recorded first thing in the next frame
   (`FrameUploads`, through `FrameSlots.recordStart`, which the frame graph calls), so what was added draws from the
   next frame on and the CPU never waits for the GPU. The benchmark's rock adds in 0.4 ms instead of 2.6-6.6 ms, its
   49,062-meshlet terrain in 7 ms instead of about 100. Without frame slots, uploads wait as before.
+- **Prepared on a loader thread:** staging still copies the data on the calling thread (16 MB for a 2048 x 2048
+  texture, about 1-1.5 ms, and fresh allocations now and then spike to 3-7 ms). `pool.prepare(mesh)` and
+  `textures.prepareColor`/`prepareData` do that part on any thread, a loader's next to the mesh build or texture
+  decode, and `pool.add(prepared)` / `textures.add(prepared)` on the frame's thread only place the data and queue its
+  copies (`FrameUploads.record(staging, ...)`). Streaming tiles of 131,000 triangles with a 2048 x 2048 texture each
+  at 90 Hz: the worst frame went from 14.9 ms to 4.0 ms, frames over 4 ms from 37 to none (`StreamBench --args=large`
+  against `large direct`).
 - **Culling on the GPU:** an instance pass tests instance bounds and splits each visible instance into chunks of 64
   meshlets; the chunk count is written straight into an indirect command, so only visible work is launched. Each
   meshlet is tested by the cluster LOD rule (its group's error projected on screen at most the allowed pixels, its
@@ -959,7 +966,9 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
   itself; `--probe` prints what the main view's scene color holds now and then.
 - `./gradlew :engine-demo:streamBench` flies over a grid of cells for 30 s at 90 Hz: cells coming into range get
   meshes built on worker threads, a texture, materials and instances, those leaving lose them. It reports frame work
-  percentiles and the slowest frames with what happened in them (`--args=rays` builds bottom levels too).
+  percentiles, GPU time per frame and the slowest frames with what happened in them (`--args=rays` builds bottom
+  levels too, `large` streams 131,000-triangle tiles and 2048 x 2048 textures, `direct` stages them on the frame's
+  thread instead of preparing them on the loaders').
 - `./gradlew :engine-demo:stereoBench` times the scene drawn for two eyes at a Quest 3's eye size, offscreen, pass by
   pass and grouped by kind (`--args="visibility"` for the visibility buffer, `-Procks=20000` for more rocks,
   `shared` for one set of shadow cascades, `rebuild` for what rebuilds and resizes cost the render thread, `noshadows`

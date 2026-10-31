@@ -462,6 +462,53 @@ class MeshletRendererTest {
     }
 
     @Test
+    void meshesAndTexturesPreparedOnAnotherThreadDrawAsAddedOnes() throws Exception {
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 16)) {
+            MemorySegment gradientTexels = texels(16, (x, y) -> 0xff000000 | (x * 16) | (y * 16) << 8);
+            MeshData quadData = texturedQuad();
+            int[][] images = new int[2][SIZE * SIZE];
+            scene.setMaterials(materials);
+            lookForward(1, MeshletRenderer.MODE_LIT);
+            for (int run = 0; run < 2; run++) {
+                int texture;
+                int mesh;
+                if (run == 0) { // added on this thread
+                    texture = textures.color(16, 16, gradientTexels);
+                    mesh = pool.add(quadData);
+                } else { // made ready on a loader thread, only added here
+                    Textures.Prepared preparedTexture = java.util.concurrent.CompletableFuture
+                        .supplyAsync(() -> textures.prepareColor(16, 16, gradientTexels)).get();
+                    GeometryPool.Prepared preparedMesh = java.util.concurrent.CompletableFuture
+                        .supplyAsync(() -> pool.prepare(quadData)).get();
+                    assertThat(preparedMesh.mesh()).isSameAs(quadData);
+                    texture = textures.add(preparedTexture);
+                    mesh = pool.add(preparedMesh);
+                    assertThatIllegalStateException().as("added once").isThrownBy(() -> textures.add(preparedTexture));
+                    assertThatIllegalStateException().isThrownBy(() -> pool.add(preparedMesh));
+                    preparedTexture.close(); // added: nothing to free
+                }
+                Material material = new Material(MR.withBaseColorTexture(texture));
+                int textured = materials.addAll(java.util.List.of(material, material));
+                scene.set(0, mesh, textured, 0.3, -0.2, -4, 0.2f, 0.3f, 0, 0.93f, 1.5f, 1.5f, 1.5f);
+                render();
+                for (int i = 0; i < SIZE * SIZE; i++) {
+                    images[run][i] = pixel(i % SIZE, i / SIZE);
+                }
+                scene.remove(0);
+                pool.remove(mesh);
+                textures.remove(texture);
+            }
+            assertThat(images[1]).as("the same image").isEqualTo(images[0]);
+            assertThat(java.util.Arrays.stream(images[0]).filter(p -> p != images[0][0]).count()).as("the quad drawn")
+                .isGreaterThan(SIZE * SIZE / 8);
+            // Prepared but never added: closed, freed.
+            pool.prepare(quadData).close();
+            textures.prepareColor(16, 16, gradientTexels).close();
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
     void bothPathsShadeTheSameImage() {
         assumeThat(device.meshShaders()).as("mesh shaders").isTrue();
         try (Textures textures = new Textures(device); Materials materials = new Materials(device, 16)) {
