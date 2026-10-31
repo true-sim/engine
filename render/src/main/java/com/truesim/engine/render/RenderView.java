@@ -69,6 +69,8 @@ public final class RenderView implements AutoCloseable {
     private Camera camera; // as last set: read again when the frame culls, if it moved since
     private float errorPixels;
     private int mode;
+    private float detail = 1; // rendered pixels per pixel the camera was set for (a render scale)
+    private float projectionScale; // the camera's, as last written
     private float jitterX;
     private float jitterY;
     final RenderView[] alone = {this}; // to cull the view by itself; never written
@@ -138,6 +140,28 @@ public final class RenderView implements AutoCloseable {
         write(camera);
     }
 
+    /**
+     * Renders at {@code scale} times the pixels the camera was set for (a view's render scale, dynamic resolution's
+     * changing every frame): detail is chosen for the error allowed in the pixels actually drawn, so a view rendered at
+     * half the size draws coarser levels. 1 by default; the scene's draws of a view set it each frame. Allocates nothing.
+     */
+    public RenderView detail(float scale) {
+        checkOpen();
+        if (!(scale > 0)) {
+            throw new IllegalArgumentException("A render scale is positive: " + scale);
+        }
+        if (scale != detail) {
+            detail = scale;
+            putFloat(ViewLayout.PROJECTION_SCALE, projectionScale * detail);
+        }
+        return this;
+    }
+
+    /** The render scale detail is chosen for ({@link #detail(float)}). */
+    public float detail() {
+        return detail;
+    }
+
     /** Whether {@code from}'s matrices or position differ from those the view holds. */
     private boolean changed(Camera from) {
         float[] matrix = from.viewProjection();
@@ -174,7 +198,8 @@ public final class RenderView implements AutoCloseable {
         for (int i = 0; i < 24; i++) {
             putFloat(ViewLayout.PLANES + 4L * i, planes[i]);
         }
-        putFloat(ViewLayout.PROJECTION_SCALE, camera.projectionScale());
+        projectionScale = camera.projectionScale();
+        putFloat(ViewLayout.PROJECTION_SCALE, projectionScale * detail);
         putFloat(ViewLayout.ERROR_PIXELS, errorPixels);
         putInt(ViewLayout.MODE, mode);
         putInt(ViewLayout.ORTHOGRAPHIC, camera.orthographic() ? 1 : 0);

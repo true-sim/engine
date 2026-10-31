@@ -661,7 +661,9 @@ that declare how they use each image. The graph does the rest:
   its depth pyramid, light clusters, the visibility buffer's shading and ray-traced shadow masks. `DisplayTransform`
   scales the region up to the size the view shows at, filtered within the region (`g.unscaled(image)` marks such a
   result); other outputs are scaled from the region unfiltered. `new DynamicResolution(graph, view).update()` once a
-  frame picks the scale from the GPU time, aiming at `resolution.targetMillis`.
+  frame picks the scale from the GPU time, aiming at `resolution.targetMillis`. Detail follows the scale: a view's
+  draws choose levels for the pixels actually rendered (`RenderView.detail`), cameras being set for the size the view
+  shows at.
 - **Switches:** `technique.when(setting)` (a `Switch`) runs the technique only while a boolean setting is on, read
   every frame: no rebuild. An in-place effect switched off leaves its image as it was; a producer gives a fallback for
   each image others sample (`fallback(key, Fallback.constant(format, value))`), read instead while it is off. A view's
