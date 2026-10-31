@@ -22,6 +22,8 @@ import static org.lwjgl.vulkan.VK10.VK_SUCCESS;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_LOAD_OP_CLEAR;
 import static org.lwjgl.vulkan.VK10.VK_ATTACHMENT_STORE_OP_STORE;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+import static org.lwjgl.vulkan.VK10.vkCmdCopyBuffer;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
@@ -57,6 +59,7 @@ import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkBufferCopy;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.EXTDebugUtils;
 import org.lwjgl.vulkan.EXTSwapchainColorspace;
@@ -367,6 +370,47 @@ class VulkanTest {
             for (VulkanDevice device : devices) {
                 device.close();
                 device.close(); // twice is fine
+            }
+            assertThat(instance.validationErrors()).isZero();
+        }
+    }
+
+    @Test
+    void setupCommandsRunOneAfterAnotherNestedAndFromOtherThreads() throws Exception {
+        try (VulkanInstance instance = headless();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             GpuBuffer target = GpuBuffer.deviceLocal(device, 64, VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                 | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+             GpuBuffer read = GpuBuffer.hostVisible(device, 64, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+            // The queue's reused pool and fence, many times over: each run sees the one before done.
+            for (int i = 0; i < 20; i++) {
+                int value = i;
+                device.submitAndWait(device.graphics(), commands -> Commands.fillBuffer(commands, target.handle(), 0,
+                    64, value));
+            }
+            // A call from inside the commands records into a pool of its own, the outer recording untouched.
+            device.submitAndWait(device.graphics(), outer -> {
+                device.submitAndWait(device.graphics(), inner -> Commands.fillBuffer(inner, target.handle(), 0, 64,
+                    7));
+                try (MemoryStack stack = stackPush()) {
+                    vkCmdCopyBuffer(outer, target.handle(), read.handle(), VkBufferCopy.calloc(1, stack).size(64));
+                }
+            });
+            assertThat(read.memory().get(ValueLayout.JAVA_INT, 0)).as("the nested fill, then the outer copy")
+                .isEqualTo(7);
+            // From several threads: each waits its turn.
+            java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(4);
+            try {
+                List<java.util.concurrent.Future<?>> runs = new ArrayList<>();
+                for (int i = 0; i < 16; i++) {
+                    runs.add(pool.submit(() -> device.submitAndWait(device.graphics(),
+                        commands -> Commands.fillBuffer(commands, target.handle(), 0, 64, 3))));
+                }
+                for (java.util.concurrent.Future<?> run : runs) {
+                    run.get();
+                }
+            } finally {
+                pool.shutdown();
             }
             assertThat(instance.validationErrors()).isZero();
         }

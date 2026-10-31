@@ -141,6 +141,15 @@ for concurrent sharing.
   `GpuImage` lists each family once.
 - Rule: run the tests with validation (they fail on any validation error), on lavapipe too.
 
+**Waiting on a fence just made took 8 ms.** `VulkanDevice.submitAndWait` made a command pool and a fence per call.
+On an RX 9070 XT (Windows, AMD driver) the wait on the new fence took 8 to 11 ms for a 64 KiB fill, against 0.06 ms
+on a reused fence reset each time; every texture, persistent resource and ray-traced mesh set up paid it, 3 to 4 times
+per mesh.
+- Proof: a probe timing each step of the call (pool 0.04 ms, recording 0.005 ms warm, submit 0.04 ms, wait 8.1 ms
+  fresh against 0.06 ms reused); `submitAndWait` went from 11 ms to 0.07 to 0.14 ms with a reused pool and fence
+  ([#101](https://github.com/true-sim/engine/issues/101)).
+- Rule: reuse fences and command pools, resetting them; never create one per wait.
+
 ## Tests and measurements
 
 **After a device loss, look at the first failure only.** Once one test lost the device, the tests after it failed too,
