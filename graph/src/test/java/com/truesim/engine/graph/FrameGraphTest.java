@@ -651,6 +651,50 @@ class FrameGraphTest {
     }
 
     @Test
+    void aResultGoesToSeveralTargetsEachHeldOnItsOwn() {
+        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        try (GpuImage second = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage,
+            VK_IMAGE_ASPECT_COLOR_BIT)) {
+            ExternalImage mirror = new ExternalImage("mirror", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(second.handle(), second.view());
+            float[] color = {1, 0, 0, 1};
+            int[] runs = {0};
+            ViewPort eye = graph.addView("eye").add(new Lambda(List.of(OUT), g -> {
+                Image image = g.create("eye", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+                g.pass("draw eye").write(image, Access.TRANSFER_DST).record(ctx -> {
+                    runs[0]++;
+                    clear(ctx, image, color);
+                });
+                g.provide(OUT, image);
+            })).output(OUT, output).output(OUT, mirror).output(OUT, mirror); // the second time: no change
+            // One result, both targets: each copied into (neither drawn into straight).
+            assertThat(frame()[0]).isEqualTo(RED);
+            assertThat(firstTexel(second)).isEqualTo(RED);
+            assertThat(graph.passes()).contains("output target", "output mirror");
+            // The mirror held: untouched, while the other target goes on.
+            color[0] = 0;
+            color[2] = 1;
+            mirror.hold(true);
+            assertThat(mirror.held()).isTrue();
+            assertThat(frame()[0]).isEqualTo(BLUE);
+            assertThat(firstTexel(second)).as("held: what it showed").isEqualTo(RED);
+            // Every target held: the view runs no frame.
+            output.hold(true);
+            int before = runs[0];
+            device.submitAndWait(device.graphics(), graph::record);
+            assertThat(runs[0]).as("nothing to draw into").isEqualTo(before);
+            output.hold(false);
+            mirror.hold(false);
+            assertThat(frame()[0]).isEqualTo(BLUE);
+            assertThat(firstTexel(second)).isEqualTo(BLUE);
+            // One target removed, the other kept.
+            eye.removeOutput(OUT, mirror).removeOutput(OUT, mirror);
+            frame();
+            assertThat(graph.passes()).doesNotContain("output mirror");
+        }
+    }
+
+    @Test
     void theFrameReadsTheViewsResults() {
         // A frame technique reading one view's result, and counting every view's: e.g. one pass for all the views.
         ViewPort[] views = new ViewPort[2];

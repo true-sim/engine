@@ -52,11 +52,11 @@ final class GraphCompiler {
      * {@code asyncCompute}, images used by both queues shared across their families with {@code twoFamilies}, batches
      * cut into chunks of {@code grain} passes.
      */
-    static CompiledGraph compile(GraphBuilder g, Map<?, ExternalImage> outputs, boolean asyncCompute,
+    static CompiledGraph compile(GraphBuilder g, List<? extends Map.Entry<?, ExternalImage>> outputs, boolean asyncCompute,
         boolean twoFamilies, int grain, OutputCopy copy) {
         List<Image> results = new ArrayList<>();
-        for (Object key : outputs.keySet()) {
-            results.add(g.output(key));
+        for (Map.Entry<?, ExternalImage> output : outputs) {
+            results.add(g.output(output.getKey()));
         }
         g.finishOpenPasses(); // the build is done: open passes take what was declared after them
         // An output whose image fits its target (size, format, usage; not sampled or a storage image) is drawn
@@ -64,15 +64,20 @@ final class GraphCompiler {
         int[] substitute = new int[g.images.size()];
         Arrays.fill(substitute, -1);
         boolean[] needed = new boolean[g.images.size() + outputs.size()];
+        // A result with several targets is copied into each: a target held for a frame must not be drawn into.
+        Map<Image, Integer> targetsOf = new java.util.HashMap<>();
+        for (Image result : results) {
+            targetsOf.merge(result, 1, Integer::sum);
+        }
         int k = 0;
-        for (Map.Entry<?, ExternalImage> output : outputs.entrySet()) {
+        for (Map.Entry<?, ExternalImage> output : outputs) {
             ExternalImage target = output.getValue();
             Image result = results.get(k++);
             ImageInfo info = g.images.get(result.id);
             // A target whose contents outlive the frame (a texture) is copied into, so a frame its view is skipped
             // leaves it as it was: drawn into straight, its passes would discard it.
             boolean copied = g.copied.contains(target);
-            boolean fits = !copied && target.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED
+            boolean fits = !copied && target.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED && targetsOf.get(result) == 1
                 && info.external == null && substitute[result.id] < 0 && result.width == target.width
                 && result.height == target.height && result.format == target.format && result.desc.flat()
                 && result.mips == 1
@@ -88,6 +93,7 @@ final class GraphCompiler {
                     .read(result, Access.TRANSFER_SRC)
                     .write(external, Access.TRANSFER_DST)
                     .record(ctx -> copy.record(ctx, result, external));
+                g.passes.getLast().into = target;
             }
             needed = Arrays.copyOf(needed, g.images.size());
             needed[fits ? result.id : external.id] = true;

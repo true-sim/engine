@@ -403,7 +403,8 @@ public final class FrameGraph implements AutoCloseable {
         texture.removed = true;
         outputs.values().removeIf(target -> target == texture.external);
         for (ViewPort view : views) {
-            view.outputs.values().removeIf(target -> target == texture.external);
+            view.outputs.values().forEach(targets -> targets.removeIf(target -> target == texture.external));
+            view.outputs.values().removeIf(List::isEmpty);
         }
         dirty = true;
         retiring.add(texture::close);
@@ -687,7 +688,8 @@ public final class FrameGraph implements AutoCloseable {
             }
         }
         for (int i = 0; i < order.length; i++) {
-            passSkipped[i] = !runs(passViews[i]);
+            ExternalImage into = order[i].into;
+            passSkipped[i] = !runs(passViews[i]) || into != null && into.held;
         }
         if (resources.hasRetired()) {
             resources.release(false, frame);
@@ -1192,7 +1194,7 @@ public final class FrameGraph implements AutoCloseable {
         int target = barrierTarget[b];
         if (barrierKind[b] == IMAGE && target < 0) {
             ViewPort view = externalView[~target];
-            if (view != null && !view.active) {
+            if (externals[~target].held || view != null && !view.active) {
                 return true;
             }
         }
@@ -1247,7 +1249,8 @@ public final class FrameGraph implements AutoCloseable {
         return target >= 0 ? physicals[target].image.layerView(layer) : externals[~target].view;
     }
 
-    VulkanDevice device() {
+    /** The device this graph renders with. */
+    public VulkanDevice device() {
         return device;
     }
 
@@ -1335,13 +1338,19 @@ public final class FrameGraph implements AutoCloseable {
     @AllowAllocation("building the graph, when it changes")
     private void build() {
         GraphBuilder g = new GraphBuilder(this, techniques, views, implementations);
-        Map<Object, ExternalImage> targets = new LinkedHashMap<>(outputs);
+        List<Map.Entry<Object, ExternalImage>> targets = new ArrayList<>();
+        for (Map.Entry<Key<Image>, ExternalImage> output : outputs.entrySet()) {
+            targets.add(Map.entry(output.getKey(), output.getValue()));
+        }
         for (ViewPort view : views) {
-            for (Map.Entry<Key<Image>, ExternalImage> output : view.outputs.entrySet()) {
-                targets.put(g.scoped(view, output.getKey()), output.getValue());
+            for (Map.Entry<Key<Image>, List<ExternalImage>> output : view.outputs.entrySet()) {
+                for (ExternalImage target : output.getValue()) {
+                    targets.add(Map.entry(g.scoped(view, output.getKey()), target));
+                }
             }
         }
-        for (ExternalImage target : targets.values()) {
+        for (Map.Entry<Object, ExternalImage> output : targets) {
+            ExternalImage target = output.getValue();
             if (target.texture != null && target.texture.closed()) {
                 throw new IllegalStateException(target.texture + " was closed: remove the outputs into it first");
             }
@@ -1441,7 +1450,7 @@ public final class FrameGraph implements AutoCloseable {
         g.finishRunning();
         externalView = new ViewPort[externals.length];
         for (ViewPort view : views) {
-            for (ExternalImage target : view.outputs.values()) {
+            for (ExternalImage target : view.outputs.values().stream().flatMap(List::stream).toList()) {
                 for (int e = 0; e < externals.length; e++) {
                     if (externals[e] == target && target.texture == null) {
                         externalView[e] = view;

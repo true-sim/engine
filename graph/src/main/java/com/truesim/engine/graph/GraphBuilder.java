@@ -96,6 +96,7 @@ public final class GraphBuilder {
         final boolean async;
         final PassBody body;
         final Object scope; // what recorded it (a technique or request), its view (an output's copy), or null: the graph
+        ExternalImage into; // an output's copy: its target, skipped while held; else null
 
         PassInfo(String name, String owner, Object scope, int[] images, Access[] accesses, int[] ranges,
             boolean[] discards, Attachment[] attachments, int[] buffers, BufferAccess[] bufferAccesses,
@@ -578,8 +579,8 @@ public final class GraphBuilder {
             return image;
         }
         for (ViewPort view : views) {
-            for (Map.Entry<Key<Image>, ExternalImage> output : view.outputs.entrySet()) {
-                if (output.getValue() == target) {
+            for (Map.Entry<Key<Image>, List<ExternalImage>> output : view.outputs.entrySet()) {
+                if (output.getValue().contains(target)) {
                     copyInto(view, output(scoped(view, output.getKey())), image);
                     return image;
                 }

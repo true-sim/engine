@@ -219,7 +219,9 @@ public final class Presenter implements AutoCloseable {
                     available[s] = semaphore.get(0);
                 }
             }
-            view.size(width, height);
+            if (view.outputCount() == 0) {
+                view.size(width, height); // a view of its own: the window's size; else its own, scaled to fit
+            }
             sync();
             window.attach(this); // closing the window stops presenting to it first
         }
@@ -237,13 +239,13 @@ public final class Presenter implements AutoCloseable {
         void sync() {
             image.reformat(Format.of(swapchain.format()));
             if (transform != null && (outputTransform == null || transformed != swapchain.encoding())) {
-                view.remove(transform).removeOutput(shown);
+                view.remove(transform).removeOutput(shown, image);
                 transform = null;
             }
             if (outputTransform != null && transform == null) {
                 transformed = swapchain.encoding();
                 transform = outputTransform.transform(key, shown, transformed);
-                view.removeOutput(key).add(transform).output(shown, image);
+                view.removeOutput(key, image).add(transform).output(shown, image);
             } else if (outputTransform == null) {
                 view.output(key, image);
             }
@@ -261,26 +263,29 @@ public final class Presenter implements AutoCloseable {
         int acquire(int slot) {
             int width = window.pixelWidth();
             int height = window.pixelHeight();
-            view.suspended = window.isMinimized() || width < 1 || height < 1;
-            if (view.suspended) {
+            if (window.isMinimized() || width < 1 || height < 1) {
+                image.hold(true); // nothing to show; the view runs no frame unless it has other outputs
                 return -1;
             }
             if (swapchain.needsRecreate() || !swapchain.isUsable() || width != swapchain.width()
                 || height != swapchain.height()) {
                 swapchain.recreate(width, height);
                 image.resize(width, height);
-                view.size(width, height);
+                if (view.outputCount() == 1) {
+                    view.size(width, height); // this window its only output: sized to it
+                }
                 sync(); // another display, maybe another encoding
             }
-            if (!view.runsNextFrame()) {
+            if (!view.dueNextFrame()) {
+                image.hold(true);
                 return -1;
             }
             int index = swapchain.acquire(available[slot]);
             if (index < 0) {
-                view.suspended = true; // out of date: rebuilt next frame
+                image.hold(true); // out of date: rebuilt next frame
                 return -1;
             }
-            image.set(swapchain.image(index), swapchain.view(index));
+            image.set(swapchain.image(index), swapchain.view(index)).hold(false);
             return index;
         }
 
@@ -327,11 +332,10 @@ public final class Presenter implements AutoCloseable {
             device.waitIdle();
             targets.remove(this);
             window.detach(this);
-            view.removeOutput(key).removeOutput(shown);
+            view.removeOutput(key, image).removeOutput(shown, image);
             if (transform != null) {
                 view.remove(transform);
             }
-            view.suspended = false;
             swapchain.close();
             surface.close();
             for (long semaphore : available) {

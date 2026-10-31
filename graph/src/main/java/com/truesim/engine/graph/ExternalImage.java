@@ -23,6 +23,7 @@ public final class ExternalImage {
     long view;
     int sampled = -1; // its sampled slot in the bindless set, if it has one (a texture's)
     Texture texture; // the texture it is, or null
+    volatile boolean held; // this frame: untouched (not acquired)
 
     /**
      * An external image of {@code width} by {@code height} {@code format} texels, created with {@code usage} (the
@@ -43,6 +44,21 @@ public final class ExternalImage {
         this.handle = image;
         this.view = imageView;
         return this;
+    }
+
+    /**
+     * Holds the image for the frames recorded from now on (true) or lets it be drawn into again (false): held, the graph
+     * leaves it untouched, no copy into it and no barrier on it, as when it was not acquired (a window not presenting, a
+     * headset not showing). A view whose every output is held runs no frame. Allocates nothing.
+     */
+    public ExternalImage hold(boolean on) {
+        held = on;
+        return this;
+    }
+
+    /** Whether it is {@link #hold held}. */
+    public boolean held() {
+        return held;
     }
 
     /** A new format (a swapchain's, rebuilt for HDR): the graph rebuilds on its next frame. */
