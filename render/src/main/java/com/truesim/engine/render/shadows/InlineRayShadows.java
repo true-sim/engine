@@ -61,10 +61,11 @@ public final class InlineRayShadows implements Technique {
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
         g.modify(Keys.LIGHT_LIST);
-        Buffer topLevel = g.request(new TopLevel(rayTracing, view));
-        g.request(new ShadowInputs(g.view())).rays(topLevel).setup(ctx -> {
-            lights.shadowRay(entry, rayTracing.slot(), offset, view.position(0), view.position(1),
-                view.position(2)); // the top level is relative to the view's camera
+        TopLevel.Structure top = g.request(new TopLevel(rayTracing)).anchor(g, view);
+        g.request(new ShadowInputs(g.view())).rays(top.buffer()).setup(ctx -> {
+            RenderView anchor = top.anchor(); // the top level is relative to its camera this frame
+            lights.shadowRay(entry, rayTracing.slot(), offset, anchor.position(0), anchor.position(1),
+                anchor.position(2));
             lights.shadows(light, entry, 1);
         });
     }

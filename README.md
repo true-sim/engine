@@ -535,7 +535,9 @@ interface:
 - **Ray tracing is a generic parameter** (`IShadowRays`): shading pipelines that cannot trace use `NoRays`, so only the
   visibility buffer's traced variant (`shadeTraced.slang`) needs ray queries. Forward shading counts inline ray
   shadows as lit; a ray-traced mask works with any shading.
-- **One top level per frame** (`TopLevel`, a shared request) serves every ray-traced technique.
+- **One top level per frame** (`TopLevel`, a shared request) serves every ray-traced technique of every view. It is
+  built relative to one camera, its anchor's: the first view a technique names (`top.anchor(g, view)`) whose technique
+  runs that frame. Other views move their rays by the difference to `top.anchor()`'s position.
 - A mask needs the camera's depth before shading: for the visibility buffer that is its own IDs' draw (shared); for
   forward shading, a depth-only draw of the camera as a view of its own, for now.
 

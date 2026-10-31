@@ -250,6 +250,32 @@ class ShadowsTest {
                 differ += Math.abs((inline[i] & 0xff) - (masked[i] & 0xff)) > 32 ? 1 : 0;
             }
             assertThat(differ).as("inline rays against the mask").isLessThan(SIZE * SIZE / 50);
+            // Two views tracing inline shadows: one build of the top level a frame, relative to the camera of the view
+            // built first, 2 right and 1 back; the other view moves its rays by the difference, its shadow in place.
+            graph.close();
+            graph = new FrameGraph(device, 2);
+            Camera away = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.1).position(2, 0, 1);
+            com.truesim.engine.graph.ViewPort awayPort = graph.addView("away").size(SIZE, SIZE);
+            SceneView anchor = geometry.createView(awayPort, away, ViewOptions.of(256, 1 << 12).withOcclusion(true))
+                .set(1, MeshletRenderer.MODE_LIT);
+            SceneView checked = new SceneView(graph.addView("main").size(SIZE, SIZE), view, camera);
+            try (GpuImage awayTarget = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) {
+                for (SceneView traced : List.of(anchor, checked)) {
+                    traced.port().add(visibility.apply(traced)).add(new ClusteredLights(lights, traced))
+                        .add(new InlineRayShadows(rayTracing, traced.view(), lights, 0, 0).offset(2e-3f));
+                }
+                awayPort.output(Keys.SCENE_COLOR, external(awayTarget, VK_FORMAT_R8G8B8A8_UNORM));
+                checked.port().output(Keys.SCENE_COLOR, external(colorTarget, VK_FORMAT_R8G8B8A8_UNORM));
+                frame(colorTarget, 4);
+                byte[] two = frame(colorTarget, 4);
+                assertThat(graph.passes()).containsOnlyOnce("top level");
+                int lit = floor(two, this, 3, -2);
+                assertThat(floor(two, this, shadow[0], shadow[1])).as("in shadow, the top level the other view's")
+                    .isLessThan((int) (lit * shadowRatio));
+                assertThat(floor(two, this, shadow[0] + 0.4, shadow[1] - 0.4)).isLessThan((int) (lit * shadowRatio));
+                device.waitIdle();
+            }
             // Forward shading cannot trace inline: the light shines unshadowed.
             SceneView main = newGraph();
             main.port().add(forward.apply(main)).add(new ClusteredLights(lights, main))
