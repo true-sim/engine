@@ -637,6 +637,27 @@ public final class Window implements AutoCloseable {
         return s;
     }
 
+    /**
+     * Applies the window settings {@code settings} holds ({@link WindowSettings#from}; a scoped view for this window,
+     * say), and applies them again whenever one of them changes, until the window closes. Change them on the
+     * platform's thread.
+     */
+    @AllowAllocation("following settings, once")
+    public Window follow(com.truesim.engine.settings.EngineSettings settings) {
+        check();
+        apply(WindowSettings.from(settings));
+        java.util.Set<String> names = new java.util.HashSet<>();
+        for (com.truesim.engine.settings.Setting<?> setting : WindowSettings.ALL) {
+            names.add(settings.nameOf(setting));
+        }
+        attach(settings.onAnyChange(name -> {
+            if (handle != 0 && names.contains(name)) {
+                apply(WindowSettings.from(settings));
+            }
+        }));
+        return this;
+    }
+
     // ---------------------------------------------------------------- rendering
 
     /**

@@ -89,6 +89,11 @@ class PresenterTest {
                 assertThat(presenter.render()).isIn(2, 3);
                 third.restore();
                 third.sync();
+                // The graph's present settings, followed by the windows given none of their own.
+                graph.settings().set(PresentSettings.PRESENT_MODE, PresentMode.IMMEDIATE);
+                assertThat(mainTarget.settings().presentMode()).isEqualTo(PresentMode.IMMEDIATE);
+                assertThat(sideTarget.settings().presentMode()).as("its own settings").isEqualTo(PresentMode.MAILBOX);
+                assertThat(presenter.render()).isEqualTo(3);
                 // Present settings changed while running, saved and read back.
                 sideTarget.apply(PresentSettings.defaults().withPresentMode(PresentMode.IMMEDIATE));
                 sideTarget.apply(sideTarget.settings());
@@ -128,12 +133,15 @@ class PresenterTest {
         PresentSettings defaults = PresentSettings.defaults();
         assertThat(defaults.presentMode()).as("vsync").isEqualTo(PresentMode.FIFO);
         PresentSettings mailbox = defaults.withPresentMode(PresentMode.MAILBOX);
-        assertThat(mailbox.toMap()).containsExactly(Map.entry("presentMode", "MAILBOX"));
+        assertThat(mailbox.toMap()).containsExactly(Map.entry("present.mode", "MAILBOX"));
         assertThat(PresentSettings.fromMap(mailbox.toMap())).isEqualTo(mailbox);
-        assertThat(PresentSettings.fromMap(Map.of("presentMode", " IMMEDIATE ", "hdr", "true")).presentMode())
+        assertThat(PresentSettings.fromMap(Map.of("present.mode", " IMMEDIATE ", "hdr", "true")).presentMode())
             .isEqualTo(PresentMode.IMMEDIATE);
-        assertThat(PresentSettings.fromMap(Map.of("presentMode", "SOMETHING_NEW"))).isEqualTo(defaults);
+        assertThat(PresentSettings.fromMap(Map.of("present.mode", "SOMETHING_NEW"))).isEqualTo(defaults);
         assertThat(PresentSettings.fromMap(Map.of())).isEqualTo(defaults);
+        assertThat(PresentSettings.ALL).containsExactly(PresentSettings.PRESENT_MODE);
+        com.truesim.engine.settings.EngineSettings settings = mailbox.store(new com.truesim.engine.settings.EngineSettings());
+        assertThat(PresentSettings.from(settings)).isEqualTo(mailbox);
         assertThatNullPointerException().isThrownBy(() -> defaults.withPresentMode(null));
     }
 }

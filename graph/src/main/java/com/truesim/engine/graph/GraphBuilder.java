@@ -19,6 +19,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import com.truesim.engine.settings.EngineSettings;
+import com.truesim.engine.settings.Setting;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 
@@ -129,6 +131,7 @@ public final class GraphBuilder {
     private final Map<Object, List<Object>> requesters = new HashMap<>(); // the scopes making each request
     private final List<Running> running = new ArrayList<>(); // handed out while building, resolved when it ends
     final Set<ExternalImage> copied = new HashSet<>(); // output targets copied into while building, for their readers
+    final Set<String> settingsRead = new HashSet<>(); // full names of the settings read while building
     private final Map<Scoped, Scoped> interned = new HashMap<>();
     private final Map<ExternalImage, Image> externals = new IdentityHashMap<>();
     /** Imported buffers by Vulkan handle: every wrapper of one buffer is the same buffer of the build. */
@@ -318,6 +321,24 @@ public final class GraphBuilder {
     /** What is being built: a technique, a request, or null (the graph itself). What it makes belongs to it. */
     private Object scope() {
         return resolution.scope();
+    }
+
+    // ---------------------------------------------------------------- settings
+
+    /**
+     * {@code setting}'s value in the graph's settings ({@link FrameGraph#settings()}), for what the build makes (sizes,
+     * counts, which passes): the graph rebuilds when it changes. Values read when frames record come from
+     * {@link #settings()} instead, without a rebuild.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public <T> T setting(Setting<T> setting) {
+        settingsRead.add(graph.settings().nameOf(setting));
+        return graph.settings().get(setting);
+    }
+
+    /** The graph's settings, to read when frames record (a pass body's exposure, say): no rebuild when they change. */
+    public EngineSettings settings() {
+        return graph.settings();
     }
 
     // ---------------------------------------------------------------- programs, and what the device can do

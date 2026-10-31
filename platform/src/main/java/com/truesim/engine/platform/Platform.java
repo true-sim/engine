@@ -252,6 +252,25 @@ public final class Platform implements AutoCloseable {
         return window;
     }
 
+    /**
+     * Opens a window as {@code options} say that follows the window settings {@code settings} holds (a scoped view for
+     * it, say): applied before it shows, and again whenever they change ({@link Window#follow}).
+     */
+    @AllowAllocation("opening a window")
+    public Window createWindow(WindowOptions options, com.truesim.engine.settings.EngineSettings settings) {
+        Window window = createWindow(options.withHidden(true));
+        try {
+            window.follow(settings);
+            if (!options.hidden()) {
+                window.show();
+            }
+        } catch (RuntimeException e) {
+            window.close();
+            throw e;
+        }
+        return window;
+    }
+
     /** The open windows. */
     @AllowAllocation("a snapshot")
     public List<Window> windows() {

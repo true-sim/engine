@@ -62,6 +62,7 @@ import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.common.jobs.JobSystem;
 import com.truesim.engine.vulkan.VulkanDevice;
+import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.vulkan.Queue;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.Vulkan;
@@ -75,6 +76,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Function;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
@@ -147,6 +149,9 @@ public final class FrameGraph implements AutoCloseable {
     private long[] builtVersions = new long[0]; // each one's buildVersion() then
     private final Map<Key<Image>, ExternalImage> outputs = new LinkedHashMap<>();
     private final List<Texture> textures = new ArrayList<>();
+    private EngineSettings settings = new EngineSettings();
+    private EngineSettings.Subscription settingsWatch = watch(settings);
+    private Set<String> builtSettings = Set.of(); // the full names of the settings the built graph read
     private Retiring retiring; // removed textures, until no frame in flight samples them
     private final Map<Class<?>, Implementation<?, ?>> implementations = new HashMap<>();
     private final Map<Object, AutoCloseable> cache = new LinkedHashMap<>();
@@ -338,6 +343,34 @@ public final class FrameGraph implements AutoCloseable {
     /** Copies the frame's result {@code key} into {@code texture} every frame; the graph rebuilds on its next frame. */
     public FrameGraph output(Key<Image> key, Texture texture) {
         return output(key, texture.external);
+    }
+
+    /** The settings this graph's techniques read ({@link GraphBuilder#setting}): every default until set. */
+    public EngineSettings settings() {
+        return settings;
+    }
+
+    /**
+     * Makes {@code settings} the ones this graph's techniques read (the app's, loaded from its preferences, say): the
+     * graph rebuilds on its next frame, and again whenever a setting its build read changes.
+     */
+    @AllowAllocation("set up rarely")
+    public FrameGraph settings(EngineSettings settings) {
+        settingsWatch.close();
+        this.settings = Objects.requireNonNull(settings, "settings");
+        settingsWatch = watch(settings);
+        dirty = true;
+        return this;
+    }
+
+    /** Rebuilds on the next frame whenever a setting the built graph read changes. */
+    @AllowAllocation("set up rarely")
+    private EngineSettings.Subscription watch(EngineSettings watched) {
+        return watched.onAnyChange(name -> {
+            if (builtSettings.contains(name)) {
+                dirty = true;
+            }
+        });
     }
 
     /** The frame's outputs, by key. */
@@ -1368,6 +1401,7 @@ public final class FrameGraph implements AutoCloseable {
             barrierHistory[b] = barrierKind[b] == IMAGE && barrierTarget[b] >= 0 ? historyOf[barrierTarget[b]] : -1;
         }
         startViews(g, plans.size());
+        builtSettings = Set.copyOf(g.settingsRead);
         CompiledGraph.Batches batches = compiled.batches();
         batchQueue = batches.queue();
         batchOrdinal = batches.ordinal();
@@ -1609,6 +1643,7 @@ public final class FrameGraph implements AutoCloseable {
             texture.close();
         }
         textures.clear();
+        settingsWatch.close();
         retiring.close(); // the frames are done: removed textures go now
         retiring = new Retiring(frameSlots); // for what is removed after, at once
         for (ReadbackPlan readback : readbacks) {

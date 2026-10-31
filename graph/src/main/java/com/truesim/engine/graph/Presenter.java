@@ -12,6 +12,7 @@ import static org.lwjgl.vulkan.VK10.vkDestroySemaphore;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.platform.Window;
+import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Surface;
 import com.truesim.engine.vulkan.Swapchain;
@@ -65,9 +66,31 @@ public final class Presenter implements AutoCloseable {
         this.device = graph.device();
     }
 
-    /** Presents {@code view}'s result {@code key} to {@code window} with vsync ({@link PresentSettings#defaults()}). */
+    /**
+     * Presents {@code view}'s result {@code key} to {@code window} as the graph's settings say
+     * ({@link PresentSettings#from}), following them while it runs.
+     */
     public Target present(ViewPort view, Key<Image> key, Window window) {
-        return present(view, key, window, PresentSettings.defaults());
+        return present(view, key, window, graph.settings());
+    }
+
+    /**
+     * Presents {@code view}'s result {@code key} to {@code window} as {@code settings} say (a scoped view for this
+     * window, say), following them while it runs.
+     */
+    @AllowAllocation("adding a window")
+    public Target present(ViewPort view, Key<Image> key, Window window, EngineSettings settings) {
+        Target target = present(view, key, window, PresentSettings.from(settings));
+        java.util.Set<String> names = new java.util.HashSet<>();
+        for (com.truesim.engine.settings.Setting<?> setting : PresentSettings.ALL) {
+            names.add(settings.nameOf(setting));
+        }
+        target.watch = settings.onAnyChange(name -> {
+            if (names.contains(name)) {
+                target.apply(PresentSettings.from(settings));
+            }
+        });
+        return target;
     }
 
     /**
@@ -146,6 +169,7 @@ public final class Presenter implements AutoCloseable {
         private final ExternalImage image;
         private final long[] available; // per frame slot: signaled when the acquired image may be written
         private PresentSettings settings;
+        private EngineSettings.Subscription watch; // of the settings it follows, or null
         private long presented;
         private boolean removed;
 
@@ -241,6 +265,9 @@ public final class Presenter implements AutoCloseable {
                 return;
             }
             removed = true;
+            if (watch != null) {
+                watch.close();
+            }
             device.waitIdle();
             targets.remove(this);
             window.detach(this);

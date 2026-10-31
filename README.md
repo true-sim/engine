@@ -69,6 +69,23 @@ try (Platform platform = Platform.start()) {
 }
 ```
 
+**Engine settings** (`com.truesim.engine.settings`): every engine setting is a declared `Setting` (name, kind,
+default, range, description, live or not), declared by the module that uses it, next to that code. `EngineSettings`
+holds the values: `get` (the default where none is set), `set` (checked against the range), change listeners, scoped
+views (one window's own values), and saving and loading as text (`toMap`/`load`: only what was set is saved; unknown
+keys are kept, unreadable ones default, values are parsed when first read). The frame graph has settings
+(`graph.settings()`): a build reads them with `g.setting(key)` and rebuilds when one it read changes; pass bodies read
+`g.settings()` when they record. Windows follow theirs (`platform.createWindow(options, settings.scoped("window.main"))`),
+and so does the `Presenter` (the graph's present settings, or a window's own).
+
+```java
+EngineSettings settings = new EngineSettings().load(saved);
+graph.settings(settings);
+Window window = platform.createWindow(WindowOptions.of("true-sim", 1280, 720), settings.scoped("window.main"));
+settings.scoped("window.main").set(WindowSettings.MODE, WindowMode.BORDERLESS_FULLSCREEN); // applied at once
+store(settings.toMap());
+```
+
 **Window settings** (`WindowSettings`): every preference the platform can set on a window, as one value to save and
 load: mode, display, windowed size and position, the exclusive fullscreen mode, maximized, resizable, borders, always
 on top, focusable, opacity, size limits, aspect ratio, mouse and keyboard grab, relative mouse, cursor, keeping the
