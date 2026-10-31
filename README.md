@@ -540,6 +540,8 @@ interface:
   first), not to a camera: each view moves its rays by its camera less the origin. Its transforms are floats, so the
   app keeps the origin within a few kilometres of the cameras, moving it when they have gone far (at 7,000 km floats
   are 0.5 m apart). Rendering stays relative to each camera; the top level's records are only for its build.
+  Its build is skipped while no instance changed (`GpuScene.version()`), no bottom level was added and the origin
+  stayed: a still scene builds it once.
 - A mask needs the camera's depth before shading: for the visibility buffer that is its own IDs' draw (shared); for
   forward shading, a depth-only draw of the camera as a view of its own, for now.
 
@@ -551,10 +553,12 @@ interface:
 | shadow map 2048 x 2048 | 1.76 ms | 1.32 ms |
 | shadow map 4096 x 4096 | 2.23 ms | 1.81 ms |
 | 3 cascades of 2048 x 2048 to 300 units | 2.14 ms | 1.70 ms |
-| ray-traced mask | 2.26 ms (with its own depth draw) | 1.34 ms |
-| inline rays | (not traced) | 1.31 ms |
+| ray-traced mask | 1.97 ms (with its own depth draw) | 1.17 ms |
+| inline rays | (not traced) | 1.15 ms |
 
-With the visibility buffer, exact ray-traced shadows cost what a 2048 x 2048 shadow map does: about 0.42 ms. Ray
+The scene stands still, so the top level is built once and stands (it was 0.31 ms a frame rebuilt; the ray rows were
+1.34 and 1.31 ms then). With the visibility buffer, exact ray-traced shadows cost about 0.22 ms, half what a 2048 x 2048
+shadow map does. Ray
 tracing gives crisp contact shadows, thin details, and no acne or peter-panning at any distance. Even at 2048 x 2048
 over a 150-unit square, the shadow map shows texel steps along shadow edges and acne where the sun grazes. The shadow
 map needs no ray tracing and no memory beyond itself; ray tracing needs bottom levels (103 MiB here, mostly the

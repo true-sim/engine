@@ -64,6 +64,7 @@ public final class GpuScene implements AutoCloseable {
     private final Materials defaultMaterials;
     private Materials materials;
     private int count;
+    private long version; // changes with every claim and removal
     private int highWater;
     private boolean closed;
 
@@ -163,6 +164,7 @@ public final class GpuScene implements AutoCloseable {
      */
     public int claim(int id) {
         Objects.checkIndex(id, capacity);
+        version++;
         if (!contains(id)) {
             used[id >>> 6] |= 1L << id;
             count++;
@@ -217,6 +219,7 @@ public final class GpuScene implements AutoCloseable {
             return;
         }
         instances.clear(id); // a hole
+        version++;
         used[id >>> 6] &= ~(1L << id);
         count--;
         firstFreeWord = Math.min(firstFreeWord, id >>> 6);
@@ -262,6 +265,14 @@ public final class GpuScene implements AutoCloseable {
             }
         }
         return -1;
+    }
+
+    /**
+     * A number that changes whenever an instance is claimed ({@link #set}, {@link #add}, {@link #claim}) or removed:
+     * what was built from the instances (a top level) stands while it is the same.
+     */
+    public long version() {
+        return version;
     }
 
     /** How many instances changed since the last upload: what the next one scatters. */
