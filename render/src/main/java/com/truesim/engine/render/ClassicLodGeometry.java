@@ -77,6 +77,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     private static final int DRAW_PUSH = ClassicPush.BYTES;
     private static final int COMMAND_BYTES = 20;
     private static final int RECORD_BYTES = 16;
+    /** Draw lists: one per raster bin, then one per bin for mirrored instances (drawn with clockwise front faces). */
+    private static final int LISTS = 2 * MeshletRenderer.BINS;
     private static final float[] NO_COLOR = new float[3]; // depth and IDs: cleared to 0
     private static final ValueLayout.OfInt U32 = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfFloat F32 = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -86,11 +88,12 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     private final int maxDraws;
     private final long recordsOffset;
     private final Pipeline select;
-    // Per raster bin: shaded, depth only, the visibility buffer's IDs (null without primitive IDs).
+    // Per draw list (raster bin, then mirrored): shaded, depth only, the visibility buffer's IDs (null without
+    // primitive IDs), and the blended bin into weighted transparency's targets (unmirrored, mirrored).
     private final Pipeline[] draw;
     private final Pipeline[] drawDepth;
     private final Pipeline[] drawIds;
-    private final Pipeline drawBlended; // the blended bin into weighted transparency's targets
+    private final Pipeline[] drawBlended;
     // Grown with the pool (indices, meshes) or as meshes come (levels, parts); replaced ones freed once no frame reads
     // them.
     private final VulkanDevice device;
@@ -123,32 +126,37 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         this.device = device;
         this.oldBuffers = new Retiring(pool.frameSlots());
         this.maxDraws = maxDraws;
-        // The bins' counts, each bin's commands, then a record per draw slot of every bin.
-        this.recordsOffset = (16 + (long) COMMAND_BYTES * maxDraws * MeshletRenderer.BINS + 15) & ~15L;
+        // The lists' counts, each list's commands, then a record per draw slot of every list.
+        this.recordsOffset = (4L * LISTS + (long) COMMAND_BYTES * maxDraws * LISTS + 15) & ~15L;
         try (ShaderModule selectShader = ShaderModule.load(device, "shaders/classic/select.spv");
              ShaderModule vertexShader = ShaderModule.load(device, "shaders/classic/draw.spv");
              ShaderModule shading = ShaderModule.load(device, "shaders/meshlets/draw.spv")) {
             select = Pipeline.compute(device, selectShader, "selectMain", SELECT_PUSH);
             // A pipeline per raster bin, as the meshlet paths have them: the double-sided and masked bins cull
             // nothing, the masked one discards what it masks (in depth only too).
-            draw = new Pipeline[MeshletRenderer.BINS];
-            drawDepth = new Pipeline[MeshletRenderer.BINS];
-            drawIds = device.primitiveIds() ? new Pipeline[MeshletRenderer.BINS] : null;
-            drawBlended = RasterPipelines.blended(raster(device, MeshletRenderer.BIN_BLENDED, vertexShader)
-                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading, "blendedMain"), depthFormat);
+            draw = new Pipeline[LISTS];
+            drawDepth = new Pipeline[LISTS];
+            drawIds = device.primitiveIds() ? new Pipeline[LISTS] : null;
+            drawBlended = new Pipeline[2];
+            for (int mirrored = 0; mirrored < 2; mirrored++) {
+                drawBlended[mirrored] = RasterPipelines.blended(raster(device, MeshletRenderer.BIN_BLENDED + mirrored
+                    * MeshletRenderer.BINS, vertexShader).stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading, "blendedMain"),
+                    depthFormat);
+            }
             try (ShaderModule idsShader = device.primitiveIds() ? ShaderModule.load(device, "shaders/classic/ids.spv")
                 : null) {
-                for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {
+                for (int list = 0; list < LISTS; list++) {
+                    int bin = list % MeshletRenderer.BINS;
                     // The blended bin drawn as opaque takes the masked entry points: one-sided back faces discarded.
                     boolean masked = bin == MeshletRenderer.BIN_MASKED || bin == MeshletRenderer.BIN_BLENDED;
-                    draw[bin] = raster(device, bin, vertexShader)
+                    draw[list] = raster(device, list, vertexShader)
                         .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading, masked ? "maskedMain" : "fragmentMain")
                         .color(colorFormat).depth(depthFormat).build(); // the meshlet paths' shading
-                    Pipeline.Graphics depth = raster(device, bin, vertexShader).depth(depthFormat);
-                    drawDepth[bin] = (masked ? depth.stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading, "maskedDepthMain")
+                    Pipeline.Graphics depth = raster(device, list, vertexShader).depth(depthFormat);
+                    drawDepth[list] = (masked ? depth.stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading, "maskedDepthMain")
                         : depth).build();
                     if (idsShader != null) {
-                        drawIds[bin] = raster(device, bin, vertexShader).stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader,
+                        drawIds[list] = raster(device, list, vertexShader).stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader,
                             masked ? "maskedClassicIdsMain" : "classicIdsMain")
                             .color(MeshletRenderer.ID_FORMAT).depth(depthFormat).build();
                     }
@@ -404,9 +412,9 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         public Buffer build(GraphBuilder g) {
             String name = "classic LOD, view " + view.index();
             Buffer list = g.createBuffer(name + " draws", geometry.recordsOffset + (long) RECORD_BYTES
-                * geometry.maxDraws * MeshletRenderer.BINS);
+                * geometry.maxDraws * LISTS);
             g.pass(name + " reset").write(list, BufferAccess.TRANSFER_DST)
-                .record(ctx -> Commands.fillBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(list), 0, 16, 0));
+                .record(ctx -> Commands.fillBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(list), 0, 4L * LISTS, 0));
             SceneData.Buffers scene = g.request(new SceneData(geometry.renderer));
             float casterDetail = camera != null
                 ? g.setting(com.truesim.engine.render.shadows.ShadowSettings.CASTER_DETAIL) : 1;
@@ -458,13 +466,17 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         }
         targets.readBehind(pass);
         com.truesim.engine.graph.Image behind = targets.behind();
-        Pipeline pipeline = weighted ? drawBlended : draw[MeshletRenderer.BIN_BLENDED];
+        Pipeline[] pipeline = weighted ? drawBlended : new Pipeline[] {draw[MeshletRenderer.BIN_BLENDED],
+            draw[MeshletRenderer.BIN_BLENDED + MeshletRenderer.BINS]};
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            recordBin(ctx, pipeline, MeshletRenderer.BIN_BLENDED, view, lights == null ? 0 : ctx.address(lights),
-                list, SceneBehind.words(ctx, behind));
+            long words = SceneBehind.words(ctx, behind);
+            long address = lights == null ? 0 : ctx.address(lights);
+            recordList(ctx, pipeline[0], MeshletRenderer.BIN_BLENDED, view, address, list, words);
+            recordList(ctx, pipeline[1], MeshletRenderer.BIN_BLENDED + MeshletRenderer.BINS, view, address, list,
+                words);
         });
     }
 
@@ -493,26 +505,34 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         }
     }
 
-    /** A graphics pipeline of raster bin {@code bin}: the opaque one culls back faces, the others nothing. */
-    private static Pipeline.Graphics raster(VulkanDevice device, int bin, ShaderModule vertexShader) {
+    /**
+     * A graphics pipeline of draw list {@code list}: the opaque bin's culls back faces, the others nothing; a mirrored
+     * list's (past the bins) takes clockwise triangles as front faces.
+     */
+    private static Pipeline.Graphics raster(VulkanDevice device, int list, ShaderModule vertexShader) {
         Pipeline.Graphics graphics = Pipeline.graphics(device)
             .stage(VK_SHADER_STAGE_VERTEX_BIT, vertexShader, "classicVertexMain").pushConstants(DRAW_PUSH);
-        return bin == MeshletRenderer.BIN_OPAQUE ? graphics : graphics.doubleSided();
+        if (list >= MeshletRenderer.BINS) {
+            graphics.clockwise();
+        }
+        return list % MeshletRenderer.BINS == MeshletRenderer.BIN_OPAQUE ? graphics : graphics.doubleSided();
     }
 
     /** Draws the list's draws of view {@code view}, each opaque bin with its {@code pipeline}, into the attachments. */
     private void record(PassContext ctx, Pipeline[] pipeline, RenderView view, long lights, Buffer list) {
         for (int bin = 0; bin < MeshletRenderer.BIN_BLENDED; bin++) {
-            recordBin(ctx, pipeline[bin], bin, view, lights, list, 0);
+            recordList(ctx, pipeline[bin], bin, view, lights, list, 0);
+            recordList(ctx, pipeline[bin + MeshletRenderer.BINS], bin + MeshletRenderer.BINS, view, lights, list, 0);
         }
     }
 
     /**
-     * Draws the list's draws of view {@code view} in bin {@code bin} with {@code pipeline}, transmissive surfaces showing
-     * the scene behind of push words {@code behind} ({@link SceneBehind}; 0: none).
+     * Draws view {@code view}'s draws of draw list {@code drawList} (a raster bin, or past the bins a mirrored one) with
+     * {@code pipeline}, transmissive surfaces showing the scene behind of push words {@code behind}
+     * ({@link SceneBehind}; 0: none).
      */
-    private void recordBin(PassContext ctx, Pipeline pipeline, int bin, RenderView view, long lights, Buffer list,
-        long behind) {
+    private void recordList(PassContext ctx, Pipeline pipeline, int drawList, RenderView view, long lights,
+        Buffer list, long behind) {
         VkCommandBuffer commands = ctx.unsafe().commands();
         long handle = ctx.unsafe().buffer(list);
         try (MemoryStack stack = stackPush()) {
@@ -529,8 +549,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             Commands.bindIndexBuffer(commands, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
             pipeline.bind(commands);
             pipeline.push(commands, push, DRAW_PUSH);
-            Commands.drawIndexedIndirectCount(commands, handle, 16 + (long) COMMAND_BYTES * maxDraws * bin, handle,
-                4L * bin, maxDraws, COMMAND_BYTES);
+            Commands.drawIndexedIndirectCount(commands, handle, 4L * LISTS + (long) COMMAND_BYTES * maxDraws
+                * drawList, handle, 4L * drawList, maxDraws, COMMAND_BYTES);
         }
     }
 
@@ -539,10 +559,12 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         if (!closed) {
             closed = true;
             select.close();
-            drawBlended.close();
-            for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {
-                draw[bin].close();
-                drawDepth[bin].close();
+            for (Pipeline pipeline : drawBlended) {
+                pipeline.close();
+            }
+            for (int list = 0; list < LISTS; list++) {
+                draw[list].close();
+                drawDepth[list].close();
             }
             if (drawIds != null) {
                 for (Pipeline pipeline : drawIds) {

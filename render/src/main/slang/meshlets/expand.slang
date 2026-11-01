@@ -42,12 +42,15 @@ void expandMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
     {
         return; // over the index capacity: not written
     }
-    MeshEntry mesh = push.meshes[push.instances[v.instance].mesh & INSTANCE_MESH];
+    Instance instance = push.instances[v.instance];
+    MeshEntry mesh = push.meshes[instance.mesh & INSTANCE_MESH];
+    bool flip = mirrored(instance);
     uint w = v.meshlet * 8;
     uint count = ((push.meshlets[w + 2] >> 8) & 0xff) * 3;
     uint first = mesh.indexBase + push.meshlets[w + 1];
     for (uint i = thread; i < count; i += 64)
     {
-        push.indices[binFirstIndex(view, push.bin) + v.firstIndex + i] = (slot << 8) | triangleByte(first + i);
+        uint corner = i - i % 3 + woundCorner(i % 3, flip); // a mirrored instance's triangles wound the other way
+        push.indices[binFirstIndex(view, push.bin) + v.firstIndex + i] = (slot << 8) | triangleByte(first + corner);
     }
 }

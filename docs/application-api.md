@@ -345,7 +345,7 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   shading samples where the ray refracted through the volume leaves it, a coarser mip for rougher glass, attenuated by
   Beer's law and tinted by the albedo; the diffuse part gives way to it. Glass behind glass, and blended surfaces behind
   glass, are not seen through it (the copy holds the opaque scene); the volume's thickness is in the mesh's units,
-  unscaled by the instance.
+  scaled by the instance's largest scale.
 - **D137** (new) Checked against the Khronos glTF sample models: an optional sweep (`-PgltfSamples=...`) imports every
   model with all its parts.
 
