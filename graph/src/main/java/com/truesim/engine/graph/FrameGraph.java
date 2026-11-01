@@ -1,12 +1,5 @@
 package com.truesim.engine.graph;
 
-import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.memPutAddress;
-import static org.lwjgl.vulkan.EXTDebugUtils.VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
-import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-import static org.lwjgl.system.MemoryUtil.memPutFloat;
-import static org.lwjgl.system.MemoryUtil.memPutInt;
-import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D16_UNORM;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D16_UNORM_S8_UINT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D24_UNORM_S8_UINT;
@@ -17,19 +10,9 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_DEPTH_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_STENCIL_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
-import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-import static org.lwjgl.vulkan.VK12.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-import static org.lwjgl.vulkan.VK12.VK_RESOLVE_MODE_AVERAGE_BIT;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_RENDERING_INFO;
-import static org.lwjgl.vulkan.VK10.VK_QUEUE_FAMILY_IGNORED;
-import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.graph.Id;
@@ -48,8 +31,6 @@ import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.vulkan.Queue;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.Vulkan;
-import java.lang.foreign.Arena;
-import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -59,17 +40,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
-import org.lwjgl.system.MemoryStack;
-import org.lwjgl.vulkan.VkBufferMemoryBarrier2;
 import org.lwjgl.vulkan.VkCommandBuffer;
-import org.lwjgl.vulkan.VkDependencyInfo;
-import org.lwjgl.vulkan.VkDebugUtilsLabelEXT;
-import org.lwjgl.vulkan.VkImageMemoryBarrier2;
-import org.lwjgl.vulkan.VkImageSubresourceRange;
-import org.lwjgl.vulkan.VkRect2D;
-import org.lwjgl.vulkan.VkRenderingAttachmentInfo;
-import org.lwjgl.vulkan.VkRenderingInfo;
-import org.lwjgl.vulkan.VkViewport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -128,12 +99,7 @@ public final class FrameGraph implements AutoCloseable {
     private final Map<Object, AutoCloseable> cache = new LinkedHashMap<>();
     private final ResourcePool resources; // the images and buffers kept across builds
     private HistoryPair[] activeHistories = new HistoryPair[0];
-    // Persistent images and buffers by key, those a rebuild replaced (freed after it), and the buffer histories of the
-    // graph built with their views.
-    private final Map<String, Persistent> persistents = new HashMap<>();
-    private final List<Persistent> replaced = new ArrayList<>();
-    private Persistent[] bufferHistories = new Persistent[0];
-    private ViewPort[] bufferHistoryView = new ViewPort[0];
+    private final PersistentResources persistents;
     private static final Physical[] NO_PHYSICALS = new Physical[0];
     /** Before the first build: no barriers. */
     private static final CompiledGraph.BarrierList NO_BARRIERS = new CompiledGraph.BarrierList(new int[] {0, 0},
@@ -164,15 +130,9 @@ public final class FrameGraph implements AutoCloseable {
     // readbacks of the build, GPU timings when on, and a debug label per pass where the instance has debug utils.
     private int recordSlot;
     private long[] slotFrame;
-    private ReadbackPlan[] readbacks = new ReadbackPlan[0];
-    private ReadbackPlan[] retiredReadbacks = new ReadbackPlan[0]; // an earlier build's, pending in frames in flight
-    private int retiredCount;
+    private final FrameTooling tooling;
     private boolean historiesSwapped;
     Object currentBuild; // the last build's builder: images and buffers of others are refused (PassContext) // by the frame being submitted: swapped back if it is dropped
-    private boolean timingsOn;
-    private GpuTimings timings;
-    private Arena labelArena;
-    private long[] passLabels = new long[0];
 
     // The built graph: passes in order, the barriers before each (CompiledGraph.BarrierList), and where each image of
     // the build lives: a physical image (index >= 0) or an external one (~index).
@@ -251,6 +211,8 @@ public final class FrameGraph implements AutoCloseable {
         this.retiring = new Retiring(frameSlots);
         this.graphicsQueue = device.graphics();
         this.computeQueue = device.compute();
+        this.tooling = new FrameTooling(device, framesInFlight);
+        this.persistents = new PersistentResources(device, graphicsQueue, computeQueue);
         this.asyncCompute = graphicsQueue != computeQueue;
     }
 
@@ -524,26 +486,7 @@ public final class FrameGraph implements AutoCloseable {
             return;
         }
         slotFrame[slot] = -1;
-        if (timings != null) {
-            timings.collect(slot, finished);
-        }
-        for (ReadbackPlan readback : readbacks) {
-            readback.deliver(slot);
-        }
-        int kept = 0;
-        for (int i = 0; i < retiredCount; i++) { // an earlier build's: delivered, then freed once none is pending
-            ReadbackPlan readback = retiredReadbacks[i];
-            readback.deliver(slot);
-            if (readback.pending()) {
-                retiredReadbacks[kept++] = readback;
-            } else {
-                readback.close();
-            }
-        }
-        for (int i = kept; i < retiredCount; i++) {
-            retiredReadbacks[i] = null;
-        }
-        retiredCount = kept;
+        tooling.finished(slot, finished);
     }
 
     /** The frame slot being recorded. */
@@ -561,19 +504,15 @@ public final class FrameGraph implements AutoCloseable {
      * which then waits for the GPU once, to make the queries.
      */
     public FrameGraph timings(boolean on) {
-        if (on != timingsOn) {
-            timingsOn = on;
+        if (tooling.timings(on)) {
             dirty = true;
-        }
-        if (on && timings == null) {
-            timings = new GpuTimings(device, framesInFlight); // its queries come with the build
         }
         return this;
     }
 
     /** The passes' GPU timings of the last finished frame, with {@link #timings(boolean)} on; null otherwise. */
     public GpuTimings timings() {
-        return timingsOn ? timings : null;
+        return tooling.timings();
     }
 
     /**
@@ -678,11 +617,7 @@ public final class FrameGraph implements AutoCloseable {
                 activeHistories[h].current.swap(activeHistories[h].previous);
             }
         }
-        for (int h = 0; h < bufferHistories.length; h++) {
-            if (bufferHistoryView[h] == null || bufferHistoryView[h].active) {
-                bufferHistories[h].swap();
-            }
-        }
+        persistents.swapHistories();
     }
 
     private void prepare() {
@@ -704,12 +639,7 @@ public final class FrameGraph implements AutoCloseable {
                 pair.firstFrame = frame + 1; // not written yet: the frame after it first is has a last frame
             }
         }
-        for (int h = 0; h < bufferHistories.length; h++) {
-            boolean runs = bufferHistoryView[h] == null || bufferHistoryView[h].active;
-            if (!runs && bufferHistories[h].firstFrame >= frame) {
-                bufferHistories[h].firstFrame = frame + 1;
-            }
-        }
+        persistents.startFrame(frame);
         for (int s = 0; s < switches.length; s++) {
             switches[s].on = switches[s].on(switchViews[s], settings);
         }
@@ -766,16 +696,12 @@ public final class FrameGraph implements AutoCloseable {
     /** Passes {@code from} to {@code to} with their barriers, and with {@code last} the outputs' final layouts. */
     private void recordPasses(VkCommandBuffer commands, int from, int to, boolean last, PassContext context) {
         context.commands = commands;
-        GpuTimings timed = timingsOn ? timings : null;
         for (int i = from; i < to; i++) {
-            boolean labelled = passLabels.length > 0 && Commands.beginLabel(commands, passLabels[i]);
-            if (timed != null) {
-                timed.write(commands, recordSlot, i, false);
-            }
+            boolean labelled = tooling.beginPass(commands, recordSlot, i);
             // A skipped pass keeps its barriers, so every later one finds the layouts and ordering it was compiled
             // for; only those on the histories of a skipped view go, which stay as they are.
             boolean skipped = passSkipped[i];
-            barriers(commands, barriers.start()[i], barriers.start()[i + 1], skipped);
+            PassCommands.barriers(commands, barriers, barriers.start()[i], barriers.start()[i + 1], skipped, this);
             PassInfo pass = order[i];
             context.pass = pass;
             if (skipped) {
@@ -783,20 +709,16 @@ public final class FrameGraph implements AutoCloseable {
             } else if (pass.attachments.length == 0) {
                 pass.body.record(context);
             } else {
-                beginRendering(commands, pass);
+                PassCommands.beginRendering(commands, pass, this);
                 pass.body.record(context);
                 Commands.endRendering(commands);
             }
-            if (timed != null) {
-                timed.write(commands, recordSlot, i, true);
-            }
-            if (labelled) {
-                Commands.endLabel(commands);
-            }
+            tooling.endPass(commands, recordSlot, i, labelled);
         }
         context.pass = null;
         if (last) {
-            barriers(commands, barriers.start()[order.length], barriers.start()[order.length + 1], false);
+            PassCommands.barriers(commands, barriers, barriers.start()[order.length],
+                barriers.start()[order.length + 1], false, this);
         }
         context.commands = null;
     }
@@ -835,161 +757,10 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     /**
-     * Starts rendering into a pass's attachments, the viewport and scissor all of them; the views are looked up each
-     * frame, since a rebuild may move images, and the clear values read, since a technique may change them.
-     */
-    private void beginRendering(VkCommandBuffer commands, PassInfo pass) {
-        GraphBuilder.Attachment[] attachments = pass.attachments;
-        try (MemoryStack stack = stackPush()) {
-            long colors = stack.ncalloc(VkRenderingAttachmentInfo.ALIGNOF, attachments.length,
-                VkRenderingAttachmentInfo.SIZEOF);
-            long depth = 0;
-            long stencil = 0;
-            int colorCount = 0;
-            Image size = attachments[0].target().image();
-            int width = pass.region ? regionWidth(pass.view, size) : size.width;
-            int height = pass.region ? regionHeight(pass.view, size) : size.height;
-            for (GraphBuilder.Attachment attachment : attachments) {
-                Subresource target = attachment.target();
-                long info;
-                if (attachment.depth()) {
-                    info = stack.ncalloc(VkRenderingAttachmentInfo.ALIGNOF, 1, VkRenderingAttachmentInfo.SIZEOF);
-                    depth = info;
-                    if ((target.image().format.aspect() & VK_IMAGE_ASPECT_STENCIL_BIT) != 0) {
-                        stencil = info;
-                    }
-                } else {
-                    info = colors + (long) colorCount++ * VkRenderingAttachmentInfo.SIZEOF;
-                }
-                memPutInt(info + VkRenderingAttachmentInfo.STYPE, VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO);
-                memPutLong(info + VkRenderingAttachmentInfo.IMAGEVIEW, attachmentView(target));
-                memPutInt(info + VkRenderingAttachmentInfo.IMAGELAYOUT, attachment.depth()
-                    ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-                memPutInt(info + VkRenderingAttachmentInfo.LOADOP, attachment.load().op);
-                memPutInt(info + VkRenderingAttachmentInfo.STOREOP, attachment.store().op);
-                Clear clear = attachment.clear();
-                if (clear != null) {
-                    long value = info + VkRenderingAttachmentInfo.CLEARVALUE;
-                    if (clear.depth) {
-                        memPutFloat(value, clear.value(0));
-                        memPutInt(value + 4, clear.stencil);
-                    } else {
-                        for (int c = 0; c < 4; c++) {
-                            memPutFloat(value + 4L * c, clear.value(c));
-                        }
-                    }
-                }
-                if (attachment.resolve() != null) {
-                    memPutInt(info + VkRenderingAttachmentInfo.RESOLVEMODE, VK_RESOLVE_MODE_AVERAGE_BIT);
-                    memPutLong(info + VkRenderingAttachmentInfo.RESOLVEIMAGEVIEW, attachmentView(attachment.resolve()));
-                    memPutInt(info + VkRenderingAttachmentInfo.RESOLVEIMAGELAYOUT,
-                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-                }
-            }
-            long rendering = stack.ncalloc(VkRenderingInfo.ALIGNOF, 1, VkRenderingInfo.SIZEOF);
-            memPutInt(rendering + VkRenderingInfo.STYPE, VK_STRUCTURE_TYPE_RENDERING_INFO);
-            memPutInt(rendering + VkRenderingInfo.RENDERAREA + VkRect2D.EXTENT, width);
-            memPutInt(rendering + VkRenderingInfo.RENDERAREA + VkRect2D.EXTENT + 4, height);
-            memPutInt(rendering + VkRenderingInfo.LAYERCOUNT, 1);
-            memPutInt(rendering + VkRenderingInfo.COLORATTACHMENTCOUNT, colorCount);
-            memPutAddress(rendering + VkRenderingInfo.PCOLORATTACHMENTS, colorCount == 0 ? 0 : colors);
-            memPutAddress(rendering + VkRenderingInfo.PDEPTHATTACHMENT, depth);
-            memPutAddress(rendering + VkRenderingInfo.PSTENCILATTACHMENT, stencil);
-            Commands.beginRendering(commands, rendering);
-            long viewport = stack.ncalloc(VkViewport.ALIGNOF, 1, VkViewport.SIZEOF);
-            memPutFloat(viewport + VkViewport.WIDTH, width);
-            memPutFloat(viewport + VkViewport.HEIGHT, height);
-            memPutFloat(viewport + VkViewport.MAXDEPTH, 1);
-            Commands.setViewport(commands, 0, 1, viewport);
-            long scissor = stack.ncalloc(VkRect2D.ALIGNOF, 1, VkRect2D.SIZEOF);
-            memPutInt(scissor + VkRect2D.EXTENT, width);
-            memPutInt(scissor + VkRect2D.EXTENT + 4, height);
-            Commands.setScissor(commands, 0, 1, scissor);
-        }
-    }
-
-    private long attachmentView(Subresource target) {
-        return target.whole() ? viewOf(target.image().id) : layerViewOf(target.image().id, target.baseLayer());
-    }
-
-    /** Barriers {@code from} to {@code to}; of a {@code skipped} pass, without those on a skipped view's histories. */
-    private void barriers(VkCommandBuffer commands, int from, int to, boolean skipped) {
-        if (from == to) {
-            return;
-        }
-        try (MemoryStack stack = stackPush()) {
-            int bufferCount = 0;
-            int imageCount = 0;
-            for (int b = from; b < to; b++) {
-                if (!dropped(b, skipped)) {
-                    bufferCount += barriers.kind()[b];
-                    imageCount += 1 - barriers.kind()[b];
-                }
-            }
-            if (bufferCount + imageCount == 0) {
-                return;
-            }
-            long images = stack.ncalloc(VkImageMemoryBarrier2.ALIGNOF, Math.max(1, imageCount),
-                VkImageMemoryBarrier2.SIZEOF);
-            long buffers = stack.ncalloc(VkBufferMemoryBarrier2.ALIGNOF, Math.max(1, bufferCount),
-                VkBufferMemoryBarrier2.SIZEOF);
-            int image = 0;
-            int buffer = 0;
-            for (int b = from; b < to; b++) {
-                if (dropped(b, skipped)) {
-                    continue;
-                }
-                if (barriers.kind()[b] == BUFFER) {
-                    long barrier = buffers + (long) buffer++ * VkBufferMemoryBarrier2.SIZEOF;
-                    memPutInt(barrier + VkBufferMemoryBarrier2.STYPE, VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2);
-                    memPutLong(barrier + VkBufferMemoryBarrier2.SRCSTAGEMASK, barriers.srcStage()[b]);
-                    memPutLong(barrier + VkBufferMemoryBarrier2.SRCACCESSMASK, barriers.srcAccess()[b]);
-                    memPutLong(barrier + VkBufferMemoryBarrier2.DSTSTAGEMASK, barriers.dstStage()[b]);
-                    memPutLong(barrier + VkBufferMemoryBarrier2.DSTACCESSMASK, barriers.dstAccess()[b]);
-                    memPutInt(barrier + VkBufferMemoryBarrier2.SRCQUEUEFAMILYINDEX, VK_QUEUE_FAMILY_IGNORED);
-                    memPutInt(barrier + VkBufferMemoryBarrier2.DSTQUEUEFAMILYINDEX, VK_QUEUE_FAMILY_IGNORED);
-                    int target = barriers.target()[b];
-                    memPutLong(barrier + VkBufferMemoryBarrier2.BUFFER, target >= 0
-                        ? physicalBuffers[target].buffer.handle() : externalBuffers[~target].handle);
-                    memPutLong(barrier + VkBufferMemoryBarrier2.SIZE, VK_WHOLE_SIZE);
-                    continue;
-                }
-                long barrier = images + (long) image++ * VkImageMemoryBarrier2.SIZEOF;
-                memPutInt(barrier + VkImageMemoryBarrier2.STYPE, VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2);
-                memPutLong(barrier + VkImageMemoryBarrier2.SRCSTAGEMASK, barriers.srcStage()[b]);
-                memPutLong(barrier + VkImageMemoryBarrier2.SRCACCESSMASK, barriers.srcAccess()[b]);
-                memPutLong(barrier + VkImageMemoryBarrier2.DSTSTAGEMASK, barriers.dstStage()[b]);
-                memPutLong(barrier + VkImageMemoryBarrier2.DSTACCESSMASK, barriers.dstAccess()[b]);
-                memPutInt(barrier + VkImageMemoryBarrier2.OLDLAYOUT, barriers.oldLayout()[b]);
-                memPutInt(barrier + VkImageMemoryBarrier2.NEWLAYOUT, barriers.newLayout()[b]);
-                memPutInt(barrier + VkImageMemoryBarrier2.SRCQUEUEFAMILYINDEX, VK_QUEUE_FAMILY_IGNORED);
-                memPutInt(barrier + VkImageMemoryBarrier2.DSTQUEUEFAMILYINDEX, VK_QUEUE_FAMILY_IGNORED);
-                int target = barriers.target()[b];
-                memPutLong(barrier + VkImageMemoryBarrier2.IMAGE, target >= 0 ? physicals[target].image.handle()
-                    : externals[~target].handle);
-                long range = barrier + VkImageMemoryBarrier2.SUBRESOURCERANGE;
-                memPutInt(range + VkImageSubresourceRange.ASPECTMASK, barriers.aspect()[b]);
-                memPutInt(range + VkImageSubresourceRange.BASEMIPLEVEL, barriers.baseMip()[b]);
-                // -1 counts: VK_REMAINING_MIP_LEVELS, VK_REMAINING_ARRAY_LAYERS
-                memPutInt(range + VkImageSubresourceRange.LEVELCOUNT, barriers.mipCount()[b]);
-                memPutInt(range + VkImageSubresourceRange.BASEARRAYLAYER, barriers.baseLayer()[b]);
-                memPutInt(range + VkImageSubresourceRange.LAYERCOUNT, barriers.layerCount()[b]);
-            }
-            long dependency = stack.ncalloc(VkDependencyInfo.ALIGNOF, 1, VkDependencyInfo.SIZEOF);
-            memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
-            memPutInt(dependency + VkDependencyInfo.IMAGEMEMORYBARRIERCOUNT, imageCount);
-            memPutAddress(dependency + VkDependencyInfo.PIMAGEMEMORYBARRIERS, images);
-            memPutInt(dependency + VkDependencyInfo.BUFFERMEMORYBARRIERCOUNT, bufferCount);
-            memPutAddress(dependency + VkDependencyInfo.PBUFFERMEMORYBARRIERS, buffers);
-            Commands.pipelineBarrier2(commands, dependency);
-        }
-    }
-
-    /**
      * Whether barrier {@code b}, of a pass {@code skipped} or not, is left out: on a skipped view's history, or on the
      * window image a view not running this frame outputs into (not acquired: the presentation engine may hold it).
      */
-    private boolean dropped(int b, boolean skipped) {
+    boolean dropped(int b, boolean skipped) {
         int target = barriers.target()[b];
         if (barriers.kind()[b] == IMAGE && target < 0) {
             ViewPort view = externalView[~target];
@@ -1001,7 +772,11 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     long bufferHandle(int buffer) {
-        int target = bufferTargetOf[buffer];
+        return targetBufferHandle(bufferTargetOf[buffer]);
+    }
+
+    /** The buffer barriers' {@code target} is: pooled (>= 0) or external ({@code ~target}). */
+    long targetBufferHandle(int target) {
         return target >= 0 ? physicalBuffers[target].buffer.handle() : externalBuffers[~target].handle;
     }
 
@@ -1019,7 +794,11 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     long handleOf(int image) {
-        int target = targetOf[image];
+        return targetImageHandle(targetOf[image]);
+    }
+
+    /** The image barriers' {@code target} is: pooled (>= 0) or external ({@code ~target}). */
+    long targetImageHandle(int target) {
         return target >= 0 ? physicals[target].image.handle() : externals[~target].handle;
     }
 
@@ -1249,7 +1028,7 @@ public final class FrameGraph implements AutoCloseable {
         chunkCommands = new VkCommandBuffer[batches.chunkBatch().length];
         startTooling(g);
         startHistories(pairs, keptPair, compiled);
-        startPersistents(g);
+        persistents.start(g, builds + 1L, retiring);
         dirty = false;
         currentBuild = g; // the build images and buffers resolved in passes must be of
         built = g.techniques().toArray(new Technique[0]);
@@ -1350,67 +1129,18 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     /**
-     * The tooling of the graph just built: its readbacks' host memory, the timings' queries and the passes' debug labels.
-     * Readbacks of the graph before that still wait are delivered first, and with them or timings on, the GPU is waited
-     * for: neither may change while frames use them.
+     * The tooling of the graph just built ({@link FrameTooling#build}). With timings on or just turned off, the GPU is
+     * waited for and every frame's timings collected first: the build lays them out anew.
      */
     @AllowAllocation("building the graph, when it changes")
     private void startTooling(GraphBuilder g) {
-        // Readbacks of frames in flight are delivered as their frames finish, by the build they were made in: kept till
-        // then, so a rebuild (a buffer grown while streaming) waits for no GPU. Timings are laid out by the build:
-        // collected first, waiting.
-        if (timingsOn || timings != null) {
+        if (tooling.waitsForBuild()) {
             waitIdle();
             for (int slot = 0; slot < framesInFlight; slot++) {
                 finished(slot);
             }
         }
-        ReadbackPlan[] kept = Arrays.copyOf(retiredReadbacks, retiredCount + readbacks.length);
-        int keptCount = retiredCount;
-        for (ReadbackPlan readback : readbacks) {
-            if (readback.pending()) {
-                kept[keptCount++] = readback;
-            } else {
-                readback.close();
-            }
-        }
-        retiredReadbacks = kept;
-        retiredCount = keptCount;
-        readbacks = g.readbacks.toArray(new ReadbackPlan[0]);
-        for (ReadbackPlan readback : readbacks) {
-            readback.allocate(device, framesInFlight, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        }
-        if (timingsOn) {
-            if (timings == null) {
-                timings = new GpuTimings(device, framesInFlight);
-            }
-            int[] families = new int[order.length];
-            for (int c = 0; c < batches.chunkBatch().length; c++) {
-                int family = batches.queue()[batches.chunkBatch()[c]] == GRAPHICS ? graphicsQueue.family()
-                    : computeQueue.family();
-                Arrays.fill(families, batches.chunkFirstPass()[c], batches.chunkEndPass()[c], family);
-            }
-            timings.build(order, families);
-        } else if (timings != null) {
-            timings.close();
-            timings = null;
-        }
-        if (labelArena != null) {
-            labelArena.close();
-            labelArena = null;
-            passLabels = new long[0];
-        }
-        if (device.handle().getPhysicalDevice().getInstance().getCapabilities().vkCmdBeginDebugUtilsLabelEXT != 0) {
-            labelArena = Arena.ofShared();
-            passLabels = new long[order.length];
-            for (int i = 0; i < order.length; i++) {
-                MemorySegment label = labelArena.allocate(VkDebugUtilsLabelEXT.SIZEOF, VkDebugUtilsLabelEXT.ALIGNOF);
-                MemorySegment name = labelArena.allocateFrom(order[i].name);
-                memPutInt(label.address() + VkDebugUtilsLabelEXT.STYPE, VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT);
-                memPutAddress(label.address() + VkDebugUtilsLabelEXT.PLABELNAME, name.address());
-                passLabels[i] = label.address();
-            }
-        }
+        tooling.build(order, g.readbacks, batches, graphicsQueue.family(), computeQueue.family());
     }
 
     /**
@@ -1479,48 +1209,12 @@ public final class FrameGraph implements AutoCloseable {
      */
     @AllowAllocation("building the graph, when it changes")
     Persistent persistent(String key, ImageDesc desc, long size, int count) {
-        Persistent kept = persistents.get(key);
-        if (kept != null && !kept.is(desc, size, count)) {
-            replaced.add(kept);
-            kept = null;
-        }
-        if (kept == null) {
-            kept = desc != null ? new Persistent(device, key, desc)
-                : new Persistent(device, key, size, count, graphicsQueue.family(), computeQueue.family());
-            kept.firstFrame = frame + 1; // the frame being built is its first
-            persistents.put(key, kept);
-        }
-        kept.built = builds + 1L;
-        return kept;
-    }
-
-    /**
-     * The persistent resources of the graph just built: its buffer histories, to swap each frame; those no build asks
-     * for any more, and those replaced, are freed once no frame in flight uses them.
-     */
-    @AllowAllocation("building the graph, when it changes")
-    private void startPersistents(GraphBuilder g) {
-        bufferHistories = new Persistent[g.bufferHistories.size()];
-        for (int h = 0; h < bufferHistories.length; h++) {
-            bufferHistories[h] = g.bufferHistories.get(h).pair;
-        }
-        bufferHistoryView = g.bufferHistoryViews.toArray(new ViewPort[0]);
-        for (java.util.Iterator<Persistent> it = persistents.values().iterator(); it.hasNext();) {
-            Persistent kept = it.next();
-            if (kept.built != builds + 1L) {
-                it.remove();
-                retiring.add(kept);
-            }
-        }
-        for (Persistent old : replaced) {
-            retiring.add(old);
-        }
-        replaced.clear();
+        return persistents.get(key, desc, size, count, frame, builds + 1L);
     }
 
     /** How many persistent images and buffers the graph keeps. */
     int persistentCount() {
-        return persistents.size();
+        return persistents.count();
     }
 
     /** Whether {@code history}'s last frame buffer holds what that frame wrote. */
@@ -1609,38 +1303,12 @@ public final class FrameGraph implements AutoCloseable {
             texture.close();
         }
         textures.clear();
-        for (Persistent kept : persistents.values()) {
-            kept.close();
-        }
-        persistents.clear();
-        for (Persistent old : replaced) {
-            old.close();
-        }
-        replaced.clear();
-        bufferHistories = new Persistent[0];
-        bufferHistoryView = new ViewPort[0];
+        persistents.close();
         settingsWatch.close();
         retiring.close(); // the frames are done: removed textures go now
         retiring = new Retiring(frameSlots); // for what is removed after, at once
-        for (ReadbackPlan readback : readbacks) {
-            readback.close();
-        }
-        readbacks = new ReadbackPlan[0];
-        for (int i = 0; i < retiredCount; i++) {
-            retiredReadbacks[i].close();
-        }
-        retiredReadbacks = new ReadbackPlan[0];
-        retiredCount = 0;
+        tooling.close();
         Arrays.fill(slotFrame, -1);
-        if (timings != null) {
-            timings.close();
-            timings = null;
-        }
-        if (labelArena != null) {
-            labelArena.close();
-            labelArena = null;
-            passLabels = new long[0];
-        }
         resources.close();
         activeHistories = new HistoryPair[0];
         physicals = new Physical[0];
