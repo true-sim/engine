@@ -29,9 +29,11 @@ import com.truesim.engine.graph.Technique;
 import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.ClusteredForwardShading;
+import com.truesim.engine.render.ClusteredLights;
 import com.truesim.engine.render.GeometryPool;
 import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.Keys;
+import com.truesim.engine.render.Lights;
 import com.truesim.engine.render.Materials;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RenderView;
@@ -72,8 +74,8 @@ import org.lwjgl.vulkan.VkBufferImageCopy;
 /**
  * Renders Khronos sample models (glTF-Sample-Assets' {@code Models}, given by {@code -PgltfSamples=...}) to PNG images
  * in {@code build/samples}, to compare by eye with the models' screenshots: many test models show green checks where a
- * renderer is right and red crosses where it is not. Each model is framed from the front (+z), lit by the sun and the
- * sky, tone mapped with Khronos PBR Neutral. Skipped without the samples; {@code -PgltfModels=A,B} picks models.
+ * renderer is right and red crosses where it is not. Each model is framed from the front (+z), lit by its own glTF
+ * lights where it has some (KHR_lights_punctual) or else the sun, and the sky; tone mapped with Khronos PBR Neutral. Skipped without the samples; {@code -PgltfModels=A,B} picks models.
  */
 class SampleModelsRender {
 
@@ -127,7 +129,8 @@ class SampleModelsRender {
             AssetRef<ModelData> ref = paths.ref(RenderAssets.MODEL, "s://" + file.getFileName());
             cache.acquire(ref);
             ModelData model = await(tasks, cache, ref);
-            double[] bounds = bounds(model, tasks, cache);
+            double[][] world = worldMatrices(model);
+            double[] bounds = bounds(model, world, tasks, cache);
             SceneGraph scene = new SceneGraph(new ChangeClock());
             Renderables renderables = new Renderables(scene);
             model.spawn(scene, renderables, scene.create());
@@ -154,6 +157,11 @@ class SampleModelsRender {
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
             GpuBuffer readback = GpuBuffer.hostVisible(device, SIZE * SIZE * 8L, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
             closing.add(readback);
+            Lights lights = lights(device, model, world, bounds);
+            if (lights != null) {
+                closing.add(lights);
+                port.add(new ClusteredLights(lights, main));
+            }
             port.add(new ClusteredForwardShading(geometry, main, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT)
                     .clearColor(0.05f, 0.05f, 0.05f))
                 .add(new WeightedBlendedTransparency(geometry, main)).add(new Readback(readback))
@@ -211,17 +219,68 @@ class SampleModelsRender {
         return cache.get(ref);
     }
 
-    /** The model's box in world space: min x, y, z, max x, y, z, its meshes' boxes moved by their nodes. */
-    private static double[] bounds(ModelData model, TaskScheduler tasks, AssetCache cache)
-        throws InterruptedException {
+    /** Each node's world matrix, column-major. */
+    private static double[][] worldMatrices(ModelData model) {
         List<ModelData.Node> nodes = model.nodes();
         double[][] world = new double[nodes.size()][];
+        for (int i = 0; i < nodes.size(); i++) {
+            ModelData.Node n = nodes.get(i);
+            world[i] = n.parent() < 0 ? trs(n) : multiply(world[n.parent()], trs(n));
+        }
+        return world;
+    }
+
+    /**
+     * The model's own lights (glTF's KHR_lights_punctual) at their nodes, as the renderer's: intensity times color
+     * (lux for directional lights, candela, the illuminance at 1 m, for the others); null without any.
+     */
+    private static Lights lights(VulkanDevice device, ModelData model, double[][] world, double[] bounds) {
+        List<ModelData.Node> nodes = model.nodes();
+        int count = 0;
+        for (ModelData.Node n : nodes) {
+            count += n.light() >= 0 ? 1 : 0;
+        }
+        if (count == 0) {
+            return null;
+        }
+        Lights lights = new Lights(device, count, 1);
+        double reach = 10 * Math.max(1, Math.max(bounds[3] - bounds[0], Math.max(bounds[4] - bounds[1],
+            bounds[5] - bounds[2])));
+        int index = 0;
+        for (int i = 0; i < nodes.size(); i++) {
+            if (nodes.get(i).light() < 0) {
+                continue;
+            }
+            ModelData.Light l = model.lights().get(nodes.get(i).light());
+            double[] m = world[i];
+            double length = Math.sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
+            float dx = (float) (-m[8] / length); // lights shine along their node's -z
+            float dy = (float) (-m[9] / length);
+            float dz = (float) (-m[10] / length);
+            float r = (float) (l.r() * l.intensity());
+            float g = (float) (l.g() * l.intensity());
+            float b = (float) (l.b() * l.intensity());
+            float range = (float) (l.range() > 0 ? l.range() : reach);
+            switch (l.kind()) {
+                case DIRECTIONAL -> lights.directional(index, dx, dy, dz, r, g, b);
+                case POINT -> lights.point(index, m[12], m[13], m[14], range, r, g, b);
+                case SPOT -> lights.spot(index, m[12], m[13], m[14], range, r, g, b, dx, dy, dz, l.innerCone(),
+                    l.outerCone());
+            }
+            index++;
+        }
+        lights.setCount(count);
+        return lights;
+    }
+
+    /** The model's box in world space: min x, y, z, max x, y, z, its meshes' boxes moved by their nodes. */
+    private static double[] bounds(ModelData model, double[][] world, TaskScheduler tasks, AssetCache cache)
+        throws InterruptedException {
+        List<ModelData.Node> nodes = model.nodes();
         double[] box = {Double.MAX_VALUE, Double.MAX_VALUE, Double.MAX_VALUE, -Double.MAX_VALUE, -Double.MAX_VALUE,
             -Double.MAX_VALUE};
         for (int i = 0; i < nodes.size(); i++) {
             ModelData.Node n = nodes.get(i);
-            double[] local = trs(n);
-            world[i] = n.parent() < 0 ? local : multiply(world[n.parent()], local);
             if (n.mesh() == null) {
                 continue;
             }

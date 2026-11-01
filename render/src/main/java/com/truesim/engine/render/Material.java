@@ -55,6 +55,17 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
     public static final int FEATURE_TRANSMISSION = MaterialsConstants.FEATURE_TRANSMISSION;
     /** Volume: a transmissive surface's inside, refracting and tinting, as glTF's {@code KHR_materials_volume}. */
     public static final int FEATURE_VOLUME = MaterialsConstants.FEATURE_VOLUME;
+    /** Anisotropy: highlights stretched along a direction, as glTF's {@code KHR_materials_anisotropy}. */
+    public static final int FEATURE_ANISOTROPY = MaterialsConstants.FEATURE_ANISOTROPY;
+    /** Iridescence: a thin film's interference colors, as glTF's {@code KHR_materials_iridescence}. */
+    public static final int FEATURE_IRIDESCENCE = MaterialsConstants.FEATURE_IRIDESCENCE;
+    /** Dispersion: refraction spreading colors, with a volume, as glTF's {@code KHR_materials_dispersion}. */
+    public static final int FEATURE_DISPERSION = MaterialsConstants.FEATURE_DISPERSION;
+    /**
+     * Diffuse transmission: light scattered through thin surfaces, as glTF's
+     * {@code KHR_materials_diffuse_transmission}.
+     */
+    public static final int FEATURE_DIFFUSE_TRANSMISSION = MaterialsConstants.FEATURE_DIFFUSE_TRANSMISSION;
     /** Unlit: the surface shows its base color as it is, as glTF's {@code KHR_materials_unlit}. */
     public static final int FEATURE_UNLIT = MaterialsConstants.FEATURE_UNLIT;
     /**

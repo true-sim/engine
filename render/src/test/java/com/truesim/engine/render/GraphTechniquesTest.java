@@ -44,6 +44,10 @@ import com.truesim.engine.render.blocks.DepthPyramid;
 import com.truesim.engine.render.materials.CarPaint;
 import com.truesim.engine.render.materials.CarPaintParameters;
 import com.truesim.engine.render.materials.ClearcoatParameters;
+import com.truesim.engine.render.materials.DiffuseTransmissionParameters;
+import com.truesim.engine.render.materials.DispersionParameters;
+import com.truesim.engine.render.materials.IridescenceParameters;
+import com.truesim.engine.render.materials.AnisotropyParameters;
 import com.truesim.engine.render.materials.VolumeParameters;
 import com.truesim.engine.render.materials.TransmissionParameters;
 import com.truesim.engine.render.materials.SpecularParameters;
@@ -2213,6 +2217,124 @@ class GraphTechniquesTest {
             assertThat(red(center)).isLessThan(8);
             scene.setMaterials(null);
         }
+    }
+
+    @Test
+    void anisotropyIridescenceAndDiffuseTransmissionChangeTheLight() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 16)) {
+            // A smooth black dielectric, its highlight from the sun; then a white matte one.
+            MetallicRoughnessParameters black = MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(0.35f)
+                .withMetallic(0);
+            MetallicRoughnessParameters matte = MR.withBaseColor(new Color(1, 1, 1, 1)).withRoughness(1)
+                .withMetallic(0);
+            AnisotropyParameters stretched = AnisotropyParameters.DEFAULTS.withAnisotropyStrength(1);
+            int plain = materials.add(new Material(black));
+            int alongU = materials.add(new Material(black).feature(stretched));
+            int alongV = materials.add(new Material(black).feature(stretched
+                .withAnisotropyRotation((float) (Math.PI / 2))));
+            // Grey metal, with a thin film and without: it reflects the sky enough for the color to show (over a perfect
+            // mirror a film changes nothing).
+            MetallicRoughnessParameters silver = MR.withBaseColor(new Color(0.5, 0.5, 0.5, 1)).withRoughness(0.35f)
+                .withMetallic(1);
+            int metal = materials.add(new Material(silver));
+            int film = materials.add(new Material(silver).feature(IridescenceParameters.DEFAULTS
+                .withIridescenceFactor(1).withIridescenceThicknessMaximum(300)));
+            int white = materials.add(new Material(matte));
+            // A green leaf letting red through: what goes through takes the transmission color in place of the base
+            // color, not times it (green times red would be black).
+            int leaf = materials.add(new Material(matte.withBaseColor(new Color(0, 1, 0, 1)))
+                .feature(DiffuseTransmissionParameters.DEFAULTS.withDiffuseTransmissionFactor(1)
+                    .withDiffuseTransmissionColorFactor(new Color(1, 0, 0, 1))));
+            scene.setMaterials(materials);
+            scene.removeFrom(1);
+            // Looking down at the quad from above and behind it, so the sun's reflection falls on it.
+            Camera camera = new Camera().set(0, -0.75, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            List<Technique> shadings = new java.util.ArrayList<>();
+            if (device.primitiveIds()) {
+                shadings.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            }
+            for (int pass = 0; pass <= shadings.size(); pass++) {
+                if (pass > 0) {
+                    main.port().replace(shadings.get(pass - 1));
+                }
+                int[] list = {plain, alongU, alongV, film, white, leaf, metal};
+                int[][] shown = new int[list.length][];
+                for (int i = 0; i < list.length; i++) {
+                    // Lying flat (facing up), below the camera
+                    scene.set(0, quadMesh, list[i], 0, -1, -2, -HALF, 0, 0, HALF, 2, 2, 2);
+                    frame();
+                    shown[i] = image().clone();
+                }
+                assertThat(difference(shown[0], shown[1])).as("pass %d: anisotropic: another highlight", pass)
+                    .isGreaterThan(1.0);
+                assertThat(difference(shown[1], shown[2])).as("pass %d: turned: another again", pass)
+                    .isGreaterThan(1.0);
+                int center = (SIZE * 3 / 4) * SIZE + SIZE / 2;
+                int filmed = shown[3][center];
+                assertThat(Math.max(red(filmed), Math.max(green(filmed), blue(filmed)))
+                    - Math.min(red(filmed), Math.min(green(filmed), blue(filmed))))
+                    .as("pass %d: a thin film colors the reflection", pass).isGreaterThan(4);
+                int grey = shown[6][center];
+                assertThat(Math.abs(red(grey) - blue(grey))).as("pass %d: without, grey", pass).isLessThan(3);
+                int lit = shown[4][center];
+                int through = shown[5][center];
+                assertThat(green(through)).as("pass %d: the light it lets through is not reflected", pass)
+                    .isLessThan(green(lit) / 2);
+                assertThat(red(through)).as("pass %d: the sky from below, through red", pass)
+                    .isGreaterThan(green(through) + 10);
+            }
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
+    void dispersionFringesWhatThickGlassRefracts() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 8)) {
+            // A white wall on the left, nothing on the right; thick clear glass turned 45 degrees before the edge.
+            int wall = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1)
+                .withEmissive(new Color(1, 1, 1, 1))));
+            MetallicRoughnessParameters clearGlass = MR.withBaseColor(new Color(1, 1, 1, 1)).withRoughness(0.05f)
+                .withMetallic(0);
+            Material thick = new Material(clearGlass).feature(TransmissionParameters.DEFAULTS.withTransmissionFactor(1))
+                .feature(VolumeParameters.DEFAULTS.withThicknessFactor(1));
+            int glass = materials.add(thick);
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, wall, -1, 0, -3, 0, 0, 0, 1, 1, 2, 1);
+            scene.set(1, quadMesh, glass, 0, 0, -2, 0, 0.38268343f, 0, 0.92387953f, 1, 1, 1);
+            scene.removeFrom(2);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .add(new WeightedBlendedTransparency(SceneGeometry.meshlets(renderer), main))
+                .output(Keys.SCENE_COLOR, output);
+            frame();
+            assertThat(fringed(image())).as("no dispersion: no colored edge").isZero();
+            materials.set(glass, thick.feature(DispersionParameters.DEFAULTS.withDispersion(10)));
+            frame();
+            assertThat(fringed(image())).as("dispersion: red and blue bent apart at the edge").isGreaterThan(4);
+            scene.setMaterials(null);
+        }
+    }
+
+    /** How many pixels of {@code image} are colored: red and blue far apart. */
+    private static int fringed(int[] image) {
+        int count = 0;
+        for (int pixel : image) {
+            if (Math.abs(red(pixel) - blue(pixel)) > 40) {
+                count++;
+            }
+        }
+        return count;
     }
 
     @Test

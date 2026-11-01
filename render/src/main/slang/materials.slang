@@ -101,8 +101,19 @@ public static const uint FEATURE_SHEEN = 32;
 public static const uint FEATURE_TRANSMISSION = 64;
 /** Volume (glTF's KHR_materials_volume): a transmissive surface's inside, refracting and tinting what passes. */
 public static const uint FEATURE_VOLUME = 128;
+/** Anisotropy (glTF's KHR_materials_anisotropy): highlights stretched along a direction, as brushed metal. */
+public static const uint FEATURE_ANISOTROPY = 256;
+/** Iridescence (glTF's KHR_materials_iridescence): a thin film's colors, as soap bubbles and oil. */
+public static const uint FEATURE_IRIDESCENCE = 512;
+/** Dispersion (glTF's KHR_materials_dispersion): refraction spreading colors, as prisms and gems (with a volume). */
+public static const uint FEATURE_DISPERSION = 1024;
+/**
+ * Diffuse transmission (glTF's KHR_materials_diffuse_transmission): light scattered through thin surfaces, as leaves,
+ * paper and lampshades.
+ */
+public static const uint FEATURE_DIFFUSE_TRANSMISSION = 2048;
 /** How many features there are: their bits are the low FEATURE_BITS of a mask. */
-public static const uint FEATURE_BITS = 8;
+public static const uint FEATURE_BITS = 12;
 
 /**
  * A texture reference, as materials' texture fields hold them: slot bits 0-15, sampler 16-20, bit 21 the second UV set,

@@ -346,6 +346,13 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   Beer's law and tinted by the albedo; the diffuse part gives way to it. Glass behind glass, and blended surfaces behind
   glass, are not seen through it (the copy holds the opaque scene); the volume's thickness is in the mesh's units,
   scaled by the instance's largest scale.
+- **D136e** (built) Anisotropy, iridescence, dispersion and diffuse transmission as features (`materials/anisotropy.slang`,
+  `iridescence.slang`, `dispersion.slang`, `diffuseTransmission.slang`; glTF's field names, the importer's
+  `diffuse_transmission` taken too), as the glTF sample viewer: an anisotropic GGX lobe along the tangent frame turned
+  by the rotation (any frame without tangents); a thin film's reflectance (Belcour and Barla) evaluated once per point
+  and mixed into the Fresnel; each color channel refracted by its own IOR through a volume; and light through thin
+  surfaces in the transmission color, from lights behind and the sky. Checked against the Khronos models; the specular
+  ones (anisotropy, iridescence) wait for environment lighting to compare fully.
 - **D137** (new) Checked against the Khronos glTF sample models: an optional sweep (`-PgltfSamples=...`) imports every
   model with all its parts.
 
