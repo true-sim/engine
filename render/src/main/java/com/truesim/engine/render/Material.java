@@ -41,8 +41,13 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
     public static final int FEATURE_CLEARCOAT = MaterialsConstants.FEATURE_CLEARCOAT;
     /** Texture transforms: textures naming one ({@link TextureSampler#transform}) sample moved, turned, scaled UVs. */
     public static final int FEATURE_TEXTURE_TRANSFORM = MaterialsConstants.FEATURE_TEXTURE_TRANSFORM;
-    /** The features every type allows, whatever its parameters say: they act on how textures are read. */
-    public static final int EVERY_TYPES_FEATURES = FEATURE_TEXTURE_TRANSFORM;
+    /** Unlit: the surface shows its base color as it is, as glTF's {@code KHR_materials_unlit}. */
+    public static final int FEATURE_UNLIT = MaterialsConstants.FEATURE_UNLIT;
+    /**
+     * The features every type allows, whatever its parameters say: how textures are read, and showing the type's
+     * albedo unlit.
+     */
+    public static final int EVERY_TYPES_FEATURES = FEATURE_TEXTURE_TRANSFORM | FEATURE_UNLIT;
     /** How many features there are, as materials.slang has them. */
     static final int FEATURE_BITS = MaterialsConstants.FEATURE_BITS;
     /** Every feature bit. */

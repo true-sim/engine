@@ -2,6 +2,7 @@ package com.truesim.engine.render;
 
 import com.truesim.engine.render.materials.ClearcoatParameters;
 import com.truesim.engine.render.materials.TextureTransformParameters;
+import com.truesim.engine.render.materials.UnlitParameters;
 
 /** The engine's features by name, as material data names them: their parameters from data by field name. */
 public final class MaterialFeatures {
@@ -14,6 +15,7 @@ public final class MaterialFeatures {
         return switch (name) {
             case ClearcoatParameters.NAME -> ClearcoatParameters.fromValues(values);
             case TextureTransformParameters.NAME -> TextureTransformParameters.fromValues(values);
+            case UnlitParameters.NAME -> UnlitParameters.fromValues(values);
             default -> null;
         };
     }

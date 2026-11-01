@@ -5,6 +5,7 @@ module common;
 import bindless;
 __exported import materials.metallicRoughness;
 __exported import materials.clearcoat;
+__exported import materials.unlit;
 __exported import lights;
 
 /** One mesh in the geometry pool: where its data lies in the pool's buffers, and its quantization box. 96 bytes. */
@@ -574,6 +575,10 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
     {
         float depth = mul(view.viewProjection, float4(in.world, 1)).w; // along the view direction
         color += lightList(rays, lights, s, in.world, toViewer, pixel, depth);
+    }
+    if ((features & FEATURE_UNLIT) != 0)
+    {
+        color = applyUnlit(color, s, materialFeature<UnlitParameters>(ref, FEATURE_UNLIT));
     }
     return float4(color, 1);
 }

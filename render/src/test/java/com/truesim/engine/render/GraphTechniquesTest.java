@@ -46,6 +46,7 @@ import com.truesim.engine.render.materials.CarPaintParameters;
 import com.truesim.engine.render.materials.ClearcoatParameters;
 import com.truesim.common.math.Vec4;
 import com.truesim.engine.render.materials.TextureTransformParameters;
+import com.truesim.engine.render.materials.UnlitParameters;
 import com.truesim.engine.render.materials.Glow;
 import com.truesim.engine.render.materials.GlowParameters;
 import com.truesim.engine.render.materials.Tinted;
@@ -1773,6 +1774,55 @@ class GraphTechniquesTest {
                 counts = redAndGreen();
                 assertThat(counts[0]).as("pass %d: the second UV set, no red", pass).isZero();
                 assertThat(counts[1]).as("pass %d: the second UV set, green", pass).isGreaterThan(SIZE * SIZE / 8);
+            }
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
+    void unlitMaterialsShowTheirBaseColorAsItIs() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 8)) {
+            MetallicRoughnessParameters blue = MR.withBaseColor(new Color(0.2, 0.6, 0.9, 1));
+            int lit = materials.add(new Material(blue));
+            int unlit = materials.add(new Material(blue).feature(UnlitParameters.DEFAULTS));
+            int half = materials.add(new Material(blue).feature(UnlitParameters.DEFAULTS.withAmount(0.5f)));
+            scene.setMaterials(materials);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            List<Technique> shadings = new java.util.ArrayList<>();
+            if (device.primitiveIds()) {
+                shadings.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            }
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            for (int pass = 0; pass <= shadings.size(); pass++) {
+                if (pass > 0) {
+                    main.port().replace(shadings.get(pass - 1));
+                }
+                scene.set(0, quadMesh, unlit, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                int shown = image()[center];
+                assertThat(shown & 0xff).as("pass %d: red", pass).isCloseTo(51, within(2));
+                assertThat((shown >> 8) & 0xff).as("pass %d: green", pass).isCloseTo(153, within(2));
+                assertThat((shown >> 16) & 0xff).as("pass %d: blue", pass).isCloseTo(230, within(2));
+                scene.set(0, quadMesh, lit, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                int litColor = image()[center];
+                assertThat(litColor).as("pass %d: lit differs", pass).isNotEqualTo(shown);
+                scene.set(0, quadMesh, half, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                int blended = image()[center];
+                for (int shift = 0; shift < 24; shift += 8) {
+                    int expected = (((litColor >> shift) & 0xff) + ((shown >> shift) & 0xff)) / 2;
+                    assertThat((blended >> shift) & 0xff).as("pass %d: halfway", pass).isCloseTo(expected,
+                        within(3));
+                }
             }
             scene.setMaterials(null);
         }

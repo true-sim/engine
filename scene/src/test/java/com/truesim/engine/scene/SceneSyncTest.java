@@ -36,6 +36,7 @@ import com.truesim.common.math.color.Color;
 import com.truesim.engine.render.Material;
 import com.truesim.common.math.Vec4;
 import com.truesim.engine.render.materials.TextureTransformParameters;
+import com.truesim.engine.render.materials.UnlitParameters;
 import com.truesim.engine.render.TextureSampler;
 import com.truesim.engine.render.materials.ClearcoatParameters;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
@@ -775,6 +776,28 @@ class SceneSyncTest {
         assertThatIllegalArgumentException().isThrownBy(() -> many.add("t9", null, 9, null))
             .withMessageContaining("at most 8 texture transforms");
         assertThat(new SceneResources.Transforms().feature()).isNull();
+    }
+
+    @Test
+    void unlitInTheDataTurnsTheFeatureOnForAnyType() throws InterruptedException {
+        materials.register(Tinted.TYPE);
+        AssetRef<MaterialData> flat = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
+            (glow, seed) -> MaterialData.builder("tinted").feature("unlit", unlit -> { }).build(), new Glow(1, 1, 1),
+            71);
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        long node = facing(scene, 0, 0, -3);
+        renderables.set(node, SQUARE, List.of(flat));
+        for (int round = 0; round < 3; round++) {
+            update(scene, renderables, sync);
+            load();
+        }
+        update(scene, renderables, sync);
+        Material made = materials.material(sync.firstMaterialOf(node));
+        assertThat(made.parameters()).isInstanceOf(TintedParameters.class);
+        assertThat(made.features()).containsExactly(UnlitParameters.DEFAULTS);
+        assertThat(made.featureMask()).isEqualTo(Material.FEATURE_UNLIT);
     }
 
     private void update(SceneGraph scene, Renderables renderables, SceneSync sync) {

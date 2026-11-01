@@ -86,8 +86,10 @@ public struct Material
 public static const uint FEATURE_CLEARCOAT = 1;
 /** Texture transforms (glTF's KHR_texture_transform): textures naming one are sampled at moved, turned, scaled UVs. */
 public static const uint FEATURE_TEXTURE_TRANSFORM = 2;
+/** Unlit (glTF's KHR_materials_unlit): the surface shows its base color as it is. */
+public static const uint FEATURE_UNLIT = 4;
 /** How many features there are: their bits are the low FEATURE_BITS of a mask. */
-public static const uint FEATURE_BITS = 2;
+public static const uint FEATURE_BITS = 3;
 
 /**
  * A texture reference, as materials' texture fields hold them: slot bits 0-15, sampler 16-19, bit 20 the second UV set,

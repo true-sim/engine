@@ -836,7 +836,7 @@ public final class SceneResources implements AutoCloseable {
                     readOfFeature, transforms));
                 if (feature == null) {
                     problem(entry, "no material feature " + name + ": it is shown without it");
-                } else if ((type.allowedFeatures() & feature.feature()) == 0) {
+                } else if (((type.allowedFeatures() | Material.EVERY_TYPES_FEATURES) & feature.feature()) == 0) {
                     problem(entry, "material type " + type.name() + " allows no " + name + ": it is shown without it");
                 } else {
                     material = material.feature(feature);
