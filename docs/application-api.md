@@ -66,7 +66,9 @@ public final class RockGarden extends BaseGame {
 listeners, scoped views, `toMap`/`load`), declared as static constants in the modules using them; in `engine-platform`.
 **Built since:** the module of its own (D121), layers and constraints (D6, D14, D15: `Layer`, `preferred`,
 `Constraint`, `commandLine`), the registry with groups and tiers (D8–D12: `SettingRegistry`, `SettingGroup`,
-`SettingTier`; plugins call it once plugins exist). **Missing:** availability (D13).
+`SettingTier`; plugins call it once plugins exist), availability (D13: `Availability`, `availableWhen`,
+`dependsOn`, `lock`, `applied`, `refreshAvailability`). Still to come with the app layer: `app.lock`/`app.limit` as
+sugar, settings files per app id (D7), plugins registering their lists (D8).
 
 - **D6** (revised) The store has four explicit layers, lowest first: engine defaults, game defaults
   (`app.defaults(...)`), the player's values, the command line (`--set name=value`). Only the player layer is saved.
