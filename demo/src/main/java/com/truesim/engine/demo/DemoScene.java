@@ -17,11 +17,16 @@ import java.util.SplittableRandom;
 
 /**
  * What the demo draws: rolling terrain with rocks on it, some of them spinning (instances changing every frame), lit by
- * the sun and colored lights circling the middle (lights changing every frame).
+ * the sun and colored lights circling the middle (lights changing every frame). With
+ * {@code -Dtruesim.demo.character=<path to the Khronos Fox.gltf>}, an animated fox stands among them
+ * ({@link DemoCharacter}).
  */
 final class DemoScene implements AutoCloseable {
 
     static final int TERRAIN_SIZE = 256;
+    /** Where the fox stands, if there is one: in front of the benchmark's camera. */
+    static final double CHARACTER_X = 26;
+    static final double CHARACTER_Z = 26;
     private static final int ROCKS = Integer.getInteger("truesim.demo.rocks", 800); // more for benchmarks
     private static final int POINT_LIGHTS = 6;
 
@@ -34,6 +39,7 @@ final class DemoScene implements AutoCloseable {
     private final int rock;
     private final float[] rocks = new float[ROCKS * 5]; // x, y, z, scale, spin speed (0: still)
     private final int[] rockMaterials = new int[ROCKS];
+    private final DemoCharacter character;
 
     DemoScene(VulkanDevice device, FrameSlots slots, int colorFormat, int depthFormat) {
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 1 << 16, 8), slots);
@@ -60,9 +66,17 @@ final class DemoScene implements AutoCloseable {
         geometry = SceneGeometry.meshlets(renderer);
         scene.set(0, terrain, ground, 0f, 0f, 0f, 0f, 0f, 0f, 1f, 1f, 1f, 1f);
         SplittableRandom random = new SplittableRandom(7);
+        boolean clearing = System.getProperty("truesim.demo.character") != null;
         for (int i = 0; i < ROCKS; i++) {
             double x = random.nextDouble(-TERRAIN_SIZE / 2.0 + 4, TERRAIN_SIZE / 2.0 - 4);
             double z = random.nextDouble(-TERRAIN_SIZE / 2.0 + 4, TERRAIN_SIZE / 2.0 - 4);
+            double dx = x - CHARACTER_X;
+            double dz = z - CHARACTER_Z;
+            double away = Math.sqrt(dx * dx + dz * dz);
+            if (clearing && away < 12) { // a clearing for the fox: rocks pushed out of it
+                x = CHARACTER_X + dx / Math.max(away, 1e-3) * 12;
+                z = CHARACTER_Z + dz / Math.max(away, 1e-3) * 12;
+            }
             float scale = (float) (0.3 + 1.7 * Maths.pow(random.nextDouble(), 3));
             rocks[5 * i] = (float) x;
             rocks[5 * i + 1] = (float) DemoMeshes.height(x, z) + scale * 0.6f;
@@ -72,6 +86,14 @@ final class DemoScene implements AutoCloseable {
             rockMaterials[i] = palette[i % 23 == 0 ? 4 : random.nextInt(4)];
         }
         lights = new Lights(device, POINT_LIGHTS + 1, 8, slots);
+        String file = System.getProperty("truesim.demo.character");
+        try {
+            character = file == null ? null : new DemoCharacter(device, slots, pool, materials, scene,
+                java.nio.file.Path.of(file), CHARACTER_X, CHARACTER_Z);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
         update(0);
     }
 
@@ -106,10 +128,20 @@ final class DemoScene implements AutoCloseable {
             lights.point(l + 1, x, DemoMeshes.height(x, z) + 2.5, z, 14, r, g, b);
         }
         lights.setCount(POINT_LIGHTS + 1);
+        if (character != null) {
+            // It looks at the first circling light
+            double a = seconds * 0.3;
+            double lx = 25 * Maths.cos(a);
+            double lz = 25 * Maths.sin(a);
+            character.update(seconds, lx, DemoMeshes.height(lx, lz) + 2.5, lz);
+        }
     }
 
     @Override
     public void close() {
+        if (character != null) {
+            character.close();
+        }
         lights.close();
         renderer.close();
         scene.close();

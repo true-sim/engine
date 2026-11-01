@@ -44,7 +44,7 @@ public final class StereoBench {
 
     private static final int WIDTH = 2064;
     private static final int HEIGHT = 2208;
-    private static final int FRAMES = 300;
+    private static final int FRAMES = Integer.getInteger("truesim.demo.frames", 300);
 
     private StereoBench() {
     }
@@ -109,10 +109,23 @@ public final class StereoBench {
             }
             for (int frame = 0; frame < FRAMES; frame++) {
                 world.update(frame / 72.0);
+                // -Ptruesim.demo.eye=x,y,z,tx,ty,tz: a camera of its own, looking from (x, y, z) at (tx, ty, tz)
+                String eye = System.getProperty("truesim.demo.eye");
                 for (int e = 0; e < 2; e++) {
                     double offset = (e == 0 ? -0.032 : 0.032);
-                    eyes[e].position(30 + offset, 6, 30).set(-0.7, -0.15, -0.7, 0, 1, 0, Math.PI / 2, WIDTH, HEIGHT,
-                        0.05);
+                    if (eye == null) {
+                        eyes[e].position(30 + offset, 6, 30).set(-0.7, -0.15, -0.7, 0, 1, 0, Math.PI / 2, WIDTH,
+                            HEIGHT, 0.05);
+                    } else {
+                        String[] v = eye.split(",");
+                        double ex = Double.parseDouble(v[0]);
+                        double ez = Double.parseDouble(v[2]);
+                        double ey = height(v[1], ex, ez);
+                        double tx = Double.parseDouble(v[3]);
+                        double tz = Double.parseDouble(v[5]);
+                        eyes[e].position(ex + offset, ey, ez).set(tx - ex, height(v[4], tx, tz) - ey, tz - ez, 0, 1,
+                            0, Math.PI / 3, WIDTH, HEIGHT, 0.05);
+                    }
                 }
                 if (shared) {
                     sharedCascades.update();
@@ -138,6 +151,15 @@ public final class StereoBench {
                 }
                 graph.beginFrame();
                 graph.submit(0, 0);
+                // -Ptruesim.demo.pngFrames=60,180: the left eye of those frames too, next to the png named
+                String pngFrames = System.getProperty("truesim.demo.pngFrames");
+                String pngFile = System.getProperty("truesim.demo.png");
+                if (pngFrames != null && pngFile != null
+                    && List.of(pngFrames.split(",")).contains(Integer.toString(frame))) {
+                    device.waitIdle();
+                    writePng(device, targets.getFirst(), java.nio.file.Path.of(pngFile.replace(".png",
+                        "_" + frame + ".png")));
+                }
                 if (captured) {
                     device.waitIdle();
                     System.out.println("RenderDoc capture written: " + renderDoc.end());
@@ -178,6 +200,12 @@ public final class StereoBench {
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    /** A height: a number, or g+h for h above the terrain at (x, z). */
+    private static double height(String value, double x, double z) {
+        return value.startsWith("g") ? DemoMeshes.height(x, z) + Double.parseDouble(value.substring(1))
+            : Double.parseDouble(value);
     }
 
     /** Writes the left eye's image (left in the transfer-source layout by the graph) to a PNG file. */

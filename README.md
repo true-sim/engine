@@ -1054,6 +1054,11 @@ shadows and colored lights circling the middle, to try what the engine does live
 title shows the frame rate, GPU time, render size and display encoding. Settings persist in
 `~/.truesim/demo.properties`.
 
+- `-Pcharacter=<glTF-Sample-Assets>/Models/Fox/glTF/Fox.gltf` puts the Khronos fox in a clearing at (26, 26), through
+  the whole animation path: surveying, cross-fading into a walk that speeds up into a run (a blend space) and back, its
+  head looking at a circling light, its tail after a wagging point (FABRIK with limits), its four feet on the terrain
+  (foot placement), skinned on the GPU. The stereo bench takes it too, with `-Peye=x,y,z,tx,ty,tz` for a camera of its
+  own (`g+h` for heights above the ground), `-Pframes=780` and `-PpngFrames=108,612 -Ppng=fox.png` for images.
 - `--args="--vr"` adds a headset through OpenXR (SteamVR, Quest Link, ...): both eyes render the scene, the left
   thumbstick walks, triggers buzz, `P` shows the left eye on the desktop for people watching.
 - `--args="--validation"` turns Vulkan validation on and prints the error count at exit; `--seconds=10` quits by
