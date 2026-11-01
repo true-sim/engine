@@ -2,6 +2,7 @@ package com.truesim.engine.scene;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.jobs.JobSystem;
+import com.truesim.common.math.Maths;
 import com.truesim.common.math.TransformArray;
 import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.render.GpuScene;
@@ -12,6 +13,7 @@ import com.truesim.scene.core.NodeHandle;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.render.MaterialData;
 import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.SkinBinding;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.Arrays;
@@ -57,6 +59,9 @@ import java.util.Objects;
  *       (the lowest free id), so what the GPU keeps per instance stays with it. Deterministic: the same changes give the
  *       same ids. A new renderable may take an id freed the same frame, and then starts with what the GPU kept for the
  *       id (seen or hidden by occlusion culling) for its first frame.</li>
+ *   <li><b>Skins:</b> a renderable with a skin ({@link Renderables#setSkin}) whose mesh has joints draws a copy of
+ *       its own ({@code GeometryPool.addDeformed}), posed each update from its joints' world transforms relative to
+ *       its node, in doubles, and skinned on the GPU before anything draws.</li>
  *   <li><b>Layers and shadows:</b> instances are on their nodes' layers ({@code SceneGraph.setLayers}), drawn in views
  *       of any of them ({@link com.truesim.engine.render.RenderView#filter}), and cast shadows as their renderables
  *       say: shadow maps and shadow rays leave out those that do not.</li>
@@ -100,6 +105,14 @@ public final class SceneSync implements AutoCloseable {
     private int[] fillItems = new int[64];
     private int[] fillEntries = new int[64];
     private int itemCount;
+    // Skinned items: the deformed copy each draws (NONE: its mesh as it is), and those that have one, densely.
+    private int[] itemCopy = filled(64);
+    private int[] skinned = new int[64];
+    private int skinnedCount;
+    private final double[] relative = new double[12]; // the node's world transform, inverted
+    private final double[] jointWorld = new double[12];
+    private final double[] matrix = new double[12];
+    private final double[] box = new double[6];
 
     // Instance ids (itemSlot) are the GpuScene's, stable while drawn, the lowest free one taken: what the GPU keeps per
     // instance (occlusion history, later previous transforms) stays with its instance.
@@ -244,6 +257,9 @@ public final class SceneSync implements AutoCloseable {
         for (int i = 0; i < count; i++) {
             fillEntries[i] = gpu.claim(itemSlot[fillItems[i]]);
         }
+        for (int i = 0; i < skinnedCount; i++) {
+            pose(skinned[i]);
+        }
         if (jobs != null && count >= PARALLEL) {
             jobs.parallelFor(count, GRAIN, fill);
         } else {
@@ -355,6 +371,7 @@ public final class SceneSync implements AutoCloseable {
                 if (wanted != null && !SceneResources.sameMaterials(wanted.key.materials(), list)) {
                     swapMaterials(item, list); // the mesh and the instance id stay
                 } else if (itemSlot[item] != NONE) {
+                    refreshCopy(item); // its skin may have changed
                     markMoved(item); // whether it casts shadows, written with the instance
                 }
                 return;
@@ -486,6 +503,7 @@ public final class SceneSync implements AutoCloseable {
             link(mesh, item);
             itemMesh[item] = mesh;
             pendingMesh[item] = null;
+            refreshCopy(item); // of the new mesh, before the old one may leave the pool
             releaseMesh(old);
         }
         resources.releaseSet(itemSet[item]);
@@ -578,6 +596,8 @@ public final class SceneSync implements AutoCloseable {
         pendingSet = Arrays.copyOf(pendingSet, length);
         isSwapping = Arrays.copyOf(isSwapping, length);
         movedItems = Arrays.copyOf(movedItems, length);
+        itemCopy = Arrays.copyOf(itemCopy, length);
+        Arrays.fill(itemCopy, old, length, NONE);
         fillItems = new int[length];
         fillEntries = new int[length];
         Arrays.fill(itemSlot, old, length, NONE);
@@ -605,6 +625,7 @@ public final class SceneSync implements AutoCloseable {
         int slot = gpu.freeId(); // the table grows if it is full
         instanceCount++;
         itemSlot[item] = slot;
+        refreshCopy(item);
         write(gpu.claim(slot), item); // takes the id
         return true;
     }
@@ -623,6 +644,7 @@ public final class SceneSync implements AutoCloseable {
 
     /** Stops drawing {@code item}: its id becomes a hole, free for the next renderable drawn. */
     private void hide(int item) {
+        dropCopy(item);
         int slot = itemSlot[item];
         if (slot != NONE) {
             gpu.remove(slot);
@@ -670,6 +692,204 @@ public final class SceneSync implements AutoCloseable {
         waitingCount = kept;
     }
 
+    /**
+     * Gives drawn {@code item} the deformed copy its skin asks for, or none: a new one when its mesh or skin changed.
+     * The instance is rewritten with it.
+     */
+    @AllowAllocation("a skinned renderable drawn or changed")
+    private void refreshCopy(int item) {
+        SkinBinding skin = renderables.has(itemNode[item]) ? renderables.skin(itemNode[item]) : null;
+        MeshData data = itemMesh[item].mesh.data;
+        boolean wanted = skin != null && data.jointCount() > 0;
+        int source = itemMesh[item].mesh.id;
+        var pool = resources.pool();
+        if (itemCopy[item] != NONE && wanted && pool.deformedFrom(itemCopy[item]) == source) {
+            return; // the same mesh: its joints are read each update
+        }
+        dropCopy(item);
+        if (!wanted) {
+            return;
+        }
+        int copy = pool.addDeformed(source);
+        pool.deformation().add(copy, data.jointCount());
+        itemCopy[item] = copy;
+        if (skinnedCount == skinned.length) {
+            skinned = Arrays.copyOf(skinned, 2 * skinnedCount);
+        }
+        skinned[skinnedCount++] = item;
+        pose(item);
+        markMoved(item);
+    }
+
+    private void dropCopy(int item) {
+        if (itemCopy[item] == NONE) {
+            return;
+        }
+        resources.pool().remove(itemCopy[item]); // after its instance stops naming it: written this update
+        itemCopy[item] = NONE;
+        for (int i = 0; i < skinnedCount; i++) {
+            if (skinned[i] == item) {
+                skinned[i] = skinned[--skinnedCount];
+                break;
+            }
+        }
+        if (itemSlot[item] != NONE) {
+            markMoved(item);
+        }
+    }
+
+    /**
+     * Poses {@code item}'s copy: each palette joint's matrix, the joint's world transform relative to the node's times
+     * its inverse bind matrix, and the box of the joints' rest boxes so moved, with how far any of them moves.
+     */
+    private void pose(int item) {
+        long node = itemNode[item];
+        SkinBinding skin = renderables.skin(node);
+        MeshData data = itemMesh[item].mesh.data;
+        int copy = itemCopy[item];
+        world(node, matrix);
+        invert(matrix, relative);
+        box[0] = box[1] = box[2] = Double.POSITIVE_INFINITY;
+        box[3] = box[4] = box[5] = Double.NEGATIVE_INFINITY;
+        double growth = 0;
+        double[] m = matrix;
+        double[] corner = jointWorld; // reused below, after the joint's matrix is made
+        for (int j = 0; j < data.jointCount(); j++) {
+            int joint = data.paletteJoint(j);
+            world(skin.joint(joint), jointWorld);
+            multiply(relative, jointWorld, m);
+            // times the inverse bind matrix (column-major 4x4, affine)
+            double a00 = m[0];
+            double a01 = m[1];
+            double a02 = m[2];
+            double a10 = m[4];
+            double a11 = m[5];
+            double a12 = m[6];
+            double a20 = m[8];
+            double a21 = m[9];
+            double a22 = m[10];
+            double[] r = m; // written in place: its translation first, then the rest from the saved values
+            double b00 = skin.inverseBind(joint, 0);
+            double b10 = skin.inverseBind(joint, 1);
+            double b20 = skin.inverseBind(joint, 2);
+            double b01 = skin.inverseBind(joint, 4);
+            double b11 = skin.inverseBind(joint, 5);
+            double b21 = skin.inverseBind(joint, 6);
+            double b02 = skin.inverseBind(joint, 8);
+            double b12 = skin.inverseBind(joint, 9);
+            double b22 = skin.inverseBind(joint, 10);
+            double b03 = skin.inverseBind(joint, 12);
+            double b13 = skin.inverseBind(joint, 13);
+            double b23 = skin.inverseBind(joint, 14);
+            r[3] = a00 * b03 + a01 * b13 + a02 * b23 + m[3];
+            r[7] = a10 * b03 + a11 * b13 + a12 * b23 + m[7];
+            r[11] = a20 * b03 + a21 * b13 + a22 * b23 + m[11];
+            r[0] = a00 * b00 + a01 * b10 + a02 * b20;
+            r[1] = a00 * b01 + a01 * b11 + a02 * b21;
+            r[2] = a00 * b02 + a01 * b12 + a02 * b22;
+            r[4] = a10 * b00 + a11 * b10 + a12 * b20;
+            r[5] = a10 * b01 + a11 * b11 + a12 * b21;
+            r[6] = a10 * b02 + a11 * b12 + a12 * b22;
+            r[8] = a20 * b00 + a21 * b10 + a22 * b20;
+            r[9] = a20 * b01 + a21 * b11 + a22 * b21;
+            r[10] = a20 * b02 + a21 * b12 + a22 * b22;
+            resources.pool().deformation().joint(copy, j, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9],
+                r[10], r[11]);
+            data.jointBox(j, corner);
+            if (corner[0] > corner[3]) {
+                continue; // a joint no vertex follows
+            }
+            for (int c = 0; c < 8; c++) {
+                double x = (c & 1) == 0 ? corner[0] : corner[3];
+                double y = (c & 2) == 0 ? corner[1] : corner[4];
+                double z = (c & 4) == 0 ? corner[2] : corner[5];
+                double px = r[0] * x + r[1] * y + r[2] * z + r[3];
+                double py = r[4] * x + r[5] * y + r[6] * z + r[7];
+                double pz = r[8] * x + r[9] * y + r[10] * z + r[11];
+                box[0] = Math.min(box[0], px);
+                box[1] = Math.min(box[1], py);
+                box[2] = Math.min(box[2], pz);
+                box[3] = Math.max(box[3], px);
+                box[4] = Math.max(box[4], py);
+                box[5] = Math.max(box[5], pz);
+                growth = Math.max(growth, Maths.sqrt((px - x) * (px - x) + (py - y) * (py - y) + (pz - z) * (pz - z)));
+            }
+        }
+        if (box[0] > box[3]) { // no joint moves a vertex: the rest box
+            for (int axis = 0; axis < 3; axis++) {
+                box[axis] = data.boxMin(axis);
+                box[3 + axis] = data.boxMin(axis) + data.boxExtent(axis);
+            }
+        }
+        resources.pool().deformation().bounds(copy, box[0], box[1], box[2], box[3], box[4], box[5], growth);
+    }
+
+    /** {@code node}'s world transform as rows of a 3x4 matrix. */
+    private void world(long node, double[] out) {
+        TransformArray world = scene.worldTransforms();
+        MemorySegment s = world.segment();
+        long o = NodeHandle.index(node) * world.stride();
+        double x = s.get(DOUBLE, o + 24);
+        double y = s.get(DOUBLE, o + 32);
+        double z = s.get(DOUBLE, o + 40);
+        double w = s.get(DOUBLE, o + 48);
+        double sx = s.get(DOUBLE, o + 56);
+        double sy = s.get(DOUBLE, o + 64);
+        double sz = s.get(DOUBLE, o + 72);
+        out[0] = (1 - 2 * (y * y + z * z)) * sx;
+        out[1] = 2 * (x * y - z * w) * sy;
+        out[2] = 2 * (x * z + y * w) * sz;
+        out[3] = s.get(DOUBLE, o);
+        out[4] = 2 * (x * y + z * w) * sx;
+        out[5] = (1 - 2 * (x * x + z * z)) * sy;
+        out[6] = 2 * (y * z - x * w) * sz;
+        out[7] = s.get(DOUBLE, o + 8);
+        out[8] = 2 * (x * z - y * w) * sx;
+        out[9] = 2 * (y * z + x * w) * sy;
+        out[10] = (1 - 2 * (x * x + y * y)) * sz;
+        out[11] = s.get(DOUBLE, o + 16);
+    }
+
+    /** The inverse of affine {@code m} (rows of 3x4) into {@code out}. */
+    static void invert(double[] m, double[] out) {
+        double c00 = m[5] * m[10] - m[6] * m[9];
+        double c01 = m[2] * m[9] - m[1] * m[10];
+        double c02 = m[1] * m[6] - m[2] * m[5];
+        double c10 = m[6] * m[8] - m[4] * m[10];
+        double c11 = m[0] * m[10] - m[2] * m[8];
+        double c12 = m[2] * m[4] - m[0] * m[6];
+        double c20 = m[4] * m[9] - m[5] * m[8];
+        double c21 = m[1] * m[8] - m[0] * m[9];
+        double c22 = m[0] * m[5] - m[1] * m[4];
+        double inverse = 1 / (m[0] * c00 + m[1] * c10 + m[2] * c20);
+        out[0] = c00 * inverse;
+        out[1] = c01 * inverse;
+        out[2] = c02 * inverse;
+        out[4] = c10 * inverse;
+        out[5] = c11 * inverse;
+        out[6] = c12 * inverse;
+        out[8] = c20 * inverse;
+        out[9] = c21 * inverse;
+        out[10] = c22 * inverse;
+        out[3] = -(out[0] * m[3] + out[1] * m[7] + out[2] * m[11]);
+        out[7] = -(out[4] * m[3] + out[5] * m[7] + out[6] * m[11]);
+        out[11] = -(out[8] * m[3] + out[9] * m[7] + out[10] * m[11]);
+    }
+
+    /** Affine {@code a} times {@code b} (rows of 3x4) into {@code out}, which may be neither. */
+    static void multiply(double[] a, double[] b, double[] out) {
+        for (int row = 0; row < 3; row++) {
+            int r = 4 * row;
+            double x = a[r];
+            double y = a[r + 1];
+            double z = a[r + 2];
+            out[r] = x * b[0] + y * b[4] + z * b[8];
+            out[r + 1] = x * b[1] + y * b[5] + z * b[9];
+            out[r + 2] = x * b[2] + y * b[6] + z * b[10];
+            out[r + 3] = x * b[3] + y * b[7] + z * b[11] + a[r + 3];
+        }
+    }
+
     private void markMoved(int item) {
         if (!moved[item]) {
             moved[item] = true;
@@ -693,7 +913,7 @@ public final class SceneSync implements AutoCloseable {
         MemorySegment s = world.segment();
         long o = NodeHandle.index(itemNode[item]) * world.stride();
         long node = itemNode[item];
-        gpu.write(entry, itemMesh[item].mesh.id, itemSet[item].first, scene.layers(node),
+        gpu.write(entry, itemCopy[item] != NONE ? itemCopy[item] : itemMesh[item].mesh.id, itemSet[item].first, scene.layers(node),
             renderables.castsShadows(node), s.get(DOUBLE, o), s.get(DOUBLE, o + 8), s.get(DOUBLE, o + 16),
             (float) s.get(DOUBLE, o + 24), (float) s.get(DOUBLE, o + 32), (float) s.get(DOUBLE, o + 40),
             (float) s.get(DOUBLE, o + 48),

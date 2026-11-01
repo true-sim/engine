@@ -74,6 +74,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
 import javax.imageio.ImageIO;
+import com.truesim.scene.animation.AnimationClip;
+import com.truesim.scene.animation.Animators;
+import com.truesim.scene.animation.ClipState;
 import org.junit.jupiter.api.Test;
 import org.lwjgl.vulkan.VkBufferImageCopy;
 
@@ -140,7 +143,18 @@ class SampleModelsRender {
             double[] bounds = bounds(model, world, tasks, cache);
             SceneGraph scene = new SceneGraph(new ChangeClock());
             Renderables renderables = new Renderables(scene);
-            model.spawn(scene, renderables, scene.create());
+            long[] nodes = model.spawn(scene, renderables, scene.create());
+            // -PgltfAnimation=t1,t2,...: the model's first clip (or -PgltfClip=name) posed at each time, an image each
+            String times = System.getProperty("truesim.gltf.animation");
+            Animators animators = new Animators(scene);
+            ClipState playing = null;
+            if (times != null && !model.animations().isEmpty()) {
+                String name = System.getProperty("truesim.gltf.clip");
+                AssetRef<AnimationClip> clipRef = name != null ? model.animation(name)
+                    : model.animations().get(0).clip();
+                cache.acquire(clipRef);
+                playing = animators.add(model.skeleton(), nodes).play(await(tasks, cache, clipRef));
+            }
             GpuScene gpu = new GpuScene(device, pool, 4096, slots);
             closing.add(gpu);
             SceneSync sync = new SceneSync(resources, renderables, gpu);
@@ -199,7 +213,13 @@ class SampleModelsRender {
             cy += Double.parseDouble(zoom[2]) * half;
             Camera camera = new Camera().position(cx, cy, cz + distance)
                 .set(0, 0, -1, 0, 1, 0, fov, SIZE, SIZE, Math.max(distance - radius * 2, distance * 1e-3));
-            for (int round = 0; round < 12; round++) {
+            String[] poses = playing != null ? times.split(",") : new String[] {null};
+            for (int pose = 0; pose < poses.length; pose++) {
+            if (playing != null) {
+                playing.time(Double.parseDouble(poses[pose]));
+                animators.update(0);
+            }
+            for (int round = 0; round < (pose == 0 ? 12 : 3); round++) {
                 int slot = graph.beginFrame();
                 slots.begin(slot);
                 tasks.drainCompleted();
@@ -216,7 +236,9 @@ class SampleModelsRender {
                 }
             }
             device.waitIdle();
-            write(readback, png);
+            write(readback, playing == null ? png
+                : png.resolveSibling(png.getFileName().toString().replace(".png", "_" + poses[pose] + "s.png")));
+            }
           } finally {
             device.waitIdle();
             for (int i = closing.size() - 1; i >= 0; i--) {
