@@ -1,6 +1,7 @@
 package com.truesim.engine.xr;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assumptions.assumeThat;
 
 import com.truesim.engine.graph.Access;
@@ -87,6 +88,21 @@ class HeadsetTest {
             assertThat(headset.camera(Eye.LEFT).position(1)).as("at the origin's height plus the head's")
                 .isGreaterThan(1.7);
             assertThat(headset.running()).isTrue();
+            // The frame split, as an engine loop the headset drives: begin (wait, input, poses), render, submit.
+            long before = headset.frames();
+            for (int i = 0; i < 10; i++) {
+                platform.pollEvents(new com.truesim.engine.platform.PlatformListener() { });
+                boolean shows = headset.beginFrame();
+                assertThatIllegalStateException().isThrownBy(headset::beginFrame);
+                try {
+                    presenter.render();
+                } finally {
+                    headset.submit(true);
+                }
+                assertThat(headset.frames()).isEqualTo(before + (shows ? 1 : 0));
+                before = headset.frames();
+            }
+            headset.submit(true); // nothing begun: nothing to end
             // Input: the head tracked, whatever the hands hold, and a short buzz on each controller.
             XrInput input = headset.input();
             double[] position = new double[3];

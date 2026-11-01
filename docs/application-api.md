@@ -59,7 +59,7 @@ public final class RockGarden extends BaseGame {
 - **D118** (new) Startup stages, in order: `BEFORE_INSTANCE` (connect a headset), `INSTANCE` (instance extensions),
   `GPU` (filter or pick the GPU), `DEVICE` (device extensions, features), `GRAPH` (after the frame graph exists),
   `RUN`. One plugin may claim the frame driver (wait, render, submit, pacing); the default is the presenter.
-- **D119** (new) `Headset.render` splits into `beginFrame` (wait, sync actions, poses) and `submit`, so XR input is read
+- **D119** (built) `Headset.render` splits into `beginFrame` (wait, sync actions, poses) and `submit`, so XR input is read
   at frame start (D59) and the XR plugin can drive frames.
 - **D120** (new) BaseGame's shortcuts (`world()`, `assets()`, `input()`, `camera()`) are sugar for `get(KEY)` calls, so
   code moves between layers unchanged; `world()` is typed by `worldType()`; calling them before `setup` throws a named
