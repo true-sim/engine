@@ -147,6 +147,10 @@ import org.lwjgl.vulkan.VkInstance;
  * }
  * }</pre>
  *
+ * <p>Where the game's update must read this frame's XR input and poses (an engine loop the headset drives), the frame
+ * is split: {@link #beginFrame} (wait, input, poses), the update, rendering, then {@link #submit} in a
+ * {@code finally}.
+ *
  * <p>The eyes' cameras sit at the tracking space's {@link #origin origin} in the world plus the eyes' poses in it,
  * updated each frame for the time the frame will show. While the runtime does not show the app (its menu open, the
  * headset off the head), the eyes' images are held: their views render nothing for the headset, a mirror still does.
@@ -187,6 +191,12 @@ public final class Headset implements AutoCloseable {
     private final float[][] poses = new float[2][7];
     private final float[][] fovs = new float[2][4];
     private long frames;
+    // The frame begun and not yet submitted: when it shows, how many eye images are acquired, whether it will show.
+    private boolean begun;
+    private long frameTime;
+    private int acquiredEyes;
+    private boolean frameShown;
+    private boolean lastShown; // whether the last frame submitted showed
     private boolean closed;
 
     private Headset(XrInstance instance, long system, String runtime, String name, int width, int height) {
@@ -559,64 +569,120 @@ public final class Headset implements AutoCloseable {
     }
 
     /**
-     * Renders a frame: waits for the headset's next one (pacing the loop to its refresh), locates the eyes for the time
-     * it will show, and renders the graph through {@code presenter} (its windows in the same frame; null: the graph
-     * alone), then hands the eyes' images to the runtime. While the runtime does not show the app, only the windows
-     * render. Returns whether the headset showed this frame.
+     * Renders a frame: {@link #beginFrame}, the graph through {@code presenter} (its windows in the same frame; null:
+     * the graph alone), then {@link #submit}, which runs however rendering ends. Returns whether the headset showed
+     * this frame.
      */
     public boolean render(Presenter presenter) {
+        beginFrame();
+        boolean rendered = false;
+        Throwable failure = null;
+        try {
+            renderGraph(presenter);
+            rendered = true;
+        } catch (RuntimeException | Error e) {
+            failure = e;
+            throw e;
+        } finally {
+            try {
+                submit(rendered);
+            } catch (RuntimeException e) {
+                if (failure == null) {
+                    throw e;
+                }
+                failure.addSuppressed(e);
+            }
+        }
+        return lastShown;
+    }
+
+    /**
+     * Starts a frame, before the game's update reads input: reads the runtime's events, waits for the headset's next
+     * frame (pacing the loop to its refresh), updates XR input and locates the eyes for the time the frame will show,
+     * and acquires the eyes' images. While the runtime does not show the app the eyes' images are held and nothing
+     * waits. Every frame begun is ended by {@link #submit}, whatever happens in between: a frame left open, or an image
+     * held, stops the session's next frames. Returns whether the headset will show this frame.
+     */
+    public boolean beginFrame() {
+        if (begun) {
+            throw new IllegalStateException("A frame is begun already: submit it first");
+        }
         pollEvents();
+        frameShown = false;
+        acquiredEyes = 0;
         if (!running) {
             holdEyes();
-            renderGraph(presenter);
             return false;
         }
         try (MemoryStack stack = stackPush()) {
             XrFrameState frame = XrFrameState.calloc(stack).type$Default();
             check(xrWaitFrame(session, XrFrameWaitInfo.calloc(stack).type$Default(), frame), "wait for a frame");
             check(xrBeginFrame(session, XrFrameBeginInfo.calloc(stack).type$Default()), "begin a frame");
-            long time = frame.predictedDisplayTime();
-            // Begun, the frame is ended whatever happens, its acquired images handed back: a frame left open, or an
-            // image held, would stop the session's next frames.
-            int acquired = 0;
-            boolean shown = false;
-            boolean rendered = false;
-            Throwable failure = null;
+            frameTime = frame.predictedDisplayTime();
+            begun = true;
             try {
-                input.update(time, state == XR_SESSION_STATE_FOCUSED);
-                shown = frame.shouldRender() && locate(stack, time);
-                if (shown) {
+                input.update(frameTime, state == XR_SESSION_STATE_FOCUSED);
+                frameShown = frame.shouldRender() && locate(stack, frameTime);
+                if (frameShown) {
                     for (int e = 0; e < 2; e++) {
                         acquire(stack, e);
-                        acquired++;
+                        acquiredEyes++;
                     }
                 } else {
                     holdEyes();
                 }
-                renderGraph(presenter);
-                rendered = true;
             } catch (RuntimeException | Error e) {
-                failure = e;
-                throw e;
-            } finally {
                 try {
-                    for (int e = 0; e < acquired; e++) {
-                        check(xrReleaseSwapchainImage(swapchains[e], XrSwapchainImageReleaseInfo.calloc(stack)
-                            .type$Default()), "hand the eye's image back");
-                    }
-                    endFrame(stack, time, shown && rendered); // no layers for a frame that failed
-                } catch (RuntimeException e) {
-                    if (failure == null) {
-                        throw e;
-                    }
-                    failure.addSuppressed(e);
+                    submit(false);
+                } catch (RuntimeException suppressed) {
+                    e.addSuppressed(suppressed);
                 }
+                throw e;
+            }
+            return frameShown;
+        }
+    }
+
+    /**
+     * Ends the frame {@link #beginFrame} began: hands the eyes' images back and, where the headset shows the frame and
+     * it {@code rendered}, gives them to the runtime as a layer (a frame that failed shows nothing). Does nothing where
+     * no frame was begun (the runtime does not show the app).
+     */
+    public void submit(boolean rendered) {
+        lastShown = false;
+        if (!begun) {
+            return;
+        }
+        begun = false;
+        try (MemoryStack stack = stackPush()) {
+            RuntimeException failure = null;
+            for (int e = 0; e < acquiredEyes; e++) {
+                try {
+                    check(xrReleaseSwapchainImage(swapchains[e], XrSwapchainImageReleaseInfo.calloc(stack)
+                        .type$Default()), "hand the eye's image back");
+                } catch (RuntimeException ex) {
+                    failure = failure == null ? ex : add(failure, ex);
+                }
+            }
+            boolean shown = frameShown && rendered && failure == null;
+            try {
+                endFrame(stack, frameTime, shown); // no layers for a frame that failed
+            } catch (RuntimeException ex) {
+                failure = failure == null ? ex : add(failure, ex);
+            }
+            if (failure != null) {
+                throw failure;
             }
             if (shown) {
                 frames++;
+                lastShown = true;
             }
-            return shown;
         }
+    }
+
+    private static RuntimeException add(RuntimeException failure, RuntimeException more) {
+        failure.addSuppressed(more);
+        return failure;
     }
 
     private void renderGraph(Presenter presenter) {
@@ -765,6 +831,9 @@ public final class Headset implements AutoCloseable {
             return;
         }
         closed = true;
+        if (begun) {
+            submit(false); // a frame left open would keep the session from ending
+        }
         if (device != null) {
             device.waitIdle();
         }
