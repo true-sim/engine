@@ -6,6 +6,8 @@ import static org.lwjgl.vulkan.VK10.VK_COLOR_COMPONENT_B_BIT;
 import static org.lwjgl.vulkan.VK10.VK_COLOR_COMPONENT_G_BIT;
 import static org.lwjgl.vulkan.VK10.VK_COLOR_COMPONENT_R_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BLEND_FACTOR_ONE;
+import static org.lwjgl.vulkan.VK10.VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+import static org.lwjgl.vulkan.VK10.VK_BLEND_FACTOR_ZERO;
 import static org.lwjgl.vulkan.VK10.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
 import static org.lwjgl.vulkan.VK10.VK_BLEND_FACTOR_SRC_ALPHA;
 import static org.lwjgl.vulkan.VK10.VK_BLEND_OP_ADD;
@@ -438,7 +440,9 @@ public final class Pipeline implements AutoCloseable {
         /** Over, the source's color premultiplied by its alpha: {@code src + dst * (1 - a)}. */
         PREMULTIPLIED(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA),
         /** Added: {@code src + dst}, e.g. light or particles. */
-        ADDITIVE(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE);
+        ADDITIVE(VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE),
+        /** What lets through: {@code dst * (1 - src)}, e.g. weighted blended transparency's revealage. */
+        TRANSMIT(VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR);
 
         final int source;
         final int destination;

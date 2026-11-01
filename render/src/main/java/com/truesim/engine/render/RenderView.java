@@ -100,7 +100,7 @@ public final class RenderView implements AutoCloseable {
         expandCommand = GpuBuffer.deviceLocal(device, 16L * MeshletRenderer.BINS, commandUsage);
         drawCommand = GpuBuffer.deviceLocal(device, 24L * MeshletRenderer.BINS, commandUsage);
         // Per bin the early and late counts, then per bin the most indices a phase wanted.
-        drawCount = GpuBuffer.hostVisible(device, 48, commandUsage);
+        drawCount = GpuBuffer.hostVisible(device, 12L * MeshletRenderer.BINS, commandUsage); // common.slang's
         int instances = renderer.scene().capacity();
         visibility = options.occlusion()
             ? GpuBuffer.deviceLocal(device, 4L * instances, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT) : null;
@@ -354,7 +354,9 @@ public final class RenderView implements AutoCloseable {
         return sum;
     }
 
-    /** Like {@link #visibleMeshlets()}, of raster bin {@code bin} alone (0 opaque, 1 double-sided, 2 masked). */
+    /**
+     * Like {@link #visibleMeshlets()}, of raster bin {@code bin} alone (0 opaque, 1 double-sided, 2 masked, 3 blended).
+     */
     public int visibleMeshlets(int bin) {
         Objects.checkIndex(bin, MeshletRenderer.BINS);
         return drawCount.memory().get(U32, 8L * bin) + drawCount.memory().get(U32, 8L * bin + 4);
@@ -371,7 +373,7 @@ public final class RenderView implements AutoCloseable {
     /** Like {@link #wantedTriangles()}, of raster bin {@code bin}. */
     public long wantedTriangles(int bin) {
         Objects.checkIndex(bin, MeshletRenderer.BINS);
-        return Integer.toUnsignedLong(drawCount.memory().get(U32, 24 + 4L * bin)) / 3;
+        return Integer.toUnsignedLong(drawCount.memory().get(U32, 8L * MeshletRenderer.BINS + 4L * bin)) / 3;
     }
 
     /**

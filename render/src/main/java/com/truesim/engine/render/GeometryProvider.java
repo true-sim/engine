@@ -26,4 +26,12 @@ public interface GeometryProvider {
      */
     default void drawLate(GraphBuilder g, SceneDraw draw, SceneDraw.Targets targets, Image pyramid) {
     }
+
+    /**
+     * Adds the passes drawing this geometry's blended meshlets for {@code draw} (both phases' lists, after the late one)
+     * into the transparency pass's {@code targets}: cleared, or with {@code load} as providers before left them.
+     * Nothing by default, for geometry without blended materials; the engine's providers draw them.
+     */
+    default void drawBlended(GraphBuilder g, SceneDraw draw, Transparency.Targets targets, boolean load) {
+    }
 }

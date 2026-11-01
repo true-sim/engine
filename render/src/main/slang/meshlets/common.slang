@@ -105,17 +105,20 @@ public struct View
 /**
  * Raster bins: how meshlets rasterize, by their material. Each has its own lists and draw: the first is ordinary
  * opaque and one-sided (back faces culled, no discard: the fastest), then double-sided opaque (no culling), then
- * alpha-masked (no culling; back faces of one-sided masked materials discarded with the masked texels).
+ * alpha-masked (no culling; back faces of one-sided masked materials discarded with the masked texels), then
+ * alpha-blended (drawn after the opaque bins by the transparency pass; back faces of one-sided materials discarded).
  */
-public static const uint BINS = 3;
+public static const uint BINS = 4;
 public static const uint BIN_OPAQUE = 0;
 public static const uint BIN_DOUBLE_SIDED = 1;
 public static const uint BIN_MASKED = 2;
+public static const uint BIN_BLENDED = 3;
 
 /** The raster bin of a meshlet of material `m`. */
 public uint rasterBin(Material m)
 {
-    return materialMasked(m) ? BIN_MASKED : materialDoubleSided(m) ? BIN_DOUBLE_SIDED : BIN_OPAQUE;
+    return materialBlended(m) ? BIN_BLENDED : materialMasked(m) ? BIN_MASKED : materialDoubleSided(m)
+        ? BIN_DOUBLE_SIDED : BIN_OPAQUE;
 }
 
 /** The first slot of `bin` in `view`'s visible list. */
@@ -342,7 +345,7 @@ public struct ViewLists
     public uint* drawCommand;    // per bin, 6 words: VkDrawIndexedIndirectCommand, its index count growing; word 5
                                  // counts the indices reserved
     public uint* visibleCount;   // per bin the early (or only) phase, then the late one (words 2 * bin + phase); then
-                                 // per bin the most indices a phase wanted (words 6 + bin)
+                                 // per bin the most indices a phase wanted (words 2 * BINS + bin)
 };
 
 /**
@@ -580,5 +583,26 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
     {
         color = applyUnlit(color, s, materialFeature<UnlitParameters>(ref, FEATURE_UNLIT));
     }
-    return float4(color, 1);
+    return float4(color, s.alpha);
+}
+
+/** What a blended fragment adds to the transparency pass's two targets (weighted blended order-independence). */
+public struct BlendedOut
+{
+    public float4 accumulated : SV_Target0; // color times alpha, and alpha, both weighted: added up
+    public float revealage : SV_Target1;    // what lets through: multiplied by 1 - alpha
+};
+
+/**
+ * `shaded` (color, alpha) at `distance` from the camera as weighted blended order-independent transparency takes it
+ * (McGuire and Bavoil 2013, their equation 9): weighted by alpha and by nearness, so nearer surfaces count more.
+ */
+public BlendedOut weighBlended(float4 shaded, float distance)
+{
+    float a = saturate(shaded.a);
+    float w = a * clamp(0.03 / (1.0e-5 + pow(distance / 200.0, 4.0)), 1.0e-2, 3.0e3);
+    BlendedOut out;
+    out.accumulated = float4(shaded.rgb * a, a) * w;
+    out.revealage = a;
+    return out;
 }

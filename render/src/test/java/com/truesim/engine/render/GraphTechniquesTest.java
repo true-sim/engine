@@ -1828,6 +1828,73 @@ class GraphTechniquesTest {
         }
     }
 
+    @Test
+    void blendedMaterialsShowWhatIsBehindThem() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 8);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            // Glowing, unlit-like colors: red behind, a half-transparent blue in front.
+            MetallicRoughnessParameters dark = MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1);
+            int red = materials.add(new Material(dark.withEmissive(new Color(1, 0, 0, 1))));
+            int blue = materials.add(new Material(dark.withBaseColor(new Color(0, 0, 0, 0.5))
+                .withEmissive(new Color(0, 0, 1, 1))).alphaBlend());
+            assertThat(materials.hasBlended()).isTrue();
+            assertThat(materials.material(blue).blended()).isTrue();
+            assertThatIllegalArgumentException().as("masked or blended")
+                .isThrownBy(() -> new Material(null, MR, List.of(), false, 0.5f, true));
+            assertThat(new Material(MR).alphaBlend().alphaMask(0.5f).blended()).as("masked instead").isFalse();
+            assertThat(new Material(MR).alphaBlend().opaque().blended()).isFalse();
+            classic.add(quadMesh, mesh);
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, red, 0, 0, -3, 0, 0, 0, 1, 2, 2, 2);
+            scene.set(1, quadMesh, blue, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(2);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            List<Technique> shadings = new java.util.ArrayList<>(List.of(new ClusteredForwardShading(
+                new SceneGeometry(classic), main, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0)));
+            if (device.primitiveIds()) {
+                shadings.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            }
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            int corner = (SIZE / 2 - SIZE / 3) * SIZE + SIZE / 2 - SIZE / 3; // the red quad alone
+            for (int pass = 0; pass <= shadings.size(); pass++) {
+                if (pass > 0) {
+                    main.port().replace(shadings.get(pass - 1));
+                }
+                graph.settings().set(Transparency.MODE, Transparency.Mode.WEIGHTED_BLENDED);
+                frame();
+                assertThat(graph.passes()).as("pass %d", pass).contains("scene transparency resolve");
+                int mixed = image()[center];
+                assertThat(mixed & 0xff).as("pass %d: red behind, half", pass).isCloseTo(128, within(6));
+                assertThat((mixed >> 16) & 0xff).as("pass %d: blue in front, half", pass).isCloseTo(128, within(6));
+                int behind = image()[corner];
+                assertThat(behind & 0xff).as("pass %d: red alone", pass).isGreaterThan(240);
+                assertThat((behind >> 16) & 0xff).as("pass %d: nothing blue there", pass).isLessThan(8);
+                // As opaque: the blue covers the red.
+                graph.settings().set(Transparency.MODE, Transparency.Mode.OPAQUE);
+                frame();
+                assertThat(graph.passes()).doesNotContain("scene transparency resolve");
+                int covered = image()[center];
+                assertThat(covered & 0xff).as("pass %d: opaque blue", pass).isLessThan(8);
+                assertThat((covered >> 16) & 0xff).as("pass %d: opaque blue", pass).isGreaterThan(240);
+            }
+            graph.settings().reset(Transparency.MODE);
+            // No blended material left: no transparency pass.
+            materials.set(blue, new Material(dark.withEmissive(new Color(0, 0, 1, 1))));
+            assertThat(materials.hasBlended()).isFalse();
+            frame();
+            assertThat(graph.passes()).doesNotContain("scene transparency resolve");
+            scene.setMaterials(null);
+        }
+    }
+
     /** Of the image's left half: how many pixels are mostly red, and how many mostly green. */
     private int[] halves() {
         int[] counts = new int[2];

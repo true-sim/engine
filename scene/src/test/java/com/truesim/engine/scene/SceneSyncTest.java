@@ -468,8 +468,8 @@ class SceneSyncTest {
 
     @Test
     void maskedAndDoubleSidedMaterialsFollowTheirData() throws InterruptedException {
-        // A scene's materials say how they rasterize, as glTF's do: one masked, one double-sided, one blended (opaque
-        // until transparents come): each renderable draws in its raster bin.
+        // A scene's materials say how they rasterize, as glTF's do: one masked, one double-sided, one blended: each
+        // renderable draws in its raster bin.
         AssetRef<MaterialData> masked = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
             (glow, seed) -> MaterialData.builder(MR).set("baseColor", 1f, 1f, 1f, 1f)
                 .alpha(MaterialData.AlphaMode.MASK, 0.5f).build(), new Glow(1, 1, 1), 4);
@@ -488,7 +488,8 @@ class SceneSyncTest {
         renderables.set(facing(scene, 1.5, 0, -4), SQUARE, List.of(blended));
         settle(graphs, List.of(sync));
         device.waitIdle();
-        assertThat(cameraView.visibleMeshlets(0)).as("the blended one, opaque").isEqualTo(1);
+        assertThat(cameraView.visibleMeshlets(0)).as("none opaque and one-sided").isZero();
+        assertThat(cameraView.visibleMeshlets(3)).as("the blended one").isEqualTo(1);
         assertThat(cameraView.visibleMeshlets(1)).as("the double-sided one").isEqualTo(1);
         assertThat(cameraView.visibleMeshlets(2)).as("the masked one").isEqualTo(1);
     }

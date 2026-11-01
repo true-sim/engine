@@ -16,6 +16,7 @@ public struct Surface
     public float roughness;
     public float3 emissive;
     public float occlusion;
+    public float alpha;            // coverage, for blended materials: 1 opaque
     public float3 clearcoatNormal; // FEATURE_CLEARCOAT: the coat's normal, unit
     public float clearcoat;        // FEATURE_CLEARCOAT: its strength (0: none, every other surface)
     public float clearcoatRoughness;
@@ -33,6 +34,7 @@ public struct Surface
         s.roughness = 0.7;
         s.emissive = 0;
         s.occlusion = 1;
+        s.alpha = 1;
         s.clearcoatNormal = normal;
         s.clearcoat = 0;
         s.clearcoatRoughness = 1;

@@ -310,6 +310,7 @@ public final class VulkanDevice implements AutoCloseable {
             features.features().shaderInt64(true).shaderInt16(true).multiDrawIndirect(true)
                 .drawIndirectFirstInstance(true).shaderStorageImageReadWithoutFormat(true)
                 .shaderStorageImageWriteWithoutFormat(true).samplerAnisotropy(anisotropic).imageCubeArray(cubeArrays)
+                .independentBlend(true)
                 .geometryShader(primitiveIds).textureCompressionBC(bcTextures).textureCompressionASTC_LDR(astcTextures);
             VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
@@ -470,6 +471,7 @@ public final class VulkanDevice implements AutoCloseable {
         check(missing, features12.storageBuffer8BitAccess(), "storageBuffer8BitAccess");
         // GPU-driven drawing: many indirect draws, their count and first instance written by the GPU.
         check(missing, features.features().multiDrawIndirect(), "multiDrawIndirect");
+        check(missing, features.features().independentBlend(), "independentBlend");
         check(missing, features.features().drawIndirectFirstInstance(), "drawIndirectFirstInstance");
         check(missing, features12.drawIndirectCount(), "drawIndirectCount");
         check(missing, features12.hostQueryReset(), "hostQueryReset");

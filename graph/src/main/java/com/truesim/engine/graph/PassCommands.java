@@ -70,8 +70,10 @@ final class PassCommands {
                 }
                 memPutInt(info + VkRenderingAttachmentInfo.STYPE, VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO);
                 memPutLong(info + VkRenderingAttachmentInfo.IMAGEVIEW, attachmentView(graph, target));
-                memPutInt(info + VkRenderingAttachmentInfo.IMAGELAYOUT, attachment.depth()
-                    ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+                memPutInt(info + VkRenderingAttachmentInfo.IMAGELAYOUT, !attachment.depth()
+                    ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : attachment.readOnly()
+                    ? org.lwjgl.vulkan.VK12.VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
+                    : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
                 memPutInt(info + VkRenderingAttachmentInfo.LOADOP, attachment.load().op);
                 memPutInt(info + VkRenderingAttachmentInfo.STOREOP, attachment.store().op);
                 Clear clear = attachment.clear();

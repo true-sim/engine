@@ -24,6 +24,7 @@ public final class RenderSettings {
     private static List<Setting<?>> all() {
         List<Setting<?>> all = new ArrayList<>();
         all.add(OCCLUSION);
+        all.add(Transparency.MODE);
         all.addAll(ClusteredLights.ALL);
         all.addAll(ShadowSettings.ALL);
         all.addAll(DisplayTransform.ALL);
