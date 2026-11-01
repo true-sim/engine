@@ -880,6 +880,8 @@ public final class SceneResources implements AutoCloseable {
     /** Material data's values as a generated record reads them: textures as the slots they have, nested by path. */
     @AllowAllocation("materials change rarely")
     private final class DataValues implements MaterialValues {
+        private static final int REPEAT = 10497; // glTF's wrap mode codes, and its nearest filter
+        private static final int NEAREST = 9728;
         private final MaterialData.Values values;
         private final String prefix;
         private final Set<String> read; // the names asked for, by path
@@ -942,13 +944,18 @@ public final class SceneResources implements AutoCloseable {
         }
 
         /**
-         * The texture's slot, at the UV set {@code nameTexCoord} names (1: the second) and moved by the transform
-         * {@code nameOffset}, {@code nameRotation}, {@code nameScale} give, as glTF's importer names them.
+         * The texture's slot, at the UV set {@code nameTexCoord} names (1: the second), moved by the transform
+         * {@code nameOffset}, {@code nameRotation}, {@code nameScale} give, and sampled as {@code nameWrapS},
+         * {@code nameWrapT} and {@code nameMagFilter} say (glTF's codes; repeating and filtered without them), as glTF's
+         * importer names them.
          */
         @Override
         public int texture(String name, boolean srgb, int fallback) {
             AssetRef<TextureData> ref = values.texture(name(name));
             int texCoord = values.i32(name(name + "TexCoord"), 0);
+            int wrapS = values.i32(name(name + "WrapS"), REPEAT);
+            int wrapT = values.i32(name(name + "WrapT"), REPEAT);
+            int magFilter = values.i32(name(name + "MagFilter"), -1);
             float[] offset = values.floats(name(name + "Offset"));
             float rotation = values.f32(name(name + "Rotation"), 0);
             float[] scale = values.floats(name(name + "Scale"));
@@ -959,6 +966,9 @@ public final class SceneResources implements AutoCloseable {
             if (slot == SceneResources.NONE) {
                 return slot;
             }
+            if (wrapS != REPEAT || wrapT != REPEAT || magFilter == NEAREST) {
+                slot = new TextureSampler(wrap(wrapS), wrap(wrapT), magFilter == NEAREST).of(slot);
+            }
             if (texCoord == 1) {
                 slot = TextureSampler.secondUv(slot);
             } else if (texCoord != 0) {
@@ -968,6 +978,17 @@ public final class SceneResources implements AutoCloseable {
                 slot = TextureSampler.transform(slot, transforms.add(prefix + name, offset, rotation, scale));
             }
             return slot;
+        }
+
+        /** glTF's wrap mode {@code code} (10497 repeating, 33071 clamped, 33648 mirrored) as a sampler's. */
+        private TextureSampler.Wrap wrap(int code) {
+            return switch (code) {
+                case REPEAT -> TextureSampler.Wrap.REPEAT;
+                case 33071 -> TextureSampler.Wrap.CLAMP;
+                case 33648 -> TextureSampler.Wrap.MIRROR;
+                default -> throw new IllegalArgumentException(prefix + ": wrap modes 10497, 33071 and 33648, not "
+                    + code);
+            };
         }
 
         @Override

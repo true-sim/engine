@@ -93,17 +93,24 @@ public final class Bindless implements AutoCloseable {
     public static final int NEAREST_CLAMP = 1;
     /** Linear filtering, repeating. */
     public static final int LINEAR_REPEAT = 2;
-    /** Trilinear and anisotropic (as far as the device goes, up to 16), repeating: for material textures. */
+    /**
+     * The first of the material samplers: 9 trilinear and anisotropic (as far as the device goes, up to 16), then 9
+     * taking the nearest texel of the nearest level, each wrapping along u and v as {@code (i % 9) / 3} and
+     * {@code i % 3} say (0 repeating, 1 clamped to the edge, 2 repeating mirrored): engine-render's
+     * {@code TextureSampler.index()}. This one repeats.
+     */
     public static final int MATERIAL = 3;
+    /** How many material samplers there are. */
+    public static final int MATERIAL_SAMPLERS = 18;
     /** {@link #MATERIAL}, clamped to the edge. */
-    public static final int MATERIAL_CLAMP = 4;
+    public static final int MATERIAL_CLAMP = MATERIAL + 4;
     /** {@link #MATERIAL}, repeating mirrored. */
-    public static final int MATERIAL_MIRROR = 5;
+    public static final int MATERIAL_MIRROR = MATERIAL + 8;
     /** Nearest texel of the nearest level, repeating: for material textures meant blocky (pixel art). */
-    public static final int MATERIAL_NEAREST = 6;
+    public static final int MATERIAL_NEAREST = MATERIAL + 9;
 
     private final VulkanDevice device;
-    private final long[] samplers = new long[7];
+    private final long[] samplers = new long[MATERIAL + MATERIAL_SAMPLERS];
     // Set once while constructing; 0 until made, so a constructor that fails frees what it made (destroying 0 is a
     // no-op).
     private long setLayout;
@@ -153,15 +160,19 @@ public final class Bindless implements AutoCloseable {
     private void create() {
         try (MemoryStack stack = stackPush()) {
             checkLimits(stack);
-            samplers[LINEAR_CLAMP] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
-            samplers[NEAREST_CLAMP] = sampler(stack, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
-            samplers[LINEAR_REPEAT] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, false);
-            samplers[MATERIAL] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, device.anisotropic());
-            samplers[MATERIAL_CLAMP] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                device.anisotropic());
-            samplers[MATERIAL_MIRROR] = sampler(stack, VK_FILTER_LINEAR,
-                org.lwjgl.vulkan.VK10.VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT, device.anisotropic());
-            samplers[MATERIAL_NEAREST] = sampler(stack, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT, false);
+            samplers[LINEAR_CLAMP] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
+            samplers[NEAREST_CLAMP] = sampler(stack, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, false);
+            samplers[LINEAR_REPEAT] = sampler(stack, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT,
+                VK_SAMPLER_ADDRESS_MODE_REPEAT, false);
+            int[] wraps = {VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                org.lwjgl.vulkan.VK10.VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT};
+            for (int i = 0; i < MATERIAL_SAMPLERS; i++) {
+                boolean nearest = i >= 9;
+                samplers[MATERIAL + i] = sampler(stack, nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR,
+                    wraps[i % 9 / 3], wraps[i % 3], !nearest && device.anisotropic());
+            }
             boolean traced = device.rayTracing();
             int count = traced ? 4 : 3;
             VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(count, stack);
@@ -216,16 +227,16 @@ public final class Bindless implements AutoCloseable {
         }
     }
 
-    private long sampler(MemoryStack stack, int filter, int address, boolean anisotropic) {
+    private long sampler(MemoryStack stack, int filter, int addressU, int addressV, boolean anisotropic) {
         LongBuffer handle = stack.mallocLong(1);
         Vulkan.check(vkCreateSampler(device.handle(), VkSamplerCreateInfo.calloc(stack)
             .sType(VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO)
             .magFilter(filter)
             .minFilter(filter)
             .mipmapMode(filter == VK_FILTER_LINEAR ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST)
-            .addressModeU(address)
-            .addressModeV(address)
-            .addressModeW(address)
+            .addressModeU(addressU)
+            .addressModeV(addressV)
+            .addressModeW(addressU)
             .anisotropyEnable(anisotropic)
             .maxAnisotropy(device.maxAnisotropy())
             .maxLod(1000)

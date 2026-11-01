@@ -11,7 +11,7 @@ public struct HostLayoutAttribute {};
 public Texture2D<float4> textures[];
 
 [[vk::binding(1, 0)]]
-public SamplerState samplers[7];
+public SamplerState samplers[21];
 
 [[vk::binding(2, 0)]]
 public RWTexture2D<float4> images[];
@@ -26,7 +26,7 @@ public RWTexture2D<uint2> uintImages[];
 public static const uint LINEAR_CLAMP = 0;
 public static const uint NEAREST_CLAMP = 1;
 public static const uint LINEAR_REPEAT = 2;
-public static const uint MATERIAL = 3;      // trilinear, anisotropic, repeating
-public static const uint MATERIAL_CLAMP = 4;
-public static const uint MATERIAL_MIRROR = 5;
-public static const uint MATERIAL_NEAREST = 6;
+public static const uint MATERIAL = 3;      // material samplers from here: engine-render's TextureSampler.index()
+public static const uint MATERIAL_CLAMP = 7;
+public static const uint MATERIAL_MIRROR = 11;
+public static const uint MATERIAL_NEAREST = 12;

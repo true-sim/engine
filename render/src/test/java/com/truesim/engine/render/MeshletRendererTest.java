@@ -986,6 +986,25 @@ class MeshletRendererTest {
             assertThat(redRepeating).as("repeating: red again").isGreaterThan(redClamped + 30);
             assertThat(redOf(materials, quadMesh, TextureSampler.CLAMP.of(repeating), from, to))
                 .as("the same image, named with another sampler").isLessThan(20);
+            // Each axis its own: clamped along u alone clamps what varies along u; along v alone, nothing changes here.
+            TextureSampler clampU = new TextureSampler(TextureSampler.Wrap.CLAMP, TextureSampler.Wrap.REPEAT, false);
+            TextureSampler clampV = new TextureSampler(TextureSampler.Wrap.REPEAT, TextureSampler.Wrap.CLAMP, false);
+            assertThat(redOf(materials, quadMesh, clampU.of(repeating), from, to)).as("clamped along u")
+                .isLessThan(20);
+            assertThat(redOf(materials, quadMesh, clampV.of(repeating), from, to)).as("clamped along v only")
+                .isCloseTo(redRepeating, org.assertj.core.api.Assertions.within(3.0));
+            // Every sampler survives the other bits of a reference: UV set and transform.
+            for (TextureSampler.Wrap s : TextureSampler.Wrap.values()) {
+                for (TextureSampler.Wrap t : TextureSampler.Wrap.values()) {
+                    for (boolean nearest : new boolean[] {false, true}) {
+                        TextureSampler sampler = new TextureSampler(s, t, nearest);
+                        int reference = TextureSampler.secondUv(TextureSampler.transform(sampler.of(repeating), 8));
+                        assertThat(TextureSampler.from(reference)).isEqualTo(sampler);
+                        assertThat(TextureSampler.transformOf(reference)).isEqualTo(8);
+                        assertThat(reference & 0xffff).isEqualTo(repeating & 0xffff);
+                    }
+                }
+            }
             assertThat(textures.contains(clamped)).isTrue();
             textures.remove(clamped);
             assertThat(textures.contains(clamped)).isFalse();
