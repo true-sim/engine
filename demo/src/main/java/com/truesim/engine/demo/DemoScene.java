@@ -40,6 +40,7 @@ final class DemoScene implements AutoCloseable {
     private final float[] rocks = new float[ROCKS * 5]; // x, y, z, scale, spin speed (0: still)
     private final int[] rockMaterials = new int[ROCKS];
     private final DemoCharacter character;
+    private final FoxCrowd crowd;
 
     DemoScene(VulkanDevice device, FrameSlots slots, int colorFormat, int depthFormat) {
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 1 << 16, 8), slots);
@@ -90,6 +91,10 @@ final class DemoScene implements AutoCloseable {
         try {
             character = file == null ? null : new DemoCharacter(device, slots, pool, materials, scene,
                 java.nio.file.Path.of(file), CHARACTER_X, CHARACTER_Z);
+            int foxes = Integer.getInteger("truesim.demo.foxes", 0);
+            crowd = foxes == 0 ? null : new FoxCrowd(device, slots, pool, materials, scene, java.nio.file.Path.of(
+                System.getProperty("truesim.demo.crowd", file == null ? "Fox.gltf" : file)), foxes,
+                Boolean.getBoolean("truesim.demo.foxLod"), 30, 30);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(e);
@@ -128,17 +133,35 @@ final class DemoScene implements AutoCloseable {
             lights.point(l + 1, x, DemoMeshes.height(x, z) + 2.5, z, 14, r, g, b);
         }
         lights.setCount(POINT_LIGHTS + 1);
+        // The fox (and the crowd) look at the first circling light
+        double a = seconds * 0.3;
+        double lx = 25 * Maths.cos(a);
+        double lz = 25 * Maths.sin(a);
         if (character != null) {
-            // It looks at the first circling light
-            double a = seconds * 0.3;
-            double lx = 25 * Maths.cos(a);
-            double lz = 25 * Maths.sin(a);
             character.update(seconds, lx, DemoMeshes.height(lx, lz) + 2.5, lz);
         }
+        if (crowd != null) {
+            crowd.update(seconds, lx, DemoMeshes.height(lx, lz) + 2.5, lz);
+        }
+    }
+
+    /** Notes the frame just recorded, for the crowd's report. */
+    void recorded() {
+        if (crowd != null) {
+            crowd.recorded();
+        }
+    }
+
+    /** What animating the crowd cost, or null without one. */
+    String crowdReport() {
+        return crowd == null ? null : crowd.report();
     }
 
     @Override
     public void close() {
+        if (crowd != null) {
+            crowd.close();
+        }
         if (character != null) {
             character.close();
         }

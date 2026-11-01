@@ -1059,6 +1059,11 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
   head looking at a circling light, its tail after a wagging point (FABRIK with limits), its four feet on the terrain
   (foot placement), skinned on the GPU. The stereo bench takes it too, with `-Peye=x,y,z,tx,ty,tz` for a camera of its
   own (`g+h` for heights above the ground), `-Pframes=780` and `-PpngFrames=108,612 -Ppng=fox.png` for images.
+- `./gradlew :engine-demo:stereoBench -Pfoxes=1000 -Pcrowd=<path to Fox.gltf> [-PfoxLod=true]` adds a crowd of foxes,
+  each with the whole rig and a GPU-skinned copy, and reports what animating them costs per frame. On a Ryzen 9
+  9950X3D and RX 9070 XT (2026-11-02), 1000 foxes: CPU 1.76 ms in the animators and 1.73 ms in the scene sync, GPU
+  0.27 ms skinning 1000 copies; with level of detail by distance (every frame within 15 m, every second to 40 m, every
+  fourth beyond) 0.81 ms and 1.60 ms, GPU 0.12 ms skinning 350.
 - `--args="--vr"` adds a headset through OpenXR (SteamVR, Quest Link, ...): both eyes render the scene, the left
   thumbstick walks, triggers buzz, `P` shows the left eye on the desktop for people watching.
 - `--args="--validation"` turns Vulkan validation on and prints the error count at exit; `--seconds=10` quits by

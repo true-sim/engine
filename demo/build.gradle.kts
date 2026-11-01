@@ -42,6 +42,10 @@ tasks.register<JavaExec>("stereoBench") {
     providers.gradleProperty("eye").orNull?.let { systemProperty("truesim.demo.eye", it) }
     providers.gradleProperty("pngFrames").orNull?.let { systemProperty("truesim.demo.pngFrames", it) }
     providers.gradleProperty("frames").orNull?.let { systemProperty("truesim.demo.frames", it) }
+    // -Pfoxes=1000 -Pcrowd=<path to Fox.gltf> [-PfoxLod=true]: a crowd of animated foxes, what animating it costs
+    providers.gradleProperty("foxes").orNull?.let { systemProperty("truesim.demo.foxes", it) }
+    providers.gradleProperty("crowd").orNull?.let { systemProperty("truesim.demo.crowd", it) }
+    providers.gradleProperty("foxLod").orNull?.let { systemProperty("truesim.demo.foxLod", it) }
 }
 
 // Hitches while content streams (StreamBench): ./gradlew :engine-demo:streamBench

@@ -151,6 +151,7 @@ public final class StereoBench {
                 }
                 graph.beginFrame();
                 graph.submit(0, 0);
+                world.recorded();
                 // -Ptruesim.demo.pngFrames=60,180: the left eye of those frames too, next to the png named
                 String pngFrames = System.getProperty("truesim.demo.pngFrames");
                 String pngFile = System.getProperty("truesim.demo.png");
@@ -184,6 +185,9 @@ public final class StereoBench {
                 }
             }
             device.waitIdle();
+            if (world.crowdReport() != null) {
+                System.out.println(world.crowdReport());
+            }
             String png = System.getProperty("truesim.demo.png");
             if (png != null) {
                 writePng(device, targets.getFirst(), java.nio.file.Path.of(png));
