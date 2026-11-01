@@ -9,6 +9,7 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 | Module            | Package                       | What                                                    |
 |-------------------|-------------------------------|---------------------------------------------------------|
 | `engine-settings` | `com.truesim.engine.settings` | Settings: declared once by the code using them, values set, saved and loaded; no SDL |
+| `engine-app`      | `com.truesim.engine.app`      | The application core: lifecycle, the engine-owned loop, plugins and their startup stages |
 | `engine-platform` | `com.truesim.engine.platform` | SDL3: displays, windows, runtime mode changes, all input devices |
 | `engine-vulkan`   | `com.truesim.engine.vulkan`   | Vulkan 1.3, 1.4 where available: instance, GPUs, devices, swapchains, frames |
 | `engine-graph`    | `com.truesim.engine.graph`    | Frame graph: techniques plugged together by the results they provide and need |
@@ -16,7 +17,33 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 | `engine-scene`    | `com.truesim.engine.scene`    | Draws scenes: scene's renderables and assets onto renderers, one view per scene and camera |
 | `engine-xr`       | `com.truesim.engine.xr`       | VR headsets through OpenXR: their eyes as frame graph views, a desktop mirror |
 
-## Platform
+## Application
+
+A game implements `Application` (every method has a default) and hands it to `TrueSim.run`, which owns the loop;
+tools and tests drive `Engine.create(app, args)` and `step()` themselves. The bare application installs nothing: parts
+are plugins, installed explicitly (`app.use(...)`) and reached by typed keys (`engine.get(Xr.KEY)`, or `find` for
+optional ones).
+
+```java
+public final class Hello implements Application {
+    public static void main(String[] args) { TrueSim.run(new Hello(), args); }
+    public void configure(AppConfig app) { app.id("hello").use(new Rendering(), Xr.optional()).saveSettings(); }
+    public void update(Frame frame) { ... }
+}
+```
+
+- **Startup stages:** every plugin starts through `BEFORE_INSTANCE`, `INSTANCE`, `GPU`, `DEVICE`, `GRAPH`, `RUN`, each
+  after the plugins it `requires()`. A plugin that cannot start throws a `StartupFailure` with a reason for players;
+  `onStartupFailure` answers retry, continue without it (optional plugins: no headset, play on the desktop) or quit.
+- **One frame:** the frame driver waits (a plugin may claim it, e.g. XR pacing; else frames start at
+  `app.frameRate`), finished jobs are delivered, plugins' `beforeUpdate`, the game's `update`, plugins' `afterUpdate`,
+  settings availability refreshed, the driver ends the frame. Nothing allocated of its own.
+- **Quitting:** close buttons and the system request a quit; `onQuitRequested` allows or defers it (save first?), and a
+  second request within 3 seconds or a forced one skips it. `engine.quit()` is the game's own. Shutdown stops the game,
+  then the plugins in reverse order, and saves the player's settings (`saveSettings()`: the OS user folder for the
+  app id).
+- **Focus, visibility, suspend** reach the game as events; nothing pauses by itself.
+
 
 One `Platform` per process, used from the thread that started it. Events go to a `PlatformListener` as engine
 types and plain values, with nothing allocated. Nothing in the public API is SDL's: keys are `Key` (physical, USB HID
