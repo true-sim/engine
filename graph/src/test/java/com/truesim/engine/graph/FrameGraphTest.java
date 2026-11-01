@@ -2003,6 +2003,33 @@ class FrameGraphTest {
     }
 
     @Test
+    void outputsOfOtherProportionsShowTheMiddleUnstretched() {
+        // Twice as wide as the square output: a red quarter, a green half, a blue quarter. The output shows the middle,
+        // cut at the sides: all green, nothing squeezed in from the edges (a headset's eye in a desktop window).
+        graph.add(new Lambda(List.of(OUT), g -> {
+            ImageDesc wide = ImageDesc.of(Format.R8G8B8A8_UNORM, 2 * SIZE, SIZE);
+            Image color = g.create("wide", wide);
+            Image red = g.create("red", wide);
+            Image green = g.create("green", wide);
+            g.pass("paint").write(red, Access.TRANSFER_DST).write(green, Access.TRANSFER_DST).record(ctx -> {
+                clear(ctx, red, 1, 0, 0, 1);
+                clear(ctx, green, 0, 1, 0, 1);
+            });
+            g.pass("compose").read(red, Access.TRANSFER_SRC).read(green, Access.TRANSFER_SRC)
+                .write(color, Access.TRANSFER_DST).record(ctx -> {
+                    ctx.clear(color.whole(), 0, 0, 1, 1);
+                });
+            g.pass("columns").read(red, Access.TRANSFER_SRC).read(green, Access.TRANSFER_SRC)
+                .write(color, Access.TRANSFER_DST).record(ctx -> {
+                    copy(ctx, red, color, 0, SIZE / 2);
+                    copy(ctx, green, color, SIZE / 2, SIZE);
+                });
+            g.provide(OUT, color);
+        })).output(OUT, output);
+        assertThat(frame()).containsOnly(GREEN);
+    }
+
+    @Test
     void persistentImagesKeepTheirContentsAcrossFramesAndRebuilds() {
         int[] frames = {0};
         ImageDesc[] desc = {ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE)};

@@ -1241,15 +1241,26 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     /**
-     * An output's copy: the render region of {@code from} (all of it outside views) scaled into all of {@code to}. A
-     * region smaller than the image is scaled unfiltered, as filtering would blend in texels beyond its edge; a technique
-     * scaling it up within its bounds does better ({@code DisplayTransform}).
+     * An output's copy: the render region of {@code from} (all of it outside views) scaled to cover all of {@code to},
+     * keeping its proportions: where they differ (a headset's eye shown in a desktop window), the middle of it, cut at
+     * the sides or at the top and bottom, never stretched. A region smaller than the image is scaled unfiltered, as
+     * filtering would blend in texels beyond its edge; a technique scaling it up within its bounds does better
+     * ({@code DisplayTransform}). Allocates nothing.
      */
     void blit(PassContext ctx, Image from, Image to) {
         int width = ctx.regionWidth(from);
         int height = ctx.regionHeight(from);
         boolean whole = width == from.width && height == from.height;
-        ctx.blit(from.whole(), width, height, to.whole(), whole && (width != to.width || height != to.height));
+        // The largest part of the region with the target's proportions, in its middle.
+        int shownWidth = width;
+        int shownHeight = height;
+        if ((long) width * to.height > (long) height * to.width) {
+            shownWidth = (int) Math.max(1, Math.round((double) height * to.width / to.height));
+        } else if ((long) width * to.height < (long) height * to.width) {
+            shownHeight = (int) Math.max(1, Math.round((double) width * to.height / to.width));
+        }
+        ctx.blit(from.whole(), (width - shownWidth) / 2, (height - shownHeight) / 2, shownWidth, shownHeight, to.whole(),
+            whole && (shownWidth != to.width || shownHeight != to.height));
     }
 
     /**

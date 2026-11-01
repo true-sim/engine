@@ -372,6 +372,14 @@ public final class PassContext {
      * {@code to}, filtered if {@code linear}.
      */
     public void blit(Subresource from, int width, int height, Subresource to, boolean linear) {
+        blit(from, 0, 0, width, height, to, linear);
+    }
+
+    /**
+     * Blits the {@code width} x {@code height} texels of {@code from} from ({@code x}, {@code y}) into all of
+     * {@code to}, filtered if {@code linear}.
+     */
+    public void blit(Subresource from, int x, int y, int width, int height, Subresource to, boolean linear) {
         oneMip("Blitting from", from);
         oneMip("Blitting into", to);
         if (from.layerCount() != to.layerCount()) {
@@ -381,8 +389,10 @@ public final class PassContext {
             long region = stack.ncalloc(VkImageBlit2.ALIGNOF, 1, VkImageBlit2.SIZEOF);
             memPutInt(region + VkImageBlit2.STYPE, VK_STRUCTURE_TYPE_IMAGE_BLIT_2);
             layers(region + VkImageBlit2.SRCSUBRESOURCE, from);
-            memPutInt(region + VkImageBlit2.SRCOFFSETS + 12, width); // offsets[1]; offsets[0] stays at the origin
-            memPutInt(region + VkImageBlit2.SRCOFFSETS + 16, height);
+            memPutInt(region + VkImageBlit2.SRCOFFSETS, x); // offsets[0]
+            memPutInt(region + VkImageBlit2.SRCOFFSETS + 4, y);
+            memPutInt(region + VkImageBlit2.SRCOFFSETS + 12, x + width); // offsets[1]
+            memPutInt(region + VkImageBlit2.SRCOFFSETS + 16, y + height);
             memPutInt(region + VkImageBlit2.SRCOFFSETS + 20, 1);
             layers(region + VkImageBlit2.DSTSUBRESOURCE, to);
             corner(region + VkImageBlit2.DSTOFFSETS + 12, to);
