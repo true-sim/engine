@@ -64,7 +64,8 @@ public final class RockGarden extends BaseGame {
 
 **Exists:** `Setting` (bool, integer, decimal, text, choice; `restartNeeded`), `EngineSettings` (get/set/reset,
 listeners, scoped views, `toMap`/`load`), declared as static constants in the modules using them; in `engine-platform`.
-**Missing:** layers (everything `set` is saved), constraints beyond the declared range, a registry.
+**Built since:** the module of its own (D121), layers and constraints (D6, D14, D15: `Layer`, `preferred`,
+`Constraint`, `commandLine`). **Missing:** a registry, groups, tiers, availability.
 
 - **D6** (revised) The store has four explicit layers, lowest first: engine defaults, game defaults
   (`app.defaults(...)`), the player's values, the command line (`--set name=value`). Only the player layer is saved.
@@ -85,8 +86,8 @@ listeners, scoped views, `toMap`/`load`), declared as static constants in the mo
 - **D14** (revised) A constraint overlay per setting computes the effective value: `get()` returns it, `preferred()`
   returns the player layer. A value the hardware rejects no longer reads silently as the default.
 - **D15** Choices and ranges can be narrowed (`allowedChoices`, `allowedRange`) by hardware or by the game
-  (`app.lock`, `app.limit`); `enabledWhen(...)` declares dependencies. The view → graph chain `ViewPort.resolve` does
-  by hand today becomes a use of the layers.
+  (`app.lock`, `app.limit`); `enabledWhen(...)` declares dependencies. The view → graph fallback in `ViewPort.resolve`
+  and `Switch` is inheritance between scopes, not a layer; it stays by hand until scoped views get a parent.
 - **D121** (new) Settings move out of `engine-platform` into their own module with no SDL or LWJGL dependency, usable by
   servers and by the scene repo.
 

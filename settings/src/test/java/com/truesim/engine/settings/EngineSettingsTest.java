@@ -151,4 +151,75 @@ class EngineSettingsTest {
         assertThat(tolerant.get(NAME)).isEqualTo("Ada");
         assertThat(tolerant.toMap()).isEmpty();
     }
+    @Test
+    void layersStackCommandLineOverPlayerOverGame() {
+        EngineSettings settings = new EngineSettings();
+        List<String> heard = new ArrayList<>();
+        settings.onAnyChange(heard::add);
+        settings.set(EngineSettings.Layer.GAME, SIZE, 1024);
+        assertThat(settings.get(SIZE)).as("the game's default").isEqualTo(1024);
+        assertThat(settings.isSet(EngineSettings.Layer.PLAYER, SIZE)).isFalse();
+        settings.set(SIZE, 4096);
+        assertThat(settings.get(SIZE)).as("the player's, over the game's").isEqualTo(4096);
+        settings.commandLine("--fullscreen", "--set", "shadows.size=512", "--set=tonemap.curve=none");
+        assertThat(settings.get(SIZE)).as("the command line's, over all").isEqualTo(512);
+        assertThat(settings.get(CURVE)).isEqualTo(Curve.NONE);
+        assertThat(settings.toMap()).as("only the player's saved").containsExactly(Map.entry("shadows.size", "4096"));
+        assertThat(settings.toMap(EngineSettings.Layer.COMMAND_LINE)).containsEntry("shadows.size", "512");
+        settings.commandLine();
+        assertThat(settings.get(SIZE)).isEqualTo(4096);
+        settings.reset(SIZE);
+        assertThat(settings.get(SIZE)).as("reset: the game's again, not the engine's").isEqualTo(1024);
+        settings.clear(EngineSettings.Layer.GAME, SIZE);
+        assertThat(settings.get(SIZE)).isEqualTo(2048);
+        assertThat(heard).as("each change heard").containsExactly("shadows.size", "shadows.size", "shadows.size",
+            "tonemap.curve", "shadows.size", "tonemap.curve", "shadows.size", "shadows.size");
+        // An unreadable player's value falls through to the game's.
+        settings.set(EngineSettings.Layer.GAME, HDR, false).load(Map.of("present.hdr", "sometimes"));
+        assertThat(settings.get(HDR)).isFalse();
+        assertThatIllegalArgumentException().isThrownBy(() -> settings.commandLine("--set"));
+        assertThatIllegalArgumentException().isThrownBy(() -> settings.commandLine("--set", "=4"));
+        assertThatIllegalArgumentException().isThrownBy(() -> settings.set(EngineSettings.Layer.GAME, SIZE, 1));
+    }
+
+    @Test
+    void constraintsChangeTheEffectiveValueAndKeepThePreferredOne() {
+        EngineSettings settings = new EngineSettings().set(HDR, true).set(SIZE, 8192).set(CURVE, Curve.REINHARD);
+        List<String> heard = new ArrayList<>();
+        settings.onAnyChange(heard::add);
+        EngineSettings.Subscription noHdr = settings.constrain(HDR, Constraint.lock(false, "the display has no HDR"));
+        assertThat(settings.get(HDR)).isFalse();
+        assertThat(settings.preferred(HDR)).isTrue();
+        assertThat(settings.isConstrained(HDR)).isTrue();
+        assertThat(settings.constraints(HDR)).extracting(Constraint::reason).containsExactly("the display has no HDR");
+        assertThat(settings.toMap()).as("the player's choice is saved").containsEntry("present.hdr", "true");
+        noHdr.close();
+        assertThat(settings.get(HDR)).as("removed: the preferred value back").isTrue();
+        assertThat(settings.constraints(HDR)).isEmpty();
+        // Ranges and choices; several apply in the order added.
+        settings.constrain(SIZE, Constraint.range(256, 4096, "GPU memory"));
+        assertThat(settings.get(SIZE)).isEqualTo(4096);
+        settings.constrain(SIZE, Constraint.range(256, 1024, "the game's limit"));
+        assertThat(settings.get(SIZE)).isEqualTo(1024);
+        settings.set(SIZE, 512);
+        assertThat(settings.get(SIZE)).as("within both").isEqualTo(512);
+        assertThat(settings.isConstrained(SIZE)).isFalse();
+        settings.constrain(CURVE, Constraint.choices(java.util.Set.of(Curve.NONE, Curve.ACES), Curve.ACES, "no"));
+        assertThat(settings.get(CURVE)).isEqualTo(Curve.ACES);
+        assertThat(heard).containsExactly("present.hdr", "present.hdr", "shadows.size", "shadows.size",
+            "shadows.size", "tonemap.curve");
+        // A constraint giving what the setting does not allow is not added.
+        org.assertj.core.api.Assertions.assertThatIllegalStateException()
+            .isThrownBy(() -> settings.constrain(SIZE, Constraint.lock(1, "broken")));
+        assertThat(settings.constraints(SIZE)).hasSize(2);
+        assertThat(settings.get(SIZE)).isEqualTo(512);
+        assertThatIllegalArgumentException().isThrownBy(() -> Constraint.range(4, 2, "empty"));
+        assertThatIllegalArgumentException()
+            .isThrownBy(() -> Constraint.choices(java.util.Set.of(Curve.NONE), Curve.ACES, "fallback outside"));
+        // Scoped: a view's constraint is its own.
+        EngineSettings left = settings.scoped("window.left");
+        left.constrain(HDR, Constraint.lock(false, "left display"));
+        assertThat(left.get(HDR)).isFalse();
+        assertThat(settings.get(HDR)).isTrue();
+    }
 }
