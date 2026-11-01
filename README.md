@@ -8,6 +8,7 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 
 | Module            | Package                       | What                                                    |
 |-------------------|-------------------------------|---------------------------------------------------------|
+| `engine-settings` | `com.truesim.engine.settings` | Settings: declared once by the code using them, values set, saved and loaded; no SDL |
 | `engine-platform` | `com.truesim.engine.platform` | SDL3: displays, windows, runtime mode changes, all input devices |
 | `engine-vulkan`   | `com.truesim.engine.vulkan`   | Vulkan 1.3, 1.4 where available: instance, GPUs, devices, swapchains, frames |
 | `engine-graph`    | `com.truesim.engine.graph`    | Frame graph: techniques plugged together by the results they provide and need |
