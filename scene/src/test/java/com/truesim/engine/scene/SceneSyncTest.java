@@ -1,6 +1,7 @@
 package com.truesim.engine.scene;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.within;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assumptions.assumeThat;
@@ -78,6 +79,7 @@ import com.truesim.scene.meshbuild.MeshBuilder;
 import com.truesim.scene.render.MaterialData;
 import com.truesim.scene.render.RenderAssets;
 import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.SkinBinding;
 import com.truesim.scene.render.TextureData;
 import com.truesim.engine.vulkan.Format;
 import java.lang.foreign.Arena;
@@ -426,6 +428,73 @@ class SceneSyncTest {
         assertThat(litColumn(readbacks[0], 8)).as("green now").isLessThan(SIZE / 2.0 - 4);
         assertThat(resources.materialCount()).as("red let go").isEqualTo(1);
         assertThat(assets.holders(RED)).isZero();
+    }
+
+    /** A 2 x 2 square facing up whose left half joint 0 moves and right half joint 1. */
+    static MeshData skinnedSquare() {
+        float[] positions = {-1, 0, -1, 1, 0, -1, -1, 0, 1, 1, 0, 1};
+        float[] normals = {0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0};
+        float[] weights = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
+        int[] joints = {0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0};
+        return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL, VertexAttribute.JOINTS,
+            VertexAttribute.WEIGHTS), 4).positions(positions).attribute(VertexAttribute.NORMAL, normals)
+            .attribute(VertexAttribute.WEIGHTS, weights).joints(joints).submesh(new int[] {0, 2, 1, 1, 2, 3})
+            .buildFlat();
+    }
+
+    static final AssetRef<MeshData> SKINNED = AssetRef.generated(RenderAssets.MESH,
+        (Generator<Integer, MeshData>) (unused, seed) -> skinnedSquare(), 0, 1);
+
+    @Test
+    void skinnedRenderablesDrawCopiesPosedByTheirJoints() throws InterruptedException {
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        GpuBuffer[] readbacks = {readback(), readback()};
+        FrameGraph graph = graph(sync, false, readbacks);
+        long body = facing(scene, -1, 0, -3);
+        long left = scene.create(body);
+        long right = scene.create(body);
+        float[] identities = new float[32];
+        for (int i = 0; i < 4; i++) {
+            identities[5 * i] = 1; // two identity matrices
+            identities[16 + 5 * i] = 1;
+        }
+        renderables.set(body, SKINNED, List.of(RED));
+        renderables.setSkin(body, new SkinBinding(new long[] {left, right}, identities));
+        settle(List.of(graph), List.of(sync));
+        device.waitIdle();
+        assertThat(sync.instanceCount()).isOne();
+        assertThat(pool.deformation().size()).as("a copy posed").isOne();
+        double rest = litColumn(readbacks[0], 0);
+        assertThat(rest).as("at rest, left").isLessThan(SIZE / 2.0 - 4);
+        // Both joints moved 2 right in the body's space: the square moves, its node does not.
+        scene.setTranslation(left, 2, 0, 0);
+        scene.setTranslation(right, 2, 0, 0);
+        for (int frame = 0; frame < 2; frame++) {
+            frame(List.of(graph), List.of(sync), camera);
+        }
+        device.waitIdle();
+        // 2 to the right at 3 deep is a third of the view's width: 21 columns
+        assertThat(litColumn(readbacks[0], 0)).as("posed, right").isCloseTo(rest + 21, within(2.0));
+        // Without its skin the mesh draws as it is, at rest; the copy leaves the pool.
+        int meshes = pool.meshCount();
+        renderables.setSkin(body, null);
+        for (int frame = 0; frame < 2; frame++) {
+            frame(List.of(graph), List.of(sync), camera);
+        }
+        device.waitIdle();
+        assertThat(pool.deformation().size()).isZero();
+        assertThat(pool.meshCount()).isEqualTo(meshes - 1);
+        assertThat(litColumn(readbacks[0], 0)).as("at rest again").isCloseTo(rest, within(0.5));
+        // Skinned again, then removed: the copy goes with it, before its mesh.
+        renderables.setSkin(body, new SkinBinding(new long[] {left, right}, identities));
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(pool.deformation().size()).isOne();
+        renderables.remove(body);
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(pool.deformation().size()).isZero();
+        assertThat(sync.instanceCount()).isZero();
     }
 
     @Test

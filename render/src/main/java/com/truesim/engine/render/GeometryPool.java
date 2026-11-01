@@ -133,6 +133,10 @@ public final class GeometryPool implements AutoCloseable {
     private long[] triangleLength;
     private boolean[] live;
     private boolean[] fits;
+    // Per mesh number: the mesh it is a deformed copy of (-1: none), and how many copies of it are live.
+    private int[] deformedFrom;
+    private int[] copies;
+    private final Deformation deformation;
     // Removed meshes waiting for the frames that may draw them: their numbers and when they are free.
     private int[] retiring;
     private long[] retireAt;
@@ -218,6 +222,9 @@ public final class GeometryPool implements AutoCloseable {
         fits = new boolean[meshes];
         retiring = new int[meshes];
         retireAt = new long[meshes];
+        deformedFrom = new int[meshes];
+        copies = new int[meshes];
+        deformation = new Deformation(device, this, slots);
     }
 
     /**
@@ -444,12 +451,100 @@ public final class GeometryPool implements AutoCloseable {
         triangleStart[id] = indexBase;
         triangleLength[id] = indexRange;
         live[id] = true;
+        deformedFrom[id] = -1;
         fits[id] = fitsMesh;
         unfit += fitsMesh ? 0 : 1;
         vertexCount += mesh.vertexCount();
         meshletCount += mesh.meshletCount();
         meshCount++;
         return id;
+    }
+
+    /**
+     * Adds a copy of mesh {@code source} for one instance to deform ({@link Deformation}): vertices, attributes and
+     * meshlet records of its own, copied on the GPU from the source's, its meshlets' vertex indices, triangles and
+     * detail levels the source's. Until posed it draws as the source does; it draws as any mesh on the meshlet paths.
+     * Remove the copies before the source. Returns its number.
+     */
+    public int addDeformed(int source) {
+        if (!contains(source) || deformedFrom[source] >= 0) {
+            throw new IllegalArgumentException("Not a mesh of the pool to deform: " + source);
+        }
+        releaseRetired();
+        if (freeIdCount == 0 && idCount == capacity.meshes()) {
+            growMeshes();
+        }
+        long vertexBase = place(vertexRanges, vertexLength[source], 1);
+        long attributeBase = place(attributeRanges, attributeLength[source], 4);
+        long meshletBase = place(meshletRanges, meshletLength[source], 1);
+        int id = freeIdCount > 0 ? takeLowestFreeId() : idCount++;
+        long fromVertex = vertexStart[source];
+        long fromAttribute = attributeStart[source];
+        long fromMeshlet = meshletStart[source];
+        long vertices = vertexLength[source];
+        long attributeBytes = attributeLength[source];
+        long meshletRecords = meshletLength[source];
+        uploads.recordCommands(commands -> {
+            // After the uploads queued before it (the source's own, maybe); read by the passes after
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+            long p = MeshData.POSITION_BYTES;
+            copy(commands, positions, p * fromVertex, positions, p * vertexBase, p * vertices);
+            copy(commands, attributes, fromAttribute, attributes, attributeBase, attributeBytes);
+            long m = MeshData.MESHLET_BYTES;
+            copy(commands, meshlets, m * fromMeshlet, meshlets, m * meshletBase, m * meshletRecords);
+            long l = MeshData.CLUSTER_LOD_BYTES;
+            copy(commands, clusterLod, l * fromMeshlet, clusterLod, l * meshletBase, l * meshletRecords);
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        });
+        MemorySegment table = meshTable.memory();
+        MemorySegment.copy(table, (long) MESH_ENTRY_BYTES * source, table, (long) MESH_ENTRY_BYTES * id,
+            MESH_ENTRY_BYTES);
+        MemorySegment entry = table.asSlice((long) MESH_ENTRY_BYTES * id, MESH_ENTRY_BYTES);
+        entry.set(U32, 12, (int) vertexBase);
+        entry.set(U32, 28, (int) meshletBase);
+        entry.set(U32, 60, (int) attributeBase); // the level table stays the source's
+        vertexStart[id] = (int) vertexBase;
+        vertexLength[id] = (int) vertices;
+        attributeStart[id] = attributeBase;
+        attributeLength[id] = attributeBytes;
+        meshletVertexStart[id] = meshletVertexStart[source];
+        meshletVertexLength[id] = meshletVertexLength[source];
+        meshletStart[id] = (int) meshletBase;
+        meshletLength[id] = (int) meshletRecords;
+        triangleStart[id] = triangleStart[source];
+        triangleLength[id] = triangleLength[source];
+        live[id] = true;
+        deformedFrom[id] = source;
+        copies[source]++;
+        fits[id] = fits[source];
+        unfit += fits[id] ? 0 : 1;
+        vertexCount += (int) vertices;
+        meshletCount += (int) meshletRecords;
+        meshCount++;
+        return id;
+    }
+
+    /** The mesh {@code mesh} is a deformed copy of, or -1 if it is not one. */
+    public int deformedFrom(int mesh) {
+        if (!contains(mesh)) {
+            throw new IllegalArgumentException("No mesh " + mesh);
+        }
+        return deformedFrom[mesh];
+    }
+
+    /** How many vertices mesh {@code mesh} has. */
+    public int vertexCountOf(int mesh) {
+        if (!contains(mesh)) {
+            throw new IllegalArgumentException("No mesh " + mesh);
+        }
+        return vertexLength[mesh];
+    }
+
+    /** Poses the pool's deformed copies on the GPU, once a frame. */
+    public Deformation deformation() {
+        return deformation;
     }
 
     /**
@@ -461,6 +556,13 @@ public final class GeometryPool implements AutoCloseable {
     public void remove(int mesh) {
         if (!contains(mesh)) {
             throw new IllegalArgumentException("No mesh " + mesh);
+        }
+        if (copies[mesh] > 0) {
+            throw new IllegalStateException("Mesh " + mesh + " has " + copies[mesh] + " deformed copies: remove them first");
+        }
+        if (deformedFrom[mesh] >= 0) {
+            copies[deformedFrom[mesh]]--;
+            deformation.forget(mesh);
         }
         for (int i = 0; i < removing.size(); i++) {
             removing.get(i).accept(mesh); // while it is the pool's still: its ranges known
@@ -500,9 +602,11 @@ public final class GeometryPool implements AutoCloseable {
             if (slots.isFinished(retireAt[i])) {
                 vertexRanges.release(vertexStart[id], vertexLength[id]);
                 attributeRanges.release(attributeStart[id], attributeLength[id]);
-                meshletVertexRanges.release(meshletVertexStart[id], meshletVertexLength[id]);
                 meshletRanges.release(meshletStart[id], meshletLength[id]);
-                triangleRanges.release(triangleStart[id], triangleLength[id]);
+                if (deformedFrom[id] < 0) { // a deformed copy shares its source's
+                    meshletVertexRanges.release(meshletVertexStart[id], meshletVertexLength[id]);
+                    triangleRanges.release(triangleStart[id], triangleLength[id]);
+                }
                 freeIds[freeIdCount++] = id;
             } else {
                 retiring[kept] = id;
@@ -637,6 +741,8 @@ public final class GeometryPool implements AutoCloseable {
         triangleLength = Arrays.copyOf(triangleLength, more);
         live = Arrays.copyOf(live, more);
         fits = Arrays.copyOf(fits, more);
+        deformedFrom = Arrays.copyOf(deformedFrom, more);
+        copies = Arrays.copyOf(copies, more);
         retiring = Arrays.copyOf(retiring, more);
         retireAt = Arrays.copyOf(retireAt, more);
         capacity = new Capacity(capacity.vertices(), capacity.meshlets(), capacity.triangles(), more);
@@ -896,6 +1002,7 @@ public final class GeometryPool implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
+            deformation.close();
             uploads.close();
             for (GpuBuffer buffer : new GpuBuffer[] {positions, attributes, meshletVertices, meshletTriangles,
                 meshlets, clusterLod, meshTable, levels}) {

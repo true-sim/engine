@@ -548,8 +548,15 @@ port.add(new ClusteredLights(lights, main));                         // provides
 
 Drawing and shading are separate, and each is swappable:
 
-- **Geometry providers** draw one kind of geometry; skinned meshes and particles come later. A `SceneGeometry` holds
+- **Geometry providers** draw one kind of geometry; particles come later. A `SceneGeometry` holds
   the providers of a frame, all drawing its renderer's views.
+- **Skinned meshes** draw as any mesh: `GeometryPool.addDeformed(mesh)` gives an instance a copy of its own (vertices,
+  attributes and meshlet records; triangles and levels shared), and a `deformation` pass after the scene upload skins
+  every posed copy (`Deformation`: joint matrices and the pose's box, linear blend skinning, normals by cofactors),
+  recomputes its meshlet spheres, turns cone culling off for it and grows its detail spheres by how far the joints
+  move. `SceneSync` does it for renderables with a skin (`Renderables.setSkin`, set by `ModelData.spawn`), posing them
+  each update from their joints' world transforms; scene-animation's `Animators` move the joints. Meshlet paths only
+  for now; ray-traced copies come with BLAS refits.
   - `MeshletGeometry`: a renderer's meshlets, with cluster LOD.
   - `ClassicLodGeometry`: the same instances drawn the classic way.
     - It takes discrete LODs (`MeshBuilder.buildDiscrete`) or flat meshes, added with `add(mesh, data)`.

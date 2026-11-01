@@ -419,6 +419,152 @@ class GraphTechniquesTest {
         assertThat(address[0]).isEqualTo(renderer.scene().instanceAddress());
     }
 
+    /** Copies the pool's positions and meshlet records into {@code into} after the frame's deformation. */
+    private record GeometryReadback(MeshletRenderer renderer, GpuBuffer into) implements Technique {
+        @Override
+        public List<Key<?>> provides() {
+            return List.of();
+        }
+
+        @Override
+        public List<Key<?>> modifies() {
+            return List.of(Keys.SCENE_COLOR);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image color = g.modify(Keys.SCENE_COLOR);
+            SceneData.Buffers scene = g.request(new SceneData(renderer));
+            g.pass("geometry readback").read(scene.positions(), com.truesim.engine.graph.BufferAccess.TRANSFER_SRC)
+                .read(scene.meshlets(), com.truesim.engine.graph.BufferAccess.TRANSFER_SRC).sideEffects()
+                .record(ctx -> {
+                    long half = into.size() / 2;
+                    try (MemoryStack stack = stackPush()) {
+                        org.lwjgl.vulkan.VkBufferCopy.Buffer region = org.lwjgl.vulkan.VkBufferCopy.calloc(1, stack);
+                        region.size(Math.min(half, renderer.pool().positions().size()));
+                        org.lwjgl.vulkan.VK10.vkCmdCopyBuffer(ctx.unsafe().commands(),
+                            ctx.unsafe().buffer(scene.positions()), into.handle(), region);
+                        region.size(Math.min(half, renderer.pool().meshlets().size())).dstOffset(half);
+                        org.lwjgl.vulkan.VK10.vkCmdCopyBuffer(ctx.unsafe().commands(),
+                            ctx.unsafe().buffer(scene.meshlets()), into.handle(), region);
+                    }
+                });
+            g.provide(Keys.SCENE_COLOR, color);
+        }
+    }
+
+    /** A 2 x 2 quad in y = 0 whose left half joint 0 moves and right half joint 1. */
+    static MeshData skinnedQuad() {
+        float[] positions = {-1, 0, -1, 1, 0, -1, -1, 0, 1, 1, 0, 1};
+        float[] normals = {0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0};
+        float[] weights = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
+        int[] joints = {0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0};
+        VertexFormat format = VertexFormat.of(VertexAttribute.NORMAL, VertexAttribute.JOINTS,
+            VertexAttribute.WEIGHTS);
+        return new MeshBuilder(format, 4).positions(positions).attribute(VertexAttribute.NORMAL, normals)
+            .attribute(VertexAttribute.WEIGHTS, weights).joints(joints).submesh(new int[] {0, 2, 1, 1, 2, 3})
+            .buildFlat();
+    }
+
+    @Test
+    void deformedCopiesArePosedByTheirJointsOnTheGpu() {
+        // The right half lifted by 1: the copy's vertices there at y = 1, its meshlet sphere around the posed quad,
+        // its entry's box the pose's; the source stays at rest.
+        MeshData mesh = skinnedQuad();
+        try (GeometryPool posing = new GeometryPool(device, GeometryPool.Capacity.of(64, 4, 4), graph.frameSlots());
+             GpuScene posed = new GpuScene(device, posing, 4, graph.frameSlots());
+             MeshletRenderer drawing = new MeshletRenderer(device, posed, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots());
+             GpuBuffer readback = GpuBuffer.hostVisible(device, 2 * 4096, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+            int source = posing.add(mesh);
+            int copy = posing.addDeformed(source);
+            assertThat(posing.deformedFrom(copy)).isEqualTo(source);
+            assertThat(posing.deformedFrom(source)).isEqualTo(-1);
+            assertThatIllegalArgumentException().isThrownBy(() -> posing.addDeformed(copy));
+            Deformation deformation = posing.deformation();
+            deformation.add(copy, 2);
+            assertThat(deformation.size()).isOne();
+            // Misuse is refused.
+            assertThatIllegalArgumentException().isThrownBy(() -> deformation.add(source, 2));
+            assertThatIllegalArgumentException().isThrownBy(() -> posing.addDeformed(-5));
+            assertThatIllegalArgumentException().isThrownBy(() -> posing.deformedFrom(-1));
+            assertThatIllegalArgumentException().isThrownBy(() -> posing.vertexCountOf(-1));
+            assertThat(posing.vertexCountOf(copy)).isEqualTo(4);
+            assertThatIllegalStateException().isThrownBy(() -> deformation.add(copy, 2));
+            assertThatIllegalArgumentException().isThrownBy(() -> deformation.joint(source, 0, 1, 0, 0, 0, 0, 1, 0, 0,
+                0, 0, 1, 0));
+            assertThatExceptionOfType(IndexOutOfBoundsException.class)
+                .isThrownBy(() -> deformation.joint(copy, 2, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0));
+            for (double[] bad : new double[][] {{1, 0, 0, 0, 1, 1, 0}, {0, 1, 0, 1, 0, 1, 0}, {0, 0, 1, 1, 1, 0, 0},
+                {Double.NaN, 0, 0, 1, 1, 1, 0}, {0, 0, 0, 1, 1, 1, -1}, {0, 0, 0, 1, 1, 1, Double.POSITIVE_INFINITY},
+                {0, 0, 0, Double.POSITIVE_INFINITY, 1, 1, 0}}) {
+                assertThatIllegalArgumentException().isThrownBy(() -> deformation.bounds(copy, bad[0], bad[1], bad[2],
+                    bad[3], bad[4], bad[5], bad[6]));
+            }
+            assertThatIllegalArgumentException().isThrownBy(() -> deformation.bounds(-1, 0, 0, 0, 1, 1, 1, 0));
+            // A copy of 256 joints grows the matrices; never posed, it draws as its source.
+            int wide = posing.addDeformed(source);
+            assertThatIllegalArgumentException().isThrownBy(() -> deformation.add(wide, 0));
+            assertThatIllegalArgumentException().isThrownBy(() -> deformation.add(wide, 257));
+            deformation.add(wide, 256);
+            assertThat(deformation.size()).isEqualTo(2);
+            SceneGeometry geometry = SceneGeometry.meshlets(drawing);
+            Camera camera = new Camera().set(0, 3, -3, 0, 0, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            ViewPort port = graph.addView("main").size(SIZE, SIZE);
+            SceneView posedView = geometry.createView(port, camera, ViewOptions.of(256, 1 << 12));
+            port.add(new ClusteredForwardShading(geometry, posedView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                    .clearColor(0, 0, 0))
+                .add(new GeometryReadback(drawing, readback)).output(Keys.SCENE_COLOR, output);
+            for (int frame = 0; frame < 3; frame++) {
+                graph.beginFrame();
+                deformation.joint(copy, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
+                deformation.joint(copy, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0);
+                deformation.bounds(copy, -1, 0, -1, 1, 1, 1, 1);
+                posed.set(0, copy, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1);
+                posedView.set(1, MeshletRenderer.MODE_WHITE);
+                graph.submit(0, 0);
+            }
+            device.waitIdle();
+            java.lang.foreign.MemorySegment data = readback.memory();
+            int base = posing.vertexBase(copy);
+            int restBase = posing.vertexBase(source);
+            for (int v = 0; v < 4; v++) {
+                double[] p = decode(data, base + v, -1, 0, -1, 2, 1, 2);
+                double[] rest = decode(data, restBase + v, mesh.boxMin(0), mesh.boxMin(1), mesh.boxMin(2),
+                    mesh.boxExtent(0), mesh.boxExtent(1), mesh.boxExtent(2));
+                assertThat(p[0]).as("x of vertex " + v).isCloseTo(rest[0], within(1e-3));
+                assertThat(p[1]).as("y of vertex " + v).isCloseTo(rest[0] > 0 ? 1 : 0, within(1e-3));
+                assertThat(rest[1]).as("the source at rest").isCloseTo(0, within(1e-3));
+            }
+            long meshlet = 4096 + (long) MeshData.MESHLET_BYTES * posing.meshletBase(copy);
+            assertThat(data.get(ValueLayout.JAVA_FLOAT_UNALIGNED, meshlet + 16)).as("the sphere around y = 0.5")
+                .isCloseTo(0.5f, within(1e-3f));
+            assertThat(data.get(ValueLayout.JAVA_FLOAT_UNALIGNED, meshlet + 24)).as("its radius")
+                .isCloseTo((float) Math.sqrt(2.25), within(1e-3f));
+            assertThat(Byte.toUnsignedInt(data.get(ValueLayout.JAVA_BYTE, meshlet + 31))).as("no cone").isEqualTo(127);
+            java.lang.foreign.MemorySegment entry = posing.meshTable().memory().asSlice(96L * copy, 96);
+            assertThat(entry.get(ValueLayout.JAVA_FLOAT_UNALIGNED, 16 + 4)).as("the box's height").isEqualTo(1f);
+            assertThat(entry.get(ValueLayout.JAVA_FLOAT_UNALIGNED, 92)).as("the detail sphere grown by 1")
+                .isCloseTo(posing.meshTable().memory().get(ValueLayout.JAVA_FLOAT_UNALIGNED, 96L * source + 92) + 1,
+                    within(1e-5f));
+            // Copies go before their source.
+            assertThatIllegalStateException().isThrownBy(() -> posing.remove(source));
+            posing.remove(copy);
+            posing.remove(wide);
+            assertThat(deformation.size()).isZero();
+            posing.remove(source);
+        }
+    }
+
+    /** Vertex {@code v}'s position in {@code data}, quantized in the box from (x, y, z) of the extents. */
+    private static double[] decode(java.lang.foreign.MemorySegment data, int v, double x, double y, double z,
+        double ex, double ey, double ez) {
+        long at = 8L * v;
+        return new double[] {x + ex * Short.toUnsignedInt(data.get(ValueLayout.JAVA_SHORT_UNALIGNED, at)) / 65535.0,
+            y + ey * Short.toUnsignedInt(data.get(ValueLayout.JAVA_SHORT_UNALIGNED, at + 2)) / 65535.0,
+            z + ez * Short.toUnsignedInt(data.get(ValueLayout.JAVA_SHORT_UNALIGNED, at + 4)) / 65535.0};
+    }
+
     @Test
     void aPoolGrowingWhileFramesAreInFlightKeepsItsMeshes() {
         // A pool with room for one quad grows with every mesh added while frames are in flight; the first mesh, copied
@@ -1251,9 +1397,9 @@ class GraphTechniquesTest {
         main.port().add(MeshletBenchmark.forward(main).clearColor(0, 0, 1)).output(Keys.SCENE_COLOR, output);
         frame();
         java.util.List<String> passes = graph.passes();
-        assertThat(passes).startsWith("scene upload", "meshlet culling", "meshlets early",
+        assertThat(passes).startsWith("scene upload", "deformation", "meshlet culling", "meshlets early",
             "depth pyramid of scene depth, level 0").endsWith("meshlets late culling", "meshlets late"); // a pass per level
-        assertThat(passes.subList(3, passes.size() - 2)).allMatch(p -> p.startsWith("depth pyramid of scene depth, level "));
+        assertThat(passes.subList(4, passes.size() - 2)).allMatch(p -> p.startsWith("depth pyramid of scene depth, level "));
         assertThat(graph.pooledImages()).isEqualTo(2); // depth and its pyramid: the color is the target
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
         assertThat(red(1, 1)).isZero(); // blue clear color
@@ -1264,7 +1410,7 @@ class GraphTechniquesTest {
         main = main(camera);
         main.port().add(MeshletBenchmark.forward(main).occlusion(false)).output(Keys.SCENE_COLOR, output);
         frame();
-        assertThat(graph.passes()).containsExactly("scene upload", "meshlet culling", "meshlets");
+        assertThat(graph.passes()).containsExactly("scene upload", "deformation", "meshlet culling", "meshlets");
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
         // Off through the graph's settings instead, and on again: rebuilt each time.
         graph.close();
@@ -1273,7 +1419,7 @@ class GraphTechniquesTest {
         main.port().add(MeshletBenchmark.forward(main)).output(Keys.SCENE_COLOR, output);
         graph.settings().set(RenderSettings.OCCLUSION, false);
         frame();
-        assertThat(graph.passes()).containsExactly("scene upload", "meshlet culling", "meshlets");
+        assertThat(graph.passes()).containsExactly("scene upload", "deformation", "meshlet culling", "meshlets");
         graph.settings().set(RenderSettings.OCCLUSION, true);
         frame();
         assertThat(graph.passes()).endsWith("meshlets late culling", "meshlets late");

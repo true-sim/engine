@@ -6,6 +6,8 @@ import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.ExternalBuffer;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Request;
+import com.truesim.engine.render.layout.DeformPush;
+import com.truesim.engine.vulkan.Pipeline;
 import java.util.List;
 import java.util.Objects;
 
@@ -72,6 +74,15 @@ public record SceneData(MeshletRenderer renderer) implements Request<SceneData.B
                 pool.uploadInPass(ctx.unsafe().commands());
                 scene.uploadInPass(ctx.unsafe().commands());
             });
+        // Deformed copies posed right after: every reader sees them as any mesh
+        Pipeline skin = g.computeProgram("shaders/deformation/skin.spv", "skinMain", DeformPush.BYTES);
+        Pipeline spheres = g.computeProgram("shaders/deformation/skin.spv", "spheresMain", DeformPush.BYTES);
+        DeformPush push = new DeformPush();
+        g.pass("deformation").write(buffers.positions, BufferAccess.STORAGE_WRITE)
+            .write(buffers.attributes, BufferAccess.STORAGE_WRITE).write(buffers.meshlets, BufferAccess.STORAGE_WRITE)
+            .read(buffers.meshletVertices, BufferAccess.STORAGE_READ)
+            .write(buffers.clusterLod, BufferAccess.STORAGE_WRITE)
+            .record(ctx -> pool.deformation().record(ctx, buffers, skin, spheres, push));
         return buffers;
     }
 }
