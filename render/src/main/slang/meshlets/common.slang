@@ -16,6 +16,7 @@ __exported import materials.dispersion;
 __exported import materials.diffuseTransmission;
 __exported import materials.unlit;
 __exported import lights;
+__exported import indirect;
 
 /** One mesh in the geometry pool: where its data lies in the pool's buffers, and its quantization box. 96 bytes. */
 public struct MeshEntry
@@ -548,17 +549,17 @@ public void discardMasked(Material m, VertexOut in, bool front)
 }
 
 public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Material* materials, float4 dx,
-    float4 dy, LightListHeader* lights, uint2 pixel, Background behind)
+    float4 dy, LightListHeader* lights, uint2 pixel, Background behind, IndirectLight* indirect)
 {
     Material m = materials[in.material];
     if (materialType(m) != 0)
     {
         // Forward shading draws only metallic-roughness for now: other types as its defaults.
         return shadeMaterial<DefaultSurface, R>(rays, view, in, materials, dx, dy, lights, pixel,
-            materialFeatures(m), behind);
+            materialFeatures(m), behind, indirect);
     }
     return shadeMaterial<MetallicRoughnessMaterial, R>(rays, view, in, materials, dx, dy, lights, pixel,
-        materialFeatures(m), behind);
+        materialFeatures(m), behind, indirect);
 }
 
 /**
@@ -652,7 +653,8 @@ struct DefaultSurface : IMaterial
  * constant, the code of the others is left out): the lighting is the same for every type.
  */
 public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
-    float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features, Background behind)
+    float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features, Background behind,
+    IndirectLight* indirect)
 {
     if (view.mode == 2)
     {
@@ -745,7 +747,8 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
         applyClearcoat(s, materialFeature<ClearcoatParameters>(ref, FEATURE_CLEARCOAT), input);
         emissive *= 1 - s.clearcoat * coatFresnel(dot(s.clearcoatNormal, toViewer)); // seen through the coat
     }
-    float3 color = ambient(s, SKY_IRRADIANCE) + emissive;
+    // Light from all around: the view's indirect-light table (an environment, later GI), or the constant sky
+    float3 color = (indirect != nullptr ? indirectLight(indirect, s, toViewer) : ambient(s, SKY_IRRADIANCE)) + emissive;
     if (lights == nullptr)
     {
         color += reflected(s, toViewer, SUN, SUN_IRRADIANCE);

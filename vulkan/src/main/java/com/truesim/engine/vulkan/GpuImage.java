@@ -159,14 +159,17 @@ public final class GpuImage implements AutoCloseable {
             // Views are for shaders and attachments; an image only copied to and from has none.
             int levelUsages = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
             int attachments = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-            this.mipViews = new long[mips > 1 && (usage & levelUsages) != 0 ? mips : 0];
+            // A cube's levels are 2D arrays of its faces: shaders write a face through one (storage images are not
+            // cubes), and read one level while writing another.
+            this.mipViews = new long[(mips > 1 || cube) && (usage & levelUsages) != 0 ? mips : 0];
             this.layerViews = new long[layers > 1 && (usage & attachments) != 0 ? layers : 0];
             long whole = 0;
             try {
                 whole = (usage & VIEW_USAGES) != 0
                     ? Images.createView(device, handle, format, aspect, viewType, 0, mips, layers) : 0;
+                int levelType = cube ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : viewType;
                 for (int mip = 0; mip < mipViews.length; mip++) {
-                    mipViews[mip] = Images.createView(device, handle, format, aspect, viewType, mip, 1, layers);
+                    mipViews[mip] = Images.createView(device, handle, format, aspect, levelType, mip, 1, layers);
                 }
                 for (int layer = 0; layer < layerViews.length; layer++) {
                     layerViews[layer] = Images.createLayerView(device, handle, format, aspect, layer);
@@ -190,11 +193,11 @@ public final class GpuImage implements AutoCloseable {
     }
 
     /**
-     * A view of mip level {@code mip} alone (of a mipmapped sampled or storage image, every layer), or the view of a
-     * one-level image.
+     * A view of mip level {@code mip} alone (of a mipmapped sampled or storage image, every layer; of a cube, a 2D array
+     * of its faces), or the view of a one-level image that is no cube.
      */
     public long view(int mip) {
-        return mips == 1 ? view : mipViews[mip];
+        return mipViews.length == 0 ? view : mipViews[mip];
     }
 
     /** A 2D view of layer {@code layer}'s first mip level (of a layered attachment), or the view of a one-layer image. */

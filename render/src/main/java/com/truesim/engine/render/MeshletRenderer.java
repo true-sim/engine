@@ -408,24 +408,34 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void drawAttached(VkCommandBuffer commands, RenderView view, boolean late, boolean depthOnly,
         long clusters) {
+        drawAttached(commands, view, late, depthOnly, clusters, 0);
+    }
+
+    /**
+     * Like {@link #drawAttached(VkCommandBuffer, RenderView, boolean, boolean, long)}, lit from all around by the
+     * indirect-light table at {@code indirect} ({@link Keys#INDIRECT_LIGHT}; 0: the constant sky).
+     */
+    public void drawAttached(VkCommandBuffer commands, RenderView view, boolean late, boolean depthOnly,
+        long clusters, long indirect) {
         raster.drawBins(commands, scene, own(view), path() == Path.MESH_SHADERS,
-            depthOnly ? RasterPipelines.DEPTH : RasterPipelines.SHADED, late, clusters);
+            depthOnly ? RasterPipelines.DEPTH : RasterPipelines.SHADED, late, clusters, indirect);
     }
 
     /** Like {@link #drawAttached}, into a visibility buffer ({@link #drawIds}) and its depth. */
     public void drawIdsAttached(VkCommandBuffer commands, RenderView view, boolean late) {
         raster.checkIds();
-        raster.drawBins(commands, scene, own(view), path() == Path.MESH_SHADERS, RasterPipelines.IDS, late, 0);
+        raster.drawBins(commands, scene, own(view), path() == Path.MESH_SHADERS, RasterPipelines.IDS, late, 0, 0);
     }
 
     /**
      * Draws the blended bin of {@code view}'s lists (both phases', appended) into a transparency technique's
      * attachments as {@code kind} says ({@link BlendedTargets}), lit by the light list at {@code clusters} (0: the
-     * sun), transmissive surfaces showing the scene behind of push words {@code behind} ({@link SceneBehind}; 0: none).
+     * sun), transmissive surfaces showing the scene behind of push words {@code behind} ({@link SceneBehind}; 0: none),
+     * lit from all around by the indirect-light table at {@code indirect} (0: the constant sky).
      */
     public void drawBlendedAttached(VkCommandBuffer commands, RenderView view, BlendedTargets.Kind kind,
-        long clusters, long behind) {
-        raster.drawBlended(commands, scene, own(view), path() == Path.MESH_SHADERS, kind, clusters, behind);
+        long clusters, long behind, long indirect) {
+        raster.drawBlended(commands, scene, own(view), path() == Path.MESH_SHADERS, kind, clusters, behind, indirect);
     }
 
     /** The scene it draws. */

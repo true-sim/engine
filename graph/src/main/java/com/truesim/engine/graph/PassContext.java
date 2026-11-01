@@ -101,6 +101,19 @@ public final class PassContext {
         return graph.historyValid(history.pair);
     }
 
+    /** The frame being recorded: a number one higher each frame of the graph. */
+    public long frame() {
+        return graph.frame();
+    }
+
+    /**
+     * Whether {@code image} is a {@link GraphBuilder#persistent persistent image} made for this frame: its first, its
+     * contents still zeros. Work kept in it (a filtered environment) is then done anew.
+     */
+    public boolean fresh(Image image) {
+        return graph.freshImage(declared(image).id);
+    }
+
     /** The storage slot of mip level {@code mip} of the image. */
     public int storage(Image image, int mip) {
         return graph.storageSlotOf(declared(image).id, mip);

@@ -2051,9 +2051,54 @@ class FrameGraphTest {
             g.persistent("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4));
             g.persistent("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4));
         }, "Two persistent resources are named image x");
-        rejects(List.of(OUT), g -> g.persistent("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4).mips(2)),
-            "one 2D layer, mip level and sample");
+        rejects(List.of(OUT), g -> g.persistent("x", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4).samples(4)),
+            "2D, one sample");
         rejects(List.of(OUT), g -> g.persistentBuffer("x", 0), "Buffer size must be positive");
+    }
+
+    @Test
+    void persistentCubesKeepEveryLevelAndFaceWithASlotPerLevel() {
+        // A kept cube with a mip chain (an environment's): one level's face written once, read back every frame.
+        boolean[] first = {true};
+        long[] frames = {-1};
+        int[][] slots = new int[2][];
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            Image cube = g.persistent("environment", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE).cube()
+                .fullMips());
+            Subresource face = new Subresource(cube, 1, 1, 3, 1);
+            g.pass("write once").write(cube.mip(1), Access.TRANSFER_DST).record(ctx -> {
+                if (ctx.fresh(cube)) { // only in its first frame
+                    assertThat(first[0]).as("fresh once").isTrue();
+                    ctx.clear(cube.mip(1), 1, 0, 0, 1);
+                    first[0] = false;
+                }
+                frames[0] = ctx.frame();
+            });
+            g.pass("read back").read(face, Access.TRANSFER_SRC).write(out, Access.TRANSFER_DST)
+                .record(ctx -> {
+                    assertThat(ctx.fresh(out)).as("a transient image is never fresh").isFalse();
+                    ctx.blit(face, out.whole(), false);
+                });
+            g.pass("slots").read(cube, Access.STORAGE_READ).sideEffects().record(ctx -> {
+                slots[0] = new int[cube.mips()];
+                slots[1] = new int[cube.mips()];
+                for (int mip = 0; mip < cube.mips(); mip++) {
+                    slots[0][mip] = ctx.storage(cube, mip);
+                    slots[1][mip] = ctx.sampled(cube.mip(mip));
+                }
+            });
+            g.provide(OUT, out);
+        })).output(OUT, output);
+        assertThat(frame()[0]).as("written in the first frame").isEqualTo(RED);
+        long before = frames[0];
+        assertThat(frame()[0]).as("kept").isEqualTo(RED);
+        assertThat(frames[0]).as("frames count up").isEqualTo(before + 1);
+        graph.invalidate();
+        assertThat(frame()[0]).as("kept across a rebuild").isEqualTo(RED);
+        assertThat(slots[0]).hasSize(Integer.numberOfTrailingZeros(Integer.highestOneBit(SIZE)) + 1)
+            .doesNotContain(-1).doesNotHaveDuplicates();
+        assertThat(slots[1]).doesNotContain(-1).doesNotHaveDuplicates();
     }
 
     @Test

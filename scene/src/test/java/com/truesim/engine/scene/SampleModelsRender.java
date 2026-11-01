@@ -28,6 +28,10 @@ import com.truesim.engine.graph.Order;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.render.Camera;
+import com.truesim.engine.render.Environment;
+import com.truesim.engine.render.EnvironmentLighting;
+import com.truesim.engine.render.SkyBackground;
+import com.truesim.engine.render.TextureFormat;
 import com.truesim.engine.render.ClusteredForwardShading;
 import com.truesim.engine.render.ClusteredLights;
 import com.truesim.engine.render.GeometryPool;
@@ -58,6 +62,8 @@ import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.gltf.Gltf;
 import com.truesim.scene.render.ImageImporter;
 import com.truesim.scene.render.ModelData;
+import com.truesim.scene.render.RadianceImporter;
+import com.truesim.scene.render.TextureData;
 import com.truesim.scene.render.RenderAssets;
 import com.truesim.scene.render.Renderables;
 import java.awt.image.BufferedImage;
@@ -75,7 +81,8 @@ import org.lwjgl.vulkan.VkBufferImageCopy;
  * Renders Khronos sample models (glTF-Sample-Assets' {@code Models}, given by {@code -PgltfSamples=...}) to PNG images
  * in {@code build/samples}, to compare by eye with the models' screenshots: many test models show green checks where a
  * renderer is right and red crosses where it is not. Each model is framed from the front (+z), lit by its own glTF
- * lights where it has some (KHR_lights_punctual) or else the sun, and the sky; tone mapped with Khronos PBR Neutral. Skipped without the samples; {@code -PgltfModels=A,B} picks models.
+ * lights where it has some (KHR_lights_punctual) or else the sun, and the sky, or with {@code -PgltfEnvironment=a.hdr}
+ * an HDR environment (lighting and background) besides; tone mapped with Khronos PBR Neutral. Skipped without the samples; {@code -PgltfModels=A,B} picks models.
  */
 class SampleModelsRender {
 
@@ -161,6 +168,17 @@ class SampleModelsRender {
             if (lights != null) {
                 closing.add(lights);
                 port.add(new ClusteredLights(lights, main));
+            }
+            String hdr = System.getProperty("truesim.gltf.environment");
+            if (hdr != null) {
+                TextureData panorama;
+                try (var in = Files.newInputStream(Path.of(hdr))) {
+                    panorama = RadianceImporter.read(in, hdr);
+                }
+                int sky = textures.add(TextureFormat.RGBA16F, panorama.width(), panorama.height(), Textures.GENERATE,
+                    panorama.texels());
+                Environment environment = Environment.panorama("hdr", sky, panorama.width());
+                port.add(new EnvironmentLighting(environment, main)).add(new SkyBackground(environment, main));
             }
             port.add(new ClusteredForwardShading(geometry, main, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT)
                     .clearColor(0.05f, 0.05f, 0.05f))

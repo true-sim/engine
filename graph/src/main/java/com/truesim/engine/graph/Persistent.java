@@ -55,11 +55,14 @@ final class Persistent implements AutoCloseable {
     long firstFrame; // a history's first frame: its previous buffer holds zeros until the frame after
     long built; // the last build that asked for it
 
-    /** An image of {@code desc}: one 2D layer, one mip level, one sample. Waits for the GPU once, to clear it. */
+    /**
+     * An image of {@code desc}: 2D, one sample, its layers (a cube's faces) and mip levels as it says, a sampled and a
+     * storage slot per level where it has several. Waits for the GPU once, to clear it.
+     */
     @AllowAllocation("made rarely")
     Persistent(VulkanDevice device, String key, ImageDesc desc) {
-        if (!desc.flat() || desc.layers() > 1 || desc.mips() > 1 || desc.samples() > 1) {
-            throw new IllegalArgumentException("A persistent image is one 2D layer, mip level and sample: " + key);
+        if (desc.depth() > 1 || desc.samples() > 1) {
+            throw new IllegalArgumentException("A persistent image is 2D, one sample: " + key);
         }
         this.device = device;
         this.key = key;
@@ -80,12 +83,27 @@ final class Persistent implements AutoCloseable {
         int usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
             | attachment | ((features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0 ? VK_IMAGE_USAGE_STORAGE_BIT : 0);
         int aspect = desc.format().aspect();
-        gpuImage = new GpuImage(device, desc.width(), desc.height(), desc.format().vk(), usage, aspect);
+        boolean levels = desc.layers() > 1 || desc.mips() > 1 || desc.cubeMap();
+        gpuImage = levels ? GpuImage.create(device, desc.format(), desc.width(), desc.height(), 1, desc.layers(),
+            desc.cubeMap(), 1, desc.mips(), usage, new int[0])
+            : new GpuImage(device, desc.width(), desc.height(), desc.format().vk(), usage, aspect);
         image = new ExternalImage(key, desc.width(), desc.height(), desc.format(), usage, VK_IMAGE_LAYOUT_GENERAL,
             VK_IMAGE_LAYOUT_GENERAL).set(gpuImage.handle(), gpuImage.view());
         image.kept = true;
         image.sampled = device.bindless().addSampled(gpuImage.view());
-        if ((usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0) {
+        boolean storage = (usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
+        if (levels) {
+            image.desc = desc;
+            image.sampledMips = new int[desc.mips()];
+            image.storageMips = new int[storage ? desc.mips() : 0];
+            for (int mip = 0; mip < desc.mips(); mip++) {
+                image.sampledMips[mip] = device.bindless().addSampled(gpuImage.view(mip));
+                if (storage) {
+                    image.storageMips[mip] = device.bindless().addStorage(gpuImage.view(mip));
+                }
+            }
+            image.storage = storage ? image.storageMips[0] : -1;
+        } else if (storage) {
             image.storage = device.bindless().addStorage(gpuImage.view());
         }
         long handle = gpuImage.handle();
@@ -93,18 +111,20 @@ final class Persistent implements AutoCloseable {
             if (depth) {
                 Images.transition(commands, handle, aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
                     VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                    VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+                    VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, desc.mips(), desc.layers());
                 return;
             }
             Images.transition(commands, handle, aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+                VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, desc.mips(),
+                desc.layers());
             try (MemoryStack stack = stackPush()) {
                 vkCmdClearColorImage(commands, handle, VK_IMAGE_LAYOUT_GENERAL, VkClearColorValue.calloc(stack),
-                    VkImageSubresourceRange.calloc(1, stack).aspectMask(aspect).levelCount(1).layerCount(1));
+                    VkImageSubresourceRange.calloc(1, stack).aspectMask(aspect).levelCount(desc.mips())
+                        .layerCount(desc.layers()));
             }
             Images.transition(commands, handle, aspect, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
                 VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, desc.mips(), desc.layers());
         });
     }
 
@@ -155,7 +175,14 @@ final class Persistent implements AutoCloseable {
     public void close() {
         if (gpuImage != null) {
             device.bindless().removeSampled(image.sampled);
-            if (image.storage >= 0) {
+            if (image.desc != null) {
+                for (int slot : image.sampledMips) {
+                    device.bindless().removeSampled(slot);
+                }
+                for (int slot : image.storageMips) {
+                    device.bindless().removeStorage(slot);
+                }
+            } else if (image.storage >= 0) {
                 device.bindless().removeStorage(image.storage);
             }
             gpuImage.close();

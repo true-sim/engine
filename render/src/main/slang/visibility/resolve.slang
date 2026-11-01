@@ -30,7 +30,8 @@ public struct ShadePush
     uint color;                // storage slot of the color
     uint size;                 // width in the low 16 bits, height in the high
     uint bins;                 // how many shading bins there are: materials of a later bin shade as bin 0
-    float3 clear;              // the color behind everything
+    IndirectLight* indirect;   // the view's indirect-light table (indirect.slang); null: the constant sky
+    uint clear;                // the color behind everything, RGB9E5 (decodeClear)
     uint bin;                  // shading: the bin this pass shades (a type and FEATURES); classification: the
                                // uints from one bin's list to the next (full-image tiles: the region may be smaller)
     uint* classicIndices;      // the classic LOD path's indices, as the pool's triangles lie (null: no such path)
@@ -46,6 +47,13 @@ static const uint TILE_ROW = 1024;
 
 [[vk::push_constant]]
 public ConstantBuffer<ShadePush> push;
+
+/** A color packed as RGB9E5: three 9-bit mantissas and a shared 5-bit exponent (VK_FORMAT_E5B9G9R9's layout). */
+public float3 decodeClear(uint c)
+{
+    float scale = exp2(float(int(c >> 27)) - 24.0);
+    return float3(c & 0x1ff, (c >> 9) & 0x1ff, (c >> 18) & 0x1ff) * scale;
+}
 
 /** Byte i of the pool's meshlet triangles. */
 uint triangleByte(uint i)
@@ -168,7 +176,7 @@ public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
     uint2 ids = uintImages[push.ids][id.xy];
     if (ids.x == 0)
     {
-        images[push.color][id.xy] = float4(push.clear, 1);
+        images[push.color][id.xy] = float4(decodeClear(push.clear), 1);
         return;
     }
     View view = push.view[0];
@@ -228,5 +236,5 @@ public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
     float4 uvY = baryY.x * float4(v[0].uv, v[0].uv1) + baryY.y * float4(v[1].uv, v[1].uv1)
         + baryY.z * float4(v[2].uv, v[2].uv1);
     images[push.color][id.xy] = shadeMaterial<M, R>(rays, view, s, push.materials, uvX - uvs, uvY - uvs,
-        push.lights, id.xy, FEATURES, Background.none()); // transmissive surfaces: drawn with the blended
+        push.lights, id.xy, FEATURES, Background.none(), push.indirect); // transmissive surfaces: drawn with the blended
 }

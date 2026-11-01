@@ -114,6 +114,8 @@ public final class MeshletGeometry implements GeometryProvider {
         if (shadows != null) {
             shadows.readBy(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
         }
+        targets.readIndirect(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
+        IndirectInputs.Set indirect = targets.indirect();
         RenderView view = draw.view();
         switch (kind) {
             case DEPTH -> pass.record(ctx -> renderer.drawAttached(ctx.unsafe().commands(), view, late, true, 0));
@@ -121,7 +123,8 @@ public final class MeshletGeometry implements GeometryProvider {
                 if (shadows != null) {
                     shadows.prepare(ctx);
                 }
-                renderer.drawAttached(ctx.unsafe().commands(), view, late, false, address(ctx, lights));
+                renderer.drawAttached(ctx.unsafe().commands(), view, late, false, address(ctx, lights),
+                    indirect == null ? 0 : ctx.address(indirect.table()));
             });
             case IDS -> pass.record(ctx -> renderer.drawIdsAttached(ctx.unsafe().commands(), view, late));
         }
@@ -164,7 +167,7 @@ public final class MeshletGeometry implements GeometryProvider {
                 shadows.prepare(ctx);
             }
             renderer.drawBlendedAttached(ctx.unsafe().commands(), view, kind, address(ctx, lights),
-                SceneBehind.words(ctx, behind));
+                SceneBehind.words(ctx, behind), targets.indirectAddress(ctx));
         });
     }
 

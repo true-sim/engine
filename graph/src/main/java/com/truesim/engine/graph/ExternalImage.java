@@ -23,6 +23,10 @@ public final class ExternalImage {
     long view;
     int sampled = -1; // its sampled slot in the bindless set, if it has one (a texture's, a persistent image's)
     int storage = -1; // its storage slot, if it has one (a persistent image's)
+    ImageDesc desc; // its layers, mip levels and cube faces where it has more than one 2D level (a persistent image's)
+    int[] storageMips; // with a desc: a storage slot per mip level (each level's faces, a 2D array), or null
+    int[] sampledMips; // with a desc: a sampled slot per mip level, or null
+    long made = -1; // a persistent image's first frame: its contents are zeros until a pass of it writes them
     boolean kept; // its contents outlive the frame, read by the next (a persistent image): its writes are kept
     Texture texture; // the texture it is, or null
     volatile boolean held; // as set: untouched (not acquired), from the next frame

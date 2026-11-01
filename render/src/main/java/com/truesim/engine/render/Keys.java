@@ -16,6 +16,13 @@ public final class Keys {
      * {@code lights.slang}'s {@code ILightList}. Without one, shading lights by the sun.
      */
     public static final Key<Buffer> LIGHT_LIST = Key.buffer("truesim.lightList");
+    /**
+     * A view's indirect light, a buffer: the table of indirect.slang's {@code IndirectLight}, whose sections its
+     * providers fill (the distant environment, {@link EnvironmentLighting}; later probe volumes, reflection probes,
+     * screen-space techniques, which modify it), their images gathered by {@link IndirectInputs}. Without one, shading
+     * takes the constant sky.
+     */
+    public static final Key<Buffer> INDIRECT_LIGHT = Key.buffer("truesim.indirectLight");
 
     /** Towards the sun, the scene's one light, unit length; the shaders' SUN. */
     public static final float SUN_X = 0.42399915f;

@@ -539,8 +539,11 @@ final class GraphCompiler {
             layersOf = new int[states];
             cellStart = new int[states + 1];
             for (int i = 0; i < states; i++) {
-                mipsOf[i] = i < physicalCount ? physicalMips[i] : 1;
-                layersOf[i] = i < physicalCount ? physicalLayers[i] : 1;
+                // An external image is one cell, but a persistent one with levels: a cell per level and layer.
+                ImageDesc external = i >= physicalCount && i < physicalCount + externalList.size()
+                    ? externalList.get(i - physicalCount).desc : null;
+                mipsOf[i] = i < physicalCount ? physicalMips[i] : external != null ? external.mips() : 1;
+                layersOf[i] = i < physicalCount ? physicalLayers[i] : external != null ? external.layers() : 1;
                 cellStart[i + 1] = cellStart[i] + mipsOf[i] * layersOf[i];
             }
             int n = cellStart[states];
@@ -608,14 +611,16 @@ final class GraphCompiler {
             boolean emit) {
             for (int e = 0; e < externalList.size(); e++) {
                 ExternalImage external = externalList.get(e);
-                int i = cellStart[physicalCount + e];
-                layout[i] = external.initialLayout;
-                writeStages[i] = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT; // whatever came before the frame
-                writeAccess[i] = external.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED ? 0 : VK_ACCESS_2_MEMORY_WRITE_BIT;
-                readStages[i] = 0;
-                visibleStages[i] = 0;
-                visibleAccess[i] = 0;
-                lastQueue[i] = GRAPHICS;
+                for (int i = cellStart[physicalCount + e]; i < cellStart[physicalCount + e + 1]; i++) {
+                    layout[i] = external.initialLayout;
+                    writeStages[i] = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT; // whatever came before the frame
+                    writeAccess[i] = external.initialLayout == VK_IMAGE_LAYOUT_UNDEFINED ? 0
+                        : VK_ACCESS_2_MEMORY_WRITE_BIT;
+                    readStages[i] = 0;
+                    visibleStages[i] = 0;
+                    visibleAccess[i] = 0;
+                    lastQueue[i] = GRAPHICS;
+                }
             }
             for (int e = 0; e < externalBufferCount; e++) {
                 int i = cellStart[physicalCount + externalList.size() + bufferCount + e];
@@ -703,12 +708,19 @@ final class GraphCompiler {
             if (emit) {
                 starts.add(out.size());
                 for (int e = 0; e < externalList.size(); e++) {
-                    int i = cellStart[physicalCount + e];
                     ExternalImage external = externalList.get(e);
-                    // Towards whatever comes after the frame.
-                    out.add(new long[] {~e, external.format.aspect(), layout[i], external.finalLayout,
-                        writeStages[i] | readStages[i], writeAccess[i], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                        VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, IMAGE, 0, -1, 0, -1});
+                    int first = cellStart[physicalCount + e];
+                    int cells = cellStart[physicalCount + e + 1] - first;
+                    int mips = mipsOf[physicalCount + e];
+                    // Towards whatever comes after the frame: each cell from its own state (one for most).
+                    for (int c = 0; c < cells; c++) {
+                        int i = first + c;
+                        out.add(new long[] {~e, external.format.aspect(), layout[i], external.finalLayout,
+                            writeStages[i] | readStages[i], writeAccess[i], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, IMAGE,
+                            cells == 1 ? 0 : c % mips, cells == 1 ? -1 : 1, cells == 1 ? 0 : c / mips,
+                            cells == 1 ? -1 : 1});
+                    }
                 }
             }
         }
@@ -735,10 +747,12 @@ final class GraphCompiler {
                     continue;
                 }
                 Access access = pass.accesses[a];
-                int baseMip = target >= 0 ? pass.ranges[4 * a] : 0; // external images: one cell
-                int mipCount = target >= 0 ? pass.ranges[4 * a + 1] : 1;
-                int baseLayer = target >= 0 ? pass.ranges[4 * a + 2] : 0;
-                int layerCount = target >= 0 ? pass.ranges[4 * a + 3] : 1;
+                // External images: one cell, but a persistent one with levels a cell per level and layer
+                boolean ranged = target >= 0 || cells > 1;
+                int baseMip = ranged ? pass.ranges[4 * a] : 0;
+                int mipCount = ranged ? pass.ranges[4 * a + 1] : 1;
+                int baseLayer = ranged ? pass.ranges[4 * a + 2] : 0;
+                int layerCount = ranged ? pass.ranges[4 * a + 3] : 1;
                 for (int layer = baseLayer; layer < baseLayer + layerCount; layer++) {
                     for (int mip = baseMip; mip < baseMip + mipCount; mip++) {
                         int c = layer * mips + mip;

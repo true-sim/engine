@@ -25,6 +25,7 @@ struct LeanPush
     uint late;
     uint background;
     uint backgroundRegion;
+    IndirectLight* indirect;
 };
 
 [[vk::push_constant]]
@@ -144,7 +145,7 @@ float4 leanMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bary : SV
     VertexOut s = lean(in, primitive, bary);
     float4 uvs = float4(s.uv, s.uv1);
     return shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind(s.instance));
+        uint2(in.position.xy), behind(s.instance), push.indirect);
 }
 
 /**
@@ -159,7 +160,7 @@ BlendedOut leanBlendedMain(LeanVertex in, uint primitive : SV_PrimitiveID, float
     discardMasked(push.materials[s.material], s, front); // masked transmissive materials draw here too
     float4 uvs = float4(s.uv, s.uv1);
     return weighBlended(shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind(s.instance)), length(s.world));
+        uint2(in.position.xy), behind(s.instance), push.indirect), length(s.world));
 }
 
 /** The masked bin's: back faces of one-sided masked materials discarded with the masked texels. */
@@ -171,5 +172,5 @@ float4 leanMaskedMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bar
     discardMasked(push.materials[s.material], s, front);
     float4 uvs = float4(s.uv, s.uv1);
     return shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind(s.instance));
+        uint2(in.position.xy), behind(s.instance), push.indirect);
 }
