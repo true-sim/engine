@@ -13,6 +13,7 @@ public struct IorParameters
 /** Sets surface `s`'s dielectric reflectance from `p`'s index of refraction. */
 public void applyIor(inout Surface s, IorParameters p)
 {
+    s.ior = p.ior;
     float r = (p.ior - 1) / (p.ior + 1);
     s.f0 = r * r;
 }

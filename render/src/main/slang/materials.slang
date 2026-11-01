@@ -94,8 +94,15 @@ public static const uint FEATURE_SPECULAR = 8;
 public static const uint FEATURE_IOR = 16;
 /** Sheen (glTF's KHR_materials_sheen): back-scattering at grazing angles, as cloth and velvet. */
 public static const uint FEATURE_SHEEN = 32;
+/**
+ * Transmission (glTF's KHR_materials_transmission): light passing through the surface, as glass, from the scene behind
+ * it. Its materials are drawn with the blended ones, after the opaque scene, whose color they sample.
+ */
+public static const uint FEATURE_TRANSMISSION = 64;
+/** Volume (glTF's KHR_materials_volume): a transmissive surface's inside, refracting and tinting what passes. */
+public static const uint FEATURE_VOLUME = 128;
 /** How many features there are: their bits are the low FEATURE_BITS of a mask. */
-public static const uint FEATURE_BITS = 6;
+public static const uint FEATURE_BITS = 8;
 
 /**
  * A texture reference, as materials' texture fields hold them: slot bits 0-15, sampler 16-19, bit 20 the second UV set,
@@ -146,6 +153,15 @@ public bool materialDoubleSided(Material m)
 public bool materialBlended(Material m)
 {
     return (m.header & (1u << 10)) != 0;
+}
+
+/**
+ * Whether `m` is drawn after the opaque surfaces, with the blended ones: alpha-blended, or transmissive
+ * (FEATURE_TRANSMISSION: it shows the scene behind it).
+ */
+public bool materialDrawnBlended(Material m)
+{
+    return materialBlended(m) || (m.features & FEATURE_TRANSMISSION) != 0;
 }
 
 /** Whether `m` is alpha-masked: texels whose alpha is below its cutoff are not drawn. */

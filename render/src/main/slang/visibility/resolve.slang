@@ -228,5 +228,5 @@ public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
     float4 uvY = baryY.x * float4(v[0].uv, v[0].uv1) + baryY.y * float4(v[1].uv, v[1].uv1)
         + baryY.z * float4(v[2].uv, v[2].uv1);
     images[push.color][id.xy] = shadeMaterial<M, R>(rays, view, s, push.materials, uvX - uvs, uvY - uvs,
-        push.lights, id.xy, FEATURES);
+        push.lights, id.xy, FEATURES, Background.none()); // transmissive surfaces: drawn with the blended
 }

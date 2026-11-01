@@ -23,10 +23,19 @@ struct LeanPush
     LightListHeader* lights;
     uint bin;
     uint late;
+    uint background;
+    uint backgroundRegion;
 };
 
 [[vk::push_constant]]
 ConstantBuffer<LeanPush> push;
+
+/** The scene behind, as the push block names it. */
+Background behind()
+{
+    Background b = { push.background, push.backgroundRegion };
+    return b;
+}
 
 /** Byte i of the pool's meshlet triangles. */
 uint triangleByte(uint i)
@@ -133,7 +142,7 @@ float4 leanMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bary : SV
     VertexOut s = lean(in, primitive, bary);
     float4 uvs = float4(s.uv, s.uv1);
     return shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy));
+        uint2(in.position.xy), behind());
 }
 
 /** The blended bin's, into the transparency pass's targets: one-sided materials' back faces discarded. */
@@ -148,7 +157,7 @@ BlendedOut leanBlendedMain(LeanVertex in, uint primitive : SV_PrimitiveID, float
     }
     float4 uvs = float4(s.uv, s.uv1);
     return weighBlended(shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy)), length(s.world));
+        uint2(in.position.xy), behind()), length(s.world));
 }
 
 /** The masked bin's: back faces of one-sided masked materials discarded with the masked texels. */
@@ -160,5 +169,5 @@ float4 leanMaskedMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bar
     discardMasked(push.materials[s.material], s, front);
     float4 uvs = float4(s.uv, s.uv1);
     return shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy));
+        uint2(in.position.xy), behind());
 }

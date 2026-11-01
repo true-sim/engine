@@ -23,6 +23,8 @@ struct MeshPush
     LightListHeader* lights; // at byte 88, likewise
     uint bin;                // the raster bin drawn
     uint late;               // 1: the late phase's meshlets
+    uint background;         // at byte 104: the scene behind, for transmission (common.slang's Background); 0: none
+    uint backgroundRegion;
 };
 
 [[vk::push_constant]]

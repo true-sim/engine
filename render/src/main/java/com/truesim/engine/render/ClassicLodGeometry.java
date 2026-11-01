@@ -456,13 +456,15 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         if (shadows != null) {
             shadows.readBy(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
         }
+        targets.readBehind(pass);
+        com.truesim.engine.graph.Image behind = targets.behind();
         Pipeline pipeline = weighted ? drawBlended : draw[MeshletRenderer.BIN_BLENDED];
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
             recordBin(ctx, pipeline, MeshletRenderer.BIN_BLENDED, view, lights == null ? 0 : ctx.address(lights),
-                list);
+                list, SceneBehind.words(ctx, behind));
         });
     }
 
@@ -501,12 +503,16 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     /** Draws the list's draws of view {@code view}, each opaque bin with its {@code pipeline}, into the attachments. */
     private void record(PassContext ctx, Pipeline[] pipeline, RenderView view, long lights, Buffer list) {
         for (int bin = 0; bin < MeshletRenderer.BIN_BLENDED; bin++) {
-            recordBin(ctx, pipeline[bin], bin, view, lights, list);
+            recordBin(ctx, pipeline[bin], bin, view, lights, list, 0);
         }
     }
 
-    /** Draws the list's draws of view {@code view} in bin {@code bin} with {@code pipeline}. */
-    private void recordBin(PassContext ctx, Pipeline pipeline, int bin, RenderView view, long lights, Buffer list) {
+    /**
+     * Draws the list's draws of view {@code view} in bin {@code bin} with {@code pipeline}, transmissive surfaces showing
+     * the scene behind of push words {@code behind} ({@link SceneBehind}; 0: none).
+     */
+    private void recordBin(PassContext ctx, Pipeline pipeline, int bin, RenderView view, long lights, Buffer list,
+        long behind) {
         VkCommandBuffer commands = ctx.unsafe().commands();
         long handle = ctx.unsafe().buffer(list);
         try (MemoryStack stack = stackPush()) {
@@ -519,6 +525,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             memPutLong(push + ClassicPush.RECORDS, ctx.address(list) + recordsOffset);
             memPutLong(push + ClassicPush.MATERIALS, renderer.scene().materialsAddress());
             memPutLong(push + ClassicPush.LIGHTS, lights);
+            memPutLong(push + ClassicPush.BACKGROUND, behind);
             Commands.bindIndexBuffer(commands, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
             pipeline.bind(commands);
             pipeline.push(commands, push, DRAW_PUSH);

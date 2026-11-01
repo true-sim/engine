@@ -15,6 +15,10 @@ struct ClassicPush
     uint64_t unused[4];
     Material* materials;
     LightListHeader* lights;
+    uint unusedBin;
+    uint unusedLate;
+    uint background;          // at byte 104, as the meshlet paths' blocks: the scene behind, for transmission
+    uint backgroundRegion;
 };
 
 [[vk::push_constant]]
