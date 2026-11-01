@@ -28,10 +28,11 @@ public interface GeometryProvider {
     }
 
     /**
-     * Adds the passes drawing this geometry's blended meshlets for {@code draw} (both phases' lists, after the late one)
-     * into the transparency pass's {@code targets}: cleared, or with {@code load} as providers before left them.
-     * Nothing by default, for geometry without blended materials; the engine's providers draw them.
+     * Adds the passes drawing this geometry's blended raster bin as {@code view} sees it (from the lists its opaque draw
+     * culled this frame, both phases) into a transparency technique's {@code targets}, as their kind says: cleared, or
+     * with {@code load} as providers before left them. Nothing by default, for geometry without blended materials; the
+     * engine's providers draw them.
      */
-    default void drawBlended(GraphBuilder g, SceneDraw draw, Transparency.Targets targets, boolean load) {
+    default void drawBlended(GraphBuilder g, RenderView view, BlendedTargets targets, boolean load) {
     }
 }

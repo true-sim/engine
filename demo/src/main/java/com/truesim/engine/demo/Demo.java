@@ -40,6 +40,7 @@ import com.truesim.engine.render.RenderSettings;
 import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.VisibilityBufferShading;
+import com.truesim.engine.render.WeightedBlendedTransparency;
 import com.truesim.engine.render.shadows.CascadedShadowMaps;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.vulkan.PresentMode;
@@ -237,7 +238,8 @@ public final class Demo implements Application, PlatformListener {
         CascadedShadowMaps sun = new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, view, 3, 2048,
             CASCADES, 150);
         cascades.add(sun);
-        port.add(shading(view)).add(new ClusteredLights(world.lights(), view)).add(sun);
+        port.add(shading(view)).add(new ClusteredLights(world.lights(), view)).add(sun)
+            .add(new WeightedBlendedTransparency(world.geometry(), view));
         shaded.add(view);
         return view;
     }
@@ -245,7 +247,8 @@ public final class Demo implements Application, PlatformListener {
     /** A view of the scene for an eye: shading and lights, with the sun's cascades both eyes share. */
     private SceneView eyeView(ViewPort port, Camera through, Technique sun) {
         SceneView view = world.geometry().createView(port, through, CAMERA).set(1, MeshletRenderer.MODE_LIT);
-        port.add(shading(view)).add(new ClusteredLights(world.lights(), view)).add(sun);
+        port.add(shading(view)).add(new ClusteredLights(world.lights(), view)).add(sun)
+            .add(new WeightedBlendedTransparency(world.geometry(), view));
         shaded.add(view);
         return view;
     }

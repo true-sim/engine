@@ -324,12 +324,15 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   its UV set (bit 20) and transform (bits 21-24) above its sampler; the transforms are a feature every type allows
   (`TextureTransformParameters`, up to eight per material); glTF's per-texture `TexCoord`, `Offset`, `Rotation`,
   `Scale` become them. Alpha-mask textures follow their UV set, not a transform (the slot has no room).
-- **D136b** (built) Unlit (a feature every type allows) and alpha blending: blended materials (`Material.alphaBlend`,
-  glTF's `BLEND`) are a fourth raster bin from the same culling, skipped by the opaque, depth and ID passes; the
-  technique is the setting `render.transparency`: `WEIGHTED_BLENDED` (weighted blended order-independent
-  transparency: a pass into accumulated color and revealage over the opaque depth, read-only, then a resolve into a new
-  scene color) or `OPAQUE`; more modes (sorted meshlets, exact per-pixel) can be added as further choices. The pass runs
-  only while a material is blended.
+- **D136b** (built, revised after a review) Unlit (a feature every type allows) and alpha blending. Blended materials
+  (`Material.alphaBlend`, glTF's `BLEND`) are a fourth raster bin from the same culling, never drawn by the opaque,
+  depth or ID passes; its lists are appended to across both occlusion phases (one counter) and drawn once, after the
+  late cull. How they are drawn is a frame graph technique, one per view under `Transparency.ID`, modifying
+  `SCENE_COLOR` at `Anchor.TRANSPARENT`, swapped with `port.replace` (which now also replaces by id):
+  `WeightedBlendedTransparency` (weighted blended order-independent transparency, resolved in place; the default a
+  preset adds) or `OpaqueTransparency` (as opaque, color and depth); sorted meshlets or per-pixel lists would be more of
+  them. A view without one draws no blended surfaces. Providers draw the bin per `RenderView` (`drawBlended`); classic
+  LOD's selection is a shared request. Blended surfaces cast no shadows yet (a shadow decision, not transparency's).
 - **D137** (new) Checked against the Khronos glTF sample models: an optional sweep (`-PgltfSamples=...`) imports every
   model with all its parts.
 
