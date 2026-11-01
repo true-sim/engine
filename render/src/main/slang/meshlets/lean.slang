@@ -145,16 +145,16 @@ float4 leanMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bary : SV
         uint2(in.position.xy), behind());
 }
 
-/** The blended bin's, into the transparency pass's targets: one-sided materials' back faces discarded. */
+/**
+ * The blended bin's, into the transparency pass's targets: one-sided materials' back faces discarded, and masked
+ * texels (a masked material that is transmissive draws here).
+ */
 [shader("fragment")]
 BlendedOut leanBlendedMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bary : SV_Barycentrics,
     bool front : SV_IsFrontFace)
 {
     VertexOut s = lean(in, primitive, bary);
-    if (!front && !materialDoubleSided(push.materials[s.material]))
-    {
-        discard;
-    }
+    discardMasked(push.materials[s.material], s, front); // masked transmissive materials draw here too
     float4 uvs = float4(s.uv, s.uv1);
     return weighBlended(shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
         uint2(in.position.xy), behind()), length(s.world));

@@ -1981,6 +1981,14 @@ class GraphTechniquesTest {
                 .withAttenuationColor(new Color(0.3, 1, 1, 1))));
             frame();
             assertThat(red(image()[center])).as("attenuated: 0.3 squared of the red").isLessThan(red(through) / 4);
+            // Masked too, as glTF's MASK with transmission: texels below the cutoff show nothing, not tinted glass.
+            MetallicRoughnessParameters cyan = white.withBaseColor(new Color(0, 1, 1, 0.2));
+            materials.set(glass, new Material(cyan).feature(clear));
+            frame();
+            assertThat(red(image()[center])).as("cyan glass takes the red").isLessThan(red(through) / 4);
+            materials.set(glass, new Material(cyan).feature(clear).alphaMask(0.5f));
+            frame();
+            assertThat(red(image()[center])).as("masked out: the wall as it is").isGreaterThan(240);
             // Refraction: red on the left, green on the right, the glass turned 45 degrees one way and the other. Thin,
             // both show what is straight behind; thick, the ray bends through the volume, to opposite sides.
             int green = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1)

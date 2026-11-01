@@ -55,14 +55,14 @@ float4 fragmentMain(VertexOut in) : SV_Target
         uint2(in.position.xy), behind());
 }
 
-/** The blended bin's, into the transparency pass's targets: one-sided materials' back faces discarded. */
+/**
+ * The blended bin's, into the transparency pass's targets: one-sided materials' back faces discarded, and masked
+ * texels (a masked material that is transmissive draws here).
+ */
 [shader("fragment")]
 BlendedOut blendedMain(VertexOut in, bool front : SV_IsFrontFace)
 {
-    if (!front && !materialDoubleSided(push.materials[in.material]))
-    {
-        discard;
-    }
+    discardMasked(push.materials[in.material], in, front); // masked transmissive materials draw here too
     float4 uvs = float4(in.uv, in.uv1);
     return weighBlended(shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
         uint2(in.position.xy), behind()), length(in.world));
