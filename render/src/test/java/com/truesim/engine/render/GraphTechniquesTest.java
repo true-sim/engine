@@ -1,6 +1,7 @@
 package com.truesim.engine.render;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.within;
@@ -789,6 +790,17 @@ class GraphTechniquesTest {
             materials.set(quadMaterial, new Material(GlowParameters.DEFAULTS));
             frame();
             assertThat(graph.builds()).as("rebuilt for the new type").isEqualTo(builds + 1);
+            // Bins: a combination of type and features each, numbered as they first appear, never twice.
+            assertThat(materials.binCount()).isEqualTo(2);
+            assertThat(materials.binType(0)).isSameAs(MetallicRoughnessMaterial.TYPE);
+            assertThat(materials.binType(1)).isSameAs(Glow.TYPE);
+            assertThat(materials.binFeatures(1)).isZero();
+            int coated = materials.add(new Material(MR).feature(ClearcoatParameters.DEFAULTS));
+            materials.add(new Material(MR.withRoughness(0.2f)).feature(ClearcoatParameters.DEFAULTS));
+            assertThat(materials.binCount()).as("metallic-roughness with a clear coat, once").isEqualTo(3);
+            assertThat(materials.binFeatures(2)).isEqualTo(Material.FEATURE_CLEARCOAT);
+            assertThat(materials.features(coated)).isEqualTo(Material.FEATURE_CLEARCOAT);
+            assertThatExceptionOfType(IndexOutOfBoundsException.class).isThrownBy(() -> materials.binType(3));
             int[] after = pixels.memory().toArray(ValueLayout.JAVA_INT);
             assertThat(glowing(after)).as("the quad's pixels").isGreaterThan(SIZE * SIZE / 40);
             for (int i = 0; i < after.length; i++) {

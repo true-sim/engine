@@ -29,9 +29,9 @@ public struct ShadePush
     uint ids;                  // storage slot of the IDs (uint2)
     uint color;                // storage slot of the color
     uint size;                 // width in the low 16 bits, height in the high
-    uint types;                // how many material types there are: higher type ids shade as type 0 (its bins)
+    uint bins;                 // how many shading bins there are: materials of a later bin shade as bin 0
     float3 clear;              // the color behind everything
-    uint bin;                  // shading: the bin this pass shades, type * VARIANTS + FEATURES; classification: the
+    uint bin;                  // shading: the bin this pass shades (a type and FEATURES); classification: the
                                // uints from one bin's list to the next (full-image tiles: the region may be smaller)
     uint* classicIndices;      // the classic LOD path's indices, as the pool's triangles lie (null: no such path)
     uint* tiles;               // classification: the first bin's tile list; shading: this pass's bin's
@@ -40,9 +40,6 @@ public struct ShadePush
 /** The features a variant of a shading pass shows (FEATURE_*): set when its pipeline is made. */
 [vk::constant_id(0)]
 const uint FEATURES = 0;
-
-/** Shading bins, by type and features: type * VARIANTS + features. */
-static const uint VARIANTS = 1u << FEATURE_BITS;
 
 /** Tiles per row before the next row of groups: an indirect dispatch's groups are (min(count, this), rows, 1). */
 static const uint TILE_ROW = 1024;
@@ -84,8 +81,7 @@ float3 barycentrics(float3 direction, float3 a, float3 b, float3 c, float3 n, fl
 }
 
 /**
- * The shading bin of the pixel showing `ids`: its material's type (0 for nothing, or for a type of no pass) and
- * features.
+ * The shading bin of the pixel showing `ids`: its material's (0 for nothing).
  */
 public uint pixelBin(uint2 ids)
 {
@@ -95,24 +91,23 @@ public uint pixelBin(uint2 ids)
     }
     Instance instance = push.instances[ids.x - 1];
     uint submesh = (ids.y & CLASSIC_TRIANGLE) != 0 ? (ids.y >> 24) & 0x7f : meshletSubmesh(push.meshlets, ids.y >> 7);
-    Material m = push.materials[instance.materialBase + submesh];
-    uint type = materialType(m);
-    return (type < push.types ? type : 0) * VARIANTS + materialFeatures(m);
+    uint bin = push.materials[instance.materialBase + submesh].bin;
+    return bin < push.bins ? bin : 0; // a bin made since the graph built: shaded as metallic-roughness till it rebuilds
 }
 
 /**
  * Each bin's tile list: (groups x, y, z, count), then the tiles, x | y << 16; room for the whole image's tiles, so the
  * lists lie as the shading passes find them whatever the render region (classification pushes the stride as its bin).
- * Only bins with a shading variant have one: a table of each bin's list (types * VARIANTS words, to 16 bytes) comes
+ * Only bins with a shading variant have one: a table of each bin's list (a word per bin, to 16 bytes) comes
  * first, then the lists.
  */
 uint* tileList(uint bin)
 {
-    uint table = ((push.types * VARIANTS + 3) / 4) * 4;
+    uint table = ((push.bins + 3) / 4) * 4;
     return push.tiles + table + push.tiles[bin] * push.bin;
 }
 
-static const uint MAX_BINS = 256 * VARIANTS;
+static const uint MAX_BINS = 2048; // engine-render's Materials.MAX_BINS
 groupshared uint present[MAX_BINS / 32]; // the bins the tile shows, a bit each
 
 /** Puts tile `group` into the list of each bin it shows: one group of 8x8 threads per tile. */
