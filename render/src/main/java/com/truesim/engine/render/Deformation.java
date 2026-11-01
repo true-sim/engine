@@ -43,8 +43,8 @@ import java.util.Arrays;
  * the targets' deltas, uploaded once per mesh, are added to the rest vertices before skinning; a copy may have no
  * joints then. The box and growth count the morphs' moves as well.
  *
- * <p>A copy draws as its source until its first bounds; posed, it is skinned every frame (skipping unchanged ones
- * comes later). Its meshlets' spheres are recomputed from the posed vertices, cone culling is off for it, and its
+ * <p>A copy draws as its source until its first bounds; posed, it is skinned in the frames whose pose (joints, weights
+ * or bounds) differs from the one it was last skinned with, and keeps its vertices in the others. Its meshlets' spheres are recomputed from the posed vertices, cone culling is off for it, and its
  * detail spheres grow by {@code growth}, the farthest any joint moves a point of its box. Allocates nothing per frame.
  */
 public final class Deformation {
@@ -71,6 +71,7 @@ public final class Deformation {
     private boolean[] added = new boolean[64];
     private float[] bounds = new float[7 * 64];
     private boolean[] posed = new boolean[64];
+    private boolean[] changed = new boolean[64]; // posed anew since its last skinning: skinned again
     // Morph targets by source mesh number, uploaded once while copies of it are added: their bytes' start in morphData
     // (offsets per vertex and one more, then the records) and how many copies use them. Ranges let go wait for the
     // frames that may read them.
@@ -86,6 +87,7 @@ public final class Deformation {
     // The copies, densely.
     private int[] copies = new int[64];
     private int copyCount;
+    private int skinned; // in the frame recorded last
 
     @AllowAllocation("made with its pool")
     Deformation(VulkanDevice device, GeometryPool pool, FrameSlots slots) {
@@ -135,6 +137,7 @@ public final class Deformation {
             added = Arrays.copyOf(added, length);
             bounds = Arrays.copyOf(bounds, 7 * length);
             posed = Arrays.copyOf(posed, length);
+            changed = Arrays.copyOf(changed, length);
         }
         int slotCount = Math.max(1, joints + (targets + MATRIX_FLOATS - 1) / MATRIX_FLOATS);
         long first = matrixRanges.allocate(slotCount, 1);
@@ -248,6 +251,11 @@ public final class Deformation {
         }
     }
 
+    /** How many copies the frame recorded last skinned: those whose pose changed. */
+    public int skinnedLastFrame() {
+        return skinned;
+    }
+
     /** How many copies it poses. */
     public int size() {
         return copyCount;
@@ -261,18 +269,18 @@ public final class Deformation {
         double m12, double m13, double m20, double m21, double m22, double m23) {
         added(copy);
         long at = 4L * MATRIX_FLOATS * (firstMatrix[copy] + java.util.Objects.checkIndex(joint, jointCount[copy]));
-        matrices.set(F32, at, (float) m00);
-        matrices.set(F32, at + 4, (float) m01);
-        matrices.set(F32, at + 8, (float) m02);
-        matrices.set(F32, at + 12, (float) m03);
-        matrices.set(F32, at + 16, (float) m10);
-        matrices.set(F32, at + 20, (float) m11);
-        matrices.set(F32, at + 24, (float) m12);
-        matrices.set(F32, at + 28, (float) m13);
-        matrices.set(F32, at + 32, (float) m20);
-        matrices.set(F32, at + 36, (float) m21);
-        matrices.set(F32, at + 40, (float) m22);
-        matrices.set(F32, at + 44, (float) m23);
+        put(copy, at, m00);
+        put(copy, at + 4, m01);
+        put(copy, at + 8, m02);
+        put(copy, at + 12, m03);
+        put(copy, at + 16, m10);
+        put(copy, at + 20, m11);
+        put(copy, at + 24, m12);
+        put(copy, at + 28, m13);
+        put(copy, at + 32, m20);
+        put(copy, at + 36, m21);
+        put(copy, at + 40, m22);
+        put(copy, at + 44, m23);
     }
 
     /** Morph target {@code target}'s weight for copy {@code copy}. */
@@ -280,7 +288,16 @@ public final class Deformation {
         added(copy);
         long at = 4L * (MATRIX_FLOATS * ((long) firstMatrix[copy] + jointCount[copy])
             + java.util.Objects.checkIndex(target, targetCount[copy]));
-        matrices.set(F32, at, (float) weight);
+        put(copy, at, weight);
+    }
+
+    /** Writes {@code value} at {@code at} of the matrices, noting {@code copy} changed if it does. */
+    private void put(int copy, long at, double value) {
+        float f = (float) value;
+        if (Float.floatToRawIntBits(matrices.get(F32, at)) != Float.floatToRawIntBits(f)) {
+            matrices.set(F32, at, f);
+            changed[copy] = true;
+        }
     }
 
     /**
@@ -296,14 +313,23 @@ public final class Deformation {
                 + maxX + ", " + maxY + ", " + maxZ + ", " + growth);
         }
         int b = 7 * copy;
-        bounds[b] = (float) minX;
-        bounds[b + 1] = (float) minY;
-        bounds[b + 2] = (float) minZ;
-        bounds[b + 3] = (float) (maxX - minX);
-        bounds[b + 4] = (float) (maxY - minY);
-        bounds[b + 5] = (float) (maxZ - minZ);
-        bounds[b + 6] = (float) growth;
+        bound(copy, b, minX);
+        bound(copy, b + 1, minY);
+        bound(copy, b + 2, minZ);
+        bound(copy, b + 3, maxX - minX);
+        bound(copy, b + 4, maxY - minY);
+        bound(copy, b + 5, maxZ - minZ);
+        bound(copy, b + 6, growth);
+        changed[copy] |= !posed[copy];
         posed[copy] = true;
+    }
+
+    private void bound(int copy, int i, double value) {
+        float f = (float) value;
+        if (bounds[i] != f) {
+            bounds[i] = f;
+            changed[copy] = true;
+        }
     }
 
     private void added(int copy) {
@@ -319,8 +345,13 @@ public final class Deformation {
     void record(PassContext ctx, SceneData.Buffers buffers, Pipeline skin, Pipeline spheres, DeformPush push) {
         retired.release();
         releaseMorphRanges();
-        if (copyCount == 0) {
-            return;
+        int skinning = 0;
+        for (int i = 0; i < copyCount; i++) {
+            skinning += posed[copies[i]] && changed[copies[i]] ? 1 : 0;
+        }
+        skinned = skinning;
+        if (skinning == 0) {
+            return; // every copy as last skinned: their vertices stay
         }
         long bytes = 4L * MATRIX_FLOATS * matrixRanges.capacity();
         if (frameMatrices == null || frameMatrices.size() < bytes) {
@@ -342,7 +373,7 @@ public final class Deformation {
             .meshletVertices(ctx.address(buffers.meshletVertices())).clusterLod(ctx.address(buffers.clusterLod()));
         for (int i = 0; i < copyCount; i++) {
             int copy = copies[i];
-            if (!posed[copy]) {
+            if (!posed[copy] || !changed[copy]) {
                 continue;
             }
             int vertices = pool.vertexCountOf(copy);
@@ -354,12 +385,13 @@ public final class Deformation {
                 | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         for (int i = 0; i < copyCount; i++) {
             int copy = copies[i];
-            if (!posed[copy]) {
+            if (!posed[copy] || !changed[copy]) {
                 continue;
             }
             int meshlets = pool.meshletCount(copy);
             set(push, copy, matrixBase).vertices(meshlets);
             ctx.dispatch(spheres, push, (meshlets + 63) / 64);
+            changed[copy] = false;
         }
         // Everything after reads them: culling, drawing, ray tracing
         Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,

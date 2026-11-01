@@ -531,6 +531,7 @@ class GraphTechniquesTest {
                 graph.submit(0, 0);
             }
             device.waitIdle();
+            assertThat(deformation.skinnedLastFrame()).as("posed as before: not skinned again").isZero();
             java.lang.foreign.MemorySegment data = readback.memory();
             int base = posing.vertexBase(copy);
             int restBase = posing.vertexBase(source);
@@ -553,6 +554,18 @@ class GraphTechniquesTest {
             assertThat(entry.get(ValueLayout.JAVA_FLOAT_UNALIGNED, 92)).as("the detail sphere grown by 1")
                 .isCloseTo(posing.meshTable().memory().get(ValueLayout.JAVA_FLOAT_UNALIGNED, 96L * source + 92) + 1,
                     within(1e-5f));
+            // Posed anew: skinned again; a weight changed alone counts too.
+            graph.beginFrame();
+            deformation.joint(copy, 1, 1, 0, 0, 0, 0, 1, 0, 0.5, 0, 0, 1, 0);
+            posedView.set(1, MeshletRenderer.MODE_WHITE);
+            graph.submit(0, 0);
+            assertThat(deformation.skinnedLastFrame()).isOne();
+            graph.beginFrame();
+            deformation.bounds(copy, -1, 0, -1, 1, 0.5, 1, 0.5);
+            posedView.set(1, MeshletRenderer.MODE_WHITE);
+            graph.submit(0, 0);
+            assertThat(deformation.skinnedLastFrame()).as("new bounds").isOne();
+            device.waitIdle();
             // Copies go before their source.
             assertThatIllegalStateException().isThrownBy(() -> posing.remove(source));
             posing.remove(copy);
