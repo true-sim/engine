@@ -90,6 +90,9 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     private final Pipeline[] draw;
     private final Pipeline[] drawDepth;
     private final Pipeline[] drawIds;
+    private final Pipeline drawBlended; // the blended bin into the transparency pass's targets
+    // Per draw of the frame graph being built: its draw list, for the transparency pass's blended draw.
+    private final java.util.Map<SceneDraw, Buffer> lists = new java.util.HashMap<>();
     // Grown with the pool (indices, meshes) or as meshes come (levels, parts); replaced ones freed once no frame reads
     // them.
     private final VulkanDevice device;
@@ -133,10 +136,13 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             draw = new Pipeline[MeshletRenderer.BINS];
             drawDepth = new Pipeline[MeshletRenderer.BINS];
             drawIds = device.primitiveIds() ? new Pipeline[MeshletRenderer.BINS] : null;
+            drawBlended = RasterPipelines.blended(raster(device, MeshletRenderer.BIN_BLENDED, vertexShader)
+                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading, "blendedMain"), depthFormat);
             try (ShaderModule idsShader = device.primitiveIds() ? ShaderModule.load(device, "shaders/classic/ids.spv")
                 : null) {
                 for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {
-                    boolean masked = bin == MeshletRenderer.BIN_MASKED;
+                    // The blended bin drawn as opaque takes the masked entry points: one-sided back faces discarded.
+                    boolean masked = bin == MeshletRenderer.BIN_MASKED || bin == MeshletRenderer.BIN_BLENDED;
                     draw[bin] = raster(device, bin, vertexShader)
                         .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading, masked ? "maskedMain" : "fragmentMain")
                         .color(colorFormat).depth(depthFormat).build(); // the meshlet paths' shading
@@ -350,6 +356,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         };
         Buffer list = g.createBuffer(name + " draws", recordsOffset + (long) RECORD_BYTES * maxDraws
             * MeshletRenderer.BINS);
+        lists.put(draw, list);
         g.pass(name + " reset").write(list, BufferAccess.TRANSFER_DST)
             .record(ctx -> Commands.fillBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(list), 0, 16, 0));
         SceneData.Buffers scene = g.request(new SceneData(renderer));
@@ -377,7 +384,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             }
         }
         if (load) {
-            pass.attachDepth(targets.depth(), Load.LOAD, Store.STORE);
+            pass.attachDepthReadOnly(targets.depth());
         } else {
             pass.attachDepth(targets.depth(), Clear.FAR);
         }
@@ -394,11 +401,49 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             case SHADED -> this.draw;
             case IDS -> drawIds;
         };
+        int bins = Transparency.opaque(g) ? MeshletRenderer.BINS : MeshletRenderer.BIN_BLENDED;
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            record(ctx, pipeline, view, lights == null ? 0 : ctx.address(lights), list);
+            record(ctx, pipeline, bins, view, lights == null ? 0 : ctx.address(lights), list);
+        });
+    }
+
+    /** The blended bin of the draw list {@link #drawFirst} selected for {@code draw}, over the opaque depth. */
+    @Override
+    @AllowAllocation("building the graph, when it changes")
+    public void drawBlended(GraphBuilder g, SceneDraw draw, Transparency.Targets targets, boolean load) {
+        Buffer list = lists.get(draw);
+        if (list == null) {
+            throw new IllegalStateException("No draw list for " + draw + ": drawFirst comes first");
+        }
+        SceneData.Buffers scene = g.request(new SceneData(renderer));
+        GraphBuilder.PassBuilder pass = scene.read(targets.inRegion(g.pass("classic LOD blended")),
+            BufferAccess.DRAW_READ).read(list, BufferAccess.INDIRECT).read(list, BufferAccess.DRAW_READ);
+        if (load) {
+            pass.attach(targets.accumulated(), Load.LOAD, Store.STORE).attach(targets.revealage(), Load.LOAD,
+                Store.STORE);
+        } else {
+            pass.attach(targets.accumulated(), Clear.color(0, 0, 0, 0)).attach(targets.revealage(),
+                Clear.color(1, 1, 1, 1));
+        }
+        pass.attachDepthReadOnly(targets.depth());
+        Buffer lights = targets.lights();
+        if (lights != null) {
+            pass.read(lights, BufferAccess.DRAW_READ);
+        }
+        ShadowInputs.Set shadows = targets.shadows();
+        if (shadows != null) {
+            shadows.readBy(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
+        }
+        RenderView view = draw.view();
+        pass.record(ctx -> {
+            if (shadows != null) {
+                shadows.prepare(ctx);
+            }
+            recordBin(ctx, drawBlended, MeshletRenderer.BIN_BLENDED, view, lights == null ? 0 : ctx.address(lights),
+                list);
         });
     }
 
@@ -434,8 +479,18 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         return bin == MeshletRenderer.BIN_OPAQUE ? graphics : graphics.doubleSided();
     }
 
-    /** Draws the list's draws of view {@code view}, each bin with its {@code pipeline}, into the pass's attachments. */
-    private void record(PassContext ctx, Pipeline[] pipeline, RenderView view, long lights, Buffer list) {
+    /**
+     * Draws the list's draws of view {@code view}, each of the first {@code bins} bins with its {@code pipeline}, into
+     * the pass's attachments.
+     */
+    private void record(PassContext ctx, Pipeline[] pipeline, int bins, RenderView view, long lights, Buffer list) {
+        for (int bin = 0; bin < bins; bin++) {
+            recordBin(ctx, pipeline[bin], bin, view, lights, list);
+        }
+    }
+
+    /** Draws the list's draws of view {@code view} in bin {@code bin} with {@code pipeline}. */
+    private void recordBin(PassContext ctx, Pipeline pipeline, int bin, RenderView view, long lights, Buffer list) {
         VkCommandBuffer commands = ctx.unsafe().commands();
         long handle = ctx.unsafe().buffer(list);
         try (MemoryStack stack = stackPush()) {
@@ -449,12 +504,10 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             memPutLong(push + ClassicPush.MATERIALS, renderer.scene().materialsAddress());
             memPutLong(push + ClassicPush.LIGHTS, lights);
             Commands.bindIndexBuffer(commands, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
-            for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {
-                pipeline[bin].bind(commands);
-                pipeline[bin].push(commands, push, DRAW_PUSH);
-                Commands.drawIndexedIndirectCount(commands, handle, 16 + (long) COMMAND_BYTES * maxDraws * bin, handle,
-                    4L * bin, maxDraws, COMMAND_BYTES);
-            }
+            pipeline.bind(commands);
+            pipeline.push(commands, push, DRAW_PUSH);
+            Commands.drawIndexedIndirectCount(commands, handle, 16 + (long) COMMAND_BYTES * maxDraws * bin, handle,
+                4L * bin, maxDraws, COMMAND_BYTES);
         }
     }
 
@@ -463,6 +516,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         if (!closed) {
             closed = true;
             select.close();
+            drawBlended.close();
             for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {
                 draw[bin].close();
                 drawDepth[bin].close();

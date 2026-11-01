@@ -98,6 +98,7 @@ public final class Materials implements AutoCloseable {
     private int[] binFeatures = new int[16];
     private int bins;
     private final Map<Long, Integer> binOf = new HashMap<>();
+    private int blended; // how many materials are blended: the transparency pass runs while there are
     /** The type of each parameters' record, where one type takes it. */
     private final Map<Class<?>, MaterialType> byRecord = new HashMap<>();
     /** Per parameters record: where in its block the mask alpha and mask texture lie (-1: none), as slots copy them. */
@@ -770,6 +771,14 @@ public final class Materials implements AutoCloseable {
         return bins;
     }
 
+    /**
+     * Whether the table holds a blended material ({@link Material#alphaBlend}): the transparency pass runs only while
+     * it does, so a scene without one pays nothing for it; a change rebuilds the graph. Allocates nothing.
+     */
+    public boolean hasBlended() {
+        return blended > 0;
+    }
+
     /** Bin {@code bin}'s material type. */
     public MaterialType binType(int bin) {
         return types.get(binTypes[java.util.Objects.checkIndex(bin, bins)]);
@@ -807,6 +816,9 @@ public final class Materials implements AutoCloseable {
             heap.release(heapUnit[id], heapUnits[id]);
             heapUnit[id] = -1;
             heapUnits[id] = 0;
+        }
+        if (materials[id] != null && materials[id].blended()) {
+            blended--;
         }
         materials[id] = null;
         unname(id);
@@ -865,6 +877,12 @@ public final class Materials implements AutoCloseable {
         table.putInt(slot + MaterialLayout.FEATURES, material.featureMask());
         table.putInt(slot + MaterialLayout.FEATURE_TABLE, (int) featureTable);
         table.putInt(slot + MaterialLayout.BIN, bin);
+        if (materials[id] != null && materials[id].blended()) {
+            blended--;
+        }
+        if (material.blended()) {
+            blended++;
+        }
         materials[id] = material;
         name(id, material);
         nameBuffers(id, material);

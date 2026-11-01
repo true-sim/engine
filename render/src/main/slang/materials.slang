@@ -71,7 +71,7 @@ public static const int SRGB = 1;
 public struct Material
 {
     public uint header;            // type bits 0-7 (0: metallic-roughness), double-sided bit 8, masked bit 9,
-                                   // cutoff bits 16-31
+                                   // blended bit 10, cutoff bits 16-31
     public uint parameters;        // its block: its type's parameters, then its features' sections
     public int maskTexture;        // masking: the texture whose alpha it compares (-1: none)
     public float maskAlpha;        // masking: the alpha factor
@@ -134,6 +134,12 @@ public uint materialFeatures(Material m)
 public bool materialDoubleSided(Material m)
 {
     return (m.header & (1u << 8)) != 0;
+}
+
+/** Whether `m` is alpha-blended: drawn over what is behind it, by its alpha, after the opaque surfaces. */
+public bool materialBlended(Material m)
+{
+    return (m.header & (1u << 10)) != 0;
 }
 
 /** Whether `m` is alpha-masked: texels whose alpha is below its cutoff are not drawn. */

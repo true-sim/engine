@@ -76,7 +76,8 @@ public final class GraphBuilder {
      * said, cleared to {@code clear}; a depth attachment with {@code depth}; a multisampled color one resolved into
      * {@code resolve} (or null).
      */
-    record Attachment(Subresource target, Load load, Store store, Clear clear, boolean depth, Subresource resolve) {
+    record Attachment(Subresource target, Load load, Store store, Clear clear, boolean depth, Subresource resolve,
+        boolean readOnly) {
     }
 
     /**
@@ -847,6 +848,26 @@ public final class GraphBuilder {
             return attachDepth(image(target).whole(), Load.CLEAR, Store.STORE, clear);
         }
 
+        /**
+         * Tests depth against {@code target} without writing it: a read-only depth attachment, as passes drawing over
+         * what another pass made (blended surfaces over the opaque scene's depth) use it, whoever made it.
+         */
+        public PassBuilder attachDepthReadOnly(Image target) {
+            Subresource whole = image(target).whole();
+            if (attachments.stream().anyMatch(Attachment::depth)) {
+                throw new IllegalStateException(name + " has a depth attachment already");
+            }
+            if (!target.format.depth()) {
+                throw new IllegalArgumentException(name + ": " + target + " is not a depth format");
+            }
+            Image first = attachments.isEmpty() ? null : attachments.getFirst().target().image();
+            if (first != null && (first.width != target.width || first.height != target.height)) {
+                throw new IllegalArgumentException(name + ": attachments are of one size: " + target + " and " + first);
+            }
+            attachments.add(new Attachment(whole, Load.LOAD, Store.NONE, null, true, null, true));
+            return use(whole, Access.DEPTH_TEST, false);
+        }
+
         /** Renders depth into part of an image, as {@link #attach(Subresource, Load, Store, Clear)} color. */
         public PassBuilder attachDepth(Subresource target, Load load, Store store, Clear clear) {
             return attachment(target, load, store, clear, true);
@@ -868,7 +889,7 @@ public final class GraphBuilder {
                     + last.target() + ": one sample, its size and format");
             }
             attachments.set(attachments.size() - 1, new Attachment(last.target(), last.load(), last.store(),
-                last.clear(), false, into));
+                last.clear(), false, into, false));
             checkWritable(into);
             return use(into, Access.COLOR_ATTACHMENT, true);
         }
@@ -896,7 +917,7 @@ public final class GraphBuilder {
                     + "a depth format");
             }
             checkWritable(target);
-            attachments.add(new Attachment(target, load, store, clear, depth, null));
+            attachments.add(new Attachment(target, load, store, clear, depth, null, false));
             return use(target, depth ? Access.DEPTH_ATTACHMENT : Access.COLOR_ATTACHMENT, load != Load.LOAD);
         }
 

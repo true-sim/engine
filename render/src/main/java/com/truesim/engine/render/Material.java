@@ -32,10 +32,11 @@ import java.util.Objects;
  * @param features    the features it shows, one per bit
  * @param doubleSided whether back faces show too, lit as the front
  * @param alphaCutoff below 0: opaque; else the alpha below which nothing is drawn
+ * @param blended     whether it is drawn over what is behind it, by its alpha ({@link Transparency})
  */
 @AllowAllocation("materials are made when they change")
 public record Material(MaterialType type, MaterialParameters parameters, List<MaterialFeature> features,
-    boolean doubleSided, float alphaCutoff) {
+    boolean doubleSided, float alphaCutoff, boolean blended) {
 
     /** A clear coat: a glossy dielectric layer over the base, as car paint or varnish. */
     public static final int FEATURE_CLEARCOAT = MaterialsConstants.FEATURE_CLEARCOAT;
@@ -76,21 +77,30 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
         if (!(alphaCutoff < 0 || alphaCutoff <= 1)) {
             throw new IllegalArgumentException("A cutoff of 0 to 1: " + alphaCutoff);
         }
+        if (blended && alphaCutoff >= 0) {
+            throw new IllegalArgumentException("Masked or blended, not both");
+        }
+    }
+
+    /** Opaque or masked: as {@link #Material(MaterialType, MaterialParameters, List, boolean, float, boolean)}. */
+    public Material(MaterialType type, MaterialParameters parameters, List<MaterialFeature> features,
+        boolean doubleSided, float alphaCutoff) {
+        this(type, parameters, features, doubleSided, alphaCutoff, false);
     }
 
     /** {@code parameters}, of the type registered for their record; opaque, one-sided, no features. */
     public Material(MaterialParameters parameters) {
-        this(null, parameters, List.of(), false, -1);
+        this(null, parameters, List.of(), false, -1, false);
     }
 
     /** {@code parameters} of type {@code type}: for records more than one type takes. */
     public Material(MaterialType type, MaterialParameters parameters) {
-        this(Objects.requireNonNull(type, "type"), parameters, List.of(), false, -1);
+        this(Objects.requireNonNull(type, "type"), parameters, List.of(), false, -1, false);
     }
 
     /** This with {@code parameters} instead. */
     public Material parameters(MaterialParameters parameters) {
-        return new Material(type, parameters, features, doubleSided, alphaCutoff);
+        return new Material(type, parameters, features, doubleSided, alphaCutoff, blended);
     }
 
     /** This showing {@code feature}, instead of any parameters it had for it. */
@@ -103,19 +113,19 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
         }
         with.add(feature);
         with.sort((a, b) -> Integer.compare(a.feature(), b.feature()));
-        return new Material(type, parameters, with, doubleSided, alphaCutoff);
+        return new Material(type, parameters, with, doubleSided, alphaCutoff, blended);
     }
 
     /** This without feature {@code feature} (a {@code FEATURE_*} bit). */
     public Material withoutFeature(int feature) {
         List<MaterialFeature> without = new ArrayList<>(features);
         without.removeIf(f -> f.feature() == feature);
-        return new Material(type, parameters, without, doubleSided, alphaCutoff);
+        return new Material(type, parameters, without, doubleSided, alphaCutoff, blended);
     }
 
     /** Whether back faces show too, lit as the front: leaves, cloth, thin walls. */
     public Material doubleSided(boolean twoSided) {
-        return new Material(type, parameters, features, twoSided, alphaCutoff);
+        return new Material(type, parameters, features, twoSided, alphaCutoff, blended);
     }
 
     /**
@@ -126,12 +136,20 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
         if (!(cutoff >= 0 && cutoff <= 1)) {
             throw new IllegalArgumentException("A cutoff of 0 to 1: " + cutoff);
         }
-        return new Material(type, parameters, features, doubleSided, cutoff);
+        return new Material(type, parameters, features, doubleSided, cutoff, false);
     }
 
-    /** Opaque again: alpha is not compared. */
+    /** Opaque again: alpha is neither compared nor blended. */
     public Material opaque() {
-        return new Material(type, parameters, features, doubleSided, -1);
+        return new Material(type, parameters, features, doubleSided, -1, false);
+    }
+
+    /**
+     * Alpha-blended, as glTF's {@code BLEND}: drawn over what is behind it by its alpha (the type's, times the vertex
+     * color's), after the opaque surfaces, as {@link Transparency#MODE} says; glass, smoke, fades.
+     */
+    public Material alphaBlend() {
+        return new Material(type, parameters, features, doubleSided, -1, true);
     }
 
     public boolean masked() {
@@ -149,10 +167,10 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
 
     /**
      * The header word shaders read, for type id {@code typeId}: type in bits 0-7, double-sided bit 8, masked bit 9,
-     * cutoff 16-31.
+     * blended bit 10, cutoff 16-31.
      */
     int header(int typeId) {
-        int header = typeId | (doubleSided ? 1 << 8 : 0);
+        int header = typeId | (doubleSided ? 1 << 8 : 0) | (blended ? 1 << 10 : 0);
         if (alphaCutoff >= 0) {
             header |= 1 << 9 | Math.round(alphaCutoff * 65_535) << 16;
         }

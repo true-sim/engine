@@ -44,6 +44,19 @@ float4 fragmentMain(VertexOut in) : SV_Target
         uint2(in.position.xy));
 }
 
+/** The blended bin's, into the transparency pass's targets: one-sided materials' back faces discarded. */
+[shader("fragment")]
+BlendedOut blendedMain(VertexOut in, bool front : SV_IsFrontFace)
+{
+    if (!front && !materialDoubleSided(push.materials[in.material]))
+    {
+        discard;
+    }
+    float4 uvs = float4(in.uv, in.uv1);
+    return weighBlended(shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
+        uint2(in.position.xy)), length(in.world));
+}
+
 /** The masked bin's: drawn without culling, so one-sided materials' back faces go here with the masked texels. */
 [shader("fragment")]
 float4 maskedMain(VertexOut in, bool front : SV_IsFrontFace) : SV_Target

@@ -63,11 +63,11 @@ public record ViewOptions(int draws, int triangles, boolean occlusion, int layer
 
     /** The meshlets the view's lists hold, every bin's. */
     public long allDraws() {
-        return draws + 2L * binDraws;
+        return draws + (MeshletRenderer.BINS - 1L) * binDraws;
     }
 
     /** The triangles the view's index buffer holds, every bin's (the indexed path). */
     public long allTriangles() {
-        return triangles + 2L * binTriangles;
+        return triangles + (MeshletRenderer.BINS - 1L) * binTriangles;
     }
 }

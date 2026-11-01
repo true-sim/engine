@@ -103,7 +103,7 @@ public final class VisibilityBufferShading implements Technique {
     public long buildVersion() {
         Materials materials = renderer.scene().materials();
         return ((long) System.identityHashCode(materials) << 32 | materials.binCount())
-            + 31 * materials.graphBuffersVersion();
+            + 31 * materials.graphBuffersVersion() + 17 * Transparency.buildVersion(materials);
     }
 
     @Override
@@ -116,9 +116,9 @@ public final class VisibilityBufferShading implements Technique {
             throw new IllegalStateException("The visibility buffer shades up to 65,535 pixels per side: " + width
                 + " x " + height);
         }
-        SceneDraw.Targets targets = g.request(new SceneDraw(geometry, view.view(), null, SurfaceOutput.ids(),
-            depthFormat, width, height, (occlusion != null ? occlusion : g.setting(RenderSettings.OCCLUSION))
-            && view.view().options().occlusion()));
+        SceneDraw draw = new SceneDraw(geometry, view.view(), null, SurfaceOutput.ids(), depthFormat, width, height,
+            (occlusion != null ? occlusion : g.setting(RenderSettings.OCCLUSION)) && view.view().options().occlusion());
+        SceneDraw.Targets targets = g.request(draw);
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         // With inline ray shadows, the variant tracing them, where the device can.
@@ -195,7 +195,8 @@ public final class VisibilityBufferShading implements Technique {
                     bin, ctx.address(tiles) + list), tiles, list);
             }
         });
-        g.provide(Keys.SCENE_COLOR, color);
+        g.provide(Keys.SCENE_COLOR, Transparency.add(g, draw, color, targets.depth(), lights, shadows,
+            targets.region()));
         g.provide(Keys.SCENE_DEPTH, targets.depth());
     }
 

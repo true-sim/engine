@@ -90,7 +90,7 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         if (total > 0 && WaveIsFirstLane())
         {
             InterlockedAdd(lists.drawCommand[6 * b + 5], total, firstBase); // indices reserved so far in the bin
-            InterlockedMax(lists.visibleCount[6 + b], firstBase + total); // the most any phase wanted, for the CPU
+            InterlockedMax(lists.visibleCount[2 * BINS + b], firstBase + total); // the most any phase wanted, for the CPU
         }
         uint first = WaveReadLaneFirst(firstBase) + WavePrefixSum(wanted);
         // Meshlets past the index capacity come last (first grows with the lane and the wave): no gaps.

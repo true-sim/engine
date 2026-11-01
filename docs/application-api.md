@@ -324,6 +324,12 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   its UV set (bit 20) and transform (bits 21-24) above its sampler; the transforms are a feature every type allows
   (`TextureTransformParameters`, up to eight per material); glTF's per-texture `TexCoord`, `Offset`, `Rotation`,
   `Scale` become them. Alpha-mask textures follow their UV set, not a transform (the slot has no room).
+- **D136b** (built) Unlit (a feature every type allows) and alpha blending: blended materials (`Material.alphaBlend`,
+  glTF's `BLEND`) are a fourth raster bin from the same culling, skipped by the opaque, depth and ID passes; the
+  technique is the setting `render.transparency`: `WEIGHTED_BLENDED` (weighted blended order-independent
+  transparency: a pass into accumulated color and revealage over the opaque depth, read-only, then a resolve into a new
+  scene color) or `OPAQUE`; more modes (sorted meshlets, exact per-pixel) can be added as further choices. The pass runs
+  only while a material is blended.
 - **D137** (new) Checked against the Khronos glTF sample models: an optional sweep (`-PgltfSamples=...`) imports every
   model with all its parts.
 

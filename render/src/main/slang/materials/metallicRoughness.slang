@@ -65,7 +65,9 @@ public Surface evaluate(MetallicRoughnessParameters p, SurfaceInput in)
 {
     float3 o = orm(p, in);
     Surface s = Surface.defaults(normal(p, in));
-    s.albedo = baseColor(p, in).rgb;
+    float4 base = baseColor(p, in);
+    s.albedo = base.rgb;
+    s.alpha = base.a;
     s.metallic = saturate(o.z);
     s.roughness = clamp(o.y, 0.03, 1.0); // a perfect mirror's highlight would be infinitely small
     s.emissive = emission(p, in);

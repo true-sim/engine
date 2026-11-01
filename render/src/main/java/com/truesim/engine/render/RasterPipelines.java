@@ -1,6 +1,7 @@
 package com.truesim.engine.render;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
+import static org.lwjgl.vulkan.VK10.VK_COMPARE_OP_GREATER_OR_EQUAL;
 import static org.lwjgl.system.MemoryUtil.memPutAddress;
 import static org.lwjgl.system.MemoryUtil.memPutFloat;
 import static org.lwjgl.system.MemoryUtil.memPutInt;
@@ -49,12 +50,16 @@ final class RasterPipelines implements AutoCloseable {
     private static final int BINS = MeshletRenderer.BINS;
     private static final int BIN_OPAQUE = MeshletRenderer.BIN_OPAQUE;
     private static final int BIN_MASKED = MeshletRenderer.BIN_MASKED;
+    private static final int BIN_BLENDED = MeshletRenderer.BIN_BLENDED;
 
     private final VulkanDevice device;
     // Per role, then raster bin (BIN_*): on the indexed path, and on mesh shaders (null without); the IDs' role is null
     // without primitive IDs.
     private final Pipeline[][] indexed = new Pipeline[3][];
     private final Pipeline[][] mesh = new Pipeline[3][];
+    // The blended bin into the transparency pass's targets: on the indexed path, and on mesh shaders (null without).
+    private final Pipeline indexedBlended;
+    private Pipeline meshBlended;
 
     RasterPipelines(VulkanDevice device, int colorFormat, int depthFormat) {
         this.device = device;
@@ -65,12 +70,14 @@ final class RasterPipelines implements AutoCloseable {
             // double-sided one culls nothing; the masked one culls nothing and discards (masked texels, one-sided
             // materials' back faces), depth only too, so shadow maps mask what the camera does.
             indexed[SHADED] = bins(bin -> raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain")
-                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, bin == BIN_MASKED ? "maskedMain" : "fragmentMain")
+                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, masking(bin) ? "maskedMain" : "fragmentMain")
                 .color(colorFormat).depth(depthFormat).build());
             indexed[DEPTH] = bins(bin -> depthOnly(raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain"),
                 bin, drawShader).depth(depthFormat).build());
+            indexedBlended = blended(raster(BIN_BLENDED, drawShader, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain")
+                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "blendedMain"), depthFormat);
             indexed[IDS] = idsShader == null ? null : bins(bin -> raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT,
-                "vertexMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader, bin == BIN_MASKED ? "maskedIdsMain"
+                "vertexMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader, masking(bin) ? "maskedIdsMain"
                 : "idsMain").color(MeshletRenderer.ID_FORMAT).depth(depthFormat).build());
             // Barycentrics and primitive IDs in fragment shaders: the mesh path's lean and slim interfaces (lean.slang, mesh.slang).
             boolean slimMeshes = device.barycentrics() && device.primitiveIds();
@@ -79,6 +86,9 @@ final class RasterPipelines implements AutoCloseable {
                     if (slimMeshes) {
                         // What interpolates, and the rest from the triangle (lean.slang); depth alone from positions.
                         try (ShaderModule leanShader = ShaderModule.load(device, "shaders/meshlets/lean.spv")) {
+                            meshBlended = blended(raster(BIN_BLENDED, leanShader, VK_SHADER_STAGE_MESH_BIT_EXT,
+                                "meshLeanMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, leanShader, "leanBlendedMain"),
+                                depthFormat);
                             mesh[SHADED] = bins(bin -> raster(bin, leanShader, VK_SHADER_STAGE_MESH_BIT_EXT,
                                 "meshLeanMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, leanShader, bin == BIN_MASKED
                                 ? "leanMaskedMain" : "leanMain").color(colorFormat).depth(depthFormat).build());
@@ -86,12 +96,14 @@ final class RasterPipelines implements AutoCloseable {
                         // Opaque bins' depth from positions alone (no fragment shader); the masked bin's fragments
                         // need texture coordinates, from the full vertices: in depth-only pipelines on an RX 9070 XT
                         // the fragment shader did not see the primitive ID the mesh shader wrote (pitfalls.md).
-                        mesh[DEPTH] = bins(bin -> (bin == BIN_MASKED ? depthOnly(raster(bin, meshShader,
+                        mesh[DEPTH] = bins(bin -> (masking(bin) ? depthOnly(raster(bin, meshShader,
                             VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain"), bin, drawShader) : raster(bin, meshShader,
                             VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain")).depth(depthFormat).build());
                     } else {
+                        meshBlended = blended(raster(BIN_BLENDED, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT,
+                            "meshIdsMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "blendedMain"), depthFormat);
                         mesh[SHADED] = bins(bin -> raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain")
-                            .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, bin == BIN_MASKED ? "maskedMain"
+                            .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, masking(bin) ? "maskedMain"
                                 : "fragmentMain") // the same shading
                             .color(colorFormat).depth(depthFormat).build());
                         mesh[DEPTH] = bins(bin -> depthOnly(raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT,
@@ -99,7 +111,7 @@ final class RasterPipelines implements AutoCloseable {
                     }
                     mesh[IDS] = idsShader == null ? null : bins(bin -> raster(bin, meshShader,
                         VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader,
-                            bin == BIN_MASKED ? "maskedIdsMain" : "idsMain").color(MeshletRenderer.ID_FORMAT)
+                            masking(bin) ? "maskedIdsMain" : "idsMain").color(MeshletRenderer.ID_FORMAT)
                         .depth(depthFormat).build());
                 }
             }
@@ -131,17 +143,43 @@ final class RasterPipelines implements AutoCloseable {
             beginRendering(commands, stack, colorView, depthView, width, height, r, g, b, late);
             setViewport(commands, stack, width, height);
         }
-        drawBins(commands, scene, v, meshShading, role, late, clusters);
+        drawBins(commands, scene, v, meshShading, role, late, clusters, false);
         Commands.endRendering(commands);
     }
 
-    /** Draws {@code v}'s raster bins in {@code role} into the rendering scope open on {@code commands}. */
-    void drawBins(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading, int role, boolean late,
+    /** Draws {@code v}'s blended bin into the transparency pass's attachments, open on {@code commands}. */
+    void drawBlended(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading, boolean late,
         long clusters) {
+        try (MemoryStack stack = stackPush()) {
+            if (meshShading) {
+                drawMeshes(commands, stack, scene, v, BIN_BLENDED, late, v.drawCount().deviceAddress(), clusters,
+                    meshBlended);
+            } else {
+                drawIndexed(commands, stack, scene, v, BIN_BLENDED, clusters, indexedBlended);
+            }
+        }
+    }
+
+    /**
+     * A pipeline drawing blended fragments ({@code graphics}, its stages set) into the transparency pass's targets:
+     * accumulated color added up, revealage multiplied down, the opaque depth tested and kept.
+     */
+    static Pipeline blended(Pipeline.Graphics graphics, int depthFormat) {
+        return graphics.color(Transparency.ACCUMULATED_FORMAT).color(Transparency.REVEALAGE_FORMAT)
+            .blend(0, Pipeline.Blend.ADDITIVE).blend(1, Pipeline.Blend.TRANSMIT).depth(depthFormat)
+            .depthTest(VK_COMPARE_OP_GREATER_OR_EQUAL, false).build();
+    }
+
+    /**
+     * Draws {@code v}'s opaque raster bins in {@code role} into the rendering scope open on {@code commands}, the
+     * blended bin too (as opaque) with {@code blended}.
+     */
+    void drawBins(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading, int role, boolean late,
+        long clusters, boolean blended) {
         long count = v.drawCount().deviceAddress();
         Pipeline[] pipelines = meshShading ? mesh[role] : indexed[role];
         try (MemoryStack stack = stackPush()) {
-            for (int bin = 0; bin < BINS; bin++) {
+            for (int bin = 0; bin < (blended ? BINS : BIN_BLENDED); bin++) {
                 if (meshShading) {
                     drawMeshes(commands, stack, scene, v, bin, late, count, clusters, pipelines[bin]);
                 } else {
@@ -200,9 +238,17 @@ final class RasterPipelines implements AutoCloseable {
         return bin == BIN_OPAQUE ? graphics : graphics.doubleSided(); // the masked bin culls one-sided back faces itself
     }
 
-    /** Depth only: no fragment stage but the masked bin's, which discards what it masks. */
+    /**
+     * Whether bin {@code bin} draws with the masked entry points: the masked bin, and the blended one drawn as opaque
+     * (both discard one-sided materials' back faces, drawn without culling).
+     */
+    private static boolean masking(int bin) {
+        return bin == BIN_MASKED || bin == BIN_BLENDED;
+    }
+
+    /** Depth only: no fragment stage but the masked bins', which discard what they mask. */
     private static Pipeline.Graphics depthOnly(Pipeline.Graphics graphics, int bin, ShaderModule drawShader) {
-        return bin == BIN_MASKED ? graphics.stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "maskedDepthMain")
+        return masking(bin) ? graphics.stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "maskedDepthMain")
             : graphics;
     }
 
@@ -261,6 +307,10 @@ final class RasterPipelines implements AutoCloseable {
 
     @Override
     public void close() {
+        indexedBlended.close();
+        if (meshBlended != null) {
+            meshBlended.close();
+        }
         for (Pipeline[][] paths : new Pipeline[][][] {indexed, mesh}) {
             for (Pipeline[] pipelines : paths) {
                 if (pipelines != null) {
