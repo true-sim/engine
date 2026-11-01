@@ -2,7 +2,7 @@
 
 The public layer a regular user writes a game or application against. Decided step by step in conversation on
 2026-11-01, then reviewed (consistency, performance, feasibility against the code) and revised. Numbers are stable
-(D1–D124); a revised decision keeps its number and says what changed. Nothing here is built yet unless marked
+(D1–D132); a revised decision keeps its number and says what changed. Nothing here is built yet unless marked
 **exists**.
 
 **Names** (D117): a *plugin* is an engine part installed once at setup; a *game system* is game logic added and removed
@@ -270,12 +270,38 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   the phase in schedule order (not completion order); debug builds report two systems writing the same node.
   (`SceneBatch`, which stages new nodes, is not this mechanism.) Node sets later, only if measured.
 
+## 7. Lifecycle and views
+
+- **D125** (new) Startup failures: a stage that cannot start throws a `StartupFailure` (stage, plugin, reason, whether
+  the plugin is required). The engine calls `onStartupFailure(failure)`, which returns `RETRY`, `CONTINUE_WITHOUT` (an
+  optional plugin is dropped, e.g. no headset: play on the desktop) or `QUIT`. The default shows a native message box
+  and quits. Plugins declare themselves optional; code using an optional plugin reads it with `find`, never `get`.
+- **D126** (new) Quitting: the close button, Alt+F4, the OS and `app.quit()` all become a quit request.
+  `onQuitRequested(reason)` returns `ALLOW` or `DEFER`; after deferring (a "save before quitting?" dialog) the game
+  calls `app.quit()`. A forced quit (OS shutdown, a second request within a few seconds) skips the veto. Shutdown runs
+  in reverse startup order and saves the player's settings (D7).
+- **D127** (new) Focus, visibility and suspend are app events: `onFocusChanged`, `onVisibilityChanged`, `onSuspend`,
+  `onResume` (headset idle counts as hidden). Nothing pauses by itself; a hidden or minimised app throttles rendering.
+- **D128** (new) Pausing is per world: `world.clock().pause()` stops its `FIXED` steps and timers and clears its input
+  edges (D60); `UPDATE`, UI and other worlds keep running. `BaseGame.pauseOnFocusLoss(true)` opts in to pausing the
+  game's worlds on focus loss and suspend.
+- **D129** (new) A camera is a component on a node (D46): it moves and animates with the scene graph. In XR the tracked
+  head is the camera node.
+- **D130** (new) A `View` is one world seen through one camera node into one target, at a rectangle of it:
+  `app.views().add(world, cameraNode, target, rect)`. Targets: a window, a headset (both eyes), a texture (a material
+  samples it: minimaps, security cameras, mirrors). Each view has its own settings scope (`view.<name>`, as the frame
+  graph's views already have). Split screen is several views in one window.
+- **D131** (new) A view may belong to a local player (`view.player(p)`, D63): that player's glyphs and UI draw in it,
+  their camera input goes to it, and the engine lays out the rectangles as players join and leave (one full; two side
+  by side or stacked, a setting; three or four in quadrants) unless the game sets them. Audio listens from every
+  player's camera.
+- **D132** (new) `BaseGame` makes the main window and one view of its world through a default camera node; more windows
+  through `app.windows()`. A window whose display is unplugged moves to the primary display; its views follow it.
+
 ## Open questions
 
-- Not designed yet: views, cameras and output targets (window, headset, texture; split screen per player; display
-  hot-plugging); quitting with a veto (`onQuitRequested`); startup failures (no GPU, required headset missing: a
-  `StartupFailure` with a reason); saving game state (stable names on component and state keys, D46/D108);
-  localisation (a locale setting and string tables behind D11's keys); pause, focus loss and suspend.
+- Not designed yet: saving game state (stable names on component and state keys, D46/D108); localisation (a locale
+  setting and string tables behind D11's keys).
 
 ## Review notes (2026-11-01)
 
