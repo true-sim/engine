@@ -35,6 +35,9 @@ import com.truesim.engine.render.Keys;
 import com.truesim.common.math.color.Color;
 import com.truesim.engine.render.Material;
 import com.truesim.common.math.Vec4;
+import com.truesim.engine.render.materials.IorParameters;
+import com.truesim.engine.render.materials.SheenParameters;
+import com.truesim.engine.render.materials.SpecularParameters;
 import com.truesim.engine.render.materials.TextureTransformParameters;
 import com.truesim.engine.render.materials.UnlitParameters;
 import com.truesim.engine.render.TextureSampler;
@@ -777,6 +780,34 @@ class SceneSyncTest {
         assertThatIllegalArgumentException().isThrownBy(() -> many.add("t9", null, 9, null))
             .withMessageContaining("at most 8 texture transforms");
         assertThat(new SceneResources.Transforms().feature()).isNull();
+    }
+
+    @Test
+    void specularIorAndSheenInTheDataBecomeTheirFeatures() throws InterruptedException {
+        // As the glTF importer names them: the extensions' own field names.
+        AssetRef<MaterialData> cloth = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
+            (glow, seed) -> MaterialData.builder(MR)
+                .feature("specular", f -> f.set("specularFactor", 0.5f).set("specularColorFactor", 1f, 0.5f, 0.5f))
+                .feature("ior", f -> f.set("ior", 1.33f))
+                .feature("sheen", f -> f.set("sheenColorFactor", 0.2f, 0.3f, 0.4f).set("sheenRoughnessFactor", 0.6f))
+                .build(), new Glow(1, 1, 1), 81);
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        long node = facing(scene, 0, 0, -3);
+        renderables.set(node, SQUARE, List.of(cloth));
+        for (int round = 0; round < 3; round++) {
+            update(scene, renderables, sync);
+            load();
+        }
+        update(scene, renderables, sync);
+        Material made = materials.material(sync.firstMaterialOf(node));
+        assertThat(made.features()).containsExactlyInAnyOrder(
+            SpecularParameters.DEFAULTS.withSpecularFactor(0.5f).withSpecularColorFactor(new Color(1, 0.5, 0.5, 1)),
+            IorParameters.DEFAULTS.withIor(1.33f),
+            SheenParameters.DEFAULTS.withSheenColorFactor(new Color(0.2f, 0.3f, 0.4f, 1)).withSheenRoughnessFactor(0.6f));
+        assertThat(made.featureMask()).isEqualTo(Material.FEATURE_SPECULAR | Material.FEATURE_IOR
+            | Material.FEATURE_SHEEN);
     }
 
     @Test

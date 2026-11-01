@@ -88,8 +88,14 @@ public static const uint FEATURE_CLEARCOAT = 1;
 public static const uint FEATURE_TEXTURE_TRANSFORM = 2;
 /** Unlit (glTF's KHR_materials_unlit): the surface shows its base color as it is. */
 public static const uint FEATURE_UNLIT = 4;
+/** Specular (glTF's KHR_materials_specular): a dielectric's reflectance, its strength and color. */
+public static const uint FEATURE_SPECULAR = 8;
+/** IOR (glTF's KHR_materials_ior): the index of refraction a dielectric's reflectance follows. */
+public static const uint FEATURE_IOR = 16;
+/** Sheen (glTF's KHR_materials_sheen): back-scattering at grazing angles, as cloth and velvet. */
+public static const uint FEATURE_SHEEN = 32;
 /** How many features there are: their bits are the low FEATURE_BITS of a mask. */
-public static const uint FEATURE_BITS = 3;
+public static const uint FEATURE_BITS = 6;
 
 /**
  * A texture reference, as materials' texture fields hold them: slot bits 0-15, sampler 16-19, bit 20 the second UV set,

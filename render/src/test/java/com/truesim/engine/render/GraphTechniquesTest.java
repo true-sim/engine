@@ -44,6 +44,9 @@ import com.truesim.engine.render.blocks.DepthPyramid;
 import com.truesim.engine.render.materials.CarPaint;
 import com.truesim.engine.render.materials.CarPaintParameters;
 import com.truesim.engine.render.materials.ClearcoatParameters;
+import com.truesim.engine.render.materials.SpecularParameters;
+import com.truesim.engine.render.materials.SheenParameters;
+import com.truesim.engine.render.materials.IorParameters;
 import com.truesim.common.math.Vec4;
 import com.truesim.engine.render.materials.TextureTransformParameters;
 import com.truesim.engine.render.materials.UnlitParameters;
@@ -2011,6 +2014,68 @@ class GraphTechniquesTest {
             assertThat(red(center)).isLessThan(8);
             scene.setMaterials(null);
         }
+    }
+
+    @Test
+    void specularIorAndSheenChangeWhatADielectricReflects() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 16)) {
+            // A black, smooth dielectric: what shows is what it reflects, its reflectance head-on (f0) times the sky.
+            MetallicRoughnessParameters black = MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(0.3f)
+                .withMetallic(0);
+            int plain = materials.add(new Material(black));
+            int dense = materials.add(new Material(black).feature(IorParameters.DEFAULTS.withIor(3)));
+            int sameAsPlain = materials.add(new Material(black).feature(IorParameters.DEFAULTS));
+            int noSpecular = materials.add(new Material(black).feature(SpecularParameters.DEFAULTS
+                .withSpecularFactor(0)));
+            int redSpecular = materials.add(new Material(black).feature(IorParameters.DEFAULTS.withIor(3))
+                .feature(SpecularParameters.DEFAULTS.withSpecularColorFactor(new Color(1, 0, 0, 1))));
+            int sheen = materials.add(new Material(black).feature(SheenParameters.DEFAULTS
+                .withSheenColorFactor(new Color(0, 1, 0, 1)).withSheenRoughnessFactor(0.5f)));
+            scene.setMaterials(materials);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            List<Technique> shadings = new java.util.ArrayList<>();
+            if (device.primitiveIds()) {
+                shadings.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            }
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            for (int pass = 0; pass <= shadings.size(); pass++) {
+                if (pass > 0) {
+                    main.port().replace(shadings.get(pass - 1));
+                }
+                int[] shown = new int[6];
+                int[] list = {plain, dense, sameAsPlain, noSpecular, redSpecular, sheen};
+                for (int i = 0; i < list.length; i++) {
+                    scene.set(0, quadMesh, list[i], 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                    frame();
+                    shown[i] = image()[center];
+                }
+                int brightness = (shown[0] & 0xff) + ((shown[0] >> 8) & 0xff) + ((shown[0] >> 16) & 0xff);
+                assertThat(brightness).as("pass %d: a plain dielectric reflects some sky", pass).isPositive();
+                assertThat(sum(shown[1])).as("pass %d: a denser dielectric reflects more", pass)
+                    .isGreaterThan(sum(shown[0]) + 6);
+                assertThat(sum(shown[2])).as("pass %d: IOR 1.5, as without", pass).isCloseTo(sum(shown[0]),
+                    within(3));
+                assertThat(sum(shown[3])).as("pass %d: no specular, less reflected", pass).isLessThan(sum(shown[0]));
+                assertThat(shown[4] & 0xff).as("pass %d: red specular: red", pass)
+                    .isGreaterThan(((shown[4] >> 16) & 0xff) + 4);
+                assertThat((shown[5] >> 8) & 0xff).as("pass %d: green sheen: green", pass)
+                    .isGreaterThan(((shown[0] >> 8) & 0xff) + 4);
+            }
+            scene.setMaterials(null);
+        }
+    }
+
+    /** The red, green and blue of {@code pixel}, added. */
+    private static int sum(int pixel) {
+        return (pixel & 0xff) + ((pixel >> 8) & 0xff) + ((pixel >> 16) & 0xff);
     }
 
     /** Of the image's left half: how many pixels are mostly red, and how many mostly green. */
