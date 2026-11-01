@@ -314,6 +314,52 @@ class EngineTest {
     }
 
     @Test
+    void aClaimedDriverWinsOverTheDefaultOne() {
+        List<String> log = new ArrayList<>();
+        Logged rendering = new Logged("rendering", log);
+        rendering.onRun = startup -> startup.defaultFrameDriver(frame -> log.add("present " + frame.number()));
+        Logged xr = new Logged("xr", log, rendering.key);
+        xr.optional = true;
+        xr.onRun = startup -> startup.driveFrames(frame -> log.add("headset " + frame.number()));
+        try (Engine engine = Engine.create(new App(log, rendering))) {
+            log.clear();
+            engine.step();
+            assertThat(log).first().isEqualTo("present 0");
+        }
+        try (Engine engine = Engine.create(new App(log, rendering, xr))) {
+            log.clear();
+            engine.step();
+            assertThat(log).first().isEqualTo("headset 0");
+        }
+        // The plugin claiming frames dropped: the default again; the default's plugin dropped: paced.
+        xr.onRun = startup -> {
+            startup.driveFrames(frame -> log.add("headset " + frame.number()));
+            throw new StartupFailure("the session ended");
+        };
+        try (Engine engine = Engine.create(new App(log, rendering, xr))) {
+            log.clear();
+            engine.step();
+            assertThat(log).first().isEqualTo("present 0");
+        }
+        Logged presenter = new Logged("presenter", log);
+        presenter.optional = true;
+        presenter.onRun = startup -> {
+            startup.defaultFrameDriver(frame -> log.add("never"));
+            throw new StartupFailure("no display");
+        };
+        Logged other = new Logged("other", log);
+        other.onRun = startup -> startup.defaultFrameDriver(frame -> { });
+        try (Engine engine = Engine.create(new App(log, presenter))) {
+            log.clear();
+            engine.step();
+            assertThat(log).containsExactly("app update 0");
+        }
+        assertThatExceptionOfType(StartupFailure.class)
+            .isThrownBy(() -> Engine.create(new App(log, rendering, other)))
+            .withMessageContaining("rendering gives the default frame driver");
+    }
+
+    @Test
     void theDefaultDriverPacesFramesAtTheFrameRate() {
         App app = new App(new ArrayList<>());
         app.config = config -> config.defaults(Engine.FRAME_RATE, 100);

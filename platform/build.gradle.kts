@@ -9,7 +9,7 @@ val lwjglVersion: String by rootProject.extra
 val lwjglNatives: List<String> by rootProject.extra
 
 dependencies {
-    api(project(":engine-settings"))
+    api(project(":engine-app"))
     api(platform("org.lwjgl:lwjgl-bom:$lwjglVersion"))
     api("org.lwjgl:lwjgl")
     implementation("org.lwjgl:lwjgl-sdl")

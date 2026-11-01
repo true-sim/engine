@@ -59,7 +59,9 @@ public final class Engine implements AutoCloseable {
     private String version;
     private Path settingsFile;
     private FrameDriver driver = new Paced();
-    private Plugin driverOwner;
+    private Plugin driverOwner; // the plugin that claimed the frame driver, or null
+    private FrameDriver defaultDriver; // a plugin's default (the presenter), or null: paced
+    private Plugin defaultOwner;
     private boolean live;
     private boolean closed;
     private boolean focused = true;
@@ -197,9 +199,13 @@ public final class Engine implements AutoCloseable {
         kept.remove(plugin);
         running = kept.toArray(new Plugin[0]);
         if (driverOwner == plugin) {
-            driver = new Paced();
             driverOwner = null;
         }
+        if (defaultOwner == plugin) {
+            defaultDriver = null;
+            defaultOwner = null;
+        }
+        driver = driverOwner != null ? driver : defaultDriver != null ? defaultDriver : new Paced();
         plugin.stop();
     }
 
@@ -209,6 +215,17 @@ public final class Engine implements AutoCloseable {
         }
         driver = claimed;
         driverOwner = plugin;
+    }
+
+    void defaultFrameDriver(Plugin plugin, FrameDriver fallback) {
+        if (defaultOwner != null && defaultOwner != plugin) {
+            throw new IllegalStateException("The plugin " + defaultOwner.key() + " gives the default frame driver");
+        }
+        defaultDriver = fallback;
+        defaultOwner = plugin;
+        if (driverOwner == null) {
+            driver = fallback;
+        }
     }
 
     /** The plugin installed by {@code key}; throws naming {@code app.use(...)} if it is not, or could not start. */

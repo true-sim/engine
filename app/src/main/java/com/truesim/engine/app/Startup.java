@@ -50,4 +50,12 @@ public final class Startup {
     public void driveFrames(FrameDriver driver) {
         engine.claimFrameDriver(current, Objects.requireNonNull(driver, "driver"));
     }
+
+    /**
+     * Makes {@code driver} pace frames unless a plugin claims them ({@link #driveFrames}): rendering's presenter, over
+     * the engine's own pacing. One plugin may give it. Throws if another plugin did.
+     */
+    public void defaultFrameDriver(FrameDriver driver) {
+        engine.defaultFrameDriver(current, Objects.requireNonNull(driver, "driver"));
+    }
 }
