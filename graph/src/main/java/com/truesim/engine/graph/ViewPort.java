@@ -386,11 +386,13 @@ public final class ViewPort {
 
     /**
      * Swaps in {@code technique} for this view's techniques providing any of its keys, e.g. one shading technique for
-     * another; removes nothing if none does. The graph rebuilds on its next frame.
+     * another, and for those of its {@link Technique#id() id}, e.g. one transparency technique for another; removes
+     * nothing if none does. The graph rebuilds on its next frame.
      */
     public ViewPort replace(Technique technique) {
         List<Key<?>> keys = technique.provides();
-        techniques.removeIf(t -> t.provides().stream().anyMatch(keys::contains));
+        Id<? extends Technique> id = technique.id();
+        techniques.removeIf(t -> t.provides().stream().anyMatch(keys::contains) || id != null && t.id() == id);
         return add(technique);
     }
 

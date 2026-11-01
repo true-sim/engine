@@ -90,9 +90,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     private final Pipeline[] draw;
     private final Pipeline[] drawDepth;
     private final Pipeline[] drawIds;
-    private final Pipeline drawBlended; // the blended bin into the transparency pass's targets
-    // Per draw of the frame graph being built: its draw list, for the transparency pass's blended draw.
-    private final java.util.Map<SceneDraw, Buffer> lists = new java.util.HashMap<>();
+    private final Pipeline drawBlended; // the blended bin into weighted transparency's targets
     // Grown with the pool (indices, meshes) or as meshes come (levels, parts); replaced ones freed once no frame reads
     // them.
     private final VulkanDevice device;
@@ -354,24 +352,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             case SHADED -> "classic LOD";
             case IDS -> "classic LOD ids";
         };
-        Buffer list = g.createBuffer(name + " draws", recordsOffset + (long) RECORD_BYTES * maxDraws
-            * MeshletRenderer.BINS);
-        lists.put(draw, list);
-        g.pass(name + " reset").write(list, BufferAccess.TRANSFER_DST)
-            .record(ctx -> Commands.fillBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(list), 0, 16, 0));
+        Buffer list = g.request(new Selection(this, view, camera, targets.region()));
         SceneData.Buffers scene = g.request(new SceneData(renderer));
-        com.truesim.engine.graph.ViewPort region = targets.region();
-        float casterDetail = camera != null
-            ? g.setting(com.truesim.engine.render.shadows.ShadowSettings.CASTER_DETAIL) : 1;
-        scene.read(g.pass(name + " selection"), BufferAccess.STORAGE_READ).write(list, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> {
-                if (camera != null) {
-                    view.camera(camera, casterDetail); // the view's mode kept
-                } else if (region != null) {
-                    view.detail(region.renderScale()); // detail for the size it renders this frame
-                }
-                select(ctx.unsafe().commands(), view, ctx.address(list));
-            });
         GraphBuilder.PassBuilder pass = scene.read(targets.inRegion(g.pass(name)), BufferAccess.DRAW_READ)
             .read(list, BufferAccess.INDIRECT)
             .read(list, BufferAccess.DRAW_READ);
@@ -384,7 +366,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             }
         }
         if (load) {
-            pass.attachDepthReadOnly(targets.depth());
+            pass.attachDepth(targets.depth(), Load.LOAD, Store.STORE);
         } else {
             pass.attachDepth(targets.depth(), Clear.FAR);
         }
@@ -401,34 +383,71 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             case SHADED -> this.draw;
             case IDS -> drawIds;
         };
-        int bins = Transparency.opaque(g) ? MeshletRenderer.BINS : MeshletRenderer.BIN_BLENDED;
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            record(ctx, pipeline, bins, view, lights == null ? 0 : ctx.address(lights), list);
+            record(ctx, pipeline, view, lights == null ? 0 : ctx.address(lights), list);
         });
     }
 
-    /** The blended bin of the draw list {@link #drawFirst} selected for {@code draw}, over the opaque depth. */
+    /**
+     * View {@code view}'s draw list for a frame: reset, then selected (each part's detail level and raster bin) on the
+     * GPU, the camera set first where given (a light's), the detail for {@code region}'s render scale where given. A
+     * request: the opaque draw and the blended one of a view share one selection.
+     */
+    record Selection(ClassicLodGeometry geometry, RenderView view, Camera camera,
+        com.truesim.engine.graph.ViewPort region) implements com.truesim.engine.graph.Request<Buffer> {
+
+        @Override
+        @AllowAllocation("building the graph, when it changes")
+        public Buffer build(GraphBuilder g) {
+            String name = "classic LOD, view " + view.index();
+            Buffer list = g.createBuffer(name + " draws", geometry.recordsOffset + (long) RECORD_BYTES
+                * geometry.maxDraws * MeshletRenderer.BINS);
+            g.pass(name + " reset").write(list, BufferAccess.TRANSFER_DST)
+                .record(ctx -> Commands.fillBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(list), 0, 16, 0));
+            SceneData.Buffers scene = g.request(new SceneData(geometry.renderer));
+            float casterDetail = camera != null
+                ? g.setting(com.truesim.engine.render.shadows.ShadowSettings.CASTER_DETAIL) : 1;
+            scene.read(g.pass(name + " selection"), BufferAccess.STORAGE_READ)
+                .write(list, BufferAccess.STORAGE_WRITE)
+                .record(ctx -> {
+                    if (camera != null) {
+                        view.camera(camera, casterDetail); // the view's mode kept
+                    } else if (region != null) {
+                        view.detail(region.renderScale()); // detail for the size it renders this frame
+                    }
+                    geometry.select(ctx.unsafe().commands(), view, ctx.address(list));
+                });
+            return list;
+        }
+    }
+
+    /**
+     * The blended bin of the view's draw list (the selection its opaque draw requested: equal requests share it), into
+     * the targets as their kind says.
+     */
     @Override
     @AllowAllocation("building the graph, when it changes")
-    public void drawBlended(GraphBuilder g, SceneDraw draw, Transparency.Targets targets, boolean load) {
-        Buffer list = lists.get(draw);
-        if (list == null) {
-            throw new IllegalStateException("No draw list for " + draw + ": drawFirst comes first");
-        }
+    public void drawBlended(GraphBuilder g, RenderView view, BlendedTargets targets, boolean load) {
+        Buffer list = g.request(new Selection(this, view, null, targets.region()));
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         GraphBuilder.PassBuilder pass = scene.read(targets.inRegion(g.pass("classic LOD blended")),
             BufferAccess.DRAW_READ).read(list, BufferAccess.INDIRECT).read(list, BufferAccess.DRAW_READ);
-        if (load) {
-            pass.attach(targets.accumulated(), Load.LOAD, Store.STORE).attach(targets.revealage(), Load.LOAD,
-                Store.STORE);
+        boolean weighted = targets.kind() == BlendedTargets.Kind.WEIGHTED;
+        if (weighted) {
+            if (load) {
+                pass.attach(targets.accumulated(), Load.LOAD, Store.STORE).attach(targets.revealage(), Load.LOAD,
+                    Store.STORE);
+            } else {
+                pass.attach(targets.accumulated(), Clear.color(0, 0, 0, 0)).attach(targets.revealage(),
+                    Clear.color(1, 1, 1, 1));
+            }
+            pass.attachDepthReadOnly(targets.depth());
         } else {
-            pass.attach(targets.accumulated(), Clear.color(0, 0, 0, 0)).attach(targets.revealage(),
-                Clear.color(1, 1, 1, 1));
+            pass.attach(targets.color(), Load.LOAD, Store.STORE).attachDepth(targets.depth(), Load.LOAD, Store.STORE);
         }
-        pass.attachDepthReadOnly(targets.depth());
         Buffer lights = targets.lights();
         if (lights != null) {
             pass.read(lights, BufferAccess.DRAW_READ);
@@ -437,12 +456,12 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         if (shadows != null) {
             shadows.readBy(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
         }
-        RenderView view = draw.view();
+        Pipeline pipeline = weighted ? drawBlended : draw[MeshletRenderer.BIN_BLENDED];
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            recordBin(ctx, drawBlended, MeshletRenderer.BIN_BLENDED, view, lights == null ? 0 : ctx.address(lights),
+            recordBin(ctx, pipeline, MeshletRenderer.BIN_BLENDED, view, lights == null ? 0 : ctx.address(lights),
                 list);
         });
     }
@@ -479,12 +498,9 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         return bin == MeshletRenderer.BIN_OPAQUE ? graphics : graphics.doubleSided();
     }
 
-    /**
-     * Draws the list's draws of view {@code view}, each of the first {@code bins} bins with its {@code pipeline}, into
-     * the pass's attachments.
-     */
-    private void record(PassContext ctx, Pipeline[] pipeline, int bins, RenderView view, long lights, Buffer list) {
-        for (int bin = 0; bin < bins; bin++) {
+    /** Draws the list's draws of view {@code view}, each opaque bin with its {@code pipeline}, into the attachments. */
+    private void record(PassContext ctx, Pipeline[] pipeline, RenderView view, long lights, Buffer list) {
+        for (int bin = 0; bin < MeshletRenderer.BIN_BLENDED; bin++) {
             recordBin(ctx, pipeline[bin], bin, view, lights, list);
         }
     }

@@ -49,7 +49,7 @@ public final class MeshletGeometry implements GeometryProvider {
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         GraphBuilder.PassBuilder pass = culling.drawing(scene.read(targets.inRegion(g.pass(name(draw,
             draw.occlusion() ? " early" : ""))), BufferAccess.DRAW_READ), view);
-        record(g, draw, targets, pass, false);
+        record(draw, targets, pass, false);
     }
 
     /**
@@ -72,7 +72,7 @@ public final class MeshletGeometry implements GeometryProvider {
         GraphBuilder.PassBuilder pass = scene.read(targets.inRegion(g.pass(name(draw, " late"))),
             BufferAccess.DRAW_READ);
         view.declareDrawing(g, pass);
-        record(g, draw, targets, pass, true);
+        record(draw, targets, pass, true);
     }
 
     @AllowAllocation("building the graph, when it changes")
@@ -89,8 +89,7 @@ public final class MeshletGeometry implements GeometryProvider {
      * {@code late}, else the early (or only) phase's.
      */
     @AllowAllocation("building the graph, when it changes")
-    private void record(GraphBuilder g, SceneDraw draw, SceneDraw.Targets targets, GraphBuilder.PassBuilder pass,
-        boolean late) {
+    private void record(SceneDraw draw, SceneDraw.Targets targets, GraphBuilder.PassBuilder pass, boolean late) {
         Image depth = targets.depth();
         Image color = targets.color();
         SurfaceOutput.Kind kind = draw.output().kind();
@@ -116,35 +115,39 @@ public final class MeshletGeometry implements GeometryProvider {
             shadows.readBy(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
         }
         RenderView view = draw.view();
-        boolean blended = Transparency.opaque(g); // the blended bin drawn as opaque
         switch (kind) {
-            case DEPTH -> pass.record(ctx -> renderer.drawAttached(ctx.unsafe().commands(), view, late, true, 0,
-                blended));
+            case DEPTH -> pass.record(ctx -> renderer.drawAttached(ctx.unsafe().commands(), view, late, true, 0));
             case SHADED -> pass.record(ctx -> {
                 if (shadows != null) {
                     shadows.prepare(ctx);
                 }
-                renderer.drawAttached(ctx.unsafe().commands(), view, late, false, address(ctx, lights), blended);
+                renderer.drawAttached(ctx.unsafe().commands(), view, late, false, address(ctx, lights));
             });
-            case IDS -> pass.record(ctx -> renderer.drawIdsAttached(ctx.unsafe().commands(), view, late, blended));
+            case IDS -> pass.record(ctx -> renderer.drawIdsAttached(ctx.unsafe().commands(), view, late));
         }
     }
 
-    /** The blended bin, both phases' lists, after the late one, over the opaque depth. */
+    /**
+     * The blended bin of {@code view}'s lists (both phases', appended: drawn once, after the late cull, which the lists'
+     * import orders), into the targets as their kind says.
+     */
     @Override
     @AllowAllocation("building the graph, when it changes")
-    public void drawBlended(GraphBuilder g, SceneDraw draw, Transparency.Targets targets, boolean load) {
+    public void drawBlended(GraphBuilder g, RenderView view, BlendedTargets targets, boolean load) {
         if (load) {
             throw new IllegalStateException("Meshlets are drawn first, before other geometry");
         }
-        RenderView view = draw.view();
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         GraphBuilder.PassBuilder pass = scene.read(targets.inRegion(g.pass("meshlets blended")),
             BufferAccess.DRAW_READ);
         view.declareDrawing(g, pass);
-        pass.attach(targets.accumulated(), Clear.color(0, 0, 0, 0))
-            .attach(targets.revealage(), Clear.color(1, 1, 1, 1))
-            .attachDepthReadOnly(targets.depth());
+        if (targets.kind() == BlendedTargets.Kind.WEIGHTED) {
+            pass.attach(targets.accumulated(), Clear.color(0, 0, 0, 0))
+                .attach(targets.revealage(), Clear.color(1, 1, 1, 1))
+                .attachDepthReadOnly(targets.depth());
+        } else {
+            pass.attach(targets.color(), Load.LOAD, Store.STORE).attachDepth(targets.depth(), Load.LOAD, Store.STORE);
+        }
         Buffer lights = targets.lights();
         if (lights != null) {
             pass.read(lights, BufferAccess.DRAW_READ);
@@ -153,15 +156,12 @@ public final class MeshletGeometry implements GeometryProvider {
         if (shadows != null) {
             shadows.readBy(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
         }
-        boolean late = draw.occlusion();
+        BlendedTargets.Kind kind = targets.kind();
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            renderer.drawBlendedAttached(ctx.unsafe().commands(), view, false, address(ctx, lights));
-            if (late) {
-                renderer.drawBlendedAttached(ctx.unsafe().commands(), view, true, address(ctx, lights));
-            }
+            renderer.drawBlendedAttached(ctx.unsafe().commands(), view, kind, address(ctx, lights));
         });
     }
 

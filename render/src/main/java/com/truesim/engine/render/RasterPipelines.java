@@ -90,7 +90,7 @@ final class RasterPipelines implements AutoCloseable {
                                 "meshLeanMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, leanShader, "leanBlendedMain"),
                                 depthFormat);
                             mesh[SHADED] = bins(bin -> raster(bin, leanShader, VK_SHADER_STAGE_MESH_BIT_EXT,
-                                "meshLeanMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, leanShader, bin == BIN_MASKED
+                                "meshLeanMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, leanShader, masking(bin)
                                 ? "leanMaskedMain" : "leanMain").color(colorFormat).depth(depthFormat).build());
                         }
                         // Opaque bins' depth from positions alone (no fragment shader); the masked bin's fragments
@@ -143,19 +143,25 @@ final class RasterPipelines implements AutoCloseable {
             beginRendering(commands, stack, colorView, depthView, width, height, r, g, b, late);
             setViewport(commands, stack, width, height);
         }
-        drawBins(commands, scene, v, meshShading, role, late, clusters, false);
+        drawBins(commands, scene, v, meshShading, role, late, clusters);
         Commands.endRendering(commands);
     }
 
-    /** Draws {@code v}'s blended bin into the transparency pass's attachments, open on {@code commands}. */
-    void drawBlended(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading, boolean late,
-        long clusters) {
+    /**
+     * Draws {@code v}'s blended bin, its lists both phases' (appended), into a transparency technique's attachments
+     * open on {@code commands}: weighted, into accumulated color and revealage; as opaque, with the shaded pipelines
+     * (the masked entry points: one-sided back faces discarded).
+     */
+    void drawBlended(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading,
+        BlendedTargets.Kind kind, long clusters) {
+        boolean weighted = kind == BlendedTargets.Kind.WEIGHTED;
         try (MemoryStack stack = stackPush()) {
             if (meshShading) {
-                drawMeshes(commands, stack, scene, v, BIN_BLENDED, late, v.drawCount().deviceAddress(), clusters,
-                    meshBlended);
+                drawMeshes(commands, stack, scene, v, BIN_BLENDED, false, v.drawCount().deviceAddress(), clusters,
+                    weighted ? meshBlended : mesh[SHADED][BIN_BLENDED]);
             } else {
-                drawIndexed(commands, stack, scene, v, BIN_BLENDED, clusters, indexedBlended);
+                drawIndexed(commands, stack, scene, v, BIN_BLENDED, clusters,
+                    weighted ? indexedBlended : indexed[SHADED][BIN_BLENDED]);
             }
         }
     }
@@ -165,21 +171,18 @@ final class RasterPipelines implements AutoCloseable {
      * accumulated color added up, revealage multiplied down, the opaque depth tested and kept.
      */
     static Pipeline blended(Pipeline.Graphics graphics, int depthFormat) {
-        return graphics.color(Transparency.ACCUMULATED_FORMAT).color(Transparency.REVEALAGE_FORMAT)
+        return graphics.color(WeightedBlendedTransparency.ACCUMULATED_FORMAT).color(WeightedBlendedTransparency.REVEALAGE_FORMAT)
             .blend(0, Pipeline.Blend.ADDITIVE).blend(1, Pipeline.Blend.TRANSMIT).depth(depthFormat)
             .depthTest(VK_COMPARE_OP_GREATER_OR_EQUAL, false).build();
     }
 
-    /**
-     * Draws {@code v}'s opaque raster bins in {@code role} into the rendering scope open on {@code commands}, the
-     * blended bin too (as opaque) with {@code blended}.
-     */
+    /** Draws {@code v}'s opaque raster bins in {@code role} into the rendering scope open on {@code commands}. */
     void drawBins(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading, int role, boolean late,
-        long clusters, boolean blended) {
+        long clusters) {
         long count = v.drawCount().deviceAddress();
         Pipeline[] pipelines = meshShading ? mesh[role] : indexed[role];
         try (MemoryStack stack = stackPush()) {
-            for (int bin = 0; bin < (blended ? BINS : BIN_BLENDED); bin++) {
+            for (int bin = 0; bin < BIN_BLENDED; bin++) {
                 if (meshShading) {
                     drawMeshes(commands, stack, scene, v, bin, late, count, clusters, pipelines[bin]);
                 } else {
@@ -240,7 +243,7 @@ final class RasterPipelines implements AutoCloseable {
 
     /**
      * Whether bin {@code bin} draws with the masked entry points: the masked bin, and the blended one drawn as opaque
-     * (both discard one-sided materials' back faces, drawn without culling).
+     * ({@link OpaqueTransparency}; both discard one-sided materials' back faces, drawn without culling).
      */
     private static boolean masking(int bin) {
         return bin == BIN_MASKED || bin == BIN_BLENDED;

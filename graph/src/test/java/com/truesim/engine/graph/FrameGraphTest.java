@@ -1485,6 +1485,48 @@ class FrameGraphTest {
         assertThat(graph.passes()).containsExactly("fill b");
     }
 
+    @Test
+    void modifiersOfOneIdReplaceEachOther() {
+        // Two modifiers of one id provide nothing: replace swaps them by their id, as transparency techniques are.
+        com.truesim.common.graph.Id<Technique> id = com.truesim.common.graph.Id.of("test.painter", Technique.class);
+        graph.add(new Fill(A, SIZE, 1, 0, 0, 1)).add(named(id, new Paint(A, 10, 0, SIZE, 0, 0, 1, 1)))
+            .add(new UsesCopy(OUT, A, A)).output(OUT, output);
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        graph.replace(named(id, new Paint(A, 10, 0, SIZE, 0, 1, 0, 1)));
+        assertThat(frame()[0]).as("the green painter instead").isEqualTo(GREEN);
+        assertThat(graph.passes().stream().filter(p -> p.startsWith("paint over")).count()).isEqualTo(1);
+    }
+
+    /** {@code technique} under {@code id}. */
+    private static Technique named(com.truesim.common.graph.Id<Technique> id, Technique technique) {
+        return new Technique() {
+            @Override
+            public List<Key<?>> provides() {
+                return technique.provides();
+            }
+
+            @Override
+            public List<Key<?>> modifies() {
+                return technique.modifies();
+            }
+
+            @Override
+            public Order order() {
+                return technique.order();
+            }
+
+            @Override
+            public com.truesim.common.graph.Id<? extends Technique> id() {
+                return id;
+            }
+
+            @Override
+            public void build(GraphBuilder g) {
+                technique.build(g);
+            }
+        };
+    }
+
     /** Provides {@code key}: a buffer of SIZE x SIZE texels of {@code rgba}. */
     record FillBuffer(Key<Buffer> key, int rgba) implements Technique {
         @Override

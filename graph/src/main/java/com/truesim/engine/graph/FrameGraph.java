@@ -245,12 +245,15 @@ public final class FrameGraph implements AutoCloseable {
     }
 
     /**
-     * Swaps in {@code technique} for the techniques providing any of its keys, e.g. one lighting technique for another:
-     * whoever requires those keys gets the new one. Removes nothing if none does. The graph rebuilds on its next frame.
+     * Swaps in {@code technique} for the techniques providing any of its keys, e.g. one lighting technique for another,
+     * and for those of its {@link Technique#id() id}, e.g. one transparency technique (modifying, providing nothing) for
+     * another: whoever requires those keys gets the new one. Removes nothing if none does. The graph rebuilds on its next
+     * frame.
      */
     public FrameGraph replace(Technique technique) {
         List<Key<?>> keys = technique.provides();
-        techniques.removeIf(t -> t.provides().stream().anyMatch(keys::contains));
+        Id<? extends Technique> id = technique.id();
+        techniques.removeIf(t -> t.provides().stream().anyMatch(keys::contains) || id != null && t.id() == id);
         return add(technique);
     }
 

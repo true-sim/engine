@@ -51,7 +51,7 @@ void meshIdsMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vert
     uint index = group.y * 65535 + group.x;
     // Past the list's end a workgroup outputs nothing, through the one SetMeshOutputCounts below all the same: with a
     // second call on an early exit, the driver of an AMD Radeon(TM) Graphics drew nothing at all (pitfalls.md).
-    bool listed = index < min(push.visibleCount[2 * push.bin + push.late], binDrawCapacity(view, push.bin));
+    bool listed = index < min(push.visibleCount[visibleCountWord(push.bin, push.late)], binDrawCapacity(view, push.bin));
     uint slot = binFirstSlot(view, push.bin) + index;
     VisibleMeshlet v = listed ? push.visible[slot] : (VisibleMeshlet) 0;
     uint m = v.meshlet;
@@ -96,7 +96,7 @@ void meshMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertice
     uint index = group.y * 65535 + group.x;
     // Past the list's end a workgroup outputs nothing, through the one SetMeshOutputCounts below all the same: with a
     // second call on an early exit, the driver of an AMD Radeon(TM) Graphics drew nothing at all (pitfalls.md).
-    bool listed = index < min(push.visibleCount[2 * push.bin + push.late], binDrawCapacity(view, push.bin));
+    bool listed = index < min(push.visibleCount[visibleCountWord(push.bin, push.late)], binDrawCapacity(view, push.bin));
     uint slot = binFirstSlot(view, push.bin) + index;
     VisibleMeshlet v = listed ? push.visible[slot] : (VisibleMeshlet) 0;
     Instance instance = relative(push.instances[v.instance], view);

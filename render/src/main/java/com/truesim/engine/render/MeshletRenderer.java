@@ -408,38 +408,24 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void drawAttached(VkCommandBuffer commands, RenderView view, boolean late, boolean depthOnly,
         long clusters) {
-        drawAttached(commands, view, late, depthOnly, clusters, false);
-    }
-
-    /**
-     * Like {@link #drawAttached(VkCommandBuffer, RenderView, boolean, boolean, long)}, the blended bin too with
-     * {@code blended} (drawn as opaque: {@link Transparency.Mode#OPAQUE}).
-     */
-    public void drawAttached(VkCommandBuffer commands, RenderView view, boolean late, boolean depthOnly,
-        long clusters, boolean blended) {
         raster.drawBins(commands, scene, own(view), path() == Path.MESH_SHADERS,
-            depthOnly ? RasterPipelines.DEPTH : RasterPipelines.SHADED, late, clusters, blended);
+            depthOnly ? RasterPipelines.DEPTH : RasterPipelines.SHADED, late, clusters);
     }
 
     /** Like {@link #drawAttached}, into a visibility buffer ({@link #drawIds}) and its depth. */
     public void drawIdsAttached(VkCommandBuffer commands, RenderView view, boolean late) {
-        drawIdsAttached(commands, view, late, false);
-    }
-
-    /** Like {@link #drawIdsAttached(VkCommandBuffer, RenderView, boolean)}, the blended bin too with {@code blended}. */
-    public void drawIdsAttached(VkCommandBuffer commands, RenderView view, boolean late, boolean blended) {
         raster.checkIds();
-        raster.drawBins(commands, scene, own(view), path() == Path.MESH_SHADERS, RasterPipelines.IDS, late, 0,
-            blended);
+        raster.drawBins(commands, scene, own(view), path() == Path.MESH_SHADERS, RasterPipelines.IDS, late, 0);
     }
 
     /**
-     * Draws the blended bin of {@code view}'s lists (the late phase's with {@code late}) into the transparency pass's
-     * attachments ({@link Transparency.Targets}: accumulated color, revealage, the opaque depth), lit by the light list
-     * at {@code clusters} (0: the sun).
+     * Draws the blended bin of {@code view}'s lists (both phases', appended) into a transparency technique's
+     * attachments as {@code kind} says ({@link BlendedTargets}), lit by the light list at {@code clusters} (0: the
+     * sun).
      */
-    public void drawBlendedAttached(VkCommandBuffer commands, RenderView view, boolean late, long clusters) {
-        raster.drawBlended(commands, scene, own(view), path() == Path.MESH_SHADERS, late, clusters);
+    public void drawBlendedAttached(VkCommandBuffer commands, RenderView view, BlendedTargets.Kind kind,
+        long clusters) {
+        raster.drawBlended(commands, scene, own(view), path() == Path.MESH_SHADERS, kind, clusters);
     }
 
     /** The scene it draws. */

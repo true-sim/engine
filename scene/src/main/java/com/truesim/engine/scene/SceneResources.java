@@ -809,7 +809,7 @@ public final class SceneResources implements AutoCloseable {
     /**
      * The renderer's material for {@code entry}: the default until it loads, untextured where textures are missing. Its
      * type by name, its parameters and features by field name (what the data lacks keeps the defaults); masked alpha
-     * and double-sidedness follow, and blended alpha (as {@code Transparency.MODE} says). Data the renderer cannot use
+     * and double-sidedness follow, and blended alpha (drawn by the view's {@code Transparency} technique). Data the renderer cannot use
      * (a type not registered, values out of range) draws as the default; field names its type does not read are
      * ignored. Each problem is logged and reported to the {@link Diagnostics}.
      */

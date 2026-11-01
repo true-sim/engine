@@ -223,8 +223,10 @@ final class CullPasses implements AutoCloseable {
                     Commands.fillBuffer(commands, v.drawCount().handle(), 0, VK_WHOLE_SIZE, 0); // counts, indices wanted
                 }
                 v.clearGrownVisibility(commands);
-                Commands.updateBuffer(commands, v.expandCommand().handle(), 0, 16 * BINS, dispatches);
-                Commands.updateBuffer(commands, v.drawCommand().handle(), 0, 24 * BINS, draws);
+                // The late phase keeps the blended bin's commands: its lists are appended to (visibleCountWord).
+                int resetBins = early != null ? BINS : MeshletRenderer.BIN_BLENDED;
+                Commands.updateBuffer(commands, v.expandCommand().handle(), 0, 16 * resetBins, dispatches);
+                Commands.updateBuffer(commands, v.drawCommand().handle(), 0, 24 * resetBins, draws);
             }
         }
         writeRows(commands, views, early, count);

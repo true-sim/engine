@@ -103,7 +103,7 @@ public final class VisibilityBufferShading implements Technique {
     public long buildVersion() {
         Materials materials = renderer.scene().materials();
         return ((long) System.identityHashCode(materials) << 32 | materials.binCount())
-            + 31 * materials.graphBuffersVersion() + 17 * Transparency.buildVersion(materials);
+            + 31 * materials.graphBuffersVersion();
     }
 
     @Override
@@ -195,8 +195,7 @@ public final class VisibilityBufferShading implements Technique {
                     bin, ctx.address(tiles) + list), tiles, list);
             }
         });
-        g.provide(Keys.SCENE_COLOR, Transparency.add(g, draw, color, targets.depth(), lights, shadows,
-            targets.region()));
+        g.provide(Keys.SCENE_COLOR, color);
         g.provide(Keys.SCENE_DEPTH, targets.depth());
     }
 

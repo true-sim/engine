@@ -61,6 +61,17 @@ and the first view's never: its floor was lit where it should be shadowed, with 
 - Rule: `ViewPort.add` and `FrameGraph.add` refuse an instance that is in another view or the frame already; sharing
   work between views goes through equal requests, each view with a technique of its own.
 
+**Per-phase culling lists are reused, not appended.** The late cull resets the draw commands and writes its visible
+meshlets from slot 0 of each bin, over the early phase's. That is right for bins drawn between the phases, wrong for a
+bin drawn after both: the blended bin, drawn by the transparency pass after the late cull, lost everything visible the
+frame before and drew the newly visible twice.
+- Proof: `GraphTechniquesTest.blendedMeshletsStayAcrossOcclusionPhasesAndRenderScales` fails at frame 2 (pure red, the
+  blended quad gone) with the blended bin counted per phase and its commands reset by the late cull, and passes with one
+  counter for both phases (`visibleCountWord`) and the late cull keeping its commands (true-sim/engine, transparency as
+  techniques). A first frame alone does not show it: with no history everything is late.
+- Rule: a bin drawn after the late phase accumulates both phases' lists; a test of anything culled in two phases runs
+  three frames or more.
+
 ## Shaders and the GPU
 
 **An instance's `mesh` word holds flag bits.** Indexing the mesh table with it unmasked read out of bounds and lost the

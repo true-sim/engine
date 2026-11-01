@@ -32,7 +32,7 @@ void expandMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
 {
     View view = push.view[0];
     uint index = group.y * 65535 + group.x;
-    if (index >= min(push.visibleCount[2 * push.bin + push.late], binDrawCapacity(view, push.bin)))
+    if (index >= min(push.visibleCount[visibleCountWord(push.bin, push.late)], binDrawCapacity(view, push.bin)))
     {
         return;
     }

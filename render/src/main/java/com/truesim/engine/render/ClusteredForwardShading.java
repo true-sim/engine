@@ -42,7 +42,7 @@ public final class ClusteredForwardShading implements Technique {
     @Override
     public long buildVersion() {
         Materials materials = geometry.renderer().scene().materials();
-        return materials == null ? 0 : 2 * materials.graphBuffersVersion() + Transparency.buildVersion(materials);
+        return materials == null ? 0 : materials.graphBuffersVersion();
     }
 
     /** The color behind everything; read when recording, so it may change every frame. */
@@ -76,8 +76,7 @@ public final class ClusteredForwardShading implements Technique {
             depthFormat, view.width(), view.height(), (occlusion != null ? occlusion
             : g.setting(RenderSettings.OCCLUSION)) && view.view().options().occlusion());
         SceneDraw.Targets targets = g.request(draw);
-        g.provide(Keys.SCENE_COLOR, Transparency.add(g, draw, targets.color(), targets.depth(), targets.lights(),
-            targets.shadows(), targets.region()));
+        g.provide(Keys.SCENE_COLOR, targets.color());
         g.provide(Keys.SCENE_DEPTH, targets.depth());
     }
 }

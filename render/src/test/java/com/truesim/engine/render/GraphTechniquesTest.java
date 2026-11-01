@@ -1828,6 +1828,36 @@ class GraphTechniquesTest {
         }
     }
 
+    /** The red of {@code pixel} and its blue. */
+    private static int red(int pixel) {
+        return pixel & 0xff;
+    }
+
+    private static int blue(int pixel) {
+        return (pixel >> 16) & 0xff;
+    }
+
+    /** Asserts the image's center shows half red, half blue, and its corner the red quad alone. */
+    private void assertHalfBlue(String what) {
+        int center = (SIZE / 2) * SIZE + SIZE / 2;
+        int corner = (SIZE / 2 - SIZE / 3) * SIZE + SIZE / 2 - SIZE / 3;
+        int mixed = image()[center];
+        assertThat(red(mixed)).as("%s: red behind, half", what).isCloseTo(128, within(6));
+        assertThat(blue(mixed)).as("%s: blue in front, half", what).isCloseTo(128, within(6));
+        int behind = image()[corner];
+        assertThat(red(behind)).as("%s: red alone", what).isGreaterThan(240);
+        assertThat(blue(behind)).as("%s: nothing blue there", what).isLessThan(8);
+    }
+
+    /** Red, glowing, opaque, and a half-transparent glowing blue: the materials of the blending tests. */
+    private static int[] redAndBlendedBlue(Materials materials) {
+        MetallicRoughnessParameters dark = MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1);
+        int red = materials.add(new Material(dark.withEmissive(new Color(1, 0, 0, 1))));
+        int blue = materials.add(new Material(dark.withBaseColor(new Color(0, 0, 0, 0.5))
+            .withEmissive(new Color(0, 0, 1, 1))).alphaBlend());
+        return new int[] {red, blue};
+    }
+
     @Test
     void blendedMaterialsShowWhatIsBehindThem() {
         MeshData mesh = twoUvQuad();
@@ -1835,62 +1865,150 @@ class GraphTechniquesTest {
         try (Materials materials = new Materials(device, 8);
              ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
                  VK_FORMAT_D32_SFLOAT, 16)) {
-            // Glowing, unlit-like colors: red behind, a half-transparent blue in front.
-            MetallicRoughnessParameters dark = MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1);
-            int red = materials.add(new Material(dark.withEmissive(new Color(1, 0, 0, 1))));
-            int blue = materials.add(new Material(dark.withBaseColor(new Color(0, 0, 0, 0.5))
-                .withEmissive(new Color(0, 0, 1, 1))).alphaBlend());
+            int[] ids = redAndBlendedBlue(materials);
+            int blue = ids[1];
             assertThat(materials.hasBlended()).isTrue();
             assertThat(materials.material(blue).blended()).isTrue();
             assertThatIllegalArgumentException().as("masked or blended")
                 .isThrownBy(() -> new Material(null, MR, List.of(), false, 0.5f, true));
             assertThat(new Material(MR).alphaBlend().alphaMask(0.5f).blended()).as("masked instead").isFalse();
             assertThat(new Material(MR).alphaBlend().opaque().blended()).isFalse();
-            classic.add(quadMesh, mesh);
             scene.setMaterials(materials);
-            scene.set(0, quadMesh, red, 0, 0, -3, 0, 0, 0, 1, 2, 2, 2);
+            scene.set(0, quadMesh, ids[0], 0, 0, -3, 0, 0, 0, 1, 2, 2, 2);
             scene.set(1, quadMesh, blue, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
             scene.removeFrom(2);
             Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
             view.set(camera, 1, MeshletRenderer.MODE_LIT);
             SceneView main = main(camera);
+            SceneGeometry meshlets = SceneGeometry.meshlets(renderer);
             main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
-                .output(Keys.SCENE_COLOR, output);
-            List<Technique> shadings = new java.util.ArrayList<>(List.of(new ClusteredForwardShading(
-                new SceneGeometry(classic), main, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0)));
-            if (device.primitiveIds()) {
-                shadings.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
-                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
-            }
-            int center = (SIZE / 2) * SIZE + SIZE / 2;
-            int corner = (SIZE / 2 - SIZE / 3) * SIZE + SIZE / 2 - SIZE / 3; // the red quad alone
-            for (int pass = 0; pass <= shadings.size(); pass++) {
-                if (pass > 0) {
-                    main.port().replace(shadings.get(pass - 1));
-                }
-                graph.settings().set(Transparency.MODE, Transparency.Mode.WEIGHTED_BLENDED);
-                frame();
-                assertThat(graph.passes()).as("pass %d", pass).contains("scene transparency resolve");
-                int mixed = image()[center];
-                assertThat(mixed & 0xff).as("pass %d: red behind, half", pass).isCloseTo(128, within(6));
-                assertThat((mixed >> 16) & 0xff).as("pass %d: blue in front, half", pass).isCloseTo(128, within(6));
-                int behind = image()[corner];
-                assertThat(behind & 0xff).as("pass %d: red alone", pass).isGreaterThan(240);
-                assertThat((behind >> 16) & 0xff).as("pass %d: nothing blue there", pass).isLessThan(8);
-                // As opaque: the blue covers the red.
-                graph.settings().set(Transparency.MODE, Transparency.Mode.OPAQUE);
-                frame();
-                assertThat(graph.passes()).doesNotContain("scene transparency resolve");
-                int covered = image()[center];
-                assertThat(covered & 0xff).as("pass %d: opaque blue", pass).isLessThan(8);
-                assertThat((covered >> 16) & 0xff).as("pass %d: opaque blue", pass).isGreaterThan(240);
-            }
-            graph.settings().reset(Transparency.MODE);
-            // No blended material left: no transparency pass.
-            materials.set(blue, new Material(dark.withEmissive(new Color(0, 0, 1, 1))));
-            assertThat(materials.hasBlended()).isFalse();
+                .add(new WeightedBlendedTransparency(meshlets, main)).output(Keys.SCENE_COLOR, output);
+            frame();
+            assertThat(graph.passes()).containsSubsequence("meshlets", "meshlets blended",
+                "scene transparency resolve");
+            assertHalfBlue("meshlets, forward");
+            // Swapped for the opaque way by its id: the blue covers the red.
+            main.port().replace(new OpaqueTransparency(meshlets, main));
             frame();
             assertThat(graph.passes()).doesNotContain("scene transparency resolve");
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            assertThat(red(image()[center])).as("opaque blue").isLessThan(8);
+            assertThat(blue(image()[center])).as("opaque blue").isGreaterThan(240);
+            // Classic LOD, and the visibility buffer: the same transparency, with their geometry.
+            SceneGeometry classics = new SceneGeometry(classic.add(quadMesh, mesh));
+            main.port().replace(new ClusteredForwardShading(classics, main, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0)).replace(new WeightedBlendedTransparency(classics, main));
+            frame();
+            assertThat(graph.passes()).contains("classic LOD blended");
+            assertHalfBlue("classic LOD, forward");
+            if (device.primitiveIds()) {
+                main.port().replace(new VisibilityBufferShading(classics, main, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                frame();
+                assertHalfBlue("classic LOD, visibility buffer");
+            }
+            // No transparency technique: no blended surfaces.
+            main.port().remove(Transparency.ID);
+            frame();
+            assertThat(red(image()[center])).as("blended not drawn").isGreaterThan(240);
+            assertThat(blue(image()[center])).isLessThan(8);
+            // Two in one view: the build refuses.
+            main.port().add(new WeightedBlendedTransparency(classics, main))
+                .add(new OpaqueTransparency(classics, main));
+            assertThatIllegalStateException().isThrownBy(this::frame);
+            main.port().remove(Transparency.ID).add(new WeightedBlendedTransparency(classics, main));
+            frame();
+            assertHalfBlue("one again");
+            // No blended material left: no transparency passes.
+            materials.set(blue, new Material(MR.withEmissive(new Color(0, 0, 1, 1))));
+            assertThat(materials.hasBlended()).isFalse();
+            frame();
+            assertThat(graph.passes()).doesNotContain("scene transparency resolve", "classic LOD blended");
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
+    void blendedMeshletsStayAcrossOcclusionPhasesAndRenderScales() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 8)) {
+            int[] ids = redAndBlendedBlue(materials);
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, ids[0], 0, 0, -3, 0, 0, 0, 1, 2, 2, 2);
+            scene.set(1, quadMesh, ids[1], 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(2);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            for (MeshletRenderer.Path path : device.meshShaders()
+                ? new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED, MeshletRenderer.Path.MESH_SHADERS}
+                : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED}) {
+                renderer.setPath(path);
+                graph.close();
+                graph = new FrameGraph(device, 2);
+                SceneView main = main(camera);
+                SceneGeometry meshlets = SceneGeometry.meshlets(renderer);
+                // Occlusion on: frame one finds both late, later frames early, from last frame's visibility.
+                main.port().add(MeshletBenchmark.forward(main).clearColor(0, 0, 0))
+                    .add(new WeightedBlendedTransparency(meshlets, main)).output(Keys.SCENE_COLOR, output);
+                for (int f = 1; f <= 3; f++) {
+                    frame();
+                    assertHalfBlue(path + ", frame " + f);
+                }
+                // At half the resolution: the render region smaller than the images.
+                graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.HEADROOM, 1.5f);
+                main.port().renderScale(0.5f);
+                frame();
+                frame();
+                assertThat(main.port().regionWidth()).isLessThan(main.port().width());
+                assertHalfBlue(path + ", at half");
+                main.port().renderScale(1);
+                graph.settings().set(ResolutionSettings.DYNAMIC, false);
+            }
+            renderer.setPath(MeshletRenderer.Path.AUTO);
+            // Bright layers (HDR highlights) stay finite: the opaque scene shows where the sum would overflow.
+            MetallicRoughnessParameters dark = MR.withBaseColor(new Color(0, 0, 0, 0.9)).withRoughness(1);
+            materials.set(ids[1], new Material(dark.withEmissive(new Color(0, 0, 1000, 1))).alphaBlend());
+            for (int layer = 2; layer < 5; layer++) {
+                scene.set(layer, quadMesh, ids[1], 0, 0, -2 + 0.1 * layer, 0, 0, 0, 1, 1, 1, 1);
+            }
+            scene.removeFrom(5);
+            frame();
+            int center = image()[(SIZE / 2) * SIZE + SIZE / 2];
+            assertThat(blue(center)).as("bright blue, not NaN black").isGreaterThan(240);
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
+    void classicLodDrawnAfterMeshletsWritesDepth() {
+        // A meshlet quad behind, a classic one in front: the classic one wins, drawn over the meshlets' depth.
+        MeshData far = twoUvQuad();
+        MeshData near = twoUvQuad();
+        int farMesh = pool.add(far);
+        int nearMesh = pool.add(near);
+        try (Materials materials = new Materials(device, 8);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            MetallicRoughnessParameters dark = MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1);
+            int red = materials.add(new Material(dark.withEmissive(new Color(1, 0, 0, 1))));
+            int blue = materials.add(new Material(dark.withEmissive(new Color(0, 0, 1, 1))));
+            classic.add(nearMesh, near);
+            scene.setMaterials(materials);
+            scene.set(0, farMesh, red, 0, 0, -3, 0, 0, 0, 1, 2, 2, 2);
+            scene.set(1, nearMesh, blue, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(2);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(new ClusteredForwardShading(new SceneGeometry(new MeshletGeometry(renderer), classic),
+                main, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            frame();
+            frame();
+            int center = image()[(SIZE / 2) * SIZE + SIZE / 2];
+            assertThat(blue(center)).as("the classic quad in front").isGreaterThan(240);
+            assertThat(red(center)).isLessThan(8);
             scene.setMaterials(null);
         }
     }
@@ -1987,7 +2105,7 @@ class GraphTechniquesTest {
                 VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f);
             main.port().replace(forward);
             frame();
-            assertThat(graph.passes()).contains("classic LOD reset", "classic LOD selection", "classic LOD")
+            assertThat(graph.passes()).contains("classic LOD, view 0 reset", "classic LOD, view 0 selection", "classic LOD")
                 .doesNotContain("meshlet culling");
             assertThat(differing(expected)).as("classic forward against meshlets").isZero();
             if (device.primitiveIds()) {

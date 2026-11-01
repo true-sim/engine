@@ -78,7 +78,7 @@ void cullMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         uint base = 0;
         if (WaveIsFirstLane())
         {
-            InterlockedAdd(lists.visibleCount[2 * b + (late ? 1 : 0)], count, base);
+            InterlockedAdd(lists.visibleCount[visibleCountWord(b, late ? 1 : 0)], count, base);
         }
         uint index = WaveReadLaneFirst(base) + WavePrefixCountBits(mine);
         // Over the bin's capacity: dropped, and counted. Indices are reserved only for those placed: a range reserved

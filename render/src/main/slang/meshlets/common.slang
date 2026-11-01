@@ -121,6 +121,16 @@ public uint rasterBin(Material m)
         ? BIN_DOUBLE_SIDED : BIN_OPAQUE;
 }
 
+/**
+ * The word of a view's visible counts (ViewLists.visibleCount) counting `bin`'s meshlets of phase `late`: each opaque
+ * bin's phases apart (the late one is drawn over the early one's attachments, the lists reused), the blended bin's both
+ * in one, its lists appended to, since the transparency pass draws it once, after the late phase.
+ */
+public uint visibleCountWord(uint bin, uint late)
+{
+    return bin == BIN_BLENDED ? 2 * bin : 2 * bin + late;
+}
+
 /** The first slot of `bin` in `view`'s visible list. */
 public uint binFirstSlot(View view, uint bin)
 {
@@ -595,12 +605,15 @@ public struct BlendedOut
 
 /**
  * `shaded` (color, alpha) at `distance` from the camera as weighted blended order-independent transparency takes it
- * (McGuire and Bavoil 2013, their equation 9): weighted by alpha and by nearness, so nearer surfaces count more.
+ * (McGuire and Bavoil 2013, their equation 9): weighted by alpha and by nearness, so nearer surfaces count more. The
+ * weight is capped at 30 rather than the paper's 3000 so that a few bright layers (HDR highlights) stay within the
+ * accumulation's 16-bit floats; ordering is lost nearer than about 2 m and farther than about 260 m (the camera-relative
+ * world position's length, independent of the depth buffer's direction).
  */
 public BlendedOut weighBlended(float4 shaded, float distance)
 {
     float a = saturate(shaded.a);
-    float w = a * clamp(0.03 / (1.0e-5 + pow(distance / 200.0, 4.0)), 1.0e-2, 3.0e3);
+    float w = a * clamp(0.03 / (1.0e-5 + pow(distance / 200.0, 4.0)), 1.0e-2, 30.0);
     BlendedOut out;
     out.accumulated = float4(shaded.rgb * a, a) * w;
     out.revealage = a;
