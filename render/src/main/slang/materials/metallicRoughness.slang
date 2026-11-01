@@ -26,7 +26,7 @@ public float4 baseColor(MetallicRoughnessParameters p, SurfaceInput in)
     float4 base = p.baseColor * in.color;
     if (p.baseColorTexture >= 0)
     {
-        base *= sampleTexture(p.baseColorTexture, in.uv, in.dx, in.dy);
+        base *= sampleTexture(p.baseColorTexture, in);
     }
     return base;
 }
@@ -37,7 +37,7 @@ public float3 orm(MetallicRoughnessParameters p, SurfaceInput in)
     float3 result = float3(1, p.roughness, p.metallic);
     if (p.ormTexture >= 0)
     {
-        float3 texel = sampleTexture(p.ormTexture, in.uv, in.dx, in.dy).rgb;
+        float3 texel = sampleTexture(p.ormTexture, in).rgb;
         result = float3(lerp(1.0, texel.r, p.occlusion), result.y * texel.g, result.z * texel.b);
     }
     return result;
@@ -46,7 +46,7 @@ public float3 orm(MetallicRoughnessParameters p, SurfaceInput in)
 /** The unit normal, bent by the normal map. */
 public float3 normal(MetallicRoughnessParameters p, SurfaceInput in)
 {
-    return mapNormal(normalize(in.normal), in.tangent, p.normalTexture, p.normalScale, in.uv, in.dx, in.dy);
+    return mapNormal(normalize(in.normal), in.tangent, p.normalTexture, p.normalScale, in);
 }
 
 /** The light it gives off: factor times the texture's. */
@@ -55,7 +55,7 @@ public float3 emission(MetallicRoughnessParameters p, SurfaceInput in)
     float3 emissive = p.emissive;
     if (p.emissiveTexture >= 0)
     {
-        emissive *= sampleTexture(p.emissiveTexture, in.uv, in.dx, in.dy).rgb;
+        emissive *= sampleTexture(p.emissiveTexture, in).rgb;
     }
     return emissive;
 }

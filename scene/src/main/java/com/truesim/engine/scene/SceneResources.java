@@ -16,7 +16,9 @@ import com.truesim.engine.render.MaterialFeatures;
 import com.truesim.engine.render.MaterialType;
 import com.truesim.engine.render.MaterialValues;
 import com.truesim.engine.render.Materials;
+import com.truesim.engine.render.TextureSampler;
 import com.truesim.engine.render.Textures;
+import com.truesim.engine.render.materials.TextureTransformParameters;
 import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.mesh.MeshData;
@@ -821,8 +823,9 @@ public final class SceneResources implements AutoCloseable {
         }
         try {
             Set<String> read = new HashSet<>();
-            Material material = new Material(type, type.fromValues().apply(new DataValues(d.values(), "", read)))
-                .doubleSided(d.doubleSided());
+            Transforms transforms = new Transforms();
+            Material material = new Material(type, type.fromValues().apply(new DataValues(d.values(), "", read,
+                transforms))).doubleSided(d.doubleSided());
             if (d.alphaMode() == MaterialData.AlphaMode.MASK) {
                 material = material.alphaMask(d.alphaCutoff());
             }
@@ -830,7 +833,7 @@ public final class SceneResources implements AutoCloseable {
             for (String name : d.features()) {
                 Set<String> readOfFeature = new HashSet<>();
                 MaterialFeature feature = MaterialFeatures.fromValues(name, new DataValues(d.feature(name), "",
-                    readOfFeature));
+                    readOfFeature, transforms));
                 if (feature == null) {
                     problem(entry, "no material feature " + name + ": it is shown without it");
                 } else if ((type.allowedFeatures() & feature.feature()) == 0) {
@@ -839,6 +842,10 @@ public final class SceneResources implements AutoCloseable {
                     material = material.feature(feature);
                     unread(entry, d.feature(name), readOfFeature, name + ": ");
                 }
+            }
+            TextureTransformParameters moved = transforms.feature();
+            if (moved != null) {
+                material = material.feature(moved);
             }
             return material;
         } catch (IllegalArgumentException e) {
@@ -874,11 +881,13 @@ public final class SceneResources implements AutoCloseable {
         private final MaterialData.Values values;
         private final String prefix;
         private final Set<String> read; // the names asked for, by path
+        private final Transforms transforms; // the material's texture transforms, gathered as textures are read
 
-        DataValues(MaterialData.Values values, String prefix, Set<String> read) {
+        DataValues(MaterialData.Values values, String prefix, Set<String> read, Transforms transforms) {
             this.values = values;
             this.prefix = prefix;
             this.read = read;
+            this.transforms = transforms;
         }
 
         private String name(String name) {
@@ -930,15 +939,81 @@ public final class SceneResources implements AutoCloseable {
             return v;
         }
 
+        /**
+         * The texture's slot, at the UV set {@code nameTexCoord} names (1: the second) and moved by the transform
+         * {@code nameOffset}, {@code nameRotation}, {@code nameScale} give, as glTF's importer names them.
+         */
         @Override
         public int texture(String name, boolean srgb, int fallback) {
             AssetRef<TextureData> ref = values.texture(name(name));
-            return ref == null ? fallback : slot(ref); // its color space is the texture data's own
+            int texCoord = values.i32(name(name + "TexCoord"), 0);
+            float[] offset = values.floats(name(name + "Offset"));
+            float rotation = values.f32(name(name + "Rotation"), 0);
+            float[] scale = values.floats(name(name + "Scale"));
+            if (ref == null) {
+                return fallback;
+            }
+            int slot = slot(ref); // its color space is the texture data's own
+            if (slot == SceneResources.NONE) {
+                return slot;
+            }
+            if (texCoord == 1) {
+                slot = TextureSampler.secondUv(slot);
+            } else if (texCoord != 0) {
+                throw new IllegalArgumentException(prefix + name + "TexCoord: UV sets 0 and 1, not " + texCoord);
+            }
+            if (offset != null || scale != null || rotation != 0) {
+                slot = TextureSampler.transform(slot, transforms.add(prefix + name, offset, rotation, scale));
+            }
+            return slot;
         }
 
         @Override
         public MaterialValues nested(String name) {
-            return new DataValues(values, prefix + name + ".", read);
+            return new DataValues(values, prefix + name + ".", read, transforms);
+        }
+    }
+
+    /** A material's texture transforms, as its textures name them: each distinct one once, up to eight. */
+    @AllowAllocation("materials change rarely")
+    static final class Transforms {
+        private final java.util.List<float[]> transforms = new java.util.ArrayList<>(); // offset xy, rotation, scale xy
+
+        /** The number (1 to 8) of the transform {@code offset}, {@code rotation}, {@code scale} (null: defaults). */
+        int add(String texture, float[] offset, float rotation, float[] scale) {
+            if (offset != null && offset.length != 2 || scale != null && scale.length != 2) {
+                throw new IllegalArgumentException(texture + ": a transform's offset and scale are 2 floats each");
+            }
+            float[] t = {offset == null ? 0 : offset[0], offset == null ? 0 : offset[1], rotation,
+                scale == null ? 1 : scale[0], scale == null ? 1 : scale[1]};
+            for (int i = 0; i < transforms.size(); i++) {
+                if (java.util.Arrays.equals(transforms.get(i), t)) {
+                    return i + 1;
+                }
+            }
+            if (transforms.size() == TextureSampler.TRANSFORMS) {
+                throw new IllegalArgumentException(texture + ": a material has at most " + TextureSampler.TRANSFORMS
+                    + " texture transforms");
+            }
+            transforms.add(t);
+            return transforms.size();
+        }
+
+        /** The feature holding them; null for none. */
+        TextureTransformParameters feature() {
+            if (transforms.isEmpty()) {
+                return null;
+            }
+            Vec4[] moves = new Vec4[TextureSampler.TRANSFORMS];
+            float[] rotations = new float[TextureSampler.TRANSFORMS];
+            for (int i = 0; i < moves.length; i++) {
+                float[] t = i < transforms.size() ? transforms.get(i) : new float[] {0, 0, 0, 1, 1};
+                moves[i] = new Vec4(t[0], t[1], t[3], t[4]);
+                rotations[i] = t[2];
+            }
+            return new TextureTransformParameters(moves[0], moves[1], moves[2], moves[3], moves[4], moves[5], moves[6],
+                moves[7], new Vec4(rotations[0], rotations[1], rotations[2], rotations[3]),
+                new Vec4(rotations[4], rotations[5], rotations[6], rotations[7]));
         }
     }
 

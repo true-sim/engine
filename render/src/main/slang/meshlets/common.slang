@@ -358,6 +358,7 @@ public struct VertexOut
     public float3 normal : NORMAL;
     public float4 tangent : TANGENT;   // w: the bitangent's sign; 0 without tangents
     public float2 uv : UV;
+    public float2 uv1 : UV1;
     public float4 color : COLOR;
     public nointerpolation uint meshlet : MESHLET;
     public nointerpolation uint material : MATERIAL;
@@ -420,6 +421,7 @@ public VertexOut transformVertex(View view, Instance instance, MeshEntry mesh, u
     out.normal = rotate(instance.rotation, float3(0, 1, 0));
     out.tangent = 0;
     out.uv = 0;
+    out.uv1 = 0;
     out.color = 1;
     uint format = mesh.attributeFormat;
     if ((format & 1) != 0) // NORMAL: octahedral
@@ -435,6 +437,11 @@ public VertexOut transformVertex(View view, Instance instance, MeshEntry mesh, u
     {
         uint word = attributeWord(mesh, attributes, vertex, 2);
         out.uv = float2(decodeHalf(word & 0xffff), decodeHalf(word >> 16));
+    }
+    if ((format & 8) != 0) // UV1: 2 x float16
+    {
+        uint word = attributeWord(mesh, attributes, vertex, 3);
+        out.uv1 = float2(decodeHalf(word & 0xffff), decodeHalf(word >> 16));
     }
     if ((format & 16) != 0) // COLOR: 4 x unorm8
     {
@@ -473,14 +480,15 @@ public static const float3 SKY_IRRADIANCE = float3(0.78539816 / 1.02);
  */
 public void discardMasked(Material m, VertexOut in, bool front)
 {
-    if ((!front && !materialDoubleSided(m)) || alphaClipped(m, in.uv, ddx(in.uv), ddy(in.uv), in.color))
+    float4 uvs = float4(in.uv, in.uv1);
+    if ((!front && !materialDoubleSided(m)) || alphaClipped(m, uvs, ddx(uvs), ddy(uvs), in.color))
     {
         discard;
     }
 }
 
-public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Material* materials, float2 dx,
-    float2 dy, LightListHeader* lights, uint2 pixel)
+public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Material* materials, float4 dx,
+    float4 dy, LightListHeader* lights, uint2 pixel)
 {
     Material m = materials[in.material];
     if (materialType(m) != 0)
@@ -510,7 +518,7 @@ struct DefaultSurface : IMaterial
  * constant, the code of the others is left out): the lighting is the same for every type.
  */
 public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
-    float2 dx, float2 dy, LightListHeader* lights, uint2 pixel, uint features)
+    float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features)
 {
     if (view.mode == 2)
     {
@@ -532,8 +540,16 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
     input.normal = normal;
     input.tangent = tangent;
     input.uv = in.uv;
-    input.dx = dx;
-    input.dy = dy;
+    input.dx = dx.xy;
+    input.dy = dy.xy;
+    input.uv1 = in.uv1;
+    input.dx1 = dx.zw;
+    input.dy1 = dy.zw;
+    input.transforms = nullptr;
+    if ((features & FEATURE_TEXTURE_TRANSFORM) != 0)
+    {
+        input.transforms = materialFeatureAt<TextureTransformParameters>(ref, FEATURE_TEXTURE_TRANSFORM);
+    }
     input.color = in.color;
     input.features = features;
     Surface s = M.surface(materialParameters<M.Parameters>(ref), ref, input);

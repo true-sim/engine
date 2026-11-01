@@ -47,6 +47,7 @@ struct LeanVertex
     float3 normal : NORMAL;
     float4 tangent : TANGENT;
     float2 uv : UV;
+    float2 uv1 : UV1;
 };
 
 [shader("mesh")]
@@ -81,6 +82,7 @@ void meshLeanMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out ver
         vertices[thread].normal = out.normal;
         vertices[thread].tangent = out.tangent;
         vertices[thread].uv = out.uv;
+        vertices[thread].uv1 = out.uv1;
     }
     for (uint t = thread; t < triangleCount; t += 64)
     {
@@ -103,6 +105,7 @@ VertexOut lean(LeanVertex in, uint primitive, float3 bary)
     s.normal = in.normal;
     s.tangent = in.tangent;
     s.uv = in.uv;
+    s.uv1 = in.uv1;
     s.color = 1;
     if ((mesh.attributeFormat & 16) != 0) // COLOR: from the triangle's vertices
     {
@@ -128,7 +131,8 @@ VertexOut lean(LeanVertex in, uint primitive, float3 bary)
 float4 leanMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bary : SV_Barycentrics) : SV_Target
 {
     VertexOut s = lean(in, primitive, bary);
-    return shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(s.uv), ddy(s.uv), push.lights,
+    float4 uvs = float4(s.uv, s.uv1);
+    return shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
         uint2(in.position.xy));
 }
 
@@ -139,6 +143,7 @@ float4 leanMaskedMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bar
 {
     VertexOut s = lean(in, primitive, bary);
     discardMasked(push.materials[s.material], s, front);
-    return shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(s.uv), ddy(s.uv), push.lights,
+    float4 uvs = float4(s.uv, s.uv1);
+    return shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
         uint2(in.position.xy));
 }

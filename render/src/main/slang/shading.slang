@@ -41,13 +41,14 @@ public struct Surface
 };
 
 /**
- * Texture `slot` at `uv`, with its screen gradients `dx`, `dy`, as materials sample: the low 16 bits are its slot, the
- * bits above its sampler past MATERIAL (engine-render's TextureSampler: 0 trilinear, anisotropic and repeating).
+ * Texture `slot` at `uv`, with its screen gradients `dx`, `dy`: the low 16 bits are its slot, bits 16-19 its sampler past
+ * MATERIAL (engine-render's TextureSampler: 0 trilinear, anisotropic and repeating). Materials sample through
+ * materials.slang's sampleTexture(slot, in), which also follows the texture's UV set and transform (bits 20-24).
  */
 public float4 sampleTexture(int slot, float2 uv, float2 dx, float2 dy)
 {
     return textures[NonUniformResourceIndex(slot & 0xffff)]
-        .SampleGrad(samplers[NonUniformResourceIndex(MATERIAL + (uint(slot) >> 16))], uv, dx, dy);
+        .SampleGrad(samplers[NonUniformResourceIndex(MATERIAL + ((uint(slot) >> 16) & 0xf))], uv, dx, dy);
 }
 
 /** Unit normal `n` bent by tangent-space normal map `slot` (by `scale`), if there are tangents. */

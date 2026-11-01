@@ -327,7 +327,7 @@ public final class Materials implements AutoCloseable {
         if (id < 0) {
             throw new IllegalArgumentException("Material type " + type.name() + " is not registered");
         }
-        int shown = material.featureMask();
+        int shown = material.featureMask() & ~Material.EVERY_TYPES_FEATURES;
         if ((shown & ~type.allowedFeatures()) != 0) {
             throw new IllegalArgumentException("Material type " + type.name() + " does not allow features "
                 + (shown & ~type.allowedFeatures()));

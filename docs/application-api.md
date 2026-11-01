@@ -320,6 +320,10 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
 - **D136** (new) Order: the bins (D135); texture transforms and the second UV set; unlit; alpha blending (a sorted
   transparent pass); specular, IOR, sheen; transmission and volume (the scene behind); iridescence, anisotropy,
   dispersion, diffuse transmission. Lights from models come with the world plugin.
+- **D136a** (built) Shading bins (D135) and texture transforms with the second UV set: a texture reference carries
+  its UV set (bit 20) and transform (bits 21-24) above its sampler; the transforms are a feature every type allows
+  (`TextureTransformParameters`, up to eight per material); glTF's per-texture `TexCoord`, `Offset`, `Rotation`,
+  `Scale` become them. Alpha-mask textures follow their UV set, not a transform (the slot has no room).
 - **D137** (new) Checked against the Khronos glTF sample models: an optional sweep (`-PgltfSamples=...`) imports every
   model with all its parts.
 

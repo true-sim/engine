@@ -220,9 +220,13 @@ public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
     s.tangent = float4(bary.x * v[0].tangent.xyz + bary.y * v[1].tangent.xyz + bary.z * v[2].tangent.xyz,
         v[0].tangent.w);
     s.uv = bary.x * v[0].uv + bary.y * v[1].uv + bary.z * v[2].uv;
+    s.uv1 = bary.x * v[0].uv1 + bary.y * v[1].uv1 + bary.z * v[2].uv1;
     s.color = bary.x * v[0].color + bary.y * v[1].color + bary.z * v[2].color;
-    float2 uvX = baryX.x * v[0].uv + baryX.y * v[1].uv + baryX.z * v[2].uv;
-    float2 uvY = baryY.x * v[0].uv + baryY.y * v[1].uv + baryY.z * v[2].uv;
-    images[push.color][id.xy] = shadeMaterial<M, R>(rays, view, s, push.materials, uvX - s.uv, uvY - s.uv,
+    float4 uvs = float4(s.uv, s.uv1);
+    float4 uvX = baryX.x * float4(v[0].uv, v[0].uv1) + baryX.y * float4(v[1].uv, v[1].uv1)
+        + baryX.z * float4(v[2].uv, v[2].uv1);
+    float4 uvY = baryY.x * float4(v[0].uv, v[0].uv1) + baryY.y * float4(v[1].uv, v[1].uv1)
+        + baryY.z * float4(v[2].uv, v[2].uv1);
+    images[push.color][id.xy] = shadeMaterial<M, R>(rays, view, s, push.materials, uvX - uvs, uvY - uvs,
         push.lights, id.xy, FEATURES);
 }
