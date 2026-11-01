@@ -1,6 +1,10 @@
 package com.truesim.engine.render;
 
+import com.truesim.engine.render.materials.AnisotropyParameters;
 import com.truesim.engine.render.materials.ClearcoatParameters;
+import com.truesim.engine.render.materials.DiffuseTransmissionParameters;
+import com.truesim.engine.render.materials.DispersionParameters;
+import com.truesim.engine.render.materials.IridescenceParameters;
 import com.truesim.engine.render.materials.IorParameters;
 import com.truesim.engine.render.materials.SheenParameters;
 import com.truesim.engine.render.materials.SpecularParameters;
@@ -26,6 +30,12 @@ public final class MaterialFeatures {
             case SheenParameters.NAME -> SheenParameters.fromValues(values);
             case TransmissionParameters.NAME -> TransmissionParameters.fromValues(values);
             case VolumeParameters.NAME -> VolumeParameters.fromValues(values);
+            case AnisotropyParameters.NAME -> AnisotropyParameters.fromValues(values);
+            case IridescenceParameters.NAME -> IridescenceParameters.fromValues(values);
+            case DispersionParameters.NAME -> DispersionParameters.fromValues(values);
+            // glTF's extension name, KHR_materials_diffuse_transmission, as the importer passes it
+            case DiffuseTransmissionParameters.NAME, "diffuse_transmission" ->
+                DiffuseTransmissionParameters.fromValues(values);
             default -> null;
         };
     }

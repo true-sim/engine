@@ -10,6 +10,10 @@ __exported import materials.sheen;
 __exported import materials.specular;
 __exported import materials.transmission;
 __exported import materials.volume;
+__exported import materials.anisotropy;
+__exported import materials.iridescence;
+__exported import materials.dispersion;
+__exported import materials.diffuseTransmission;
 __exported import materials.unlit;
 __exported import lights;
 
@@ -580,15 +584,14 @@ public struct Background
 };
 
 /**
- * The light transmissive surface `s` lets through at camera-relative `world`, seen from `toViewer` at `pixel` (in the
- * render region): the scene behind it, where the ray refracted through its volume leaves it (thin-walled: straight
- * behind), blurred by its roughness (rougher: a coarser mip), attenuated through the volume and tinted by its albedo.
+ * The scene behind transmissive surface `s` where a ray refracted by index `ior` through its volume of `thickness`
+ * leaves it, blurred by its roughness.
  */
-public float3 transmitted(Surface s, View view, float3 world, float3 toViewer, uint2 pixel, Background behind)
+float3 behindAlong(Surface s, float ior, float thickness, View view, float3 world, float3 toViewer, uint2 pixel,
+    Background behind)
 {
     float2 region = float2(behind.region & 0xffff, behind.region >> 16);
-    float3 inside = refract(-toViewer, s.normal, 1 / max(s.ior, 1.0));
-    float thickness = s.thickness * behind.scale;
+    float3 inside = refract(-toViewer, s.normal, 1 / max(ior, 1.0));
     float3 exit = world + normalize(inside) * thickness;
     float4 from = mul(view.viewProjection, float4(world, 1));
     float4 to = mul(view.viewProjection, float4(exit, 1));
@@ -599,9 +602,32 @@ public float3 transmitted(Surface s, View view, float3 world, float3 toViewer, u
     uint levels;
     textures[behind.slot - 1].GetDimensions(0, width, height, levels);
     // As the glTF sample viewer: no blur at IOR 1 (nothing bends), full blur from 1.5.
-    float lod = log2(max(region.x, region.y)) * s.roughness * saturate(s.ior * 2 - 2);
-    float3 color = textures[behind.slot - 1].SampleLevel(samplers[LINEAR_CLAMP], at / float2(width, height),
+    float lod = log2(max(region.x, region.y)) * s.roughness * saturate(ior * 2 - 2);
+    return textures[behind.slot - 1].SampleLevel(samplers[LINEAR_CLAMP], at / float2(width, height),
         min(lod, float(levels - 1))).rgb;
+}
+
+/**
+ * The light transmissive surface `s` lets through at camera-relative `world`, seen from `toViewer` at `pixel` (in the
+ * render region): the scene behind it, where the ray refracted through its volume leaves it (thin-walled: straight
+ * behind), blurred by its roughness (rougher: a coarser mip), attenuated through the volume and tinted by its albedo.
+ */
+public float3 transmitted(Surface s, View view, float3 world, float3 toViewer, uint2 pixel, Background behind)
+{
+    float thickness = s.thickness * behind.scale;
+    float3 color;
+    if (s.dispersion > 0 && thickness > 0)
+    {
+        // Dispersion (as the glTF sample viewer): red refracted by a lower IOR, blue by a higher, each its own ray.
+        float spread = (s.ior - 1) * 0.025 * s.dispersion;
+        color = float3(behindAlong(s, s.ior - spread, thickness, view, world, toViewer, pixel, behind).r,
+            behindAlong(s, s.ior, thickness, view, world, toViewer, pixel, behind).g,
+            behindAlong(s, s.ior + spread, thickness, view, world, toViewer, pixel, behind).b);
+    }
+    else
+    {
+        color = behindAlong(s, s.ior, thickness, view, world, toViewer, pixel, behind);
+    }
     if (s.attenuationDistance > 0 && thickness > 0)
     {
         color *= pow(max(s.attenuationColor, 1.0e-4), thickness / s.attenuationDistance);
@@ -690,6 +716,28 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
         {
             applyVolume(s, materialFeature<VolumeParameters>(ref, FEATURE_VOLUME), input);
         }
+        if ((features & FEATURE_DISPERSION) != 0)
+        {
+            applyDispersion(s, materialFeature<DispersionParameters>(ref, FEATURE_DISPERSION));
+        }
+    }
+    if ((features & FEATURE_ANISOTROPY) != 0)
+    {
+        applyAnisotropy(s, materialFeature<AnisotropyParameters>(ref, FEATURE_ANISOTROPY), input);
+    }
+    if ((features & FEATURE_DIFFUSE_TRANSMISSION) != 0)
+    {
+        applyDiffuseTransmission(s, materialFeature<DiffuseTransmissionParameters>(ref,
+            FEATURE_DIFFUSE_TRANSMISSION), input);
+    }
+    if ((features & FEATURE_IRIDESCENCE) != 0)
+    {
+        applyIridescence(s, materialFeature<IridescenceParameters>(ref, FEATURE_IRIDESCENCE), input);
+        // The film over the base as seen from here, once per point (as the glTF sample viewer): over a dielectric's
+        // reflectance, and a metal's albedo.
+        float nv = saturate(dot(s.normal, toViewer));
+        s.iridescenceFresnel = thinFilm(s.iridescenceIor, s.iridescenceThickness, nv,
+            lerp(s.f0, s.albedo, s.metallic));
     }
     float3 emissive = s.emissive;
     if ((features & FEATURE_CLEARCOAT) != 0)

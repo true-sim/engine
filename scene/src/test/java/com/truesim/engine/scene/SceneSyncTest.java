@@ -39,6 +39,10 @@ import com.truesim.engine.render.materials.IorParameters;
 import com.truesim.engine.render.materials.SheenParameters;
 import com.truesim.engine.render.materials.SpecularParameters;
 import com.truesim.engine.render.materials.TextureTransformParameters;
+import com.truesim.engine.render.materials.DiffuseTransmissionParameters;
+import com.truesim.engine.render.materials.DispersionParameters;
+import com.truesim.engine.render.materials.IridescenceParameters;
+import com.truesim.engine.render.materials.AnisotropyParameters;
 import com.truesim.engine.render.materials.VolumeParameters;
 import com.truesim.engine.render.materials.TransmissionParameters;
 import com.truesim.engine.render.materials.UnlitParameters;
@@ -787,6 +791,39 @@ class SceneSyncTest {
         assertThatIllegalArgumentException().isThrownBy(() -> many.add("t9", null, 9, null))
             .withMessageContaining("at most 8 texture transforms");
         assertThat(new SceneResources.Transforms().feature()).isNull();
+    }
+
+    @Test
+    void anisotropyIridescenceDispersionAndDiffuseTransmissionInTheDataBecomeTheirFeatures()
+        throws InterruptedException {
+        // As the glTF importer names them: the extensions' own names, diffuse_transmission included.
+        AssetRef<MaterialData> rich = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
+            (glow, seed) -> MaterialData.builder(MR)
+                .feature("anisotropy", f -> f.set("anisotropyStrength", 0.5f).set("anisotropyRotation", 1f))
+                .feature("iridescence", f -> f.set("iridescenceFactor", 1f).set("iridescenceIor", 1.8f)
+                    .set("iridescenceThicknessMaximum", 500f))
+                .feature("dispersion", f -> f.set("dispersion", 0.3f))
+                .feature("diffuse_transmission", f -> f.set("diffuseTransmissionFactor", 0.25f)
+                    .set("diffuseTransmissionColorFactor", 1f, 0.5f, 0f))
+                .build(), new Glow(1, 1, 1), 83);
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        long node = facing(scene, 0, 0, -3);
+        renderables.set(node, SQUARE, List.of(rich));
+        for (int round = 0; round < 3; round++) {
+            update(scene, renderables, sync);
+            load();
+        }
+        update(scene, renderables, sync);
+        Material made = materials.material(sync.firstMaterialOf(node));
+        assertThat(made.features()).containsExactlyInAnyOrder(
+            AnisotropyParameters.DEFAULTS.withAnisotropyStrength(0.5f).withAnisotropyRotation(1),
+            IridescenceParameters.DEFAULTS.withIridescenceFactor(1).withIridescenceIor(1.8f)
+                .withIridescenceThicknessMaximum(500),
+            DispersionParameters.DEFAULTS.withDispersion(0.3f),
+            DiffuseTransmissionParameters.DEFAULTS.withDiffuseTransmissionFactor(0.25f)
+                .withDiffuseTransmissionColorFactor(new Color(1, 0.5f, 0, 1)));
     }
 
     @Test
