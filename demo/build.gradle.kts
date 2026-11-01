@@ -6,7 +6,9 @@ description = "The engine's demo: a scene to try settings, HDR, dynamic resoluti
 
 dependencies {
     implementation(project(":engine-xr"))
-    implementation("com.truesim.scene:scene-meshbuild:0.37.0")
+    implementation(project(":engine-scene"))
+    implementation("com.truesim.scene:scene-meshbuild:0.41.0")
+    implementation("com.truesim.scene:scene-gltf:0.41.0")
 }
 
 application {
@@ -17,6 +19,8 @@ application {
 tasks.named<JavaExec>("run") {
     workingDir = rootProject.projectDir
     jvmArgs("--enable-native-access=ALL-UNNAMED")
+    // -Pcharacter=<glTF-Sample-Assets>/Models/Fox/glTF/Fox.gltf: an animated fox among the rocks
+    providers.gradleProperty("character").orNull?.let { systemProperty("truesim.demo.character", it) }
 }
 
 // A demo to run, not a library: nothing to cover.
@@ -34,6 +38,10 @@ tasks.register<JavaExec>("stereoBench") {
     providers.gradleProperty("rocks").orNull?.let { systemProperty("truesim.demo.rocks", it) }
     providers.gradleProperty("png").orNull?.let { systemProperty("truesim.demo.png", it) }
     providers.gradleProperty("casterDetail").orNull?.let { systemProperty("truesim.demo.casterDetail", it) }
+    providers.gradleProperty("character").orNull?.let { systemProperty("truesim.demo.character", it) }
+    providers.gradleProperty("eye").orNull?.let { systemProperty("truesim.demo.eye", it) }
+    providers.gradleProperty("pngFrames").orNull?.let { systemProperty("truesim.demo.pngFrames", it) }
+    providers.gradleProperty("frames").orNull?.let { systemProperty("truesim.demo.frames", it) }
 }
 
 // Hitches while content streams (StreamBench): ./gradlew :engine-demo:streamBench
