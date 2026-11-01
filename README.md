@@ -83,7 +83,11 @@ lists the settings an app has, each registered once by the part owning it, with 
 with translation-key labels and an order, apart from saved names) and optionally a `SettingTier`. Options screens ask
 it for groups and their settings up to a tier; hidden tiers show only when revealed; `check()` at startup fails on a
 setting with a tier but no group, an undeclared tier or two groups with one id; settings players never see are
-registered with `addHidden`. The frame graph has settings
+registered with `addHidden`. Each setting has an `Availability` for options screens to grey it out with a reason:
+unsupported (rules the owning part adds with `availableWhen`), depends on another setting (`dependsOn`), locked by the
+game (`lock`, a constraint), or pending a restart (a setting that is not live, changed since `applied`). Availability
+listeners hear of changes when the app calls `refreshAvailability()` at a frame boundary, which does nothing unless a
+value, rule or lock changed or `invalidateAvailability()` was called (a device or display came or went). The frame graph has settings
 (`graph.settings()`): a build reads them with `g.setting(key)` and rebuilds when one it read changes; pass bodies read
 `g.settings()` when they record. Windows follow theirs (`platform.createWindow(options, settings.scoped("window.main"))`),
 and so does the `Presenter` (the graph's present settings, or a window's own). The core's tuning values are settings

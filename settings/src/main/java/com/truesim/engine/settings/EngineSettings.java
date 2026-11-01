@@ -3,6 +3,7 @@ package com.truesim.engine.settings;
 import com.truesim.annotations.AllowAllocation;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -10,6 +11,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * The engine's settings: values per {@link Setting} in layers, and what the hardware or the game allows on top. One
@@ -35,6 +37,11 @@ import java.util.function.Consumer;
  * settings this version does not know (another version's) are kept and saved again. Use it from one thread at a time;
  * listeners run on the thread that changes a value, and hear of a change to the effective or the preferred value.
  * Reading allocates nothing once read.
+ *
+ * <p>Each setting also has an {@link Availability}: whether a player can change it now, and why not. Owning parts
+ * register rules ({@link #availableWhen}, {@link #dependsOn}), the game locks values ({@link #lock}), and a setting
+ * that is not {@link Setting#live() live} is pending a restart while its value differs from the one {@link #applied}.
+ * Availability listeners hear of changes when the app calls {@link #refreshAvailability()}, at a frame boundary.
  */
 @AllowAllocation("set up and changed rarely")
 public final class EngineSettings {
@@ -199,11 +206,148 @@ public final class EngineSettings {
         Object preferredBefore = preferred(setting, key);
         change.run();
         store.effective.remove(key);
+        store.availabilityDirty = true;
         Object after = get(setting);
         if (!before.equals(after) || !preferredBefore.equals(preferred(setting, key))) {
             store.changed(key);
         }
         return this;
+    }
+
+    /**
+     * Fixes {@code setting} at {@code value} for the game, because {@code reason}: a constraint whose availability reads
+     * {@link Availability.State#LOCKED}. Returns what unlocks it.
+     */
+    public <T> Subscription lock(Setting<T> setting, T value, String reason) {
+        Constraint<T> lock = Constraint.lock(value, reason);
+        store.locks.add(lock);
+        Subscription constraint;
+        try {
+            constraint = constrain(setting, lock);
+        } catch (RuntimeException e) {
+            store.locks.remove(lock);
+            throw e;
+        }
+        know(setting);
+        return () -> {
+            constraint.close();
+            store.locks.remove(lock);
+        };
+    }
+
+    /**
+     * Adds {@code rule} deciding {@code setting}'s availability in this view, after those already on it: the first rule
+     * not available decides. Returns what removes it.
+     */
+    public Subscription availableWhen(Setting<?> setting, Availability.Rule rule) {
+        Objects.requireNonNull(rule, "rule");
+        String key = keyOf(setting);
+        store.rules.computeIfAbsent(key, k -> new ArrayList<>()).add(rule);
+        know(setting);
+        return () -> {
+            List<Availability.Rule> rules = store.rules.get(key);
+            if (rules != null && rules.remove(rule) && rules.isEmpty()) {
+                store.rules.remove(key);
+            }
+            store.availabilityDirty = true;
+        };
+    }
+
+    /**
+     * Makes {@code setting} depend on {@code on}, both in this view: {@link Availability.State#DEPENDS_ON}, because
+     * {@code reason}, while {@code when} does not hold for {@code on}'s value
+     * ({@code dependsOn(SOFT, SHADOWS, on -> on, "shadows are off")}).
+     */
+    public <T> Subscription dependsOn(Setting<?> setting, Setting<T> on, Predicate<T> when, String reason) {
+        Objects.requireNonNull(when, "when");
+        Availability off = Availability.dependsOn(reason);
+        return availableWhen(setting, settings -> when.test(get(on)) ? Availability.AVAILABLE : off);
+    }
+
+    /**
+     * Notes that {@code setting}'s value now is the one in use (a window made, a swapchain built): a setting that is not
+     * live is pending a restart while its value differs from this one.
+     */
+    public EngineSettings applied(Setting<?> setting) {
+        store.applied.put(keyOf(setting), get(setting));
+        know(setting);
+        return this;
+    }
+
+    private void know(Setting<?> setting) {
+        store.known.putIfAbsent(keyOf(setting), new Known(this, setting));
+        store.availabilityDirty = true;
+    }
+
+    /**
+     * Whether {@code setting} can be changed now, and why not: the first of its rules not available, else the game's
+     * lock, else a pending restart, else available.
+     */
+    public Availability availability(Setting<?> setting) {
+        String key = keyOf(setting);
+        List<Availability.Rule> rules = store.rules.get(key);
+        if (rules != null) {
+            for (Availability.Rule rule : rules) {
+                Availability availability = rule.evaluate(this);
+                if (availability.state() != Availability.State.AVAILABLE) {
+                    return availability;
+                }
+            }
+        }
+        List<Constraint<?>> constraints = store.constraints.get(key);
+        if (constraints != null) {
+            for (Constraint<?> constraint : constraints) {
+                if (store.locks.contains(constraint)) {
+                    return Availability.locked(constraint.reason());
+                }
+            }
+        }
+        Object applied = store.applied.get(key);
+        if (!setting.live() && applied != null && !applied.equals(get(setting))) {
+            return Availability.restartPending("takes effect on restart");
+        }
+        return Availability.AVAILABLE;
+    }
+
+    /**
+     * Calls {@code listener} with the full name of every setting whose availability changes, when
+     * {@link #refreshAvailability()} finds it. Returns what stops it.
+     */
+    public Subscription onAvailabilityChange(Consumer<String> listener) {
+        Objects.requireNonNull(listener, "listener");
+        store.availabilityListeners.add(listener);
+        return () -> store.availabilityListeners.remove(listener);
+    }
+
+    /**
+     * Says that what availability rules read outside the settings changed (a device or display came or went), so the
+     * next {@link #refreshAvailability()} evaluates them again.
+     */
+    public EngineSettings invalidateAvailability() {
+        store.availabilityDirty = true;
+        return this;
+    }
+
+    /**
+     * At a frame boundary: if anything availability depends on changed since the last call (a value, a rule, a lock,
+     * {@link #invalidateAvailability}), evaluates every setting with rules, locks or an applied value, and tells
+     * availability listeners of each whose availability changed. Does nothing otherwise.
+     */
+    public void refreshAvailability() {
+        if (!store.availabilityDirty) {
+            return;
+        }
+        store.availabilityDirty = false;
+        List<String> changed = new ArrayList<>();
+        for (Map.Entry<String, Known> entry : store.known.entrySet()) {
+            Known known = entry.getValue();
+            Availability now = known.view.availability(known.setting);
+            Availability before = store.lastAvailability.put(entry.getKey(), now);
+            if (before == null ? now.state() != Availability.State.AVAILABLE : !before.equals(now)) {
+                changed.add(entry.getKey());
+            }
+        }
+        store.tell(store.availabilityListeners, changed);
     }
 
     /**
@@ -266,6 +410,7 @@ public final class EngineSettings {
         replaced.loaded.clear();
         replaced.loaded.putAll(values);
         store.effective.clear();
+        store.availabilityDirty = true;
         store.changedAll(keys);
         return this;
     }
@@ -298,10 +443,14 @@ public final class EngineSettings {
         return load(Layer.COMMAND_LINE, values);
     }
 
-    /** Stops a listener, or removes a constraint. */
+    /** Stops a listener, or removes a constraint, a lock or a rule. */
     public interface Subscription extends AutoCloseable {
         @Override
         void close();
+    }
+
+    /** A setting availability is kept for, with the view it was registered in. */
+    private record Known(EngineSettings view, Setting<?> setting) {
     }
 
     /** One layer's values. */
@@ -358,6 +507,13 @@ public final class EngineSettings {
         final Map<String, List<Constraint<?>>> constraints = new HashMap<>();
         final Map<String, Object> effective = new HashMap<>(); // each key's effective value, once read
         final List<Consumer<String>> listeners = new ArrayList<>();
+        final Map<String, List<Availability.Rule>> rules = new HashMap<>();
+        final Set<Constraint<?>> locks = new HashSet<>();
+        final Map<String, Object> applied = new HashMap<>(); // the value in use, of settings that are not live
+        final Map<String, Known> known = new LinkedHashMap<>(); // settings with rules, locks or an applied value
+        final Map<String, Availability> lastAvailability = new HashMap<>(); // as of the last refresh
+        final List<Consumer<String>> availabilityListeners = new ArrayList<>();
+        boolean availabilityDirty;
 
         Values layer(Layer layer) {
             return layers[layer.ordinal()];
@@ -377,6 +533,11 @@ public final class EngineSettings {
          * them. The first exception is rethrown after, later ones suppressed in it.
          */
         void changedAll(Iterable<String> keys) {
+            tell(listeners, keys);
+        }
+
+        /** Tells each of {@code listeners} of each of {@code keys}; see {@link #changedAll}. */
+        void tell(List<Consumer<String>> listeners, Iterable<String> keys) {
             RuntimeException failure = null;
             List<Consumer<String>> told = List.copyOf(listeners);
             for (String key : keys) {
