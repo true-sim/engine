@@ -76,7 +76,7 @@ void meshIdsMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vert
     for (uint t = thread; t < triangleCount; t += 64)
     {
         uint b = mesh.indexBase + triangleOffset + t * 3;
-        triangles[t] = uint3(triangleByte(b), triangleByte(b + 1), triangleByte(b + 2));
+        triangles[t] = wound(uint3(triangleByte(b), triangleByte(b + 1), triangleByte(b + 2)), mirrored(instance));
         primitives[t].id = t;
     }
 }
@@ -119,7 +119,7 @@ void meshMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertice
     for (uint t = thread; t < triangleCount; t += 64)
     {
         uint b = mesh.indexBase + triangleOffset + t * 3;
-        triangles[t] = uint3(triangleByte(b), triangleByte(b + 1), triangleByte(b + 2));
+        triangles[t] = wound(uint3(triangleByte(b), triangleByte(b + 1), triangleByte(b + 2)), mirrored(instance));
     }
 }
 

@@ -1934,6 +1934,75 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void mirroredInstancesFaceAndLightAsTheirMeshes() {
+        // A one-sided white quad facing the camera, lit by the sun from the front: mirrored along x it still faces the
+        // camera (its triangles wound the other way, its normal kept), lit the same; mirrored along z it faces away.
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 8);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            MetallicRoughnessParameters white = MR.withBaseColor(new Color(1, 1, 1, 1)).withRoughness(1)
+                .withMetallic(0);
+            int oneSided = materials.add(new Material(white));
+            int masked = materials.add(new Material(white).alphaMask(0.5f));
+            int doubleSided = materials.add(new Material(white).doubleSided(true));
+            scene.setMaterials(materials);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            SceneGeometry meshlets = SceneGeometry.meshlets(renderer);
+            SceneGeometry classics = new SceneGeometry(classic.add(quadMesh, mesh));
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            List<String> ways = new java.util.ArrayList<>(List.of("indexed"));
+            if (device.meshShaders()) {
+                ways.add("mesh shaders");
+            }
+            if (device.primitiveIds()) {
+                ways.add("visibility buffer");
+                ways.add("classic, visibility buffer");
+            }
+            ways.add("classic");
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            for (String way : ways) {
+                switch (way) {
+                    case "indexed" -> renderer.setPath(MeshletRenderer.Path.INDEXED);
+                    case "mesh shaders" -> renderer.setPath(MeshletRenderer.Path.MESH_SHADERS);
+                    case "visibility buffer" -> main.port().replace(new VisibilityBufferShading(meshlets, main,
+                        VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                    case "classic, visibility buffer" -> main.port().replace(new VisibilityBufferShading(classics, main,
+                        VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                    default -> main.port().replace(new ClusteredForwardShading(classics, main,
+                        VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                }
+                for (int material : new int[] {oneSided, masked, doubleSided}) {
+                    scene.set(0, quadMesh, material, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                    frame();
+                    int plain = image()[center];
+                    assertThat(red(plain)).as("%s: lit from the front", way).isGreaterThan(60);
+                    scene.set(0, quadMesh, material, 0, 0, -2, 0, 0, 0, 1, -1, 1, 1);
+                    frame();
+                    assertThat(red(image()[center])).as("%s, material %d: mirrored along x, the same", way, material)
+                        .isCloseTo(red(plain), within(3));
+                    scene.set(0, quadMesh, material, 0, 0, -2, 0, 0, 0, 1, 1, 1, -1);
+                    frame();
+                    if (material == doubleSided) {
+                        assertThat(red(image()[center])).as("%s: its back, lit as its front", way)
+                            .isCloseTo(red(plain), within(3));
+                    } else {
+                        assertThat(red(image()[center])).as("%s, material %d: mirrored along z, facing away", way,
+                            material).isZero();
+                    }
+                }
+            }
+            renderer.setPath(MeshletRenderer.Path.AUTO);
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
     void transmissiveMaterialsShowTheSceneBehindThroughThem() {
         MeshData mesh = twoUvQuad();
         int quadMesh = pool.add(mesh);
@@ -1980,7 +2049,13 @@ class GraphTechniquesTest {
                 .withThicknessFactor(0.1f).withAttenuationDistance(0.05f)
                 .withAttenuationColor(new Color(0.3, 1, 1, 1))));
             frame();
-            assertThat(red(image()[center])).as("attenuated: 0.3 squared of the red").isLessThan(red(through) / 4);
+            int attenuated = red(image()[center]);
+            assertThat(attenuated).as("attenuated: 0.3 squared of the red").isLessThan(red(through) / 4);
+            // The thickness is in the mesh's units: an instance twice as large is twice as thick.
+            scene.set(1, quadMesh, glass, 0, 0, -2, 0, 0, 0, 1, 1, 1, 2);
+            frame();
+            assertThat(red(image()[center])).as("twice as thick: 0.3 to the fourth").isLessThan(attenuated / 2);
+            scene.set(1, quadMesh, glass, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
             // Masked too, as glTF's MASK with transmission: texels below the cutoff show nothing, not tinted glass.
             MetallicRoughnessParameters cyan = white.withBaseColor(new Color(0, 1, 1, 0.2));
             materials.set(glass, new Material(cyan).feature(clear));

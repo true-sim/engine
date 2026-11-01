@@ -25,10 +25,11 @@ struct DrawPush
 [[vk::push_constant]]
 ConstantBuffer<DrawPush> push;
 
-/** The scene behind, as the push block names it. */
-Background behind()
+/** The scene behind, as the push block names it, for a fragment of instance `instance`. */
+Background behind(uint instance)
 {
-    Background b = { push.background, push.backgroundRegion };
+    Background b = { push.background, push.backgroundRegion,
+        push.background != 0 ? maxScale(push.instances[instance]) : 1.0 };
     return b;
 }
 
@@ -52,7 +53,7 @@ float4 fragmentMain(VertexOut in) : SV_Target
 {
     float4 uvs = float4(in.uv, in.uv1);
     return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind());
+        uint2(in.position.xy), behind(in.instance));
 }
 
 /**
@@ -65,7 +66,7 @@ BlendedOut blendedMain(VertexOut in, bool front : SV_IsFrontFace)
     discardMasked(push.materials[in.material], in, front); // masked transmissive materials draw here too
     float4 uvs = float4(in.uv, in.uv1);
     return weighBlended(shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind()), length(in.world));
+        uint2(in.position.xy), behind(in.instance)), length(in.world));
 }
 
 /** The masked bin's: drawn without culling, so one-sided materials' back faces go here with the masked texels. */
@@ -75,7 +76,7 @@ float4 maskedMain(VertexOut in, bool front : SV_IsFrontFace) : SV_Target
     discardMasked(push.materials[in.material], in, front);
     float4 uvs = float4(in.uv, in.uv1);
     return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind());
+        uint2(in.position.xy), behind(in.instance));
 }
 
 /** The masked bin's depth only (shadow maps, depth prepasses): the same texels masked as the color pass's. */

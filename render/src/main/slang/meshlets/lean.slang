@@ -30,10 +30,11 @@ struct LeanPush
 [[vk::push_constant]]
 ConstantBuffer<LeanPush> push;
 
-/** The scene behind, as the push block names it. */
-Background behind()
+/** The scene behind, as the push block names it, for a fragment of instance `instance`. */
+Background behind(uint instance)
 {
-    Background b = { push.background, push.backgroundRegion };
+    Background b = { push.background, push.backgroundRegion,
+        push.background != 0 ? maxScale(push.instances[instance]) : 1.0 };
     return b;
 }
 
@@ -96,7 +97,7 @@ void meshLeanMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out ver
     for (uint t = thread; t < triangleCount; t += 64)
     {
         uint b = mesh.indexBase + triangleOffset + t * 3;
-        triangles[t] = uint3(triangleByte(b), triangleByte(b + 1), triangleByte(b + 2));
+        triangles[t] = wound(uint3(triangleByte(b), triangleByte(b + 1), triangleByte(b + 2)), mirrored(instance));
         primitives[t].id = slot << 7 | t;
     }
 }
@@ -124,7 +125,8 @@ VertexOut lean(LeanVertex in, uint primitive, float3 bary)
         s.color = 0;
         for (uint k = 0; k < 3; k++)
         {
-            uint vertex = mesh.vertexBase + push.meshletVertices[vertexBase + triangleByte(first + k)];
+            uint vertex = mesh.vertexBase + push.meshletVertices[vertexBase
+                + triangleByte(first + woundCorner(k, mirrored(instance)))]; // barycentrics follow the drawn corners
             uint word = attributeWord(mesh, push.attributes, vertex, 4);
             s.color += bary[k] * float4(word & 0xff, (word >> 8) & 0xff, (word >> 16) & 0xff, word >> 24) / 255.0;
         }
@@ -142,7 +144,7 @@ float4 leanMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bary : SV
     VertexOut s = lean(in, primitive, bary);
     float4 uvs = float4(s.uv, s.uv1);
     return shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind());
+        uint2(in.position.xy), behind(s.instance));
 }
 
 /**
@@ -157,7 +159,7 @@ BlendedOut leanBlendedMain(LeanVertex in, uint primitive : SV_PrimitiveID, float
     discardMasked(push.materials[s.material], s, front); // masked transmissive materials draw here too
     float4 uvs = float4(s.uv, s.uv1);
     return weighBlended(shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind()), length(s.world));
+        uint2(in.position.xy), behind(s.instance)), length(s.world));
 }
 
 /** The masked bin's: back faces of one-sided masked materials discarded with the masked texels. */
@@ -169,5 +171,5 @@ float4 leanMaskedMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bar
     discardMasked(push.materials[s.material], s, front);
     float4 uvs = float4(s.uv, s.uv1);
     return shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind());
+        uint2(in.position.xy), behind(s.instance));
 }

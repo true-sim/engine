@@ -187,10 +187,44 @@ public float3 toWorld(Instance instance, float3 local)
     return instance.position + rotate(instance.rotation, local * instance.scale);
 }
 
-/** The largest scale factor: spheres and errors grow by it. */
+/** The largest scale factor, whatever its sign: spheres and errors grow by it. */
 public float maxScale(Instance instance)
 {
-    return max(instance.scale.x, max(instance.scale.y, instance.scale.z));
+    float3 s = abs(instance.scale);
+    return max(s.x, max(s.y, s.z));
+}
+
+/**
+ * Whether `instance` is mirrored: scaled negatively along one axis or all three. Its triangles then wind the other way
+ * on screen, so every path draws them with their second and third corners swapped (wound()), and they face as they did.
+ */
+public bool mirrored(Instance instance)
+{
+    return instance.scale.x * instance.scale.y * instance.scale.z < 0;
+}
+
+/** Triangle `t`'s corners as drawn for an instance that is `mirrored` or not: wound as the mesh means them to face. */
+public uint3 wound(uint3 t, bool mirrored)
+{
+    return mirrored ? t.xzy : t;
+}
+
+/** Corner `k` (0 to 2) of a triangle drawn wound(): which of the mesh's corners it is. */
+public uint woundCorner(uint k, bool mirrored)
+{
+    return mirrored && k != 0 ? 3 - k : k;
+}
+
+/**
+ * Direction `d` of the mesh (a normal), in the world: as normals transform, by the inverse of the instance's scale, so
+ * they stay perpendicular to its surfaces under any scale, a mirroring one too.
+ */
+public float3 normalToWorld(Instance instance, float3 d)
+{
+    float3 s = instance.scale;
+    float3 safe = float3(abs(s.x) > 1.0e-20 ? s.x : 1.0e-20, abs(s.y) > 1.0e-20 ? s.y : 1.0e-20,
+        abs(s.z) > 1.0e-20 ? s.z : 1.0e-20);
+    return rotate(instance.rotation, normalize(d / safe));
 }
 
 /** A position from 3 x unorm16 in the mesh's box. */
@@ -414,7 +448,7 @@ public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets,
     // Back faces as seen from the eye; orthographic views (shadow maps) keep them.
     float3 fromEye = center - view.eye;
     return doubleSided || view.orthographic != 0 || cone.w >= 1
-        || dot(fromEye, rotate(instance.rotation, cone.xyz)) < cone.w * length(fromEye) + radius;
+        || dot(fromEye, normalToWorld(instance, cone.xyz)) < cone.w * length(fromEye) + radius;
 }
 
 /** The submesh of pool meshlet `m`: its material is the instance's material base plus this. */
@@ -438,7 +472,7 @@ public VertexOut transformVertex(View view, Instance instance, MeshEntry mesh, u
     VertexOut out;
     out.position = mul(view.viewProjection, float4(world, 1.0));
     out.world = world;
-    out.normal = rotate(instance.rotation, float3(0, 1, 0));
+    out.normal = normalToWorld(instance, float3(0, 1, 0));
     out.tangent = 0;
     out.uv = 0;
     out.uv1 = 0;
@@ -446,12 +480,14 @@ public VertexOut transformVertex(View view, Instance instance, MeshEntry mesh, u
     uint format = mesh.attributeFormat;
     if ((format & 1) != 0) // NORMAL: octahedral
     {
-        out.normal = rotate(instance.rotation, decodeOctahedral(attributeWord(mesh, attributes, vertex, 0)));
+        out.normal = normalToWorld(instance, decodeOctahedral(attributeWord(mesh, attributes, vertex, 0)));
     }
     if ((format & 2) != 0) // TANGENT: octahedral, the bitangent's sign in the lowest bit
     {
         uint word = attributeWord(mesh, attributes, vertex, 1);
-        out.tangent = float4(rotate(instance.rotation, decodeOctahedral(word)), (word & 1) != 0 ? -1.0 : 1.0);
+        // A tangent follows the surface as positions do; mirrored, the bitangent's sign turns
+        out.tangent = float4(rotate(instance.rotation, normalize(decodeOctahedral(word) * instance.scale)),
+            ((word & 1) != 0) != mirrored(instance) ? -1.0 : 1.0);
     }
     if ((format & 4) != 0) // UV0: 2 x float16
     {
@@ -529,10 +565,11 @@ public struct Background
 {
     public uint slot;      // its sampled slot plus 1; 0: none (transmissive surfaces then blend by what they let through)
     public uint region;    // the render region's width (low 16 bits) and height, in pixels
+    public float scale;    // the drawn instance's largest scale: a volume's thickness is in its mesh's units
 
     public static Background none()
     {
-        Background b = { 0, 0 };
+        Background b = { 0, 0, 1 };
         return b;
     }
 
@@ -551,7 +588,8 @@ public float3 transmitted(Surface s, View view, float3 world, float3 toViewer, u
 {
     float2 region = float2(behind.region & 0xffff, behind.region >> 16);
     float3 inside = refract(-toViewer, s.normal, 1 / max(s.ior, 1.0));
-    float3 exit = world + normalize(inside) * s.thickness;
+    float thickness = s.thickness * behind.scale;
+    float3 exit = world + normalize(inside) * thickness;
     float4 from = mul(view.viewProjection, float4(world, 1));
     float4 to = mul(view.viewProjection, float4(exit, 1));
     float2 offset = to.w > 1.0e-5 ? (to.xy / to.w - from.xy / from.w) * 0.5 * region : float2(0, 0);
@@ -564,9 +602,9 @@ public float3 transmitted(Surface s, View view, float3 world, float3 toViewer, u
     float lod = log2(max(region.x, region.y)) * s.roughness * saturate(s.ior * 2 - 2);
     float3 color = textures[behind.slot - 1].SampleLevel(samplers[LINEAR_CLAMP], at / float2(width, height),
         min(lod, float(levels - 1))).rgb;
-    if (s.attenuationDistance > 0 && s.thickness > 0)
+    if (s.attenuationDistance > 0 && thickness > 0)
     {
-        color *= pow(max(s.attenuationColor, 1.0e-4), s.thickness / s.attenuationDistance);
+        color *= pow(max(s.attenuationColor, 1.0e-4), thickness / s.attenuationDistance);
     }
     return color * s.albedo;
 }

@@ -1,8 +1,9 @@
 // The classic LOD path's selection, one view: one thread per instance tests the mesh's bounds against the frustum,
 // picks the coarsest level whose error, seen from the mesh's nearest point, is within the allowed pixels (the meshlet
 // path's rule for discrete LODs), and appends a VkDrawIndexedIndirectCommand per part of it to the list of the part's
-// raster bin (by its material: opaque, double-sided, masked). Words 0 to 2 of the draw list count each bin's; draws
-// past a bin's capacity are not written, and its draw's count is capped.
+// raster bin (by its material: opaque, double-sided, masked, blended), a mirrored instance's to the bin's mirrored list
+// (drawn with clockwise front faces: the pool's indices wind the other way on screen). Words 0 to 7 of the draw list
+// count each list's; draws past a list's capacity are not written, and its draw's count is capped.
 import classic.parts;
 
 struct SelectPush
@@ -13,8 +14,9 @@ struct SelectPush
     ClassicMesh* classicMeshes;
     ClassicLevel* levels;
     ClassicPart* parts;
-    uint* draws;           // the bins' counts, then from word 4 each bin's commands (maxDraws of 5 words each)
-    ClassicDraw* records;  // per draw slot: bin * maxDraws + the draw in the bin
+    uint* draws;           // the lists' counts (the bins', then their mirrored ones), then from word 8 each list's
+                           // commands (maxDraws of 5 words each)
+    ClassicDraw* records;  // per draw slot: list * maxDraws + the draw in the list
     uint instanceCount;
     uint maxDraws;         // per bin
     Material* materials;   // for each part's raster bin
@@ -64,7 +66,8 @@ void selectMain(uint3 id : SV_DispatchThreadID)
     for (uint p = 0; p < level.partCount; p++)
     {
         ClassicPart part = push.parts[level.firstPart + p];
-        uint bin = rasterBin(push.materials[instance.materialBase + ((part.tag >> 24) & 0x7f)]);
+        uint bin = rasterBin(push.materials[instance.materialBase + ((part.tag >> 24) & 0x7f)])
+            + (mirrored(instance) ? BINS : 0);
         uint local;
         InterlockedAdd(push.draws[bin], 1, local);
         if (local >= push.maxDraws)
@@ -72,7 +75,7 @@ void selectMain(uint3 id : SV_DispatchThreadID)
             continue; // over the bin's capacity: counted, not drawn
         }
         uint slot = bin * push.maxDraws + local;
-        uint c = 4 + slot * 5;
+        uint c = 2 * BINS + slot * 5;
         push.draws[c] = part.indexCount;
         push.draws[c + 1] = 1;
         push.draws[c + 2] = part.firstIndex;
