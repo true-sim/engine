@@ -82,7 +82,8 @@ layer is saved; unknown keys are kept, unreadable ones fall through, values are 
 lists the settings an app has, each registered once by the part owning it, with a `SettingGroup` (a tree of groups
 with translation-key labels and an order, apart from saved names) and optionally a `SettingTier`. Options screens ask
 it for groups and their settings up to a tier; hidden tiers show only when revealed; `check()` at startup fails on a
-visible setting without a group or an undeclared tier. The frame graph has settings
+setting with a tier but no group, an undeclared tier or two groups with one id; settings players never see are
+registered with `addHidden`. The frame graph has settings
 (`graph.settings()`): a build reads them with `g.setting(key)` and rebuilds when one it read changes; pass bodies read
 `g.settings()` when they record. Windows follow theirs (`platform.createWindow(options, settings.scoped("window.main"))`),
 and so does the `Presenter` (the graph's present settings, or a window's own). The core's tuning values are settings
