@@ -73,9 +73,12 @@ try (Platform platform = Platform.start()) {
 
 **Engine settings** (`com.truesim.engine.settings`): every engine setting is a declared `Setting` (name, kind,
 default, range, description, live or not), declared by the module that uses it, next to that code. `EngineSettings`
-holds the values: `get` (the default where none is set), `set` (checked against the range), change listeners, scoped
-views (one window's own values), and saving and loading as text (`toMap`/`load`: only what was set is saved; unknown
-keys are kept, unreadable ones default, values are parsed when first read). The frame graph has settings
+holds the values in layers, lowest first: the setting's default, the game's (`set(Layer.GAME, ...)`), the player's
+(`set`), the command line (`commandLine(args)`, `--set name=value`). `preferred` is the highest layer's value; `get`,
+what the engine uses, is that value through the `Constraint`s on it (`constrain(setting, Constraint.lock(false, "no
+HDR display"))`, `range`, `choices`), so hardware and game limits never overwrite the player's choice. Change
+listeners, scoped views (one window's own values), and saving and loading as text (`toMap`/`load`: only the player's
+layer is saved; unknown keys are kept, unreadable ones fall through, values are parsed when first read). The frame graph has settings
 (`graph.settings()`): a build reads them with `g.setting(key)` and rebuilds when one it read changes; pass bodies read
 `g.settings()` when they record. Windows follow theirs (`platform.createWindow(options, settings.scoped("window.main"))`),
 and so does the `Presenter` (the graph's present settings, or a window's own). The core's tuning values are settings
