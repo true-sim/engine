@@ -39,6 +39,10 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
 
     /** A clear coat: a glossy dielectric layer over the base, as car paint or varnish. */
     public static final int FEATURE_CLEARCOAT = MaterialsConstants.FEATURE_CLEARCOAT;
+    /** Texture transforms: textures naming one ({@link TextureSampler#transform}) sample moved, turned, scaled UVs. */
+    public static final int FEATURE_TEXTURE_TRANSFORM = MaterialsConstants.FEATURE_TEXTURE_TRANSFORM;
+    /** The features every type allows, whatever its parameters say: they act on how textures are read. */
+    public static final int EVERY_TYPES_FEATURES = FEATURE_TEXTURE_TRANSFORM;
     /** How many features there are, as materials.slang has them. */
     static final int FEATURE_BITS = MaterialsConstants.FEATURE_BITS;
     /** Every feature bit. */

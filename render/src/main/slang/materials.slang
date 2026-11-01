@@ -84,8 +84,37 @@ public struct Material
 
 /** Features: parts of the lighting a material may show, each a bit of its features and a section of its block. */
 public static const uint FEATURE_CLEARCOAT = 1;
+/** Texture transforms (glTF's KHR_texture_transform): textures naming one are sampled at moved, turned, scaled UVs. */
+public static const uint FEATURE_TEXTURE_TRANSFORM = 2;
 /** How many features there are: their bits are the low FEATURE_BITS of a mask. */
-public static const uint FEATURE_BITS = 1;
+public static const uint FEATURE_BITS = 2;
+
+/**
+ * A texture reference, as materials' texture fields hold them: slot bits 0-15, sampler 16-19, bit 20 the second UV set,
+ * bits 21-24 the transform (1-8, of the material's FEATURE_TEXTURE_TRANSFORM; 0: none). -1: no texture.
+ */
+public static const uint TEXTURE_UV1 = 1u << 20;
+public static const uint TEXTURE_TRANSFORM_SHIFT = 21;
+
+/**
+ * The texture transforms a material's textures name (FEATURE_TEXTURE_TRANSFORM), as glTF's KHR_texture_transform:
+ * transform n moves UVs by its offset, turns them by its rotation (radians, counterclockwise) and scales them, in
+ * glTF's order (scale, then rotate, then translate).
+ */
+[MaterialFeature(FEATURE_TEXTURE_TRANSFORM)]
+public struct TextureTransformParameters
+{
+    public float4 transform1 = float4(0, 0, 1, 1); // offset x, y; scale x, y
+    public float4 transform2 = float4(0, 0, 1, 1);
+    public float4 transform3 = float4(0, 0, 1, 1);
+    public float4 transform4 = float4(0, 0, 1, 1);
+    public float4 transform5 = float4(0, 0, 1, 1);
+    public float4 transform6 = float4(0, 0, 1, 1);
+    public float4 transform7 = float4(0, 0, 1, 1);
+    public float4 transform8 = float4(0, 0, 1, 1);
+    public float4 rotations1to4 = float4(0, 0, 0, 0); // radians
+    public float4 rotations5to8 = float4(0, 0, 0, 0);
+};
 
 /** The type of `m`, bits 0-7 of its header. */
 public uint materialType(Material m)
@@ -113,9 +142,9 @@ public bool materialMasked(Material m)
 
 /**
  * Whether `m` masks this point out: alpha (its mask alpha, times its mask texture's, times the vertex color's) below
- * the cutoff. Opaque materials mask nothing.
+ * the cutoff, at texture coordinates `uvs` (both sets) with gradients `dx`, `dy`. Opaque materials mask nothing.
  */
-public bool alphaClipped(Material m, float2 uv, float2 dx, float2 dy, float4 color)
+public bool alphaClipped(Material m, float4 uvs, float4 dx, float4 dy, float4 color)
 {
     if (!materialMasked(m))
     {
@@ -124,7 +153,10 @@ public bool alphaClipped(Material m, float2 uv, float2 dx, float2 dy, float4 col
     float alpha = m.maskAlpha * color.a;
     if (m.maskTexture >= 0)
     {
-        alpha *= sampleTexture(m.maskTexture, uv, dx, dy).a;
+        // In its UV set (`uvs`: the first, then the second); not moved by a transform, which the slot does not hold.
+        bool second = (uint(m.maskTexture) & TEXTURE_UV1) != 0;
+        alpha *= sampleTexture(m.maskTexture, second ? uvs.zw : uvs.xy, second ? dx.zw : dx.xy, second ? dy.zw : dy.xy)
+            .a;
     }
     return alpha < float(m.header >> 16) / 65535.0;
 }
@@ -152,10 +184,16 @@ public T materialParameters<T>(MaterialRef m)
 /** The parameters (struct T) of feature `feature` (one FEATURE_* bit), which `m` shows. */
 public T materialFeature<T>(MaterialRef m, uint feature)
 {
+    return *materialFeatureAt<T>(m, feature);
+}
+
+/** Where the parameters (struct T) of feature `feature` (one FEATURE_* bit), which `m` shows, lie. */
+public T* materialFeatureAt<T>(MaterialRef m, uint feature)
+{
     Material s = m.slot();
     uint64_t block = (uint64_t)m.table + s.parameters;
     uint section = *(uint*)(block + s.featureTable + 4 * countbits(s.features & (feature - 1)));
-    return *(T*)(block + section);
+    return (T*)(block + section);
 }
 
 // ---------------------------------------------------------------------------------------------- types
@@ -170,9 +208,56 @@ public struct SurfaceInput
     public float2 uv;
     public float2 dx;              // the texture coordinates' gradients, per pixel
     public float2 dy;
+    public float2 uv1;             // the second set (TEXTURE_UV1), and its gradients
+    public float2 dx1;
+    public float2 dy1;
     public float4 color;           // the vertex color
     public uint features;          // the features shaded (FEATURE_*): a constant where the pass is a variant
+    public TextureTransformParameters* transforms; // the material's texture transforms; null: none
 };
+
+/**
+ * Texture `texture` (a texture reference: slot, sampler, UV set, transform) at this point: in its UV set, moved by its
+ * transform, with the gradients transformed alike.
+ */
+public float4 sampleTexture(int texture, SurfaceInput in)
+{
+    bool second = (uint(texture) & TEXTURE_UV1) != 0;
+    float2 uv = second ? in.uv1 : in.uv;
+    float2 dx = second ? in.dx1 : in.dx;
+    float2 dy = second ? in.dy1 : in.dy;
+    uint t = (uint(texture) >> TEXTURE_TRANSFORM_SHIFT) & 0xf;
+    if (t != 0 && in.transforms != nullptr)
+    {
+        TextureTransformParameters p = *in.transforms;
+        float4 transforms[8] = { p.transform1, p.transform2, p.transform3, p.transform4, p.transform5, p.transform6,
+            p.transform7, p.transform8 };
+        float4 tr = transforms[min(t, 8u) - 1];
+        float rotation = t <= 4 ? p.rotations1to4[t - 1] : p.rotations5to8[min(t, 8u) - 5];
+        float c = cos(rotation);
+        float s = sin(rotation);
+        // glTF: uv' = T * R * S * uv, R = [c, s; -s, c] (counterclockwise in texture space, whose v runs down)
+        float2x2 m = float2x2(c * tr.z, s * tr.w, -s * tr.z, c * tr.w);
+        uv = mul(m, uv) + tr.xy;
+        dx = mul(m, dx);
+        dy = mul(m, dy);
+    }
+    return sampleTexture(texture, uv, dx, dy);
+}
+
+/** Unit normal `n` bent by tangent-space normal map `texture` (by `scale`) at this point, if there are tangents. */
+public float3 mapNormal(float3 n, float4 tangent, int texture, float scale, SurfaceInput in)
+{
+    if (texture < 0 || dot(tangent.xyz, tangent.xyz) <= 0)
+    {
+        return n;
+    }
+    float3 t = normalize(tangent.xyz - n * dot(n, tangent.xyz));
+    float3 b = cross(n, t) * (tangent.w < 0 ? -1.0 : 1.0);
+    float3 local = sampleTexture(texture, in).xyz * 2 - 1;
+    local.xy *= scale;
+    return normalize(local.x * t + local.y * b + local.z * n);
+}
 
 /**
  * A material type: how its materials' parameters become a surface to light. Lighting, and the features, are the

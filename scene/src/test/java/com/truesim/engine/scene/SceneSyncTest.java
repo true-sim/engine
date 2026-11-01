@@ -34,6 +34,9 @@ import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.Keys;
 import com.truesim.common.math.color.Color;
 import com.truesim.engine.render.Material;
+import com.truesim.common.math.Vec4;
+import com.truesim.engine.render.materials.TextureTransformParameters;
+import com.truesim.engine.render.TextureSampler;
 import com.truesim.engine.render.materials.ClearcoatParameters;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.scene.materials.Tinted;
@@ -704,6 +707,74 @@ class SceneSyncTest {
         assertThat(resources.textureCount()).isZero();
         assertThat(assets.holders(white)).isZero();
         assertThat(sync.renderableCount()).isEqualTo(1);
+    }
+
+    @Test
+    void textureTransformsAndUvSetsInTheDataBecomeTheMaterials() throws InterruptedException {
+        AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 61);
+        // Two textures sharing one transform, a third with another, one on the second UV set; a clear coat's too.
+        AssetRef<MaterialData> moved = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
+            (glow, seed) -> MaterialData.builder(MR)
+                .texture("baseColorTexture", white).set("baseColorTextureOffset", 0.5f, 0f)
+                .set("baseColorTextureScale", 2f, 2f)
+                .texture("ormTexture", white).set("ormTextureOffset", 0.5f, 0f).set("ormTextureScale", 2f, 2f)
+                .texture("emissiveTexture", white).set("emissiveTextureRotation", 1.5f)
+                .texture("normalTexture", white).set("normalTextureTexCoord", 1)
+                .feature("clearcoat", coat -> coat.texture("strengthTexture", white)
+                    .set("strengthTextureOffset", 0f, 0.25f))
+                .build(), new Glow(1, 1, 1), 61);
+        // Mistakes: a third UV set, an offset of three floats.
+        AssetRef<MaterialData> thirdSet = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
+            (glow, seed) -> MaterialData.builder(MR).texture("baseColorTexture", white)
+                .set("baseColorTextureTexCoord", 2).build(), new Glow(1, 1, 1), 62);
+        AssetRef<MaterialData> badOffset = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
+            (glow, seed) -> MaterialData.builder(MR).texture("baseColorTexture", white)
+                .set("baseColorTextureOffset", 1f, 2f, 3f).build(), new Glow(1, 1, 1), 64);
+        List<String> problems = new ArrayList<>();
+        resources.diagnostics(new SceneResources.Diagnostics() {
+            @Override
+            public void materialProblem(AssetRef<MaterialData> material, String problem) {
+                problems.add(problem);
+            }
+        });
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        long node = facing(scene, 0, 0, -3);
+        renderables.set(node, SQUARE, List.of(moved));
+        renderables.set(facing(scene, 1, 0, -3), SQUARE, List.of(thirdSet));
+        renderables.set(facing(scene, 0, 1, -3), SQUARE, List.of(badOffset));
+        for (int round = 0; round < 4; round++) {
+            update(scene, renderables, sync);
+            load();
+        }
+        update(scene, renderables, sync);
+        Material made = materials.material(sync.firstMaterialOf(node));
+        MetallicRoughnessParameters p = (MetallicRoughnessParameters) made.parameters();
+        assertThat(TextureSampler.transformOf(p.baseColorTexture())).isEqualTo(1);
+        assertThat(TextureSampler.transformOf(p.ormTexture())).as("the same transform: shared").isEqualTo(1);
+        assertThat(TextureSampler.transformOf(p.emissiveTexture())).isEqualTo(2);
+        assertThat(TextureSampler.transformOf(p.normalTexture())).isZero();
+        assertThat(TextureSampler.usesSecondUv(p.normalTexture())).isTrue();
+        assertThat(TextureSampler.usesSecondUv(p.baseColorTexture())).isFalse();
+        TextureTransformParameters transforms = made.features().stream()
+            .filter(f -> f instanceof TextureTransformParameters).map(f -> (TextureTransformParameters) f)
+            .findFirst().orElseThrow();
+        assertThat(transforms.transform1()).isEqualTo(new Vec4(0.5, 0, 2, 2));
+        assertThat(transforms.transform2()).isEqualTo(new Vec4(0, 0, 1, 1));
+        assertThat(transforms.rotations1to4()).isEqualTo(new Vec4(0, 1.5, 0, 0));
+        assertThat(transforms.transform3()).as("the clear coat's").isEqualTo(new Vec4(0, 0.25, 1, 1));
+        assertThat(problems).anyMatch(m -> m.contains("UV sets 0 and 1, not 2"))
+            .anyMatch(m -> m.contains("offset and scale are 2 floats"));
+        // At most eight distinct transforms per material.
+        SceneResources.Transforms many = new SceneResources.Transforms();
+        for (int t = 1; t <= 8; t++) {
+            assertThat(many.add("t" + t, null, t, null)).isEqualTo(t);
+        }
+        assertThat(many.add("again", null, 3, null)).as("the same: shared").isEqualTo(3);
+        assertThatIllegalArgumentException().isThrownBy(() -> many.add("t9", null, 9, null))
+            .withMessageContaining("at most 8 texture transforms");
+        assertThat(new SceneResources.Transforms().feature()).isNull();
     }
 
     private void update(SceneGraph scene, Renderables renderables, SceneSync sync) {

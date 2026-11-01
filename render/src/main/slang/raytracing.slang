@@ -103,7 +103,7 @@ public bool clipped(RayScene* scene, uint id, uint primitive, float2 bary)
             color += weights[k] * float4(word & 0xff, (word >> 8) & 0xff, (word >> 16) & 0xff, word >> 24) / 255.0;
         }
     }
-    return alphaClipped(m, uv, float2(0), float2(0), color);
+    return alphaClipped(m, float4(uv, uv), float4(0), float4(0), color);
 }
 
 /**

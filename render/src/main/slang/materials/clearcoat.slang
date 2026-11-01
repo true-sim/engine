@@ -21,15 +21,14 @@ public void applyClearcoat(inout Surface s, ClearcoatParameters c, SurfaceInput 
     float strength = c.strength;
     if (c.strengthTexture >= 0)
     {
-        strength *= sampleTexture(c.strengthTexture, in.uv, in.dx, in.dy).r;
+        strength *= sampleTexture(c.strengthTexture, in).r;
     }
     float roughness = c.roughness;
     if (c.roughnessTexture >= 0)
     {
-        roughness *= sampleTexture(c.roughnessTexture, in.uv, in.dx, in.dy).g;
+        roughness *= sampleTexture(c.roughnessTexture, in).g;
     }
     s.clearcoat = saturate(strength);
     s.clearcoatRoughness = clamp(roughness, 0.03, 1.0);
-    s.clearcoatNormal = mapNormal(normalize(in.normal), in.tangent, c.normalTexture, c.normalScale, in.uv, in.dx,
-        in.dy);
+    s.clearcoatNormal = mapNormal(normalize(in.normal), in.tangent, c.normalTexture, c.normalScale, in);
 }

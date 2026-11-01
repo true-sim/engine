@@ -44,6 +44,8 @@ import com.truesim.engine.render.blocks.DepthPyramid;
 import com.truesim.engine.render.materials.CarPaint;
 import com.truesim.engine.render.materials.CarPaintParameters;
 import com.truesim.engine.render.materials.ClearcoatParameters;
+import com.truesim.common.math.Vec4;
+import com.truesim.engine.render.materials.TextureTransformParameters;
 import com.truesim.engine.render.materials.Glow;
 import com.truesim.engine.render.materials.GlowParameters;
 import com.truesim.engine.render.materials.Tinted;
@@ -1687,6 +1689,109 @@ class GraphTechniquesTest {
         return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL), count).positions(positions)
             .attribute(VertexAttribute.NORMAL, MeshletBenchmark.normals(positions, indices)).submesh(indices)
             .buildDiscrete(6, 0.5);
+    }
+
+    /**
+     * A quad facing the camera, a quarter of the view at 2 m, its first UV set across it (0 to 1) and its second at
+     * (0.75, 0.5) throughout.
+     */
+    private static MeshData twoUvQuad() {
+        float[] positions = {-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0};
+        float[] normals = {0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1};
+        float[] uv0 = {0, 1, 1, 1, 1, 0, 0, 0};
+        float[] uv1 = {0.75f, 0.5f, 0.75f, 0.5f, 0.75f, 0.5f, 0.75f, 0.5f};
+        return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL, VertexAttribute.UV0, VertexAttribute.UV1), 4)
+            .positions(positions).attribute(VertexAttribute.NORMAL, normals).attribute(VertexAttribute.UV0, uv0)
+            .attribute(VertexAttribute.UV1, uv1).submesh(new int[] {0, 1, 2, 0, 2, 3}).buildFlat();
+    }
+
+    /** How many pixels are mostly red, and how many mostly green. */
+    private int[] redAndGreen() {
+        int[] counts = new int[2];
+        for (int pixel : image()) {
+            int r = pixel & 0xff;
+            int g = (pixel >> 8) & 0xff;
+            counts[0] += r > 2 * g + 20 ? 1 : 0;
+            counts[1] += g > 2 * r + 20 ? 1 : 0;
+        }
+        return counts;
+    }
+
+    @Test
+    void texturesFollowTheirTransformAndUvSet() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        // Two texels, nearest: red on the left half of UV space, green on the right.
+        java.lang.foreign.MemorySegment texels = java.lang.foreign.Arena.ofAuto().allocate(8, 4);
+        texels.setAtIndex(ValueLayout.JAVA_INT, 0, 0xff0000ff);
+        texels.setAtIndex(ValueLayout.JAVA_INT, 1, 0xff00ff00);
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8)) {
+            int texture = TextureSampler.NEAREST.of(textures.color(2, 1, texels));
+            MetallicRoughnessParameters glowing = MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1)
+                .withEmissive(new Color(1, 1, 1, 1));
+            int plain = materials.add(new Material(glowing.withEmissiveTexture(texture)));
+            // Moved by half: the green half's texels where the red were, and the other way round.
+            int moved = materials.add(new Material(glowing.withEmissiveTexture(TextureSampler.transform(texture, 1)))
+                .feature(TextureTransformParameters.DEFAULTS.withTransform1(new Vec4(0.5, 0, 1, 1))));
+            // The second UV set, (0.75, 0.5) throughout: green everywhere.
+            int second = materials.add(new Material(glowing.withEmissiveTexture(TextureSampler.secondUv(texture))));
+            assertThat(TextureSampler.usesSecondUv(TextureSampler.secondUv(texture))).isTrue();
+            assertThat(TextureSampler.transformOf(TextureSampler.transform(texture, 3))).isEqualTo(3);
+            assertThat(TextureSampler.from(TextureSampler.secondUv(TextureSampler.transform(texture, 8))))
+                .isEqualTo(TextureSampler.NEAREST);
+            assertThatIllegalArgumentException().isThrownBy(() -> TextureSampler.transform(texture, 9));
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, plain, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            List<Technique> shadings = new java.util.ArrayList<>(List.of());
+            if (device.primitiveIds()) {
+                shadings.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            }
+            for (int pass = 0; pass <= shadings.size(); pass++) {
+                if (pass > 0) {
+                    main.port().replace(shadings.get(pass - 1));
+                }
+                scene.set(0, quadMesh, plain, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                int[] counts = redAndGreen();
+                int[] left = halves();
+                assertThat(counts[0]).as("pass %d: red pixels", pass).isGreaterThan(SIZE * SIZE / 16);
+                assertThat(counts[1]).as("pass %d: green pixels", pass).isGreaterThan(SIZE * SIZE / 16);
+                assertThat(left[0]).as("pass %d: red on the left", pass).isGreaterThan(left[1]);
+                scene.set(0, quadMesh, moved, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                left = halves();
+                assertThat(left[1]).as("pass %d: moved, green on the left", pass).isGreaterThan(left[0]);
+                scene.set(0, quadMesh, second, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                counts = redAndGreen();
+                assertThat(counts[0]).as("pass %d: the second UV set, no red", pass).isZero();
+                assertThat(counts[1]).as("pass %d: the second UV set, green", pass).isGreaterThan(SIZE * SIZE / 8);
+            }
+            scene.setMaterials(null);
+        }
+    }
+
+    /** Of the image's left half: how many pixels are mostly red, and how many mostly green. */
+    private int[] halves() {
+        int[] counts = new int[2];
+        int[] image = image();
+        for (int y = 0; y < SIZE; y++) {
+            for (int x = 0; x < SIZE / 2; x++) {
+                int pixel = image[y * SIZE + x];
+                int r = pixel & 0xff;
+                int g = (pixel >> 8) & 0xff;
+                counts[0] += r > 2 * g + 20 ? 1 : 0;
+                counts[1] += g > 2 * r + 20 ? 1 : 0;
+            }
+        }
+        return counts;
     }
 
     @Test

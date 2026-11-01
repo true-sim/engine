@@ -39,7 +39,8 @@ VertexOut vertexMain(uint index : SV_VulkanVertexID)
 [shader("fragment")]
 float4 fragmentMain(VertexOut in) : SV_Target
 {
-    return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(in.uv), ddy(in.uv), push.lights,
+    float4 uvs = float4(in.uv, in.uv1);
+    return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
         uint2(in.position.xy));
 }
 
@@ -48,7 +49,8 @@ float4 fragmentMain(VertexOut in) : SV_Target
 float4 maskedMain(VertexOut in, bool front : SV_IsFrontFace) : SV_Target
 {
     discardMasked(push.materials[in.material], in, front);
-    return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(in.uv), ddy(in.uv), push.lights,
+    float4 uvs = float4(in.uv, in.uv1);
+    return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
         uint2(in.position.xy));
 }
 
