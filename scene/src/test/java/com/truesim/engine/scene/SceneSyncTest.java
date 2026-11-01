@@ -726,6 +726,8 @@ class SceneSyncTest {
                 .set("baseColorTextureScale", 2f, 2f)
                 .texture("ormTexture", white).set("ormTextureOffset", 0.5f, 0f).set("ormTextureScale", 2f, 2f)
                 .texture("emissiveTexture", white).set("emissiveTextureRotation", 1.5f)
+                .set("emissiveTextureWrapS", 33071).set("emissiveTextureWrapT", 33648)
+                .set("emissiveTextureMagFilter", 9728)
                 .texture("normalTexture", white).set("normalTextureTexCoord", 1)
                 .feature("clearcoat", coat -> coat.texture("strengthTexture", white)
                     .set("strengthTextureOffset", 0f, 0.25f))
@@ -764,6 +766,9 @@ class SceneSyncTest {
         assertThat(TextureSampler.transformOf(p.normalTexture())).isZero();
         assertThat(TextureSampler.usesSecondUv(p.normalTexture())).isTrue();
         assertThat(TextureSampler.usesSecondUv(p.baseColorTexture())).isFalse();
+        assertThat(TextureSampler.from(p.emissiveTexture())).as("glTF's sampler codes: clamped, mirrored, nearest")
+            .isEqualTo(new TextureSampler(TextureSampler.Wrap.CLAMP, TextureSampler.Wrap.MIRROR, true));
+        assertThat(TextureSampler.from(p.ormTexture())).as("none: repeating, filtered").isEqualTo(TextureSampler.REPEAT);
         TextureTransformParameters transforms = made.features().stream()
             .filter(f -> f instanceof TextureTransformParameters).map(f -> (TextureTransformParameters) f)
             .findFirst().orElseThrow();

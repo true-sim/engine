@@ -105,11 +105,11 @@ public static const uint FEATURE_VOLUME = 128;
 public static const uint FEATURE_BITS = 8;
 
 /**
- * A texture reference, as materials' texture fields hold them: slot bits 0-15, sampler 16-19, bit 20 the second UV set,
- * bits 21-24 the transform (1-8, of the material's FEATURE_TEXTURE_TRANSFORM; 0: none). -1: no texture.
+ * A texture reference, as materials' texture fields hold them: slot bits 0-15, sampler 16-20, bit 21 the second UV set,
+ * bits 22-25 the transform (1-8, of the material's FEATURE_TEXTURE_TRANSFORM; 0: none). -1: no texture.
  */
-public static const uint TEXTURE_UV1 = 1u << 20;
-public static const uint TEXTURE_TRANSFORM_SHIFT = 21;
+public static const uint TEXTURE_UV1 = 1u << 21;
+public static const uint TEXTURE_TRANSFORM_SHIFT = 22;
 
 /**
  * The texture transforms a material's textures name (FEATURE_TEXTURE_TRANSFORM), as glTF's KHR_texture_transform:
