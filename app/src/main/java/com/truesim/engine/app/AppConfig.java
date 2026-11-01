@@ -16,7 +16,7 @@ import java.util.regex.Pattern;
  *
  * <pre>{@code
  * app.id("rock-garden").name("Rock Garden").version("1.2")
- *     .use(new Rendering(), new Input(), Xr.optional())
+ *     .use(new Rendering(), new Input(), Xr.ifAvailable())
  *     .defaults(Shadows.SIZE, 1024)                       // the game's default; the player's value wins
  *     .saveSettings();                                    // the player's values in the OS user folder
  * }</pre>

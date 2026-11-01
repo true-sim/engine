@@ -27,7 +27,7 @@ optional ones).
 ```java
 public final class Hello implements Application {
     public static void main(String[] args) { TrueSim.run(new Hello(), args); }
-    public void configure(AppConfig app) { app.id("hello").use(new Rendering(), Xr.optional()).saveSettings(); }
+    public void configure(AppConfig app) { app.id("hello").use(new Rendering(), Xr.ifAvailable()).saveSettings(); }
     public void update(Frame frame) { ... }
 }
 ```
@@ -43,6 +43,11 @@ public final class Hello implements Application {
   then the plugins in reverse order, and saves the player's settings (`saveSettings()`: the OS user folder for the
   app id).
 - **Focus, visibility, suspend** reach the game as events; nothing pauses by itself.
+- **The engine's plugins:** `Desktop` (SDL: windows, input; the last window closing requests a quit), `Rendering`
+  (Vulkan instance, device, frame graph on the engine's settings, presenter pacing frames; other plugins add instance
+  and device extensions or pick the GPU in the stage before it acts) and `Xr` (a headset: connects first, picks the
+  GPU, starts its session with the graph and drives frames, so the game's update reads this frame's poses). The demo
+  is an `Application` on them.
 
 
 One `Platform` per process, used from the thread that started it. Events go to a `PlatformListener` as engine

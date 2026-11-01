@@ -13,13 +13,14 @@ data. (The scene repo's `scene.world.Feature` is a world content variant and kee
 
 **Built since:** `engine-app` (D1, D2, D31–D33, D35, D118, D125–D127): `Application`, `AppConfig`, `Plugin`,
 `PluginKey`, `Stage`, `Startup`, `StartupFailure`, `FrameDriver`, `Frame`, `Engine`, `TrueSim`, `SettingsFile` (D7).
-Not yet: `fixedUpdate` (with the clocks, D88–D92), BaseGame, plugins for platform, rendering and XR, the native error
-box.
+Plugins: `Desktop` (engine-platform), `Rendering` (engine-graph: instance, device, graph, presenter as the default
+frame driver), `Xr` (engine-xr: `Xr.ifAvailable()` / `Xr.required()`, drives frames with `Headset.beginFrame` and
+`submit`); the demo runs on them. Not yet: `fixedUpdate` (with the clocks, D88–D92), BaseGame, the native error box.
 
 ```java
 public final class RockGarden extends BaseGame {
     public static void main(String[] args) { run(new RockGarden(), args); }
-    @Override protected void configureGame(AppConfig app) { app.use(Xr.optional()); }
+    @Override protected void configureGame(AppConfig app) { app.use(Xr.ifAvailable()); }
     @Override protected void setup() { world().spawn(assets().model("game://models/boulder.glb")).move(0, 0, -5); }
     @Override protected void update(Frame frame) { ... }
 }

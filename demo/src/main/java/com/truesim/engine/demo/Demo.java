@@ -4,14 +4,23 @@ import com.truesim.common.math.Maths;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R16G16B16A16_SFLOAT;
 
+import com.truesim.engine.app.AppConfig;
+import com.truesim.engine.app.Application;
+import com.truesim.engine.app.Engine;
+import com.truesim.engine.app.Frame;
+import com.truesim.engine.app.SettingsFile;
+import com.truesim.engine.app.StartupFailure;
+import com.truesim.engine.app.TrueSim;
 import com.truesim.engine.graph.DynamicResolution;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.GpuTimings;
 import com.truesim.engine.graph.PresentSettings;
 import com.truesim.engine.graph.Presenter;
+import com.truesim.engine.graph.Rendering;
 import com.truesim.engine.graph.ResolutionSettings;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.graph.ViewPort;
+import com.truesim.engine.platform.Desktop;
 import com.truesim.engine.platform.Key;
 
 import com.truesim.engine.platform.MouseButton;
@@ -34,35 +43,29 @@ import com.truesim.engine.render.VisibilityBufferShading;
 import com.truesim.engine.render.shadows.CascadedShadowMaps;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.vulkan.PresentMode;
-import com.truesim.engine.vulkan.VulkanDevice;
-import com.truesim.engine.vulkan.VulkanInstance;
 import com.truesim.engine.xr.Eye;
 import com.truesim.engine.xr.Hand;
 import com.truesim.engine.xr.Headset;
-import com.truesim.engine.xr.HeadsetException;
 import com.truesim.engine.xr.XrAxis;
 import com.truesim.engine.xr.XrButton;
 import com.truesim.engine.xr.XrInput;
 import com.truesim.engine.xr.XrListener;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.file.Files;
+import com.truesim.engine.xr.Xr;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
-import java.util.Properties;
-import java.util.TreeMap;
 
 /**
  * The engine's demo: rolling terrain with rocks, the sun with cascaded shadows and colored lights, to try what the
  * engine does live. Run with {@code ./gradlew :engine-demo:run}; {@code --args="--vr"} adds a headset (OpenXR, e.g.
  * SteamVR), {@code --args="--validation"} turns Vulkan validation on. Settings are saved to
  * {@code ~/.truesim/demo.properties} on exit (and with F5) and read back at start. The keys are printed at start.
+ *
+ * <p>An {@link Application} on the engine's plugins: {@link Desktop} for windows and input, {@link Rendering} for the
+ * device, graph and presenter, and with {@code --vr} {@link Xr} if a headset is there, which then paces frames.
  */
-public final class Demo implements PlatformListener {
+public final class Demo implements Application, PlatformListener {
 
     private static final int COLOR = VK_FORMAT_R16G16B16A16_SFLOAT;
     private static final int DEPTH = VK_FORMAT_D32_SFLOAT;
@@ -90,10 +93,13 @@ public final class Demo implements PlatformListener {
     private final double seconds; // quits by itself after this long (a smoke test); 0: runs until closed
     private final String[] args;
     private final Path settingsFile = Path.of(System.getProperty("user.home"), ".truesim", "demo.properties");
-    private final EngineSettings settings = new EngineSettings();
     private final boolean[] held = new boolean[Key.values().length];
-    private boolean running = true;
+    private Engine engine;
+    private EngineSettings settings;
     private boolean looking;
+    private long started;
+    private long titled;
+    private int titledFrames;
     private double yaw = -2.4;
     private double pitch = -0.25;
     private final double[] eye = {40, 14, 40};
@@ -138,54 +144,90 @@ public final class Demo implements PlatformListener {
                 seconds = Double.parseDouble(option.substring("--seconds=".length()));
             }
         }
-        new Demo(args, options.contains("--vr"), options.contains("--validation"), seconds).run();
+        TrueSim.run(new Demo(args, options.contains("--vr"), options.contains("--validation"), seconds), args);
     }
 
-    private void run() {
-        load();
+    @Override
+    public void configure(AppConfig app) {
+        app.id("truesim-demo").name("true-sim demo").saveSettings(settingsFile)
+            .use(new Desktop(), new Rendering().validation(validation));
         if (vr) {
-            try {
-                headset = Headset.connect("true-sim demo");
-                System.out.println("Headset: " + headset);
-            } catch (HeadsetException e) {
-                System.out.println("No headset (" + e.getMessage() + "): the desktop only");
-            }
+            app.use(Xr.ifAvailable());
         }
-        try (Platform p = Platform.start();
-             VulkanInstance instance = VulkanInstance.builder().applicationName("true-sim demo")
-                 .validation(validation).extensions(headset == null ? List.of() : headset.vulkanInstanceExtensions())
-                 .build();
-             VulkanDevice device = headset == null ? VulkanDevice.create(instance.bestGpu())
-                 : VulkanDevice.create(headset.gpu(instance), headset.vulkanDeviceExtensions());
-             FrameGraph g = new FrameGraph(device, 2);
-             DemoScene scene = new DemoScene(device, g.frameSlots(), COLOR, DEPTH);
-             Presenter pr = new Presenter(g, instance)) {
-            platform = p;
-            graph = g.settings(settings).timings(true);
-            world = scene;
-            presenter = pr.outputTransform(new DisplayTransform());
-            System.out.println("GPU: " + device.gpu().name() + (validation ? ", validation on" : ""));
-            window = platform.createWindow(WindowOptions.of("true-sim demo", 1600, 900), settings.scoped("main"));
-            main = graph.addView("main");
-            mainView = sceneView(main, camera);
-            if (List.of(args).contains("--probe")) {
-                main.add(new Probe());
-            }
-            mainTarget = presenter.present(main, Keys.SCENE_COLOR, window);
-            if (headset != null) {
-                startHeadset();
-            }
-            System.out.println(HELP);
-            loop();
-            device.waitIdle();
-            if (validation) {
-                System.out.println("Validation errors: " + instance.validationErrors());
-            }
-        } finally {
-            if (headset != null) {
-                headset.close();
-            }
-            save();
+    }
+
+    @Override
+    public StartupFailure.Response onStartupFailure(StartupFailure failure) {
+        if (!failure.required()) {
+            System.out.println(failure.reason() + ": the desktop only");
+        }
+        return Application.super.onStartupFailure(failure);
+    }
+
+    @Override
+    public void start(Engine started) {
+        engine = started;
+        settings = engine.settings();
+        Desktop desktop = engine.get(Desktop.KEY);
+        platform = desktop.platform();
+        desktop.listen(this);
+        Rendering rendering = engine.get(Rendering.KEY);
+        graph = rendering.graph().timings(true);
+        presenter = rendering.presenter().outputTransform(new DisplayTransform());
+        world = new DemoScene(rendering.device(), graph.frameSlots(), COLOR, DEPTH);
+        System.out.println("GPU: " + rendering.device().gpu().name() + (validation ? ", validation on" : ""));
+        window = platform.createWindow(WindowOptions.of("true-sim demo", 1600, 900), settings.scoped("main"));
+        main = graph.addView("main");
+        mainView = sceneView(main, camera);
+        if (List.of(args).contains("--probe")) {
+            main.add(new Probe());
+        }
+        mainTarget = presenter.present(main, Keys.SCENE_COLOR, window);
+        headset = engine.find(Xr.KEY).map(Xr::headset).orElse(null);
+        if (headset != null) {
+            System.out.println("Headset: " + headset);
+            startHeadset();
+        }
+        System.out.println(HELP);
+        this.started = System.nanoTime();
+        titled = this.started;
+    }
+
+    @Override
+    public void update(Frame frame) {
+        long now = System.nanoTime();
+        if (seconds > 0 && now - started >= seconds * 1e9) {
+            engine.quit();
+        }
+        double dt = Math.min(0.1, frame.delta());
+        move(dt);
+        world.update((now - started) / 1e9);
+        for (CascadedShadowMaps sun : cascades) {
+            sun.update();
+        }
+        if (automatic != null) {
+            automatic.update();
+        }
+        if (headset != null) {
+            xrInput(dt); // the headset's input and poses are this frame's: read when the frame began
+        }
+        titledFrames++;
+        if (now - titled > 500_000_000L) {
+            window.setTitle(status(titledFrames * 1e9 / (now - titled)));
+            titled = now;
+            titledFrames = 0;
+        }
+    }
+
+    @Override
+    public void stop() {
+        Rendering rendering = engine.get(Rendering.KEY);
+        rendering.device().waitIdle();
+        if (world != null) {
+            world.close();
+        }
+        if (validation) {
+            System.out.println("Validation errors: " + rendering.instance().validationErrors());
         }
     }
 
@@ -216,7 +258,7 @@ public final class Demo implements PlatformListener {
 
     private void startHeadset() {
         origin[1] = DemoMeshes.height(0, 0);
-        headset.start(graph).origin(origin[0], origin[1], origin[2]);
+        headset.origin(origin[0], origin[1], origin[2]); // its session started with the graph, by the plugin
         // One set of sun cascades for both eyes, fitted to the left one: the margin covers the other eye and how far the
         // head moves in a frame (the eyes are located just before the frame records).
         CascadedShadowMaps sun = new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0,
@@ -230,42 +272,6 @@ public final class Demo implements PlatformListener {
         }
         System.out.println("Eyes: " + headset.recommendedWidth() + " x " + headset.recommendedHeight()
             + "; P shows the left eye on the desktop");
-    }
-
-    private void loop() {
-        long start = System.nanoTime();
-        long last = start;
-        long titled = start;
-        int frames = 0;
-        while (running && (seconds <= 0 || System.nanoTime() - start < seconds * 1e9)) {
-            platform.pollEvents(this);
-            long now = System.nanoTime();
-            double dt = Math.min(0.1, (now - last) / 1e9);
-            last = now;
-            move(dt);
-            world.update((now - start) / 1e9);
-            for (CascadedShadowMaps sun : cascades) {
-                sun.update();
-            }
-            if (automatic != null) {
-                automatic.update();
-            }
-            if (headset != null) {
-                xrInput(dt);
-                headset.render(presenter);
-                if (headset.exiting()) {
-                    running = false;
-                }
-            } else {
-                presenter.render();
-            }
-            frames++;
-            if (now - titled > 500_000_000L) {
-                window.setTitle(status(frames * 1e9 / (now - titled)));
-                titled = now;
-                frames = 0;
-            }
-        }
     }
 
     /** The free camera: moved by the keys held, looking where the mouse turned it; the map's above it. */
@@ -346,16 +352,11 @@ public final class Demo implements PlatformListener {
     // ---------------------------------------------------------------- events
 
     @Override
-    public void quitRequested() {
-        running = false;
-    }
-
-    @Override
     public void windowCloseRequested(int id) {
         if (mapWindow != null && id == mapWindow.id()) {
             closeMap();
         } else {
-            running = false;
+            engine.requestQuit(QuitReason.WINDOW_CLOSED, false);
         }
     }
 
@@ -384,7 +385,7 @@ public final class Demo implements PlatformListener {
             return;
         }
         switch (key) {
-            case ESCAPE -> running = false;
+            case ESCAPE -> engine.quit();
             case DIGIT_1 -> shadeWith(false);
             case DIGIT_2 -> shadeWith(true);
             case H -> say("HDR", toggle(PresentSettings.HDR));
@@ -534,33 +535,11 @@ public final class Demo implements PlatformListener {
         System.out.println(what + ": " + value);
     }
 
-    private void load() {
-        if (!Files.exists(settingsFile)) {
-            return;
-        }
-        Properties saved = new Properties();
-        try (InputStream in = Files.newInputStream(settingsFile)) {
-            saved.load(in);
-        } catch (IOException e) {
-            System.out.println("Could not read " + settingsFile + ": " + e.getMessage());
-            return;
-        }
-        Map<String, String> map = new TreeMap<>();
-        saved.stringPropertyNames().forEach(name -> map.put(name, saved.getProperty(name)));
-        settings.load(map);
-        System.out.println("Settings from " + settingsFile + ": " + map.size());
-    }
-
     private void save() {
-        Properties out = new Properties();
-        out.putAll(settings.toMap());
         try {
-            Files.createDirectories(settingsFile.getParent());
-            try (OutputStream stream = Files.newOutputStream(settingsFile)) {
-                out.store(stream, "true-sim demo settings");
-            }
+            SettingsFile.save(settingsFile, settings.toMap(), "true-sim demo settings");
             System.out.println("Settings saved to " + settingsFile);
-        } catch (IOException e) {
+        } catch (java.io.UncheckedIOException e) {
             System.out.println("Could not save " + settingsFile + ": " + e.getMessage());
         }
     }
