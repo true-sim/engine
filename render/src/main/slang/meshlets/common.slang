@@ -8,6 +8,8 @@ __exported import materials.clearcoat;
 __exported import materials.ior;
 __exported import materials.sheen;
 __exported import materials.specular;
+__exported import materials.transmission;
+__exported import materials.volume;
 __exported import materials.unlit;
 __exported import lights;
 
@@ -109,7 +111,8 @@ public struct View
  * Raster bins: how meshlets rasterize, by their material. Each has its own lists and draw: the first is ordinary
  * opaque and one-sided (back faces culled, no discard: the fastest), then double-sided opaque (no culling), then
  * alpha-masked (no culling; back faces of one-sided masked materials discarded with the masked texels), then
- * alpha-blended (drawn after the opaque bins by the transparency pass; back faces of one-sided materials discarded).
+ * alpha-blended and transmissive (drawn after the opaque bins by the transparency pass; back faces of one-sided
+ * materials discarded).
  */
 public static const uint BINS = 4;
 public static const uint BIN_OPAQUE = 0;
@@ -120,7 +123,7 @@ public static const uint BIN_BLENDED = 3;
 /** The raster bin of a meshlet of material `m`. */
 public uint rasterBin(Material m)
 {
-    return materialBlended(m) ? BIN_BLENDED : materialMasked(m) ? BIN_MASKED : materialDoubleSided(m)
+    return materialDrawnBlended(m) ? BIN_BLENDED : materialMasked(m) ? BIN_MASKED : materialDoubleSided(m)
         ? BIN_DOUBLE_SIDED : BIN_OPAQUE;
 }
 
@@ -505,17 +508,67 @@ public void discardMasked(Material m, VertexOut in, bool front)
 }
 
 public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Material* materials, float4 dx,
-    float4 dy, LightListHeader* lights, uint2 pixel)
+    float4 dy, LightListHeader* lights, uint2 pixel, Background behind)
 {
     Material m = materials[in.material];
     if (materialType(m) != 0)
     {
         // Forward shading draws only metallic-roughness for now: other types as its defaults.
         return shadeMaterial<DefaultSurface, R>(rays, view, in, materials, dx, dy, lights, pixel,
-            materialFeatures(m));
+            materialFeatures(m), behind);
     }
     return shadeMaterial<MetallicRoughnessMaterial, R>(rays, view, in, materials, dx, dy, lights, pixel,
-        materialFeatures(m));
+        materialFeatures(m), behind);
+}
+
+/**
+ * The opaque scene behind what is drawn, for transmission: a sampled image of its color with a mip chain (each level
+ * averaging the one below), its render region at the top left. Push blocks hold its two words.
+ */
+public struct Background
+{
+    public uint slot;      // its sampled slot plus 1; 0: none (transmissive surfaces then blend by what they let through)
+    public uint region;    // the render region's width (low 16 bits) and height, in pixels
+
+    public static Background none()
+    {
+        Background b = { 0, 0 };
+        return b;
+    }
+
+    public bool present()
+    {
+        return slot != 0;
+    }
+};
+
+/**
+ * The light transmissive surface `s` lets through at camera-relative `world`, seen from `toViewer` at `pixel` (in the
+ * render region): the scene behind it, where the ray refracted through its volume leaves it (thin-walled: straight
+ * behind), blurred by its roughness (rougher: a coarser mip), attenuated through the volume and tinted by its albedo.
+ */
+public float3 transmitted(Surface s, View view, float3 world, float3 toViewer, uint2 pixel, Background behind)
+{
+    float2 region = float2(behind.region & 0xffff, behind.region >> 16);
+    float3 inside = refract(-toViewer, s.normal, 1 / max(s.ior, 1.0));
+    float3 exit = world + normalize(inside) * s.thickness;
+    float4 from = mul(view.viewProjection, float4(world, 1));
+    float4 to = mul(view.viewProjection, float4(exit, 1));
+    float2 offset = to.w > 1.0e-5 ? (to.xy / to.w - from.xy / from.w) * 0.5 * region : float2(0, 0);
+    float2 at = clamp(float2(pixel) + 0.5 + offset, float2(0.5, 0.5), region - 0.5);
+    uint width;
+    uint height;
+    uint levels;
+    textures[behind.slot - 1].GetDimensions(0, width, height, levels);
+    // As the glTF sample viewer: no blur at IOR 1 (nothing bends), full blur from 1.5.
+    float lod = log2(max(region.x, region.y)) * s.roughness * saturate(s.ior * 2 - 2);
+    float3 color = textures[behind.slot - 1].SampleLevel(samplers[LINEAR_CLAMP], at / float2(width, height),
+        min(lod, float(levels - 1))).rgb;
+    if (s.attenuationDistance > 0 && s.thickness > 0)
+    {
+        color *= pow(max(s.attenuationColor, 1.0e-4), s.thickness / s.attenuationDistance);
+    }
+    return color * s.albedo;
 }
 
 /** Metallic-roughness's defaults, whatever the material's parameters: for types a pass cannot shade yet. */
@@ -535,7 +588,7 @@ struct DefaultSurface : IMaterial
  * constant, the code of the others is left out): the lighting is the same for every type.
  */
 public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
-    float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features)
+    float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features, Background behind)
 {
     if (view.mode == 2)
     {
@@ -588,6 +641,18 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
     {
         applySheen(s, materialFeature<SheenParameters>(ref, FEATURE_SHEEN), input);
     }
+    if ((features & FEATURE_TRANSMISSION) != 0)
+    {
+        applyTransmission(s, materialFeature<TransmissionParameters>(ref, FEATURE_TRANSMISSION), input);
+        if (!materialBlended(m))
+        {
+            s.alpha = 1; // drawn with the blended surfaces for the scene behind, but covering what it covers
+        }
+        if ((features & FEATURE_VOLUME) != 0)
+        {
+            applyVolume(s, materialFeature<VolumeParameters>(ref, FEATURE_VOLUME), input);
+        }
+    }
     float3 emissive = s.emissive;
     if ((features & FEATURE_CLEARCOAT) != 0)
     {
@@ -603,6 +668,20 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
     {
         float depth = mul(view.viewProjection, float4(in.world, 1)).w; // along the view direction
         color += lightList(rays, lights, s, in.world, toViewer, pixel, depth);
+    }
+    if ((features & FEATURE_TRANSMISSION) != 0 && s.transmission > 0)
+    {
+        float through = s.transmission * (1 - s.metallic);
+        if (behind.present())
+        {
+            float nv = saturate(dot(s.normal, toViewer));
+            float3 fresnel = s.f0 + (s.f90 - s.f0) * pow(1 - nv, 5); // what the surface reflects rather than lets in
+            color += through * (1 - fresnel) * transmitted(s, view, in.world, toViewer, pixel, behind);
+        }
+        else
+        {
+            s.alpha *= 1 - through; // no scene behind to sample: blended over it by what passes, unbent and untinted
+        }
     }
     if ((features & FEATURE_UNLIT) != 0)
     {

@@ -338,6 +338,14 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   reflectance head-on (`f0`, from the IOR, scaled and tinted by specular) and at grazing angles (`f90`), and a sheen
   (Charlie distribution, Neubelt visibility, the base dimmed by an average sheen albedo). Metallic-roughness allows them;
   a game's type opts in as for clearcoat.
+- **D136d** (built) Transmission and volume as features (`materials/transmission.slang`, `volume.slang`, glTF's
+  field names; volume's `attenuationDistance` 0 stands for glTF's infinity). Transmissive materials are drawn with the
+  blended ones, by the view's `Transparency` technique (chosen over a bin and technique of their own: one place to pick
+  quality, no new cull path): it requests `SceneBehind`, a copy of the opaque scene's color with averaging mips, which
+  shading samples where the ray refracted through the volume leaves it, a coarser mip for rougher glass, attenuated by
+  Beer's law and tinted by the albedo; the diffuse part gives way to it. Glass behind glass, and blended surfaces behind
+  glass, are not seen through it (the copy holds the opaque scene); the volume's thickness is in the mesh's units,
+  unscaled by the instance.
 - **D137** (new) Checked against the Khronos glTF sample models: an optional sweep (`-PgltfSamples=...`) imports every
   model with all its parts.
 

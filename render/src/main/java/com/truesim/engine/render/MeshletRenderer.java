@@ -421,11 +421,11 @@ public final class MeshletRenderer implements AutoCloseable {
     /**
      * Draws the blended bin of {@code view}'s lists (both phases', appended) into a transparency technique's
      * attachments as {@code kind} says ({@link BlendedTargets}), lit by the light list at {@code clusters} (0: the
-     * sun).
+     * sun), transmissive surfaces showing the scene behind of push words {@code behind} ({@link SceneBehind}; 0: none).
      */
     public void drawBlendedAttached(VkCommandBuffer commands, RenderView view, BlendedTargets.Kind kind,
-        long clusters) {
-        raster.drawBlended(commands, scene, own(view), path() == Path.MESH_SHADERS, kind, clusters);
+        long clusters, long behind) {
+        raster.drawBlended(commands, scene, own(view), path() == Path.MESH_SHADERS, kind, clusters, behind);
     }
 
     /** The scene it draws. */

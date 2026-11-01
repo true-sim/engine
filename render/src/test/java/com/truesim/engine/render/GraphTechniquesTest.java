@@ -44,6 +44,8 @@ import com.truesim.engine.render.blocks.DepthPyramid;
 import com.truesim.engine.render.materials.CarPaint;
 import com.truesim.engine.render.materials.CarPaintParameters;
 import com.truesim.engine.render.materials.ClearcoatParameters;
+import com.truesim.engine.render.materials.VolumeParameters;
+import com.truesim.engine.render.materials.TransmissionParameters;
 import com.truesim.engine.render.materials.SpecularParameters;
 import com.truesim.engine.render.materials.SheenParameters;
 import com.truesim.engine.render.materials.IorParameters;
@@ -1929,6 +1931,120 @@ class GraphTechniquesTest {
             assertThat(graph.passes()).doesNotContain("scene transparency resolve", "classic LOD blended");
             scene.setMaterials(null);
         }
+    }
+
+    @Test
+    void transmissiveMaterialsShowTheSceneBehindThroughThem() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 8);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            // A red wall behind, clear glass in front: white, smooth, letting everything through.
+            int wall = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1)
+                .withEmissive(new Color(1, 0, 0, 1))));
+            MetallicRoughnessParameters white = MR.withBaseColor(new Color(1, 1, 1, 1)).withRoughness(0.05f)
+                .withMetallic(0);
+            TransmissionParameters clear = TransmissionParameters.DEFAULTS.withTransmissionFactor(1);
+            int glass = materials.add(new Material(white).feature(clear));
+            assertThat(materials.hasTransmissive()).isTrue();
+            assertThat(materials.hasBlended()).as("drawn with the blended").isTrue();
+            assertThat(materials.material(glass).drawnBlended()).isTrue();
+            assertThat(materials.material(glass).blended()).as("not alpha-blended").isFalse();
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, wall, 0, 0, -3, 0, 0, 0, 1, 2, 2, 2);
+            scene.set(1, quadMesh, glass, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(2);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            SceneGeometry meshlets = SceneGeometry.meshlets(renderer);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .add(new WeightedBlendedTransparency(meshlets, main)).output(Keys.SCENE_COLOR, output);
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            frame();
+            assertThat(graph.passes()).anyMatch(name -> name.startsWith("scene behind"));
+            assertThat(graph.passes()).containsSubsequence("meshlets", "meshlets blended",
+                "scene transparency resolve");
+            int through = image()[center];
+            assertThat(red(through)).as("the red wall through the glass").isGreaterThan(200);
+            assertThat(green(through)).as("little reflected").isLessThan(red(through) - 120);
+            // Nothing let through: the white glass hides the wall.
+            materials.set(glass, new Material(white).feature(clear.withTransmissionFactor(0)));
+            frame();
+            int none = image()[center];
+            assertThat(green(none)).as("lit white").isGreaterThan(100);
+            assertThat(red(none)).isCloseTo(green(none), within(12));
+            // A volume attenuating red away: thick, tinted cyan.
+            materials.set(glass, new Material(white).feature(clear).feature(VolumeParameters.DEFAULTS
+                .withThicknessFactor(0.1f).withAttenuationDistance(0.05f)
+                .withAttenuationColor(new Color(0.3, 1, 1, 1))));
+            frame();
+            assertThat(red(image()[center])).as("attenuated: 0.3 squared of the red").isLessThan(red(through) / 4);
+            // Refraction: red on the left, green on the right, the glass turned 45 degrees one way and the other. Thin,
+            // both show what is straight behind; thick, the ray bends through the volume, to opposite sides.
+            int green = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1)
+                .withEmissive(new Color(0, 1, 0, 1))));
+            scene.set(0, quadMesh, wall, -1, 0, -3, 0, 0, 0, 1, 1, 2, 1);
+            scene.set(2, quadMesh, green, 1, 0, -3, 0, 0, 0, 1, 1, 2, 1);
+            int[][] seen = new int[2][2];
+            for (int thick = 0; thick < 2; thick++) {
+                materials.set(glass, new Material(white).feature(clear).feature(VolumeParameters.DEFAULTS
+                    .withThicknessFactor(thick)));
+                for (int turn = 0; turn < 2; turn++) {
+                    float sin = (turn == 0 ? 1 : -1) * 0.38268343f; // 45 degrees about y
+                    scene.set(1, quadMesh, glass, 0, 0, -2, 0, sin, 0, 0.92387953f, 1, 1, 1);
+                    frame();
+                    seen[thick][turn] = image()[center];
+                }
+            }
+            assertThat(red(seen[0][0]) > green(seen[0][0])).as("thin: straight behind, either way")
+                .isEqualTo(red(seen[0][1]) > green(seen[0][1]));
+            assertThat(red(seen[1][0]) > green(seen[1][0])).as("thick: bent to opposite sides")
+                .isNotEqualTo(red(seen[1][1]) > green(seen[1][1]));
+            scene.set(0, quadMesh, wall, 0, 0, -3, 0, 0, 0, 1, 2, 2, 2);
+            scene.set(1, quadMesh, glass, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(2);
+            // Swapped for the opaque way, and classic LOD with the visibility buffer: the same glass.
+            materials.set(glass, new Material(white).feature(clear));
+            main.port().replace(new OpaqueTransparency(meshlets, main));
+            frame();
+            assertThat(red(image()[center])).as("opaque transparency").isGreaterThan(200);
+            SceneGeometry classics = new SceneGeometry(classic.add(quadMesh, mesh));
+            main.port().replace(new ClusteredForwardShading(classics, main, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0)).replace(new WeightedBlendedTransparency(classics, main));
+            frame();
+            assertThat(red(image()[center])).as("classic LOD").isGreaterThan(200);
+            if (device.primitiveIds()) {
+                main.port().replace(new VisibilityBufferShading(classics, main, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                frame();
+                assertThat(red(image()[center])).as("visibility buffer").isGreaterThan(200);
+            }
+            // At half the resolution: the render region smaller than the images, the scene behind too.
+            graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.HEADROOM, 1.5f);
+            main.port().renderScale(0.5f);
+            frame();
+            frame();
+            assertThat(main.port().regionWidth()).isLessThan(main.port().width());
+            int half = image()[center];
+            assertThat(red(half)).as("at half").isGreaterThan(200);
+            assertThat(green(half)).isLessThan(red(half) - 120);
+            main.port().renderScale(1);
+            graph.settings().set(ResolutionSettings.DYNAMIC, false);
+            // No transmissive material left: no copy of the scene behind.
+            materials.set(glass, new Material(white));
+            assertThat(materials.hasTransmissive()).isFalse();
+            assertThat(materials.hasBlended()).isFalse();
+            frame();
+            assertThat(graph.passes()).noneMatch(name -> name.startsWith("scene behind"));
+            scene.setMaterials(null);
+        }
+    }
+
+    /** The green of {@code pixel}. */
+    private static int green(int pixel) {
+        return (pixel >> 8) & 0xff;
     }
 
     @Test

@@ -98,7 +98,8 @@ public final class Materials implements AutoCloseable {
     private int[] binFeatures = new int[16];
     private int bins;
     private final Map<Long, Integer> binOf = new HashMap<>();
-    private int blended; // how many materials are blended: the transparency pass runs while there are
+    private int blended; // how many materials are drawn blended: the transparency pass runs while there are
+    private int transmissive; // how many are transmissive: transparency copies the scene behind while there are
     /** The type of each parameters' record, where one type takes it. */
     private final Map<Class<?>, MaterialType> byRecord = new HashMap<>();
     /** Per parameters record: where in its block the mask alpha and mask texture lie (-1: none), as slots copy them. */
@@ -779,6 +780,14 @@ public final class Materials implements AutoCloseable {
         return blended > 0;
     }
 
+    /**
+     * Whether the table holds a transmissive material ({@link Material#FEATURE_TRANSMISSION}, drawn blended too):
+     * transparency copies the opaque scene for it to show ({@link SceneBehind}) only while it does. Allocates nothing.
+     */
+    public boolean hasTransmissive() {
+        return transmissive > 0;
+    }
+
     /** Bin {@code bin}'s material type. */
     public MaterialType binType(int bin) {
         return types.get(binTypes[java.util.Objects.checkIndex(bin, bins)]);
@@ -817,12 +826,20 @@ public final class Materials implements AutoCloseable {
             heapUnit[id] = -1;
             heapUnits[id] = 0;
         }
-        if (materials[id] != null && materials[id].blended()) {
-            blended--;
-        }
+        count(materials[id], -1);
         materials[id] = null;
         unname(id);
         unnameBuffers(id);
+    }
+
+    /** Counts {@code material} (nullable) in or out ({@code by} 1 or -1) of the blended and transmissive ones. */
+    private void count(Material material, int by) {
+        if (material != null && material.drawnBlended()) {
+            blended += by;
+        }
+        if (material != null && material.shows(Material.FEATURE_TRANSMISSION)) {
+            transmissive += by;
+        }
     }
 
     private static long align(long bytes) {
@@ -877,12 +894,8 @@ public final class Materials implements AutoCloseable {
         table.putInt(slot + MaterialLayout.FEATURES, material.featureMask());
         table.putInt(slot + MaterialLayout.FEATURE_TABLE, (int) featureTable);
         table.putInt(slot + MaterialLayout.BIN, bin);
-        if (materials[id] != null && materials[id].blended()) {
-            blended--;
-        }
-        if (material.blended()) {
-            blended++;
-        }
+        count(materials[id], -1);
+        count(material, 1);
         materials[id] = material;
         name(id, material);
         nameBuffers(id, material);

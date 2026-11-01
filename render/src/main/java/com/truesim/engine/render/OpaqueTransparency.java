@@ -11,7 +11,8 @@ import java.util.Objects;
 /**
  * Blended materials drawn as opaque, over the view's opaque scene: double-sided materials both ways, one-sided ones
  * their front faces, written into the scene's color and depth. The cheapest way to show them, for low settings or
- * debugging; they hide what is behind them. Without blended materials it adds no passes.
+ * debugging; they hide what is behind them (transmissive ones still show the opaque scene through them). Without
+ * blended materials it adds no passes.
  *
  * <pre>{@code
  * view.port().replace(new OpaqueTransparency(geometry, view));
@@ -48,10 +49,11 @@ public final class OpaqueTransparency implements Transparency {
         if (materials == null || !materials.hasBlended()) {
             return;
         }
+        com.truesim.engine.graph.Image behind = Transparency.behind(g, materials, color);
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         BlendedTargets targets = new BlendedTargets(BlendedTargets.Kind.OPAQUE, color, null, null, depth, lights,
-            shadows, g.view());
+            shadows, g.view(), behind);
         boolean load = false;
         for (GeometryProvider provider : geometry.providers()) {
             provider.drawBlended(g, view.view(), targets, load);

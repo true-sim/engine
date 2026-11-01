@@ -1,7 +1,8 @@
 // The shading model every way of drawing shares: what a surface is at a point (Surface) and how it is lit. Physically
 // based: Lambert diffuse and a GGX specular lobe with Smith visibility and Schlick Fresnel (a dielectric's reflectance
-// head-on and at grazing angles from its IOR and specular features), an optional sheen (Charlie distribution) and an
-// optional clear coat. What a surface is comes from its material (materials.slang): the forward fragment shader and the visibility
+// head-on and at grazing angles from its IOR and specular features), an optional sheen (Charlie distribution), an
+// optional clear coat, and transmission (light passing through, from the scene behind: the diffuse part given up for
+// it). What a surface is comes from its material (materials.slang): the forward fragment shader and the visibility
 // buffer's shading pass evaluate it the same way, the only difference being where texture gradients come from (the
 // hardware's, or reconstructed).
 module shading;
@@ -22,6 +23,11 @@ public struct Surface
     public float f90;              // and at grazing angles, the specular weight (FEATURE_SPECULAR): 1
     public float3 sheenColor;      // FEATURE_SHEEN: the sheen's color, linear (0: none)
     public float sheenRoughness;   // FEATURE_SHEEN: perceptual
+    public float ior;              // the index of refraction (FEATURE_IOR): 1.5
+    public float transmission;     // FEATURE_TRANSMISSION: how much of the diffuse part passes through instead (0: none)
+    public float thickness;        // FEATURE_VOLUME: the volume's thickness under the surface (0: thin-walled)
+    public float3 attenuationColor; // FEATURE_VOLUME: the color white light becomes after attenuationDistance inside
+    public float attenuationDistance; // FEATURE_VOLUME: 0: no attenuation
     public float3 clearcoatNormal; // FEATURE_CLEARCOAT: the coat's normal, unit
     public float clearcoat;        // FEATURE_CLEARCOAT: its strength (0: none, every other surface)
     public float clearcoatRoughness;
@@ -44,6 +50,11 @@ public struct Surface
         s.f90 = 1;
         s.sheenColor = 0;
         s.sheenRoughness = 0;
+        s.ior = 1.5;
+        s.transmission = 0;
+        s.thickness = 0;
+        s.attenuationColor = 1;
+        s.attenuationDistance = 0;
         s.clearcoatNormal = normal;
         s.clearcoat = 0;
         s.clearcoatRoughness = 1;
@@ -94,7 +105,7 @@ public float3 reflected(Surface s, float3 toViewer, float3 toLight, float3 irrad
         float f90 = lerp(s.f90, 1.0, s.metallic);
         float3 fresnel = f0 + (f90 - f0) * pow(1 - vh, 5);
         float3 specular = lobe(s.normal, toViewer, h, nl, s.roughness) * fresnel;
-        float3 diffuse = (1 - fresnel) * (1 - s.metallic) * s.albedo / PI;
+        float3 diffuse = (1 - fresnel) * (1 - s.metallic) * (1 - s.transmission) * s.albedo / PI;
         color = (diffuse + specular) * irradiance * nl;
     }
     if (any(s.sheenColor > 0))
@@ -169,7 +180,7 @@ float lobe(float3 n, float3 toViewer, float3 h, float nl, float roughness)
 /** Light from all around, `irradiance` from the sky: diffuse only, darkened by the surface's occlusion. */
 public float3 ambient(Surface s, float3 irradiance)
 {
-    float3 base = (1 - s.metallic) * s.albedo / PI * irradiance * s.occlusion
+    float3 base = (1 - s.metallic) * (1 - s.transmission) * s.albedo / PI * irradiance * s.occlusion
         + lerp(s.f0, s.albedo, s.metallic) * irradiance / PI * 0.5 * s.occlusion;
     if (any(s.sheenColor > 0))
     {

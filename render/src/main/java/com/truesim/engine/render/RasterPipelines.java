@@ -153,15 +153,15 @@ final class RasterPipelines implements AutoCloseable {
      * (the masked entry points: one-sided back faces discarded).
      */
     void drawBlended(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading,
-        BlendedTargets.Kind kind, long clusters) {
+        BlendedTargets.Kind kind, long clusters, long behind) {
         boolean weighted = kind == BlendedTargets.Kind.WEIGHTED;
         try (MemoryStack stack = stackPush()) {
             if (meshShading) {
                 drawMeshes(commands, stack, scene, v, BIN_BLENDED, false, v.drawCount().deviceAddress(), clusters,
-                    weighted ? meshBlended : mesh[SHADED][BIN_BLENDED]);
+                    weighted ? meshBlended : mesh[SHADED][BIN_BLENDED], behind);
             } else {
                 drawIndexed(commands, stack, scene, v, BIN_BLENDED, clusters,
-                    weighted ? indexedBlended : indexed[SHADED][BIN_BLENDED]);
+                    weighted ? indexedBlended : indexed[SHADED][BIN_BLENDED], behind);
             }
         }
     }
@@ -184,16 +184,16 @@ final class RasterPipelines implements AutoCloseable {
         try (MemoryStack stack = stackPush()) {
             for (int bin = 0; bin < BIN_BLENDED; bin++) {
                 if (meshShading) {
-                    drawMeshes(commands, stack, scene, v, bin, late, count, clusters, pipelines[bin]);
+                    drawMeshes(commands, stack, scene, v, bin, late, count, clusters, pipelines[bin], 0);
                 } else {
-                    drawIndexed(commands, stack, scene, v, bin, clusters, pipelines[bin]);
+                    drawIndexed(commands, stack, scene, v, bin, clusters, pipelines[bin], 0);
                 }
             }
         }
     }
 
     private static void drawMeshes(VkCommandBuffer commands, MemoryStack stack, GpuScene scene, RenderView v, int bin,
-        boolean late, long count, long clusters, Pipeline pipeline) {
+        boolean late, long count, long clusters, Pipeline pipeline, long behind) {
         GeometryPool pool = scene.pool();
         long push = stack.nmalloc(8, DRAW_PUSH);
         memPutLong(push + MeshPush.VIEW, v.address());
@@ -210,13 +210,14 @@ final class RasterPipelines implements AutoCloseable {
         memPutLong(push + MeshPush.LIGHTS, clusters);
         memPutInt(push + MeshPush.BIN, bin);
         memPutInt(push + MeshPush.LATE, late ? 1 : 0);
+        memPutLong(push + MeshPush.BACKGROUND, behind); // its slot, then its region: SceneBehind.words
         pipeline.bind(commands);
         pipeline.push(commands, push, DRAW_PUSH);
         Commands.drawMeshTasksIndirect(commands, v.expandCommand().handle(), 16L * bin, 1, 12);
     }
 
     private static void drawIndexed(VkCommandBuffer commands, MemoryStack stack, GpuScene scene, RenderView v, int bin,
-        long clusters, Pipeline pipeline) {
+        long clusters, Pipeline pipeline, long behind) {
         GeometryPool pool = scene.pool();
         long push = stack.ncalloc(8, 1, DRAW_PUSH);
         memPutLong(push + DrawPush.VIEW, v.address());
@@ -229,6 +230,7 @@ final class RasterPipelines implements AutoCloseable {
         memPutLong(push + DrawPush.MESHLET_VERTICES, pool.meshletVertices().deviceAddress());
         memPutLong(push + DrawPush.MATERIALS, scene.materialsAddress());
         memPutLong(push + DrawPush.LIGHTS, clusters);
+        memPutLong(push + DrawPush.BACKGROUND, behind);
         pipeline.bind(commands);
         pipeline.push(commands, push, DRAW_PUSH);
         Commands.bindIndexBuffer(commands, v.frameIndices().handle(), 0, VK_INDEX_TYPE_UINT32);

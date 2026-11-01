@@ -156,12 +156,15 @@ public final class MeshletGeometry implements GeometryProvider {
         if (shadows != null) {
             shadows.readBy(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
         }
+        targets.readBehind(pass);
         BlendedTargets.Kind kind = targets.kind();
+        com.truesim.engine.graph.Image behind = targets.behind();
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            renderer.drawBlendedAttached(ctx.unsafe().commands(), view, kind, address(ctx, lights));
+            renderer.drawBlendedAttached(ctx.unsafe().commands(), view, kind, address(ctx, lights),
+                SceneBehind.words(ctx, behind));
         });
     }
 

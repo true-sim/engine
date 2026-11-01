@@ -16,10 +16,21 @@ struct DrawPush
     uint64_t unused[2];
     Material* materials;      // at byte 80 and the light list at 88, as in mesh.slang's push block: the fragment
     LightListHeader* lights;  // shader serves both paths (null: no light list, the sun)
+    uint unusedBin;
+    uint unusedLate;
+    uint background;          // at byte 104 as in mesh.slang: the scene behind, for transmission; 0: none
+    uint backgroundRegion;
 };
 
 [[vk::push_constant]]
 ConstantBuffer<DrawPush> push;
+
+/** The scene behind, as the push block names it. */
+Background behind()
+{
+    Background b = { push.background, push.backgroundRegion };
+    return b;
+}
 
 [shader("vertex")]
 VertexOut vertexMain(uint index : SV_VulkanVertexID)
@@ -41,7 +52,7 @@ float4 fragmentMain(VertexOut in) : SV_Target
 {
     float4 uvs = float4(in.uv, in.uv1);
     return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy));
+        uint2(in.position.xy), behind());
 }
 
 /** The blended bin's, into the transparency pass's targets: one-sided materials' back faces discarded. */
@@ -54,7 +65,7 @@ BlendedOut blendedMain(VertexOut in, bool front : SV_IsFrontFace)
     }
     float4 uvs = float4(in.uv, in.uv1);
     return weighBlended(shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy)), length(in.world));
+        uint2(in.position.xy), behind()), length(in.world));
 }
 
 /** The masked bin's: drawn without culling, so one-sided materials' back faces go here with the masked texels. */
@@ -64,7 +75,7 @@ float4 maskedMain(VertexOut in, bool front : SV_IsFrontFace) : SV_Target
     discardMasked(push.materials[in.material], in, front);
     float4 uvs = float4(in.uv, in.uv1);
     return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy));
+        uint2(in.position.xy), behind());
 }
 
 /** The masked bin's depth only (shadow maps, depth prepasses): the same texels masked as the color pass's. */

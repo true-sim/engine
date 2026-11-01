@@ -19,9 +19,11 @@ import java.util.Objects;
  * @param lights the light list, or null
  * @param shadows the shadow inputs, or null
  * @param region the render region, or null
+ * @param behind the opaque scene behind, which transmissive surfaces sample ({@link SceneBehind}), or null: they blend
+ *               by what they let through
  */
 public record BlendedTargets(Kind kind, Image color, Image accumulated, Image revealage, Image depth, Buffer lights,
-    ShadowInputs.Set shadows, ViewPort region) {
+    ShadowInputs.Set shadows, ViewPort region, Image behind) {
 
     /** How blended surfaces are drawn. */
     public enum Kind {
@@ -37,6 +39,11 @@ public record BlendedTargets(Kind kind, Image color, Image accumulated, Image re
         if (kind == Kind.WEIGHTED ? accumulated == null || revealage == null : color == null) {
             throw new IllegalArgumentException(kind + " takes its targets");
         }
+    }
+
+    /** Declares that {@code pass} samples the scene behind, where there is one. */
+    public GraphBuilder.PassBuilder readBehind(GraphBuilder.PassBuilder pass) {
+        return behind == null ? pass : pass.read(behind, com.truesim.engine.graph.Access.SAMPLED_FRAGMENT);
     }
 
     /** {@code pass}, drawing within the render region of {@link #region} where there is one. */

@@ -39,6 +39,8 @@ import com.truesim.engine.render.materials.IorParameters;
 import com.truesim.engine.render.materials.SheenParameters;
 import com.truesim.engine.render.materials.SpecularParameters;
 import com.truesim.engine.render.materials.TextureTransformParameters;
+import com.truesim.engine.render.materials.VolumeParameters;
+import com.truesim.engine.render.materials.TransmissionParameters;
 import com.truesim.engine.render.materials.UnlitParameters;
 import com.truesim.engine.render.TextureSampler;
 import com.truesim.engine.render.materials.ClearcoatParameters;
@@ -780,6 +782,34 @@ class SceneSyncTest {
         assertThatIllegalArgumentException().isThrownBy(() -> many.add("t9", null, 9, null))
             .withMessageContaining("at most 8 texture transforms");
         assertThat(new SceneResources.Transforms().feature()).isNull();
+    }
+
+    @Test
+    void transmissionAndVolumeInTheDataBecomeTheirFeatures() throws InterruptedException {
+        // As the glTF importer names them: the extensions' own field names.
+        AssetRef<MaterialData> glass = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
+            (glow, seed) -> MaterialData.builder(MR)
+                .feature("transmission", f -> f.set("transmissionFactor", 0.9f))
+                .feature("volume", f -> f.set("thicknessFactor", 0.2f).set("attenuationDistance", 0.5f)
+                    .set("attenuationColor", 0.25f, 0.5f, 0.75f))
+                .build(), new Glow(1, 1, 1), 82);
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        long node = facing(scene, 0, 0, -3);
+        renderables.set(node, SQUARE, List.of(glass));
+        for (int round = 0; round < 3; round++) {
+            update(scene, renderables, sync);
+            load();
+        }
+        update(scene, renderables, sync);
+        Material made = materials.material(sync.firstMaterialOf(node));
+        assertThat(made.features()).containsExactlyInAnyOrder(
+            TransmissionParameters.DEFAULTS.withTransmissionFactor(0.9f),
+            VolumeParameters.DEFAULTS.withThicknessFactor(0.2f).withAttenuationDistance(0.5f)
+                .withAttenuationColor(new Color(0.25f, 0.5f, 0.75f, 1)));
+        assertThat(made.drawnBlended()).as("transmissive: drawn with the blended").isTrue();
+        assertThat(materials.hasTransmissive()).isTrue();
     }
 
     @Test

@@ -48,6 +48,13 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
     public static final int FEATURE_IOR = MaterialsConstants.FEATURE_IOR;
     /** Sheen: back-scattering at grazing angles, as cloth, as glTF's {@code KHR_materials_sheen}. */
     public static final int FEATURE_SHEEN = MaterialsConstants.FEATURE_SHEEN;
+    /**
+     * Transmission: light passing through, as glass, showing the scene behind, as glTF's
+     * {@code KHR_materials_transmission}. Its materials are drawn with the blended ones ({@link Transparency}).
+     */
+    public static final int FEATURE_TRANSMISSION = MaterialsConstants.FEATURE_TRANSMISSION;
+    /** Volume: a transmissive surface's inside, refracting and tinting, as glTF's {@code KHR_materials_volume}. */
+    public static final int FEATURE_VOLUME = MaterialsConstants.FEATURE_VOLUME;
     /** Unlit: the surface shows its base color as it is, as glTF's {@code KHR_materials_unlit}. */
     public static final int FEATURE_UNLIT = MaterialsConstants.FEATURE_UNLIT;
     /**
@@ -160,6 +167,19 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
 
     public boolean masked() {
         return alphaCutoff >= 0;
+    }
+
+    /** Whether it shows feature {@code feature} (a {@code FEATURE_*} bit). */
+    public boolean shows(int feature) {
+        return (featureMask() & feature) != 0;
+    }
+
+    /**
+     * Whether it is drawn after the opaque surfaces, with the blended ones ({@link Transparency}): alpha-blended, or
+     * transmissive (it shows the scene behind it).
+     */
+    public boolean drawnBlended() {
+        return blended || shows(FEATURE_TRANSMISSION);
     }
 
     /** The features it shows, {@code FEATURE_*} bits. */
