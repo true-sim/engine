@@ -24,8 +24,8 @@ import java.util.Objects;
  * drawn and lit as the front). The renderer draws each kind in a raster bin of its own.
  *
  * <p>Features are parts of the lighting any type allowing them gets: a material shows one where it has its
- * parameters. Materials without a feature never pay for it: the visibility buffer shades each combination with a
- * variant of its own.
+ * parameters. Materials without a feature never pay for it: the visibility buffer shades each combination of type and
+ * features in use with a variant of its own, made when the combination first appears.
  *
  * @param type        its type, or null for the one registered for its parameters' record
  * @param parameters  its type's parameters
@@ -39,7 +39,7 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
 
     /** A clear coat: a glossy dielectric layer over the base, as car paint or varnish. */
     public static final int FEATURE_CLEARCOAT = MaterialsConstants.FEATURE_CLEARCOAT;
-    /** How many feature bits there are, as materials.slang has them. */
+    /** How many features there are, as materials.slang has them. */
     static final int FEATURE_BITS = MaterialsConstants.FEATURE_BITS;
     /** Every feature bit. */
     static final int FEATURES = (1 << FEATURE_BITS) - 1;
@@ -140,10 +140,10 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
 
     /**
      * The header word shaders read, for type id {@code typeId}: type in bits 0-7, double-sided bit 8, masked bit 9,
-     * features 10-15, cutoff 16-31.
+     * cutoff 16-31.
      */
     int header(int typeId) {
-        int header = typeId | (doubleSided ? 1 << 8 : 0) | featureMask() << 10;
+        int header = typeId | (doubleSided ? 1 << 8 : 0);
         if (alphaCutoff >= 0) {
             header |= 1 << 9 | Math.round(alphaCutoff * 65_535) << 16;
         }

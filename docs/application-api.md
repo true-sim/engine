@@ -2,7 +2,7 @@
 
 The public layer a regular user writes a game or application against. Decided step by step in conversation on
 2026-11-01, then reviewed (consistency, performance, feasibility against the code) and revised. Numbers are stable
-(D1–D132); a revised decision keeps its number and says what changed. Nothing here is built yet unless marked
+(D1–D137); a revised decision keeps its number and says what changed. Nothing here is built yet unless marked
 **exists**.
 
 **Names** (D117): a *plugin* is an engine part installed once at setup; a *game system* is game logic added and removed
@@ -304,6 +304,24 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   player's camera.
 - **D132** (new) `BaseGame` makes the main window and one view of its world through a default camera node; more windows
   through `app.windows()`. A window whose display is unplugged moves to the primary display; its views follow it.
+
+## 8. Model import and rendering features
+
+- **D133** (new) glTF import leaves nothing out: every extension becomes engine data (material extensions as features,
+  lights and visibility on models, texture transforms, quantized and compressed data); points and lines are an asset of
+  their own (`LineData`). The renderer then takes features up one PR each. A file requiring an extension not read
+  fails, as glTF asks.
+- **D134** (new) Decoders: meshopt through LWJGL's meshoptimizer, KTX2/Basis through LWJGL's libktx, WebP through the
+  TwelveMonkeys ImageIO plugin; Draco through a small native binding, later.
+- **D135** (new) Material features stay modules with a bit each (as clearcoat); the visibility buffer makes a pipeline
+  only for each combination of type and features materials use (a shading bin, numbered as it first appears; the
+  feature mask a specialization constant of one build-time SPIR-V), not for every combination. No shader compiler at
+  runtime. The slot holds a 32-bit feature mask and an offset to a table of the material's feature sections.
+- **D136** (new) Order: the bins (D135); texture transforms and the second UV set; unlit; alpha blending (a sorted
+  transparent pass); specular, IOR, sheen; transmission and volume (the scene behind); iridescence, anisotropy,
+  dispersion, diffuse transmission. Lights from models come with the world plugin.
+- **D137** (new) Checked against the Khronos glTF sample models: an optional sweep (`-PgltfSamples=...`) imports every
+  model with all its parts.
 
 ## Open questions
 

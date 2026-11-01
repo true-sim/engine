@@ -94,14 +94,15 @@ public final class VisibilityBufferShading implements Technique {
     }
 
     /**
-     * The scene's material table, its count of types and the graph buffers its materials name: a shading pass per type,
-     * so a type registered after the graph built (or another table) rebuilds it before its materials draw, instead of
-     * shading as metallic-roughness; and a buffer named anew is imported, ordered after its writers.
+     * The scene's material table, its count of shading bins and the graph buffers its materials name: a shading pass
+     * per bin (a type and features), so a combination first shown after the graph built (or another table) rebuilds it
+     * before its materials draw, instead of shading as metallic-roughness; and a buffer named anew is imported, ordered
+     * after its writers.
      */
     @Override
     public long buildVersion() {
         Materials materials = renderer.scene().materials();
-        return ((long) System.identityHashCode(materials) << 32 | materials.typeCount())
+        return ((long) System.identityHashCode(materials) << 32 | materials.binCount())
             + 31 * materials.graphBuffersVersion();
     }
 
@@ -122,15 +123,12 @@ public final class VisibilityBufferShading implements Technique {
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         // With inline ray shadows, the variant tracing them, where the device can.
         boolean traced = shadows != null && shadows.traced() && g.capabilities().rayTracing();
-        List<MaterialType> types = renderer.scene().materials().types();
-        int variants = 1 << Material.FEATURE_BITS;
-        Pipeline[] shade = new Pipeline[types.size() * variants];
+        // A variant per bin: a type, and the features its materials show; made for the combinations in use only.
+        Materials materials = renderer.scene().materials();
+        Pipeline[] shade = new Pipeline[materials.binCount()];
         for (int bin = 0; bin < shade.length; bin++) {
-            MaterialType type = types.get(bin / variants);
-            int features = bin % variants;
-            if ((features & ~type.allowedFeatures()) != 0) {
-                continue; // no material of the type shows them: no variant, and no pixels of the bin
-            }
+            MaterialType type = materials.binType(bin);
+            int features = materials.binFeatures(bin);
             boolean rays = traced && type.tracedShader() != null;
             shade[bin] = compute(g, rays ? type.tracedShader() : type.shader(), rays ? type.tracedEntry() : type.entry(),
                 features);
@@ -170,7 +168,7 @@ public final class VisibilityBufferShading implements Technique {
             .read(ids, Access.STORAGE_READ)
             .write(tiles, BufferAccess.STORAGE_WRITE)
             // The stride between bins' lists as the bin: the whole image's, as the shading passes below space them.
-            .record(ctx -> ctx.dispatch(classify, push(classifyPush, ctx, ids, null, null, size(ctx, ids), types.size(),
+            .record(ctx -> ctx.dispatch(classify, push(classifyPush, ctx, ids, null, null, size(ctx, ids), shade.length,
                 (int) (listBytes / 4), ctx.address(tiles)), (ctx.regionWidth(ids) + TILE - 1) / TILE,
                 (ctx.regionHeight(ids) + TILE - 1) / TILE, 1));
         GraphBuilder.PassBuilder pass = scene.read(g.pass("visibility shading"), BufferAccess.STORAGE_READ)
@@ -193,7 +191,7 @@ public final class VisibilityBufferShading implements Technique {
                     continue;
                 }
                 long list = tableBytes + listBytes * listOf[bin];
-                ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, ids, color, lights, size(ctx, ids), types.size(),
+                ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, ids, color, lights, size(ctx, ids), shade.length,
                     bin, ctx.address(tiles) + list), tiles, list);
             }
         });
@@ -214,10 +212,9 @@ public final class VisibilityBufferShading implements Technique {
 
     /**
      * resolve.slang's ShadePush, into {@code push}: for images of {@code size} (width, height in the high 16 bits),
-     * {@code types} types, shading bin {@code bin}'s tiles at
-     * {@code tiles}.
+     * {@code bins} bins, shading bin {@code bin}'s tiles at {@code tiles}.
      */
-    private ShadePush push(ShadePush push, PassContext ctx, Image ids, Image color, Buffer lights, int size, int types,
+    private ShadePush push(ShadePush push, PassContext ctx, Image ids, Image color, Buffer lights, int size, int bins,
         int bin, long tiles) {
         GeometryPool pool = renderer.pool();
         return push.view(view.view().address())
@@ -233,7 +230,7 @@ public final class VisibilityBufferShading implements Technique {
             .ids(ctx.storage(ids))
             .color(color == null ? 0 : ctx.storage(color))
             .size(size)
-            .types(types)
+            .bins(bins)
             .clear(clear[0], clear[1], clear[2])
             .bin(bin)
             .classicIndices(classic == null ? 0 : classic.indicesAddress())

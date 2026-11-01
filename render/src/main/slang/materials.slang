@@ -1,8 +1,9 @@
 // Materials: the table every pass reads, and how material types make surfaces (shading.slang lights them).
 //
 // The table (engine-render's Materials) is a slot of 32 bytes per material, then the materials' parameter blocks. A
-// slot says how the material rasterizes (header, mask) and where its blocks lie: its type's parameters, and a section
-// per feature it shows. Passes that only rasterize (depth, shadows, IDs) read the slot alone, whatever the type.
+// slot says how the material rasterizes (header, mask), where its block lies (its type's parameters, then a section
+// per feature it shows, then a table of those sections), which features it shows, and its shading bin. Passes that
+// only rasterize (depth, shadows, IDs) read the slot alone, whatever the type.
 //
 // A material type is an IMaterial with the struct of its parameters; a feature (FEATURE_*) is a part of the lighting
 // any type allowing it gets, with its own parameters. Their structs are marked for the build, which generates their
@@ -70,17 +71,20 @@ public static const int SRGB = 1;
 public struct Material
 {
     public uint header;            // type bits 0-7 (0: metallic-roughness), double-sided bit 8, masked bit 9,
-                                   // features bits 10-15, cutoff bits 16-31
-    public uint parameters;        // its type's parameter block
+                                   // cutoff bits 16-31
+    public uint parameters;        // its block: its type's parameters, then its features' sections
     public int maskTexture;        // masking: the texture whose alpha it compares (-1: none)
     public float maskAlpha;        // masking: the alpha factor
     public uint geometry;          // a geometry block (displacement, to come); 0: none
-    public uint features[3];       // per feature bit, its section; 0: the material does not show it
+    public uint features;          // the FEATURE_* bits it shows
+    public uint featureTable;      // from its block's start: a uint per feature it shows, in bit order, each the
+                                   // offset of the feature's section from the block's start
+    public uint bin;               // its shading bin: its type and features, as the table numbers them
 };
 
-/** Features: parts of the lighting a material may show, each a bit of the header (from bit 10) and a section. */
+/** Features: parts of the lighting a material may show, each a bit of its features and a section of its block. */
 public static const uint FEATURE_CLEARCOAT = 1;
-/** How many feature bits there are: combinations of them are 1 << FEATURE_BITS. */
+/** How many features there are: their bits are the low FEATURE_BITS of a mask. */
 public static const uint FEATURE_BITS = 1;
 
 /** The type of `m`, bits 0-7 of its header. */
@@ -92,7 +96,7 @@ public uint materialType(Material m)
 /** The features `m` shows. */
 public uint materialFeatures(Material m)
 {
-    return (m.header >> 10) & ((1u << FEATURE_BITS) - 1);
+    return m.features;
 }
 
 /** Whether `m`'s back faces show, lit as the front. */
@@ -148,7 +152,10 @@ public T materialParameters<T>(MaterialRef m)
 /** The parameters (struct T) of feature `feature` (one FEATURE_* bit), which `m` shows. */
 public T materialFeature<T>(MaterialRef m, uint feature)
 {
-    return *(T*)((uint64_t)m.table + m.slot().features[firstbitlow(feature)]);
+    Material s = m.slot();
+    uint64_t block = (uint64_t)m.table + s.parameters;
+    uint section = *(uint*)(block + s.featureTable + 4 * countbits(s.features & (feature - 1)));
+    return *(T*)(block + section);
 }
 
 // ---------------------------------------------------------------------------------------------- types

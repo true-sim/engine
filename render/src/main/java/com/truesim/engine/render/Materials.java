@@ -48,8 +48,11 @@ public final class Materials implements AutoCloseable {
     public static final int BLOCK_BYTES_PER_MATERIAL = 128;
     /** Blocks start at multiples of this. */
     private static final int ALIGNMENT = 16;
-    /** Feature sections a slot has room for. */
-    private static final int MAX_FEATURE_SECTIONS = 3;
+    /**
+     * Shading bins a table may number: combinations of type and features its materials show, each shaded by a variant of
+     * its own (as resolve.slang's MAX_BINS).
+     */
+    public static final int MAX_BINS = 2048;
 
     private static final int USAGE = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
@@ -90,6 +93,11 @@ public final class Materials implements AutoCloseable {
     private long[] retireAt;
     private int retiringCount;
     private final List<MaterialType> types = new ArrayList<>();
+    // The shading bins: per bin its type id and features, in the order they first appeared; never dropped.
+    private int[] binTypes = new int[16];
+    private int[] binFeatures = new int[16];
+    private int bins;
+    private final Map<Long, Integer> binOf = new HashMap<>();
     /** The type of each parameters' record, where one type takes it. */
     private final Map<Class<?>, MaterialType> byRecord = new HashMap<>();
     /** Per parameters record: where in its block the mask alpha and mask texture lie (-1: none), as slots copy them. */
@@ -395,14 +403,7 @@ public final class Materials implements AutoCloseable {
             }
             long slot = (long) SLOT_BYTES * id;
             long parameters = slot + MaterialLayout.PARAMETERS;
-            grown.putInt(parameters, (int) (grown.getInt(parameters) + shift));
-            for (int s = 0; s < MAX_FEATURE_SECTIONS; s++) {
-                long at = slot + MaterialLayout.FEATURES + 4L * s;
-                int offset = grown.getInt(at);
-                if (offset != 0) {
-                    grown.putInt(at, (int) (offset + shift));
-                }
-            }
+            grown.putInt(parameters, (int) (grown.getInt(parameters) + shift)); // its sections lie relative to it
         }
         oldTables.add(old);
         table = grown;
@@ -738,6 +739,47 @@ public final class Materials implements AutoCloseable {
         return materials[id];
     }
 
+    /**
+     * The shading bin of type id {@code typeId} with features {@code features}: numbered as combinations first appear,
+     * up to {@link #MAX_BINS}. A new one changes {@link #binsVersion}.
+     */
+    private int bin(int typeId, int features) {
+        Integer known = binOf.get((long) typeId << 32 | features & 0xffffffffL);
+        if (known != null) {
+            return known;
+        }
+        if (bins == MAX_BINS) {
+            throw new IllegalStateException("A table shades at most " + MAX_BINS + " combinations of type and features");
+        }
+        if (bins == binTypes.length) {
+            binTypes = Arrays.copyOf(binTypes, 2 * bins);
+            binFeatures = Arrays.copyOf(binFeatures, 2 * bins);
+        }
+        binTypes[bins] = typeId;
+        binFeatures[bins] = features;
+        binOf.put((long) typeId << 32 | features & 0xffffffffL, bins);
+        return bins++;
+    }
+
+    /**
+     * How many shading bins the table numbers: combinations of type and features its materials showed, in the order
+     * they first appeared; bin 0 is metallic-roughness without features. The visibility buffer shades a bin with a
+     * variant of its type's pass showing its features, so a new bin rebuilds the graph. Allocates nothing.
+     */
+    public int binCount() {
+        return bins;
+    }
+
+    /** Bin {@code bin}'s material type. */
+    public MaterialType binType(int bin) {
+        return types.get(binTypes[java.util.Objects.checkIndex(bin, bins)]);
+    }
+
+    /** Bin {@code bin}'s features ({@code Material.FEATURE_*} bits). */
+    public int binFeatures(int bin) {
+        return binFeatures[java.util.Objects.checkIndex(bin, bins)];
+    }
+
     /** The features ({@code Material.FEATURE_*} bits) material {@code id} shows. Allocates nothing. */
     public int features(int id) {
         return material(id).featureMask();
@@ -778,13 +820,13 @@ public final class Materials implements AutoCloseable {
     /** Writes {@code material}'s blocks and slot under {@code id}; false (and nothing changed) without heap room. */
     private void write(int id, Material material) {
         int typeId = typeId(material);
-        if (material.features().size() > MAX_FEATURE_SECTIONS) {
-            throw new IllegalArgumentException("A material shows at most " + MAX_FEATURE_SECTIONS + " features");
-        }
+        int bin = bin(typeId, material.featureMask());
         long bytes = align(material.parameters().bytes());
         for (MaterialFeature feature : material.features()) {
             bytes += align(feature.bytes());
         }
+        long featureTable = bytes;
+        bytes += align(4L * material.features().size());
         int units = (int) (bytes / ALIGNMENT);
         long unit = heapUnit[id];
         if (unit < 0 || heapUnits[id] != units) {
@@ -806,13 +848,12 @@ public final class Materials implements AutoCloseable {
         long block = heapStart + unit * ALIGNMENT;
         material.parameters().write(scratch, 0);
         long slot = (long) SLOT_BYTES * id;
-        for (int s = 0; s < MAX_FEATURE_SECTIONS; s++) {
-            table.putInt(slot + MaterialLayout.FEATURES + 4L * s, 0);
-        }
         long o = align(material.parameters().bytes());
-        for (MaterialFeature feature : material.features()) {
+        long entry = featureTable;
+        for (MaterialFeature feature : material.features()) { // in bit order, as the table lists them
             feature.write(scratch, o);
-            table.putInt(slot + MaterialLayout.FEATURES + 4L * Integer.numberOfTrailingZeros(feature.feature()), (int) (block + o));
+            scratch.set(java.lang.foreign.ValueLayout.JAVA_INT_UNALIGNED, entry, (int) o);
+            entry += 4;
             o += align(feature.bytes());
         }
         table.put(block, scratch, 0, bytes);
@@ -821,6 +862,9 @@ public final class Materials implements AutoCloseable {
         table.putInt(slot + MaterialLayout.MASK_TEXTURE, material.parameters().maskTexture());
         table.putFloat(slot + MaterialLayout.MASK_ALPHA, material.parameters().maskAlpha());
         table.putInt(slot + MaterialLayout.GEOMETRY, 0);
+        table.putInt(slot + MaterialLayout.FEATURES, material.featureMask());
+        table.putInt(slot + MaterialLayout.FEATURE_TABLE, (int) featureTable);
+        table.putInt(slot + MaterialLayout.BIN, bin);
         materials[id] = material;
         name(id, material);
         nameBuffers(id, material);
