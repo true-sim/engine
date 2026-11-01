@@ -544,12 +544,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         try (MemoryStack stack = stackPush()) {
             long push = stack.ncalloc(8, 1, DRAW_PUSH);
             memPutLong(push + ClassicPush.VIEW, view.address());
-            memPutLong(push + ClassicPush.MESHES, pool.meshTable().deviceAddress());
-            memPutLong(push + ClassicPush.INSTANCES, renderer.scene().instanceAddress());
-            memPutLong(push + ClassicPush.POSITIONS, pool.positions().deviceAddress());
-            memPutLong(push + ClassicPush.ATTRIBUTES, pool.attributes().deviceAddress());
+            memPutLong(push + ClassicPush.SCENE, renderer.scene().tableAddress());
             memPutLong(push + ClassicPush.RECORDS, ctx.address(list) + recordsOffset);
-            memPutLong(push + ClassicPush.MATERIALS, renderer.scene().materialsAddress());
             memPutLong(push + ClassicPush.LIGHTS, lights);
             memPutLong(push + ClassicPush.BACKGROUND, behind);
             memPutLong(push + ClassicPush.INDIRECT, indirect);

@@ -9,23 +9,16 @@ import meshlets.common;
 /** As mesh.slang's MeshPush: the renderer sets the one block for both. */
 struct LeanPush
 {
-    View* view;
-    MeshEntry* meshes;
-    Instance* instances;
+    View* view;               // the shaded fields at the same bytes in every raster block: draw.slang's fragment
+    SceneTable* scene;        // shader serves them all (common.slang's SceneTable: the frame's scene buffers)
+    LightListHeader* lights;  // at 16: the light list, or null: the sun
+    IndirectLight* indirect;  // at 24: the view's indirect-light table (indirect.slang), or null: the constant sky
     VisibleMeshlet* visible;
     uint* visibleCount;
-    uint* meshlets;
-    uint* meshletVertices;
-    uint* meshletTriangles;
-    uint2* positions;
-    uint* attributes;
-    Material* materials;
-    LightListHeader* lights;
     uint bin;
     uint late;
-    uint background;
+    uint background;          // at 56: the scene behind, for transmission (common.slang's Background); 0: none
     uint backgroundRegion;
-    IndirectLight* indirect;
 };
 
 [[vk::push_constant]]
@@ -35,14 +28,14 @@ ConstantBuffer<LeanPush> push;
 Background behind(uint instance)
 {
     Background b = { push.background, push.backgroundRegion,
-        push.background != 0 ? maxScale(push.instances[instance]) : 1.0 };
+        push.background != 0 ? maxScale(push.scene[0].instances[instance]) : 1.0 };
     return b;
 }
 
 /** Byte i of the pool's meshlet triangles. */
-uint triangleByte(uint i)
+uint triangleByte(uint* triangles, uint i)
 {
-    return (push.meshletTriangles[i >> 2] >> ((i & 3) * 8)) & 0xff;
+    return (triangles[i >> 2] >> ((i & 3) * 8)) & 0xff;
 }
 
 /** A triangle, as its primitive ID: its visible meshlet's slot, then its number in the meshlet (7 bits). */
@@ -68,25 +61,28 @@ void meshLeanMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out ver
     out indices uint3 triangles[124], out primitives LeanPrimitive primitives[124])
 {
     View view = push.view[0];
+    uint* triangleBytes = push.scene[0].meshletTriangles; // loaded once, read per triangle
     uint index = group.y * 65535 + group.x;
     // Past the list's end a workgroup outputs nothing, through the one SetMeshOutputCounts below all the same: with a
     // second call on an early exit, the driver of an AMD Radeon(TM) Graphics drew nothing at all (pitfalls.md).
     bool listed = index < min(push.visibleCount[visibleCountWord(push.bin, push.late)], binDrawCapacity(view, push.bin));
     uint slot = binFirstSlot(view, push.bin) + index;
     VisibleMeshlet v = listed ? push.visible[slot] : (VisibleMeshlet) 0;
-    Instance instance = relative(push.instances[v.instance], view);
-    MeshEntry mesh = push.meshes[instance.mesh];
+    Instance instance = relative(push.scene[0].instances[v.instance], view);
+    MeshEntry mesh = push.scene[0].meshes[instance.mesh];
     uint w = v.meshlet * 8;
-    uint vertexOffset = push.meshlets[w];
-    uint triangleOffset = push.meshlets[w + 1];
-    uint counts = listed ? push.meshlets[w + 2] : 0;
+    uint vertexOffset = push.scene[0].meshlets[w];
+    uint triangleOffset = push.scene[0].meshlets[w + 1];
+    uint counts = listed ? push.scene[0].meshlets[w + 2] : 0;
     uint vertexCount = counts & 0xff;
     uint triangleCount = (counts >> 8) & 0xff;
     SetMeshOutputCounts(vertexCount, triangleCount);
     if (thread < vertexCount)
     {
-        uint vertex = mesh.vertexBase + push.meshletVertices[mesh.meshletVertexBase + vertexOffset + thread];
-        VertexOut out = transformVertex(view, instance, mesh, vertex, push.positions, push.attributes, v.meshlet,
+        uint vertex = mesh.vertexBase
+            + push.scene[0].meshletVertices[mesh.meshletVertexBase + vertexOffset + thread];
+        VertexOut out = transformVertex(view, instance, mesh, vertex, push.scene[0].positions,
+            push.scene[0].attributes, v.meshlet,
             counts >> 16);
         vertices[thread].position = out.position;
         vertices[thread].world = out.world;
@@ -98,7 +94,7 @@ void meshLeanMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out ver
     for (uint t = thread; t < triangleCount; t += 64)
     {
         uint b = mesh.indexBase + triangleOffset + t * 3;
-        triangles[t] = wound(uint3(triangleByte(b), triangleByte(b + 1), triangleByte(b + 2)), mirrored(instance));
+        triangles[t] = wound(uint3(triangleByte(triangleBytes, b), triangleByte(triangleBytes, b + 1), triangleByte(triangleBytes, b + 2)), mirrored(instance));
         primitives[t].id = slot << 7 | t;
     }
 }
@@ -107,8 +103,9 @@ void meshLeanMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out ver
 VertexOut lean(LeanVertex in, uint primitive, float3 bary)
 {
     VisibleMeshlet visible = push.visible[primitive >> 7];
-    Instance instance = push.instances[visible.instance];
-    MeshEntry mesh = push.meshes[instance.mesh & INSTANCE_MESH]; // the mesh word holds flags too
+    uint* triangleBytes = push.scene[0].meshletTriangles; // loaded once, read per triangle
+    Instance instance = push.scene[0].instances[visible.instance];
+    MeshEntry mesh = push.scene[0].meshes[instance.mesh & INSTANCE_MESH]; // the mesh word holds flags too
     uint m = visible.meshlet;
     VertexOut s;
     s.position = in.position;
@@ -121,19 +118,19 @@ VertexOut lean(LeanVertex in, uint primitive, float3 bary)
     if ((mesh.attributeFormat & 16) != 0) // COLOR: from the triangle's vertices
     {
         uint w = m * 8;
-        uint first = mesh.indexBase + push.meshlets[w + 1] + (primitive & 0x7f) * 3;
-        uint vertexBase = mesh.meshletVertexBase + push.meshlets[w];
+        uint first = mesh.indexBase + push.scene[0].meshlets[w + 1] + (primitive & 0x7f) * 3;
+        uint vertexBase = mesh.meshletVertexBase + push.scene[0].meshlets[w];
         s.color = 0;
         for (uint k = 0; k < 3; k++)
         {
-            uint vertex = mesh.vertexBase + push.meshletVertices[vertexBase
-                + triangleByte(first + woundCorner(k, mirrored(instance)))]; // barycentrics follow the drawn corners
-            uint word = attributeWord(mesh, push.attributes, vertex, 4);
+            uint vertex = mesh.vertexBase + push.scene[0].meshletVertices[vertexBase
+                + triangleByte(triangleBytes, first + woundCorner(k, mirrored(instance)))]; // as the drawn corners
+            uint word = attributeWord(mesh, push.scene[0].attributes, vertex, 4);
             s.color += bary[k] * float4(word & 0xff, (word >> 8) & 0xff, (word >> 16) & 0xff, word >> 24) / 255.0;
         }
     }
     s.meshlet = m;
-    s.material = instance.materialBase + (push.meshlets[m * 8 + 2] >> 16);
+    s.material = instance.materialBase + (push.scene[0].meshlets[m * 8 + 2] >> 16);
     s.instance = visible.instance;
     s.firstTriangle = 0;
     return s;
@@ -144,7 +141,7 @@ float4 leanMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bary : SV
 {
     VertexOut s = lean(in, primitive, bary);
     float4 uvs = float4(s.uv, s.uv1);
-    return shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
+    return shadeSurface(NoRays(), push.view[0], s, push.scene[0].materials, ddx(uvs), ddy(uvs), push.lights,
         uint2(in.position.xy), behind(s.instance), push.indirect);
 }
 
@@ -157,9 +154,10 @@ BlendedOut leanBlendedMain(LeanVertex in, uint primitive : SV_PrimitiveID, float
     bool front : SV_IsFrontFace)
 {
     VertexOut s = lean(in, primitive, bary);
-    discardMasked(push.materials[s.material], s, front); // masked transmissive materials draw here too
+    discardMasked(push.scene[0].materials[s.material], s, front); // masked transmissive materials draw here too
     float4 uvs = float4(s.uv, s.uv1);
-    return weighBlended(shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
+    return weighBlended(shadeSurface(NoRays(), push.view[0], s, push.scene[0].materials, ddx(uvs), ddy(uvs),
+        push.lights,
         uint2(in.position.xy), behind(s.instance), push.indirect), length(s.world));
 }
 
@@ -169,8 +167,8 @@ float4 leanMaskedMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bar
     bool front : SV_IsFrontFace) : SV_Target
 {
     VertexOut s = lean(in, primitive, bary);
-    discardMasked(push.materials[s.material], s, front);
+    discardMasked(push.scene[0].materials[s.material], s, front);
     float4 uvs = float4(s.uv, s.uv1);
-    return shadeSurface(NoRays(), push.view[0], s, push.materials, ddx(uvs), ddy(uvs), push.lights,
+    return shadeSurface(NoRays(), push.view[0], s, push.scene[0].materials, ddx(uvs), ddy(uvs), push.lights,
         uint2(in.position.xy), behind(s.instance), push.indirect);
 }

@@ -204,28 +204,6 @@ public final class VisibilityBufferShading implements Technique {
         g.provide(Keys.SCENE_DEPTH, targets.depth());
     }
 
-    /**
-     * A color as RGB9E5, three 9-bit mantissas and a shared 5-bit exponent (EXT_texture_shared_exponent), as resolve.slang
-     * decodes the clear color: a push word for three floats. Allocates nothing.
-     */
-    static int rgb9e5(float r, float g, float b) {
-        float max = 65408;
-        float rc = Math.max(0, Math.min(r, max));
-        float gc = Math.max(0, Math.min(g, max));
-        float bc = Math.max(0, Math.min(b, max));
-        float maxc = Math.max(rc, Math.max(gc, bc));
-        int exponent = Math.max(-16, maxc > 0 ? Math.getExponent(maxc) : -16) + 1 + 15;
-        double scale = Math.scalb(1.0, exponent - 15 - 9);
-        if (Math.floor(maxc / scale + 0.5) == 512) {
-            exponent++;
-            scale *= 2;
-        }
-        int rs = (int) Math.floor(rc / scale + 0.5);
-        int gs = (int) Math.floor(gc / scale + 0.5);
-        int bs = (int) Math.floor(bc / scale + 0.5);
-        return rs | gs << 9 | bs << 18 | exponent << 27;
-    }
-
     /** The render region in {@code ids} this frame: width, and height in the high 16 bits (resolve.slang's size). */
     private static int size(PassContext ctx, Image ids) {
         return ctx.regionWidth(ids) | ctx.regionHeight(ids) << 16;
@@ -243,22 +221,14 @@ public final class VisibilityBufferShading implements Technique {
      */
     private ShadePush push(ShadePush push, PassContext ctx, Image ids, Image color, Buffer lights, int size, int bins,
         int bin, long tiles) {
-        GeometryPool pool = renderer.pool();
         return push.view(view.view().address())
-            .meshes(pool.meshTable().deviceAddress())
-            .instances(renderer.scene().instanceAddress())
-            .positions(pool.positions().deviceAddress())
-            .attributes(pool.attributes().deviceAddress())
-            .meshlets(pool.meshlets().deviceAddress())
-            .meshletVertices(pool.meshletVertices().deviceAddress())
-            .meshletTriangles(pool.meshletTriangles().deviceAddress())
-            .materials(renderer.scene().materialsAddress())
+            .scene(renderer.scene().tableAddress())
             .lights(lights == null ? 0 : ctx.address(lights))
             .ids(ctx.storage(ids))
             .color(color == null ? 0 : ctx.storage(color))
             .size(size)
             .bins(bins)
-            .clear(rgb9e5(clear[0], clear[1], clear[2]))
+            .clear(clear[0], clear[1], clear[2])
             .bin(bin)
             .classicIndices(classic == null ? 0 : classic.indicesAddress())
             .tiles(tiles);

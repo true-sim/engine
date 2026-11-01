@@ -194,19 +194,11 @@ final class RasterPipelines implements AutoCloseable {
 
     private static void drawMeshes(VkCommandBuffer commands, MemoryStack stack, GpuScene scene, RenderView v, int bin,
         boolean late, long count, long clusters, Pipeline pipeline, long behind, long indirect) {
-        GeometryPool pool = scene.pool();
         long push = stack.nmalloc(8, DRAW_PUSH);
         memPutLong(push + MeshPush.VIEW, v.address());
-        memPutLong(push + MeshPush.MESHES, pool.meshTable().deviceAddress());
-        memPutLong(push + MeshPush.INSTANCES, scene.instanceAddress());
+        memPutLong(push + MeshPush.SCENE, scene.tableAddress());
         memPutLong(push + MeshPush.VISIBLE, v.visible().deviceAddress());
         memPutLong(push + MeshPush.VISIBLE_COUNT, count);
-        memPutLong(push + MeshPush.MESHLETS, pool.meshlets().deviceAddress());
-        memPutLong(push + MeshPush.MESHLET_VERTICES, pool.meshletVertices().deviceAddress());
-        memPutLong(push + MeshPush.MESHLET_TRIANGLES, pool.meshletTriangles().deviceAddress());
-        memPutLong(push + MeshPush.POSITIONS, pool.positions().deviceAddress());
-        memPutLong(push + MeshPush.ATTRIBUTES, pool.attributes().deviceAddress());
-        memPutLong(push + MeshPush.MATERIALS, scene.materialsAddress());
         memPutLong(push + MeshPush.LIGHTS, clusters);
         memPutInt(push + MeshPush.BIN, bin);
         memPutInt(push + MeshPush.LATE, late ? 1 : 0);
@@ -219,17 +211,10 @@ final class RasterPipelines implements AutoCloseable {
 
     private static void drawIndexed(VkCommandBuffer commands, MemoryStack stack, GpuScene scene, RenderView v, int bin,
         long clusters, Pipeline pipeline, long behind, long indirect) {
-        GeometryPool pool = scene.pool();
         long push = stack.ncalloc(8, 1, DRAW_PUSH);
         memPutLong(push + DrawPush.VIEW, v.address());
-        memPutLong(push + DrawPush.MESHES, pool.meshTable().deviceAddress());
-        memPutLong(push + DrawPush.INSTANCES, scene.instanceAddress());
-        memPutLong(push + DrawPush.POSITIONS, pool.positions().deviceAddress());
-        memPutLong(push + DrawPush.ATTRIBUTES, pool.attributes().deviceAddress());
+        memPutLong(push + DrawPush.SCENE, scene.tableAddress());
         memPutLong(push + DrawPush.VISIBLE, v.visible().deviceAddress());
-        memPutLong(push + DrawPush.MESHLETS, pool.meshlets().deviceAddress());
-        memPutLong(push + DrawPush.MESHLET_VERTICES, pool.meshletVertices().deviceAddress());
-        memPutLong(push + DrawPush.MATERIALS, scene.materialsAddress());
         memPutLong(push + DrawPush.LIGHTS, clusters);
         memPutLong(push + DrawPush.BACKGROUND, behind);
         memPutLong(push + DrawPush.INDIRECT, indirect);

@@ -2,6 +2,7 @@ package com.truesim.engine.render;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.ExternalBuffer;
+import com.truesim.engine.render.layout.SceneTableLayout;
 import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.InstanceLayout;
 import com.truesim.engine.vulkan.FrameSlots;
@@ -74,6 +75,7 @@ public final class GpuScene implements AutoCloseable {
     private int firstFreeWord; // every word of used before it is full: the search for a free id starts here
     private final FrameSlots slots;
     private final Materials defaultMaterials;
+    private final com.truesim.engine.vulkan.FrameBuffer table; // common.slang's SceneTable, a copy per frame slot
     private Materials materials;
     private int count;
     private long version; // changes with every claim and removal
@@ -97,6 +99,9 @@ public final class GpuScene implements AutoCloseable {
         graphBuffer = new ExternalBuffer("instances", instances.buffer());
         used = new long[(capacity + 63) / 64];
         defaultMaterials = new Materials(device, 1);
+        table = com.truesim.engine.vulkan.FrameBuffer.create(device, SceneTableLayout.BYTES,
+            org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                | org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, slots);
         materials = defaultMaterials;
     }
 
@@ -472,6 +477,23 @@ public final class GpuScene implements AutoCloseable {
         return instances.buffer();
     }
 
+    /**
+     * The device address of the frame's scene table (common.slang's {@code SceneTable}): the pool's buffers, the
+     * instances and the materials as they are now, written into the copy of the frame slot recording, for draws to reach
+     * through one push pointer. Take it while recording each frame, never once (pitfalls.md). Allocates nothing.
+     */
+    public synchronized long tableAddress() {
+        table.putLong(SceneTableLayout.MESHES, pool.meshTable().deviceAddress());
+        table.putLong(SceneTableLayout.INSTANCES, instances.deviceAddress());
+        table.putLong(SceneTableLayout.POSITIONS, pool.positions().deviceAddress());
+        table.putLong(SceneTableLayout.ATTRIBUTES, pool.attributes().deviceAddress());
+        table.putLong(SceneTableLayout.MESHLETS, pool.meshlets().deviceAddress());
+        table.putLong(SceneTableLayout.MESHLET_VERTICES, pool.meshletVertices().deviceAddress());
+        table.putLong(SceneTableLayout.MESHLET_TRIANGLES, pool.meshletTriangles().deviceAddress());
+        table.putLong(SceneTableLayout.MATERIALS, materials.deviceAddress());
+        return table.deviceAddress();
+    }
+
     /** The material table's device address, for passes shading the instances (as {@code shading.slang} reads it). */
     public long materialsAddress() {
         return materials.deviceAddress();
@@ -483,6 +505,7 @@ public final class GpuScene implements AutoCloseable {
             closed = true;
             instances.close();
             defaultMaterials.close();
+            table.close();
         }
     }
 }

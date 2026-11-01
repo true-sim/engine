@@ -17,21 +17,14 @@ __exported import meshlets.common;
 public struct ShadePush
 {
     View* view;
-    MeshEntry* meshes;
-    Instance* instances;
-    uint2* positions;
-    uint* attributes;
-    uint* meshlets;
-    uint* meshletVertices;
-    uint* meshletTriangles;
-    Material* materials;
+    SceneTable* scene;         // the frame's scene buffers (common.slang's SceneTable)
     LightListHeader* lights;   // the frame's light list; null: the sun
+    IndirectLight* indirect;   // the view's indirect-light table (indirect.slang); null: the constant sky
     uint ids;                  // storage slot of the IDs (uint2)
     uint color;                // storage slot of the color
     uint size;                 // width in the low 16 bits, height in the high
     uint bins;                 // how many shading bins there are: materials of a later bin shade as bin 0
-    IndirectLight* indirect;   // the view's indirect-light table (indirect.slang); null: the constant sky
-    uint clear;                // the color behind everything, RGB9E5 (decodeClear)
+    float3 clear;              // the color behind everything
     uint bin;                  // shading: the bin this pass shades (a type and FEATURES); classification: the
                                // uints from one bin's list to the next (full-image tiles: the region may be smaller)
     uint* classicIndices;      // the classic LOD path's indices, as the pool's triangles lie (null: no such path)
@@ -48,17 +41,10 @@ static const uint TILE_ROW = 1024;
 [[vk::push_constant]]
 public ConstantBuffer<ShadePush> push;
 
-/** A color packed as RGB9E5: three 9-bit mantissas and a shared 5-bit exponent (VK_FORMAT_E5B9G9R9's layout). */
-public float3 decodeClear(uint c)
-{
-    float scale = exp2(float(int(c >> 27)) - 24.0);
-    return float3(c & 0x1ff, (c >> 9) & 0x1ff, (c >> 18) & 0x1ff) * scale;
-}
-
 /** Byte i of the pool's meshlet triangles. */
 uint triangleByte(uint i)
 {
-    return (push.meshletTriangles[i >> 2] >> ((i & 3) * 8)) & 0xff;
+    return (push.scene[0].meshletTriangles[i >> 2] >> ((i & 3) * 8)) & 0xff;
 }
 
 uint width()
@@ -97,9 +83,9 @@ public uint pixelBin(uint2 ids)
     {
         return 0;
     }
-    Instance instance = push.instances[ids.x - 1];
-    uint submesh = (ids.y & CLASSIC_TRIANGLE) != 0 ? (ids.y >> 24) & 0x7f : meshletSubmesh(push.meshlets, ids.y >> 7);
-    uint bin = push.materials[instance.materialBase + submesh].bin;
+    Instance instance = push.scene[0].instances[ids.x - 1];
+    uint submesh = (ids.y & CLASSIC_TRIANGLE) != 0 ? (ids.y >> 24) & 0x7f : meshletSubmesh(push.scene[0].meshlets, ids.y >> 7);
+    uint bin = push.scene[0].materials[instance.materialBase + submesh].bin;
     return bin < push.bins ? bin : 0; // a bin made since the graph built: shaded as metallic-roughness till it rebuilds
 }
 
@@ -176,12 +162,12 @@ public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
     uint2 ids = uintImages[push.ids][id.xy];
     if (ids.x == 0)
     {
-        images[push.color][id.xy] = float4(decodeClear(push.clear), 1);
+        images[push.color][id.xy] = float4(push.clear, 1);
         return;
     }
     View view = push.view[0];
-    Instance instance = relative(push.instances[ids.x - 1], view);
-    MeshEntry mesh = push.meshes[instance.mesh];
+    Instance instance = relative(push.scene[0].instances[ids.x - 1], view);
+    MeshEntry mesh = push.scene[0].meshes[instance.mesh];
     VertexOut v[3];
     if ((ids.y & CLASSIC_TRIANGLE) != 0)
     {
@@ -192,7 +178,8 @@ public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
         for (uint k = 0; k < 3; k++)
         {
             uint vertex = mesh.vertexBase + push.classicIndices[first + k];
-            v[k] = transformVertex(view, instance, mesh, vertex, push.positions, push.attributes, t >> 7, submesh);
+            v[k] = transformVertex(view, instance, mesh, vertex, push.scene[0].positions, push.scene[0].attributes,
+                t >> 7, submesh);
         }
     }
     else
@@ -200,13 +187,14 @@ public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
         uint m = ids.y >> 7;
         uint t = ids.y & 0x7f;
         uint w = m * 8;
-        uint first = mesh.indexBase + push.meshlets[w + 1] + t * 3;
-        uint vertexBase = mesh.meshletVertexBase + push.meshlets[w];
-        uint submesh = meshletSubmesh(push.meshlets, m);
+        uint first = mesh.indexBase + push.scene[0].meshlets[w + 1] + t * 3;
+        uint vertexBase = mesh.meshletVertexBase + push.scene[0].meshlets[w];
+        uint submesh = meshletSubmesh(push.scene[0].meshlets, m);
         for (uint k = 0; k < 3; k++)
         {
-            uint vertex = mesh.vertexBase + push.meshletVertices[vertexBase + triangleByte(first + k)];
-            v[k] = transformVertex(view, instance, mesh, vertex, push.positions, push.attributes, m, submesh);
+            uint vertex = mesh.vertexBase + push.scene[0].meshletVertices[vertexBase + triangleByte(first + k)];
+            v[k] = transformVertex(view, instance, mesh, vertex, push.scene[0].positions, push.scene[0].attributes,
+                m, submesh);
         }
     }
     float4x4 toWorld = view.inverseViewProjection;
@@ -235,6 +223,6 @@ public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
         + baryX.z * float4(v[2].uv, v[2].uv1);
     float4 uvY = baryY.x * float4(v[0].uv, v[0].uv1) + baryY.y * float4(v[1].uv, v[1].uv1)
         + baryY.z * float4(v[2].uv, v[2].uv1);
-    images[push.color][id.xy] = shadeMaterial<M, R>(rays, view, s, push.materials, uvX - uvs, uvY - uvs,
+    images[push.color][id.xy] = shadeMaterial<M, R>(rays, view, s, push.scene[0].materials, uvX - uvs, uvY - uvs,
         push.lights, id.xy, FEATURES, Background.none(), push.indirect); // transmissive surfaces: drawn with the blended
 }

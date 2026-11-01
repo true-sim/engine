@@ -5,8 +5,8 @@ import meshlets.common;
 
 struct IdsPush
 {
-    uint64_t unused[10];
-    Material* materials;     // at byte 80, as both paths' draw push blocks have it
+    View* view;
+    SceneTable* scene;       // at byte 8, as both paths' draw push blocks have it
 };
 
 [[vk::push_constant]]
@@ -22,6 +22,6 @@ uint2 idsMain(VertexOut in, uint primitive : SV_PrimitiveID) : SV_Target
 [shader("fragment")]
 uint2 maskedIdsMain(VertexOut in, uint primitive : SV_PrimitiveID, bool front : SV_IsFrontFace) : SV_Target
 {
-    discardMasked(push.materials[in.material], in, front);
+    discardMasked(push.scene[0].materials[in.material], in, front);
     return uint2(in.instance + 1, (in.meshlet << 7) | (primitive - in.firstTriangle));
 }
