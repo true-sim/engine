@@ -120,7 +120,7 @@ final class FoxCrowd implements AutoCloseable {
             a.fabrik(tail).target(x - 0.6 * Maths.sin(yaw), DemoMeshes.height(x, z) + 0.8, z - 0.6 * Maths.cos(yaw))
                 .weight(0.8);
             if (lod) {
-                double d = Math.hypot(x - eyeX, z - eyeZ);
+                double d = Maths.sqrt((x - eyeX) * (x - eyeX) + (z - eyeZ) * (z - eyeZ));
                 a.updateEvery(d < 15 ? 1 : d < 40 ? 2 : 4);
             }
             crowd[i] = a;
