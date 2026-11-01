@@ -19,6 +19,7 @@ struct ClassicPush
     uint unusedLate;
     uint background;          // at byte 104, as the meshlet paths' blocks: the scene behind, for transmission
     uint backgroundRegion;
+    IndirectLight* indirect;  // at byte 112, likewise: the indirect-light table, or null
 };
 
 [[vk::push_constant]]

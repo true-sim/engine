@@ -28,5 +28,5 @@ float4 fragmentMain(VertexOut in) : SV_Target
 {
     float4 uvs = float4(in.uv, in.uv1);
     return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), nullptr, uint2(0, 0),
-        Background.none());
+        Background.none(), nullptr);
 }

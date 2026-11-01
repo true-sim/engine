@@ -25,6 +25,7 @@ struct MeshPush
     uint late;               // 1: the late phase's meshlets
     uint background;         // at byte 104: the scene behind, for transmission (common.slang's Background); 0: none
     uint backgroundRegion;
+    IndirectLight* indirect; // at byte 112: the view's indirect-light table (indirect.slang); null: the constant sky
 };
 
 [[vk::push_constant]]

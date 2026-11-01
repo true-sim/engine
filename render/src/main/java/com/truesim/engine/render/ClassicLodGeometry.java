@@ -386,6 +386,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         if (shadows != null) {
             shadows.readBy(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
         }
+        targets.readIndirect(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
+        IndirectInputs.Set indirect = targets.indirect();
         Pipeline[] pipeline = switch (kind) {
             case DEPTH -> drawDepth;
             case SHADED -> this.draw;
@@ -395,7 +397,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            record(ctx, pipeline, view, lights == null ? 0 : ctx.address(lights), list);
+            record(ctx, pipeline, view, lights == null ? 0 : ctx.address(lights), list,
+                indirect == null ? 0 : ctx.address(indirect.table()));
         });
     }
 
@@ -474,9 +477,10 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             }
             long words = SceneBehind.words(ctx, behind);
             long address = lights == null ? 0 : ctx.address(lights);
-            recordList(ctx, pipeline[0], MeshletRenderer.BIN_BLENDED, view, address, list, words);
+            long indirect = targets.indirectAddress(ctx);
+            recordList(ctx, pipeline[0], MeshletRenderer.BIN_BLENDED, view, address, list, words, indirect);
             recordList(ctx, pipeline[1], MeshletRenderer.BIN_BLENDED + MeshletRenderer.BINS, view, address, list,
-                words);
+                words, indirect);
         });
     }
 
@@ -519,20 +523,22 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     }
 
     /** Draws the list's draws of view {@code view}, each opaque bin with its {@code pipeline}, into the attachments. */
-    private void record(PassContext ctx, Pipeline[] pipeline, RenderView view, long lights, Buffer list) {
+    private void record(PassContext ctx, Pipeline[] pipeline, RenderView view, long lights, Buffer list,
+        long indirect) {
         for (int bin = 0; bin < MeshletRenderer.BIN_BLENDED; bin++) {
-            recordList(ctx, pipeline[bin], bin, view, lights, list, 0);
-            recordList(ctx, pipeline[bin + MeshletRenderer.BINS], bin + MeshletRenderer.BINS, view, lights, list, 0);
+            recordList(ctx, pipeline[bin], bin, view, lights, list, 0, indirect);
+            recordList(ctx, pipeline[bin + MeshletRenderer.BINS], bin + MeshletRenderer.BINS, view, lights, list, 0,
+                indirect);
         }
     }
 
     /**
      * Draws view {@code view}'s draws of draw list {@code drawList} (a raster bin, or past the bins a mirrored one) with
      * {@code pipeline}, transmissive surfaces showing the scene behind of push words {@code behind}
-     * ({@link SceneBehind}; 0: none).
+     * ({@link SceneBehind}; 0: none), lit from all around by the indirect-light table at {@code indirect} (0: none).
      */
     private void recordList(PassContext ctx, Pipeline pipeline, int drawList, RenderView view, long lights,
-        Buffer list, long behind) {
+        Buffer list, long behind, long indirect) {
         VkCommandBuffer commands = ctx.unsafe().commands();
         long handle = ctx.unsafe().buffer(list);
         try (MemoryStack stack = stackPush()) {
@@ -546,6 +552,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             memPutLong(push + ClassicPush.MATERIALS, renderer.scene().materialsAddress());
             memPutLong(push + ClassicPush.LIGHTS, lights);
             memPutLong(push + ClassicPush.BACKGROUND, behind);
+            memPutLong(push + ClassicPush.INDIRECT, indirect);
             Commands.bindIndexBuffer(commands, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
             pipeline.bind(commands);
             pipeline.push(commands, push, DRAW_PUSH);

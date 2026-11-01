@@ -589,8 +589,8 @@ public final class GraphBuilder {
     }
 
     /**
-     * An image kept by the graph from frame to frame and build to build, as {@code desc} describes it (one 2D layer, mip
-     * level and sample): what a frame writes, the next reads, in any pass and any build that asks for it by the same name
+     * An image kept by the graph from frame to frame and build to build, as {@code desc} describes it (2D, one sample;
+     * layers, a cube's faces and mip levels as it says, a slot per level): what a frame writes, the next reads, in any pass and any build that asks for it by the same name
      * and descriptor. Unlike a {@link #history}, there is one image: a pass reads and writes it in place (an
      * accumulation, a cache filled over frames, a simulation's state). It starts zeroed, keeps its contents while builds
      * ask for it, is made anew (zeroed) for a new descriptor and freed once a build no longer asks for it. It may be
@@ -695,7 +695,8 @@ public final class GraphBuilder {
     /** {@code external} as an image of this build, the same one each time. */
     public Image external(ExternalImage external) {
         return externals.computeIfAbsent(external, e -> {
-            Image image = new Image(images.size(), e.name, ImageDesc.of(e.format, e.width, e.height), this);
+            Image image = new Image(images.size(), e.name, e.desc != null ? e.desc
+                : ImageDesc.of(e.format, e.width, e.height), this);
             images.add(new ImageInfo(image, null, e));
             return image;
         });

@@ -743,9 +743,12 @@ public final class SceneResources implements AutoCloseable {
     @AllowAllocation("a texture arrived")
     private void textureLoaded(TextureEntry entry, TextureData data) {
         boolean srgb = data.colorSpace() == TextureData.ColorSpace.SRGB;
+        boolean hdr = data.format() == TextureData.Format.RGBA16F; // light: an environment's panorama
         if (workers == null) {
             try {
-                entry.slot = srgb ? textures.color(data.width(), data.height(), data.texels())
+                entry.slot = hdr ? textures.add(com.truesim.engine.render.TextureFormat.RGBA16F, data.width(),
+                    data.height(), com.truesim.engine.render.Textures.GENERATE, data.texels())
+                    : srgb ? textures.color(data.width(), data.height(), data.texels())
                     : textures.data(data.width(), data.height(), data.texels());
             } catch (RuntimeException e) {
                 failed(entry, e); // not thrown into the cache's delivery
@@ -756,7 +759,9 @@ public final class SceneResources implements AutoCloseable {
         }
         entry.preparing = true;
         preparing++;
-        workers.task(() -> srgb ? textures.prepareColor(data.width(), data.height(), data.texels())
+        workers.task(() -> hdr ? textures.prepare(com.truesim.engine.render.TextureFormat.RGBA16F, data.width(),
+                data.height(), com.truesim.engine.render.Textures.GENERATE, data.texels())
+                : srgb ? textures.prepareColor(data.width(), data.height(), data.texels())
                 : textures.prepareData(data.width(), data.height(), data.texels()))
             .deliver(done -> texturePrepared(entry, done)).submit();
     }

@@ -47,6 +47,9 @@ final class PersistentResources {
             kept = desc != null ? new Persistent(device, key, desc)
                 : new Persistent(device, key, size, count, graphicsQueue.family(), computeQueue.family());
             kept.firstFrame = frame + 1; // the frame being built is its first
+            if (kept.image != null) {
+                kept.image.made = kept.firstFrame;
+            }
             persistents.put(key, kept);
         }
         kept.built = build;

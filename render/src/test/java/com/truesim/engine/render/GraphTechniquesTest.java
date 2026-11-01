@@ -2006,6 +2006,136 @@ class GraphTechniquesTest {
         }
     }
 
+    /** A panorama of half floats: blue above the horizon, green below, a red mark along +X. */
+    private static java.lang.foreign.MemorySegment skyPanorama(int width, int height) {
+        java.lang.foreign.MemorySegment texels = java.lang.foreign.Arena.ofAuto().allocate(8L * width * height);
+        ValueLayout.OfShort half = ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                // u 0.5 looks along +X (environment/filter.slang's panoramaUv)
+                boolean mark = Math.abs((x + 0.5) / width - 0.5) < 0.08 && Math.abs((y + 0.5) / height - 0.5) < 0.2;
+                float[] c = mark ? new float[] {4, 0, 0} : y < height / 2 ? new float[] {0, 0, 1} : new float[] {0, 1, 0};
+                for (int k = 0; k < 3; k++) {
+                    texels.set(half, 8L * (y * width + x) + 2L * k, Float.floatToFloat16(c[k]));
+                }
+                texels.set(half, 8L * (y * width + x) + 6, Float.floatToFloat16(1));
+            }
+        }
+        return texels;
+    }
+
+    @Test
+    void anEnvironmentLightsReflectsAndShowsBehindTheScene() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8)) {
+            int sky = textures.add(TextureFormat.RGBA16F, 64, 32, Textures.GENERATE, skyPanorama(64, 32));
+            Environment environment = Environment.panorama("test sky", sky, 64);
+            EnvironmentMaps.Quality small = new EnvironmentMaps.Quality(64, 32, 4, 16, 64);
+            int matte = materials.add(new Material(MR.withBaseColor(new Color(1, 1, 1, 1)).withRoughness(1)
+                .withMetallic(0)));
+            int mirror = materials.add(new Material(MR.withBaseColor(new Color(1, 1, 1, 1)).withRoughness(0)
+                .withMetallic(1)));
+            scene.setMaterials(materials);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .add(new SkyBackground(environment, main, small)).output(Keys.SCENE_COLOR, output);
+            // Behind an empty scene: the sky above the horizon, the ground below.
+            frame();
+            int top = image()[2 * SIZE + SIZE / 2];
+            int bottom = image()[(SIZE - 3) * SIZE + SIZE / 2];
+            assertThat(blue(top)).as("blue above").isGreaterThan(200);
+            assertThat(green(top)).isLessThan(30);
+            assertThat(green(bottom)).as("green below").isGreaterThan(200);
+            assertThat(graph.passes()).contains("sky").anyMatch(n -> n.startsWith("environment test sky radiance"));
+            // Turned towards +X: the red mark ahead.
+            camera.set(1, 0, 0, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            frame();
+            int ahead = image()[(SIZE / 2) * SIZE + SIZE / 2];
+            assertThat(red(ahead)).as("red along +X").isGreaterThan(200);
+            // The environment turned a quarter about +Y, counterclockwise from above: +X now shows what +Z showed.
+            environment.yaw(Math.PI / 2);
+            frame();
+            assertThat(red(image()[(SIZE / 2) * SIZE + SIZE / 2])).as("turned away").isLessThan(30);
+            environment.yaw(0);
+            camera.set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            // A white matte quad facing up, lit by the blue sky above (and the sun): bluer than under the constant sky.
+            scene.set(0, quadMesh, matte, 0, -1, -2, -HALF, 0, 0, HALF, 1, 1, 1);
+            frame();
+            int center = (SIZE * 3 / 4) * SIZE + SIZE / 2;
+            int constant = image()[center];
+            main.port().add(new EnvironmentLighting(environment, main, small));
+            frame();
+            int lit = image()[center];
+            assertThat(blue(lit) - green(lit)).as("lit by the blue sky").isGreaterThan(blue(constant) - green(constant) + 20);
+            // Facing down at the green ground: greener.
+            scene.set(0, quadMesh, matte, 0, 1, -2, HALF, 0, 0, HALF, 1, 1, 1);
+            camera.set(0, 1, -1, 0, 0, 1, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            frame();
+            int under = image()[(SIZE / 2) * SIZE + SIZE / 2];
+            assertThat(green(under)).as("lit by the green ground").isGreaterThan(blue(under) + 20);
+            camera.set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            // A mirror facing the camera reflects what is behind it: +Z, past the horizon line, half sky, half ground.
+            scene.set(0, quadMesh, mirror, 0, 0.6, -2, 0, 0, 0, 1, 1, 1, 1);
+            frame();
+            int reflected = image()[(SIZE / 2 - SIZE / 4) * SIZE + SIZE / 2];
+            assertThat(blue(reflected)).as("the sky above, reflected").isGreaterThan(green(reflected) + 60);
+            // Intensity: a factor on all of it, sky and reflections, read as frames run.
+            environment.intensity(0.25f);
+            frame();
+            assertThat(blue(image()[(SIZE / 2 - SIZE / 4) * SIZE + SIZE / 2])).as("a quarter as bright")
+                .isLessThan(blue(reflected) / 2);
+            environment.intensity(1);
+            // A new source filters anew, the frame after: one red color everywhere.
+            environment.setColor(1, 0, 0);
+            frame();
+            frame();
+            int red = image()[(SIZE / 2 - SIZE / 4) * SIZE + SIZE / 2];
+            assertThat(red(red)).as("refiltered: red").isGreaterThan(200);
+            assertThat(blue(red)).isLessThan(30);
+            assertThat(red(image()[2 * SIZE + 2])).as("the sky too").isGreaterThan(200);
+            // The visibility buffer shades the same.
+            environment.setPanorama(sky, 64);
+            frame();
+            int forward = image()[(SIZE / 2 - SIZE / 4) * SIZE + SIZE / 2];
+            if (device.primitiveIds()) {
+                main.port().replace(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                frame();
+                int resolved = image()[(SIZE / 2 - SIZE / 4) * SIZE + SIZE / 2];
+                assertThat(blue(resolved)).as("visibility buffer").isCloseTo(blue(forward), within(4));
+                assertThat(green(resolved)).isCloseTo(green(forward), within(4));
+            }
+            // No lighting technique: the constant sky again, the background still shown.
+            main.port().remove(EnvironmentLighting.ID);
+            frame();
+            assertThat(blue(image()[2 * SIZE + SIZE / 2])).as("the background alone").isGreaterThan(200);
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
+    void theClearColorPacksIntoOneWord() {
+        // resolve.slang decodes RGB9E5: 9 bits of mantissa a channel, plenty for 8-bit images.
+        int packed = VisibilityBufferShading.rgb9e5(0, 0, 0.5f);
+        assertThat(packed & 0x1ff).isZero();
+        assertThat(((packed >> 18) & 0x1ff) * Math.scalb(1.0, (packed >>> 27) - 24)).isEqualTo(0.5);
+        int any = VisibilityBufferShading.rgb9e5(0.1f, 0.73f, 2.5f);
+        double scale = Math.scalb(1.0, (any >>> 27) - 24);
+        assertThat((any & 0x1ff) * scale).isCloseTo(0.1, within(0.01));
+        assertThat(((any >> 9) & 0x1ff) * scale).isCloseTo(0.73, within(0.01));
+        assertThat(((any >> 18) & 0x1ff) * scale).isCloseTo(2.5, within(0.01));
+        assertThat(VisibilityBufferShading.rgb9e5(0, 0, 0)).isZero();
+        assertThat(VisibilityBufferShading.rgb9e5(1e9f, -1, Float.NaN) & 0x1ff).as("clamped").isEqualTo(511);
+    }
+
     @Test
     void transmissiveMaterialsShowTheSceneBehindThroughThem() {
         MeshData mesh = twoUvQuad();

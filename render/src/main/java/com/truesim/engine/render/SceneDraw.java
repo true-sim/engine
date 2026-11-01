@@ -51,14 +51,22 @@ public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, 
     }
 
     /**
-     * What the draw wrote: {@code depth}, {@code color} (shaded color or IDs; null for depth only), and the light list
-     * and shadow inputs shading used ({@link Keys#LIGHT_LIST}, {@link ShadowInputs}; null without a light list, or
-     * without shading), within the render region of {@code region} (null: all of them).
+     * What the draw wrote: {@code depth}, {@code color} (shaded color or IDs; null for depth only), and the light list,
+     * shadow inputs and indirect light shading used ({@link Keys#LIGHT_LIST}, {@link ShadowInputs},
+     * {@link IndirectInputs}; null without them, or without shading), within the render region of {@code region} (null:
+     * all of them).
      */
-    public record Targets(Image depth, Image color, Buffer lights, ShadowInputs.Set shadows, ViewPort region) {
+    public record Targets(Image depth, Image color, Buffer lights, ShadowInputs.Set shadows,
+        IndirectInputs.Set indirect, ViewPort region) {
 
         public Targets(Image depth, Image color, Buffer lights, ShadowInputs.Set shadows) {
-            this(depth, color, lights, shadows, null);
+            this(depth, color, lights, shadows, null, null);
+        }
+
+        /** Declares that {@code pass} reads the indirect light, where shading has some. */
+        public GraphBuilder.PassBuilder readIndirect(GraphBuilder.PassBuilder pass, com.truesim.engine.graph.Access access,
+            com.truesim.engine.graph.BufferAccess read) {
+            return indirect == null ? pass : indirect.readBy(pass, access, read);
         }
 
         /** {@code pass}, drawing (or culling) within the render region of {@link #region} where there is one. */
@@ -83,7 +91,8 @@ public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, 
         ViewPort built = g.view();
         ViewPort region = port != null ? port : camera == null && built != null && built.width() == width
             && built.height() == height ? built : null;
-        Targets targets = new Targets(depth, color, lights, shadows, region);
+        IndirectInputs.Set indirect = output.kind() == SurfaceOutput.Kind.SHADED ? IndirectInputs.of(g) : null;
+        Targets targets = new Targets(depth, color, lights, shadows, indirect, region);
         boolean load = false;
         for (GeometryProvider provider : geometry.providers()) {
             provider.drawFirst(g, this, targets, load);

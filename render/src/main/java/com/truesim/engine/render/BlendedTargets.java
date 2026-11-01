@@ -21,9 +21,10 @@ import java.util.Objects;
  * @param region the render region, or null
  * @param behind the opaque scene behind, which transmissive surfaces sample ({@link SceneBehind}), or null: they blend
  *               by what they let through
+ * @param indirect the view's indirect light ({@link IndirectInputs}), or null: the constant sky
  */
 public record BlendedTargets(Kind kind, Image color, Image accumulated, Image revealage, Image depth, Buffer lights,
-    ShadowInputs.Set shadows, ViewPort region, Image behind) {
+    ShadowInputs.Set shadows, ViewPort region, Image behind, IndirectInputs.Set indirect) {
 
     /** How blended surfaces are drawn. */
     public enum Kind {
@@ -41,9 +42,18 @@ public record BlendedTargets(Kind kind, Image color, Image accumulated, Image re
         }
     }
 
-    /** Declares that {@code pass} samples the scene behind, where there is one. */
+    /** Declares that {@code pass} samples the scene behind and reads the indirect light, where there are some. */
     public GraphBuilder.PassBuilder readBehind(GraphBuilder.PassBuilder pass) {
+        if (indirect != null) {
+            indirect.readBy(pass, com.truesim.engine.graph.Access.SAMPLED_FRAGMENT,
+                com.truesim.engine.graph.BufferAccess.DRAW_READ);
+        }
         return behind == null ? pass : pass.read(behind, com.truesim.engine.graph.Access.SAMPLED_FRAGMENT);
+    }
+
+    /** The indirect light's table address in a pass with context {@code ctx}; 0 without. Allocates nothing. */
+    public long indirectAddress(com.truesim.engine.graph.PassContext ctx) {
+        return indirect == null ? 0 : ctx.address(indirect.table());
     }
 
     /** {@code pass}, drawing within the render region of {@link #region} where there is one. */

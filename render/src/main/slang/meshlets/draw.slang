@@ -20,6 +20,7 @@ struct DrawPush
     uint unusedLate;
     uint background;          // at byte 104 as in mesh.slang: the scene behind, for transmission; 0: none
     uint backgroundRegion;
+    IndirectLight* indirect;  // at byte 112 as in mesh.slang: the indirect-light table, or null
 };
 
 [[vk::push_constant]]
@@ -53,7 +54,7 @@ float4 fragmentMain(VertexOut in) : SV_Target
 {
     float4 uvs = float4(in.uv, in.uv1);
     return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind(in.instance));
+        uint2(in.position.xy), behind(in.instance), push.indirect);
 }
 
 /**
@@ -66,7 +67,7 @@ BlendedOut blendedMain(VertexOut in, bool front : SV_IsFrontFace)
     discardMasked(push.materials[in.material], in, front); // masked transmissive materials draw here too
     float4 uvs = float4(in.uv, in.uv1);
     return weighBlended(shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind(in.instance)), length(in.world));
+        uint2(in.position.xy), behind(in.instance), push.indirect), length(in.world));
 }
 
 /** The masked bin's: drawn without culling, so one-sided materials' back faces go here with the masked texels. */
@@ -76,7 +77,7 @@ float4 maskedMain(VertexOut in, bool front : SV_IsFrontFace) : SV_Target
     discardMasked(push.materials[in.material], in, front);
     float4 uvs = float4(in.uv, in.uv1);
     return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind(in.instance));
+        uint2(in.position.xy), behind(in.instance), push.indirect);
 }
 
 /** The masked bin's depth only (shadow maps, depth prepasses): the same texels masked as the color pass's. */

@@ -822,7 +822,9 @@ public final class FrameGraph implements AutoCloseable {
     int storageSlotOf(int image, int mip) {
         int target = targetOf[image];
         if (target < 0) {
-            return mip == 0 ? externals[~target].storage : -1;
+            ExternalImage e = externals[~target];
+            return e.storageMips != null ? (mip < e.storageMips.length ? e.storageMips[mip] : -1)
+                : mip == 0 ? e.storage : -1;
         }
         int[] slots = physicals[target].storage;
         return mip < slots.length ? slots[mip] : -1;
@@ -831,10 +833,18 @@ public final class FrameGraph implements AutoCloseable {
     int sampledSlotOf(int image, int mip) {
         int target = targetOf[image];
         if (target < 0) {
-            return mip == 0 ? externals[~target].sampled : -1;
+            ExternalImage e = externals[~target];
+            return e.sampledMips != null ? (mip < e.sampledMips.length ? e.sampledMips[mip] : -1)
+                : mip == 0 ? e.sampled : -1;
         }
         int[] slots = physicals[target].sampledMips;
         return mip < slots.length ? slots[mip] : -1;
+    }
+
+    /** Whether image {@code image} of the build is a persistent image whose first frame this is. */
+    boolean freshImage(int image) {
+        int target = targetOf[image];
+        return target < 0 && externals[~target].made == frame;
     }
 
     long layerViewOf(int image, int layer) {

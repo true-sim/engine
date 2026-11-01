@@ -353,6 +353,20 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   and mixed into the Fresnel; each color channel refracted by its own IOR through a volume; and light through thin
   surfaces in the transmission color, from lights behind and the sky. Checked against the Khronos models; the specular
   ones (anisotropy, iridescence) wait for environment lighting to compare fully.
+- **D138** (built) Environment lighting, as a high-effort review recommended, decided with the user (HDR images first,
+  filtered on the GPU at runtime, later real-time GI must fit): shading reads one per-view **indirect-light table**
+  (`Keys.INDIRECT_LIGHT`, indirect.slang's `IndirectLight`) through one push pointer, its sections filled by their
+  providers and their images gathered by the shared `IndirectInputs` request, as `LIGHT_LIST` and `ShadowInputs` work.
+  `EnvironmentLighting` provides it and fills the distant environment's section; probe volumes, reflection probes and
+  screen-space techniques will modify it with sections of their own, shading combining screen space, probes and the
+  environment in one place (screen-space reflections near, the environment far), without new variants. `Environment`
+  is an app object (a panorama or a color; intensity and rotation applied at lookup, so changing them costs nothing);
+  `EnvironmentMaps` filters it into graph-persistent cubes (radiance with a mip chain, GGX levels by roughness, Charlie
+  for sheen) and spherical harmonics, again only when its version changes or its images are new (`PassContext.fresh`),
+  so views and eyes share one filtering; `EnvironmentMaps.BrdfTable` is made once per graph. `SkyBackground` shows an
+  environment behind a view at `Anchor.OPAQUE`, chosen apart from the lighting (AR passthrough shows none, a product
+  viewer a plain color). The graph's persistent images gained cube faces and mip chains with a slot per level, and the
+  bindless set cube and 2D-array views. HDR panoramas come from scene's `RadianceImporter` as half-float `TextureData`.
 - **D137** (new) Checked against the Khronos glTF sample models: an optional sweep (`-PgltfSamples=...`) imports every
   model with all its parts.
 

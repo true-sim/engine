@@ -8,9 +8,9 @@ description = "Engine scene bridge for true-sim: draws scene's renderables, foll
 
 dependencies {
     api(project(":engine-render"))
-    api("com.truesim.scene:scene-render:0.30.0")
-    testImplementation("com.truesim.scene:scene-meshbuild:0.30.0")
-    testImplementation("com.truesim.scene:scene-gltf:0.30.0")
+    api("com.truesim.scene:scene-render:0.31.0")
+    testImplementation("com.truesim.scene:scene-meshbuild:0.31.0")
+    testImplementation("com.truesim.scene:scene-gltf:0.31.0")
 }
 
 // The test shaders' material records (a game's own type, as in a project of its own), as Java.
@@ -25,6 +25,7 @@ tasks.test {
     providers.gradleProperty("gltfSamples").orNull?.let { systemProperty("truesim.gltf.samples", it) }
     providers.gradleProperty("gltfModels").orNull?.let { systemProperty("truesim.gltf.models", it) }
     providers.gradleProperty("gltfZoom").orNull?.let { systemProperty("truesim.gltf.zoom", it) }
+    providers.gradleProperty("gltfEnvironment").orNull?.let { systemProperty("truesim.gltf.environment", it) }
 }
 
 // The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.

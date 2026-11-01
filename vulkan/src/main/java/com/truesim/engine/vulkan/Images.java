@@ -75,6 +75,12 @@ public final class Images {
      */
     public static void transition(VkCommandBuffer commands, long image, int aspect, int oldLayout, int newLayout,
         long srcStage, long srcAccess, long dstStage, long dstAccess) {
+        transition(commands, image, aspect, oldLayout, newLayout, srcStage, srcAccess, dstStage, dstAccess, 1, 1);
+    }
+
+    /** {@link #transition} of {@code levels} mip levels and {@code layers} layers from the first. */
+    public static void transition(VkCommandBuffer commands, long image, int aspect, int oldLayout, int newLayout,
+        long srcStage, long srcAccess, long dstStage, long dstAccess, int levels, int layers) {
         // Written field by field into stack memory: no struct wrappers, so nothing is allocated per frame.
         try (MemoryStack stack = stackPush()) {
             long barrier = stack.ncalloc(VkImageMemoryBarrier2.ALIGNOF, 1, VkImageMemoryBarrier2.SIZEOF);
@@ -90,8 +96,8 @@ public final class Images {
             memPutLong(barrier + VkImageMemoryBarrier2.IMAGE, image);
             long range = barrier + VkImageMemoryBarrier2.SUBRESOURCERANGE;
             memPutInt(range + VkImageSubresourceRange.ASPECTMASK, aspect);
-            memPutInt(range + VkImageSubresourceRange.LEVELCOUNT, 1);
-            memPutInt(range + VkImageSubresourceRange.LAYERCOUNT, 1);
+            memPutInt(range + VkImageSubresourceRange.LEVELCOUNT, levels);
+            memPutInt(range + VkImageSubresourceRange.LAYERCOUNT, layers);
             long dependency = stack.ncalloc(VkDependencyInfo.ALIGNOF, 1, VkDependencyInfo.SIZEOF);
             memPutInt(dependency + VkDependencyInfo.STYPE, VK_STRUCTURE_TYPE_DEPENDENCY_INFO);
             memPutInt(dependency + VkDependencyInfo.IMAGEMEMORYBARRIERCOUNT, 1);

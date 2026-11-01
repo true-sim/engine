@@ -145,6 +145,15 @@ uploads became a graph pass, `SceneSyncTest` loses it every run there. It comes 
 material's type, whatever the shape of the check; not the barriers, the lean path or the data. Cause not found;
 everything checked and measured is in [#151](https://github.com/true-sim/engine/issues/151).
 
+**One `public` in a Slang file without a `module` line hides the rest of it.** environment/filter.slang marked one
+function `public`; from then on its other declarations defaulted to internal, and the build's push-constant layout
+generator, which imports the file, failed with E30600 "'FilterPush' is not accessible from the current context". Files
+without any visibility modifier make everything public, which is what the generator relies on.
+- Proof: reproduced while adding environment lighting (true-sim/engine, environment lighting PR); removing the `public`
+  fixed the build.
+- Rule: in shader files that are entry points rather than modules (no `module` line), use no visibility modifiers; in
+  modules, mark everything other files use `public`.
+
 **Features and sharing must match the device.** Cube array image views failed validation until `imageCubeArray` was
 enabled, and on lavapipe (one queue family for graphics and compute) images failed when they listed that family twice
 for concurrent sharing.

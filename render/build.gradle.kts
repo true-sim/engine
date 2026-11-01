@@ -8,9 +8,9 @@ description = "Engine renderer for true-sim: GPU-driven meshlet rendering of sce
 
 dependencies {
     api(project(":engine-graph"))
-    api("com.truesim.scene:scene-assets:0.30.0")
+    api("com.truesim.scene:scene-assets:0.31.0")
     api("com.truesim.common:common-math:0.5.0") // the material records' colors and vectors
-    testImplementation("com.truesim.scene:scene-meshbuild:0.30.0")
+    testImplementation("com.truesim.scene:scene-meshbuild:0.31.0")
 }
 
 // The material records of src/main/slang (materials.slang), as Java: MetallicRoughnessParameters and the others.
@@ -18,7 +18,7 @@ slang {
     javaPackage = "com.truesim.engine.render.materials"
     pushPackage = "com.truesim.engine.render.layout"
     pushBase = "com.truesim.engine.vulkan.PushConstants" // push layouts are writers too
-    constantModules = listOf("bindless", "lights", "materials", "meshlets/common") // BindlessConstants and others
+    constantModules = listOf("bindless", "lights", "materials", "meshlets/common", "indirect") // BindlessConstants and others
 }
 
 // The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.

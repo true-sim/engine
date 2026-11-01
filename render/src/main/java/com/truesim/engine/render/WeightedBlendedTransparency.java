@@ -70,7 +70,7 @@ public final class WeightedBlendedTransparency implements Transparency {
         Image revealage = g.create(name + " blended revealage", ImageDesc.of(Format.of(REVEALAGE_FORMAT),
             color.width(), color.height()));
         BlendedTargets targets = new BlendedTargets(BlendedTargets.Kind.WEIGHTED, null, accumulated, revealage, depth,
-            lights, shadows, region, behind);
+            lights, shadows, region, behind, IndirectInputs.of(g));
         boolean load = false;
         for (GeometryProvider provider : geometry.providers()) {
             provider.drawBlended(g, view.view(), targets, load);

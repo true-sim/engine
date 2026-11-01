@@ -10,6 +10,13 @@ public struct HostLayoutAttribute {};
 [[vk::binding(0, 0)]]
 public Texture2D<float4> textures[];
 
+// The same sampled images, for cubes (an environment's) and for 2D arrays (a cube's level, its faces).
+[[vk::binding(0, 0)]]
+public TextureCube<float4> cubes[];
+
+[[vk::binding(0, 0)]]
+public Texture2DArray<float4> textureArrays[];
+
 [[vk::binding(1, 0)]]
 public SamplerState samplers[21];
 
@@ -21,6 +28,10 @@ public RWTexture2D<float4> images[];
 // the overlap: render/build.gradle.kts).
 [[vk::binding(2, 0)]]
 public RWTexture2D<uint2> uintImages[];
+
+// The same storage images, for 2D arrays: a cube's level, its six faces as layers.
+[[vk::binding(2, 0)]]
+public RWTexture2DArray<float4> imageArrays[];
 
 /** Sampler slots. */
 public static const uint LINEAR_CLAMP = 0;

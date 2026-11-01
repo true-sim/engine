@@ -121,6 +121,7 @@ public final class VisibilityBufferShading implements Technique {
         SceneDraw.Targets targets = g.request(draw);
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
+        IndirectInputs.Set indirect = IndirectInputs.of(g);
         // With inline ray shadows, the variant tracing them, where the device can.
         boolean traced = shadows != null && shadows.traced() && g.capabilities().rayTracing();
         // A variant per bin: a type, and the features its materials show; made for the combinations in use only.
@@ -182,6 +183,9 @@ public final class VisibilityBufferShading implements Technique {
         if (shadows != null) {
             shadows.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ, traced);
         }
+        if (indirect != null) {
+            indirect.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
+        }
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
@@ -192,11 +196,34 @@ public final class VisibilityBufferShading implements Technique {
                 }
                 long list = tableBytes + listBytes * listOf[bin];
                 ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, ids, color, lights, size(ctx, ids), shade.length,
-                    bin, ctx.address(tiles) + list), tiles, list);
+                    bin, ctx.address(tiles) + list).indirect(indirect == null ? 0 : ctx.address(indirect.table())),
+                    tiles, list);
             }
         });
         g.provide(Keys.SCENE_COLOR, color);
         g.provide(Keys.SCENE_DEPTH, targets.depth());
+    }
+
+    /**
+     * A color as RGB9E5, three 9-bit mantissas and a shared 5-bit exponent (EXT_texture_shared_exponent), as resolve.slang
+     * decodes the clear color: a push word for three floats. Allocates nothing.
+     */
+    static int rgb9e5(float r, float g, float b) {
+        float max = 65408;
+        float rc = Math.max(0, Math.min(r, max));
+        float gc = Math.max(0, Math.min(g, max));
+        float bc = Math.max(0, Math.min(b, max));
+        float maxc = Math.max(rc, Math.max(gc, bc));
+        int exponent = Math.max(-16, maxc > 0 ? Math.getExponent(maxc) : -16) + 1 + 15;
+        double scale = Math.scalb(1.0, exponent - 15 - 9);
+        if (Math.floor(maxc / scale + 0.5) == 512) {
+            exponent++;
+            scale *= 2;
+        }
+        int rs = (int) Math.floor(rc / scale + 0.5);
+        int gs = (int) Math.floor(gc / scale + 0.5);
+        int bs = (int) Math.floor(bc / scale + 0.5);
+        return rs | gs << 9 | bs << 18 | exponent << 27;
     }
 
     /** The render region in {@code ids} this frame: width, and height in the high 16 bits (resolve.slang's size). */
@@ -231,7 +258,7 @@ public final class VisibilityBufferShading implements Technique {
             .color(color == null ? 0 : ctx.storage(color))
             .size(size)
             .bins(bins)
-            .clear(clear[0], clear[1], clear[2])
+            .clear(rgb9e5(clear[0], clear[1], clear[2]))
             .bin(bin)
             .classicIndices(classic == null ? 0 : classic.indicesAddress())
             .tiles(tiles);
