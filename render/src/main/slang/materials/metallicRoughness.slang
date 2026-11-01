@@ -5,7 +5,7 @@ module metallicRoughness;
 
 __exported import materials;
 
-[MaterialParameters(FEATURE_CLEARCOAT)]
+[MaterialParameters(FEATURE_CLEARCOAT | FEATURE_SPECULAR | FEATURE_IOR | FEATURE_SHEEN)]
 public struct MetallicRoughnessParameters
 {
     [Color] [MaskAlpha] public float4 baseColor = float4(0.8, 0.8, 0.8, 1); // linear; alpha: what masking compares

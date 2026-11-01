@@ -333,6 +333,11 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   preset adds) or `OpaqueTransparency` (as opaque, color and depth); sorted meshlets or per-pixel lists would be more of
   them. A view without one draws no blended surfaces. Providers draw the bin per `RenderView` (`drawBlended`); classic
   LOD's selection is a shared request. Blended surfaces cast no shadows yet (a shadow decision, not transparency's).
+- **D136c** (built) Specular, IOR and sheen as features (modules `materials/specular.slang`, `ior.slang`,
+  `sheen.slang`, field names glTF's own so imported data converts as it is): the surface carries a dielectric's
+  reflectance head-on (`f0`, from the IOR, scaled and tinted by specular) and at grazing angles (`f90`), and a sheen
+  (Charlie distribution, Neubelt visibility, the base dimmed by an average sheen albedo). Metallic-roughness allows them;
+  a game's type opts in as for clearcoat.
 - **D137** (new) Checked against the Khronos glTF sample models: an optional sweep (`-PgltfSamples=...`) imports every
   model with all its parts.
 

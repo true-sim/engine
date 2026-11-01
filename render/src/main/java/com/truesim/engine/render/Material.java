@@ -42,6 +42,12 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
     public static final int FEATURE_CLEARCOAT = MaterialsConstants.FEATURE_CLEARCOAT;
     /** Texture transforms: textures naming one ({@link TextureSampler#transform}) sample moved, turned, scaled UVs. */
     public static final int FEATURE_TEXTURE_TRANSFORM = MaterialsConstants.FEATURE_TEXTURE_TRANSFORM;
+    /** Specular: a dielectric's reflectance, its strength and color, as glTF's {@code KHR_materials_specular}. */
+    public static final int FEATURE_SPECULAR = MaterialsConstants.FEATURE_SPECULAR;
+    /** IOR: the index of refraction a dielectric's reflectance follows, as glTF's {@code KHR_materials_ior}. */
+    public static final int FEATURE_IOR = MaterialsConstants.FEATURE_IOR;
+    /** Sheen: back-scattering at grazing angles, as cloth, as glTF's {@code KHR_materials_sheen}. */
+    public static final int FEATURE_SHEEN = MaterialsConstants.FEATURE_SHEEN;
     /** Unlit: the surface shows its base color as it is, as glTF's {@code KHR_materials_unlit}. */
     public static final int FEATURE_UNLIT = MaterialsConstants.FEATURE_UNLIT;
     /**

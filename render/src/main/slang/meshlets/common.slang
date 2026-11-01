@@ -5,6 +5,9 @@ module common;
 import bindless;
 __exported import materials.metallicRoughness;
 __exported import materials.clearcoat;
+__exported import materials.ior;
+__exported import materials.sheen;
+__exported import materials.specular;
 __exported import materials.unlit;
 __exported import lights;
 
@@ -573,6 +576,18 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
     }
     // The features, the engine's: on any type's surface.
     s.clearcoat = 0;
+    if ((features & FEATURE_IOR) != 0)
+    {
+        applyIor(s, materialFeature<IorParameters>(ref, FEATURE_IOR));
+    }
+    if ((features & FEATURE_SPECULAR) != 0) // after the IOR: it scales the reflectance the IOR gives
+    {
+        applySpecular(s, materialFeature<SpecularParameters>(ref, FEATURE_SPECULAR), input);
+    }
+    if ((features & FEATURE_SHEEN) != 0)
+    {
+        applySheen(s, materialFeature<SheenParameters>(ref, FEATURE_SHEEN), input);
+    }
     float3 emissive = s.emissive;
     if ((features & FEATURE_CLEARCOAT) != 0)
     {

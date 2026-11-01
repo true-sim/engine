@@ -1,6 +1,9 @@
 package com.truesim.engine.render;
 
 import com.truesim.engine.render.materials.ClearcoatParameters;
+import com.truesim.engine.render.materials.IorParameters;
+import com.truesim.engine.render.materials.SheenParameters;
+import com.truesim.engine.render.materials.SpecularParameters;
 import com.truesim.engine.render.materials.TextureTransformParameters;
 import com.truesim.engine.render.materials.UnlitParameters;
 
@@ -16,6 +19,9 @@ public final class MaterialFeatures {
             case ClearcoatParameters.NAME -> ClearcoatParameters.fromValues(values);
             case TextureTransformParameters.NAME -> TextureTransformParameters.fromValues(values);
             case UnlitParameters.NAME -> UnlitParameters.fromValues(values);
+            case SpecularParameters.NAME -> SpecularParameters.fromValues(values);
+            case IorParameters.NAME -> IorParameters.fromValues(values);
+            case SheenParameters.NAME -> SheenParameters.fromValues(values);
             default -> null;
         };
     }

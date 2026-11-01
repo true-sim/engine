@@ -1,6 +1,7 @@
 // The shading model every way of drawing shares: what a surface is at a point (Surface) and how it is lit. Physically
-// based: Lambert diffuse and a GGX specular lobe with Smith visibility and Schlick Fresnel, under an optional clear
-// coat. What a surface is comes from its material (materials.slang): the forward fragment shader and the visibility
+// based: Lambert diffuse and a GGX specular lobe with Smith visibility and Schlick Fresnel (a dielectric's reflectance
+// head-on and at grazing angles from its IOR and specular features), an optional sheen (Charlie distribution) and an
+// optional clear coat. What a surface is comes from its material (materials.slang): the forward fragment shader and the visibility
 // buffer's shading pass evaluate it the same way, the only difference being where texture gradients come from (the
 // hardware's, or reconstructed).
 module shading;
@@ -17,6 +18,10 @@ public struct Surface
     public float3 emissive;
     public float occlusion;
     public float alpha;            // coverage, for blended materials: 1 opaque
+    public float3 f0;              // a dielectric's reflectance head-on (FEATURE_IOR, FEATURE_SPECULAR): 0.04 at IOR 1.5
+    public float f90;              // and at grazing angles, the specular weight (FEATURE_SPECULAR): 1
+    public float3 sheenColor;      // FEATURE_SHEEN: the sheen's color, linear (0: none)
+    public float sheenRoughness;   // FEATURE_SHEEN: perceptual
     public float3 clearcoatNormal; // FEATURE_CLEARCOAT: the coat's normal, unit
     public float clearcoat;        // FEATURE_CLEARCOAT: its strength (0: none, every other surface)
     public float clearcoatRoughness;
@@ -35,6 +40,10 @@ public struct Surface
         s.emissive = 0;
         s.occlusion = 1;
         s.alpha = 1;
+        s.f0 = 0.04;
+        s.f90 = 1;
+        s.sheenColor = 0;
+        s.sheenRoughness = 0;
         s.clearcoatNormal = normal;
         s.clearcoat = 0;
         s.clearcoatRoughness = 1;
@@ -81,11 +90,21 @@ public float3 reflected(Surface s, float3 toViewer, float3 toLight, float3 irrad
     float nl = dot(s.normal, toLight);
     if (nl > 0)
     {
-        float3 f0 = lerp(float3(0.04), s.albedo, s.metallic);
-        float3 fresnel = f0 + (1 - f0) * pow(1 - vh, 5);
+        float3 f0 = lerp(s.f0, s.albedo, s.metallic);
+        float f90 = lerp(s.f90, 1.0, s.metallic);
+        float3 fresnel = f0 + (f90 - f0) * pow(1 - vh, 5);
         float3 specular = lobe(s.normal, toViewer, h, nl, s.roughness) * fresnel;
         float3 diffuse = (1 - fresnel) * (1 - s.metallic) * s.albedo / PI;
         color = (diffuse + specular) * irradiance * nl;
+    }
+    if (any(s.sheenColor > 0))
+    {
+        // A sheen over the base (KHR_materials_sheen): its lobe added, the base dimmed by what the sheen takes.
+        color *= sheenScaling(s);
+        if (nl > 0)
+        {
+            color += s.sheenColor * sheenLobe(s.normal, toViewer, h, nl, s.sheenRoughness) * irradiance * nl;
+        }
     }
     if (s.clearcoat > 0)
     {
@@ -100,6 +119,30 @@ public float3 reflected(Surface s, float3 toViewer, float3 toLight, float3 irrad
         }
     }
     return color;
+}
+
+/**
+ * How much of the base a sheen leaves: 1 - its color's largest channel times the sheen's directional albedo, taken as
+ * its average (0.157, for a mid roughness) rather than from a table.
+ */
+public float sheenScaling(Surface s)
+{
+    return 1 - max(s.sheenColor.r, max(s.sheenColor.g, s.sheenColor.b)) * 0.157;
+}
+
+/**
+ * The sheen's lobe: the Charlie distribution (Estevez and Kulla 2017) times Neubelt's visibility, for normal `n`, half
+ * vector `h` and cosine `nl` towards the light.
+ */
+float sheenLobe(float3 n, float3 toViewer, float3 h, float nl, float roughness)
+{
+    float a = max(roughness * roughness, 1.0e-3);
+    float nh = saturate(dot(n, h));
+    float sin2 = max(1 - nh * nh, 1.0e-4);
+    float distribution = (2 + 1 / a) * pow(sin2, 0.5 / a) / (2 * PI);
+    float nv = max(dot(n, toViewer), 1.0e-4);
+    float visibility = 1 / (4 * (nl + nv - nl * nv));
+    return distribution * visibility;
 }
 
 /** The clear coat's Fresnel, a dielectric's (index 1.5: 4 % head-on), by the cosine `c` towards the viewer. */
@@ -127,7 +170,11 @@ float lobe(float3 n, float3 toViewer, float3 h, float nl, float roughness)
 public float3 ambient(Surface s, float3 irradiance)
 {
     float3 base = (1 - s.metallic) * s.albedo / PI * irradiance * s.occlusion
-        + lerp(float3(0.04), s.albedo, s.metallic) * irradiance / PI * 0.5 * s.occlusion;
+        + lerp(s.f0, s.albedo, s.metallic) * irradiance / PI * 0.5 * s.occlusion;
+    if (any(s.sheenColor > 0))
+    {
+        base = base * sheenScaling(s) + s.sheenColor * 0.157 * irradiance / PI * s.occlusion;
+    }
     if (s.clearcoat > 0)
     {
         float coat = s.clearcoat * 0.04;
