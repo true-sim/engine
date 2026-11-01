@@ -78,7 +78,12 @@ holds the values in layers, lowest first: the setting's default, the game's (`se
 what the engine uses, is that value through the `Constraint`s on it (`constrain(setting, Constraint.lock(false, "no
 HDR display"))`, `range`, `choices`), so hardware and game limits never overwrite the player's choice. Change
 listeners, scoped views (one window's own values), and saving and loading as text (`toMap`/`load`: only the player's
-layer is saved; unknown keys are kept, unreadable ones fall through, values are parsed when first read). The frame graph has settings
+layer is saved; unknown keys are kept, unreadable ones fall through, values are parsed when first read). A `SettingRegistry`
+lists the settings an app has, each registered once by the part owning it, with a `SettingGroup` (a tree of groups
+with translation-key labels and an order, apart from saved names) and optionally a `SettingTier`. Options screens ask
+it for groups and their settings up to a tier; hidden tiers show only when revealed; `check()` at startup fails on a
+setting with a tier but no group, an undeclared tier or two groups with one id; settings players never see are
+registered with `addHidden`. The frame graph has settings
 (`graph.settings()`): a build reads them with `g.setting(key)` and rebuilds when one it read changes; pass bodies read
 `g.settings()` when they record. Windows follow theirs (`platform.createWindow(options, settings.scoped("window.main"))`),
 and so does the `Presenter` (the graph's present settings, or a window's own). The core's tuning values are settings
