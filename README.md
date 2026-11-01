@@ -554,8 +554,11 @@ Drawing and shading are separate, and each is swappable:
   attributes and meshlet records; triangles and levels shared), and a `deformation` pass after the scene upload skins
   every posed copy (`Deformation`: joint matrices and the pose's box, linear blend skinning, normals by cofactors),
   recomputes its meshlet spheres, turns cone culling off for it and grows its detail spheres by how far the joints
-  move. `SceneSync` does it for renderables with a skin (`Renderables.setSkin`, set by `ModelData.spawn`), posing them
-  each update from their joints' world transforms; scene-animation's `Animators` move the joints. Meshlet paths only
+  move. Morph targets go first: a copy of a mesh with targets takes their weights (`Deformation.weight`), the
+  deltas uploaded once per mesh. `SceneSync` does it for renderables with a skin (`Renderables.setSkin`, set by
+  `ModelData.spawn`) or morph targets (`Renderables.setMorphWeights`), posing them each update from their joints'
+  world transforms and weights; scene-animation's `Animators` move the joints and, through
+  `animators.morphSink(renderables::setMorphWeights)`, the weights. Meshlet paths only
   for now; ray-traced copies come with BLAS refits.
   - `MeshletGeometry`: a renderer's meshlets, with cluster LOD.
   - `ClassicLodGeometry`: the same instances drawn the classic way.

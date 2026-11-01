@@ -59,9 +59,10 @@ import java.util.Objects;
  *       (the lowest free id), so what the GPU keeps per instance stays with it. Deterministic: the same changes give the
  *       same ids. A new renderable may take an id freed the same frame, and then starts with what the GPU kept for the
  *       id (seen or hidden by occlusion culling) for its first frame.</li>
- *   <li><b>Skins:</b> a renderable with a skin ({@link Renderables#setSkin}) whose mesh has joints draws a copy of
- *       its own ({@code GeometryPool.addDeformed}), posed each update from its joints' world transforms relative to
- *       its node, in doubles, and skinned on the GPU before anything draws.</li>
+ *   <li><b>Skins and morph targets:</b> a renderable with a skin ({@link Renderables#setSkin}) whose mesh has joints,
+ *       or whose mesh has morph targets, draws a copy of its own ({@code GeometryPool.addDeformed}), posed each update
+ *       from its joints' world transforms relative to its node, in doubles, and its morph weights
+ *       ({@link Renderables#setMorphWeights}), and deformed on the GPU before anything draws.</li>
  *   <li><b>Layers and shadows:</b> instances are on their nodes' layers ({@code SceneGraph.setLayers}), drawn in views
  *       of any of them ({@link com.truesim.engine.render.RenderView#filter}), and cast shadows as their renderables
  *       say: shadow maps and shadow rays leave out those that do not.</li>
@@ -107,6 +108,7 @@ public final class SceneSync implements AutoCloseable {
     private int itemCount;
     // Skinned items: the deformed copy each draws (NONE: its mesh as it is), and those that have one, densely.
     private int[] itemCopy = filled(64);
+    private boolean[] itemCopySkinned = new boolean[64]; // whether its copy was made with the skin's joints
     private int[] skinned = new int[64];
     private int skinnedCount;
     private final double[] relative = new double[12]; // the node's world transform, inverted
@@ -597,6 +599,7 @@ public final class SceneSync implements AutoCloseable {
         isSwapping = Arrays.copyOf(isSwapping, length);
         movedItems = Arrays.copyOf(movedItems, length);
         itemCopy = Arrays.copyOf(itemCopy, length);
+        itemCopySkinned = Arrays.copyOf(itemCopySkinned, length);
         Arrays.fill(itemCopy, old, length, NONE);
         fillItems = new int[length];
         fillEntries = new int[length];
@@ -700,19 +703,22 @@ public final class SceneSync implements AutoCloseable {
     private void refreshCopy(int item) {
         SkinBinding skin = renderables.has(itemNode[item]) ? renderables.skin(itemNode[item]) : null;
         MeshData data = itemMesh[item].mesh.data;
-        boolean wanted = skin != null && data.jointCount() > 0;
+        boolean skinning = skin != null && data.jointCount() > 0;
+        boolean wanted = skinning || data.morphTargetCount() > 0;
         int source = itemMesh[item].mesh.id;
         var pool = resources.pool();
-        if (itemCopy[item] != NONE && wanted && pool.deformedFrom(itemCopy[item]) == source) {
-            return; // the same mesh: its joints are read each update
+        if (itemCopy[item] != NONE && wanted && pool.deformedFrom(itemCopy[item]) == source
+            && itemCopySkinned[item] == skinning) {
+            return; // the same mesh: its joints and weights are read each update
         }
         dropCopy(item);
         if (!wanted) {
             return;
         }
         int copy = pool.addDeformed(source);
-        pool.deformation().add(copy, data.jointCount());
+        pool.deformation().add(copy, skinning ? data.jointCount() : 0, data);
         itemCopy[item] = copy;
+        itemCopySkinned[item] = skinning;
         if (skinnedCount == skinned.length) {
             skinned = Arrays.copyOf(skinned, 2 * skinnedCount);
         }
@@ -739,18 +745,45 @@ public final class SceneSync implements AutoCloseable {
     }
 
     /**
-     * Poses {@code item}'s copy: each palette joint's matrix, the joint's world transform relative to the node's times
-     * its inverse bind matrix, and the box of the joints' rest boxes so moved, with how far any of them moves.
+     * Poses {@code item}'s copy: its morph weights, and each palette joint's matrix, the joint's world transform
+     * relative to the node's times its inverse bind matrix; the box of the joints' rest boxes, grown by the morphs'
+     * largest moves, so moved (or the rest box so grown), and how far any point moves.
      */
     private void pose(int item) {
         long node = itemNode[item];
-        SkinBinding skin = renderables.skin(node);
         MeshData data = itemMesh[item].mesh.data;
         int copy = itemCopy[item];
-        world(node, matrix);
-        invert(matrix, relative);
+        var deformation = resources.pool().deformation();
+        double morph = 0; // the farthest the morphs move a vertex
+        for (int t = 0; t < data.morphTargetCount(); t++) {
+            float weight = renderables.morphWeight(node, t);
+            deformation.weight(copy, t, weight);
+            morph += Math.abs(weight) * data.morphMaxDisplacement(t);
+        }
         box[0] = box[1] = box[2] = Double.POSITIVE_INFINITY;
         box[3] = box[4] = box[5] = Double.NEGATIVE_INFINITY;
+        double growth = 0;
+        if (itemCopySkinned[item]) {
+            growth = skin(node, data, copy, morph);
+        }
+        if (box[0] > box[3]) { // no joint moves a vertex: the rest box
+            for (int axis = 0; axis < 3; axis++) {
+                box[axis] = data.boxMin(axis);
+                box[3 + axis] = data.boxMin(axis) + data.boxExtent(axis);
+            }
+        }
+        deformation.bounds(copy, box[0] - morph, box[1] - morph, box[2] - morph, box[3] + morph, box[4] + morph,
+            box[5] + morph, growth + morph);
+    }
+
+    /**
+     * Sets each palette joint's matrix and fills {@link #box} with the joints' rest boxes, grown by {@code morph}, so
+     * moved (to be grown by it again: a morph's move is moved too); returns how far a point of them moves.
+     */
+    private double skin(long node, MeshData data, int copy, double morph) {
+        SkinBinding skin = renderables.skin(node);
+        world(node, matrix);
+        invert(matrix, relative);
         double growth = 0;
         double[] m = matrix;
         double[] corner = jointWorld; // reused below, after the joint's matrix is made
@@ -800,9 +833,9 @@ public final class SceneSync implements AutoCloseable {
                 continue; // a joint no vertex follows
             }
             for (int c = 0; c < 8; c++) {
-                double x = (c & 1) == 0 ? corner[0] : corner[3];
-                double y = (c & 2) == 0 ? corner[1] : corner[4];
-                double z = (c & 4) == 0 ? corner[2] : corner[5];
+                double x = (c & 1) == 0 ? corner[0] - morph : corner[3] + morph;
+                double y = (c & 2) == 0 ? corner[1] - morph : corner[4] + morph;
+                double z = (c & 4) == 0 ? corner[2] - morph : corner[5] + morph;
                 double px = r[0] * x + r[1] * y + r[2] * z + r[3];
                 double py = r[4] * x + r[5] * y + r[6] * z + r[7];
                 double pz = r[8] * x + r[9] * y + r[10] * z + r[11];
@@ -815,13 +848,7 @@ public final class SceneSync implements AutoCloseable {
                 growth = Math.max(growth, Maths.sqrt((px - x) * (px - x) + (py - y) * (py - y) + (pz - z) * (pz - z)));
             }
         }
-        if (box[0] > box[3]) { // no joint moves a vertex: the rest box
-            for (int axis = 0; axis < 3; axis++) {
-                box[axis] = data.boxMin(axis);
-                box[3 + axis] = data.boxMin(axis) + data.boxExtent(axis);
-            }
-        }
-        resources.pool().deformation().bounds(copy, box[0], box[1], box[2], box[3], box[4], box[5], growth);
+        return growth;
     }
 
     /** {@code node}'s world transform as rows of a 3x4 matrix. */

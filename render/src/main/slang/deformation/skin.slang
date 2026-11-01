@@ -4,7 +4,8 @@
 // bounded the pose by, and its normal and tangent (normals by the blended matrix's cofactors, so scaling keeps them
 // perpendicular). Its first thread writes the copy's mesh entry: box, sphere and the detail sphere grown by how far
 // the joints move. spheresMain, a thread per meshlet, after: each meshlet's sphere around its posed vertices, cone
-// culling off, and the cluster LOD spheres grown alike, so detail selection keeps the rest pose's order.
+// culling off, and the cluster LOD spheres grown alike, so detail selection keeps the rest pose's order. Morph
+// targets, if the copy has weights, move the rest vertices before skinning.
 import meshlets.common;
 
 struct DeformPush
@@ -15,13 +16,17 @@ struct DeformPush
     uint* meshlets;
     uint* meshletVertices;
     float* clusterLod;
-    float* matrices;           // the copy's joints, 12 floats each: rows of a 3x4 matrix, in the mesh's space
+    float* matrices;           // the copy's joints, 12 floats each: rows of a 3x4 matrix, in the mesh's space; then
+                               // its morph targets' weights
+    uint* morph;               // its morph targets: per vertex its first record, and one more; then the records
+    float3 boxMin;             // the posed mesh's box
+    float growth;              // the farthest any joint or morph moves a point of its box
+    float3 boxExtent;
     uint source;               // the mesh at rest
     uint target;               // its copy
     uint vertices;             // how many vertices it has (skinMain) or meshlets (spheresMain)
-    float growth;              // the farthest any joint moves a point of its box
-    float3 boxMin;             // the posed mesh's box
-    float3 boxExtent;
+    uint joints;               // 0: not skinned
+    uint targets;              // morph targets; 0: none
 };
 
 [[vk::push_constant]]
@@ -79,11 +84,40 @@ void skinMain(uint3 id : SV_DispatchThreadID)
     uint* attributes = push.attributes;
     uint2* positions = push.positions;
     uint format = source.attributeFormat;
-    uint joints = attributes[attributeIndex(source, v, 5)];
-    float4 weights = float4(attributes[attributeIndex(source, v, 6)] >> uint4(0, 8, 16, 24) & 0xff) / 255.0;
-    float3x4 m = weights.x * joint(joints & 0xff) + weights.y * joint(joints >> 8 & 0xff)
-        + weights.z * joint(joints >> 16 & 0xff) + weights.w * joint(joints >> 24);
+    float3x4 m = float3x4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
+    if (push.joints != 0)
+    {
+        uint joints = attributes[attributeIndex(source, v, 5)];
+        float4 weights = float4(attributes[attributeIndex(source, v, 6)] >> uint4(0, 8, 16, 24) & 0xff) / 255.0;
+        m = weights.x * joint(joints & 0xff) + weights.y * joint(joints >> 8 & 0xff)
+            + weights.z * joint(joints >> 16 & 0xff) + weights.w * joint(joints >> 24);
+    }
     float3 rest = decodePosition(positions[source.vertexBase + v], source);
+    // Morph targets first, at rest: their deltas by their weights (glTF's order)
+    float3 normalDelta = 0;
+    float3 tangentDelta = 0;
+    if (push.targets != 0)
+    {
+        uint* morph = push.morph;
+        float* morphWeights = push.matrices + 12 * push.joints;
+        uint* records = morph + (push.vertices + 1);
+        uint end = morph[v + 1];
+        for (uint r = morph[v]; r < end; r++)
+        {
+            uint* w = records + 5 * r;
+            float k = morphWeights[w[0] & 0xffff];
+            if (k != 0)
+            {
+                uint w1 = w[1];
+                uint w2 = w[2];
+                uint w3 = w[3];
+                uint w4 = w[4];
+                rest += k * float3(decodeHalf(w[0] >> 16), decodeHalf(w1 & 0xffff), decodeHalf(w1 >> 16));
+                normalDelta += k * float3(decodeHalf(w2 & 0xffff), decodeHalf(w2 >> 16), decodeHalf(w3 & 0xffff));
+                tangentDelta += k * float3(decodeHalf(w3 >> 16), decodeHalf(w4 & 0xffff), decodeHalf(w4 >> 16));
+            }
+        }
+    }
     float3 posed = mul(m, float4(rest, 1.0));
     float3 extent = max(boxExtent, 1e-20);
     uint3 q = uint3(saturate((posed - boxMin) / extent) * 65535.0 + 0.5);
@@ -98,13 +132,14 @@ void skinMain(uint3 id : SV_DispatchThreadID)
         // The cofactor matrix: the inverse transpose up to scale, which normalizing removes
         float3x3 cofactor = float3x3(cross(linear[1], linear[2]), cross(linear[2], linear[0]),
             cross(linear[0], linear[1]));
-        normal = normalize(mul(transpose(cofactor), decodeOctahedral(attributes[attributeIndex(source, v, 0)])));
+        float3 restNormal = decodeOctahedral(attributes[attributeIndex(source, v, 0)]) + normalDelta;
+        normal = normalize(mul(transpose(cofactor), restNormal));
         attributes[attributeIndex(target, v, 0)] = encodeOctahedral(normal, 0);
     }
     if ((format & 2) != 0)
     {
         uint word = attributes[attributeIndex(source, v, 1)];
-        float3 tangent = mul(linear, decodeOctahedral(word));
+        float3 tangent = mul(linear, decodeOctahedral(word) + tangentDelta);
         if ((format & 1) != 0)
         {
             tangent -= normal * dot(normal, tangent);
