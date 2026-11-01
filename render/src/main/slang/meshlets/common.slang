@@ -61,6 +61,24 @@ public struct Instance
     public uint layers;            // the layers it is on: drawn in views of any of them
 };
 
+/**
+ * The frame's scene buffers, as GpuScene writes them each frame (a copy per frame slot): what every draw reads,
+ * behind one pointer in its push block (push blocks hold 128 bytes on many devices). Read a field at a time
+ * (pitfalls.md).
+ */
+[HostLayout]
+public struct SceneTable
+{
+    public MeshEntry* meshes;
+    public Instance* instances;
+    public uint2* positions;       // 8 bytes per vertex
+    public uint* attributes;       // the meshes' attribute bytes, as words
+    public uint* meshlets;
+    public uint* meshletVertices;  // mesh vertex indices, per meshlet
+    public uint* meshletTriangles; // 3 bytes per triangle, as words
+    public Material* materials;
+};
+
 /** Instance flags, in the mesh word's top 8 bits. */
 public static const uint INSTANCE_LIVE = 1u << 24;          // 0: a hole, an id not in use
 public static const uint INSTANCE_CASTS_SHADOWS = 1u << 25;

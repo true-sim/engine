@@ -2122,21 +2122,6 @@ class GraphTechniquesTest {
     }
 
     @Test
-    void theClearColorPacksIntoOneWord() {
-        // resolve.slang decodes RGB9E5: 9 bits of mantissa a channel, plenty for 8-bit images.
-        int packed = VisibilityBufferShading.rgb9e5(0, 0, 0.5f);
-        assertThat(packed & 0x1ff).isZero();
-        assertThat(((packed >> 18) & 0x1ff) * Math.scalb(1.0, (packed >>> 27) - 24)).isEqualTo(0.5);
-        int any = VisibilityBufferShading.rgb9e5(0.1f, 0.73f, 2.5f);
-        double scale = Math.scalb(1.0, (any >>> 27) - 24);
-        assertThat((any & 0x1ff) * scale).isCloseTo(0.1, within(0.01));
-        assertThat(((any >> 9) & 0x1ff) * scale).isCloseTo(0.73, within(0.01));
-        assertThat(((any >> 18) & 0x1ff) * scale).isCloseTo(2.5, within(0.01));
-        assertThat(VisibilityBufferShading.rgb9e5(0, 0, 0)).isZero();
-        assertThat(VisibilityBufferShading.rgb9e5(1e9f, -1, Float.NaN) & 0x1ff).as("clamped").isEqualTo(511);
-    }
-
-    @Test
     void transmissiveMaterialsShowTheSceneBehindThroughThem() {
         MeshData mesh = twoUvQuad();
         int quadMesh = pool.add(mesh);

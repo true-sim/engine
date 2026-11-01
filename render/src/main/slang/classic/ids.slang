@@ -4,8 +4,8 @@ import classic.parts;
 
 struct ClassicIdsPush
 {
-    uint64_t unused[10];
-    Material* materials;   // at byte 80, as the path's draw push block has it
+    View* view;
+    SceneTable* scene;     // at byte 8, as the path's draw push block has it
 };
 
 [[vk::push_constant]]
@@ -21,6 +21,6 @@ uint2 classicIdsMain(VertexOut in, uint primitive : SV_PrimitiveID) : SV_Target
 [shader("fragment")]
 uint2 maskedClassicIdsMain(VertexOut in, uint primitive : SV_PrimitiveID, bool front : SV_IsFrontFace) : SV_Target
 {
-    discardMasked(push.materials[in.material], in, front);
+    discardMasked(push.scene[0].materials[in.material], in, front);
     return uint2(in.instance + 1, in.firstTriangle + primitive);
 }

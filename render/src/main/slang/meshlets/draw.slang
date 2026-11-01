@@ -5,22 +5,16 @@ import meshlets.common;
 
 struct DrawPush
 {
-    View* view;
-    MeshEntry* meshes;
-    Instance* instances;
-    uint2* positions;         // 8 bytes per vertex
-    uint* attributes;         // the meshes' attribute bytes, as words
+    View* view;               // the shaded fields at the same bytes in every raster block: draw.slang's fragment
+    SceneTable* scene;        // shader serves them all (common.slang's SceneTable: the frame's scene buffers)
+    LightListHeader* lights;  // at 16: the light list, or null: the sun
+    IndirectLight* indirect;  // at 24: the view's indirect-light table (indirect.slang), or null: the constant sky
     VisibleMeshlet* visible;
-    uint* meshlets;
-    uint* meshletVertices;
-    uint64_t unused[2];
-    Material* materials;      // at byte 80 and the light list at 88, as in mesh.slang's push block: the fragment
-    LightListHeader* lights;  // shader serves both paths (null: no light list, the sun)
+    uint64_t unused;
     uint unusedBin;
     uint unusedLate;
-    uint background;          // at byte 104 as in mesh.slang: the scene behind, for transmission; 0: none
+    uint background;          // at 56: the scene behind, for transmission (common.slang's Background); 0: none
     uint backgroundRegion;
-    IndirectLight* indirect;  // at byte 112 as in mesh.slang: the indirect-light table, or null
 };
 
 [[vk::push_constant]]
@@ -30,7 +24,7 @@ ConstantBuffer<DrawPush> push;
 Background behind(uint instance)
 {
     Background b = { push.background, push.backgroundRegion,
-        push.background != 0 ? maxScale(push.instances[instance]) : 1.0 };
+        push.background != 0 ? maxScale(push.scene[0].instances[instance]) : 1.0 };
     return b;
 }
 
@@ -38,12 +32,14 @@ Background behind(uint instance)
 VertexOut vertexMain(uint index : SV_VulkanVertexID)
 {
     VisibleMeshlet v = push.visible[index >> 8];
-    Instance instance = relative(push.instances[v.instance], push.view[0]);
-    MeshEntry mesh = push.meshes[instance.mesh];
-    uint vertexOffset = push.meshlets[v.meshlet * 8];
-    uint vertex = mesh.vertexBase + push.meshletVertices[mesh.meshletVertexBase + vertexOffset + (index & 0xff)];
-    VertexOut out = transformVertex(push.view[0], instance, mesh, vertex, push.positions, push.attributes, v.meshlet,
-        meshletSubmesh(push.meshlets, v.meshlet));
+    Instance instance = relative(push.scene[0].instances[v.instance], push.view[0]);
+    MeshEntry mesh = push.scene[0].meshes[instance.mesh];
+    uint vertexOffset = push.scene[0].meshlets[v.meshlet * 8];
+    uint vertex = mesh.vertexBase
+        + push.scene[0].meshletVertices[mesh.meshletVertexBase + vertexOffset + (index & 0xff)];
+    VertexOut out = transformVertex(push.view[0], instance, mesh, vertex, push.scene[0].positions,
+        push.scene[0].attributes, v.meshlet,
+        meshletSubmesh(push.scene[0].meshlets, v.meshlet));
     out.instance = v.instance;
     out.firstTriangle = v.firstIndex / 3;
     return out;
@@ -53,7 +49,7 @@ VertexOut vertexMain(uint index : SV_VulkanVertexID)
 float4 fragmentMain(VertexOut in) : SV_Target
 {
     float4 uvs = float4(in.uv, in.uv1);
-    return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
+    return shadeSurface(NoRays(), push.view[0], in, push.scene[0].materials, ddx(uvs), ddy(uvs), push.lights,
         uint2(in.position.xy), behind(in.instance), push.indirect);
 }
 
@@ -64,9 +60,10 @@ float4 fragmentMain(VertexOut in) : SV_Target
 [shader("fragment")]
 BlendedOut blendedMain(VertexOut in, bool front : SV_IsFrontFace)
 {
-    discardMasked(push.materials[in.material], in, front); // masked transmissive materials draw here too
+    discardMasked(push.scene[0].materials[in.material], in, front); // masked transmissive materials draw here too
     float4 uvs = float4(in.uv, in.uv1);
-    return weighBlended(shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
+    return weighBlended(shadeSurface(NoRays(), push.view[0], in, push.scene[0].materials, ddx(uvs), ddy(uvs),
+        push.lights,
         uint2(in.position.xy), behind(in.instance), push.indirect), length(in.world));
 }
 
@@ -74,9 +71,9 @@ BlendedOut blendedMain(VertexOut in, bool front : SV_IsFrontFace)
 [shader("fragment")]
 float4 maskedMain(VertexOut in, bool front : SV_IsFrontFace) : SV_Target
 {
-    discardMasked(push.materials[in.material], in, front);
+    discardMasked(push.scene[0].materials[in.material], in, front);
     float4 uvs = float4(in.uv, in.uv1);
-    return shadeSurface(NoRays(), push.view[0], in, push.materials, ddx(uvs), ddy(uvs), push.lights,
+    return shadeSurface(NoRays(), push.view[0], in, push.scene[0].materials, ddx(uvs), ddy(uvs), push.lights,
         uint2(in.position.xy), behind(in.instance), push.indirect);
 }
 
@@ -84,5 +81,5 @@ float4 maskedMain(VertexOut in, bool front : SV_IsFrontFace) : SV_Target
 [shader("fragment")]
 void maskedDepthMain(VertexOut in, bool front : SV_IsFrontFace)
 {
-    discardMasked(push.materials[in.material], in, front);
+    discardMasked(push.scene[0].materials[in.material], in, front);
 }
