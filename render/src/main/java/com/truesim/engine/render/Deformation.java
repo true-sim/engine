@@ -15,9 +15,11 @@ import com.truesim.engine.render.layout.DeformPush;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
+import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
+import com.truesim.scene.assets.mesh.MeshData;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -36,6 +38,10 @@ import java.util.Arrays;
  * deformation.joint(copy, j, m00, m01, m02, m03, m10, ..., m23);   // per joint: rows of a 3x4 matrix
  * deformation.bounds(copy, minX, minY, minZ, maxX, maxY, maxZ, growth);
  * }</pre>
+ *
+ * <p>A copy of a mesh with morph targets ({@link #add(int, int, MeshData)}) has their weights too ({@link #weight}):
+ * the targets' deltas, uploaded once per mesh, are added to the rest vertices before skinning; a copy may have no
+ * joints then. The box and growth count the morphs' moves as well.
  *
  * <p>A copy draws as its source until its first bounds; posed, it is skinned every frame (skipping unchanged ones
  * comes later). Its meshlets' spheres are recomputed from the posed vertices, cone culling is off for it, and its
@@ -56,11 +62,27 @@ public final class Deformation {
     private MemorySegment matrices;
     private FrameBuffer frameMatrices;
     private final RangeAllocator matrixRanges;
-    // By mesh number: the copy's first matrix and count (0: not a copy), box and growth, and whether it is posed.
+    // By mesh number: the copy's first matrix, joints, morph targets and matrix slots (its weights after its joints'
+    // matrices), box and growth, and whether it is added and posed.
     private int[] firstMatrix = new int[64];
     private int[] jointCount = new int[64];
+    private int[] targetCount = new int[64];
+    private int[] matrixSlots = new int[64];
+    private boolean[] added = new boolean[64];
     private float[] bounds = new float[7 * 64];
     private boolean[] posed = new boolean[64];
+    // Morph targets by source mesh number, uploaded once while copies of it are added: their bytes' start in morphData
+    // (offsets per vertex and one more, then the records) and how many copies use them. Ranges let go wait for the
+    // frames that may read them.
+    private GpuBuffer morphData;
+    private final RangeAllocator morphRanges;
+    private long[] morphStart = new long[64];
+    private long[] morphLength = new long[64];
+    private int[] morphUsers = new int[64];
+    private long[] releasingStart = new long[16];
+    private long[] releasingLength = new long[16];
+    private long[] releasingAt = new long[16];
+    private int releasingCount;
     // The copies, densely.
     private int[] copies = new int[64];
     private int copyCount;
@@ -73,39 +95,67 @@ public final class Deformation {
         this.retired = new Retiring(slots);
         this.matrixRanges = new RangeAllocator(256);
         this.matrices = arena.allocate(256L * MATRIX_FLOATS * 4, 16);
+        this.morphRanges = new RangeAllocator(1 << 16);
+        this.morphData = GpuBuffer.hostVisible(device, 1 << 16,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
     }
 
     /** Takes copy {@code copy} (a pool's deformed mesh) with {@code joints} joints, its palette's. */
-    @AllowAllocation("adding a copy")
     public void add(int copy, int joints) {
-        if (pool.deformedFrom(copy) < 0) {
+        add(copy, joints, null);
+    }
+
+    /**
+     * Takes copy {@code copy} with {@code joints} joints (0 to 256; at least 1 unless {@code mesh} has morph targets)
+     * and {@code mesh}'s morph targets (the copy's source's data; null or none: no morphs), their weights 0.
+     */
+    @AllowAllocation("adding a copy")
+    public void add(int copy, int joints, MeshData mesh) {
+        int source = pool.deformedFrom(copy);
+        if (source < 0) {
             throw new IllegalArgumentException("Not a deformed copy: " + copy);
         }
-        if (joints < 1 || joints > 256) {
-            throw new IllegalArgumentException("A copy has 1 to 256 joints: " + joints);
+        int targets = mesh == null ? 0 : mesh.morphTargetCount();
+        if (joints < (targets > 0 ? 0 : 1) || joints > 256) {
+            throw new IllegalArgumentException("A copy has 1 to 256 joints, or 0 with morph targets: " + joints);
         }
-        if (copy < jointCount.length && jointCount[copy] != 0) {
+        if (targets > 0 && mesh.vertexCount() != pool.vertexCountOf(copy)) {
+            throw new IllegalArgumentException("Not the copy's mesh: " + mesh.vertexCount() + " vertices for "
+                + pool.vertexCountOf(copy));
+        }
+        if (copy < added.length && added[copy]) {
             throw new IllegalStateException("Copy " + copy + " was added already");
         }
-        if (copy >= jointCount.length) {
-            int length = Math.max(copy + 1, 2 * jointCount.length);
+        if (copy >= added.length) {
+            int length = Math.max(copy + 1, 2 * added.length);
             firstMatrix = Arrays.copyOf(firstMatrix, length);
             jointCount = Arrays.copyOf(jointCount, length);
+            targetCount = Arrays.copyOf(targetCount, length);
+            matrixSlots = Arrays.copyOf(matrixSlots, length);
+            added = Arrays.copyOf(added, length);
             bounds = Arrays.copyOf(bounds, 7 * length);
             posed = Arrays.copyOf(posed, length);
         }
-        long first = matrixRanges.allocate(joints, 1);
+        int slotCount = Math.max(1, joints + (targets + MATRIX_FLOATS - 1) / MATRIX_FLOATS);
+        long first = matrixRanges.allocate(slotCount, 1);
         if (first < 0) {
-            long capacity = Math.max(2 * matrixRanges.capacity(), matrixRanges.capacity() + joints);
+            long capacity = Math.max(2 * matrixRanges.capacity(), matrixRanges.capacity() + slotCount);
             MemorySegment grown = arena.allocate(capacity * MATRIX_FLOATS * 4, 16);
             MemorySegment.copy(matrices, 0, grown, 0, matrices.byteSize());
             matrices = grown; // the arena frees it with the rest
             matrixRanges.grow(capacity);
-            first = matrixRanges.allocate(joints, 1);
+            first = matrixRanges.allocate(slotCount, 1);
+        }
+        if (targets > 0) {
+            holdMorphs(source, mesh);
         }
         firstMatrix[copy] = (int) first;
         jointCount[copy] = joints;
+        targetCount[copy] = targets;
+        matrixSlots[copy] = slotCount;
+        added[copy] = true;
         posed[copy] = false;
+        matrices.asSlice(4L * MATRIX_FLOATS * first, 4L * MATRIX_FLOATS * slotCount).fill((byte) 0); // weights 0
         if (copyCount == copies.length) {
             copies = Arrays.copyOf(copies, 2 * copyCount);
         }
@@ -115,13 +165,80 @@ public final class Deformation {
         }
     }
 
+    /** Uploads {@code mesh}'s morph targets for copies of {@code source}, unless they are already. */
+    @AllowAllocation("adding a copy of a mesh with morph targets")
+    private void holdMorphs(int source, MeshData mesh) {
+        if (source >= morphUsers.length) {
+            int length = Math.max(source + 1, 2 * morphUsers.length);
+            morphStart = Arrays.copyOf(morphStart, length);
+            morphLength = Arrays.copyOf(morphLength, length);
+            morphUsers = Arrays.copyOf(morphUsers, length);
+        }
+        if (morphUsers[source]++ > 0) {
+            return;
+        }
+        releaseMorphRanges();
+        long offsets = mesh.morphOffsets().byteSize();
+        long length = offsets + mesh.morphRecords().byteSize();
+        long start = morphRanges.allocate(length, 4);
+        if (start < 0) {
+            long capacity = Math.max(2 * morphRanges.capacity(), morphRanges.capacity() + length + 4);
+            GpuBuffer grown = GpuBuffer.hostVisible(device, capacity,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            MemorySegment.copy(morphData.memory(), 0, grown.memory(), 0, morphData.size());
+            retired.add(morphData); // frames in flight read it
+            morphData = grown;
+            morphRanges.grow(capacity);
+            start = morphRanges.allocate(length, 4);
+        }
+        MemorySegment.copy(mesh.morphOffsets(), 0, morphData.memory(), start, offsets);
+        MemorySegment.copy(mesh.morphRecords(), 0, morphData.memory(), start + offsets, mesh.morphRecords().byteSize());
+        morphStart[source] = start;
+        morphLength[source] = length;
+    }
+
+    /** Lets go of {@code source}'s morph targets once no copy uses them and no frame in flight reads them. */
+    @AllowAllocation("growing the list of ranges let go")
+    private void releaseMorphs(int source) {
+        if (--morphUsers[source] > 0) {
+            return;
+        }
+        if (releasingCount == releasingStart.length) {
+            releasingStart = Arrays.copyOf(releasingStart, 2 * releasingCount);
+            releasingLength = Arrays.copyOf(releasingLength, 2 * releasingCount);
+            releasingAt = Arrays.copyOf(releasingAt, 2 * releasingCount);
+        }
+        releasingStart[releasingCount] = morphStart[source];
+        releasingLength[releasingCount] = morphLength[source];
+        releasingAt[releasingCount++] = slots.retireAt();
+    }
+
+    private void releaseMorphRanges() {
+        int kept = 0;
+        for (int i = 0; i < releasingCount; i++) {
+            if (slots.isFinished(releasingAt[i])) {
+                morphRanges.release(releasingStart[i], releasingLength[i]);
+            } else {
+                releasingStart[kept] = releasingStart[i];
+                releasingLength[kept] = releasingLength[i];
+                releasingAt[kept++] = releasingAt[i];
+            }
+        }
+        releasingCount = kept;
+    }
+
     /** Lets go of copy {@code copy}: the pool removed it. */
     void forget(int copy) {
-        if (copy >= jointCount.length || jointCount[copy] == 0) {
+        if (copy >= added.length || !added[copy]) {
             return; // added to the pool, never posed here
         }
-        matrixRanges.release(firstMatrix[copy], jointCount[copy]);
+        matrixRanges.release(firstMatrix[copy], matrixSlots[copy]);
+        if (targetCount[copy] > 0) {
+            releaseMorphs(pool.deformedFrom(copy));
+        }
+        added[copy] = false;
         jointCount[copy] = 0;
+        targetCount[copy] = 0;
         posed[copy] = false;
         for (int i = 0; i < copyCount; i++) {
             if (copies[i] == copy) {
@@ -142,7 +259,8 @@ public final class Deformation {
      */
     public void joint(int copy, int joint, double m00, double m01, double m02, double m03, double m10, double m11,
         double m12, double m13, double m20, double m21, double m22, double m23) {
-        long at = 4L * MATRIX_FLOATS * (firstMatrix[copy] + java.util.Objects.checkIndex(joint, joints(copy)));
+        added(copy);
+        long at = 4L * MATRIX_FLOATS * (firstMatrix[copy] + java.util.Objects.checkIndex(joint, jointCount[copy]));
         matrices.set(F32, at, (float) m00);
         matrices.set(F32, at + 4, (float) m01);
         matrices.set(F32, at + 8, (float) m02);
@@ -157,13 +275,21 @@ public final class Deformation {
         matrices.set(F32, at + 44, (float) m23);
     }
 
+    /** Morph target {@code target}'s weight for copy {@code copy}. */
+    public void weight(int copy, int target, double weight) {
+        added(copy);
+        long at = 4L * (MATRIX_FLOATS * ((long) firstMatrix[copy] + jointCount[copy])
+            + java.util.Objects.checkIndex(target, targetCount[copy]));
+        matrices.set(F32, at, (float) weight);
+    }
+
     /**
      * The box holding copy {@code copy} as posed, in its mesh's space (positions are quantized in it), and the farthest
      * any joint moves a point of its box; from now on it is skinned every frame.
      */
     public void bounds(int copy, double minX, double minY, double minZ, double maxX, double maxY, double maxZ,
         double growth) {
-        joints(copy);
+        added(copy);
         if (!(maxX >= minX && maxY >= minY && maxZ >= minZ) || !Double.isFinite(minX + minY + minZ + maxX + maxY + maxZ)
             || !(growth >= 0) || growth == Double.POSITIVE_INFINITY) {
             throw new IllegalArgumentException("Not a box and growth: " + minX + ", " + minY + ", " + minZ + " to "
@@ -180,11 +306,10 @@ public final class Deformation {
         posed[copy] = true;
     }
 
-    private int joints(int copy) {
-        if (copy < 0 || copy >= jointCount.length || jointCount[copy] == 0) {
+    private void added(int copy) {
+        if (copy < 0 || copy >= added.length || !added[copy]) {
             throw new IllegalArgumentException("Not a copy of these: " + copy);
         }
-        return jointCount[copy];
     }
 
     /**
@@ -193,6 +318,7 @@ public final class Deformation {
      */
     void record(PassContext ctx, SceneData.Buffers buffers, Pipeline skin, Pipeline spheres, DeformPush push) {
         retired.release();
+        releaseMorphRanges();
         if (copyCount == 0) {
             return;
         }
@@ -242,7 +368,10 @@ public final class Deformation {
 
     private DeformPush set(DeformPush push, int copy, long matrixBase) {
         int b = 7 * copy;
-        return push.matrices(matrixBase + 4L * MATRIX_FLOATS * firstMatrix[copy]).source(pool.deformedFrom(copy))
+        int source = pool.deformedFrom(copy);
+        push.morph(targetCount[copy] > 0 ? morphData.deviceAddress() + morphStart[source] : 0)
+            .joints(jointCount[copy]).targets(targetCount[copy]);
+        return push.matrices(matrixBase + 4L * MATRIX_FLOATS * firstMatrix[copy]).source(source)
             .target(copy).growth(bounds[b + 6]).boxMin(bounds[b], bounds[b + 1], bounds[b + 2])
             .boxExtent(bounds[b + 3], bounds[b + 4], bounds[b + 5]);
     }
@@ -252,6 +381,7 @@ public final class Deformation {
         if (frameMatrices != null) {
             frameMatrices.close();
         }
+        morphData.close();
         retired.close();
         arena.close();
     }

@@ -147,6 +147,7 @@ class SampleModelsRender {
             // -PgltfAnimation=t1,t2,...: the model's first clip (or -PgltfClip=name) posed at each time, an image each
             String times = System.getProperty("truesim.gltf.animation");
             Animators animators = new Animators(scene);
+            animators.morphSink(renderables::setMorphWeights); // animated morph weights drawn
             ClipState playing = null;
             if (times != null && !model.animations().isEmpty()) {
                 String name = System.getProperty("truesim.gltf.clip");

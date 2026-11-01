@@ -497,6 +497,44 @@ class SceneSyncTest {
         assertThat(sync.instanceCount()).isZero();
     }
 
+    /** A 2 x 2 square facing up whose morph target moves it 2 along x. */
+    static MeshData morphingSquare() {
+        float[] positions = {-1, 0, -1, 1, 0, -1, -1, 0, 1, 1, 0, 1};
+        float[] normals = {0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0};
+        return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL), 4).positions(positions)
+            .attribute(VertexAttribute.NORMAL, normals)
+            .morphTarget("slide", new float[] {2, 0, 0, 2, 0, 0, 2, 0, 0, 2, 0, 0}, null, null)
+            .submesh(new int[] {0, 2, 1, 1, 2, 3}).buildFlat();
+    }
+
+    static final AssetRef<MeshData> MORPHING = AssetRef.generated(RenderAssets.MESH,
+        (Generator<Integer, MeshData>) (unused, seed) -> morphingSquare(), 0, 1);
+
+    @Test
+    void morphingRenderablesDrawCopiesMovedByTheirWeights() throws InterruptedException {
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        GpuBuffer[] readbacks = {readback(), readback()};
+        FrameGraph graph = graph(sync, false, readbacks);
+        long face = facing(scene, -1, 0, -3);
+        renderables.set(face, MORPHING, List.of(RED));
+        settle(List.of(graph), List.of(sync));
+        device.waitIdle();
+        assertThat(pool.deformation().size()).as("a copy, without a skin").isOne();
+        double rest = litColumn(readbacks[0], 0);
+        assertThat(rest).as("weight 0: at rest, left").isLessThan(SIZE / 2.0 - 4);
+        renderables.setMorphWeights(face, new double[] {1}, 0, 1);
+        for (int frame = 0; frame < 2; frame++) {
+            frame(List.of(graph), List.of(sync), camera);
+        }
+        device.waitIdle();
+        assertThat(litColumn(readbacks[0], 0)).as("slid 2 right").isCloseTo(rest + 21, within(2.0));
+        renderables.remove(face);
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(pool.deformation().size()).isZero();
+    }
+
     @Test
     void instancesWrittenOnManyThreadsAreTheSame() throws InterruptedException {
         // 5,000 small squares, followed twice: by a sync writing on the calling thread and one writing on four. All

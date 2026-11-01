@@ -438,6 +438,12 @@ class GraphTechniquesTest {
             g.pass("geometry readback").read(scene.positions(), com.truesim.engine.graph.BufferAccess.TRANSFER_SRC)
                 .read(scene.meshlets(), com.truesim.engine.graph.BufferAccess.TRANSFER_SRC).sideEffects()
                 .record(ctx -> {
+                    // Every frame copies into the one buffer: after the frames before
+                    com.truesim.engine.vulkan.Barriers.memory(ctx.unsafe().commands(),
+                        org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                        org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                        org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT);
                     long half = into.size() / 2;
                     try (MemoryStack stack = stackPush()) {
                         org.lwjgl.vulkan.VkBufferCopy.Buffer region = org.lwjgl.vulkan.VkBufferCopy.calloc(1, stack);
@@ -553,6 +559,97 @@ class GraphTechniquesTest {
             posing.remove(wide);
             assertThat(deformation.size()).isZero();
             posing.remove(source);
+        }
+    }
+
+    /** {@link #skinnedQuad()} with a morph target raising its far edge (z = 1) by 1 and tilting its normals there. */
+    static MeshData morphingQuad(boolean skinned) {
+        float[] positions = {-1, 0, -1, 1, 0, -1, -1, 0, 1, 1, 0, 1};
+        float[] normals = {0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0};
+        float[] raise = {0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0};
+        float[] tilt = {0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, -1};
+        VertexFormat format = skinned ? VertexFormat.of(VertexAttribute.NORMAL, VertexAttribute.JOINTS,
+            VertexAttribute.WEIGHTS) : VertexFormat.of(VertexAttribute.NORMAL);
+        MeshBuilder builder = new MeshBuilder(format, 4).positions(positions).attribute(VertexAttribute.NORMAL, normals)
+            .morphTarget("raise", raise, tilt, null).submesh(new int[] {0, 2, 1, 1, 2, 3});
+        if (skinned) {
+            builder.attribute(VertexAttribute.WEIGHTS, new float[] {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0})
+                .joints(new int[] {0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0});
+        }
+        return builder.buildFlat();
+    }
+
+    @Test
+    void morphTargetsMoveDeformedCopiesByTheirWeightsBeforeSkinning() {
+        // Half the raise: the far edge at y = 0.5; skinned too, the right half lifted by 1 more after it.
+        MeshData plain = morphingQuad(false);
+        MeshData skinned = morphingQuad(true);
+        try (GeometryPool posing = new GeometryPool(device, GeometryPool.Capacity.of(64, 4, 4), graph.frameSlots());
+             GpuScene posed = new GpuScene(device, posing, 4, graph.frameSlots());
+             MeshletRenderer drawing = new MeshletRenderer(device, posed, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots());
+             GpuBuffer readback = GpuBuffer.hostVisible(device, 2 * 4096, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+            int plainSource = posing.add(plain);
+            int skinnedSource = posing.add(skinned);
+            int face = posing.addDeformed(plainSource);
+            int twin = posing.addDeformed(plainSource); // shares the uploaded targets
+            int body = posing.addDeformed(skinnedSource);
+            Deformation deformation = posing.deformation();
+            assertThatIllegalArgumentException().isThrownBy(() -> deformation.add(face, 0)); // no joints, no morphs
+            assertThatIllegalArgumentException().isThrownBy(() -> deformation.add(face, 0, skinnedQuad()));
+            assertThatIllegalArgumentException().isThrownBy(() -> deformation.add(face, 0, MeshletRendererTest.grid(2,
+                1, false, VertexFormat.POSITIONS_ONLY))); // another mesh: other vertices
+            deformation.add(face, 0, plain);
+            deformation.add(twin, 0, plain);
+            deformation.add(body, 2, skinned);
+            assertThatExceptionOfType(IndexOutOfBoundsException.class)
+                .isThrownBy(() -> deformation.weight(face, 1, 1));
+            assertThatIllegalArgumentException().isThrownBy(() -> deformation.weight(-1, 0, 1));
+            SceneGeometry geometry = SceneGeometry.meshlets(drawing);
+            Camera camera = new Camera().set(0, 3, -3, 0, 0, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            ViewPort port = graph.addView("main").size(SIZE, SIZE);
+            SceneView posedView = geometry.createView(port, camera, ViewOptions.of(256, 1 << 12));
+            port.add(new ClusteredForwardShading(geometry, posedView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                    .clearColor(0, 0, 0))
+                .add(new GeometryReadback(drawing, readback)).output(Keys.SCENE_COLOR, output);
+            for (int frame = 0; frame < 3; frame++) {
+                graph.beginFrame();
+                deformation.weight(face, 0, 0.5);
+                deformation.bounds(face, -1, 0, -1, 1, 0.5, 1, 0.5);
+                deformation.weight(body, 0, 0.5);
+                deformation.joint(body, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
+                deformation.joint(body, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0);
+                deformation.bounds(body, -1, 0, -1, 1, 1.5, 1, 1.5);
+                posed.set(0, face, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1);
+                posed.set(1, body, 3, 0, 0, 0, 0, 0, 1, 1, 1, 1);
+                posedView.set(1, MeshletRenderer.MODE_WHITE);
+                graph.submit(0, 0);
+            }
+            device.waitIdle();
+            java.lang.foreign.MemorySegment data = readback.memory();
+            for (int v = 0; v < 4; v++) {
+                double[] rest = decode(data, posing.vertexBase(plainSource) + v, plain.boxMin(0), plain.boxMin(1),
+                    plain.boxMin(2), plain.boxExtent(0), plain.boxExtent(1), plain.boxExtent(2));
+                double[] p = decode(data, posing.vertexBase(face) + v, -1, 0, -1, 2, 0.5, 2);
+                assertThat(p[1]).as("y of vertex " + v).isCloseTo(rest[2] > 0 ? 0.5 : 0, within(1e-3));
+                double[] q = decode(data, posing.vertexBase(body) + v, -1, 0, -1, 2, 1.5, 2);
+                assertThat(q[1]).as("skinned y of vertex " + v)
+                    .isCloseTo((rest[2] > 0 ? 0.5 : 0) + (rest[0] > 0 ? 1 : 0), within(1e-3));
+            }
+            // Copies let go of the targets; the last one frees them once no frame reads them.
+            posing.remove(twin);
+            posing.remove(face);
+            posing.remove(body);
+            for (int frame = 0; frame < 3; frame++) {
+                graph.beginFrame();
+                posedView.set(1, MeshletRenderer.MODE_WHITE);
+                graph.submit(0, 0);
+            }
+            device.waitIdle();
+            int again = posing.addDeformed(plainSource);
+            deformation.add(again, 0, plain);
+            assertThat(deformation.size()).isOne();
+            posing.remove(again);
         }
     }
 
