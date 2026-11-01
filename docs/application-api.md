@@ -11,6 +11,11 @@ data. (The scene repo's `scene.world.Feature` is a world content variant and kee
 
 ## 1. Application setup
 
+**Built since:** `engine-app` (D1, D2, D31–D33, D35, D118, D125–D127): `Application`, `AppConfig`, `Plugin`,
+`PluginKey`, `Stage`, `Startup`, `StartupFailure`, `FrameDriver`, `Frame`, `Engine`, `TrueSim`, `SettingsFile` (D7).
+Not yet: `fixedUpdate` (with the clocks, D88–D92), BaseGame, plugins for platform, rendering and XR, the native error
+box.
+
 ```java
 public final class RockGarden extends BaseGame {
     public static void main(String[] args) { run(new RockGarden(), args); }
