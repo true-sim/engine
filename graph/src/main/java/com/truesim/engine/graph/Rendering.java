@@ -39,6 +39,7 @@ public final class Rendering implements Plugin {
     private final Set<String> deviceExtensions = new LinkedHashSet<>();
     private Function<VulkanInstance, Gpu> gpuChoice;
     private boolean validation;
+    private boolean headless;
     private int framesInFlight = 2;
     private VulkanInstance instance;
     private Gpu gpu;
@@ -54,6 +55,15 @@ public final class Rendering implements Plugin {
     /** Vulkan's validation layers on or off (off by default): for development. Before startup. */
     public Rendering validation(boolean on) {
         validation = on;
+        return this;
+    }
+
+    /**
+     * Without windows: no surfaces, no swapchains, no platform needed (servers rendering offscreen, tests). Before
+     * startup.
+     */
+    public Rendering headless(boolean on) {
+        headless = on;
         return this;
     }
 
@@ -107,10 +117,11 @@ public final class Rendering implements Plugin {
         try {
             switch (stage) {
                 case INSTANCE -> instance = VulkanInstance.builder().applicationName(startup.engine().name())
-                    .validation(validation).extensions(instanceExtensions).build();
+                    .validation(validation).surfaces(!headless).extensions(instanceExtensions).build();
                 case GPU -> gpu = gpuChoice != null ? gpuChoice.apply(instance) : instance.bestGpu();
                 case DEVICE -> {
-                    device = VulkanDevice.create(gpu, deviceExtensions);
+                    device = headless && deviceExtensions.isEmpty() ? VulkanDevice.createHeadless(gpu)
+                        : VulkanDevice.create(gpu, deviceExtensions);
                     graph = new FrameGraph(device, framesInFlight).settings(startup.settings());
                     presenter = new Presenter(graph, instance);
                     startup.defaultFrameDriver(new Presenting());

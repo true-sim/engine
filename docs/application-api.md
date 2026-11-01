@@ -15,7 +15,8 @@ data. (The scene repo's `scene.world.Feature` is a world content variant and kee
 `PluginKey`, `Stage`, `Startup`, `StartupFailure`, `FrameDriver`, `Frame`, `Engine`, `TrueSim`, `SettingsFile` (D7).
 Plugins: `Desktop` (engine-platform), `Rendering` (engine-graph: instance, device, graph, presenter as the default
 frame driver), `Xr` (engine-xr: `Xr.ifAvailable()` / `Xr.required()`, drives frames with `Headset.beginFrame` and
-`submit`); the demo runs on them. Not yet: `fixedUpdate` (with the clocks, D88–D92), BaseGame, the native error box.
+`submit`); the demo runs on them. `Assets` (engine-scene: cache, path assets, GPU resources); glTF import is
+scene's `scene-gltf` module, models are `RenderAssets.MODEL` (D17), sub-assets path fragments (`#mesh/0`). Not yet: `fixedUpdate` (with the clocks, D88–D92), BaseGame, the native error box.
 
 ```java
 public final class RockGarden extends BaseGame {

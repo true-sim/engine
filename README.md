@@ -48,6 +48,10 @@ public final class Hello implements Application {
   and device extensions or pick the GPU in the stage before it acts) and `Xr` (a headset: connects first, picks the
   GPU, starts its session with the graph and drives frames, so the game's update reads this frame's poses). The demo
   is an `Application` on them.
+- **`Assets`** (engine-scene): the asset cache on the engine's jobs, path-addressed assets on it (`paths()`: mounts
+  and importers; `mount("game", folder)` before startup) and their GPU side (`resources()`). Nothing is imported by
+  default: add importers, e.g. `new Gltf(assets.paths()).register()` from scene-gltf. `assets.budgetMegabytes` is a
+  developer setting. `Rendering.headless(true)` runs without windows, for servers and tests.
 
 
 One `Platform` per process, used from the thread that started it. Events go to a `PlatformListener` as engine
