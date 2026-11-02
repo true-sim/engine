@@ -849,6 +849,58 @@ class PlatformTest {
     }
 
     @Test
+    void audioStartsOnThePlatformThreadAndItsDeviceEventsAreForwarded() throws InterruptedException {
+        assertThat(Platform.runningAudioDriver()).isNull();
+        platform.startAudio("dummy");
+        platform.startAudio("dummy"); // started already
+        assertThat(Platform.runningAudioDriver()).isEqualTo("dummy");
+        Thread other = new Thread(() -> assertThatThrownBy(() -> platform.startAudio(null))
+            .isInstanceOf(IllegalStateException.class));
+        other.start();
+        other.join();
+        List<String> heard = new ArrayList<>();
+        PlatformListener audio = new PlatformListener() {
+            @Override
+            public void audioDeviceAdded(int device, boolean playback) {
+                heard.add("added " + device + " " + playback);
+            }
+
+            @Override
+            public void audioDeviceRemoved(int device) {
+                heard.add("removed " + device);
+            }
+
+            @Override
+            public void audioDeviceFormatChanged(int device) {
+                heard.add("format " + device);
+            }
+        };
+        platform.pollEvents(audio);
+        heard.clear();
+        long e = event.address();
+        push(SDLEvents.SDL_EVENT_AUDIO_DEVICE_ADDED);
+        org.lwjgl.sdl.SDL_AudioDeviceEvent.nwhich(e, 77);
+        send();
+        push(SDLEvents.SDL_EVENT_AUDIO_DEVICE_ADDED);
+        org.lwjgl.sdl.SDL_AudioDeviceEvent.nwhich(e, 78);
+        org.lwjgl.sdl.SDL_AudioDeviceEvent.nrecording(e, true);
+        send();
+        push(SDLEvents.SDL_EVENT_AUDIO_DEVICE_REMOVED);
+        org.lwjgl.sdl.SDL_AudioDeviceEvent.nwhich(e, 77);
+        send();
+        push(SDLEvents.SDL_EVENT_AUDIO_DEVICE_FORMAT_CHANGED);
+        org.lwjgl.sdl.SDL_AudioDeviceEvent.nwhich(e, 79);
+        send();
+        platform.pollEvents(audio);
+        assertThat(heard).containsExactly("added 77 true", "added 78 false", "removed 77", "format 79");
+        PlatformListener ignoring = new PlatformListener() {
+        };
+        ignoring.audioDeviceAdded(1, true);
+        ignoring.audioDeviceRemoved(1);
+        ignoring.audioDeviceFormatChanged(1);
+    }
+
+    @Test
     void moreEventsAndDefaults() {
         Recorder recorder = new Recorder();
         poll(recorder);

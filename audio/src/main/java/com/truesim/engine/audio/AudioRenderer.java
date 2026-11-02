@@ -164,6 +164,14 @@ public final class AudioRenderer implements AutoCloseable {
         clock.publish(frame, System.nanoTime(), 0);
     }
 
+    /**
+     * Renders a block into {@code scratch} to warm the JIT up before a device starts (§2.3: about 200, so the audio
+     * thread never runs interpreted code for long). The blocks count: the clock moves on.
+     */
+    void warmUp(float[] scratch) {
+        render(scratch, 0, format.block());
+    }
+
     /** The last block rendered, interleaved. */
     float[] block() {
         return block;

@@ -22,3 +22,17 @@ tasks.test {
     providers.gradleProperty("truesim.audio.goldens").orNull?.let { systemProperty("truesim.audio.goldens", it) }
     systemProperty("truesim.audio.resources", file("src/test/resources/com/truesim/engine/audio").absolutePath)
 }
+
+// The real-device probe (AudioDeviceProbe): TRUESIM_AUDIO=true ./gradlew :engine-audio:test --tests '*AudioDeviceProbe*'
+// [-Ptruesim.audio.seconds=600] [-Ptruesim.audio.garbage=true] [-Ptruesim.audio.zgc=true] [-Ptruesim.audio.minimised=true]
+tasks.test {
+    for (name in listOf("seconds", "garbage", "minimised")) {
+        providers.gradleProperty("truesim.audio.$name").orNull?.let { systemProperty("truesim.audio.$name", it) }
+    }
+    if (providers.gradleProperty("truesim.audio.zgc").orNull == "true") {
+        jvmArgs("-XX:+UseZGC")
+    }
+    if (providers.environmentVariable("TRUESIM_AUDIO").orNull == "true") {
+        extensions.configure<JacocoTaskExtension> { isEnabled = false } // measure the code, not its coverage probes
+    }
+}
