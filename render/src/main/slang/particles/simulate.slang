@@ -10,7 +10,11 @@
 // arithmetic as scene-effects' CpuSimulation, the reference the tests compare against. Mesh shapes read the geometry
 // pool (a skinned mesh's posed copy, after the deformation pass) through the frame's emission sources and alias
 // tables; bone shapes the joints the CPU wrote there; masks sample a texture where the shapes put a particle.
+#ifdef PARTICLE_MODULES
+import particles.particle; // included by a game's kernel variant (effects step 20), from its own folder
+#else
 import particle;
+#endif
 import bindless;
 import meshlets.common;
 #ifdef PARTICLE_RAYS
