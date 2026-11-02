@@ -30,9 +30,38 @@ struct ParticleDrawPush
     float3 facing;                 // what billboards and strips face, from the camera: a pair's center, or 0
     uint drawCount;                // (cullMain)
     uint first;                    // the first draw of the multi-draw recorded: each reads its record by draw index
-    uint depth;                    // the scene's depth, sampled slot
-    uint paired;                   // 1 for an eye of a pair: view-plane billboards face the center instead
+    uint depth;                    // the scene's depth, sampled slot: full resolution, or the half's farthest
+    uint flags;                    // DRAW_PAIRED, and GLASS_* << 1: split emitters keep their fragments behind or before
+    uint glassDepth;               // the nearest blended surfaces' depth, sampled slot (split emitters), or NO_TEXTURE
 };
+
+/** Of an eye of a pair: view-plane billboards face the center instead. */
+static const uint DRAW_PAIRED = 1;
+
+/** Of a pass drawing split emitters: the fragments behind the nearest glass (drawn before it), or in front of it. */
+static const uint GLASS_BEHIND = 1;
+static const uint GLASS_FRONT = 2;
+
+/** The salt of the hash a particle compares with its emitter's drawn fraction (levels of detail). */
+static const uint LOD_SALT = 0x4c0d;
+/** The hashes beyond the drawn fraction over which particles fade out, rather than vanish. */
+static const float LOD_BAND = 0.08;
+
+/**
+ * How much of particle `p` its emitter draws: 1 within its drawn fraction by its hash, fading to 0 beyond it across
+ * LOD_BAND; times the emitter's fade (a placement's share of its variant).
+ */
+float kept(ParticleEmitter e, Particle p)
+{
+    float keep = e.drawn >= 1 ? 1 : saturate(1 + (e.drawn - random(p.seed, LOD_SALT)) / LOD_BAND);
+    return keep * e.fade;
+}
+
+/** Where particle `p` is drawn: moved on by its velocity for the time its emitter has been held (reduced rates). */
+float3 drawnAt(ParticleEmitter e, Particle p)
+{
+    return p.position + p.velocity * e.held;
+}
 
 [[vk::push_constant]]
 ConstantBuffer<ParticleDrawPush> push;
@@ -64,15 +93,15 @@ void cullMain(uint3 id : SV_DispatchThreadID)
     uint alive = state[at + STATE_ALIVE];
     uint vertices = r.kind == RENDER_TRAIL ? 6 * r.points : r.kind == RENDER_BEAM ? 6 * r.segments : 6;
     uint instances = r.kind == RENDER_BEAM ? 1 : alive;
-    bool visible = r.kind == RENDER_BEAM
-        || alive > 0 && state[at + STATE_BOUNDS] <= state[at + STATE_BOUNDS + 3];
+    bool visible = (e.flags & EMITTER_HIDDEN) == 0 && (r.kind == RENDER_BEAM
+        || alive > 0 && state[at + STATE_BOUNDS] <= state[at + STATE_BOUNDS + 3]);
     if (visible && r.kind != RENDER_BEAM)
     {
         float3 low;
         float3 high;
         stateBounds(state, e.instance, low, high);
         float3 center = relativeTo(e, 0.5 * (low + high), view.position, view.positionLow);
-        float radius = 0.5 * length(high - low);
+        float radius = 0.5 * length(high - low) * e.scale;
         if (r.kind == RENDER_RIBBON)
         {
             // its head reaches the emitter, outside its particles' box
@@ -254,7 +283,12 @@ ParticleVertex billboardMain(uint vertex : SV_VertexID, uint instance : SV_Insta
         // Back to front: the emitter's run of the sort (its dead particles draw nothing, as unsorted)
         uint* sortArgs = push.sortArgs;
         uint2* sorted = push.sorted;
-        index = sorted[sortArgs[4 + d.sort] + instance].y;
+        uint key = sortArgs[4 + d.sort] + instance;
+        if (key >= sortArgs[3])
+        {
+            return nothing(); // left out of a sort its buffers had no room for
+        }
+        index = min(sorted[key].y, e.capacity - 1);
     }
     Particle* particles = push.particles;
     Particle p = particles[e.first + index];
@@ -264,15 +298,21 @@ ParticleVertex billboardMain(uint vertex : SV_VertexID, uint instance : SV_Insta
     {
         return nothing();
     }
+    float keep = kept(e, p);
+    if (!(keep > 0))
+    {
+        return nothing();
+    }
     ParticleRenderer r = rendererAt(d.renderer);
-    float3 center = relativeTo(e, p.position, view.position, view.positionLow);
+    float3 center = relativeTo(e, drawnAt(e, p), view.position, view.positionLow);
     float3 velocity = (e.flags & EMITTER_LOCAL) != 0 ? turn(e.rotation, p.velocity) : p.velocity;
     // Towards the camera, or for both eyes of a pair their center: one orientation, no rivalry between the eyes
     float3 toCamera = normalize(push.facing - center);
     float3 right;
     float3 up;
-    float2 half = 0.5 * p.size;
-    if (r.facing == FACING_VIEW_PLANE && push.paired == 0)
+    // Placements scale; levels of detail grow the kept to keep the coverage
+    float2 half = 0.5 * p.size * e.scale * (e.drawn < 1 ? min(rsqrt(max(e.drawn, 0.05)), 2.0) : 1.0);
+    if (r.facing == FACING_VIEW_PLANE && (push.flags & DRAW_PAIRED) == 0)
     {
         right = normalize(row(viewProjection, 0));
         up = -normalize(row(viewProjection, 1));
@@ -307,15 +347,15 @@ ParticleVertex billboardMain(uint vertex : SV_VertexID, uint instance : SV_Insta
     float2 xy = corner(vertex);
     float3 world = center + right * (xy.x * half.x) + up * (xy.y * half.y);
     o.position = mul(viewProjection, float4(world, 1));
-    o.color = p.color;
+    o.color = float4(p.color.rgb, p.color.a * keep);
     o.uv = float2(0.5 + 0.5 * xy.x, 0.5 - 0.5 * xy.y);
     float centerW = mul(viewProjection, float4(center, 1)).w;
     o.sphere = float3(centerW, max(half.x, half.y), o.position.w);
     // Flipbook frames: by age, looping, or over the particle's life.
     float frames = r.frames;
-    float t = r.rate > 0 ? p.age * r.rate : p.age / p.lifetime * frames;
+    float t = (r.rate > 0 ? p.age * r.rate : p.age / p.lifetime * frames) + p.custom.x * frames; // its start
     bool loop = (r.flags & DRAW_LOOP) != 0;
-    t = loop ? t - frames * floor(t / frames) : clamp(t, 0.0, frames - 1);
+    t = loop || p.custom.x != 0 ? t - frames * floor(t / frames) : clamp(t, 0.0, frames - 1);
     uint f0 = min(uint(t), uint(frames) - 1);
     uint f1 = loop ? (f0 + 1) % uint(frames) : min(f0 + 1, uint(frames) - 1);
     float blend = (r.flags & DRAW_BLEND_FRAMES) != 0 ? t - floor(t) : 0;
@@ -383,11 +423,18 @@ StripPoint stripPoint(ParticleEmitter e, ParticleRenderer r, uint i, float along
     Particle p = particles[e.first + i];
     View* view = push.view;
     StripPoint s;
-    s.position = relativeTo(e, p.position, view.position, view.positionLow);
-    s.width = p.size.x * lerp(r.widthTail, r.widthHead, along);
-    s.color = p.color;
+    s.position = relativeTo(e, drawnAt(e, p), view.position, view.positionLow);
+    s.width = p.size.x * e.scale * lerp(r.widthTail, r.widthHead, along);
+    s.color = float4(p.color.rgb, p.color.a * e.fade);
     s.u = u;
     return s;
+}
+
+/** Particle `p`'s ribbon: its spawn index's strand of a renderer's several, or its parent's (`ribbons` 0, per parent). */
+uint ribbonOf(Particle p, ParticleRenderer r)
+{
+    uint id = asuint(p.custom.y);
+    return r.ribbons == 0 ? id : id % r.ribbons;
 }
 
 [shader("vertex")]
@@ -401,7 +448,7 @@ ParticleVertex ribbonMain(uint vertex : SV_VertexID, uint index : SV_InstanceID,
     uint n = state[e.instance * STATE_WORDS + STATE_ALIVE];
     Particle* particles = push.particles;
     View* view = push.view;
-    if (r.ribbons > 1)
+    if (r.ribbons != 1)
     {
         // Ribbon by ribbon (second key): neighbours in the order buffer of one ribbon make a segment
         uint* order = push.order;
@@ -411,18 +458,22 @@ ParticleVertex ribbonMain(uint vertex : SV_VertexID, uint index : SV_InstanceID,
         }
         uint i0 = order[e.first + index];
         uint i1 = order[e.first + index + 1];
-        uint ribbon = particles[e.first + i0].spawnIndex % r.ribbons;
-        if (particles[e.first + i1].spawnIndex % r.ribbons != ribbon)
+        uint ribbon = ribbonOf(particles[e.first + i0], r);
+        if (ribbonOf(particles[e.first + i1], r) != ribbon)
         {
             return nothing();
         }
         uint ib = index > 0 ? order[e.first + index - 1] : i0;
         uint ia = index + 2 < n ? order[e.first + index + 2] : i1;
-        ib = particles[e.first + ib].spawnIndex % r.ribbons == ribbon ? ib : i0;
-        ia = particles[e.first + ia].spawnIndex % r.ribbons == ribbon ? ia : i1;
-        float scale = 1.0 / max(float(n), 1.0);
-        StripPoint a = stripPoint(e, r, i0, i0 * scale, r.tile > 0 ? particles[e.first + i0].spawnIndex / r.tile : i0 * scale);
-        StripPoint b = stripPoint(e, r, i1, i1 * scale, r.tile > 0 ? particles[e.first + i1].spawnIndex / r.tile : i1 * scale);
+        ib = ribbonOf(particles[e.first + ib], r) == ribbon ? ib : i0;
+        ia = ribbonOf(particles[e.first + ia], r) == ribbon ? ia : i1;
+        // Along each ribbon by age: the tail the oldest
+        Particle p0 = particles[e.first + i0];
+        Particle p1 = particles[e.first + i1];
+        float along0 = saturate(1 - p0.age / p0.lifetime);
+        float along1 = saturate(1 - p1.age / p1.lifetime);
+        StripPoint a = stripPoint(e, r, i0, along0, r.tile > 0 ? p0.spawnIndex / r.tile : along0);
+        StripPoint b = stripPoint(e, r, i1, along1, r.tile > 0 ? p1.spawnIndex / r.tile : along1);
         return segment(stripPoint(e, r, ib, 0, 0), a, b, stripPoint(e, r, ia, 0, 0), vertex, RENDER_RIBBON, d);
     }
     // One ribbon: every stride-th particle by spawn index, then its head at the emitter (no first-frame gap).
@@ -486,7 +537,8 @@ ParticleVertex trailMain(uint vertex : SV_VertexID, uint index : SV_InstanceID, 
     uint* words = push.words;
     uint header = words[e.program];
     uint4* side = push.side;
-    uint4* trail = side + e.side + index * e.sideUnits + (((header >> 16) & PROGRAM_OVER) != 0 ? 2 : 0);
+    uint4* trail = side + e.side + index * e.sideUnits + (((header >> 16) & PROGRAM_OVER) != 0 ? 2 : 0)
+        + (((header >> 16) & PROGRAM_EMIT) != 0 ? 1 : 0);
     uint n = r.points;
     uint head = trail[0].x;
     uint s = vertex / 6;
@@ -562,6 +614,24 @@ LightListHeader* lightsOf(ParticleVertex v)
 [shader("fragment")]
 float4 fragmentMain(ParticleVertex v) : SV_Target
 {
+    return shade(v);
+}
+
+/**
+ * The reactive mask (TAA hooks, effects step 21): how much particles cover each pixel, their alpha and their added
+ * light's brightness, kept at the greatest (blended by max): temporal antialiasing trusts its history less there.
+ */
+[shader("fragment")]
+float4 reactiveMain(ParticleVertex v) : SV_Target
+{
+    float4 c = shade(v);
+    float cover = saturate(max(c.a, max(c.r, max(c.g, c.b))));
+    return float4(cover, cover, cover, cover);
+}
+
+/** Fragment `v`'s premultiplied color: its texture, lighting, the opaque scene's depth test and soft fade. */
+float4 shade(ParticleVertex v)
+{
     ParticleRenderer r = rendererAt(v.draw.x);
     uint texture = v.draw.y;
     bool strip = v.frames.w != RENDER_BILLBOARD;
@@ -630,6 +700,17 @@ float4 fragmentMain(ParticleVertex v) : SV_Target
     if (distance > scene)
     {
         discard;
+    }
+    uint glassSide = push.flags >> 1;
+    if (glassSide != 0)
+    {
+        // Split at the nearest glass: behind it drawn before the glass (tinted by it), in front of it after
+        float glass = textures[push.glassDepth].Load(int3(int2(v.position.xy), 0)).r;
+        bool behind = glass > 0 && distance > near / glass;
+        if (behind != (glassSide == GLASS_BEHIND))
+        {
+            discard;
+        }
     }
     if (r.soft > 0)
     {

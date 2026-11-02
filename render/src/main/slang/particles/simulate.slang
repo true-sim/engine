@@ -129,6 +129,38 @@ float4 colorOf<K : ICurveKeys>(Emitting m, K keys, uint op, uint salt, Particle 
     }
 }
 
+#ifdef PARTICLE_MODULES
+/**
+ * Runs plugin module `op` (an opcode from OP_PLUGIN on) of program `m` on particle `p`: its fields evaluated, in
+ * alphabetical order of their names, then the game's ParticleModules dispatch (effects step 20).
+ */
+void plugin<K : ICurveKeys>(Emitting m, K keys, uint op, inout Particle p, float h, bool init)
+{
+    uint code = m.program[op] & 0xff;
+    uint salt = m.program[op + 1];
+    uint fields = min(((m.program[op] >> 8) - 2) / BINDING_WORDS, PLUGIN_FIELDS);
+    ParticleModuleInput in;
+    for (uint f = 0; f < PLUGIN_FIELDS; f++)
+    {
+        in.values[f] = f < fields ? value(m, keys, op, salt, f, p) : 0;
+    }
+    in.h = h;
+    in.time = m.emitter.time;
+    in.salt = salt;
+    in.local = (m.emitter.flags & EMITTER_LOCAL) != 0;
+    in.down = m.emitter.down;
+    in.wind = m.emitter.wind;
+    if (init)
+    {
+        ParticleModules.init(code - OP_PLUGIN, p, in);
+    }
+    else
+    {
+        ParticleModules.update(code - OP_PLUGIN, p, in);
+    }
+}
+#endif
+
 /** A unit direction uniform on the sphere, from two draws from `salt` on. */
 float3 randomDirection(uint seed, uint salt)
 {
@@ -402,13 +434,22 @@ void initialize<K : ICurveKeys>(Emitting m, K keys, inout Particle p, inout floa
             break;
         case OP_INHERIT:
             break; // read when an event spawns the particle (inheritFrom)
-        case OP_MESH:
+        case OP_MESH: // mode, upward
             p.position = 0;
             direction = float3(0, 1, 0);
             textured = false;
             // Nothing to emit from (no mesh named, or not loaded yet): born dead, not in a heap at the emitter
             masked = masked || m.emitter.source == NO_SOURCE || !meshPoint(m.emitter.source,
                 uint(value(m, keys, op, salt, 0, p) + 0.5), seed, salt, p.position, direction, uv, textured);
+            // Weighted by how far the surface faces up: kept with the chance 1 - upward + upward max(0, n.y)
+            float upward = value(m, keys, op, salt, 1, p);
+            masked = masked || !(random(seed, salt + 13) < 1 - upward + upward * max(0.0, direction.y));
+            break;
+        case OP_ROTATION:
+            p.rotation = value(m, keys, op, salt, 0, p);
+            break;
+        case OP_FRAME:
+            p.custom.x = value(m, keys, op, salt, 0, p);
             break;
         case OP_BONES:
             p.position = 0;
@@ -430,9 +471,14 @@ void initialize<K : ICurveKeys>(Emitting m, K keys, inout Particle p, inout floa
                 masked = masked || (threshold > 0 ? density < threshold : !(random(seed, salt + 12) < density));
             }
             break;
-        default: // OP_COLOR
+        case OP_COLOR:
             color0 = colorOf(m, keys, op, salt, p);
             p.color = color0;
+            break;
+        default:
+#ifdef PARTICLE_MODULES
+            plugin(m, keys, op, p, 0, true);
+#endif
             break;
         }
         op = skip(m, op);
@@ -460,7 +506,7 @@ uint eventList(Emitting m, uint first)
  * the half read: each with its chance and count, appended to the frame's events with its sort key (CpuSimulation.send).
  */
 void send<K : ICurveKeys>(Emitting m, K keys, uint list, uint index, uint local, Particle p, uint phase, bool birth,
-    bool death, bool collision, float before)
+    bool death, bool collision, float before, uint emitAt)
 {
     ParticleFrame* frame = push.frame;
     uint count = m.program[list];
@@ -472,11 +518,31 @@ void send<K : ICurveKeys>(Emitting m, K keys, uint list, uint index, uint local,
         bool sent = kind == EVENT_BIRTH ? birth : kind == EVENT_DEATH ? death : kind == EVENT_COLLISION ? collision
             : kind == EVENT_PERIODIC && phase == 1 && floor(p.age / interval) > floor(before / interval);
         uint salt = m.program[at + 1];
-        if (!sent || !(random(p.seed, salt + 15) < asfloat(m.program[at + 6])))
+        bool emits = kind == EVENT_EMIT && phase == 1 && emitAt != NO_SIDE;
+        if (!(sent || emits) || !(random(p.seed, salt + 15) < asfloat(m.program[at + 6])))
         {
             continue;
         }
-        uint children = uint(clamp(round(value(m, keys, at, salt, 0, p)), 0.0, float(MAX_CHILDREN)));
+        float rate = value(m, keys, at, salt, 0, p);
+        uint children;
+        if (emits)
+        {
+            // Per second, carried in fixed point per particle (CpuSimulation.send): what its step owes, spread over it
+            uint slot = 0;
+            for (uint j = 0; j < k; j++)
+            {
+                slot += (m.program[list + 1 + j * EVENT_WORDS] & 0xff) == EVENT_EMIT ? 1 : 0;
+            }
+            uint4* sides = push.sideSource;
+            uint4* written = sides + push.sideDelta;
+            uint owed = written[emitAt][slot] + uint(max(0.0, rate * (p.age - before) * float(1u << EMIT_BITS)));
+            children = min(owed >> EMIT_BITS, MAX_CHILDREN);
+            written[emitAt][slot] = owed - (children << EMIT_BITS);
+        }
+        else
+        {
+            children = uint(clamp(round(rate), 0.0, float(MAX_CHILDREN)));
+        }
         uint* targets = frame.targets;
         uint target = targets[m.emitter.targets + (m.program[at] >> 8)];
         if (children == 0 || target == NO_EMITTER)
@@ -496,7 +562,9 @@ void send<K : ICurveKeys>(Emitting m, K keys, uint list, uint index, uint local,
         r.target = target;
         r.count = children;
         r.seed = p.seed;
-        r.salt = salt;
+        r.salt = salt | (emits ? EVENT_SPREAD : 0);
+        r.parentIndex = p.spawnIndex;
+        r.step = emits ? p.age - before : 0;
         r.position = space ? turn(e.rotation, p.position) : p.position;
         r.parent = index;
         r.velocity = space ? turn(e.rotation, p.velocity) : p.velocity;
@@ -911,6 +979,7 @@ void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, floa
     bool over = false;
     bool kill = false;
     bool after = false;
+    bool plugins = false;
     // Where the emitter is in its particles' space: its frame's origin, or its offset from theirs
     float3 center = (e.flags & EMITTER_LOCAL) != 0 ? 0 : e.position;
     float3 x = p.position;
@@ -988,8 +1057,12 @@ void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, floa
         case OP_RAYS:
             after = true;
             break;
-        default:
+        case OP_OVER_SIZE:
+        case OP_OVER_COLOR:
             over = true;
+            break;
+        default:
+            plugins = true; // the game's own modules, after the motion
             break;
         }
         op = skip(m, op);
@@ -1111,6 +1184,20 @@ void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, floa
     {
         p.lifetime = p.age; // within an attractor's kill radius: dead from now, gone at the next count
     }
+#ifdef PARTICLE_MODULES
+    if (plugins)
+    {
+        op = first;
+        for (uint i = 0; i < count; i++)
+        {
+            if ((m.program[op] & 0xff) >= OP_PLUGIN)
+            {
+                plugin(m, keys, op, p, h, false);
+            }
+            op = skip(m, op);
+        }
+    }
+#endif
     if (!over)
     {
         return;
@@ -1327,6 +1414,7 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     bool keep = false;
     uint header0 = m.program[0];
     bool sends = ((header0 >> 16) & PROGRAM_EVENTS) != 0;
+    bool held = (e.flags & EMITTER_HELD) != 0; // a reduced update rate: copied as it is this frame
     uint list = sends ? eventList(m, updaters(m)) : 0;
     bool born = false;
     if (local < aliveOf(e))
@@ -1339,12 +1427,15 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
             p.position += e.shift; // the origin rebased: the same place in the world
         }
         born = (p.flags & PARTICLE_NEWBORN) != 0;
-        p.flags &= ~PARTICLE_NEWBORN;
+        if (!held) // held still, it sends its birth events when it next moves
+        {
+            p.flags &= ~PARTICLE_NEWBORN;
+        }
         if (sends && !keep && (p.flags & PARTICLE_DEAD) == 0)
         {
             CurveBuffer dying;
             dying.block = block;
-            send(m, dying, list, chunks[chunk], local, p, 0, born, true, false, p.age);
+            send(m, dying, list, chunks[chunk], local, p, 0, born, true, false, p.age, NO_SIDE);
         }
     }
     shared[lane] = keep ? 1 : 0;
@@ -1381,36 +1472,40 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         float before = p.age;
         CurveBuffer events;
         events.block = block;
-        if (sends && born)
+        uint header1 = m.program[0];
+        // Its emit accumulators, in the side range it was just copied to
+        uint emitAt = ((header1 >> 16) & PROGRAM_EMIT) != 0 ? e.side + (to - e.first) * e.sideUnits
+            + (((header1 >> 16) & PROGRAM_OVER) != 0 ? 2 : 0) : NO_SIDE;
+        if (sends && born && !held)
         {
-            send(m, events, list, chunks[chunk], local, p, 0, true, false, false, before);
+            send(m, events, list, chunks[chunk], local, p, 0, true, false, false, before, NO_SIDE);
         }
-        if (cached)
+        if (cached && !held)
         {
             CurveCache keys;
             step(m, keys, first, p, color0, size0, e.dt);
         }
-        else
+        else if (!held)
         {
             CurveBuffer keys;
             keys.block = block;
             step(m, keys, first, p, color0, size0, e.dt);
         }
-        if (sends)
+        if (sends && !held)
         {
-            send(m, events, list, chunks[chunk], local, p, 1, false, false, (p.flags & PARTICLE_COLLIDED) != 0, before);
+            send(m, events, list, chunks[chunk], local, p, 1, false, false, (p.flags & PARTICLE_COLLIDED) != 0, before,
+                emitAt);
         }
         Particle* source0 = push.source;
         Particle* target = source0 + push.targetDelta;
         target[to] = p;
         bound(p);
         uint header = m.program[0];
-        if (((header >> 16) & PROGRAM_TRAIL) != 0)
+        if (((header >> 16) & PROGRAM_TRAIL) != 0 && !held)
         {
             // The trail's ring: one more past position, over its oldest
             uint4* sideSource0 = push.sideSource;
-            uint4* trail = sideSource0 + push.sideDelta + e.side + (to - e.first) * e.sideUnits
-                + (((header >> 16) & PROGRAM_OVER) != 0 ? 2 : 0);
+            uint4* trail = sideSource0 + push.sideDelta + e.side + (to - e.first) * e.sideUnits + trailUnit(header);
             uint points = header >> 24;
             if (any(e.shift != 0))
             {
@@ -1524,6 +1619,12 @@ void place(ParticleEmitter e, ParticleSpawn r, inout Particle p, float age)
     p.velocity = turn(q, p.velocity);
 }
 
+/** The side unit of its range a particle's trail starts at: after its attributes from birth and its accumulators. */
+uint trailUnit(uint header)
+{
+    return (((header >> 16) & PROGRAM_OVER) != 0 ? 2 : 0) + (((header >> 16) & PROGRAM_EMIT) != 0 ? 1 : 0);
+}
+
 /** Writes newborn `p` (with `color0` and `size0` from birth) into slot `slot` of emitter `e`'s range, and its box. */
 void store(ParticleEmitter e, uint at, uint slot, Particle p, float4 color0, float size0, uint header)
 {
@@ -1541,10 +1642,14 @@ void store(ParticleEmitter e, uint at, uint slot, Particle p, float4 color0, flo
             sideTarget[s] = asuint(color0);
             sideTarget[s + 1] = uint4(asuint(size0), 0, 0, 0);
         }
+        if (((header >> 16) & PROGRAM_EMIT) != 0)
+        {
+            sideTarget[s + (((header >> 16) & PROGRAM_OVER) != 0 ? 2 : 0)] = 0; // nothing owed yet
+        }
         if (((header >> 16) & PROGRAM_TRAIL) != 0)
         {
             // A trail starts where its particle is: no streak back to the origin
-            uint4* trail = sideTarget + s + (((header >> 16) & PROGRAM_OVER) != 0 ? 2 : 0);
+            uint4* trail = sideTarget + s + trailUnit(header);
             trail[0] = uint4(0, 0, 0, 0);
             for (uint i = 0; i < (header >> 24); i++)
             {
@@ -1596,6 +1701,9 @@ void spawnChild(ParticleEmitter e, uint at, uint k, uint j)
     ParticleEventRecord* events = (ParticleEventRecord*) frame.events;
     ParticleEventRecord r = events[eventKeys[low].y];
     uint c = global - prefix[low];
+    // An emit event's children: spread back over their parent's step along its path, the youngest last
+    float spread = (r.salt & EVENT_SPREAD) != 0 ? r.step * float(r.count - 1 - c) / float(r.count) : 0;
+    r.salt &= ~EVENT_SPREAD;
     Particle p;
     p.position = 0;
     p.velocity = 0;
@@ -1607,7 +1715,7 @@ void spawnChild(ParticleEmitter e, uint at, uint k, uint j)
     p.seed = combine(combine(r.seed, r.salt), c);
     p.spawnIndex = state[at + STATE_EVENT_INDEX] + j;
     p.flags = PARTICLE_NEWBORN;
-    p.custom = 0;
+    p.custom = float2(0, asfloat(r.parentIndex)); // a ribbon per parent
     float4 color0 = 1;
     float size0 = 0.1;
     Emitting m = emitting(e);
@@ -1639,7 +1747,7 @@ void spawnChild(ParticleEmitter e, uint at, uint k, uint j)
     ParticleEmitter parent = emitters[r.parent];
     precise float3 high3 = parent.originHigh - e.originHigh;
     precise float3 low3 = parent.originLow - e.originLow;
-    float3 from = (high3 + low3) + r.position;
+    float3 from = (high3 + low3) + r.position - r.velocity * spread;
     float4 back = float4(-e.rotation.xyz, e.rotation.w);
     if ((e.flags & EMITTER_LOCAL) != 0)
     {
@@ -1661,6 +1769,7 @@ void spawnChild(ParticleEmitter e, uint at, uint k, uint j)
         p.size *= r.size;
         size0 = p.size.x;
     }
+    p.age = spread;
     store(e, at, state[at + STATE_SURVIVORS] + k, p, color0, size0, m.program[0]);
 }
 
@@ -1720,7 +1829,7 @@ void spawnMain(uint3 id : SV_DispatchThreadID)
     p.spawnIndex = record.firstIndex + j;
     p.seed = combine(e.seed, p.spawnIndex);
     p.flags = ((record.flags & SPAWN_PREWARM) != 0 ? PARTICLE_PREWARM : 0) | PARTICLE_NEWBORN;
-    p.custom = 0;
+    p.custom = float2(0, asfloat(p.spawnIndex)); // its ribbon of several: spawn index % ribbons
     float4 color0 = 1;
     float size0 = 0.1;
     Emitting m = emitting(e);

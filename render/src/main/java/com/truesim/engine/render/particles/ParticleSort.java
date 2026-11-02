@@ -63,7 +63,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Order build(GraphBuilder g) {
-        int slots = particles.pool().slots();
+        int slots = particles.sortSlots();
         long groups = (slots + ParticleConstants.SORT_GROUP - 1) / ParticleConstants.SORT_GROUP;
         Buffer a = g.createBuffer("particle sort keys", 8L * slots);
         Buffer b = g.createBuffer("particle sort keys, other", 8L * slots);
@@ -80,7 +80,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
         g.pass("particle sort args").read(state, BufferAccess.STORAGE_READ).write(args, BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
                 if (p.sortedCount() > 0) {
-                    ctx.dispatch(argsProgram, common(argsPush, p, camera).args(ctx.address(args)), 1);
+                    ctx.dispatch(argsProgram, common(argsPush, p, camera, slots).args(ctx.address(args)), 1);
                 }
             });
         ParticleSortPush keysPush = new ParticleSortPush();
@@ -89,7 +89,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
             .record(ctx -> {
                 if (p.sortedCount() > 0) {
                     int chunks = p.sortChunkCount();
-                    ctx.dispatch(keys, common(keysPush, p, camera).args(ctx.address(args)).target(ctx.address(a)),
+                    ctx.dispatch(keys, common(keysPush, p, camera, slots).args(ctx.address(args)).target(ctx.address(a)),
                         Math.min(chunks, PassContext.MAX_GROUPS), (chunks + PassContext.MAX_GROUPS - 1)
                             / PassContext.MAX_GROUPS, 1);
                 }
@@ -104,7 +104,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
                 .write(histogram, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> {
                     if (index < passes(p.sortedCount()) && p.sortedCount() > 0) {
-                        ctx.dispatchIndirect(count, common(countPush, p, camera).args(ctx.address(args))
+                        ctx.dispatchIndirect(count, common(countPush, p, camera, slots).args(ctx.address(args))
                             .histogram(ctx.address(histogram)).source(ctx.address(source)), args, 0);
                     }
                 });
@@ -113,7 +113,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
                 .write(histogram, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> {
                     if (index < passes(p.sortedCount()) && p.sortedCount() > 0) {
-                        ctx.dispatch(scan, common(scanPush, p, camera).args(ctx.address(args))
+                        ctx.dispatch(scan, common(scanPush, p, camera, slots).args(ctx.address(args))
                             .histogram(ctx.address(histogram)), 1);
                     }
                 });
@@ -123,7 +123,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
                 .read(args, BufferAccess.STORAGE_READ).write(target, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> {
                     if (index < passes(p.sortedCount()) && p.sortedCount() > 0) {
-                        ctx.dispatchIndirect(scatter, common(scatterPush, p, camera).args(ctx.address(args))
+                        ctx.dispatchIndirect(scatter, common(scatterPush, p, camera, slots).args(ctx.address(args))
                             .histogram(ctx.address(histogram)).source(ctx.address(source)).target(ctx.address(target)),
                             args, 0);
                     }
@@ -133,7 +133,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
     }
 
     /** Sets what every pass shares. */
-    private static ParticleSortPush common(ParticleSortPush push, Particles p, Camera center) {
+    private static ParticleSortPush common(ParticleSortPush push, Particles p, Camera center, int capacity) {
         double x = center.position(0);
         double y = center.position(1);
         double z = center.position(2);
@@ -142,7 +142,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
         float hz = (float) z;
         return push.particles(p.particlesAddress()).emitters(p.emitterTableAddress()).state(p.stateAddress())
             .list(p.sortListAddress()).chunks(p.sortChunksAddress()).centerHigh(hx, hy, hz)
-            .centerLow((float) (x - hx), (float) (y - hy), (float) (z - hz)).sortedCount(p.sortedCount())
+            .centerLow((float) (x - hx), (float) (y - hy), (float) (z - hz)).sortedCount(p.sortedCount()).capacity(capacity)
             .chunkCount(p.sortChunkCount());
     }
 }

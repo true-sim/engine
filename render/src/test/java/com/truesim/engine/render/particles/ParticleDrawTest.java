@@ -439,8 +439,13 @@ class ParticleDrawTest {
     void aParticleDrawIsNamedAndDrawsOverTheBlendedMaterials() {
         ParticleDraw draw = new ParticleDraw(particles, view);
         assertThat(draw.id()).isEqualTo(ParticleDraw.ID);
-        assertThat(draw.provides()).isEmpty();
+        assertThat(draw.provides()).containsExactly(ParticleKeys.REACTIVE); // drawn where something requires it
         assertThat(draw.order()).isEqualTo(Order.at(Anchor.TRANSPARENT).after(com.truesim.engine.render.Transparency.ID));
+        ParticleDraw before = ParticleDraw.beforeGlass(particles, view, null);
+        assertThat(before.id()).isEqualTo(ParticleDraw.BEFORE_GLASS_ID);
+        assertThat(before.provides()).isEmpty();
+        assertThat(before.order()).isEqualTo(Order.at(Anchor.TRANSPARENT)
+            .before(com.truesim.engine.render.Transparency.ID));
     }
 
     /** Sparks and puffs, on {@code target}: non-chaotic modules, so the CPU and GPU stay within a pixel. */

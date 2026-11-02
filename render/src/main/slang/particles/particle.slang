@@ -24,12 +24,14 @@ public struct Particle
     public uint seed;              // hash of (effect seed, emitter, spawn index): every random value it draws
     public uint flags;             // PARTICLE_*
     public uint spawnIndex;        // its order of birth in its emitter (low 32 bits)
-    public float2 custom;          // flipbook frame, ribbon id, user data
+    public float2 custom;          // where its flipbook starts (a fraction of its frames), its ribbon id (as uint bits)
 };
 
 /**
- * An emitter instance in this frame's list: 208 bytes, written by the CPU each frame. Its particles live in slots
- * [first, first + capacity) of each half of the pool.
+ * An emitter instance in this frame's list: 224 bytes, written by the CPU each frame. Its particles live in slots
+ * [first, first + capacity) of each half of the pool. After the simulated emitters come the placements of shared
+ * effects (EMITTER_PLACEMENT): records the draws and sorts read, naming their variant's range and state at the
+ * placement's origin, rotation and scale; the simulation never reaches them.
  */
 [HostLayout]
 public struct ParticleEmitter
@@ -69,6 +71,10 @@ public struct ParticleEmitter
                                    // shadows); 0: nothing to draw (its mesh not on the GPU yet)
     public uint material;          // that mesh's first material
     public uint meshRenderer;      // its mesh renderer's record: its word in the program buffer
+    public float drawn;            // the fraction of its particles drawn (levels of detail): the others fade by hash
+    public float fade;             // its draws' alpha: a placement's share of its variant, 1 for others
+    public float scale;            // a placement's scale, 1 for others
+    public float held;             // seconds since its particles last moved (a reduced update rate): drawn moved on
 };
 
 /**
@@ -162,7 +168,7 @@ public struct ParticleFrame
 
 /**
  * An event a particle sent (E9, effects.md §2.7): what it spawns and a snapshot of its parent, which the children read
- * (source attributes). 64 bytes, appended by the update; sorted by (target, parent emitter, parent, phase, event).
+ * (source attributes). 80 bytes, appended by the update; sorted by (target, parent emitter, parent, phase, event).
  */
 [HostLayout]
 public struct ParticleEventRecord
@@ -176,6 +182,10 @@ public struct ParticleEventRecord
     public float3 velocity;        // the parent's velocity, in world axes
     public float size;             // the parent's size
     public float4 color;           // the parent's color
+    public uint parentIndex;       // the parent's spawn index: its children's ribbon id
+    public float step;             // an emit event's: the parent's step, which its children are spread back over
+    public uint pad0;
+    public uint pad1;
 };
 
 /** A spawn record: 64 bytes, as scene-effects' SpawnRecords, written by the CPU each frame. */
@@ -248,13 +258,38 @@ public struct ParticleDrawRecord
     public uint64_t lights;        // LightListHeader*: the view's light list, for lit renderers; or 0: the sun
 };
 
+/** The most float fields a plugin module reads (ParticleModules.MAX_FIELDS). */
+public static const uint PLUGIN_FIELDS = 8;
+
+/** What a plugin module (effects step 20) reads beside its particle: its fields evaluated, the step and its frame. */
+public struct ParticleModuleInput
+{
+    public float values[8];        // its float fields, in alphabetical order of their names
+    public float h;                // the step, in seconds (0 for initializers)
+    public float time;             // its effect's time, in seconds
+    public uint salt;              // its salts' first: random(p.seed, salt + i) draws its own values
+    public bool local;             // the particle lives in its emitter's frame
+    public float3 down;            // world down in the particle's frame
+    public float3 wind;            // the world's wind in the particle's frame, m/s
+};
+
+/**
+ * A game's own particle module (effects step 20): an initializer (`init`, at birth) or updater (`update`, each step
+ * after the built-in forces have moved the particle), dispatched by the game's kernel variant's ParticleModules type.
+ */
+public interface IParticleModule
+{
+    static void init(inout Particle p, ParticleModuleInput in);
+    static void update(inout Particle p, ParticleModuleInput in);
+};
+
 /** Lightings: scene-effects' Renderer.Lighting, in order. */
 public static const uint LIGHTING_UNLIT = 0;
 public static const uint LIGHTING_VERTEX = 1;
 public static const uint LIGHTING_PIXEL = 2;
 public static const uint LIGHTING_SIX_WAY = 3;
 /** Draws a view has room for: renderers of emitter instances. */
-public static const uint MAX_DRAWS = 4096;
+public static const uint MAX_DRAWS = 16384;
 /** Slots per chunk: the simulation's groups each take one chunk of one emitter. */
 public static const uint CHUNK = 64;
 /** Floats of an effect's curve keys the update keeps in group-shared memory; longer blocks are read in place. */
@@ -306,6 +341,9 @@ public static const uint EMITTER_NEW = 1;                 // its first frame: no
 public static const uint EMITTER_LOCAL = 2;               // its particles live in its frame
 public static const uint EMITTER_CPU = 4;                 // simulated on the CPU: its particles uploaded each frame
 public static const uint EMITTER_MESH = 8;                // drawn as meshes: its particles roll as they move
+public static const uint EMITTER_HELD = 16;               // not updated this frame (a reduced update rate): copied
+public static const uint EMITTER_HIDDEN = 32;             // not drawn as itself: a variant of a shared effect
+public static const uint EMITTER_PLACEMENT = 64;          // a placement of a variant, drawn only: no simulation
 /** An emitter without instances in the scene. */
 public static const uint NO_INSTANCES = 0xffffffffu;
 /** How mesh particles turn: tumbling about a random axis as they roll, along their velocity, as their emitter. */
@@ -391,6 +429,10 @@ public static const uint OP_INHERIT = 26;
 public static const uint OP_MESH = 27;
 public static const uint OP_BONES = 28;
 public static const uint OP_MASK = 29;
+public static const uint OP_ROTATION = 30;
+public static const uint OP_FRAME = 31;
+/** Plugin modules (step 20): their opcodes from here on, in the order registered (ParticleModules). */
+public static const uint OP_PLUGIN = 64;
 /** Events: scene-effects' ParticleEvent.Kind, in order; an emitter's events follow its updaters, EVENT_WORDS each. */
 public static const uint EVENT_BIRTH = 0;
 public static const uint EVENT_DEATH = 1;
@@ -455,6 +497,14 @@ public static const uint PROGRAM_OVER = 1;
 public static const uint PROGRAM_TRAIL = 2;
 /** Program header bits: its particles send events (listed after its updaters). */
 public static const uint PROGRAM_EVENTS = 4;
+/** Program header bits: its particles emit (EVENT_EMIT): a side unit of four accumulators each, after those over life. */
+public static const uint PROGRAM_EMIT = 8;
+/** Emit accumulators: children in fixed point with this many fraction bits (CpuSimulation.EMIT_BITS). */
+public static const uint EMIT_BITS = 16;
+/** The most emit events an emitter sends (CpuSimulation.MAX_EMITS). */
+public static const uint MAX_EMITS = 4;
+/** An event's salt with this bit: its children are spread back over their parent's step (an emit event's). */
+public static const uint EVENT_SPREAD = 0x80000000u;
 /** Curve header bits (above the key count and the stride): keys evenly spaced, indexed directly. */
 public static const uint CURVE_EVEN = 1;
 /** Interpolations: scene-effects' Interpolation, in order. */
@@ -664,7 +714,7 @@ public float3 relativeTo(ParticleEmitter e, float3 p, float3 high, float3 low)
 {
     precise float3 h = e.originHigh - high;
     precise float3 l = e.originLow - low;
-    float3 offset = (e.flags & EMITTER_LOCAL) != 0 ? turn(e.rotation, p) : p;
+    float3 offset = (e.flags & EMITTER_LOCAL) != 0 ? turn(e.rotation, p * e.scale) : p;
     return (h + l) + offset;
 }
 

@@ -26,6 +26,7 @@ struct ParticleSortPush
     float3 centerLow;              // and the rest
     uint chunkCount;               // chunks of their ranges (sortKeysMain)
     uint shift;                    // the pass's digit: bits from the key's lowest
+    uint capacity;                 // keys the buffers hold: more are left out (a frame before its graph grew them)
 };
 
 [[vk::push_constant]]
@@ -85,6 +86,7 @@ void sortArgsMain(uint lane : SV_GroupIndex)
         args[0] = min(g, 65535u);
         args[1] = (g + 65534) / 65535;
         args[2] = 1;
+        total = min(total, push.capacity);
         args[3] = total;
     }
     GroupMemoryBarrierWithGroupSync();
@@ -117,12 +119,16 @@ void sortKeysMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         return;
     }
     Particle* particles = push.particles;
-    float3 d = relativeTo(e, particles[e.first + i].position, push.centerHigh, push.centerLow);
+    Particle p = particles[e.first + i];
+    float3 d = relativeTo(e, p.position + p.velocity * e.held, push.centerHigh, push.centerLow);
     // Farthest first: the squared distance's bits (a positive float orders as its bits do), inverted, top 20 kept
     uint depth = (0x7fffffffu - asuint(dot(d, d))) >> (31 - SORT_DEPTH_BITS);
     uint* args = push.args;
     uint2* target = push.target;
-    target[args[4 + chunk.x] + i] = uint2(chunk.x << SORT_DEPTH_BITS | depth, i);
+    if (args[4 + chunk.x] + i < push.capacity)
+    {
+        target[args[4 + chunk.x] + i] = uint2(chunk.x << SORT_DEPTH_BITS | depth, i);
+    }
 }
 
 /**

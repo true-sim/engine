@@ -47,10 +47,10 @@ final class CpuEmitters implements AutoCloseable {
         this.device = device;
         this.slots = slots;
         this.retired = new Retiring(slots);
-        list = FrameBuffer.create(device, 4L * maxEmitters, USAGE, slots);
+        list = FrameBuffer.create(device, 4L * maxEmitters, USAGE, slots, Particles.queues(device));
         listStaged = new Staging(4L * maxEmitters);
         try {
-            records = FrameBuffer.create(device, 256L * ParticleLayout.BYTES, USAGE, slots);
+            records = FrameBuffer.create(device, 256L * ParticleLayout.BYTES, USAGE, slots, Particles.queues(device));
         } catch (RuntimeException e) {
             list.close();
             throw e;
@@ -121,7 +121,7 @@ final class CpuEmitters implements AutoCloseable {
                     writer.positions[3 * i + 2] - oz, writer.velocities[3 * i], writer.velocities[3 * i + 1],
                     writer.velocities[3 * i + 2], writer.ages[i], writer.lifetimes[i], writer.colors[4 * i],
                     writer.colors[4 * i + 1], writer.colors[4 * i + 2], writer.colors[4 * i + 3], writer.sizes[i],
-                    writer.rotations[i], 0, i);
+                    writer.rotations[i], 0, i, 0);
             }
             uploaded += n;
         } else if (simulation != null) {
@@ -131,7 +131,8 @@ final class CpuEmitters implements AutoCloseable {
             for (int i = 0; i < n && cursor.next(); i++) {
                 put(first + i, cursor.x() - ox, cursor.y() - oy, cursor.z() - oz, cursor.vx(), cursor.vy(),
                     cursor.vz(), cursor.age(), cursor.lifetime(), cursor.color(0), cursor.color(1), cursor.color(2),
-                    cursor.color(3), cursor.size(), 0, cursor.seed(), (int) cursor.spawnIndex());
+                    cursor.color(3), cursor.size(), cursor.rotation(), cursor.seed(), (int) cursor.spawnIndex(),
+                    cursor.frame());
             }
             uploaded += n;
         }
@@ -147,11 +148,11 @@ final class CpuEmitters implements AutoCloseable {
     @AllowAllocation("the upload growing")
     private void grow(long bytes) {
         retired.add(records);
-        records = FrameBuffer.create(device, Math.max(bytes, 2 * records.size()), USAGE, slots);
+        records = FrameBuffer.create(device, Math.max(bytes, 2 * records.size()), USAGE, slots, Particles.queues(device));
     }
 
     private void put(int i, double x, double y, double z, float vx, float vy, float vz, float age, float lifetime,
-        float r, float g, float b, float a, float size, float rotation, int seed, int index) {
+        float r, float g, float b, float a, float size, float rotation, int seed, int index, float frame) {
         long at = (long) ParticleLayout.BYTES * i;
         Staging f = recordsStaged;
         float px = (float) x;
@@ -171,8 +172,8 @@ final class CpuEmitters implements AutoCloseable {
         f.putInt(at + ParticleLayout.SEED, seed);
         f.putInt(at + ParticleLayout.FLAGS, 0);
         f.putInt(at + ParticleLayout.SPAWN_INDEX, index);
-        f.putFloat(at + ParticleLayout.CUSTOM, 0);
-        f.putFloat(at + ParticleLayout.CUSTOM + 4, 0);
+        f.putFloat(at + ParticleLayout.CUSTOM, frame);
+        f.putInt(at + ParticleLayout.CUSTOM + 4, index); // its ribbon of several: spawn index % ribbons
         float half = 0.5f * size;
         lowX = Math.min(lowX, px - half);
         lowY = Math.min(lowY, py - half);
