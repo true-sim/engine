@@ -19,7 +19,8 @@ subprojects {
 val concurrentTests = setOf("engine-graph", "engine-scene", "engine-render")
 val measuring = providers.environmentVariable("TRUESIM_BENCHMARK").orNull == "true"
     || providers.environmentVariable("TRUESIM_SCREENSHOTS").orNull == "true"
-val testThreads = Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
+val testThreads = providers.gradleProperty("truesim.testThreads").map(String::toInt)
+    .getOrElse(Runtime.getRuntime().availableProcessors().coerceIn(1, 4))
 configure(subprojects.filter { it.name in concurrentTests }) {
     tasks.withType<Test>().configureEach {
         if (!measuring) {
