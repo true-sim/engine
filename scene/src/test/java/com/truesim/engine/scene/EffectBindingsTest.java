@@ -117,6 +117,34 @@ class EffectBindingsTest {
     }
 
     @Test
+    void eventsBurstIntoSharedInstancesWhereTheirJointsAre() {
+        Rig.Builder r = Rig.builder(legs());
+        Joint footL = r.joint("footL");
+        Clip walk = r.clip(step()).event(0.25, LEFT);
+        Rig.Layer base = r.layer();
+        Rig rig = r.build();
+        for (int i = 0; i < 20; i++) {
+            animators.add(rig, spawn(0.02 * i)).layer(base).play(walk); // feet in one cell
+        }
+        EffectBindings fx = new EffectBindings(effects, animators);
+        fx.onEvent(LEFT, DUST, footL).offset(0, -0.5, 0).minimumWeight(0.2f).burst();
+        scene.update();
+        animators.update(0);
+        animators.update(0.5);
+        assertThat(fx.played()).as("a burst per animator").isEqualTo(20);
+        List<Long> playing = new ArrayList<>();
+        effects.forEach(playing::add);
+        assertThat(playing).as("into one shared instance of the cell").hasSize(1);
+        assertThat(effects.burstCount()).isEqualTo(20);
+        assertThat(effects.burstPosition(0, 0)).as("at the left foot").isCloseTo(-1, within(1e-9));
+        assertThat(effects.burstPosition(0, 1)).as("offset in its frame").isCloseTo(-0.5, within(1e-9));
+        for (int f = 0; f < 4; f++) {
+            animators.update(0.5);
+        }
+        assertThat(fx.played()).isEqualTo(100);
+    }
+
+    @Test
     void curvesDriveParametersFrameByFrame() {
         Rig.Builder r = Rig.builder(legs());
         Clip flicker = r.clip(step()).curve(FLICKER, new float[] {0, 1}, new float[] {0, 1});

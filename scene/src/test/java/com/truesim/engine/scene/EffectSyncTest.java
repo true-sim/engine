@@ -354,6 +354,8 @@ class EffectSyncTest {
             com.truesim.scene.animation.Animators animators = new com.truesim.scene.animation.Animators(world);
             assertThat(fx.bindings(animators)).isNotNull();
             assertThatIllegalStateException().isThrownBy(() -> fx.bindings(animators));
+            assertThat(fx.lights(null, 0)).isSameAs(fx);
+            assertThat(fx.rays(null, null)).isSameAs(fx);
             engine.step();
         }
     }
