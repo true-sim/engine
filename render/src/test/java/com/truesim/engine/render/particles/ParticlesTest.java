@@ -59,6 +59,7 @@ import com.truesim.scene.effects.Init;
 import com.truesim.scene.effects.Module;
 import com.truesim.scene.effects.Over;
 import com.truesim.scene.effects.ParticleCursor;
+import com.truesim.scene.effects.Renderer;
 import com.truesim.scene.effects.Shape;
 import com.truesim.scene.effects.Space;
 import com.truesim.scene.effects.Spawn;
@@ -102,6 +103,8 @@ class ParticlesTest {
     private final EffectRuntime runtime = new EffectRuntime(effects);
     private CpuSimulation cpu = new CpuSimulation(runtime, null);
     private final ParticleCursor cursor = new ParticleCursor();
+    private ParticleSimulation simulation;
+    private GpuBuffer orderCopy;
 
     @BeforeEach
     void start() {
@@ -124,11 +127,13 @@ class ParticlesTest {
         poolCopy = GpuBuffer.hostVisible(device, particles.pool().buffer().size(), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         stateCopy = GpuBuffer.hostVisible(device, 4L * ParticleConstants.STATE_WORDS * particles.maxEmitters(),
             VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        orderCopy = GpuBuffer.hostVisible(device, 4L * particles.pool().slots(), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         target = new GpuImage(device, 4, 4, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
         ExternalImage output = new ExternalImage("probe", 4, 4, Format.R8G8B8A8_UNORM, usage,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
-        graph.add(new ParticleSimulation(particles)).add(new Probe(poolCopy, stateCopy)).output(PROBE, output);
+        simulation = new ParticleSimulation(particles);
+        graph.add(simulation).add(new Probe(poolCopy, stateCopy, orderCopy)).output(PROBE, output);
     }
 
     @AfterEach
@@ -140,6 +145,7 @@ class ParticlesTest {
             particles.close();
             poolCopy.close();
             stateCopy.close();
+            orderCopy.close();
             target.close();
             device.close();
             instance.close();
@@ -150,7 +156,7 @@ class ParticlesTest {
     }
 
     /** Copies the pool and the emitter state into host buffers each frame, after the simulation. */
-    private record Probe(GpuBuffer pool, GpuBuffer state) implements Technique {
+    private record Probe(GpuBuffer pool, GpuBuffer state, GpuBuffer orders) implements Technique {
         @Override
         public List<Key<?>> provides() {
             return List.of(PROBE);
@@ -160,8 +166,10 @@ class ParticlesTest {
         public void build(GraphBuilder g) {
             Buffer particles = g.require(ParticleKeys.PARTICLES);
             Buffer states = g.require(ParticleKeys.STATE);
+            Buffer order = g.require(ParticleKeys.RIBBON_ORDER);
             Image image = g.create("probe", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4));
             g.pass("particle probe").read(particles, BufferAccess.TRANSFER_SRC).read(states, BufferAccess.TRANSFER_SRC)
+                .read(order, BufferAccess.TRANSFER_SRC)
                 .write(image, Access.TRANSFER_DST).sideEffects()
                 .record(ctx -> {
                     ctx.clear(image.mip(0), 0, 0, 0, 1);
@@ -179,6 +187,9 @@ class ParticlesTest {
                         region.size(state.size());
                         org.lwjgl.vulkan.VK10.vkCmdCopyBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(states),
                             state.handle(), region);
+                        region.size(this.orders.size());
+                        org.lwjgl.vulkan.VK10.vkCmdCopyBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(order),
+                            this.orders.handle(), region);
                     }
                 });
             g.provide(PROBE, image);
@@ -209,6 +220,16 @@ class ParticlesTest {
         cpu.update();
         graph.beginFrame();
         particles.update(effects, runtime.spawns());
+        graph.submit(0, 0);
+    }
+
+    /** A frame of {@code ticks} through the runtime's decisions: levels of detail, drawn fractions, placements. */
+    private void frameThroughRuntime(long ticks) {
+        scene.update();
+        runtime.update(ticks);
+        cpu.update();
+        graph.beginFrame();
+        particles.update(runtime, cpu);
         graph.submit(0, 0);
     }
 
@@ -534,6 +555,139 @@ class ParticlesTest {
         frame(FRAME);
         device.waitIdle();
         assertThat(particles.events()).as("no events this late").isZero();
+    }
+
+    /** Sparks each emitting a trail of 30 a second (particles as emitters, step 19), on {@code target}. */
+    private static EffectData emitting(Target target) {
+        return EffectData.builder()
+            .emitter("sparks", e -> e.target(target).spawn(Spawn.burst(0, 6)).init(Shape.disc(0.5f),
+                    Init.lifetime(Bind.random(0.6f, 0.9f)), Init.velocity(Bind.random(-2, 2), Bind.constant(5),
+                    Bind.random(-2, 2)))
+                .update(Forces.gravity()).event(ParticleEvent.emit("trail", Bind.constant(30))))
+            .emitter("trail", e -> e.target(target).capacity(200).spawn(Spawn.fromEvents())
+                .init(Init.lifetime(5), Init.inherit(0.2f)))
+            .build();
+    }
+
+    @Test
+    void particlesAsEmittersMatchTheReferenceAndTheirRates() {
+        long gpuEffect = effects.play(emitting(Target.GPU), 1, 2, -3).seed(9).id();
+        long cpuEffect = effects.play(emitting(Target.CPU), 1, 2, -3).seed(9).id();
+        for (int f = 0; f < 30; f++) {
+            frame(FRAME);
+            if (f % 6 == 5) {
+                assertSameEmitter(gpuEffect, cpuEffect, 0, 1, 2, -3);
+                assertSameEmitter(gpuEffect, cpuEffect, 1, 1, 2, -3);
+            }
+        }
+        // Each spark has emitted floor(30 x its age) children, give or take the one being carried: 30 frames, 0.5 s
+        List<Gpu> trail = gpu(gpuEffect, 1);
+        assertThat(trail.size()).as("6 sparks, 15 each").isBetween(6 * 14, 6 * 15);
+        // Spread along each spark's path: no two of one spark at one place
+        assertThat(trail.stream().map(p -> Math.round(p.y * 1000) + "," + Math.round(p.x * 1000)).distinct().count())
+            .isGreaterThan(80);
+        assertThat(trail.stream().map(p -> p.seed).distinct().count()).as("each child's own seed").isGreaterThan(80);
+    }
+
+    @Test
+    void ribbonsPerParentKeepEachSparksTrailTogetherInSpawnOrder() {
+        EffectData data = EffectData.builder()
+            .emitter("sparks", e -> e.spawn(Spawn.rate(20)).init(Shape.sphere(1), Init.lifetime(0.7f),
+                    Init.speed(Bind.constant(3)))
+                .event(ParticleEvent.emit("trail", Bind.constant(40))))
+            .emitter("trail", e -> e.capacity(600).spawn(Spawn.fromEvents()).init(Init.lifetime(0.3f))
+                .render(Renderer.ribbon().set("ribbons", 0)))
+            .build();
+        long effect = effects.play(data, 0, 0, 0).id();
+        for (int f = 0; f < 40; f++) {
+            frame(FRAME);
+        }
+        device.waitIdle();
+        int instance = particles.instance(effect, 1);
+        int alive = stateCopy.memory().getAtIndex(ValueLayout.JAVA_INT,
+            (long) instance * ParticleConstants.STATE_WORDS + ParticleConstants.STATE_ALIVE);
+        assertThat(alive).as("trails").isGreaterThan(100);
+        MemorySegment pool = poolCopy.memory();
+        long base = (long) particles.currentHalf() * particles.pool().slots() + particles.first(effect, 1);
+        int first = particles.first(effect, 1);
+        java.util.Set<Integer> done = new java.util.HashSet<>();
+        int ribbon = -1;
+        int index = -1;
+        int ribbons = 0;
+        for (int i = 0; i < alive; i++) {
+            int k = orderCopy.memory().getAtIndex(ValueLayout.JAVA_INT, first + i);
+            long p = (base + k) * ParticleLayout.BYTES;
+            int id = pool.get(ValueLayout.JAVA_INT, p + ParticleLayout.CUSTOM + 4);
+            int spawn = pool.get(ValueLayout.JAVA_INT, p + ParticleLayout.SPAWN_INDEX);
+            if (id != ribbon) {
+                assertThat(done.add(id)).as("ribbon " + id + " in one run").isTrue();
+                ribbon = id;
+                ribbons++;
+            } else {
+                assertThat(spawn).as("in spawn order").isGreaterThan(index);
+            }
+            index = spawn;
+        }
+        assertThat(ribbons).as("a ribbon per spark alive").isBetween(10, 20);
+    }
+
+    @Test
+    void emittersUpdatedEveryOtherFrameMoveByTheTimeBetween() {
+        // Past 50 m from the viewer its level of detail updates every second frame
+        EffectData data = EffectData.builder(com.truesim.scene.effects.EffectType.builder("far").lod(50, 1, 2, 1)
+                .build())
+            .emitter("e", e -> e.spawn(Spawn.burst(0, 3)).init(Init.lifetime(100),
+                Init.velocity(Bind.constant(1), Bind.constant(0), Bind.constant(0))))
+            .build();
+        runtime.addViewer(0, 0, 0);
+        long effect = effects.play(data, 100, 0, 0).id();
+        float[] xs = new float[12];
+        for (int f = 0; f < xs.length; f++) {
+            frameThroughRuntime(FRAME);
+            xs[f] = gpu(effect, 0).getFirst().x;
+        }
+        int still = 0;
+        for (int f = 2; f < xs.length; f++) {
+            still += xs[f] == xs[f - 1] ? 1 : 0;
+            // never behind by more than the frame held
+            assertThat((double) xs[f]).isCloseTo((f + 1) * FRAME * 1e-6, within(FRAME * 1.1e-6));
+        }
+        assertThat(still).as("held every other frame").isBetween(4, 6);
+        assertThat(runtime.updateEvery(effect)).isEqualTo(2);
+    }
+
+    @Test
+    void sharedEffectsSimulateTheirVariantsOnly() {
+        EffectData torch = EffectData.builder().emitter("e", e -> e.space(Space.LOCAL).spawn(Spawn.rate(30))
+                .init(Init.lifetime(1), Init.velocity(Bind.constant(0), Bind.constant(1), Bind.constant(0)))
+                .render(Renderer.billboard(Renderer.Facing.POSITION)))
+            .shared(3).build();
+        for (int i = 0; i < 40; i++) {
+            effects.play(torch, i, 0, 0);
+        }
+        for (int f = 0; f < 5; f++) {
+            frameThroughRuntime(FRAME);
+        }
+        assertThat(particles.emitterCount()).as("three variants simulated").isEqualTo(3);
+        assertThat(particles.drawCount()).as("and drawn at forty places").isEqualTo(43);
+        for (int i = 0; i < 3; i++) {
+            assertThat(particles.listHidden(i)).as("variants are not drawn as themselves").isTrue();
+        }
+        assertThat(particles.listPlacement(3)).isTrue();
+    }
+
+    @Test
+    void theSimulationOnTheAsyncQueueMatchesTheReference() {
+        simulation.async(true);
+        assertThat(simulation.async()).isTrue();
+        long gpuEffect = effects.play(fireworks(Target.GPU), 2, 1, -3).seed(77).id();
+        long cpuEffect = effects.play(fireworks(Target.CPU), 2, 1, -3).seed(77).id();
+        for (int f = 0; f < 30; f++) {
+            frame(FRAME);
+        }
+        for (int e = 0; e < 3; e++) {
+            assertSameEmitter(gpuEffect, cpuEffect, e, 2, 1, -3);
+        }
     }
 
     @Test

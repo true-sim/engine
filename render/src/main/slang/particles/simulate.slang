@@ -1702,7 +1702,8 @@ void spawnChild(ParticleEmitter e, uint at, uint k, uint j)
     ParticleEventRecord r = events[eventKeys[low].y];
     uint c = global - prefix[low];
     // An emit event's children: spread back over their parent's step along its path, the youngest last
-    float spread = (r.salt & EVENT_SPREAD) != 0 ? r.step * float(r.count - 1 - c) / float(r.count) : 0;
+    bool emitted = (r.salt & EVENT_SPREAD) != 0;
+    float spread = emitted ? r.step * float(r.count - 1 - c) / float(r.count) : 0;
     r.salt &= ~EVENT_SPREAD;
     Particle p;
     p.position = 0;
@@ -1712,8 +1713,9 @@ void spawnChild(ParticleEmitter e, uint at, uint k, uint j)
     p.color = 1;
     p.size = 0.1;
     p.rotation = 0;
-    p.seed = combine(combine(r.seed, r.salt), c);
     p.spawnIndex = state[at + STATE_EVENT_INDEX] + j;
+    // An emitting parent's children each by their spawn index: its events come every frame, alike
+    p.seed = combine(combine(r.seed, r.salt), emitted ? p.spawnIndex : c);
     p.flags = PARTICLE_NEWBORN;
     p.custom = float2(0, asfloat(r.parentIndex)); // a ribbon per parent
     float4 color0 = 1;

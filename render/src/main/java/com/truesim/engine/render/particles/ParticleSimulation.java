@@ -401,7 +401,7 @@ public final class ParticleSimulation implements Technique {
             .write(args, BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
                 if (p.simulating() && p.parentRibbonCount() > 0) {
-                    ctx.dispatch(argsProgram, ribbonPush(argsPush, ctx.address(b.state()), slots)
+                    ctx.dispatch(argsProgram, ribbonPush(argsPush, p.stateAddress(), slots)
                         .args(ctx.address(args)), 1);
                 }
             });
@@ -411,7 +411,7 @@ public final class ParticleSimulation implements Technique {
             .write(keys, BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
                 if (p.simulating() && p.parentRibbonCount() > 0) {
-                    dispatchChunks(ctx, keysProgram, ribbonPush(keysPush, ctx.address(b.state()), slots)
+                    dispatchChunks(ctx, keysProgram, ribbonPush(keysPush, p.stateAddress(), slots)
                         .args(ctx.address(args)).target(ctx.address(keys)), p.parentRibbonChunks());
                 }
             });
@@ -425,7 +425,7 @@ public final class ParticleSimulation implements Technique {
                 .write(histogram, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> {
                     if (p.simulating() && index < ParticleSort.passes(p.parentRibbonCount())) {
-                        ctx.dispatchIndirect(count, ribbonPush(countPush, ctx.address(b.state()), slots)
+                        ctx.dispatchIndirect(count, ribbonPush(countPush, p.stateAddress(), slots)
                             .args(ctx.address(args)).histogram(ctx.address(histogram)).source(ctx.address(source)),
                             args, 0);
                     }
@@ -435,7 +435,7 @@ public final class ParticleSimulation implements Technique {
                 .write(histogram, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> {
                     if (p.simulating() && index < ParticleSort.passes(p.parentRibbonCount())) {
-                        ctx.dispatch(scan, ribbonPush(scanPush, ctx.address(b.state()), slots)
+                        ctx.dispatch(scan, ribbonPush(scanPush, p.stateAddress(), slots)
                             .args(ctx.address(args)).histogram(ctx.address(histogram)), 1);
                     }
                 });
@@ -445,7 +445,7 @@ public final class ParticleSimulation implements Technique {
                 .read(args, BufferAccess.STORAGE_READ).write(target, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> {
                     if (p.simulating() && index < ParticleSort.passes(p.parentRibbonCount())) {
-                        ctx.dispatchIndirect(scatter, ribbonPush(scatterPush, ctx.address(b.state()), slots)
+                        ctx.dispatchIndirect(scatter, ribbonPush(scatterPush, p.stateAddress(), slots)
                             .args(ctx.address(args)).histogram(ctx.address(histogram)).source(ctx.address(source))
                             .target(ctx.address(target)), args, 0);
                     }
@@ -456,7 +456,7 @@ public final class ParticleSimulation implements Technique {
             .read(args, BufferAccess.STORAGE_READ).write(b.order(), BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
                 if (p.simulating() && p.parentRibbonCount() > 0) {
-                    ctx.dispatchIndirect(orderProgram, ribbonPush(orderPush, ctx.address(b.state()), slots)
+                    ctx.dispatchIndirect(orderProgram, ribbonPush(orderPush, p.stateAddress(), slots)
                         .args(ctx.address(args)).source(ctx.address(keys)).target(ctx.address(b.order())), args, 0);
                 }
             });
