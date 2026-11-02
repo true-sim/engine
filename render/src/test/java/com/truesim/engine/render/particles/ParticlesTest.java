@@ -545,7 +545,7 @@ class ParticlesTest {
     }
 
     @Test
-    void emittersWithoutRoomAreReportedAndCpuEmittersTakeNone() {
+    void emittersWithoutRoomAreReportedWhileCpuEmittersTakeRanges() {
         EffectData huge = EffectData.builder().emitter("huge", e -> e.capacity(1 << 20).spawn(Spawn.rate(10)))
             .emitter("cpu", e -> e.target(Target.CPU).spawn(Spawn.rate(10))).build();
         long effect = effects.play(huge, 0, 0, 0).id();
@@ -554,7 +554,7 @@ class ParticlesTest {
         frame(FRAME);
         assertThat(particles.unplaced()).isOne();
         assertThat(particles.instance(effect, 0)).isEqualTo(-1);
-        assertThat(particles.instance(effect, 1)).isEqualTo(-1);
+        assertThat(particles.instance(effect, 1)).as("a CPU emitter: uploaded into a range").isNotNegative();
         assertThat(particles.alive(effect, 0)).isZero();
         assertThatIllegalArgumentException().isThrownBy(() -> new Particles(device, graph.frameSlots(), 1 << 20, 0));
     }

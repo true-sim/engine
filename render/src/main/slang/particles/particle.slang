@@ -47,14 +47,14 @@ public struct ParticleEmitter
     public float3 originLow;       // the rest of the origin
     public float frame;            // seconds its effect moved on this frame, unclamped: births spread over them
     public float4 rotation;        // the emitter's rotation now, a quaternion
-    public float3 position;        // where the emitter is now, from the origin
+    public float3 position;        // where the emitter is now, from the origin; a CPU emitter's box's least corner
     public uint parameters;        // its effect's user parameters: float offset in the frame's parameter blocks
-    public float3 previous;        // where it was at the last update, from the origin
+    public float3 previous;        // where it was at the last update, from the origin; a CPU emitter's box's greatest
     public uint chunks;            // its first entry in the frame's chunk list
     public float3 down;            // world down in its particles' frame, for gravity
-    public uint records;           // its first spawn record
+    public uint records;           // its first spawn record; a CPU emitter's first uploaded particle
     public uint recordCount;       // how many spawn records it has
-    public uint demand;            // particles they ask for
+    public uint demand;            // particles they ask for; a CPU emitter's uploaded particles
     public uint instance;          // its row of the state buffer (STATE_WORDS words), stable while it lives
     public uint sideUnits;         // 16-byte side units per particle
 };
@@ -122,6 +122,7 @@ public static const uint PARTICLE_PREWARM = 2;            // born before its eff
 /** Emitter flags. */
 public static const uint EMITTER_NEW = 1;                 // its first frame: no particles yet
 public static const uint EMITTER_LOCAL = 2;               // its particles live in its frame
+public static const uint EMITTER_CPU = 4;                 // simulated on the CPU: its particles uploaded each frame
 
 /** Spawn record flags. */
 public static const uint SPAWN_PREWARM = 1;               // scene-effects' SpawnRecords.PREWARM

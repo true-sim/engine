@@ -1048,6 +1048,12 @@ particles.update(effects, runtime.spawns());
 - **The same as the Java reference:** the kernel runs scene-effects' `CpuSimulation` modules with the same hash,
   salts and order; the tests run each module's asset as a GPU and a CPU emitter side by side and compare particle by
   particle, and check the hash against scene-effects' `hash-vectors.csv`.
+- **CPU emitters** (E1: `Target.CPU`, simulated by scene-effects' `CpuSimulation`, which gameplay reads): given
+  to `particles.update(effects, spawns, simulation)`, their particles are written each frame into a mapped buffer and
+  "particle upload" copies them into their ranges of the pool, so drawing, culling and sorting treat them like GPU
+  particles. A game simulating particles itself writes them through `particles.writer(effect, emitter)`
+  (`writer.clear(); writer.next().position(x, y, z).velocity(...).color(...).size(...)`), allocation-free, instead of
+  the simulation's. The same asset as a CPU and as a GPU emitter draws the same image (tested).
 - **World and local space:** world-space particles are float offsets from their effect's origin (two floats per axis
   on the GPU); local-space ones live in the emitter's frame.
 - **Statistics** (alive, spawned, dropped; per instance and in all) come back through a readback a few frames late,

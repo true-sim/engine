@@ -36,6 +36,7 @@ import com.truesim.scene.effects.Effects;
 import com.truesim.scene.effects.EmitterData;
 import com.truesim.scene.effects.Space;
 import com.truesim.scene.effects.SpawnRecords;
+import com.truesim.scene.effects.Target;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.Arrays;
@@ -112,6 +113,10 @@ public final class Particles implements AutoCloseable {
     private final int[] sideUnits;
     private final boolean[] fresh;
     private final boolean[] local;
+    private final boolean[] cpu;
+    private final ParticleWriter[] writers;
+    private final CpuEmitters cpuEmitters;
+    private CpuSimulation simulation;
     private final int[] freeInstances;
     private int freeCount;
     private int unplaced;
@@ -165,6 +170,8 @@ public final class Particles implements AutoCloseable {
         sideUnits = new int[maxEmitters];
         fresh = new boolean[maxEmitters];
         local = new boolean[maxEmitters];
+        cpu = new boolean[maxEmitters];
+        writers = new ParticleWriter[maxEmitters];
         freeInstances = new int[maxEmitters];
         for (int i = 0; i < maxEmitters; i++) {
             freeInstances[i] = maxEmitters - 1 - i; // the lowest first
@@ -181,11 +188,13 @@ public final class Particles implements AutoCloseable {
         overflowOf = new int[maxEmitters];
         ParticlePool p = null;
         ModulePrograms m = null;
+        CpuEmitters c = null;
         GpuBuffer[] made = new GpuBuffer[4];
         FrameBuffer[] tables = new FrameBuffer[4];
         try {
             p = new ParticlePool(device, budget);
             m = new ModulePrograms(device, slots);
+            c = new CpuEmitters(device, slots, maxEmitters);
             made[0] = GpuBuffer.deviceLocal(device, 4L * ParticleConstants.STATE_WORDS * maxEmitters, GPU_USAGE);
             made[1] = GpuBuffer.deviceLocal(device, 8L * p.slots() / ParticleConstants.CHUNK, GPU_USAGE);
             made[2] = GpuBuffer.deviceLocal(device, statisticsBytes(maxEmitters), GPU_USAGE);
@@ -208,6 +217,9 @@ public final class Particles implements AutoCloseable {
             if (m != null) {
                 m.close();
             }
+            if (c != null) {
+                c.close();
+            }
             if (p != null) {
                 p.close();
             }
@@ -215,6 +227,7 @@ public final class Particles implements AutoCloseable {
         }
         pool = p;
         programs = m;
+        cpuEmitters = c;
         state = made[0];
         chunkCounts = made[1];
         statistics = made[2];
@@ -280,7 +293,16 @@ public final class Particles implements AutoCloseable {
      * simulates nothing and draws what the frame before left. Allocates nothing once its tables have grown.
      */
     public void update(Effects effects, SpawnRecords spawns) {
+        update(effects, spawns, null);
+    }
+
+    /**
+     * {@link #update(Effects, SpawnRecords)}, uploading CPU emitters' particles: as the game wrote them for emitters it
+     * has a {@link #writer} of, else as {@code simulation} (null: none) left them, after its own update.
+     */
+    public void update(Effects effects, SpawnRecords spawns, CpuSimulation simulation) {
         Objects.requireNonNull(effects, "effects");
+        this.simulation = simulation;
         long frames = slots.frames();
         if (updatedAt != frames || slots.isSingle()) {
             source = written;
@@ -300,6 +322,7 @@ public final class Particles implements AutoCloseable {
         }
         list(effects);
         spawn(effects, spawns);
+        upload();
         for (int i = 0; i < emitterCount; i++) {
             int at = ParticleEmitterLayout.BYTES * i;
             emitterTable.putInt(at + ParticleEmitterLayout.RECORDS, recordStart[i]);
@@ -349,9 +372,7 @@ public final class Particles implements AutoCloseable {
         }
         Arrays.fill(instances[slot], -1);
         for (int e = 0; e < emitters.size(); e++) {
-            if (block.programs[e] >= 0) {
-                instances[slot][e] = place(emitters.get(e), block.over[e]);
-            }
+            instances[slot][e] = place(emitters.get(e), block.over[e]); // CPU emitters too: uploaded into it
         }
         ids[slot] = effect;
         blocks[slot] = block;
@@ -385,7 +406,9 @@ public final class Particles implements AutoCloseable {
         sideFirsts[instance] = side;
         sideUnits[instance] = units;
         fresh[instance] = true;
-        local[instance] = emitter.space() == Space.LOCAL;
+        cpu[instance] = emitter.target() == Target.CPU;
+        local[instance] = !cpu[instance] && emitter.space() == Space.LOCAL; // CPU emitters upload world offsets
+        writers[instance] = null;
         return instance;
     }
 
@@ -403,6 +426,10 @@ public final class Particles implements AutoCloseable {
                 pool.releaseSide(sideFirsts[instance], sideUnits[instance]);
             }
             freeInstances[freeCount++] = instance;
+            if (writers[instance] != null) {
+                writers[instance].ended = true;
+                writers[instance] = null;
+            }
             own[e] = -1;
         }
         programs.release(blocks[slot]);
@@ -462,7 +489,8 @@ public final class Particles implements AutoCloseable {
                 t.putInt(at + ParticleEmitterLayout.CURVES, block.curves);
                 t.putInt(at + ParticleEmitterLayout.CURVE_FLOATS, block.curveLength);
                 t.putInt(at + ParticleEmitterLayout.FLAGS, (fresh[instance] ? ParticleConstants.EMITTER_NEW : 0)
-                    | (local[instance] ? ParticleConstants.EMITTER_LOCAL : 0));
+                    | (local[instance] ? ParticleConstants.EMITTER_LOCAL : 0)
+                    | (cpu[instance] ? ParticleConstants.EMITTER_CPU : 0));
                 t.putInt(at + ParticleEmitterLayout.SIDE, sideFirsts[instance]);
                 t.putInt(at + ParticleEmitterLayout.SEED, EffectRuntime.emitterSeed(seed, e));
                 t.putFloat(at + ParticleEmitterLayout.DT, dt);
@@ -493,7 +521,7 @@ public final class Particles implements AutoCloseable {
                     putVector(t, at + ParticleEmitterLayout.DOWN, 0, -1, 0);
                 }
                 fresh[instance] = false;
-                int chunks = ParticlePool.chunksOf(capacities[instance]);
+                int chunks = cpu[instance] ? 0 : ParticlePool.chunksOf(capacities[instance]);
                 for (int c = 0; c < chunks; c++) {
                     chunkTable.putInt(4L * chunkCount++, index);
                 }
@@ -592,6 +620,57 @@ public final class Particles implements AutoCloseable {
         }
     }
 
+    /** Writes the CPU emitters' particles for the upload; their boxes and counts into their records. */
+    private void upload() {
+        cpuEmitters.begin();
+        for (int i = 0; i < emitterCount; i++) {
+            int instance = listInstance[i];
+            if (!cpu[instance]) {
+                continue;
+            }
+            int slot = listSlot[i];
+            int before = cpuEmitters.uploaded();
+            int first = cpuEmitters.write(i, ids[slot], listEmitter[i], capacities[instance], writers[instance],
+                simulation, origins[3 * slot], origins[3 * slot + 1], origins[3 * slot + 2]);
+            recordStart[i] = first;
+            recordFill[i] = first;
+            demand[i] = cpuEmitters.uploaded() - before;
+            long at = (long) ParticleEmitterLayout.BYTES * i;
+            putVector(emitterTable, at + ParticleEmitterLayout.POSITION, cpuEmitters.lowX, cpuEmitters.lowY,
+                cpuEmitters.lowZ);
+            putVector(emitterTable, at + ParticleEmitterLayout.PREVIOUS, cpuEmitters.highX, cpuEmitters.highY,
+                cpuEmitters.highZ);
+        }
+    }
+
+    /**
+     * The writer of CPU emitter {@code emitter} of playing effect {@code effect}: from now on the GPU draws the records
+     * the game writes into it instead of the simulation's particles of that emitter. Made once; inert (and
+     * {@link ParticleWriter#ended()}) once the effect ended. Call after an {@link #update} has seen the effect.
+     */
+    @AllowAllocation("a writer made once per emitter")
+    public ParticleWriter writer(long effect, int emitter) {
+        int instance = instance(effect, emitter);
+        if (instance < 0 || !cpu[instance]) {
+            throw new IllegalArgumentException("Not a CPU emitter with room of a playing effect: " + emitter
+                + " of " + Long.toHexString(effect));
+        }
+        if (writers[instance] == null) {
+            writers[instance] = new ParticleWriter(effect, emitter, capacities[instance]);
+        }
+        return writers[instance];
+    }
+
+    /** CPU emitters uploaded in the last update. */
+    int cpuEmitterCount() {
+        return cpuEmitters.emitters();
+    }
+
+    /** The most particles one of them uploaded. */
+    int largestUpload() {
+        return cpuEmitters.largest();
+    }
+
     /** The place in the frame's list of the emitter spawn record {@code i} spawns, or -1 for none on the GPU. */
     private int placeOf(SpawnRecords spawns, int i) {
         long effect = spawns.effect(i);
@@ -600,7 +679,7 @@ public final class Particles implements AutoCloseable {
             return -1;
         }
         int instance = instances[slot][spawns.emitter(i)];
-        return instance < 0 ? -1 : places[slot][spawns.emitter(i)];
+        return instance < 0 || cpu[instance] ? -1 : places[slot][spawns.emitter(i)];
     }
 
     // ---------------------------------------------------------------------------------------------- the GPU side
@@ -639,13 +718,14 @@ public final class Particles implements AutoCloseable {
         long sideHalf = 16L * pool.sideUnits();
         long particles = pool.buffer().deviceAddress();
         long side = pool.sideBuffer().deviceAddress();
-        return push.source(particles + source * half).target(particles + target * half)
-            .sideSource(side + source * sideHalf).sideTarget(side + target * sideHalf)
+        return push.source(particles + source * half).targetDelta((target - source) * pool.slots())
+            .sideSource(side + source * sideHalf).sideDelta((target - source) * pool.sideUnits())
             .emitters(emitterTable.deviceAddress()).chunks(chunkTable.deviceAddress())
             .chunkCounts(chunkCounts.deviceAddress()).state(state.deviceAddress())
             .spawns(spawnRing.deviceAddress()).programs(programs.wordsAddress()).curves(programs.curvesAddress())
             .parameters(parameterBlocks.deviceAddress()).statistics(statistics.deviceAddress())
-            .dispatch(dispatch.deviceAddress()).emitterCount(emitterCount).chunkCount(chunkCount);
+            .dispatch(dispatch.deviceAddress()).uploads(cpuEmitters.recordsAddress()).cpu(cpuEmitters.listAddress())
+            .emitterCount(emitterCount).chunkCount(chunkCount);
     }
 
     /** The half of the pool the frame's simulation writes and every draw after reads. */
@@ -823,6 +903,7 @@ public final class Particles implements AutoCloseable {
         statistics.close();
         dispatch.close();
         programs.close();
+        cpuEmitters.close();
         pool.close();
         retired.close();
     }
