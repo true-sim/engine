@@ -1174,12 +1174,13 @@ public final class Particles implements AutoCloseable {
             long time = effects.time(effect);
             double frame = (time - times[slot]) * 1e-6;
             // A reduced update rate (levels of detail): held still between updates, then moved on by the time owed
-            int every = runtime == null ? 1 : runtime.updateEvery(effect);
+            boolean decided = runtime != null && runtime.decided(effect); // else as for an update without a runtime
+            int every = decided ? runtime.updateEvery(effect) : 1;
             boolean held = every > 1 && (updates + slot) % every != 0;
             double step = held ? 0 : frame + owed[slot];
             owed[slot] = held ? owed[slot] + frame : 0;
             float dt = (float) Math.min(CpuSimulation.MAX_STEP * every, step);
-            float drawn = runtime == null ? 1 : runtime.drawn(effect);
+            float drawn = decided ? runtime.drawn(effect) : 1;
             boolean hidden = effects.variant(effect);
             double x = effects.position(effect, 0);
             double y = effects.position(effect, 1);
@@ -1357,6 +1358,9 @@ public final class Particles implements AutoCloseable {
         }
         long variant = effects.variantOf(effect);
         int slot = (int) variant;
+        if (runtime != null && !runtime.decided(effect)) {
+            return; // played since the runtime's update: drawn from the next on
+        }
         float weight = runtime == null ? 1 : runtime.culled(effect) ? 0 : runtime.placementWeight(effect);
         if (variant == 0 || slot >= highest || ids[slot] != variant || !(weight > 0)) {
             return;
