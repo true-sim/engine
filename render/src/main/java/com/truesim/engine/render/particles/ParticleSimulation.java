@@ -8,6 +8,7 @@ import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.layout.ParticlePush;
+import com.truesim.engine.render.layout.ParticleRibbonPush;
 import com.truesim.engine.vulkan.Pipeline;
 import java.util.List;
 import java.util.Objects;
@@ -18,7 +19,8 @@ import java.util.Objects;
  * graphics queue: "particle count" (survivors per chunk), "particle scan" (their slots, per emitter), "particle update"
  * (the updaters, survivors copied in order into the other half), "particle spawn args" (spawns within room, overflow
  * counted), "particle spawn" (the newborn, indirect), "particle upload" (CPU emitters' particles into their ranges),
- * "particle args" (counts for the next frame), and the statistics' readback. A frame {@link Particles#update} was not called in simulates nothing.
+ * "particle args" (counts for the next frame), "particle ribbons" (ribbons of several strands ordered by strand and
+ * spawn index), and the statistics' readback. A frame {@link Particles#update} was not called in simulates nothing.
  *
  * <pre>{@code
  * graph.add(new ParticleSimulation(particles));
@@ -42,7 +44,7 @@ public final class ParticleSimulation implements Technique {
 
     @Override
     public List<Key<?>> provides() {
-        return List.of(ParticleKeys.PARTICLES, ParticleKeys.STATE);
+        return List.of(ParticleKeys.PARTICLES, ParticleKeys.STATE, ParticleKeys.SIDE, ParticleKeys.RIBBON_ORDER);
     }
 
     @Override
@@ -114,9 +116,23 @@ public final class ParticleSimulation implements Technique {
                     ctx.dispatch(args, p.push(argsPush), (p.emitterCount() + 63) / 64);
                 }
             });
+        Pipeline ribbons = g.computeProgram("shaders/particles/ribbons.spv", "orderMain", ParticleRibbonPush.BYTES);
+        ParticleRibbonPush ribbonPush = new ParticleRibbonPush();
+        g.pass("particle ribbons").read(b.particles(), BufferAccess.STORAGE_READ)
+            .read(b.state(), BufferAccess.STORAGE_READ).write(b.order(), BufferAccess.STORAGE_WRITE)
+            .record(ctx -> {
+                if (p.simulating() && p.ribbonCount() > 0) {
+                    ctx.dispatch(ribbons, ribbonPush.particles(p.particlesAddress())
+                        .emitters(p.emitterTableAddress()).state(ctx.address(b.state()))
+                        .order(ctx.address(b.order())).list(p.ribbonListAddress()).count(p.ribbonCount()),
+                        p.ribbonCount());
+                }
+            });
         g.readback("particle statistics", b.statistics(), 0, p.statisticsBytes(), p.receiver());
         g.provide(ParticleKeys.PARTICLES, b.particles());
         g.provide(ParticleKeys.STATE, b.state());
+        g.provide(ParticleKeys.SIDE, b.side());
+        g.provide(ParticleKeys.RIBBON_ORDER, b.order());
     }
 
     /** Dispatches a group per chunk (or emitter), in rows of up to 65,535 groups. */

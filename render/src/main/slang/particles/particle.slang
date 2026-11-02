@@ -7,9 +7,9 @@ module particle;
 import bindless;
 
 /**
- * A particle: 64 bytes. Positions are offsets from its emitter's origin (world space) or in the emitter's frame (local
- * space). The pool holds two copies of every range: each frame reads one and writes the survivors, in order, then the
- * newborn into the other.
+ * A particle: 80 bytes (the design's fields; its "64 bytes" miscounts them). Positions are offsets from its emitter's
+ * origin (world space) or in the emitter's frame (local space). The pool holds two copies of every range: each frame
+ * reads one and writes the survivors, in order, then the newborn into the other.
  */
 [HostLayout]
 public struct Particle
@@ -79,7 +79,7 @@ public struct ParticleSpawn
 
 /**
  * How an emitter's particles are drawn: one of its renderers (scene-effects' Renderer), encoded with its effect's
- * programs. 48 bytes.
+ * programs. 112 bytes.
  */
 [HostLayout]
 public struct ParticleRenderer
@@ -94,8 +94,21 @@ public struct ParticleRenderer
     public uint rows;              // and down
     public float frames;           // frames it plays
     public float rate;             // frames per second of age; 0: the frames over its life
-    public float pad0;
-    public float pad1;
+    public uint ribbons;           // ribbons: how many, particle i in ribbon (spawn index % ribbons)
+    public uint stride;            // ribbons: every stride-th particle a point
+    public float lodDistance;      // ribbons: the stride doubles every time the distance doubles past this; 0: never
+    public float widthTail;        // ribbons, trails and beams: the width at the tail, in sizes
+    public float widthHead;        // and at the head
+    public float tile;             // ribbons and trails: particles (or points) per texture repeat; 0: stretched over
+    public uint points;            // trails: past positions kept per particle
+    public uint segments;          // beams: segments from end to end
+    public float noise;            // beams: how far the noise moves them sideways, in metres
+    public float width;            // beams: metres across
+    public float length;           // beams: metres along the emitter's +Y without an end given
+    public float4 color;           // beams: linear color and alpha
+    public uint pad0;
+    public uint pad1;
+    public uint pad2;
 };
 
 /** A draw of one renderer of one emitter instance in a view: 16 bytes, written by the CPU each frame. */
@@ -161,7 +174,7 @@ public static const uint DRAW_VOLUME = 1;                 // the soft fade by th
 public static const uint DRAW_BLEND_FRAMES = 2;           // a flipbook's frames blended
 public static const uint DRAW_LOOP = 4;                   // a flipbook played by age loops
 /** Words of a renderer record. */
-public static const uint RENDERER_WORDS = 12;
+public static const uint RENDERER_WORDS = 28;
 /** A draw without a texture. */
 public static const uint NO_TEXTURE = 0xffffffffu;
 
@@ -198,6 +211,8 @@ public static const uint BINDING_WORDS = 4;
 public static const uint COLOR_WORDS = 5;
 /** Program header bits: it has attributes over life, kept from birth in its side range. */
 public static const uint PROGRAM_OVER = 1;
+/** Program header bits: it keeps a trail of past positions (their count in the header's top 8 bits). */
+public static const uint PROGRAM_TRAIL = 2;
 /** Curve header bits (above the key count and the stride): keys evenly spaced, indexed directly. */
 public static const uint CURVE_EVEN = 1;
 /** Interpolations: scene-effects' Interpolation, in order. */

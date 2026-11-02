@@ -496,10 +496,12 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         {
             uint4* sideSource = push.sideSource;
             uint s = e.side + local * e.sideUnits;
-            color0 = asfloat(sideSource[s]);
-            size0 = asfloat(sideSource[s + 1].x);
-            uint4* sideSource0 = push.sideSource;
-            uint4* sideTarget = sideSource0 + push.sideDelta;
+            if (((m.program[0] >> 16) & PROGRAM_OVER) != 0)
+            {
+                color0 = asfloat(sideSource[s]);
+                size0 = asfloat(sideSource[s + 1].x);
+            }
+            uint4* sideTarget = sideSource + push.sideDelta;
             uint t = e.side + (to - e.first) * e.sideUnits;
             for (uint u = 0; u < e.sideUnits; u++)
             {
@@ -522,6 +524,18 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         Particle* target = source0 + push.targetDelta;
         target[to] = p;
         bound(p);
+        uint header = m.program[0];
+        if (((header >> 16) & PROGRAM_TRAIL) != 0)
+        {
+            // The trail's ring: one more past position, over its oldest
+            uint4* sideSource0 = push.sideSource;
+            uint4* trail = sideSource0 + push.sideDelta + e.side + (to - e.first) * e.sideUnits
+                + (((header >> 16) & PROGRAM_OVER) != 0 ? 2 : 0);
+            uint points = header >> 24;
+            uint head = (trail[0].x + 1) % points;
+            trail[0] = uint4(head, 0, 0, 0);
+            trail[1 + head] = uint4(asuint(p.position), 0);
+        }
     }
     mergeBounds(e.instance, lane);
 }
@@ -695,10 +709,24 @@ void spawnMain(uint3 id : SV_DispatchThreadID)
     if (e.side != NO_SIDE)
     {
         uint4* sideSource0 = push.sideSource;
-            uint4* sideTarget = sideSource0 + push.sideDelta;
+        uint4* sideTarget = sideSource0 + push.sideDelta;
         uint s = e.side + slot * e.sideUnits;
-        sideTarget[s] = asuint(color0);
-        sideTarget[s + 1] = uint4(asuint(size0), 0, 0, 0);
+        uint header = m.program[0];
+        if (((header >> 16) & PROGRAM_OVER) != 0)
+        {
+            sideTarget[s] = asuint(color0);
+            sideTarget[s + 1] = uint4(asuint(size0), 0, 0, 0);
+        }
+        if (((header >> 16) & PROGRAM_TRAIL) != 0)
+        {
+            // A trail starts where its particle is: no streak back to the origin
+            uint4* trail = sideTarget + s + (((header >> 16) & PROGRAM_OVER) != 0 ? 2 : 0);
+            trail[0] = uint4(0, 0, 0, 0);
+            for (uint i = 0; i < (header >> 24); i++)
+            {
+                trail[1 + i] = uint4(asuint(p.position), 0);
+            }
+        }
     }
     if ((p.flags & PARTICLE_DEAD) == 0)
     {

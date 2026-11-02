@@ -1026,7 +1026,7 @@ followed yet: lights and cameras from the scene.
 
 `engine-render`'s `particles` package simulates scene-effects' effects (`EffectData`, played in `Effects`, spawned by
 `EffectRuntime`) on the GPU, as the scene repository's `docs/effects.md` designs them. Every GPU emitter of a playing
-effect is an emitter instance with a range of the shared `ParticlePool` (two copies of 64-byte particles, the layout
+effect is an emitter instance with a range of the shared `ParticlePool` (two copies of 80-byte particles, the layout
 generated from `particles/particle.slang`), reserved from its capacity in chunks of 64 slots. Each effect's emitters
 are encoded once into module programs and curve keys (`ModulePrograms`), which one interpreting kernel runs.
 
@@ -1048,6 +1048,17 @@ particles.update(effects, runtime.spawns());
 - **The same as the Java reference:** the kernel runs scene-effects' `CpuSimulation` modules with the same hash,
   salts and order; the tests run each module's asset as a GPU and a CPU emitter side by side and compare particle by
   particle, and check the hash against scene-effects' `hash-vectors.csv`.
+- **Ribbons, trails and beams** (E13), camera-facing strips drawn by `ParticleDraw` too:
+  - ribbons through an emitter's particles in spawn order (the survivor copy keeps it across chunks), their head at
+    the emitter so there is no gap behind it, every `stride`-th particle by spawn index a point (doubling with distance
+    past `lodDistance`), and ribbons of several strands (`ribbons`) ordered by the second key (strand, spawn index) in a
+    "particle ribbons" pass;
+  - trails through each particle's last positions (`Renderer.trail(points)`), kept in a ring in its side range, copied
+    with the survivors; emitters with trails hold at most `Particles.MAX_TRAIL_PARTICLES`;
+  - beams of noisy segments from the emitter to an end (`particles.beamEnd(effect, emitter, x, y, z)`: another node, a
+    target), or up its `length` along the emitter's +Y;
+  - textures stretched over a strip or tiled (`tile`), widths from tail to head (`width.tail`, `width.head`).
+  10,000 sparks with trails of 16 points: update 0.027 ms, draw 0.083 ms on an RX 9070 XT (64 x 64 pixels).
 - **CPU emitters** (E1: `Target.CPU`, simulated by scene-effects' `CpuSimulation`, which gameplay reads): given
   to `particles.update(effects, spawns, simulation)`, their particles are written each frame into a mapped buffer and
   "particle upload" copies them into their ranges of the pool, so drawing, culling and sorting treat them like GPU
@@ -1130,7 +1141,7 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
   (foot placement), skinned on the GPU. The stereo bench takes it too, with `-Peye=x,y,z,tx,ty,tz` for a camera of its
   own (`g+h` for heights above the ground), `-Pframes=780` and `-PpngFrames=108,612 -Ppng=fox.png` for images.
 - `-Peffect=x,y,z` (`g+h` for heights above the ground) plays the demo's particle effects there in the stereo bench:
-  a fountain of sparks over a column of smoke.
+  a fountain of sparks and trailed streaks over a column of smoke, an orb circling it with a ribbon, and a beam.
 - `./gradlew :engine-demo:stereoBench -Pfoxes=1000 -Pcrowd=<path to Fox.gltf> [-PfoxLod=true]` adds a crowd of foxes,
   each with the whole rig and a GPU-skinned copy, and reports what animating them costs per frame. On a Ryzen 9
   9950X3D and RX 9070 XT (2026-11-02), 1000 foxes: CPU 1.75 ms in the animators and 1.69 ms in the scene sync, GPU

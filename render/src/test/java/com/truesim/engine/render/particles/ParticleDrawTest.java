@@ -80,6 +80,7 @@ import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.lwjgl.vulkan.VkBufferImageCopy;
 
 /**
@@ -136,7 +137,7 @@ class ParticleDrawTest {
         materials = new Materials(device, 8, graph.frameSlots());
         textures = new Textures(device, graph.frameSlots());
         scene.setMaterials(materials);
-        particles = new Particles(device, graph.frameSlots(), 1 << 20, 64);
+        particles = new Particles(device, graph.frameSlots(), 24 << 20, 64); // room for 10,000 trails
         int white = textures.color(1, 1, MemorySegment.ofArray(new int[] {0xffffffff}));
         int flipbook = textures.color(2, 1, MemorySegment.ofArray(new int[] {0xff0000ff, 0xff00ff00})); // red, green
         particles.texture(WHITE, white);
@@ -508,6 +509,209 @@ class ParticleDrawTest {
         effect.kill();
         frames(1);
         assertThat(writer.ended()).isTrue();
+    }
+
+
+    /** The screen column of world x at depth {@code z} (the camera at the origin looking down -z, 90 degrees). */
+    private static int column(double x, double z) {
+        return (int) Math.floor(SIZE / 2.0 + x / -z * SIZE / 2.0);
+    }
+
+    /** The screen row of world y at depth {@code z}. */
+    private static int row(double y, double z) {
+        return (int) Math.floor(SIZE / 2.0 - y / -z * SIZE / 2.0);
+    }
+
+    /** How many columns from {@code from} to {@code to} (inclusive) have channel {@code c} above 40 somewhere in rows y-1..y+1. */
+    private static int coveredColumns(int[] image, int y, int from, int to, int c) {
+        int n = 0;
+        for (int x = Math.max(0, from); x <= Math.min(SIZE - 1, to); x++) {
+            boolean lit = false;
+            for (int dy = -1; dy <= 1; dy++) {
+                lit |= y + dy >= 0 && y + dy < SIZE && at(image, x, y + dy, c) > 40;
+            }
+            n += lit ? 1 : 0;
+        }
+        return n;
+    }
+
+    /** A ribbon effect: {@code rate} a second, living {@code lifetime}, red, set up further by {@code renderer}. */
+    private static EffectData ribbon(float rate, float lifetime, Renderer renderer) {
+        return EffectData.builder().emitter("e", e -> e.spawn(Spawn.rate(rate), Spawn.burst(0, 1))
+            .init(Init.lifetime(lifetime), Init.size(Bind.constant(0.6f)), Init.color(Bind.color(1, 0, 0, 1)))
+            .render(renderer)).build();
+    }
+
+    @Test
+    void aRibbonBehindAMovingEmitterIsContinuousAcrossChunksAndFrames() {
+        // 100 a second for 1.2 s: 120 particles, two chunks, survivors copied every frame; the node at 2 m/s.
+        long node = nodes.create();
+        nodes.setTranslation(node, -3, 0, -5);
+        Effect effect = effects.play(ribbon(100, 1.2f, Renderer.ribbon().additive()), node);
+        int[] image = null;
+        for (int f = 0; f < 100; f++) {
+            nodes.setTranslation(node, -3 + 2 * f / 60.0, 0, -5);
+            image = frames(1);
+        }
+        double head = -3 + 2 * 99 / 60.0;
+        int from = column(head - 2.0, -5);
+        int to = column(head, -5);
+        assertThat(particles.emitterCount()).isOne();
+        assertThat(coveredColumns(image, row(0, -5), from, to, 0)).as("every column from 2 m behind to the emitter")
+            .isEqualTo(to - from + 1);
+        assertThat(coveredColumns(image, row(0, -5), column(head + 0.6, -5), SIZE - 1, 0)).as("nothing ahead")
+            .isZero();
+        assertThat(coveredColumns(image, row(0, -5), 0, column(head - 2.8, -5), 0)).as("nothing past its tail")
+            .isZero();
+        // Every 4th particle a point, as far as the eye sees: still continuous.
+        effect.kill();
+        effects.play(ribbon(100, 1.2f, Renderer.ribbon().additive().set("stride", 4)), node);
+        for (int f = 0; f < 100; f++) {
+            nodes.setTranslation(node, -3 + 2 * f / 60.0, 0, -5);
+            image = frames(1);
+        }
+        assertThat(coveredColumns(image, row(0, -5), column(head - 1.0, -5), to, 0)).as("strided")
+            .isEqualTo(to - column(head - 1.0, -5) + 1);
+    }
+
+    @Test
+    void aRibbonsHeadIsAtTheEmitterFromItsFirstFrame() {
+        // One particle born at the start; then the node jumps 3 m in a frame, too soon for the next birth.
+        long node = nodes.create();
+        nodes.setTranslation(node, -2, 0, -5);
+        effects.play(ribbon(1, 5, Renderer.ribbon().additive()), node);
+        frames(1);
+        nodes.setTranslation(node, 1, 0, -5);
+        int[] image = frames(1);
+        int from = column(-2, -5);
+        int to = column(1, -5);
+        assertThat(coveredColumns(image, row(0, -5), from + 1, to - 1, 0)).as("from the particle to the emitter")
+            .isEqualTo(to - from - 1);
+    }
+
+    @Test
+    void ribbonTexturesStretchOrTileAndWidthTapers() {
+        long node = nodes.create();
+        nodes.setTranslation(node, -3, 0, -5);
+        effects.play(EffectData.builder().emitter("e", e -> e.spawn(Spawn.rate(30), Spawn.burst(0, 1))
+            .init(Init.lifetime(2), Init.size(Bind.constant(1)))
+            .render(Renderer.ribbon().asset("texture", FLIPBOOK).set("width.tail", 0.2f).set("width.head", 1f)))
+            .build(), node);
+        int[] image = null;
+        for (int f = 0; f < 90; f++) {
+            nodes.setTranslation(node, -3 + 3 * f / 60.0, 0, -5);
+            image = frames(1);
+        }
+        // Stretched: u from 0 at the tail to 1 at the head, red to green; the tail thinner than the head.
+        double head = -3 + 3 * 89 / 60.0;
+        int tail = column(-2.7, -5); // the first particle's, 1.5 s ago
+        int near = column(head - 0.3, -5);
+        int y = row(0, -5);
+        assertThat(at(image, tail, y, 0)).as("red at the tail").isGreaterThan(at(image, tail, y, 1));
+        assertThat(at(image, near, y, 1)).as("green at the head").isGreaterThan(at(image, near, y, 0));
+        assertThat(height(image, near)).as("wide at the head").isGreaterThan(height(image, tail) + 2);
+        assertThat(graph.passes()).contains("particle ribbons");
+    }
+
+    /** How many rows of column {@code x} have anything drawn. */
+    private static int height(int[] image, int x) {
+        int n = 0;
+        for (int y = 0; y < SIZE; y++) {
+            n += (image[y * SIZE + x] & 0xffffff) != 0 ? 1 : 0;
+        }
+        return n;
+    }
+
+    @Test
+    void ribbonsOfSeveralStrandsFollowEachStrand() {
+        // Two strands, alternate particles: one shot up, one down, each its own ribbon (no zigzag between them).
+        long node = nodes.create();
+        nodes.setTranslation(node, -3, 0, -5);
+        effects.play(EffectData.builder().emitter("e", e -> e.spawn(Spawn.rate(60)).init(Init.lifetime(1),
+                Init.size(Bind.constant(0.3f)), Init.color(Bind.color(1, 0, 0, 1)),
+                Init.velocity(Bind.constant(0), Bind.constant(0), Bind.constant(0)))
+            .render(Renderer.ribbon().additive().set("ribbons", 2))).build(), node);
+        int[] image = null;
+        for (int f = 0; f < 60; f++) {
+            nodes.setTranslation(node, -3 + 4 * f / 60.0, 0, -5);
+            image = frames(1);
+        }
+        int y = row(0, -5);
+        assertThat(coveredColumns(image, y, column(-1.5, -5), column(0.5, -5), 0)).as("both strands along the path")
+            .isEqualTo(column(0.5, -5) - column(-1.5, -5) + 1);
+    }
+
+    @Test
+    void aBeamJoinsTwoNodes() {
+        long a = nodes.create();
+        long b = nodes.create();
+        nodes.setTranslation(a, -2, 0, -5);
+        nodes.setTranslation(b, 2, 1, -5);
+        Effect beam = effects.play(EffectData.builder().emitter("beam", e -> e.spawn(Spawn.rate(1))
+            .render(Renderer.beam().set("width", 0.3f).set("color.r", 0f).set("color.b", 0f).additive())).build(), a);
+        frames(1);
+        particles.beamEnd(beam.id(), 0, 2, 1, -5);
+        int[] image = frames(2);
+        assertThat(at(image, column(0, -5), row(0.5, -5), 1)).as("halfway").isGreaterThan(200);
+        assertThat(at(image, column(-1, -5), row(0.25, -5), 1)).as("a quarter of the way").isGreaterThan(200);
+        assertThat(at(image, column(3, -5), row(1.25, -5), 1)).as("not past the end").isLessThan(10);
+        assertThat(at(image, column(0, -5), row(-0.8, -5), 1)).as("nowhere else").isLessThan(10);
+        // The far node moves: the beam follows.
+        particles.beamEnd(beam.id(), 0, 2, -1, -5);
+        image = frames(1);
+        assertThat(at(image, column(0, -5), row(-0.5, -5), 1)).as("halfway down").isGreaterThan(200);
+        // Without an end: its length up the emitter's +Y.
+        Effect upright = effects.play(EffectData.builder().emitter("beam", e -> e.spawn(Spawn.rate(1))
+            .render(Renderer.beam().set("width", 0.3f).set("length", 2f).set("color.g", 0f).set("color.b", 0f)
+                .additive())).build(), -2.5, -2, -5);
+        image = frames(2);
+        assertThat(at(image, column(-2.5, -5), row(-1, -5), 0)).as("up from the emitter").isGreaterThan(150);
+        assertThat(upright.alive()).isTrue();
+        assertThatIllegalArgumentException().isThrownBy(() -> particles.beamEnd(upright.id(), 3, 0, 0, 0));
+    }
+
+    @Test
+    void trailsFollowTheirParticles() {
+        // A particle at 3 m/s keeps its last 16 positions: a trail some 0.8 m long behind it.
+        effects.play(EffectData.builder().emitter("e", e -> e.spawn(Spawn.burst(0, 1)).init(Init.lifetime(5),
+                Init.size(Bind.constant(0.3f)), Init.color(Bind.color(1, 0, 0, 1)),
+                Init.velocity(Bind.constant(3), Bind.constant(0), Bind.constant(0)))
+            .render(Renderer.trail(16).additive())).build(), -2, 0, -5);
+        int[] image = frames(30);
+        double x = -2 + 3 * 30 / 60.0;
+        int y = row(0, -5);
+        assertThat(coveredColumns(image, y, column(x - 0.7, -5), column(x - 0.1, -5), 0)).as("the trail")
+            .isEqualTo(column(x - 0.1, -5) - column(x - 0.7, -5) + 1);
+        assertThat(coveredColumns(image, y, 0, column(x - 1.2, -5), 0)).as("no older positions").isZero();
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "TRUESIM_BENCHMARK", matches = "true")
+    void trailsOnTenThousandSparksTimed() {
+        graph.timings(true);
+        effects.play(EffectData.builder().emitter("sparks", e -> e.capacity(10_000).spawn(Spawn.burst(0, 10_000))
+                .init(Shape.sphere(0.5f), Init.speed(Bind.random(1, 3)), Init.lifetime(1000),
+                    Init.size(Bind.constant(0.02f)), Init.color(Bind.color(1, 0.6f, 0.2f, 1)))
+                .update(Forces.gravity(Bind.constant(0.05f)), Forces.drag(0.5f))
+                .render(Renderer.trail(16).additive())).build(), 0, 0, -6);
+        double[] sums = new double[2];
+        int timed = 0;
+        for (int f = 0; f < 120; f++) {
+            frames(1);
+            var timings = graph.timings();
+            if (f < 20 || timings == null) {
+                continue;
+            }
+            for (int i = 0; i < timings.count(); i++) {
+                sums[0] += timings.pass(i).equals("particle update") ? timings.millis(i) : 0;
+                sums[1] += timings.pass(i).equals("particle draw") ? timings.millis(i) : 0;
+            }
+            timed++;
+        }
+        System.out.printf("10,000 sparks with trails of 16 points: update %.3f ms, draw %.3f ms (%d x %d)%n",
+            sums[0] / timed, sums[1] / timed, SIZE, SIZE);
+        assertThat(particles.unplaced()).isZero();
+        assertThat(particles.alive()).isEqualTo(10_000);
     }
 
 }
