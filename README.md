@@ -1196,8 +1196,24 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
 - `./gradlew :engine-demo:stereoBench` times the scene drawn for two eyes at a Quest 3's eye size, offscreen, pass by
   pass and grouped by kind (`--args="visibility"` for the visibility buffer, `-Procks=20000` for more rocks,
   `shared` for one set of shadow cascades, `rebuild` for what rebuilds and resizes cost the render thread, `noshadows`
-  without the sun's cascades, `-Ppng=<file>` to write the left eye). `capture` writes frame 100 for RenderDoc through its
+  without the sun's cascades, `-Ppng=<file>` to write the left eye as a window shows it: through `DisplayTransform`'s
+  exposure and ACES curve on the GPU, sRGB-encoded). `capture` writes frame 100 for RenderDoc through its
   in-application API, offscreen; launch the benchmark's `java` with `renderdoccmd capture -c <file>`.
+- `./gradlew :engine-demo:showcase -Pcrowd=<path to Fox.gltf>` is the effects showcase: 100 foxes roaming an arena at
+  dusk (a third surveying, the rest walking and running on rings, animation level of detail by distance), every one
+  kicking up dust where its feet come down and ten of them burning over their skinned meshes (upward-facing skin the
+  most, through a mask baked from the mesh); a bonfire and eight swaying torches; a fireworks show of twelve launchers
+  firing in waves, each burst a flash lighting the ground and the foxes; blasts throwing rocks that bounce and cast
+  shadows, hail and sparks settling, swirls, a dust devil and gusting wind, ribbons and beams circling above. Fire is
+  content only: flipbooks of flame tongues, embers and smoke puffs (with normals) made from noise when it starts, in
+  layers (a hot core, tongues cooling from white to red as they rise, embers, lit smoke, a flickering particle light).
+  `-Pout=<folder> -Pframes=900 -Pfirst=300 -Pevery=2 [-Psize=1920x1080] [-Pcamera=orbit|keys:t,x,y,z,tx,ty,tz;...|
+  follow:fox,distance,height,side] [-Pstills=360,720]` writes tone-mapped PNG frames (60 Hz simulated, every second
+  frame: 30 fps). `--args=measure` gives complete frame times in stereo at 2064 x 2208 per eye, offscreen without
+  present: on a Ryzen 9 9950X3D and RX 9070 XT (2026-11-02), about 12,000 particles alive, a frame takes 2.79 ms from
+  start to start (99th percentile 3.94, worst 4.08); the main thread 2.14 ms (scene update 0.24, animation 0.21,
+  effects sync 0.28, recording and submitting the graph 1.42), the GPU 2.61 ms from its first pass to its last; 401 of
+  1080 frames waited for the GPU.
 - Keys: `1`/`2` forward or visibility buffer shading, `H` HDR, `T` tone curve, `[`/`]` exposure, `V` present mode,
   `F`/`F11` window mode, `R` dynamic resolution, `-`/`=` render scale, `G` GPU-timed dynamic resolution (`,`/`.` its
   target), `O` occlusion culling, `N` a second window, `F5` save.

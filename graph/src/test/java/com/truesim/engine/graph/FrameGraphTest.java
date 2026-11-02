@@ -1361,6 +1361,9 @@ class FrameGraphTest {
         for (int i = 0; i < timings.count(); i++) {
             assertThat(timings.millis(i)).as(timings.pass(i)).satisfiesAnyOf(m -> assertThat(m).isNaN(),
                 m -> assertThat(m).isNotNegative());
+            if (!Double.isNaN(timings.millis(i))) {
+                assertThat(timings.spanMillis()).as("the frame's span").isGreaterThanOrEqualTo(timings.millis(i));
+            }
         }
         assertThat(delivered[0]).isPositive();
         assertThat(delivered[1]).isEqualTo(3);

@@ -56,6 +56,8 @@ final class DemoCharacter implements AutoCloseable {
         AnimationEvent.of("front right foot down")};
     /** A curve flickering between 0 and 1 while the fox surveys: drives the torch beside it. */
     static final AnimationCurve FLICKER = AnimationCurve.of("flicker");
+    /** The joints of the feet, in the order of {@link #FEET}. */
+    static final String[] FOOT_JOINTS = {"b_LeftFoot01_017", "b_RightFoot01_021", "b_LeftHand_011", "b_RightHand_08"};
     /** When each foot comes down in the walk and the run (seconds into them; found from the feet's heights). */
     private static final double[] WALK_STEPS = {0.5, 0.692, 0.017, 0.375};
     private static final double[] RUN_STEPS = {1.0, 1.092, 0.525, 0.417};
@@ -120,12 +122,10 @@ final class DemoCharacter implements AutoCloseable {
         survey = r.clip(await(model.animation("Survey")));
         Clip walk = r.clip(await(model.animation("Walk")));
         Clip run = r.clip(await(model.animation("Run")));
-        String[] footNames = {"b_LeftFoot01_017", "b_RightFoot01_021", "b_LeftHand_011", "b_RightHand_08"};
         for (int f = 0; f < 4; f++) {
-            feet[f] = r.joint(footNames[f]);
-            walk.event(WALK_STEPS[f], FEET[f]);
-            run.event(RUN_STEPS[f], FEET[f]);
+            feet[f] = r.joint(FOOT_JOINTS[f]);
         }
+        footEvents(walk, run);
         float[] times = new float[25];
         float[] values = new float[25];
         for (int k = 0; k < times.length; k++) {
@@ -155,6 +155,14 @@ final class DemoCharacter implements AutoCloseable {
         animator = animators.add(rig, nodes);
         animator.layer(base).play(survey);
         update(0, 0, 0, 0);
+    }
+
+    /** Puts the {@link #FEET} events on the fox's walk and run clips, where each foot comes down. */
+    static void footEvents(Clip walk, Clip run) {
+        for (int f = 0; f < 4; f++) {
+            walk.event(WALK_STEPS[f], FEET[f]);
+            run.event(RUN_STEPS[f], FEET[f]);
+        }
     }
 
     SceneGraph scene() {

@@ -77,7 +77,8 @@ final class DemoEffects implements AutoCloseable {
                 Init.color(Bind.color(0.55f, 0.45f, 0.32f, 0.7f)))
             .update(Forces.gravity(Bind.constant(0.05f)), Forces.drag(2.5f), Over.size(FloatCurve.of(0, 1, 1, 3.5f)),
                 Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0.9f).linear(1, 1, 1, 1, 0).build()))
-            .render(Renderer.billboard(Renderer.Facing.POSITION).set("soft", 0.1f)))
+            .render(Renderer.billboard(Renderer.Facing.POSITION).lighting(Renderer.Lighting.PER_VERTEX)
+                .set("soft", 0.1f)))
         .build();
 
     /**
@@ -119,7 +120,8 @@ final class DemoEffects implements AutoCloseable {
             .update(Forces.drag(1.5f), Over.size(FloatCurve.of(0, 0.6f, 1, 2)),
                 Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0).linear(0.1f, 1, 1, 1, 1)
                     .linear(1, 1, 1, 1, 0).build()))
-            .render(Renderer.billboard(Renderer.Facing.POSITION).set("soft", 0.3f)))
+            .render(Renderer.billboard(Renderer.Facing.POSITION).lighting(Renderer.Lighting.PER_VERTEX)
+                .set("soft", 0.3f)))
         .build();
 
     /**
