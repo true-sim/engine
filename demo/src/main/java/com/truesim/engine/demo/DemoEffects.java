@@ -29,9 +29,9 @@ import com.truesim.scene.effects.Spawn;
  * (flames carried with it in its frame, sparks thrown off with its velocity, smoke left behind in the world), a
  * fountain of sparks with streaks of trails over a column of smoke, and an orb circling it with a ribbon behind and a
  * beam reaching it from the fountain (the beam's end is the orb's node), and two clouds of red and blue puffs through
- * each other, each drawn back to front. Simulated on the GPU and drawn in every view given a {@code ParticleDraw}. With
- * the fox ({@link #dust}), its feet kick up dust on their foot-down events and its survey's flickering curve drives
- * the torch's intensity, frame by frame.
+ * each other, each drawn back to front, and a swirl of motes in a vortex stirred by curl noise. Simulated on the GPU
+ * and drawn in every view given a {@code ParticleDraw}. With the fox ({@link #dust}), its feet kick up dust on their
+ * foot-down events and its survey's flickering curve drives the torch's intensity, frame by frame.
  */
 final class DemoEffects implements AutoCloseable {
 
@@ -119,6 +119,16 @@ final class DemoEffects implements AutoCloseable {
             .render(Renderer.billboard(Renderer.Facing.POSITION).set("soft", 0.2f)))
         .build();
 
+    /** A swirl: motes rising in a vortex that pulls them in, stirred by curl noise. */
+    static final EffectData SWIRL = EffectData.builder().emitter("motes", e -> e.spawn(Spawn.rate(260))
+        .init(Shape.disc(1.4f), Init.velocity(Bind.random(-0.2f, 0.2f), Bind.random(0.4f, 0.9f),
+                Bind.random(-0.2f, 0.2f)), Init.lifetime(Bind.random(3, 4.5f)), Init.size(Bind.random(0.04f, 0.08f)),
+            Init.color(Bind.color(0.4f, 1.6f, 2.4f, 1)))
+        .update(Forces.vortex(Bind.constant(5), 3, 0, 1, 0), Forces.curl(Bind.constant(1.5f), 0.7f, 0.3f, 2),
+            Forces.gravity(Bind.constant(-0.1f)), Forces.drag(0.8f), Forces.speedLimit(4), Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0)
+                .linear(0.1f, 1, 1, 1, 1).linear(1, 0.6f, 0.3f, 1.2f, 0).build()))
+        .render(Renderer.billboard(Renderer.Facing.POSITION).additive())).build();
+
     /** A ribbon behind an orb circling the fountain, narrowing to its tail. */
     static final EffectData RIBBON = EffectData.builder().emitter("ribbon", e -> e.spawn(Spawn.rate(60))
         .init(Init.lifetime(1.5f), Init.size(Bind.constant(0.3f)), Init.color(Bind.color(0.3f, 1.2f, 2, 1)))
@@ -170,6 +180,7 @@ final class DemoEffects implements AutoCloseable {
         effects.play(SPARKS, fountain);
         effects.play(RIBBON, orb);
         effects.play(PUFFS, x + 3, DemoMeshes.height(x + 3, z - 1) + 1.2, z - 1);
+        effects.play(SWIRL, x - 1, DemoMeshes.height(x - 1, z - 4) + 0.1, z - 4);
         sync.beamEnd(effects.play(BEAM, fountain).offset(0, 0.3, 0).id(), 0, orb);
     }
 

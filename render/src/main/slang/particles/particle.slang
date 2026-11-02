@@ -28,7 +28,7 @@ public struct Particle
 };
 
 /**
- * An emitter instance in this frame's list: 176 bytes, written by the CPU each frame. Its particles live in slots
+ * An emitter instance in this frame's list: 192 bytes, written by the CPU each frame. Its particles live in slots
  * [first, first + capacity) of each half of the pool.
  */
 [HostLayout]
@@ -58,9 +58,11 @@ public struct ParticleEmitter
     public uint instance;          // its row of the state buffer (STATE_WORDS words), stable while it lives
     public uint sideUnits;         // 16-byte side units per particle
     public float3 shift;           // added to its world-space particles this frame: the old origin minus the new
-    public uint pad0;
+    public float time;             // its effect's time at the frame's end, in seconds: noise drifts and gusts by it
     public float3 inherited;       // velocity its world-space newborn inherit: a share of the emitter's over the frame
     public uint pad1;
+    public float3 wind;            // the world's wind in its particles' frame, m/s
+    public uint pad2;
 };
 
 /** A spawn record: 64 bytes, as scene-effects' SpawnRecords, written by the CPU each frame. */
@@ -210,6 +212,16 @@ public static const uint OP_GRAVITY = 10;
 public static const uint OP_DRAG = 11;
 public static const uint OP_OVER_SIZE = 12;
 public static const uint OP_OVER_COLOR = 13;
+public static const uint OP_WIND = 14;
+public static const uint OP_CURL = 15;
+public static const uint OP_VORTEX = 16;
+public static const uint OP_POINT_FORCE = 17;
+public static const uint OP_LINE = 18;
+public static const uint OP_ORBIT = 19;
+public static const uint OP_FIELD = 20;
+public static const uint OP_SPEED_LIMIT = 21;
+/** How fast gusts of wind change: noise cells per second (scene-effects' CpuSimulation.GUST_RATE). */
+public static const float GUST_RATE = 0.5f;
 
 /** Binding kinds: scene-effects' Binding.Kind and ColorBinding.Kind, in order. */
 public static const uint BIND_CONSTANT = 0;

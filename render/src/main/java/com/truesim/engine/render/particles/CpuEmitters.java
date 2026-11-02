@@ -17,7 +17,7 @@ import com.truesim.scene.effects.ParticleCursor;
  * {@link CpuSimulation} left them or as the game wrote them ({@link ParticleWriter}), written as particle records into
  * plain memory and copied into a per-frame mapped buffer once, which the simulation's "particle upload" copies into the
  * emitters' ranges of the pool. From then on drawing, culling and LOD do not know where a particle was simulated. 80
- * bytes per particle per frame: for small counts. Allocates nothing once its buffer has grown to the particles uploaded.
+ * bytes per particle per frame: for small counts. Allocates nothing once its buffer has grown to what is uploaded.
  */
 final class CpuEmitters implements AutoCloseable {
 
