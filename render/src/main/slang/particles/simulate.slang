@@ -2142,6 +2142,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
         return;
     }
     Instance r;
+    Instance before = (Instance) 0; // a frame before: moved back by its velocity, turned back by its roll
     r.rotation = float4(0, 0, 0, 1);
     r.position = 0;
     r.mesh = 0; // a hole
@@ -2175,6 +2176,9 @@ void instancesMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
                 float3 axis = randomDirection(p.seed, 0x7000);
                 float angle = TAU * random(p.seed, 0x7002) + p.rotation;
                 r.rotation = float4(axis * sin(0.5 * angle), cos(0.5 * angle));
+                // as the update rolls it: by its speed over half its size
+                float back = angle - length(p.velocity) * e.dt / max(0.5 * p.size.x, 1e-4);
+                before.rotation = float4(axis * sin(0.5 * back), cos(0.5 * back));
             }
             r.position = e.originHigh;
             r.positionLow = e.originLow + (local ? turn(e.rotation, p.position) : p.position);
@@ -2186,6 +2190,18 @@ void instancesMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
     }
     Instance* instances = (Instance*) frame.instances;
     instances[e.meshFirst + k] = r;
+    float4 turned = before.rotation;
+    before = r;
+    if (r.mesh != 0)
+    {
+        Particle* source1 = push.source;
+        Particle p1 = (source1 + push.targetDelta)[e.first + k];
+        bool turns = ((ParticleRenderer*) (push.programs + e.meshRenderer))[0].orient == ORIENT_TUMBLE;
+        before.rotation = turns ? turned : r.rotation;
+        before.positionLow -= ((e.flags & EMITTER_LOCAL) != 0 ? turn(e.rotation, p1.velocity) : p1.velocity) * e.dt;
+    }
+    Instance* previous = (Instance*) frame.previousInstances;
+    previous[e.meshFirst - frame.meshBase + k] = before;
 }
 
 // ---------------------------------------------------------------------------------------------- particle lights

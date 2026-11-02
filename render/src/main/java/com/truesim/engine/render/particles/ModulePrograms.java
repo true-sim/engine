@@ -429,7 +429,8 @@ final class ModulePrograms implements AutoCloseable {
         w[at + ParticleRendererLayout.ROWS / 4] = rows;
         put(w, at, ParticleRendererLayout.FRAMES, frames);
         put(w, at, ParticleRendererLayout.RATE, rate);
-        w[at + ParticleRendererLayout.RIBBONS / 4] = Math.max(1, (int) setting(r, "ribbons", 1));
+        w[at + ParticleRendererLayout.RIBBONS / 4] = setting(r, "ribbons", 1) <= 0 ? 0
+            : Math.max(1, (int) setting(r, "ribbons", 1)); // 0: a ribbon per parent (particles as emitters)
         w[at + ParticleRendererLayout.STRIDE / 4] = Math.max(1, (int) setting(r, "stride", 1));
         put(w, at, ParticleRendererLayout.LOD_DISTANCE, setting(r, "lodDistance", 0));
         put(w, at, ParticleRendererLayout.WIDTH_TAIL, setting(r, "width.tail", 1));
@@ -462,7 +463,8 @@ final class ModulePrograms implements AutoCloseable {
 
     /** The strands of a ribbon renderer; 1 for other renderers. */
     static int ribbons(Renderer r) {
-        return r.kind() == Renderer.Kind.RIBBON ? Math.max(1, (int) setting(r, "ribbons", 1)) : 1;
+        return r.kind() != Renderer.Kind.RIBBON ? 1 : setting(r, "ribbons", 1) <= 0 ? 0
+            : Math.max(1, (int) setting(r, "ribbons", 1));
     }
 
     static float setting(Renderer r, String name, float fallback) {

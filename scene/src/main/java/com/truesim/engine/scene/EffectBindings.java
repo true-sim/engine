@@ -31,8 +31,8 @@ import java.util.Objects;
  * <p>Events fire on the animator's updates only ({@link Animator#updateEvery}); effects attached to its joints follow
  * the joints every frame. Every animator of the {@link Animators} plays a binding's effect when it passes the event,
  * at the binding's joint of its own rig (a crowd sharing a rig shares the bindings); an animator whose skeleton has no
- * such joint plays nothing. Each effect played allocates its handle, as {@link Effects#play} does; curves allocate
- * nothing. Used from the scene's thread.
+ * such joint plays nothing. Effects are played by id ({@link Effects#start}), so neither they nor curves allocate.
+ * Used from the scene's thread.
  */
 public final class EffectBindings {
 
@@ -98,7 +98,6 @@ public final class EffectBindings {
         return played;
     }
 
-    @AllowAllocation("an effect played: its handle")
     private void fired(long node, AnimationEvent event, float weight) {
         Animator animator = null;
         for (EventBinding b : events) {
@@ -114,9 +113,10 @@ public final class EffectBindings {
             if (b.joint.index() >= animator.skeleton().size()) {
                 continue; // another rig's joint
             }
-            Effect effect = effects.play(b.effect, animator.node(b.joint)).offset(b.x, b.y, b.z);
+            long effect = effects.start(b.effect, animator.node(b.joint)); // by id: no handle
+            effects.offset(effect, b.x, b.y, b.z);
             if (b.weightTo != null) {
-                effect.set(b.weightTo, weight * b.weightScale);
+                effects.set(effect, b.weightTo, weight * b.weightScale);
             }
             played++;
         }

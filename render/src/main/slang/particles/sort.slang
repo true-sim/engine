@@ -298,3 +298,63 @@ void sortScatterMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------- ribbons per parent
+
+/**
+ * Keys of the particles of emitters drawing a ribbon per parent (particles as emitters, effects step 19), as
+ * sortKeysMain makes the view's: the emitter's place among them above the low 20 bits of its parent's spawn index (the
+ * ribbon id), and each particle's index in its range. The stable sort leaves each ribbon's particles together, in spawn
+ * order. (Ribbons whose parents' spawn indices are 2^20 apart share a run: never at once at the rates of trails.)
+ */
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ribbonKeysMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    uint g = groupOf(group);
+    if (g >= push.chunkCount)
+    {
+        return;
+    }
+    uint2* chunks = push.chunks;
+    uint2 chunk = chunks[g];
+    uint* list = push.list;
+    ParticleEmitter* emitters = push.emitters;
+    ParticleEmitter e = emitters[list[chunk.x]];
+    uint* state = push.state;
+    uint i = chunk.y * CHUNK + lane;
+    if (i >= state[e.instance * STATE_WORDS + STATE_ALIVE])
+    {
+        return;
+    }
+    Particle* particles = push.particles;
+    uint ribbon = asuint(particles[e.first + i].custom.y) & ((1u << SORT_DEPTH_BITS) - 1);
+    uint* args = push.args;
+    uint2* target = push.target;
+    if (args[4 + chunk.x] + i < push.capacity)
+    {
+        target[args[4 + chunk.x] + i] = uint2(chunk.x << SORT_DEPTH_BITS | ribbon, i);
+    }
+}
+
+/** Each sorted key's particle into its emitter's range of the ribbon order, in its run's order. */
+[shader("compute")]
+[numthreads(SORT_THREADS, 1, 1)]
+void ribbonOrderMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    uint* args = push.args;
+    uint2* source = push.source;
+    uint* list = push.list;
+    ParticleEmitter* emitters = push.emitters;
+    uint* order = (uint*) push.target;
+    for (uint k = 0; k < SORT_KEYS; k++)
+    {
+        uint s = groupOf(group) * SORT_GROUP + k * SORT_THREADS + lane;
+        if (s < args[3])
+        {
+            uint2 item = source[s];
+            uint place = item.x >> SORT_DEPTH_BITS;
+            order[emitters[list[place]].first + s - args[4 + place]] = item.y;
+        }
+    }
+}

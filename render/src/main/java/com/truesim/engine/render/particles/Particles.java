@@ -139,6 +139,15 @@ public final class Particles implements AutoCloseable {
     private final Staging spawnStaged = new Staging(256L * ParticleSpawnLayout.BYTES);
     private final Staging parameterStaged = new Staging(4L * 1024);
     private final Staging ribbonStaged;
+    // Ribbons per parent (particles as emitters): the emitters' places in the list, their chunks (place, chunk)
+    private static final int MAX_PARENT_RIBBONS = 64;
+    private final Staging parentRibbonStaged = new Staging(4L * MAX_PARENT_RIBBONS);
+    private final Staging parentChunkStaged = new Staging(8L * 64);
+    private final FrameBuffer parentRibbonList;
+    private FrameBuffer parentRibbonChunkTable;
+    private int parentRibbonCount;
+    private int parentRibbonChunks;
+    private boolean parentRibbonsSeen;
     private int parameterFloats;
     // The frame's sorted emitters (each one's place in the list) and the chunks of their ranges, for the sorts
     private final int[] sortOf;
@@ -255,6 +264,8 @@ public final class Particles implements AutoCloseable {
     private final CpuEmitters cpuEmitters;
     private CpuSimulation simulation;
     private ParticleModules modules;
+    private GpuBuffer previousInstances;
+    private ExternalBuffer previousImport;
     private EffectRuntime runtime; // the update's: levels of detail, drawn fractions, placements' shares
     private double[] owed = new double[16]; // per effect slot: seconds its held emitters have not moved
     private long updates; // updates so far: emitters of reduced rates take turns by it
@@ -466,6 +477,8 @@ public final class Particles implements AutoCloseable {
         frameTable = tables[7];
         colliderTable = tables[8];
         ribbonList = tables[4];
+        parentRibbonList = FrameBuffer.create(device, 4L * MAX_PARENT_RIBBONS, STORAGE, slots, queues(device));
+        parentRibbonChunkTable = FrameBuffer.create(device, 8L * 64, STORAGE, slots, queues(device));
         emitterTable = tables[0];
         chunkTable = tables[1];
         spawnRing = tables[2];
@@ -730,6 +743,11 @@ public final class Particles implements AutoCloseable {
         }
         parameterStaged.copyTo(parameterBlocks, parameterBytes);
         ribbonStaged.copyTo(ribbonList, 8L * ribbonCount);
+        parentRibbonStaged.copyTo(parentRibbonList, 4L * parentRibbonCount);
+        if (parentRibbonChunkTable.size() < 8L * parentRibbonChunks) {
+            parentRibbonChunkTable = grown(parentRibbonChunkTable, 8L * parentRibbonChunks);
+        }
+        parentChunkStaged.copyTo(parentRibbonChunkTable, 8L * parentRibbonChunks);
         long sourceBytes = (long) ParticleSourceLayout.BYTES * sourceCount;
         if (sourceTable.size() < sourceBytes) {
             sourceTable = grown(sourceTable, sourceBytes);
@@ -780,6 +798,9 @@ public final class Particles implements AutoCloseable {
         r.putLong(ParticleFrameLayout.GPU_LIGHTS, lights == null || lights.gpuLightsBuffer() == null ? 0
             : lights.gpuLightsBuffer().deviceAddress());
         r.putInt(ParticleFrameLayout.LIGHT_EMITTER_COUNT, lightCount);
+        r.putInt(ParticleFrameLayout.MESH_BASE, meshBase);
+        r.putLong(ParticleFrameLayout.PREVIOUS_INSTANCES, previousInstances == null ? depth.deviceAddress()
+            : previousInstances.deviceAddress());
         r.putInt(ParticleFrameLayout.LIGHT_BUDGET, lightBudget);
         r.putInt(ParticleFrameLayout.EVENT_LIMIT, radixEvents ? ParticleConstants.EVENT_CAPACITY
             : ParticleConstants.EVENT_SMALL);
@@ -1672,8 +1693,19 @@ public final class Particles implements AutoCloseable {
             meshBase = meshScene.reserveGpuRange(instances);
             meshScene.writtenBy(ParticleKeys.PARTICLES);
             meshIds = new com.truesim.engine.render.RangeAllocator(instances);
+            if (previousInstances != null) {
+                retired.add(previousInstances);
+            }
+            previousInstances = GpuBuffer.deviceLocal(device, (long) com.truesim.engine.render.layout.InstanceLayout
+                .BYTES * instances, GPU_USAGE, queues(device));
+            previousImport = new ExternalBuffer("particle previous instances", previousInstances);
         }
         return this;
+    }
+
+    /** Mesh particles' transforms a frame before, per slot of their range ({@link ParticleKeys#PREVIOUS_INSTANCES}). */
+    ExternalBuffer previousInstances() {
+        return previousImport;
     }
 
     /**
@@ -2053,16 +2085,33 @@ public final class Particles implements AutoCloseable {
     /** Lists the frame's GPU emitters with ribbons of several strands, for their order. */
     private void ribbons() {
         ribbonCount = 0;
+        parentRibbonCount = 0;
+        parentRibbonChunks = 0;
         for (int i = 0; i < emitterCount; i++) {
             if (cpu[listInstance[i]]) {
                 continue;
             }
             int strands = 1;
+            boolean parents = false;
             List<Renderer> renderers = blocks[listSlot[i]].data.emitters().get(listEmitter[i]).renderers();
             for (int r = 0; r < renderers.size(); r++) {
-                strands = Math.max(strands, ModulePrograms.ribbons(renderers.get(r)));
+                int n = ModulePrograms.ribbons(renderers.get(r));
+                parents |= n == 0;
+                strands = Math.max(strands, n);
             }
-            if (strands > 1) {
+            if (parents && parentRibbonCount < MAX_PARENT_RIBBONS) {
+                // A ribbon per parent: ordered by the radix sort of (place, parent) keys
+                int place = parentRibbonCount++;
+                parentRibbonsSeen = true;
+                parentRibbonStaged.putInt(4L * place, i);
+                int chunks = ParticlePool.chunksOf(capacities[listInstance[i]]);
+                parentChunkStaged.room(8L * (parentRibbonChunks + chunks));
+                for (int c = 0; c < chunks; c++) {
+                    parentChunkStaged.putInt(8L * parentRibbonChunks, place);
+                    parentChunkStaged.putInt(8L * parentRibbonChunks + 4, c);
+                    parentRibbonChunks++;
+                }
+            } else if (strands > 1) {
                 ribbonStaged.putInt(8L * ribbonCount, i);
                 ribbonStaged.putInt(8L * ribbonCount + 4, strands);
                 ribbonCount++;
@@ -2109,6 +2158,29 @@ public final class Particles implements AutoCloseable {
     /** Emitters whose ribbons the frame orders. */
     int ribbonCount() {
         return ribbonCount;
+    }
+
+    /** Emitters whose ribbons go a ribbon per parent, ordered by the radix sort (at most 64). */
+    int parentRibbonCount() {
+        return parentRibbonCount;
+    }
+
+    /** Chunks of their ranges. */
+    int parentRibbonChunks() {
+        return parentRibbonChunks;
+    }
+
+    /** Whether any emitter drew a ribbon per parent since this was made: the simulation sorts their keys from then. */
+    boolean parentRibbons() {
+        return parentRibbonsSeen;
+    }
+
+    long parentRibbonListAddress() {
+        return parentRibbonList.deviceAddress();
+    }
+
+    long parentRibbonChunksAddress() {
+        return parentRibbonChunkTable.deviceAddress();
     }
 
     long ribbonListAddress() {
@@ -2575,6 +2647,8 @@ public final class Particles implements AutoCloseable {
         dispatch.close();
         order.close();
         ribbonList.close();
+        parentRibbonList.close();
+        parentRibbonChunkTable.close();
         sortList.close();
         sortChunks.close();
         frameTable.close();
@@ -2594,6 +2668,9 @@ public final class Particles implements AutoCloseable {
         meshList.close();
         lightList.close();
         lightState.close();
+        if (previousInstances != null) {
+            previousInstances.close();
+        }
         if (lights != null) {
             lights.notWrittenBy(ParticleKeys.PARTICLES);
         }

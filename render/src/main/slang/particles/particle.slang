@@ -163,6 +163,9 @@ public struct ParticleFrame
     public uint eventLimit;        // the most events the frame keeps: EVENT_CAPACITY with the radix sort recorded,
                                    // else EVENT_SMALL
     public uint smallEvents;       // the most events the small sort takes: EVENT_SMALL, or 0 (the radix sort's alone)
+    public uint meshBase;          // the scene's first instance id of the range mesh particles write
+    public uint pad4;
+    public uint64_t previousInstances; // Instance*: per slot of that range, its particle a frame before (motion vectors)
 };
 
 
