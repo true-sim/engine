@@ -50,7 +50,23 @@ jobs:
           java-version: 27
       - uses: gradle/actions/setup-gradle@v6
         if: steps.changes.outputs.code == 'true'
-      - run: ./gradlew build
+      - run: |
+          mkdir -p mem
+          ( peak=0
+            while true; do
+              avail=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+              used=$(( $(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo) - avail ))
+              [ $used -gt $peak ] && peak=$used && { date +%T; free -m; ps -eo rss,pcpu,comm,args --sort=-rss | head -12 | cut -c1-220; } > mem/peak.txt
+              echo "$(date +%T) used=${used}M avail=${avail}M load=$(cut -d' ' -f1 /proc/loadavg)" >> mem/mem.txt
+              if [ $avail -lt 1500 ]; then
+                echo "WATCHDOG low memory" >> mem/mem.txt
+                ps -eo rss,comm,args --sort=-rss | head -12 | cut -c1-220 >> mem/mem.txt
+                pkill -9 -f 'Gradle Test Executor'
+              fi
+              sleep 3
+            done ) &
+          ./gradlew build || { cat mem/peak.txt; tail -5 mem/mem.txt; exit 1; }
+          cat mem/peak.txt; tail -3 mem/mem.txt
         if: steps.changes.outputs.code == 'true'
         env:
           GITHUB_ACTOR: ${{ github.actor }}
@@ -60,5 +76,6 @@ jobs:
         with:
           name: reports
           path: |
+            mem
             */build/reports
             */build/test-results
