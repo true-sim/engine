@@ -1,7 +1,8 @@
 // The top level's instance records, from the meshlet renderer's instances: one thread per instance writes a
 // VkAccelerationStructureInstanceKHR (64 bytes): its 3 x 4 transform (rotation and scale, then position, row-major),
 // its index as custom index, mask 0xff (0: left out, when its mesh has no bottom level), two-sided, opaque unless one
-// of its materials is masked (then its triangles are candidates rays alpha-test), and its mesh's bottom level. An
+// of its materials is masked (then its triangles are candidates rays alpha-test), and its mesh's bottom level; the ids
+// the GPU writes (mesh particles) are left out, as they move without a rebuild of the top level. An
 // instance left out names an empty bottom level, never none (reference 0): an inactive instance must stay inactive
 // through refits of the top level, and an instance whose mesh loses or gains its level would change that.
 import meshlets.common;
@@ -16,6 +17,8 @@ struct InstancesPush
     uint* records;        // 16 words per instance
     uint64_t empty;       // a bottom level holding nothing traceable, for instances left out
     uint count;
+    uint gpuFirst;        // the ids the GPU writes (mesh particles): left out
+    uint gpuCount;
     float originX;        // the world position the top level is relative to (RayTracing.origin), high part
     float originY;
     float originZ;
@@ -59,7 +62,8 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     uint64_t bottom = level.address;
     // Rays trace shadows: holes and instances casting none are left out.
     bool casts = (stored.mesh & INSTANCE_LIVE) != 0 && (stored.mesh & INSTANCE_CASTS_SHADOWS) != 0;
-    uint mask = bottom != 0 && casts ? 0xffu : 0u;
+    bool gpu = i >= push.gpuFirst && i - push.gpuFirst < push.gpuCount; // they move without a rebuild: never traced
+    uint mask = bottom != 0 && casts && !gpu ? 0xffu : 0u;
     push.records[w + 12] = (i & 0xffffffu) | (mask << 24);
     bool masked = false;
     for (uint s = 0; s < level.submeshes && mask != 0; s++) // holes name mesh 0 and no materials

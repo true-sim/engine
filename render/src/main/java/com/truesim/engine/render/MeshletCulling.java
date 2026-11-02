@@ -33,6 +33,7 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Views build(GraphBuilder g) {
+        SceneData.written(g, renderer); // instances the GPU writes (mesh particles) before they are culled
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         // Open: the views techniques add later in the build declare their lists on it.
         GraphBuilder.PassBuilder pass = scene.read(g.pass("meshlet culling"), BufferAccess.STORAGE_READ).open();

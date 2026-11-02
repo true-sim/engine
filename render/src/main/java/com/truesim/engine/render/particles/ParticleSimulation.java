@@ -26,7 +26,8 @@ import java.util.Objects;
  * "particle args" (counts for the next frame), "particle ribbons" (ribbons of several strands ordered by strand and
  * spawn index), and the statistics' readback. A frame {@link Particles#update} was not called in simulates nothing.
  * With mesh shapes ({@link Particles#meshes}) the spawn reads the renderer's geometry pool, so it runs after the scene
- * upload and the deformation pass.
+ * upload and the deformation pass; with mesh particles, "particle instances" writes their instances into the scene's
+ * range the GPU writes, and the whole simulation runs before the scene is culled (effects.md §2.4's early group).
  *
  * <pre>{@code
  * graph.add(new ParticleSimulation(particles));
@@ -157,6 +158,21 @@ public final class ParticleSimulation implements Technique {
                     ctx.dispatch(args, p.push(argsPush), (p.emitterCount() + 63) / 64);
                 }
             });
+        if (scene != null && p.meshParticles()) {
+            // Mesh particles' instances, before anything culls the scene (SceneData.written builds this first)
+            Pipeline instances = g.computeProgram(SHADER, "instancesMain", ParticlePush.BYTES);
+            ParticlePush instancesPush = new ParticlePush();
+            g.pass("particle instances").read(b.particles(), BufferAccess.STORAGE_READ)
+                .read(b.state(), BufferAccess.STORAGE_READ).write(scene.instances(), BufferAccess.TRANSFER_DST)
+                .write(scene.instances(), BufferAccess.STORAGE_WRITE)
+                .record(ctx -> {
+                    p.clearHoles(ctx.unsafe().commands(), ctx.unsafe().buffer(scene.instances()));
+                    if (p.simulating() && p.meshEmitterCount() > 0) {
+                        ctx.dispatch(instances, p.push(instancesPush), (p.largestMeshEmitter() + 63) / 64,
+                            p.meshEmitterCount(), 1);
+                    }
+                });
+        }
         Pipeline ribbons = g.computeProgram("shaders/particles/ribbons.spv", "orderMain", ParticleRibbonPush.BYTES);
         ParticleRibbonPush ribbonPush = new ParticleRibbonPush();
         g.pass("particle ribbons").read(b.particles(), BufferAccess.STORAGE_READ)

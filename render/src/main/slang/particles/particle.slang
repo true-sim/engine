@@ -28,7 +28,7 @@ public struct Particle
 };
 
 /**
- * An emitter instance in this frame's list: 192 bytes, written by the CPU each frame. Its particles live in slots
+ * An emitter instance in this frame's list: 208 bytes, written by the CPU each frame. Its particles live in slots
  * [first, first + capacity) of each half of the pool.
  */
 [HostLayout]
@@ -63,6 +63,12 @@ public struct ParticleEmitter
     public uint targets;           // its effect's emitters' places in the list, from here in the frame's target table
     public float3 wind;            // the world's wind in its particles' frame, m/s
     public uint source;            // what its mesh and bone shapes emit from: its entry of the frame's sources, or NO_SOURCE
+    public uint meshFirst;         // mesh particles: the scene's instance id of its slot 0, in the range the GPU writes;
+                                   // NO_INSTANCES: none
+    public uint mesh;              // its mesh renderer's instance word: the pool mesh | INSTANCE_LIVE (| casting
+                                   // shadows); 0: nothing to draw (its mesh not on the GPU yet)
+    public uint material;          // that mesh's first material
+    public uint meshRenderer;      // its mesh renderer's record: its word in the program buffer
 };
 
 /**
@@ -139,6 +145,8 @@ public struct ParticleFrame
     public uint* meshlets;
     public uint* meshletVertices;
     public uint* meshletTriangles; // and triangles, 3 bytes each
+    public uint64_t instances;     // Instance*: the scene's instances, whose range the GPU writes holds mesh particles
+    public uint* meshEmitters;     // the frame's emitters with a mesh renderer: their places in the list
 };
 
 
@@ -207,9 +215,9 @@ public struct ParticleRenderer
     public float width;            // beams: metres across
     public float length;           // beams: metres along the emitter's +Y without an end given
     public float4 color;           // beams: linear color and alpha
-    public uint pad0;
-    public uint pad1;
-    public uint pad2;
+    public uint orient;            // meshes: ORIENT_*
+    public float scale;            // meshes: their scale per metre of the particle's size
+    public uint layers;            // meshes: the layers their instances are on
 };
 
 /**
@@ -262,6 +270,13 @@ public static const uint PARTICLE_NEWBORN = 16;           // born in the last fr
 public static const uint EMITTER_NEW = 1;                 // its first frame: no particles yet
 public static const uint EMITTER_LOCAL = 2;               // its particles live in its frame
 public static const uint EMITTER_CPU = 4;                 // simulated on the CPU: its particles uploaded each frame
+public static const uint EMITTER_MESH = 8;                // drawn as meshes: its particles roll as they move
+/** An emitter without instances in the scene. */
+public static const uint NO_INSTANCES = 0xffffffffu;
+/** How mesh particles turn: tumbling about a random axis as they roll, along their velocity, as their emitter. */
+public static const uint ORIENT_TUMBLE = 0;
+public static const uint ORIENT_VELOCITY = 1;
+public static const uint ORIENT_EMITTER = 2;
 
 /** Spawn record flags. */
 public static const uint SPAWN_PREWARM = 1;               // scene-effects' SpawnRecords.PREWARM

@@ -81,6 +81,11 @@ public final class GpuScene implements AutoCloseable {
     private long version; // changes with every claim and removal
     private int highWater;
     private boolean closed;
+    // The ids the GPU writes (mesh particles, effects.md §3): the CPU never writes them; and the keys whose producers
+    // write them, built before anything culls the instances
+    private int gpuFirst;
+    private int gpuCount;
+    private final List<com.truesim.engine.graph.Key<?>> writers = new ArrayList<>();
 
     /** Room for {@code capacity} instances of {@code pool}'s meshes to start with, for the frames of the pool's slots. */
     public GpuScene(VulkanDevice device, GeometryPool pool, int capacity) {
@@ -319,6 +324,9 @@ public final class GpuScene implements AutoCloseable {
         if (id < 0) {
             throw new IndexOutOfBoundsException("No instance " + id);
         }
+        if (gpuWritten(id)) {
+            throw new IllegalArgumentException("Instance " + id + " is in the range the GPU writes");
+        }
         if (id >= capacity) {
             grow(id + 1);
         }
@@ -373,7 +381,7 @@ public final class GpuScene implements AutoCloseable {
      */
     public void remove(int id) {
         Objects.checkIndex(id, capacity);
-        if (!contains(id)) {
+        if (!contains(id) || gpuWritten(id)) {
             return;
         }
         instances.clear(id); // a hole
@@ -391,6 +399,97 @@ public final class GpuScene implements AutoCloseable {
         for (int i = highWater - 1; i >= Math.max(id, 0); i--) {
             remove(i);
         }
+    }
+
+    /**
+     * Reserves {@code count} consecutive ids for the GPU to write (mesh particles, effects.md §3), the lowest run free,
+     * the table grown if there is none: the CPU never writes them and the upload never scatters into them; they start
+     * as holes. They are below {@link #highWater()}, so culling and the top level count them; ray tracing leaves them
+     * out (mask 0, an empty bottom level), so the top level, which stands while {@link #version()} does, stays right
+     * while the GPU moves them. One range at a time; returns its first id.
+     */
+    public int reserveGpuRange(int count) {
+        if (count < 1) {
+            throw new IllegalArgumentException("Not an instance count: " + count);
+        }
+        if (gpuCount > 0) {
+            throw new IllegalStateException("A range is reserved already: " + gpuCount + " from " + gpuFirst);
+        }
+        int first = 0;
+        int run = 0;
+        for (int id = 0; id < capacity && run < count; id++) {
+            if (contains(id)) {
+                run = 0;
+                first = id + 1;
+            } else {
+                run++;
+            }
+        }
+        if (first + count > capacity) {
+            grow(first + count);
+        }
+        for (int id = first; id < first + count; id++) {
+            used[id >>> 6] |= 1L << id;
+            instances.clear(id); // a hole until the GPU writes it
+        }
+        gpuFirst = first;
+        gpuCount = count;
+        highWater = Math.max(highWater, first + count);
+        version++;
+        return first;
+    }
+
+    /** Gives the range the GPU writes back: holes, free for instances. */
+    public void releaseGpuRange() {
+        int first = gpuFirst;
+        int count = gpuCount;
+        gpuCount = 0;
+        gpuFirst = 0;
+        for (int id = first; id < first + count; id++) {
+            instances.clear(id);
+            used[id >>> 6] &= ~(1L << id);
+        }
+        firstFreeWord = Math.min(firstFreeWord, first >>> 6);
+        while (highWater > 0 && !contains(highWater - 1)) {
+            highWater--;
+        }
+        version++;
+    }
+
+    /** The first id of the range the GPU writes. */
+    public int gpuFirst() {
+        return gpuFirst;
+    }
+
+    /** How many ids the GPU writes, 0 for none. */
+    public int gpuCount() {
+        return gpuCount;
+    }
+
+    private boolean gpuWritten(int id) {
+        return id >= gpuFirst && id < gpuFirst + gpuCount;
+    }
+
+    /**
+     * Notes that the technique providing {@code key} writes the range the GPU writes: those culling the instances
+     * ({@link MeshletCulling}, {@link ClassicLodGeometry}) build it first ({@link SceneData#written}), so its writes come
+     * before their reads in the frame.
+     */
+    @AllowAllocation("set up once")
+    public void writtenBy(com.truesim.engine.graph.Key<?> key) {
+        if (!writers.contains(key)) {
+            writers.add(Objects.requireNonNull(key, "key"));
+        }
+    }
+
+    /** Stops noting {@code key}. */
+    public void notWrittenBy(com.truesim.engine.graph.Key<?> key) {
+        writers.remove(key);
+    }
+
+    /** The keys whose producers write the range the GPU writes. */
+    List<com.truesim.engine.graph.Key<?>> writers() {
+        return writers;
     }
 
     /** Whether id {@code id} is an instance's. */
