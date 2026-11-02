@@ -288,7 +288,7 @@ class EffectSyncTest {
                 sync.clearViewers();
                 sync.addViewer(0, 2, -5);
                 sync.update(FRAME);
-            }, 500, 200, 5);
+            }, 2_000, 200, 10);
         }
     }
 
@@ -325,6 +325,10 @@ class EffectSyncTest {
             assertThat(fx.sync().runtime().quality()).isEqualTo(Quality.LOW);
             assertThat(torch.time()).as("moved on by the frames").isPositive();
             assertThat(fx.particles().instance(torch.id(), 0)).isNotNegative();
+            com.truesim.scene.animation.Animators animators = new com.truesim.scene.animation.Animators(world);
+            assertThat(fx.bindings(animators)).isNotNull();
+            assertThatIllegalStateException().isThrownBy(() -> fx.bindings(animators));
+            engine.step();
         }
     }
 }

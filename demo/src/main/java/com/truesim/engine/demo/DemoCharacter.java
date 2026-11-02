@@ -12,12 +12,15 @@ import com.truesim.engine.scene.SceneResources;
 import com.truesim.engine.scene.SceneSync;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.VulkanDevice;
+import com.truesim.scene.animation.AnimationCurve;
+import com.truesim.scene.animation.AnimationEvent;
 import com.truesim.scene.animation.Animator;
 import com.truesim.scene.animation.Animators;
 import com.truesim.scene.animation.BlendSpace1;
 import com.truesim.scene.animation.Clip;
 import com.truesim.scene.animation.FabrikChain;
 import com.truesim.scene.animation.FootPlacement;
+import com.truesim.scene.animation.Joint;
 import com.truesim.scene.animation.LookAt;
 import com.truesim.scene.animation.Rig;
 import com.truesim.scene.animation.TwoBoneIk;
@@ -39,12 +42,23 @@ import java.util.List;
  * terrain, through the whole animation path: its clips in a rig, played by an animator, skinned on the GPU. A loop of a
  * few seconds: surveying, cross-fading into a walk that speeds up into a run (a blend space), and back; all the while its
  * head looks at a circling light (a look-at shared down its neck and spine), its tail follows a wagging point (a FABRIK
- * chain with limits), and its four feet stand on the uneven ground (foot placement on both pairs of legs).
+ * chain with limits), and its four feet stand on the uneven ground (foot placement on both pairs of legs). Its walk and
+ * run carry an event as each foot comes down ({@link #FEET}, for dust), and its survey a flickering curve
+ * ({@link #FLICKER}).
  */
 final class DemoCharacter implements AutoCloseable {
 
     /** How long the loop lasts, seconds. */
     static final double LOOP = 12;
+    /** A foot coming down: back left, back right, front left, front right, in that order of {@link #feet()}. */
+    static final AnimationEvent[] FEET = {AnimationEvent.of("back left foot down"),
+        AnimationEvent.of("back right foot down"), AnimationEvent.of("front left foot down"),
+        AnimationEvent.of("front right foot down")};
+    /** A curve flickering between 0 and 1 while the fox surveys: drives the torch beside it. */
+    static final AnimationCurve FLICKER = AnimationCurve.of("flicker");
+    /** When each foot comes down in the walk and the run (seconds into them; found from the feet's heights). */
+    private static final double[] WALK_STEPS = {0.5, 0.692, 0.017, 0.375};
+    private static final double[] RUN_STEPS = {1.0, 1.092, 0.525, 0.417};
 
     private final TaskScheduler tasks = new TaskScheduler();
     private final AssetCache cache = new AssetCache(tasks);
@@ -64,6 +78,7 @@ final class DemoCharacter implements AutoCloseable {
     private final LookAt look;
     private final FabrikChain tail;
     private final double[] tailRoot = new double[3];
+    private final Joint[] feet = new Joint[4];
     private boolean moving;
     private double last;
 
@@ -99,6 +114,19 @@ final class DemoCharacter implements AutoCloseable {
         survey = r.clip(await(model.animation("Survey")));
         Clip walk = r.clip(await(model.animation("Walk")));
         Clip run = r.clip(await(model.animation("Run")));
+        String[] footNames = {"b_LeftFoot01_017", "b_RightFoot01_021", "b_LeftHand_011", "b_RightHand_08"};
+        for (int f = 0; f < 4; f++) {
+            feet[f] = r.joint(footNames[f]);
+            walk.event(WALK_STEPS[f], FEET[f]);
+            run.event(RUN_STEPS[f], FEET[f]);
+        }
+        float[] times = new float[25];
+        float[] values = new float[25];
+        for (int k = 0; k < times.length; k++) {
+            times[k] = (float) (survey.duration() * 0.999 * k / (times.length - 1)); // within it: the loop keeps its length
+            values[k] = (float) (0.5 + 0.5 * Maths.sin(k * 2.7) * Maths.cos(k * 1.3));
+        }
+        survey.curve(FLICKER, times, values);
         move = r.blendSpace1().at(0, walk).at(1, run);
         base = r.layer();
         look = r.lookAt(r.joint("b_Head_05"), 0, 0, 1).chain(r.joint("b_Neck_04"), 0.4)
@@ -121,6 +149,23 @@ final class DemoCharacter implements AutoCloseable {
         animator = animators.add(rig, nodes);
         animator.layer(base).play(survey);
         update(0, 0, 0, 0);
+    }
+
+    SceneGraph scene() {
+        return scene;
+    }
+
+    Animators animators() {
+        return animators;
+    }
+
+    Animator animator() {
+        return animator;
+    }
+
+    /** Its feet's joints, in the order of {@link #FEET}. */
+    Joint[] feet() {
+        return feet;
     }
 
     private <T> T await(AssetRef<T> ref) throws InterruptedException {

@@ -132,6 +132,11 @@ final class DemoScene implements AutoCloseable {
         return lights;
     }
 
+    /** The fox, or null without. */
+    DemoCharacter character() {
+        return character;
+    }
+
     /** Its ray tracing, or null without. */
     RayTracing rayTracing() {
         return rayTracing;

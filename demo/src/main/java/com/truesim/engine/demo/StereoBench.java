@@ -83,14 +83,20 @@ public final class StereoBench {
             CascadedShadowMaps sharedCascades = new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, eyes[0],
                 3, 2048, ViewOptions.shadow(1 << 16, 1 << 22), 150).margin(0.064f);
             owned.add(sharedCascades);
-            // -Ptruesim.demo.effect=x,y,z: the demo's effects there (g+h: h above the ground)
+            // -Ptruesim.demo.effect=x,y,z: the demo's effects there (g+h: h above the ground); with -Pcharacter the
+            // fox's feet kick up dust
             String effect = System.getProperty("truesim.demo.effect");
             DemoEffects effects = null;
             if (effect != null) {
                 String[] v = effect.split(",");
                 double fx = Double.parseDouble(v[0]);
                 double fz = Double.parseDouble(v[2]);
-                effects = new DemoEffects(device, graph.frameSlots(), fx, height(v[1], fx, fz), fz);
+                DemoCharacter fox = world.character();
+                effects = fox == null ? new DemoEffects(device, graph.frameSlots(), fx, height(v[1], fx, fz), fz)
+                    : new DemoEffects(device, graph.frameSlots(), fox.scene(), fx, height(v[1], fx, fz), fz);
+                if (fox != null) {
+                    effects.dust(fox); // the fox kicks up dust; its survey flickers the torch
+                }
                 owned.add(effects);
                 graph.add(effects.simulation());
             }

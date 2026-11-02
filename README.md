@@ -1108,6 +1108,11 @@ effects.replace(TORCH, editedTorch);                       // hot reload: instan
 - **Pooling:** an ended effect's ranges and programs stay warm for `Particles.WARM_FRAMES` (300) for the next instance
   of the same asset (at most 4 per asset, given back early when the pool lacks room); a replaced asset's instances keep
   the ranges that still fit.
+- **Animation drives effects** (`EffectBindings`, `fx.bindings(animators)` on the plugin): `onEvent(event, effect,
+  joint)` plays the effect at that joint of whichever animator passes the event (found by the node its listener hears
+  of), the event's weight as a parameter with `scale(parameter)`; `curve(animator, curve, effect, parameter)` sets the
+  parameter from the animator's curve every frame. The demo's fox kicks up dust on its four foot-down events and its
+  survey's curve flickers the torch (`stereoBench -Pcharacter=<Fox.gltf> -Peffect=31,g0,22`).
 - Interpolation between fixed steps (application-api D91) is not built: effects take nodes' world transforms as they
   are. 100 torches on rocks in the scene benchmark allocate 0 bytes per frame (median).
 
