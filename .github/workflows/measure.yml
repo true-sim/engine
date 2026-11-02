@@ -1,0 +1,55 @@
+name: Measure (throwaway)
+
+on:
+  push:
+    branches: [ci-measure]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      GITHUB_ACTOR: ${{ github.actor }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: true-sim/build-logic/.github/actions/setup-vulkan@61314fb2c79472f89f95c8ffd001ee53e904b02a
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 27
+      - uses: gradle/actions/setup-gradle@v6
+      - run: ./gradlew :engine-render:testClasses
+      - name: Test JVM memory
+        run: |
+          mkdir -p out
+          run() { # name threads env...
+            name=$1; threads=$2; shift 2
+            ( peak=0; while true; do
+                r=$(ps -eo rss,args | grep 'Gradle Test Executor' | grep -v grep | awk '{s+=$1} END {print int(s/1024)}')
+                [ -n "$r" ] && [ "$r" -gt "$peak" ] && peak=$r && echo $peak > out/peak-$name.txt
+                echo "$(date +%T) $r" >> out/rss-$name.txt
+                avail=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+                [ $avail -lt 1500 ] && pkill -9 -f 'Gradle Test Executor' && echo KILLED >> out/rss-$name.txt
+                sleep 3; done ) & mon=$!
+            start=$(date +%s)
+            env "$@" ./gradlew --no-daemon -q :engine-render:test --rerun --continue -Ptruesim.testThreads=$threads > /dev/null 2>&1 || true
+            wall=$(( $(date +%s) - start )); kill $mon
+            res=$(grep -h '<testsuite ' render/build/test-results/test/*.xml | grep -o 'tests="[0-9]*" skipped="[0-9]*" failures="[0-9]*" errors="[0-9]*"' | awk -F'"' '{t+=$2; f+=$6+$8} END {print "tests=" t " failed=" f}')
+            echo "CONFIG $name threads=$threads wall=${wall}s peakRSS=$(cat out/peak-$name.txt)M $res $(grep -c KILLED out/rss-$name.txt) kills" | tee -a out/summary.txt
+          }
+          run cold-conc4 4 MESA_SHADER_CACHE_DIR=/tmp/mA
+          run arena2-conc4 4 MESA_SHADER_CACHE_DIR=/tmp/mA MALLOC_ARENA_MAX=2
+          run conc4 4 MESA_SHADER_CACHE_DIR=/tmp/mA
+          run serial 1 MESA_SHADER_CACHE_DIR=/tmp/mA
+          run arena2-serial 1 MESA_SHADER_CACHE_DIR=/tmp/mA MALLOC_ARENA_MAX=2
+          cat out/summary.txt
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: measure-mem
+          path: out
