@@ -12,10 +12,8 @@ import particle;
 
 struct ParticlePush
 {
-    Particle* source;              // the half of the pool the frame reads
-    Particle* target;              // the half it writes
+    Particle* source;              // the half of the pool the frame reads; it writes the other (targetDelta)
     uint4* sideSource;             // side arrays (attributes kept from birth), by halves likewise
-    uint4* sideTarget;
     ParticleEmitter* emitters;     // the frame's list
     uint* chunks;                  // per chunk: its emitter's place in the list
     uint2* chunkCounts;            // per chunk: survivors, then the first slot they go to
@@ -26,6 +24,10 @@ struct ParticlePush
     float* parameters;             // the frame's user parameter blocks
     uint* statistics;              // STATISTICS_HEADER words, then ALIVE and OVERFLOW per instance
     uint* dispatch;                // the spawn dispatch's group counts
+    Particle* uploads;             // the frame's CPU emitters' particles (uploadMain)
+    uint* cpu;                     // the CPU emitters' places in the list (uploadMain)
+    int targetDelta;               // particles from the half read to the half written
+    int sideDelta;                 // side units likewise
     uint emitterCount;
     uint chunkCount;
 };
@@ -419,15 +421,17 @@ void scanMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         }
         uint* state = push.state;
         uint at = e.instance * STATE_WORDS;
-        state[at + STATE_SURVIVORS] = total;
+        bool cpu = (e.flags & EMITTER_CPU) != 0;
+        state[at + STATE_SURVIVORS] = cpu ? e.demand : total; // a CPU emitter: what it uploads
         if ((e.flags & EMITTER_NEW) != 0)
         {
             state[at + STATE_OVERFLOW] = 0;
         }
         for (uint b = 0; b < 3; b++)
         {
-            state[at + STATE_BOUNDS + b] = 0xffffffffu;    // empty: min above max
-            state[at + STATE_BOUNDS + 3 + b] = 0;
+            bool empty = !cpu || e.demand == 0;
+            state[at + STATE_BOUNDS + b] = empty ? 0xffffffffu : uint(ordered(e.position[b])) ^ 0x80000000u;
+            state[at + STATE_BOUNDS + 3 + b] = empty ? 0 : uint(ordered(e.previous[b])) ^ 0x80000000u;
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -494,7 +498,8 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
             uint s = e.side + local * e.sideUnits;
             color0 = asfloat(sideSource[s]);
             size0 = asfloat(sideSource[s + 1].x);
-            uint4* sideTarget = push.sideTarget;
+            uint4* sideSource0 = push.sideSource;
+            uint4* sideTarget = sideSource0 + push.sideDelta;
             uint t = e.side + (to - e.first) * e.sideUnits;
             for (uint u = 0; u < e.sideUnits; u++)
             {
@@ -513,7 +518,8 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
             keys.block = block;
             step(m, keys, first, p, color0, size0, e.dt);
         }
-        Particle* target = push.target;
+        Particle* source0 = push.source;
+        Particle* target = source0 + push.targetDelta;
         target[to] = p;
         bound(p);
     }
@@ -540,10 +546,11 @@ void spawnArgsMain(uint lane : SV_GroupIndex)
         ParticleEmitter e = emitters[i];
         uint at = e.instance * STATE_WORDS;
         uint survivors = state[at + STATE_SURVIVORS];
-        uint spawned = min(e.demand, e.capacity - survivors);
+        uint spawned = (e.flags & EMITTER_CPU) != 0 ? 0 : min(e.demand, e.capacity - survivors);
         state[at + STATE_SPAWNED] = spawned;
-        state[at + STATE_OVERFLOW] += e.demand - spawned;
-        dropped += e.demand - spawned;
+        uint demand = (e.flags & EMITTER_CPU) != 0 ? 0 : e.demand;
+        state[at + STATE_OVERFLOW] += demand - spawned;
+        dropped += demand - spawned;
         survived += survivors;
         sum += spawned;
     }
@@ -682,11 +689,13 @@ void spawnMain(uint3 id : SV_DispatchThreadID)
         step(m, keys, updaters(m), p, color0, size0, age);
     }
     uint slot = state[at + STATE_SURVIVORS] + k;
-    Particle* target = push.target;
+    Particle* source0 = push.source;
+    Particle* target = source0 + push.targetDelta;
     target[e.first + slot] = p;
     if (e.side != NO_SIDE)
     {
-        uint4* sideTarget = push.sideTarget;
+        uint4* sideSource0 = push.sideSource;
+            uint4* sideTarget = sideSource0 + push.sideDelta;
         uint s = e.side + slot * e.sideUnits;
         sideTarget[s] = asuint(color0);
         sideTarget[s + 1] = uint4(asuint(size0), 0, 0, 0);
@@ -721,4 +730,22 @@ void argsMain(uint3 id : SV_DispatchThreadID)
     uint* statistics = push.statistics;
     statistics[STATISTICS_HEADER + 2 * instance] = alive;
     statistics[STATISTICS_HEADER + 2 * instance + 1] = state[at + STATE_OVERFLOW];
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void uploadMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
+{
+    // A row of groups per CPU emitter: its uploaded particles into its range of the half the frame writes.
+    uint* cpu = push.cpu;
+    ParticleEmitter* emitters = push.emitters;
+    ParticleEmitter e = emitters[cpu[group.y]];
+    if (id.x >= e.demand)
+    {
+        return;
+    }
+    Particle* uploads = push.uploads;
+    Particle* source0 = push.source;
+    Particle* target = source0 + push.targetDelta;
+    target[e.first + id.x] = uploads[e.records + id.x];
 }

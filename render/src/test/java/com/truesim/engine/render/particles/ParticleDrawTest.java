@@ -3,6 +3,8 @@ package com.truesim.engine.render.particles;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
 import static org.assertj.core.api.Assumptions.assumeThat;
+import static com.truesim.testing.AllocationAssertions.assertAllocationFree;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT;
@@ -56,6 +58,13 @@ import com.truesim.scene.assets.mesh.VertexAttribute;
 import com.truesim.scene.assets.mesh.VertexFormat;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.effects.Bind;
+import com.truesim.scene.effects.ColorGradient;
+import com.truesim.scene.effects.CpuSimulation;
+import com.truesim.scene.effects.Effect;
+import com.truesim.scene.effects.Forces;
+import com.truesim.scene.effects.Over;
+import com.truesim.scene.effects.Shape;
+import com.truesim.scene.effects.Target;
 import com.truesim.scene.effects.EffectData;
 import com.truesim.scene.effects.EffectRuntime;
 import com.truesim.scene.effects.Effects;
@@ -106,6 +115,7 @@ class ParticleDrawTest {
     private final SceneGraph nodes = new SceneGraph(new ChangeClock());
     private final Effects effects = new Effects(nodes);
     private final EffectRuntime runtime = new EffectRuntime(effects);
+    private final CpuSimulation cpu = new CpuSimulation(runtime, null);
 
     @BeforeEach
     void start() {
@@ -234,8 +244,9 @@ class ParticleDrawTest {
         for (int f = 0; f < n; f++) {
             nodes.update();
             runtime.update(FRAME);
+            cpu.update();
             graph.beginFrame();
-            particles.update(effects, runtime.spawns());
+            particles.update(effects, runtime.spawns(), cpu);
             view.set(1, MeshletRenderer.MODE_LIT);
             graph.submit(0, 0);
         }
@@ -415,4 +426,88 @@ class ParticleDrawTest {
         assertThat(draw.provides()).isEmpty();
         assertThat(draw.order()).isEqualTo(Order.at(Anchor.TRANSPARENT).after(com.truesim.engine.render.Transparency.ID));
     }
+
+    /** Sparks and puffs, on {@code target}: non-chaotic modules, so the CPU and GPU stay within a pixel. */
+    private static EffectData fountain(Target target) {
+        return EffectData.builder().emitter("e", e -> e.target(target).spawn(Spawn.rate(80), Spawn.burst(0, 30))
+            .init(Shape.cone(0.5f, 0.2f), Init.speed(Bind.random(2, 4)), Init.lifetime(Bind.random(0.8f, 1.5f)),
+                Init.size(Bind.random(0.2f, 0.4f)), Init.color(Bind.color(0.6f, 0.4f, 0.2f, 0.7f)))
+            .update(Forces.gravity(), Forces.drag(0.5f), Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 1)
+                .linear(1, 0.2f, 0.2f, 1, 0).build()))
+            .render(Renderer.billboard(Renderer.Facing.POSITION).alphaToAdd(0.5f))).build();
+    }
+
+    @Test
+    void aCpuEmitterDrawsAsItsGpuTwin() {
+        int[][] images = new int[2][];
+        for (Target target : new Target[] {Target.GPU, Target.CPU}) {
+            Effect effect = effects.play(fountain(target), 0, -1.5, -4).seed(21);
+            images[target.ordinal()] = frames(40);
+            if (target == Target.CPU) {
+                long instance = particles.instance(effect.id(), 0);
+                assertThat(instance).as("uploaded into a range").isNotNegative();
+                for (int f = 0; f < 3; f++) { // the statistics come back late: frames that do not simulate
+                    graph.beginFrame();
+                    view.set(1, MeshletRenderer.MODE_LIT);
+                    graph.submit(0, 0);
+                }
+                device.waitIdle();
+                assertThat(particles.alive(effect.id(), 0)).isEqualTo(cpu.count(effect.id(), 0)).isPositive();
+            }
+            effect.kill();
+        }
+        int differing = 0;
+        long sum = 0;
+        for (int i = 0; i < images[0].length; i++) {
+            for (int c = 0; c < 3; c++) {
+                int d = Math.abs(channel(images[0][i], c) - channel(images[1][i], c));
+                differing += d > 8 ? 1 : 0;
+                sum += d;
+            }
+        }
+        System.out.printf("CPU against GPU emitter: %d channels off by more than 8, mean difference %.3f per pixel%n",
+            differing, (double) sum / images[0].length);
+        assertThat(covered(images[0], 0, 20)).as("something drawn").isGreaterThan(50);
+        assertThat(differing).as("channels off by more than 8 of 255").isLessThan(images[0].length * 3 / 100);
+        assertThat((double) sum / images[0].length).as("mean difference per pixel").isLessThan(2.0);
+    }
+
+    @Test
+    void gameWrittenRecordsDrawAndAllocateNothing() {
+        EffectData shards = EffectData.builder().emitter("shards", e -> e.target(Target.CPU).capacity(8)
+            .spawn(Spawn.rate(1)).render(sprite(Renderer.Facing.POSITION))).build();
+        Effect effect = effects.play(shards, 0, 0, -4);
+        frames(1);
+        ParticleWriter writer = particles.writer(effect.id(), 0);
+        assertThat(particles.writer(effect.id(), 0)).isSameAs(writer);
+        assertThat(writer.effect()).isEqualTo(effect.id());
+        assertThat(writer.emitter()).isZero();
+        assertThat(writer.capacity()).isEqualTo(8);
+        Runnable write = () -> {
+            writer.clear();
+            writer.next().position(-1.5, 0, -4).size(1).color(1, 0, 0, 1).velocity(0, 0, 0).rotation(0).age(0, 1);
+            writer.next().position(1.5, 0, -4).size(1).color(0, 1, 0, 1);
+        };
+        write.run();
+        int[] image = frames(3);
+        assertThat(writer.count()).isEqualTo(2);
+        assertThat(at(image, 20, 32, 0)).as("red on the left").isGreaterThan(240);
+        assertThat(at(image, 44, 32, 1)).as("green on the right").isGreaterThan(240);
+        assertThat(at(image, 32, 32, 0) + at(image, 32, 32, 1)).as("nothing between").isLessThan(5);
+        for (int i = 0; i < 10; i++) {
+            writer.next();
+        }
+        assertThat(writer.count()).isEqualTo(8);
+        assertThat(writer.dropped()).isEqualTo(4);
+        // Writing and uploading allocate nothing.
+        assertAllocationFree(() -> {
+            write.run();
+            particles.update(effects, runtime.spawns(), cpu);
+        });
+        assertThatIllegalArgumentException().isThrownBy(() -> particles.writer(effect.id(), 1));
+        effect.kill();
+        frames(1);
+        assertThat(writer.ended()).isTrue();
+    }
+
 }

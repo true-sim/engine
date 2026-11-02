@@ -17,8 +17,8 @@ import java.util.Objects;
  * ({@link ParticleKeys#PARTICLES}) and the emitter instances' state ({@link ParticleKeys#STATE}). Its passes, on the
  * graphics queue: "particle count" (survivors per chunk), "particle scan" (their slots, per emitter), "particle update"
  * (the updaters, survivors copied in order into the other half), "particle spawn args" (spawns within room, overflow
- * counted), "particle spawn" (the newborn, indirect), "particle args" (counts for the next frame), and the statistics'
- * readback. A frame {@link Particles#update} was not called in simulates nothing.
+ * counted), "particle spawn" (the newborn, indirect), "particle upload" (CPU emitters' particles into their ranges),
+ * "particle args" (counts for the next frame), and the statistics' readback. A frame {@link Particles#update} was not called in simulates nothing.
  *
  * <pre>{@code
  * graph.add(new ParticleSimulation(particles));
@@ -96,6 +96,14 @@ public final class ParticleSimulation implements Technique {
             .record(ctx -> {
                 if (p.simulating() && p.recordCount() > 0) {
                     ctx.dispatchIndirect(spawn, p.push(spawnPush), b.dispatch(), 0);
+                }
+            });
+        Pipeline upload = g.computeProgram(SHADER, "uploadMain", ParticlePush.BYTES);
+        ParticlePush uploadPush = new ParticlePush();
+        g.pass("particle upload").write(b.particles(), BufferAccess.STORAGE_WRITE)
+            .record(ctx -> {
+                if (p.simulating() && p.cpuEmitterCount() > 0 && p.largestUpload() > 0) {
+                    ctx.dispatch(upload, p.push(uploadPush), (p.largestUpload() + 63) / 64, p.cpuEmitterCount(), 1);
                 }
             });
         ParticlePush argsPush = new ParticlePush();
