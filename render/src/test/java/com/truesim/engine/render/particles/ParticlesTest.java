@@ -41,6 +41,8 @@ import com.truesim.scene.assets.AssetId;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.AssetType;
 import com.truesim.scene.effects.Bind;
+import com.truesim.scene.effects.Collide;
+import com.truesim.scene.effects.ParticleWorld;
 import com.truesim.scene.effects.ColorGradient;
 import com.truesim.scene.effects.CpuSimulation;
 import com.truesim.scene.effects.Effect;
@@ -97,7 +99,7 @@ class ParticlesTest {
     private final SceneGraph scene = new SceneGraph(new ChangeClock());
     private final Effects effects = new Effects(scene);
     private final EffectRuntime runtime = new EffectRuntime(effects);
-    private final CpuSimulation cpu = new CpuSimulation(runtime, null);
+    private CpuSimulation cpu = new CpuSimulation(runtime, null);
     private final ParticleCursor cursor = new ParticleCursor();
 
     @BeforeEach
@@ -391,6 +393,87 @@ class ParticlesTest {
             compare(e -> e.spawn(Spawn.rate(40)).init(Shape.sphere(1.5f), Init.lifetime(10),
                 Init.velocity(Bind.random(-1, 1), Bind.random(0, 2), Bind.random(-1, 1))).update(forces),
                 20, FRAME, 1e-2);
+        }
+    }
+
+    @Test
+    void collisionsWithCollidersMatchTheReference() {
+        long floor = scene.create();
+        scene.setTranslation(floor, 10, 0, -3);
+        long ball = scene.create();
+        scene.setTranslation(ball, 10.5, 0.8, -3);
+        long crate = scene.create();
+        scene.setTranslation(crate, 9, 0.5, -2.5);
+        scene.setRotation(crate, 0, Math.sin(0.4), 0, Math.cos(0.4));
+        long pole = scene.create();
+        scene.setTranslation(pole, 11, 0.5, -3.5);
+        scene.update();
+        effects.colliders().plane(floor, 1);
+        effects.colliders().sphere(ball, 0.4f, 1);
+        effects.colliders().box(crate, 0.4f, 0.3f, 0.4f, 1);
+        effects.colliders().capsule(pole, 0.2f, 0.5f, 1);
+        effects.colliders().sphere(ball, 3, 2); // another layer
+        Collide.Collision[] responses = {Collide.colliders(1).bounce(0.6f).friction(0.1f),
+            Collide.colliders(1).slide().radius(0.05f), Collide.colliders(1).stick(), Collide.colliders(1).kill()};
+        for (Collide.Collision collision : responses) {
+            compare(e -> e.spawn(Spawn.rate(60)).init(Shape.disc(1.5f), Init.lifetime(3), Init.size(Bind.constant(0.1f)),
+                Init.velocity(Bind.random(-1, 1), Bind.random(1, 3), Bind.random(-1, 1)))
+                .update(Forces.gravity()).collide(collision), 60, FRAME, 1e-2);
+        }
+    }
+
+    @Test
+    void collisionsWithTheHeightFieldMatchTheReference() {
+        ParticleWorld slope = new ParticleWorld() {
+            @Override
+            public double height(double x, double z) {
+                return 0.2 * x - 0.1 * z - 1;
+            }
+
+            @Override
+            public boolean raycast(double x, double y, double z, double dx, double dy, double dz, double max, Hit hit) {
+                return false;
+            }
+        };
+        cpu = new CpuSimulation(runtime, slope);
+        particles.heights(slope, 64, 65).heightFocus(10, -3);
+        compare(e -> e.spawn(Spawn.rate(60)).init(Shape.disc(2), Init.lifetime(3), Init.size(Bind.constant(0.1f)),
+            Init.velocity(Bind.random(-1, 1), Bind.random(0, 2), Bind.random(-1, 1)))
+            .update(Forces.gravity()).collide(Collide.height().bounce(0.3f)), 60, FRAME, 1e-2);
+        assertThat(particles.heightRefreshes()).isOne();
+        particles.heightFocus(40, -3); // far enough: taken again
+        frame(FRAME);
+        assertThat(particles.heightRefreshes()).isEqualTo(2);
+        particles.heights(null, 0, 0);
+        frame(FRAME);
+        assertThatIllegalArgumentException().isThrownBy(() -> particles.heights(slope, 0, 64));
+        assertThatIllegalArgumentException().isThrownBy(() -> particles.heights(slope, 10, 1));
+    }
+
+    @Test
+    void localSpaceParticlesCollideInTheWorldOnTheGpu() {
+        long floor = scene.create();
+        scene.update();
+        effects.colliders().plane(floor, 1);
+        long holder = scene.create();
+        scene.setTranslation(holder, 0, 2, 0);
+        scene.setRotation(holder, Math.sin(0.5), 0, 0, Math.cos(0.5));
+        scene.update();
+        EffectData[] local = pair(e -> e.space(Space.LOCAL).spawn(Spawn.burst(0, 5)).init(Shape.disc(0.5f),
+            Init.lifetime(100)).update(Forces.gravity()).collide(Collide.colliders(1).stick()));
+        long[] l = {effects.play(local[0], holder).seed(6).id(), effects.play(local[1], holder).seed(6).id()};
+        for (int f = 0; f < 90; f++) {
+            frame(FRAME);
+        }
+        List<Gpu> gpu = gpu(l[0], 0);
+        cpu.particles(l[1], 0, cursor);
+        assertThat(gpu).hasSize(cursor.count()).hasSize(5);
+        for (Gpu p : gpu) {
+            cursor.next();
+            double[] r = rotate(Math.sin(0.5), 0, 0, Math.cos(0.5), p.x, p.y, p.z);
+            assertThat(2 + r[1]).as("on the floor, in the world").isCloseTo(0.05, within(1e-3));
+            assertThat(cursor.y()).isCloseTo(0.05, within(1e-3));
+            assertThat(p.flags & ParticleConstants.PARTICLE_STUCK).isNotZero();
         }
     }
 

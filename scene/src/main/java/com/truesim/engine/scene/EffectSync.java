@@ -42,10 +42,18 @@ import java.util.Objects;
  * ({@link Effects#replace}, a hot reload) keeps the ranges that still fit. Transforms are the nodes' world transforms
  * as they are: interpolation between fixed steps (application-api D91) is not built yet.
  *
+ * <p>Given a {@link ParticleWorld}, CPU emitters collide with it and GPU emitters with its heights around the first
+ * viewer ({@link Particles#heights}); depth collision needs a {@code ParticleCollisionDepth} in the collision view.
+ *
  * <p>Call {@link #update} once per frame, between frames or while it records (after {@code beginFrame}); on the
  * scene's thread. Allocates nothing per frame once its tables have grown to the effects playing.
  */
 public final class EffectSync {
+
+    /** Metres across the height field GPU emitters collide with, around the first viewer, given a world. */
+    public static final float HEIGHT_FIELD_SIZE = 256;
+    /** Its points along each side: 2 m apart. */
+    public static final int HEIGHT_FIELD_RESOLUTION = 129;
 
     private final Effects effects;
     private final Particles particles;
@@ -57,6 +65,7 @@ public final class EffectSync {
     private int[] beamEmitters = new int[4];
     private long[] beamNodes = new long[4];
     private int beams;
+    private int viewers;
 
     /** The effects of {@code effects} drawn through {@code particles}, simulated on the calling thread. */
     public EffectSync(Effects effects, Particles particles) {
@@ -74,6 +83,9 @@ public final class EffectSync {
         scene = effects.scene();
         runtime = new EffectRuntime(effects, jobs);
         simulation = new CpuSimulation(runtime, world, jobs);
+        if (world != null) { // GPU emitters' height collision: the world's heights around the first viewer
+            particles.heights(world, HEIGHT_FIELD_SIZE, HEIGHT_FIELD_RESOLUTION);
+        }
     }
 
     public Effects effects() {
@@ -102,11 +114,18 @@ public final class EffectSync {
     /** Forgets the viewers; with none, every effect counts as near. */
     public void clearViewers() {
         runtime.clearViewers();
+        viewers = 0;
     }
 
-    /** A viewer (a camera, a headset's eyes' center) at ({@code x}, {@code y}, {@code z}), for distances. */
+    /**
+     * A viewer (a camera, a headset's eyes' center) at ({@code x}, {@code y}, {@code z}), for distances; the first is
+     * where the height field GPU emitters collide with centers.
+     */
     public void addViewer(double x, double y, double z) {
         runtime.addViewer(x, y, z);
+        if (viewers++ == 0) {
+            particles.heightFocus(x, z);
+        }
     }
 
     /**

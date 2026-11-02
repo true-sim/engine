@@ -18,6 +18,7 @@ final class Staging {
 
     private static final ValueLayout.OfInt U32 = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfFloat F32 = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+    private static final ValueLayout.OfLong U64 = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
     private MemorySegment memory;
 
@@ -43,6 +44,10 @@ final class Staging {
 
     void putInt(long offset, int value) {
         memory.set(U32, offset, value);
+    }
+
+    void putLong(long offset, long value) {
+        memory.set(U64, offset, value);
     }
 
     void putFloat(long offset, float value) {

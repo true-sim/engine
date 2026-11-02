@@ -65,6 +65,44 @@ public struct ParticleEmitter
     public uint pad2;
 };
 
+/**
+ * A collider on a scene node (scene-effects' EffectColliders), as of the frame: 64 bytes, written by the CPU each
+ * frame. Its position is two floats per axis, as effects' origins are.
+ */
+[HostLayout]
+public struct ParticleCollider
+{
+    public float3 positionHigh;    // its node's world position
+    public uint kind;              // COLLIDER_*
+    public float3 positionLow;
+    public uint layers;            // its layer bits
+    public float4 rotation;        // its node's world rotation
+    public float3 size;            // a sphere's radius, a box's half extents, a capsule's radius and half length
+    public uint pad;
+};
+
+/**
+ * What the frame's simulation collides with and uploads, beside its emitters: written by the CPU each frame, reached
+ * through one pointer of the push constants (each field loaded on its own).
+ */
+[HostLayout]
+public struct ParticleFrame
+{
+    public Particle* uploads;      // the CPU emitters' particles (uploadMain)
+    public uint* cpu;              // the CPU emitters' places in the list (uploadMain)
+    public ParticleCollider* colliders;
+    public float* heights;         // the height field: resolution x resolution heights, x fastest; or null
+    public float* depth;           // the collision view's last depth: its header (DEPTH_HEADER floats), then the grid
+    public uint colliderCount;
+    public uint heightResolution;
+    public float heightSize;       // metres across the height field's square
+    public uint depthReady;        // 1 when the depth grid holds a frame
+    public float3 heightCenterHigh; // the square's center (y unused)
+    public uint pad0;
+    public float3 heightCenterLow;
+    public uint pad1;
+};
+
 /** A spawn record: 64 bytes, as scene-effects' SpawnRecords, written by the CPU each frame. */
 [HostLayout]
 public struct ParticleSpawn
@@ -150,6 +188,8 @@ public static const uint NO_SIDE = 0xffffffffu;
 /** Particle flags. */
 public static const uint PARTICLE_DEAD = 1;               // leaves at the next count (born dead, or killed)
 public static const uint PARTICLE_PREWARM = 2;            // born before its effect started
+public static const uint PARTICLE_STUCK = 4;              // stuck where it hit: it only ages (CpuSimulation.STUCK)
+public static const uint PARTICLE_COLLIDED = 8;           // it hit something in its last step
 
 /** Emitter flags. */
 public static const uint EMITTER_NEW = 1;                 // its first frame: no particles yet
@@ -220,6 +260,29 @@ public static const uint OP_LINE = 18;
 public static const uint OP_ORBIT = 19;
 public static const uint OP_FIELD = 20;
 public static const uint OP_SPEED_LIMIT = 21;
+public static const uint OP_COLLIDERS = 22;
+public static const uint OP_HEIGHT = 23;
+public static const uint OP_DEPTH = 24;
+/** Collider kinds: scene-effects' EffectColliders.Kind, in order. */
+public static const uint COLLIDER_PLANE = 0;
+public static const uint COLLIDER_SPHERE = 1;
+public static const uint COLLIDER_BOX = 2;
+public static const uint COLLIDER_CAPSULE = 3;
+/** Collision responses: scene-effects' Collide.Response, in order. */
+public static const uint RESPONSE_BOUNCE = 0;
+public static const uint RESPONSE_SLIDE = 1;
+public static const uint RESPONSE_STICK = 2;
+public static const uint RESPONSE_KILL = 3;
+public static const uint RESPONSE_SNAP = 4;
+/** The most colliders the GPU tests a frame. */
+public static const uint MAX_COLLIDERS = 256;
+/**
+ * The collision depth's header, in floats: the view's view-projection (16) and its inverse (16), its camera's
+ * position high (3) and low (3), the grid's width and height (2, as floats).
+ */
+public static const uint DEPTH_HEADER = 40;
+/** The collision depth grid's most samples along its longer side. */
+public static const uint DEPTH_GRID = 512;
 /** How fast gusts of wind change: noise cells per second (scene-effects' CpuSimulation.GUST_RATE). */
 public static const float GUST_RATE = 0.5f;
 
