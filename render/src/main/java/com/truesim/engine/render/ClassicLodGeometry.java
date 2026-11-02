@@ -360,6 +360,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             case SHADED -> "classic LOD";
             case IDS -> "classic LOD ids";
         };
+        SceneData.written(g, renderer); // instances the GPU writes (mesh particles) before they are selected
         Buffer list = g.request(new Selection(this, view, camera, targets.region()));
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         GraphBuilder.PassBuilder pass = scene.read(targets.inRegion(g.pass(name)), BufferAccess.DRAW_READ)

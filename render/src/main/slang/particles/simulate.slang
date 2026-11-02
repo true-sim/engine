@@ -1012,6 +1012,10 @@ void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, floa
         p.velocity = terminal + (v - terminal) * decay;
     }
     p.age += h;
+    if ((m.emitter.flags & EMITTER_MESH) != 0)
+    {
+        p.rotation += sqrt(dot(v, v)) * h / max(0.5 * p.size.x, 1e-3); // mesh particles roll as far as they move
+    }
     for (uint i = 0, op = first; after && i < count; i++)
     {
         uint code = m.program[op] & 0xff;
@@ -1839,6 +1843,75 @@ void eventsRangesMain(uint lane : SV_GroupIndex)
         }
         InterlockedAdd(state[at + STATE_EVENT_CHILDREN], r.count);
     }
+}
+
+/** The rotation turning +Y onto unit `d`. */
+float4 fromUp(float3 d)
+{
+    float w = 1 + d.y;
+    return w < 1e-6 ? float4(1, 0, 0, 0) : float4(d.z, 0, -d.x, w) / sqrt(w * w + d.z * d.z + d.x * d.x);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void instancesMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
+{
+    // Mesh particles (E15): a row of groups per emitter with a mesh renderer, an instance per slot of its range in the
+    // scene's range the GPU writes: its live particles as drawn (from the half just written), the other slots holes.
+    ParticleFrame* frame = push.frame;
+    uint* list = frame.meshEmitters;
+    ParticleEmitter* emitters = push.emitters;
+    ParticleEmitter e = emitters[list[group.y]];
+    uint k = id.x;
+    if (k >= e.capacity)
+    {
+        return;
+    }
+    Instance r;
+    r.rotation = float4(0, 0, 0, 1);
+    r.position = 0;
+    r.mesh = 0; // a hole
+    r.scale = 0;
+    r.materialBase = 0;
+    r.positionLow = 0;
+    r.layers = 0;
+    uint* state = push.state;
+    if (e.mesh != 0 && k < state[e.instance * STATE_WORDS + STATE_ALIVE])
+    {
+        Particle* source0 = push.source;
+        Particle* written = source0 + push.targetDelta;
+        Particle p = written[e.first + k];
+        if ((p.flags & PARTICLE_DEAD) == 0 && p.age < p.lifetime)
+        {
+            uint* words = push.programs;
+            ParticleRenderer renderer = ((ParticleRenderer*) (words + e.meshRenderer))[0];
+            bool local = (e.flags & EMITTER_LOCAL) != 0;
+            if (renderer.orient == ORIENT_VELOCITY)
+            {
+                float3 v = local ? turn(e.rotation, p.velocity) : p.velocity;
+                float speed = length(v);
+                r.rotation = speed > 1e-6 ? fromUp(v / speed) : float4(0, 0, 0, 1);
+            }
+            else if (renderer.orient == ORIENT_EMITTER)
+            {
+                r.rotation = e.rotation;
+            }
+            else // tumbling about an axis of its own, by how far it rolled
+            {
+                float3 axis = randomDirection(p.seed, 0x7000);
+                float angle = TAU * random(p.seed, 0x7002) + p.rotation;
+                r.rotation = float4(axis * sin(0.5 * angle), cos(0.5 * angle));
+            }
+            r.position = e.originHigh;
+            r.positionLow = e.originLow + (local ? turn(e.rotation, p.position) : p.position);
+            r.mesh = e.mesh;
+            r.scale = p.size.x * renderer.scale;
+            r.materialBase = e.material;
+            r.layers = renderer.layers;
+        }
+    }
+    Instance* instances = (Instance*) frame.instances;
+    instances[e.meshFirst + k] = r;
 }
 
 [shader("compute")]

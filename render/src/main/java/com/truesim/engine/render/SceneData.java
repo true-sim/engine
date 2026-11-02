@@ -44,6 +44,18 @@ public record SceneData(MeshletRenderer renderer) implements Request<SceneData.B
     }
 
     /**
+     * Builds the techniques writing {@code renderer}'s instances on the GPU ({@link GpuScene#writtenBy}: mesh
+     * particles) now, if the graph has them, so their writes come before what culls the instances: techniques culling
+     * them call this before declaring their passes.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public static void written(GraphBuilder g, MeshletRenderer renderer) {
+        for (com.truesim.engine.graph.Key<?> key : List.copyOf(renderer.scene().writers())) {
+            g.optional(key);
+        }
+    }
+
+    /**
      * Imports the buffers and adds the pass uploading what changed since the last frame: the instances' scatter and the
      * pool's new meshes. The graph places its barriers from what it and the readers declare, so the frames' starts no
      * longer upload them, for this renderer (frames recorded without a graph upload themselves, as before).

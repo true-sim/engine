@@ -100,12 +100,14 @@ final class ModulePrograms implements AutoCloseable {
         final boolean[][] sorted;
         /** Per emitter on the GPU: whether its shapes emit from a mesh or a chain of joints, which the engine names. */
         final boolean[] sourced;
+        /** Per emitter: its first mesh renderer's place among its renderers, -1 for none. */
+        final int[] meshRenderers;
         int users;
         long releaseAt = -1;
 
         Block(EffectData data, int words, int wordLength, int curves, int curveLength, int[] programs,
             boolean[] over, int[][] renderers, AssetRef<?>[][] textures, int[] trails, boolean[][] sorted,
-            boolean[] sourced) {
+            boolean[] sourced, int[] meshRenderers) {
             this.data = data;
             this.words = words;
             this.wordLength = wordLength;
@@ -118,6 +120,7 @@ final class ModulePrograms implements AutoCloseable {
             this.trails = trails;
             this.sorted = sorted;
             this.sourced = sourced;
+            this.meshRenderers = meshRenderers;
         }
     }
 
@@ -245,13 +248,18 @@ final class ModulePrograms implements AutoCloseable {
         AssetRef<?>[][] textures = new AssetRef<?>[emitters.size()][];
         boolean[][] sorted = new boolean[emitters.size()][];
         boolean[] sourced = new boolean[emitters.size()];
+        int[] meshRenderers = new int[emitters.size()];
         for (int e = 0; e < emitters.size(); e++) {
             EmitterData emitter = emitters.get(e);
             List<Renderer> drawn = emitter.renderers();
             renderers[e] = new int[drawn.size()];
             textures[e] = new AssetRef<?>[drawn.size()];
             sorted[e] = new boolean[drawn.size()];
+            meshRenderers[e] = -1;
             for (int r = 0; r < drawn.size(); r++) {
+                if (meshRenderers[e] < 0 && drawn.get(r).kind() == Renderer.Kind.MESH) {
+                    meshRenderers[e] = r;
+                }
                 renderers[e][r] = renderer(drawn.get(r), program);
                 textures[e][r] = drawn.get(r).settings().get("texture") instanceof AssetRef<?> t ? t : null;
                 sorted[e][r] = drawn.get(r).sorted() && drawn.get(r).kind() == Renderer.Kind.BILLBOARD;
@@ -313,7 +321,7 @@ final class ModulePrograms implements AutoCloseable {
             }
         }
         return new Block(data, wordStart, Math.max(1, program.size), curveStart, Math.max(1, keys.floats.size), starts,
-            over, renderers, textures, trails, sorted, sourced);
+            over, renderers, textures, trails, sorted, sourced, meshRenderers);
     }
 
     /** A range of {@code length} units of the words (or curves), the buffer grown if there is no room. */
@@ -349,7 +357,9 @@ final class ModulePrograms implements AutoCloseable {
      * {@code tile} (particles, points or metres per texture repeat; 0 by default: stretched over the strip); trails:
      * {@code points}; beams: {@code segments} (16), {@code noise} (metres sideways), {@code width} (metres, 0.1),
      * {@code length} (metres along the emitter's +Y without an end given, 1), {@code color.r}, {@code color.g},
-     * {@code color.b}, {@code color.a} (white).
+     * {@code color.b}, {@code color.a} (white); meshes: {@code orient} (0: tumbling as they roll, 1: along their
+     * velocity, 2: as their emitter), {@code scale} (the mesh's scale per metre of the particle's size, 1),
+     * {@code layers} (the layers their instances are on, 1).
      */
     private static int renderer(Renderer r, IntList program) {
         int columns = Math.max(1, (int) setting(r, "flipbook.columns", 1));
@@ -389,6 +399,9 @@ final class ModulePrograms implements AutoCloseable {
         put(w, at, ParticleRendererLayout.COLOR + 4, setting(r, "color.g", 1));
         put(w, at, ParticleRendererLayout.COLOR + 8, setting(r, "color.b", 1));
         put(w, at, ParticleRendererLayout.COLOR + 12, setting(r, "color.a", 1));
+        w[at + ParticleRendererLayout.ORIENT / 4] = (int) setting(r, "orient", ParticleConstants.ORIENT_TUMBLE);
+        put(w, at, ParticleRendererLayout.SCALE, setting(r, "scale", 1));
+        w[at + ParticleRendererLayout.LAYERS / 4] = (int) setting(r, "layers", 1);
         assert ParticleRendererLayout.BYTES == 4 * RENDERER_WORDS;
         return at;
     }

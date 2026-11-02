@@ -101,6 +101,7 @@ public final class StereoBench {
                     effects.burn(fox, world.renderer()); // and burns all over as it moves
                 }
                 owned.add(effects);
+                effects.debris(world.renderer(), world.rock(), world.rockMaterial(), 5, -3); // rocks casting shadows
                 graph.add(effects.simulation());
             }
             for (int e = 0; e < 2; e++) {

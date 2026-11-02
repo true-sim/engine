@@ -97,6 +97,31 @@ final class DemoEffects implements AutoCloseable {
             .render(Renderer.billboard(Renderer.Facing.AXIS).additive().set("soft", 0.05f)))
         .build();
 
+    /** The rock mesh and material debris draws: the world's own, registered as {@link #debris} says. */
+    static final com.truesim.scene.assets.AssetRef<?> ROCK = com.truesim.scene.assets.AssetRef.of(
+        com.truesim.scene.assets.AssetType.of("demo.mesh", String.class, s -> 0),
+        new com.truesim.scene.assets.AssetId(0, 1));
+
+    /**
+     * Debris: every four seconds a burst of rocks thrown up, tumbling as they fly and roll, bouncing on the terrain and
+     * settling, mesh particles casting shadows (instances the simulation writes), with a puff of dust.
+     */
+    static final EffectData DEBRIS = EffectData.builder()
+        .emitter("rocks", e -> e.duration(4).loops(0).capacity(60).spawn(Spawn.burst(0, 40))
+            .init(Shape.cone(0.5f, 0.3f), Init.speed(Bind.random(4, 8)), Init.lifetime(Bind.random(3.4f, 3.9f)),
+                Init.size(Bind.random(0.1f, 0.22f)))
+            .update(Forces.gravity(), Forces.drag(0.1f))
+            .collide(Collide.height().bounce(0.3f).friction(0.5f))
+            .render(Renderer.mesh(ROCK, ROCK).castsShadows(true)))
+        .emitter("dust", e -> e.duration(4).loops(0).capacity(40).spawn(Spawn.burst(0, 24))
+            .init(Shape.sphere(0.5f), Init.speed(Bind.random(0.5f, 1.5f)), Init.lifetime(Bind.random(1.5f, 2.5f)),
+                Init.size(Bind.random(0.6f, 1.1f)), Init.color(Bind.color(0.45f, 0.38f, 0.3f, 0.5f)))
+            .update(Forces.drag(1.5f), Over.size(FloatCurve.of(0, 0.6f, 1, 2)),
+                Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0).linear(0.1f, 1, 1, 1, 1)
+                    .linear(1, 1, 1, 1, 0).build()))
+            .render(Renderer.billboard(Renderer.Facing.POSITION).set("soft", 0.3f)))
+        .build();
+
     /** Sparks: velocity-facing and additive, cooling as they fall. */
     static final EffectData SPARKS = EffectData.builder().emitter("sparks", e -> e.spawn(Spawn.rate(400))
         .init(Shape.cone(0.35f, 0.05f), Init.speed(Bind.random(4, 8)), Init.lifetime(Bind.random(0.8f, 1.8f)),
@@ -279,6 +304,16 @@ final class DemoEffects implements AutoCloseable {
         particles.meshes(renderer);
         sync.meshes(fox.sync());
         effects.play(SKIN_FIRE, fox.body());
+    }
+
+    /**
+     * Debris at ({@code dx}, {@code dz}) from the effects' place: rocks of the world's mesh {@code rock} with material
+     * {@code material}, mesh particles in {@code renderer}'s scene (a range of its ids the GPU writes).
+     */
+    void debris(com.truesim.engine.render.MeshletRenderer renderer, int rock, int material, double dx, double dz) {
+        particles.meshes(renderer, 1024);
+        particles.mesh(ROCK, rock, material);
+        effects.play(DEBRIS, x + dx, DemoMeshes.height(x + dx, z + dz), z + dz);
     }
 
     /** The bindings with the fox, or null. */

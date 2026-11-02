@@ -533,6 +533,8 @@ public final class RayTracing implements AutoCloseable {
             memPutLong(push + InstancesPush.RECORDS, t.instancesAddress);
             memPutLong(push + InstancesPush.EMPTY, bottoms.emptyAddress()); // left out, yet active: refits stay valid
             memPutInt(push + InstancesPush.COUNT, count);
+            memPutInt(push + InstancesPush.GPU_FIRST, scene.gpuFirst());
+            memPutInt(push + InstancesPush.GPU_COUNT, scene.gpuCount());
             putOrigin(push + InstancesPush.ORIGIN_X, push + InstancesPush.ORIGIN_LOW_X, originX);
             putOrigin(push + InstancesPush.ORIGIN_Y, push + InstancesPush.ORIGIN_LOW_Y, originY);
             putOrigin(push + InstancesPush.ORIGIN_Z, push + InstancesPush.ORIGIN_LOW_Z, originZ);

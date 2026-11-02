@@ -42,6 +42,7 @@ final class DemoScene implements AutoCloseable {
     private final int rock;
     private final float[] rocks = new float[ROCKS * 5]; // x, y, z, scale, spin speed (0: still)
     private final int[] rockMaterials = new int[ROCKS];
+    private final int rockMaterial;
     private final DemoCharacter character;
     private final FoxCrowd crowd;
     private final RayTracing rayTracing; // or null
@@ -79,6 +80,7 @@ final class DemoScene implements AutoCloseable {
             materials.add(new Material(base.withBaseColor(new Color(1, 1, 1, 1))
                 .withEmissive(new Color(4, 2.5f, 1, 1)))), // glowing: bright for HDR
         };
+        rockMaterial = palette[0];
         scene = new GpuScene(device, pool, ROCKS + 16, slots);
         scene.setMaterials(materials);
         renderer = new MeshletRenderer(device, scene, colorFormat, depthFormat, slots);
@@ -130,6 +132,16 @@ final class DemoScene implements AutoCloseable {
 
     Lights lights() {
         return lights;
+    }
+
+    /** The rock's mesh in the pool. */
+    int rock() {
+        return rock;
+    }
+
+    /** The plain rock material. */
+    int rockMaterial() {
+        return rockMaterial;
     }
 
     /** The fox, or null without. */

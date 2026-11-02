@@ -20,6 +20,7 @@ import com.truesim.engine.render.layout.ParticlePush;
 import com.truesim.engine.render.layout.ParticleSpawnLayout;
 import com.truesim.engine.render.layout.ParticleSourceLayout;
 import com.truesim.engine.render.GeometryPool;
+import com.truesim.engine.render.GpuScene;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RayTracing;
@@ -167,6 +168,19 @@ public final class Particles implements AutoCloseable {
     private final Staging sourceStaged = new Staging(16L * ParticleSourceLayout.BYTES);
     private int sourceCount;
     private long setup; // changes with what the simulation reads: ray tracing, meshes
+    // Mesh particles (E15): the scene whose range the GPU writes holds their instances, that range's ids handed to
+    // emitter instances, the frame's emitters with mesh renderers, and the meshes registered for mesh renderers
+    private GpuScene meshScene;
+    private com.truesim.engine.render.RangeAllocator meshIds;
+    private int meshBase;
+    private final FrameBuffer meshList;
+    private final Staging meshStaged;
+    private int meshCount;
+    private int largestMesh;
+    private int meshUnplaced;
+    private int[] holes = new int[16]; // ranges given back whose slots the next frame clears: first id, count
+    private int holeCount;
+    private final Map<AssetRef<?>, long[]> meshAssets = new HashMap<>();
     // Events (E9): the frame's records, their sort keys (two buffers), the sort's counts and dispatch, each sorted
     // event's first child; and each effect's emitters' places, for their targets
     private final GpuBuffer events;
@@ -212,6 +226,7 @@ public final class Particles implements AutoCloseable {
     private final int[] sourceMesh; // the pool mesh its mesh shapes emit from, -1: none
     private final MeshData[] sourceData;
     private final double[][] sourceWorld; // that mesh's world transform, rows of 3 x 4; made when first set
+    private final int[] meshFirsts; // its first id of the mesh particles' range, -1: none
     private final int[] jointCounts;
     private final double[][] jointWorld; // the joints its bone shapes run along, x, y, z each; made when first set
     private final ParticleWriter[] writers;
@@ -295,6 +310,8 @@ public final class Particles implements AutoCloseable {
         sourceData = new MeshData[maxEmitters];
         sourceWorld = new double[maxEmitters][];
         jointCounts = new int[maxEmitters];
+        meshFirsts = new int[maxEmitters];
+        Arrays.fill(meshFirsts, -1);
         jointWorld = new double[maxEmitters][];
         writers = new ParticleWriter[maxEmitters];
         freeInstances = new int[maxEmitters];
@@ -323,7 +340,7 @@ public final class Particles implements AutoCloseable {
         ModulePrograms m = null;
         CpuEmitters c = null;
         GpuBuffer[] made = new GpuBuffer[12];
-        FrameBuffer[] tables = new FrameBuffer[11];
+        FrameBuffer[] tables = new FrameBuffer[12];
         try {
             p = new ParticlePool(device, budget);
             m = new ModulePrograms(device, slots);
@@ -345,6 +362,7 @@ public final class Particles implements AutoCloseable {
             made[11] = GpuBuffer.deviceLocal(device, 4 * events, GPU_USAGE);
             tables[9] = FrameBuffer.create(device, 4L * maxEmitters, STORAGE, slots);
             tables[10] = FrameBuffer.create(device, 16L * ParticleSourceLayout.BYTES, STORAGE, slots);
+            tables[11] = FrameBuffer.create(device, 4L * maxEmitters, STORAGE, slots);
             tables[7] = FrameBuffer.create(device, ParticleFrameLayout.BYTES, STORAGE, slots);
             tables[8] = FrameBuffer.create(device, (long) ParticleColliderLayout.BYTES
                 * ParticleConstants.MAX_COLLIDERS, STORAGE, slots);
@@ -395,6 +413,8 @@ public final class Particles implements AutoCloseable {
         childPrefix = made[11];
         targetTable = tables[9];
         sourceTable = tables[10];
+        meshList = tables[11];
+        meshStaged = new Staging(4L * maxEmitters);
         meshTables = new MeshTables(device, slots);
         targetStaged = new Staging(4L * maxEmitters);
         frameTable = tables[7];
@@ -576,6 +596,7 @@ public final class Particles implements AutoCloseable {
             sourceTable = grown(sourceTable, sourceBytes);
         }
         sourceStaged.copyTo(sourceTable, sourceBytes);
+        meshStaged.copyTo(meshList, 4L * meshCount);
         sortStaged.copyTo(sortList, 4L * sortedCount);
         sortChunkStaged.copyTo(sortChunks, 8L * sortChunkCount);
         cpuEmitters.finish();
@@ -606,6 +627,8 @@ public final class Particles implements AutoCloseable {
         r.putLong(ParticleFrameLayout.CHILD_PREFIX, childPrefix.deviceAddress());
         r.putLong(ParticleFrameLayout.TARGETS, targetTable.deviceAddress());
         r.putLong(ParticleFrameLayout.SOURCES, sourceTable.deviceAddress());
+        r.putLong(ParticleFrameLayout.INSTANCES, meshScene == null ? 0 : meshScene.instanceAddress());
+        r.putLong(ParticleFrameLayout.MESH_EMITTERS, meshList.deviceAddress());
         GeometryPool meshes = meshRenderer == null ? null : meshRenderer.pool();
         r.putLong(ParticleFrameLayout.MESHES, meshes == null ? 0 : meshes.meshTable().deviceAddress());
         r.putLong(ParticleFrameLayout.POSITIONS, meshes == null ? 0 : meshes.positions().deviceAddress());
@@ -758,7 +781,8 @@ public final class Particles implements AutoCloseable {
     /** Whether {@code instance}'s ranges suit {@code emitter} as they are. */
     private boolean fits(int instance, EmitterData emitter, boolean over, int trail) {
         return capacities[instance] == emitter.capacity() && cpu[instance] == (emitter.target() == Target.CPU)
-            && sideUnits[instance] == sideUnits(emitter.capacity(), over, trail);
+            && sideUnits[instance] == sideUnits(emitter.capacity(), over, trail)
+            && (meshFirsts[instance] >= 0) == (meshIds != null && meshRendered(emitter));
     }
 
     /** {@code instance} as new: no particles, nothing written to it, no beam end. */
@@ -837,7 +861,13 @@ public final class Particles implements AutoCloseable {
         if (first < 0) {
             return -1;
         }
+        int meshFirst = -1;
+        if (meshIds != null && meshRendered(emitter)) {
+            meshFirst = (int) meshIds.allocate(capacity, 1);
+            meshUnplaced += meshFirst < 0 ? 1 : 0; // simulated, not drawn
+        }
         int instance = freeInstances[--freeCount];
+        meshFirsts[instance] = meshFirst;
         firsts[instance] = first;
         capacities[instance] = capacity;
         sideFirsts[instance] = side;
@@ -859,6 +889,9 @@ public final class Particles implements AutoCloseable {
             if (own[e] >= 0 && writers[own[e]] != null) {
                 writers[own[e]].ended = true;
                 writers[own[e]] = null;
+            }
+            if (own[e] >= 0 && meshFirsts[own[e]] >= 0) {
+                hole(meshBase + meshFirsts[own[e]], capacities[own[e]]); // kept warm or given back: drawn no more
             }
         }
         if (warmFrames > 0 && warmCount < WARM && warmOf(block.data, WARM_PER_EFFECT)) {
@@ -902,6 +935,13 @@ public final class Particles implements AutoCloseable {
         if (sideFirsts[instance] != ParticleConstants.NO_SIDE) {
             pool.releaseSide(sideFirsts[instance], sideUnits[instance]);
         }
+        if (meshFirsts[instance] >= 0) {
+            // Holes from the next simulated frame on: its slots are no emitter's then, and the frames in flight run in
+            // order
+            meshIds.release(meshFirsts[instance], capacities[instance]);
+            hole(meshBase + meshFirsts[instance], capacities[instance]);
+            meshFirsts[instance] = -1;
+        }
         freeInstances[freeCount++] = instance;
         if (writers[instance] != null) {
             writers[instance].ended = true;
@@ -918,6 +958,8 @@ public final class Particles implements AutoCloseable {
         sortChunkCount = 0;
         targetCount = 0;
         sourceCount = 0;
+        meshCount = 0;
+        largestMesh = 0;
         sendsEvents = false;
         for (int slot = 0; slot < highest; slot++) {
             long effect = ids[slot];
@@ -1003,7 +1045,8 @@ public final class Particles implements AutoCloseable {
                 t.putInt(at + ParticleEmitterLayout.CURVE_FLOATS, block.curveLength);
                 t.putInt(at + ParticleEmitterLayout.FLAGS, (fresh[instance] ? ParticleConstants.EMITTER_NEW : 0)
                     | (local[instance] ? ParticleConstants.EMITTER_LOCAL : 0)
-                    | (cpu[instance] ? ParticleConstants.EMITTER_CPU : 0));
+                    | (cpu[instance] ? ParticleConstants.EMITTER_CPU : 0)
+                    | (meshFirsts[instance] >= 0 && block.meshRenderers[e] >= 0 ? ParticleConstants.EMITTER_MESH : 0));
                 t.putInt(at + ParticleEmitterLayout.SIDE, sideFirsts[instance]);
                 t.putInt(at + ParticleEmitterLayout.SEED, EffectRuntime.emitterSeed(seed, e));
                 t.putFloat(at + ParticleEmitterLayout.DT, dt);
@@ -1048,6 +1091,7 @@ public final class Particles implements AutoCloseable {
                     source = putSource(instance, x, y, z, qx, qy, qz, qw);
                 }
                 t.putInt(at + ParticleEmitterLayout.SOURCE, source);
+                putMesh(t, at, block, e, index, instance);
                 fresh[instance] = false;
                 sendsEvents |= !blocks[slot].data.emitters().get(e).events().isEmpty();
                 int chunks = cpu[instance] ? 0 : ParticlePool.chunksOf(capacities[instance]);
@@ -1072,6 +1116,43 @@ public final class Particles implements AutoCloseable {
             previous[3 * slot + 1] = y;
             previous[3 * slot + 2] = z;
         }
+    }
+
+    /**
+     * Writes the mesh renderer of emitter {@code e} of {@code block} (at {@code index} of the list, instance
+     * {@code instance}) into its record at {@code at}: its range of the scene's instances, its mesh as registered and
+     * its first material; and lists it for the instance pass.
+     */
+    private void putMesh(Staging t, int at, ModulePrograms.Block block, int e, int index, int instance) {
+        int r = block.meshRenderers[e];
+        int first = meshFirsts[instance];
+        t.putInt(at + ParticleEmitterLayout.MESH_FIRST, first < 0 ? ParticleConstants.NO_INSTANCES : meshBase + first);
+        t.putInt(at + ParticleEmitterLayout.MESH, 0);
+        if (r < 0 || first < 0) {
+            return;
+        }
+        Renderer renderer = block.data.emitters().get(e).renderers().get(r);
+        long[] mesh = renderer.settings().get("mesh") instanceof AssetRef<?> asset ? meshAssets.get(asset) : null;
+        if (mesh != null) {
+            t.putInt(at + ParticleEmitterLayout.MESH, (int) mesh[0] | com.truesim.engine.render.layout.CommonConstants
+                .INSTANCE_LIVE | (renderer.castsShadows()
+                ? com.truesim.engine.render.layout.CommonConstants.INSTANCE_CASTS_SHADOWS : 0));
+            t.putInt(at + ParticleEmitterLayout.MATERIAL, (int) mesh[1]);
+        }
+        t.putInt(at + ParticleEmitterLayout.MESH_RENDERER, block.renderers[e][r]);
+        meshStaged.putInt(4L * meshCount++, index);
+        largestMesh = Math.max(largestMesh, capacities[instance]);
+    }
+
+    /** Whether {@code emitter} draws meshes. */
+    private static boolean meshRendered(EmitterData emitter) {
+        List<Renderer> renderers = emitter.renderers();
+        for (int r = 0; r < renderers.size(); r++) {
+            if (renderers.get(r).kind() == Renderer.Kind.MESH) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1249,6 +1330,102 @@ public final class Particles implements AutoCloseable {
         meshTables.follow(renderer == null ? null : renderer.pool());
         setup++;
         return this;
+    }
+
+    /**
+     * {@link #meshes(MeshletRenderer)}, with mesh particles (E15): {@code instances} ids of {@code renderer}'s scene
+     * reserved for the GPU to write ({@link GpuScene#reserveGpuRange}), the instances of mesh renderers' particles,
+     * which the scene's culling, drawing and shadows take as any (ray tracing leaves them out). The simulation then
+     * runs before the scene is culled, after its upload and deformation; emitters with mesh renderers take ranges of
+     * their capacity from it (those finding no room simulate without drawing). 0: no mesh particles.
+     */
+    public Particles meshes(MeshletRenderer renderer, int instances) {
+        if (instances < 0) {
+            throw new IllegalArgumentException("Not an instance count: " + instances);
+        }
+        if (meshScene != null) {
+            meshScene.notWrittenBy(ParticleKeys.PARTICLES);
+            meshScene.releaseGpuRange();
+            meshScene = null;
+            meshIds = null;
+        }
+        meshes(renderer);
+        if (renderer != null && instances > 0) {
+            meshScene = renderer.scene();
+            meshBase = meshScene.reserveGpuRange(instances);
+            meshScene.writtenBy(ParticleKeys.PARTICLES);
+            meshIds = new com.truesim.engine.render.RangeAllocator(instances);
+        }
+        return this;
+    }
+
+    /**
+     * Draws mesh renderers naming {@code mesh} (their {@code mesh} setting) with pool mesh {@code poolMesh} of the
+     * {@link #meshes} renderer and its materials from {@code materialBase} on; until then their particles draw
+     * nothing. The scene's resources say where they put them.
+     */
+    @AllowAllocation("a mesh registered")
+    public void mesh(AssetRef<?> mesh, int poolMesh, int materialBase) {
+        meshAssets.put(Objects.requireNonNull(mesh, "mesh"), new long[] {poolMesh, materialBase});
+    }
+
+    /** Forgets {@code mesh}'s pool mesh. */
+    public void forgetMesh(AssetRef<?> mesh) {
+        meshAssets.remove(mesh);
+    }
+
+    /** Notes ids {@code first} on, {@code count} of them, for the next frame to clear: their emitter is gone. */
+    private void hole(int first, int count) {
+        if (2 * holeCount + 2 > holes.length) {
+            holes = grownHoles(holes);
+        }
+        holes[2 * holeCount] = first;
+        holes[2 * holeCount + 1] = count;
+        holeCount++;
+    }
+
+    @AllowAllocation("ranges given back growing")
+    private static int[] grownHoles(int[] holes) {
+        return Arrays.copyOf(holes, 2 * holes.length);
+    }
+
+    /**
+     * Clears the slots of mesh ranges given back since the last frame recorded, in {@code buffer} (the scene's
+     * instances): holes, before the instance pass writes the frame's; a barrier after.
+     */
+    void clearHoles(org.lwjgl.vulkan.VkCommandBuffer commands, long buffer) {
+        if (holeCount == 0) {
+            return;
+        }
+        for (int i = 0; i < holeCount; i++) {
+            com.truesim.engine.vulkan.Commands.fillBuffer(commands, buffer, (long) GpuScene.INSTANCE_BYTES
+                * holes[2 * i], (long) GpuScene.INSTANCE_BYTES * holes[2 * i + 1], 0);
+        }
+        holeCount = 0;
+        com.truesim.engine.vulkan.Barriers.memory(commands, org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT | org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT);
+    }
+
+    /** Whether mesh particles are set up: their instances written before culling. */
+    boolean meshParticles() {
+        return meshScene != null;
+    }
+
+    /** Emitters of the last update's list with mesh renderers. */
+    int meshEmitterCount() {
+        return meshCount;
+    }
+
+    /** The largest capacity among them. */
+    int largestMeshEmitter() {
+        return largestMesh;
+    }
+
+    /** Emitter instances with mesh renderers that found no room for their instances since this was made. */
+    public int meshUnplaced() {
+        return meshUnplaced;
     }
 
     /** The renderer whose meshes mesh shapes read, or null. */
@@ -1934,6 +2111,10 @@ public final class Particles implements AutoCloseable {
         childPrefix.close();
         targetTable.close();
         sourceTable.close();
+        meshList.close();
+        if (meshScene != null) {
+            meshScene.notWrittenBy(ParticleKeys.PARTICLES);
+        }
         meshTables.close();
         programs.close();
         cpuEmitters.close();
