@@ -1,6 +1,8 @@
 package com.truesim.engine.render.particles;
 
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_FRAGMENT_BIT;
+import static org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_VERTEX_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -18,7 +20,13 @@ import com.truesim.engine.render.layout.ParticlePush;
 import com.truesim.engine.render.layout.ParticleSpawnLayout;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
+import com.truesim.engine.render.layout.ParticleDrawPush;
 import com.truesim.engine.vulkan.GpuBuffer;
+import com.truesim.engine.vulkan.Pipeline;
+import com.truesim.engine.vulkan.ShaderModule;
+import com.truesim.scene.assets.AssetRef;
+import java.util.HashMap;
+import java.util.Map;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.effects.CpuSimulation;
@@ -110,6 +118,9 @@ public final class Particles implements AutoCloseable {
 
     // The frame's list.
     private final int[] listInstance;
+    private final int[] listSlot;
+    private final int[] listEmitter;
+    private final double[] listPosition;
     private final int[] demand;
     private final int[] recordStart;
     private final int[] recordFill;
@@ -130,6 +141,8 @@ public final class Particles implements AutoCloseable {
     private long overflowTotal;
     private long statisticsFrame = -1;
     private final Readback receiver = this::receive;
+    private final Map<AssetRef<?>, Integer> textureSlots = new HashMap<>();
+    private final Map<Integer, Pipeline> billboards = new HashMap<>();
 
     /** Particles in a pool of {@code budget} bytes, with up to {@value #DEFAULT_EMITTERS} emitter instances. */
     public Particles(VulkanDevice device, FrameSlots slots, long budget) {
@@ -158,6 +171,9 @@ public final class Particles implements AutoCloseable {
         }
         freeCount = maxEmitters;
         listInstance = new int[maxEmitters];
+        listSlot = new int[maxEmitters];
+        listEmitter = new int[maxEmitters];
+        listPosition = new double[3 * maxEmitters];
         demand = new int[maxEmitters];
         recordStart = new int[maxEmitters];
         recordFill = new int[maxEmitters];
@@ -215,6 +231,19 @@ public final class Particles implements AutoCloseable {
 
     private static long statisticsBytes(int maxEmitters) {
         return 4L * (ParticleConstants.STATISTICS_HEADER + 2L * maxEmitters);
+    }
+
+    VulkanDevice device() {
+        return device;
+    }
+
+    FrameSlots slots() {
+        return slots;
+    }
+
+    /** Whether there is anything to draw: an update listed emitter instances. */
+    boolean drawable() {
+        return updatedAt >= 0 && emitterCount > 0;
     }
 
     /** The pool. */
@@ -418,6 +447,11 @@ public final class Particles implements AutoCloseable {
                 }
                 int index = emitterCount++;
                 listInstance[index] = instance;
+                listSlot[index] = slot;
+                listEmitter[index] = e;
+                listPosition[3 * index] = x;
+                listPosition[3 * index + 1] = y;
+                listPosition[3 * index + 2] = z;
                 places[slot][e] = index;
                 demand[index] = 0;
                 int at = ParticleEmitterLayout.BYTES * index;
@@ -646,6 +680,87 @@ public final class Particles implements AutoCloseable {
         statisticsFrame = frame;
     }
 
+    // ---------------------------------------------------------------------------------------------- drawing
+
+    /**
+     * Draws {@code texture} (a texture asset renderers name in their {@code texture} setting) from bindless sampled
+     * slot {@code slot}: the scene's resources say where they put it. A renderer whose texture has no slot draws a
+     * round sprite.
+     */
+    @AllowAllocation("a texture registered")
+    public void texture(AssetRef<?> texture, int slot) {
+        textureSlots.put(Objects.requireNonNull(texture, "texture"), slot);
+    }
+
+    /** Forgets {@code texture}'s slot. */
+    public void forgetTexture(AssetRef<?> texture) {
+        textureSlots.remove(texture);
+    }
+
+    /** {@code texture}'s sampled slot, or {@code NO_TEXTURE}. */
+    int textureSlot(AssetRef<?> texture) {
+        if (texture == null) {
+            return ParticleConstants.NO_TEXTURE;
+        }
+        Integer slot = textureSlots.get(texture);
+        return slot == null ? ParticleConstants.NO_TEXTURE : slot;
+    }
+
+    /** How many renderers the emitter at {@code index} of the frame's list has. */
+    int renderers(int index) {
+        return blocks[listSlot[index]].renderers[listEmitter[index]].length;
+    }
+
+    /** Its renderer {@code r}'s record, as a word of the program buffer. */
+    int rendererWord(int index, int r) {
+        return blocks[listSlot[index]].renderers[listEmitter[index]][r];
+    }
+
+    /** Its renderer {@code r}'s kind ({@code RENDER_*}). */
+    int rendererKind(int index, int r) {
+        return blocks[listSlot[index]].data.emitters().get(listEmitter[index]).renderers().get(r).kind().ordinal();
+    }
+
+    /** Its renderer {@code r}'s texture slot. */
+    int rendererTexture(int index, int r) {
+        return textureSlot(blocks[listSlot[index]].textures[listEmitter[index]][r]);
+    }
+
+    /** Where the emitter at {@code index} of the frame's list is, along {@code axis}: its effect's position. */
+    double listPosition(int index, int axis) {
+        return listPosition[3 * index + axis];
+    }
+
+    /** The program buffer's address, for renderers' records. */
+    long wordsAddress() {
+        return programs.wordsAddress();
+    }
+
+    /** The pool's half the frame wrote, by address. */
+    long particlesAddress() {
+        return pool.buffer().deviceAddress() + (long) written * pool.slots() * ParticleLayout.BYTES;
+    }
+
+    long stateAddress() {
+        return state.deviceAddress();
+    }
+
+    /** The billboard pipeline drawing into color attachments of {@code format} (a VkFormat), made once. */
+    @AllowAllocation("a pipeline made once per color format")
+    Pipeline billboards(int format) {
+        Pipeline pipeline = billboards.get(format);
+        if (pipeline == null) {
+            try (ShaderModule shaders = ShaderModule.load(device, "shaders/particles/draw.spv")) {
+                pipeline = Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, "vertexMain")
+                    .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, "fragmentMain").color(format)
+                    .blend(0, Pipeline.Blend.PREMULTIPLIED).pushConstants(ParticleDrawPush.BYTES).doubleSided()
+                    .build();
+            }
+            billboards.put(format, pipeline);
+        }
+        return pipeline;
+    }
+
     // ---------------------------------------------------------------------------------------------- statistics
 
     /** The graph frame the statistics are of, -1 before any came back. */
@@ -698,6 +813,7 @@ public final class Particles implements AutoCloseable {
 
     @Override
     public void close() {
+        billboards.values().forEach(Pipeline::close);
         emitterTable.close();
         chunkTable.close();
         spawnRing.close();

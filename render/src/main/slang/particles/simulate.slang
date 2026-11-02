@@ -609,8 +609,8 @@ void place(ParticleEmitter e, ParticleSpawn r, inout Particle p, float age)
         float along = e.frame > 0 ? clamp(1 - age / e.frame, 0.0, 1.0) : 1.0;
         at = e.previous + (e.position - e.previous) * along;
     }
-    p.position = at + rotate(q, p.position);
-    p.velocity = rotate(q, p.velocity);
+    p.position = at + turn(q, p.position);
+    p.velocity = turn(q, p.velocity);
 }
 
 [shader("compute")]

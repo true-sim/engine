@@ -3,6 +3,9 @@ package com.truesim.engine.render.particles;
 import static com.truesim.engine.render.layout.ParticleConstants.BINDING_WORDS;
 import static com.truesim.engine.render.layout.ParticleConstants.COLOR_WORDS;
 import static com.truesim.engine.render.layout.ParticleConstants.CURVE_EVEN;
+import static com.truesim.engine.render.layout.ParticleConstants.DRAW_BLEND_FRAMES;
+import static com.truesim.engine.render.layout.ParticleConstants.DRAW_LOOP;
+import static com.truesim.engine.render.layout.ParticleConstants.DRAW_VOLUME;
 import static com.truesim.engine.render.layout.ParticleConstants.OP_BOX;
 import static com.truesim.engine.render.layout.ParticleConstants.OP_COLOR;
 import static com.truesim.engine.render.layout.ParticleConstants.OP_CONE;
@@ -18,6 +21,7 @@ import static com.truesim.engine.render.layout.ParticleConstants.OP_SPEED;
 import static com.truesim.engine.render.layout.ParticleConstants.OP_SPHERE;
 import static com.truesim.engine.render.layout.ParticleConstants.OP_VELOCITY;
 import static com.truesim.engine.render.layout.ParticleConstants.PROGRAM_OVER;
+import static com.truesim.engine.render.layout.ParticleConstants.RENDERER_WORDS;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
@@ -27,6 +31,7 @@ import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
+import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.effects.Binding;
 import com.truesim.scene.effects.ColorBinding;
 import com.truesim.scene.effects.ColorGradient;
@@ -40,6 +45,7 @@ import com.truesim.scene.effects.Module;
 import com.truesim.scene.effects.ModuleRegistry;
 import com.truesim.scene.effects.ModuleType;
 import com.truesim.scene.effects.Over;
+import com.truesim.scene.effects.Renderer;
 import com.truesim.scene.effects.Shape;
 import com.truesim.scene.effects.Target;
 import java.lang.foreign.MemorySegment;
@@ -78,11 +84,15 @@ final class ModulePrograms implements AutoCloseable {
         final int[] programs;
         /** Per emitter: whether it keeps attributes from birth for those over life. */
         final boolean[] over;
+        /** Per emitter: its renderers' records' first words in the program buffer, in the order listed. */
+        final int[][] renderers;
+        /** Per emitter and renderer: its texture's asset, or null. */
+        final AssetRef<?>[][] textures;
         int users;
         long releaseAt = -1;
 
         Block(EffectData data, int words, int wordLength, int curves, int curveLength, int[] programs,
-            boolean[] over) {
+            boolean[] over, int[][] renderers, AssetRef<?>[][] textures) {
             this.data = data;
             this.words = words;
             this.wordLength = wordLength;
@@ -90,6 +100,8 @@ final class ModulePrograms implements AutoCloseable {
             this.curveLength = curveLength;
             this.programs = programs;
             this.over = over;
+            this.renderers = renderers;
+            this.textures = textures;
         }
     }
 
@@ -196,8 +208,17 @@ final class ModulePrograms implements AutoCloseable {
         List<EmitterData> emitters = data.emitters();
         int[] starts = new int[emitters.size()];
         boolean[] over = new boolean[emitters.size()];
+        int[][] renderers = new int[emitters.size()][];
+        AssetRef<?>[][] textures = new AssetRef<?>[emitters.size()][];
         for (int e = 0; e < emitters.size(); e++) {
             EmitterData emitter = emitters.get(e);
+            List<Renderer> drawn = emitter.renderers();
+            renderers[e] = new int[drawn.size()];
+            textures[e] = new AssetRef<?>[drawn.size()];
+            for (int r = 0; r < drawn.size(); r++) {
+                renderers[e][r] = renderer(drawn.get(r), program);
+                textures[e][r] = drawn.get(r).settings().get("texture") instanceof AssetRef<?> t ? t : null;
+            }
             if (emitter.target() != Target.GPU) {
                 starts[e] = -1;
                 continue;
@@ -228,9 +249,12 @@ final class ModulePrograms implements AutoCloseable {
             if (starts[e] >= 0) {
                 starts[e] += wordStart;
             }
+            for (int r = 0; r < renderers[e].length; r++) {
+                renderers[e][r] += wordStart;
+            }
         }
         return new Block(data, wordStart, Math.max(1, program.size), curveStart, Math.max(1, keys.floats.size), starts,
-            over);
+            over, renderers, textures);
     }
 
     /** A range of {@code length} units of the words (or curves), the buffer grown if there is no room. */
@@ -251,6 +275,42 @@ final class ModulePrograms implements AutoCloseable {
         }
         ranges.grow(capacity);
         return ranges.allocate(length, 1);
+    }
+
+    /**
+     * A renderer's record ({@code RENDERER_WORDS} words, particle.slang's {@code ParticleRenderer}); returns its first
+     * word. Settings by name: {@code stretch} (velocity facing: extra length per m/s, in sizes), {@code soft} (metres of
+     * fade into the opaque scene), {@code volume} (1: that fade by the view ray's path through a sphere),
+     * {@code flipbook.columns} and {@code flipbook.rows} (frames in the texture), {@code flipbook.frames} (frames
+     * played; all by default), {@code flipbook.fps} (frames per second of age, looping; 0 by default: the frames over
+     * the particle's life) and {@code flipbook.blend} (0: frames not blended).
+     */
+    private static int renderer(Renderer r, IntList program) {
+        int columns = Math.max(1, (int) setting(r, "flipbook.columns", 1));
+        int rows = Math.max(1, (int) setting(r, "flipbook.rows", 1));
+        float frames = Math.max(1, Math.min(columns * rows, setting(r, "flipbook.frames", columns * rows)));
+        float rate = setting(r, "flipbook.fps", 0);
+        int flags = (setting(r, "volume", 0) != 0 ? DRAW_VOLUME : 0)
+            | (frames > 1 && setting(r, "flipbook.blend", 1) != 0 ? DRAW_BLEND_FRAMES : 0)
+            | (rate > 0 ? DRAW_LOOP : 0);
+        int at = program.add(r.kind().ordinal());
+        program.add(r.facing() == null ? 0 : r.facing().ordinal());
+        program.add(flags);
+        program.add(Float.floatToRawIntBits(r.alphaToAdd()));
+        program.add(Float.floatToRawIntBits(setting(r, "stretch", 0)));
+        program.add(Float.floatToRawIntBits(setting(r, "soft", 0)));
+        program.add(columns);
+        program.add(rows);
+        program.add(Float.floatToRawIntBits(frames));
+        program.add(Float.floatToRawIntBits(rate));
+        program.add(0);
+        program.add(0);
+        assert program.size - at == RENDERER_WORDS;
+        return at;
+    }
+
+    private static float setting(Renderer r, String name, float fallback) {
+        return r.settings().get(name) instanceof Number n ? n.floatValue() : fallback;
     }
 
     private static void encodeOps(EffectData data, List<Module> modules, int salts, IntList program, Curves keys) {
