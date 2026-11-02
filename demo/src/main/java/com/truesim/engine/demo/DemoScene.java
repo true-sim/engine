@@ -79,8 +79,6 @@ final class DemoScene implements AutoCloseable {
             materials.add(new Material(base.withBaseColor(new Color(0.9f, 0.8f, 0.3f, 1)).withMetallic(1)
                 .withRoughness(0.3f))),
             materials.add(new Material(base.withBaseColor(new Color(0.2f, 0.4f, 0.9f, 1)).withRoughness(0.2f))),
-            materials.add(new Material(base.withBaseColor(new Color(1, 1, 1, 1))
-                .withEmissive(new Color(4, 2.5f, 1, 1)))), // glowing: bright for HDR
         };
         rockMaterial = palette[0];
         scene = new GpuScene(device, pool, ROCKS + 16, slots);
@@ -106,7 +104,7 @@ final class DemoScene implements AutoCloseable {
             rocks[5 * i + 2] = (float) z;
             rocks[5 * i + 3] = scale;
             rocks[5 * i + 4] = i % 8 == 0 ? (float) random.nextDouble(-2, 2) : 0;
-            rockMaterials[i] = palette[i % 23 == 0 ? 4 : random.nextInt(4)];
+            rockMaterials[i] = palette[i % 23 == 0 ? 0 : random.nextInt(4)]; // every 23rd stone: the others as they were
         }
         lights = new Lights(device, POINT_LIGHTS + 1, 8, slots);
         String file = System.getProperty("truesim.demo.character");
