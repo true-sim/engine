@@ -172,6 +172,15 @@ struct it described already instead of describing it again, and the probe's own 
   the build.
 - Rule: declare a `[HostLayout]` struct before any struct holding a pointer to it.
 
+**On lavapipe, a load through a null pointer crashed the process even behind a branch.** The light clusters read the
+GPU-written lights' count through a pointer that was null without them: as a ternary (`p == nullptr ? 0 : p[0]`, a
+select loading both sides) and then guarded by an `if`, every test with light clusters on CI's lavapipe died with
+SIGSEGV in the test JVM; the RX 9070 XT ran both. lavapipe runs shaders on the CPU, so a wild read is a segfault, and
+the guarded load still ran, speculated or flattened somewhere between Slang and the driver (not found where).
+- Proof: three CI runs of the particle lights PR (effects step 17b) crashed in `engine-render` and `engine-demo`
+  tests within seconds; with the pointer always naming a word that holds 0, the run passed.
+- Rule: never hand a shader a null pointer it may load through, even behind a branch; point it at a valid empty value.
+
 **Features and sharing must match the device.** Cube array image views failed validation until `imageCubeArray` was
 enabled, and on lavapipe (one queue family for graphics and compute) images failed when they listed that family twice
 for concurrent sharing.
