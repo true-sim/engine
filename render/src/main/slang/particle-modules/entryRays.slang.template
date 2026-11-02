@@ -1,0 +1,4 @@
+// The rays variant of the kernel with these modules: particles/simulate.slang's entry points ([shader("compute")] ...)
+// with ray collision.
+#define PARTICLE_RAYS 1
+#include "particles/simulate.slang"

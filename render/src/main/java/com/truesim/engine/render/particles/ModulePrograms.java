@@ -6,20 +6,6 @@ import static com.truesim.engine.render.layout.ParticleConstants.CURVE_EVEN;
 import static com.truesim.engine.render.layout.ParticleConstants.DRAW_BLEND_FRAMES;
 import static com.truesim.engine.render.layout.ParticleConstants.DRAW_LOOP;
 import static com.truesim.engine.render.layout.ParticleConstants.DRAW_VOLUME;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_BOX;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_COLOR;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_CONE;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_DISC;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_DRAG;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_GRAVITY;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_LIFETIME;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_OVER_COLOR;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_OVER_SIZE;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_POINT;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_SIZE;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_SPEED;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_SPHERE;
-import static com.truesim.engine.render.layout.ParticleConstants.OP_VELOCITY;
 import static com.truesim.engine.render.layout.ParticleConstants.PROGRAM_OVER;
 import static com.truesim.engine.render.layout.ParticleConstants.PROGRAM_TRAIL;
 import static com.truesim.engine.render.layout.ParticleConstants.RENDERER_WORDS;
@@ -38,19 +24,14 @@ import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.effects.Binding;
 import com.truesim.scene.effects.ColorBinding;
 import com.truesim.scene.effects.Capability;
-import com.truesim.scene.effects.Collide;
 import com.truesim.scene.effects.ColorGradient;
 import com.truesim.scene.effects.ParticleEvent;
 import com.truesim.scene.effects.CpuSimulation;
 import com.truesim.scene.effects.EffectData;
 import com.truesim.scene.effects.EmitterData;
 import com.truesim.scene.effects.FloatCurve;
-import com.truesim.scene.effects.Forces;
-import com.truesim.scene.effects.Init;
 import com.truesim.scene.effects.Module;
-import com.truesim.scene.effects.ModuleRegistry;
 import com.truesim.scene.effects.ModuleType;
-import com.truesim.scene.effects.Over;
 import com.truesim.scene.effects.Renderer;
 import com.truesim.scene.effects.Shape;
 import com.truesim.scene.effects.Target;
@@ -69,10 +50,11 @@ import java.util.Map;
  * {@link CpuSimulation}.
  *
  * <p>An emitter's program is a header word (initializers | updaters << 8 | PROGRAM_* << 16), then each module as an
- * opcode word (op | words << 8), its salt, and its fields in alphabetical order of their names: a float binding in
- * {@code BINDING_WORDS} words (kind | parameter offset << 8, scale, the constant times its scale or a range's least
- * value or a curve, a range's greatest value), a color binding in {@code COLOR_WORDS} (kind | parameter offset << 8,
- * the color or a gradient), a curve or gradient in one word. Curves are offsets in the effect's block: a header (keys,
+ * opcode word (its opcode in the kernel's {@link ParticleModules} | words << 8 | its stages << 16), its salt, and its
+ * fields in alphabetical order of their names: a float binding in {@code BINDING_WORDS} words (kind | parameter offset
+ * << 8, scale, the constant times its scale or a range's least value or a curve, a range's greatest value), a color
+ * binding in {@code COLOR_WORDS} (kind | parameter offset << 8, the color or a gradient), a curve or gradient in one
+ * word, an asset's sampled slot padded to a binding's words. Curves are offsets in the effect's block: a header (keys,
  * stride << 8, CURVE_* << 16), the times, values, slopes and a word per key of interpolation. A curve of one key folds
  * to a constant where a binding reads it.
  */
@@ -162,16 +144,14 @@ final class ModulePrograms implements AutoCloseable {
 
     /** Whether collision chains may take ray queries: the device traces rays and the frame builds their structures. */
     private boolean rays;
-    private ParticleModules plugins;
-    private ModuleRegistry registry = ModuleRegistry.BUILT_IN;
+    private ParticleModules modules = BuiltInModules.MODULES;
 
-    /** Lets collision chains take ray queries in effects encoded from now on, or not. */
-    /** Effects encoded from now on may name {@code plugins}' modules (null: built-in ones only). */
-    void plugins(ParticleModules plugins) {
-        this.plugins = plugins;
-        registry = plugins == null ? ModuleRegistry.BUILT_IN : plugins.registry();
+    /** Effects encoded from now on are encoded for the kernel of {@code modules}: they may name its modules. */
+    void modules(ParticleModules modules) {
+        this.modules = modules;
     }
 
+    /** Lets collision chains take ray queries in effects encoded from now on, or not. */
     void rays(boolean rays) {
         this.rays = rays;
     }
@@ -294,9 +274,10 @@ final class ModulePrograms implements AutoCloseable {
             }
             starts[e] = program.size;
             int header = program.add(0);
-            boolean overLife = false;
+            boolean overLife = false; // an updater scaling the attributes from birth
             for (Module module : emitter.update()) {
-                overLife |= module.type().equals(Over.SIZE) || module.type().equals(Over.COLOR);
+                int op = modules.opcode(module.type());
+                overLife |= op >= 0 && (modules.stages(op) & ParticleModules.STAGE_OVER) != 0;
             }
             over[e] = overLife;
             for (Module module : emitter.init()) {
@@ -472,16 +453,16 @@ final class ModulePrograms implements AutoCloseable {
     }
 
     /**
-     * Encodes {@code modules}, each with its salt by its place in the list; of each collision chain only the first
+     * Encodes modules {@code ops}, each with its salt by its place in the list; of each collision chain only the first
      * method the GPU has (ray queries where the device traces rays). Returns how many ops it encoded.
      */
-    private int encodeOps(EffectData data, List<Module> modules, int salts, IntList program, Curves keys,
+    private int encodeOps(EffectData data, List<Module> ops, int salts, IntList program, Curves keys,
         java.util.function.ToIntFunction<AssetRef<?>> assetSlots) {
         int encoded = 0;
         boolean chosen = false;
-        for (int m = 0; m < modules.size(); m++) {
-            Module module = modules.get(m);
-            ModuleType type = registry.type(module.type());
+        for (int m = 0; m < ops.size(); m++) {
+            Module module = ops.get(m);
+            ModuleType type = modules.registry().type(module.type());
             if (module.type().startsWith("collide.")) {
                 chosen &= module.value("fallback") instanceof Binding b && b.kind() == Binding.Kind.CONSTANT
                     && b.value() * b.scale() >= 0.5f; // a method that is no fallback starts a chain
@@ -492,8 +473,10 @@ final class ModulePrograms implements AutoCloseable {
                 chosen = true;
             }
             encoded++;
-            int plugin = plugins == null ? -1 : plugins.indexOf(module.type());
-            int op = plugin >= 0 ? ParticleConstants.OP_PLUGIN + plugin : opcode(module.type());
+            int op = modules.opcode(module.type());
+            if (op < 0) {
+                throw new IllegalArgumentException("No GPU module " + module.type() + " in the kernel's modules");
+            }
             int at = program.add(0);
             program.add(salts + 16 * m);
             List<String> names = type.fields().keySet().stream().sorted().toList();
@@ -515,47 +498,9 @@ final class ModulePrograms implements AutoCloseable {
                     default -> program.add(keys.gradient((ColorGradient) value));
                 }
             }
-            program.values[at] = op | (program.size - at) << 8;
+            program.values[at] = op | (program.size - at) << 8 | modules.stages(op) << 16;
         }
         return encoded;
-    }
-
-    private static int opcode(String type) {
-        return switch (type) {
-            case Shape.POINT -> OP_POINT;
-            case Shape.SPHERE -> OP_SPHERE;
-            case Shape.BOX -> OP_BOX;
-            case Shape.CONE -> OP_CONE;
-            case Shape.DISC -> OP_DISC;
-            case Init.LIFETIME -> OP_LIFETIME;
-            case Init.SPEED -> OP_SPEED;
-            case Init.VELOCITY -> OP_VELOCITY;
-            case Init.SIZE -> OP_SIZE;
-            case Init.COLOR -> OP_COLOR;
-            case Init.INHERIT -> ParticleConstants.OP_INHERIT;
-            case Init.ROTATION -> ParticleConstants.OP_ROTATION;
-            case Init.FRAME -> ParticleConstants.OP_FRAME;
-            case Shape.MESH -> ParticleConstants.OP_MESH;
-            case Shape.BONES -> ParticleConstants.OP_BONES;
-            case Shape.MASK -> ParticleConstants.OP_MASK;
-            case Forces.GRAVITY -> OP_GRAVITY;
-            case Forces.DRAG -> OP_DRAG;
-            case Over.SIZE -> OP_OVER_SIZE;
-            case Over.COLOR -> OP_OVER_COLOR;
-            case Forces.WIND -> ParticleConstants.OP_WIND;
-            case Forces.CURL -> ParticleConstants.OP_CURL;
-            case Forces.VORTEX -> ParticleConstants.OP_VORTEX;
-            case Forces.POINT -> ParticleConstants.OP_POINT_FORCE;
-            case Forces.LINE -> ParticleConstants.OP_LINE;
-            case Forces.ORBIT -> ParticleConstants.OP_ORBIT;
-            case Forces.FIELD -> ParticleConstants.OP_FIELD;
-            case Forces.SPEED_LIMIT -> ParticleConstants.OP_SPEED_LIMIT;
-            case Collide.COLLIDERS -> ParticleConstants.OP_COLLIDERS;
-            case Collide.HEIGHT -> ParticleConstants.OP_HEIGHT;
-            case Collide.DEPTH -> ParticleConstants.OP_DEPTH;
-            case Collide.RAYS -> ParticleConstants.OP_RAYS;
-            default -> throw new IllegalArgumentException("No GPU module " + type + " (plugin modules come later)");
-        };
     }
 
     /** A float binding in {@code BINDING_WORDS} words. */

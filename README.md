@@ -1093,10 +1093,28 @@ particles.update(effects, runtime.spawns());
 - **Particles as emitters** (E2, `ParticleEvent.emit(target, perSecond)`): fixed-point accumulators per particle,
   children spread along the parent's path; ribbons per parent (`ribbons` 0), ordered by a radix sort of their parents'
   spawn indices: 100,000 sparks each with a trail.
-- **A game's own modules** (`ParticleModules`, `particles.modules(...)`): Slang structs dispatched by a kernel variant
-  of the game's (`#define PARTICLE_MODULES`, then `#include "particles/simulate.slang"`); techniques may modify
-  `ParticleKeys.PARTICLES` after the simulation. Built in too: `Init.rotation`, `Init.frame`, `Shape.mesh(mode,
-  upward)`.
+- **Modules from their Slang structs** (E24): every module, built in (particles/modules) or a game's, is one
+  `[ParticleModule("name")]` struct, its fields its parameters and its functions its stages (`init`, `force`, `after`,
+  `collide`, `update`, `over`); the build generates the kernel's dispatch, the opcodes and the Java listing
+  (`BuiltInModules`, a game's `slang.particleModules` class). A game's modules come with kernel variants of its own
+  (base and rays) and, optionally, Java twins for CPU emitters (`[ModuleTwin("...")]`, scene-effects' `ModuleTwin`);
+  techniques may modify `ParticleKeys.PARTICLES` after the simulation. Built in too: `Init.rotation`, `Init.frame`,
+  `Shape.mesh(mode, upward)`.
+
+  ```slang
+  [ParticleModule("game.gust")]
+  [ModuleTwin("com.example.game.GustTwin")] // optional: CPU emitters may have it
+  public struct Gust
+  {
+      public float strength = 1;
+      public void update(inout ParticleStep s, inout Particle p) { p.velocity.x += strength * s.h; }
+  };
+  ```
+
+  ```java
+  particles.modules(GameModules.MODULES);   // slang { particleModules = "com.example.game.GameModules" }
+  EffectData leaves = EffectData.builder().emitter(...).build(GameModules.MODULES.registry());
+  ```
 - **Glass order** (`glass` 1: drawn by `ParticleDraw.beforeGlass`, tinted by the glass in front; 2: split at a view's
   `ParticleKeys.GLASS_DEPTH`) and TAA hooks: the reactive mask (`ParticleKeys.REACTIVE`) and mesh particles'
   transforms a frame before (`ParticleKeys.PREVIOUS_INSTANCES`).

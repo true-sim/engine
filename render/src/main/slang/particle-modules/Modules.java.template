@@ -1,0 +1,30 @@
+package {package};
+
+import com.truesim.engine.render.particles.ParticleModules;
+import com.truesim.scene.effects.Bind;
+import com.truesim.scene.effects.Capability;
+import com.truesim.scene.effects.ColorGradient;
+import com.truesim.scene.effects.FloatCurve;
+import com.truesim.scene.effects.Forces;
+import com.truesim.scene.effects.ModuleType;
+import com.truesim.scene.effects.Target;
+import java.util.List;
+
+/**
+ * Generated from the {@code [ParticleModule]} structs of these shaders and their libraries (effects.md E24): the module
+ * types they declare, and every module of their kernel by opcode, as its generated dispatch numbers them.
+ */
+@lombok.Generated
+public final class {class} {
+
+    /** The module types these shaders declare. */
+    public static final List<ModuleType> OWN = List.of(
+        {own});
+
+    /** The kernel's modules: its libraries' and these, for {@code Particles.modules}. */
+    public static final ParticleModules MODULES = ParticleModules.of("{entry}", new String[] {{names}},
+        new int[] {{stages}}, List.of(OWN{libraryTypes}));
+
+    private {class}() {
+    }
+}

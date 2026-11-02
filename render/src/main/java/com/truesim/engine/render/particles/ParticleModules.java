@@ -3,64 +3,119 @@ package com.truesim.engine.render.particles;
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.scene.effects.ModuleRegistry;
 import com.truesim.scene.effects.ModuleType;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
- * A game's own particle modules (effects step 20), registered as material types are: Slang structs implementing
- * {@code IParticleModule} (particles/particle.slang), dispatched by a kernel variant the game compiles, whose entry file
- * defines {@code PARTICLE_MODULES} and a {@code ParticleModules} type calling each module by its index, then includes
- * particles/simulate.slang. Module {@code i} of {@link #types()} is opcode {@code OP_PLUGIN + i}; its fields (at most
- * {@code PLUGIN_FIELDS}, floats) reach it evaluated, in alphabetical order of their names, as built-in modules' do.
- * Effects naming them are built against {@link #registry()}; on the CPU they need a Java twin (a CPU target in their
- * type, run by the game's own simulator), else they are GPU only.
+ * The particle modules of a kernel (effects.md E24): every {@code [ParticleModule]} Slang struct the build collected
+ * into its dispatch, each at its opcode, with the stages it has and its module type. The build generates them, with
+ * the kernel: {@link BuiltInModules#MODULES} holds the built-in modules (particles/modules, engine-render's kernels),
+ * and a game whose shaders declare modules of its own gets a class of {@code slang.particleModules} holding them and
+ * the built-in ones, with kernel variants (base and rays) of its own. Effects naming its modules are built against
+ * {@link #registry()}.
  *
  * <pre>{@code
- * // gust.slang (the game's): [shader] entry points come from the include
- * #define PARTICLE_MODULES
- * import particle;
- * struct Gust : IParticleModule { static void update(inout Particle p, ParticleModuleInput in) { ... } };
- * struct ParticleModules { static void update(uint i, inout Particle p, ParticleModuleInput in) { Gust.update(p, in); }
- *                          static void init(uint i, inout Particle p, ParticleModuleInput in) { } };
- * #include "particles/simulate.slang"
+ * // gust.slang, the game's: one struct, its fields its parameters, its functions its stages
+ * [ParticleModule("game.gust")]
+ * public struct Gust
+ * {
+ *     public float strength = 1;
+ *     public void update(inout ParticleStep s, inout Particle p) { p.velocity.x += strength * s.h; }
+ * };
  *
- * ParticleModules gust = new ParticleModules("shaders/gust.spv", List.of(GUST));    // GUST: its ModuleType
- * particles.modules(gust);
- * EffectData leaves = EffectData.builder().emitter(...).build(gust.registry());
+ * particles.modules(GameModules.MODULES);                   // generated
+ * EffectData leaves = EffectData.builder().emitter(...).build(GameModules.MODULES.registry());
  * }</pre>
- *
- * @param shader the kernel variant: a resource path as {@code ShaderModule.load} takes, with the simulation's entry points
- * @param types the modules it adds, in the order its {@code ParticleModules} dispatches them
  */
-public record ParticleModules(String shader, List<ModuleType> types) {
+public final class ParticleModules {
 
-    /** The most float fields a plugin module reads. */
-    public static final int MAX_FIELDS = com.truesim.engine.render.layout.ParticleConstants.PLUGIN_FIELDS;
+    /** Stages, as particle-modules/modules.properties lists them: bit i of a module's stages is stage i. */
+    static final int STAGE_INIT = 1;
+    static final int STAGE_FORCE = 2;
+    static final int STAGE_AFTER = 4;
+    static final int STAGE_COLLIDE = 8;
+    static final int STAGE_UPDATE = 16;
+    static final int STAGE_OVER = 32;
 
-    @AllowAllocation("set up once")
-    public ParticleModules {
-        Objects.requireNonNull(shader, "shader");
-        types = List.copyOf(types);
-        for (ModuleType type : types) {
-            if (type.fields().size() > MAX_FIELDS) {
-                throw new IllegalArgumentException(type.name() + " has more than " + MAX_FIELDS + " fields");
+    private final String shader;
+    private final String raysShader;
+    private final List<String> names;
+    private final int[] stages;
+    private final Map<String, Integer> opcodes = new HashMap<>();
+    private final List<ModuleType> types;
+    private final ModuleRegistry registry;
+
+    @AllowAllocation("made once, by the generated classes")
+    private ParticleModules(String entry, String[] names, int[] stages, List<List<ModuleType>> types) {
+        Objects.requireNonNull(entry, "entry");
+        shader = entry.isEmpty() ? null : "shaders/" + entry + ".spv";
+        raysShader = entry.isEmpty() ? null : "shaders/" + entry + "Rays.spv";
+        this.names = List.of(names);
+        this.stages = stages.clone();
+        if (stages.length != names.length) {
+            throw new IllegalArgumentException(names.length + " modules, " + stages.length + " stages");
+        }
+        for (int i = 0; i < names.length; i++) {
+            opcodes.put(names[i], i);
+        }
+        List<ModuleType> all = new ArrayList<>();
+        types.forEach(all::addAll);
+        this.types = List.copyOf(all);
+        // The built-in modules scene-effects knows without the engine must be as their Slang declares them
+        List<ModuleType> added = new ArrayList<>();
+        for (ModuleType type : this.types) {
+            ModuleType mirror = ModuleRegistry.BUILT_IN.type(type.name());
+            if (mirror == null) {
+                added.add(type);
+            } else if (!mirror.equals(type)) {
+                throw new IllegalStateException("Module " + type.name() + " disagrees with scene-effects' built-in one:"
+                    + " Slang " + type + ", scene " + mirror);
             }
         }
+        registry = ModuleRegistry.BUILT_IN.with(added.toArray(ModuleType[]::new));
     }
 
-    /** The built-in modules and these: what effects naming them are built against. */
-    @AllowAllocation("set up once")
+    /**
+     * The modules of a kernel, as its generated class lists them: its entry points ({@code particle-modules/<class>},
+     * empty for engine-render's own kernels), each module's name and stages by opcode, and the module types of its
+     * shaders and their libraries.
+     */
+    @AllowAllocation("made once, by the generated classes")
+    public static ParticleModules of(String entry, String[] names, int[] stages, List<List<ModuleType>> types) {
+        return new ParticleModules(entry, names, stages, types);
+    }
+
+    /** The kernel variant's shader, with ray collision or not; null for engine-render's own kernels. */
+    String shader(boolean rays) {
+        return rays ? raysShader : shader;
+    }
+
+    /** The module types effects may name: scene-effects' built-in ones and these shaders' own. */
     public ModuleRegistry registry() {
-        return ModuleRegistry.BUILT_IN.with(types.toArray(ModuleType[]::new));
+        return registry;
     }
 
-    /** The index of the module called {@code name}, or -1 if it is none of these. */
-    int indexOf(String name) {
-        for (int i = 0; i < types.size(); i++) {
-            if (types.get(i).name().equals(name)) {
-                return i;
-            }
-        }
-        return -1;
+    /** The module types the build generated, of these shaders and their libraries. */
+    public List<ModuleType> types() {
+        return types;
+    }
+
+    /** The modules' names, by opcode. */
+    public List<String> names() {
+        return names;
+    }
+
+    /** The opcode of the module called {@code name}, or -1 if the kernel has none. */
+    public int opcode(String name) {
+        Integer op = opcodes.get(name);
+        return op == null ? -1 : op;
+    }
+
+    /** The stages of the module at {@code opcode}: STAGE_* bits. */
+    int stages(int opcode) {
+        return stages[opcode];
     }
 }

@@ -94,7 +94,8 @@ public final class ParticleSimulation implements Technique {
         // With ray collision, the update and spawn take the rays variant, after the frame's top level
         boolean traced = particles.rayTracing() != null;
         Buffer topLevel = traced ? g.request(new TopLevel(particles.rayTracing(), particles.rayRenderer())) : null;
-        String variant = particles.modules() != null ? particles.modules().shader() : traced ? RAYS_SHADER : SHADER;
+        String own = particles.modules().shader(traced); // a game's kernel variant, with its own modules
+        String variant = own != null ? own : traced ? RAYS_SHADER : SHADER;
         // With mesh shapes, the spawn reads the pool's meshes: after the scene upload and the deformation pass
         SceneData.Buffers scene = p0.meshRenderer() == null ? null : g.request(new SceneData(p0.meshRenderer()));
         Pipeline count = g.computeProgram(SHADER, "countMain", ParticlePush.BYTES);
