@@ -8,6 +8,7 @@ import com.truesim.common.graph.Id;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.render.SceneData;
 import com.truesim.engine.render.layout.ParticlePush;
 import com.truesim.engine.render.layout.ParticleRibbonPush;
 import com.truesim.engine.render.layout.ParticleSortPush;
@@ -24,6 +25,8 @@ import java.util.Objects;
  * counted), "particle spawn" (the newborn, indirect), "particle upload" (CPU emitters' particles into their ranges),
  * "particle args" (counts for the next frame), "particle ribbons" (ribbons of several strands ordered by strand and
  * spawn index), and the statistics' readback. A frame {@link Particles#update} was not called in simulates nothing.
+ * With mesh shapes ({@link Particles#meshes}) the spawn reads the renderer's geometry pool, so it runs after the scene
+ * upload and the deformation pass.
  *
  * <pre>{@code
  * graph.add(new ParticleSimulation(particles));
@@ -47,6 +50,12 @@ public final class ParticleSimulation implements Technique {
         return ID;
     }
 
+    /** What the simulation reads ({@link Particles#rays}, {@link Particles#meshes}): a change rebuilds the graph. */
+    @Override
+    public long buildVersion() {
+        return particles.setup();
+    }
+
     @Override
     public List<Key<?>> provides() {
         return List.of(ParticleKeys.PARTICLES, ParticleKeys.STATE, ParticleKeys.SIDE, ParticleKeys.RIBBON_ORDER);
@@ -55,11 +64,14 @@ public final class ParticleSimulation implements Technique {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
+        Particles p0 = particles;
         Particles.Buffers b = particles.importInto(g);
         // With ray collision, the update and spawn take the rays variant, after the frame's top level
         boolean traced = particles.rayTracing() != null;
         Buffer topLevel = traced ? g.request(new TopLevel(particles.rayTracing(), particles.rayRenderer())) : null;
         String variant = traced ? RAYS_SHADER : SHADER;
+        // With mesh shapes, the spawn reads the pool's meshes: after the scene upload and the deformation pass
+        SceneData.Buffers scene = p0.meshRenderer() == null ? null : g.request(new SceneData(p0.meshRenderer()));
         Pipeline count = g.computeProgram(SHADER, "countMain", ParticlePush.BYTES);
         Pipeline scan = g.computeProgram(SHADER, "scanMain", ParticlePush.BYTES);
         Pipeline update = g.computeProgram(variant, "updateMain", ParticlePush.BYTES);
@@ -111,6 +123,12 @@ public final class ParticleSimulation implements Technique {
         GraphBuilder.PassBuilder spawnPass = g.pass("particle spawn"); // after the spawn args, as declared
         if (traced) {
             spawnPass.read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ);
+        }
+        if (scene != null) {
+            spawnPass.read(scene.positions(), BufferAccess.STORAGE_READ)
+                .read(scene.attributes(), BufferAccess.STORAGE_READ).read(scene.meshlets(), BufferAccess.STORAGE_READ)
+                .read(scene.meshletVertices(), BufferAccess.STORAGE_READ)
+                .read(scene.meshletTriangles(), BufferAccess.STORAGE_READ);
         }
         spawnPass.read(b.dispatch(), BufferAccess.INDIRECT).read(b.dispatch(), BufferAccess.STORAGE_READ)
             .read(b.depth(), BufferAccess.STORAGE_READ).read(b.events(), BufferAccess.STORAGE_READ)

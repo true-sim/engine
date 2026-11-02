@@ -9,11 +9,14 @@ import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.effects.CpuSimulation;
 import com.truesim.scene.effects.EffectRuntime;
 import com.truesim.scene.effects.Effects;
+import com.truesim.scene.effects.Module;
+import com.truesim.scene.effects.Shape;
 import com.truesim.scene.effects.ParticleWorld;
 import com.truesim.scene.effects.Quality;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -42,6 +45,11 @@ import java.util.Objects;
  * ({@link Effects#replace}, a hot reload) keeps the ranges that still fit. Transforms are the nodes' world transforms
  * as they are: interpolation between fixed steps (application-api D91) is not built yet.
  *
+ * <p>Mesh shapes ({@code Shape.mesh}) emit from the renderable of the node their effect follows, as the
+ * {@link #meshes} sync draws it: a skinned one's posed copy, so fire runs over a moving character's skin; bone shapes
+ * ({@code Shape.bones}) along the joints given them ({@link #joints}). The particles need the renderer
+ * ({@link Particles#meshes}).
+ *
  * <p>Given a {@link ParticleWorld}, CPU emitters collide with it and GPU emitters with its heights around the first
  * viewer ({@link Particles#heights}); depth collision needs a {@code ParticleCollisionDepth} in the collision view.
  *
@@ -65,6 +73,14 @@ public final class EffectSync {
     private int[] beamEmitters = new int[4];
     private long[] beamNodes = new long[4];
     private int beams;
+    // Bone shapes along nodes: effect, emitter, the nodes; and the renderables mesh shapes emit from.
+    private long[] jointEffects = new long[4];
+    private int[] jointEmitters = new int[4];
+    private long[][] jointNodes = new long[4][];
+    private int jointChains;
+    private final double[] jointScratch = new double[3 * com.truesim.engine.render.layout.ParticleConstants.MAX_JOINTS];
+    private final double[] world = new double[12];
+    private SceneSync meshes;
     private int viewers;
 
     /** The effects of {@code effects} drawn through {@code particles}, simulated on the calling thread. */
@@ -86,6 +102,7 @@ public final class EffectSync {
         if (world != null) { // GPU emitters' height collision: the world's heights around the first viewer
             particles.heights(world, HEIGHT_FIELD_SIZE, HEIGHT_FIELD_RESOLUTION);
         }
+        particles.sources(this::emit);
     }
 
     public Effects effects() {
@@ -158,6 +175,94 @@ public final class EffectSync {
         beams++;
     }
 
+    /**
+     * Mesh shapes emit from the renderables {@code sync} draws (null: none): each from the renderable of its effect's
+     * node, as drawn, a skinned one's posed copy; with none drawn there (not loaded yet, or no renderable), its
+     * particles are born dead. {@code sync} draws the effects' scene.
+     */
+    public EffectSync meshes(SceneSync sync) {
+        meshes = sync;
+        return this;
+    }
+
+    /**
+     * Runs the bone shapes of emitter {@code emitter} of playing effect {@code effect} along {@code nodes} (joints'
+     * nodes, at most {@code MAX_JOINTS}, followed every frame as of the last {@code scene.update()}) while it plays.
+     */
+    @AllowAllocation("a chain of joints, set up once")
+    public void joints(long effect, int emitter, long... nodes) {
+        if (nodes.length > com.truesim.engine.render.layout.ParticleConstants.MAX_JOINTS) {
+            throw new IllegalArgumentException("At most " + com.truesim.engine.render.layout.ParticleConstants
+                .MAX_JOINTS + " joints: " + nodes.length);
+        }
+        for (long node : nodes) {
+            if (!scene.contains(node)) {
+                throw new IllegalArgumentException("Not a node of the scene: " + NodeHandle.toString(node));
+            }
+        }
+        if (!effects.alive(effect)) {
+            throw new IllegalArgumentException("No effect plays as " + Long.toHexString(effect));
+        }
+        int at = jointChains;
+        for (int i = 0; i < jointChains; i++) {
+            if (jointEffects[i] == effect && jointEmitters[i] == emitter) {
+                at = i;
+            }
+        }
+        if (at == jointEffects.length) {
+            jointEffects = Arrays.copyOf(jointEffects, 2 * at);
+            jointEmitters = Arrays.copyOf(jointEmitters, 2 * at);
+            jointNodes = Arrays.copyOf(jointNodes, 2 * at);
+        }
+        jointEffects[at] = effect;
+        jointEmitters[at] = emitter;
+        jointNodes[at] = nodes.clone();
+        jointChains = Math.max(jointChains, at + 1);
+    }
+
+    /** Chains of joints bone shapes run along, of effects still playing. */
+    public int jointChainCount() {
+        return jointChains;
+    }
+
+    /** Names what emitter {@code emitter} of {@code effect} emits from this frame: its node's mesh, its joints. */
+    private void emit(long effect, int emitter) {
+        List<Module> init = effects.data(effect).emitters().get(emitter).init();
+        boolean meshed = false;
+        for (int i = 0; i < init.size(); i++) {
+            meshed |= init.get(i).type().equals(Shape.MESH);
+        }
+        if (meshed) {
+            long node = effects.node(effect);
+            int mesh = meshes == null || node == NodeHandle.NONE || !scene.contains(node) ? -1
+                : meshes.drawnMeshOf(node);
+            if (mesh >= 0) {
+                meshes.worldOf(node, world);
+                particles.emitFrom(effect, emitter, mesh, meshes.meshDataOf(node), world);
+            } else {
+                particles.emitFrom(effect, emitter, -1, null, null);
+            }
+        }
+        for (int i = 0; i < jointChains; i++) {
+            if (jointEffects[i] == effect && jointEmitters[i] == emitter) {
+                long[] nodes = jointNodes[i];
+                TransformArray transforms = scene.worldTransforms();
+                MemorySegment s = transforms.segment();
+                int count = 0;
+                for (long node : nodes) {
+                    if (scene.contains(node)) {
+                        long base = NodeHandle.index(node) * transforms.stride();
+                        jointScratch[3 * count] = s.get(ValueLayout.JAVA_DOUBLE, base);
+                        jointScratch[3 * count + 1] = s.get(ValueLayout.JAVA_DOUBLE, base + 8);
+                        jointScratch[3 * count + 2] = s.get(ValueLayout.JAVA_DOUBLE, base + 16);
+                        count++;
+                    }
+                }
+                particles.joints(effect, emitter, jointScratch, count);
+            }
+        }
+    }
+
     /** Beams ended at nodes, of effects still playing. */
     public int beamCount() {
         return beams;
@@ -192,5 +297,18 @@ public final class EffectSync {
             }
         }
         beams = kept;
+        kept = 0;
+        for (int i = 0; i < jointChains; i++) {
+            if (effects.alive(jointEffects[i])) {
+                jointEffects[kept] = jointEffects[i];
+                jointEmitters[kept] = jointEmitters[i];
+                jointNodes[kept] = jointNodes[i];
+                kept++;
+            }
+        }
+        for (int i = kept; i < jointChains; i++) {
+            jointNodes[i] = null;
+        }
+        jointChains = kept;
     }
 }
