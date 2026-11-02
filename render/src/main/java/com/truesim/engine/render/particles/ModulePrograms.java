@@ -37,6 +37,8 @@ import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.effects.Binding;
 import com.truesim.scene.effects.ColorBinding;
+import com.truesim.scene.effects.Capability;
+import com.truesim.scene.effects.Collide;
 import com.truesim.scene.effects.ColorGradient;
 import com.truesim.scene.effects.CpuSimulation;
 import com.truesim.scene.effects.EffectData;
@@ -134,6 +136,9 @@ final class ModulePrograms implements AutoCloseable {
     void assetSlots(java.util.function.ToIntFunction<AssetRef<?>> slots) {
         assetSlots = slots;
     }
+
+    /** Whether collision chains may take ray queries: the device traces rays and the frame builds their structures. */
+    private boolean rays;
 
     ModulePrograms(VulkanDevice device, FrameSlots slots) {
         this.device = device;
@@ -251,14 +256,14 @@ final class ModulePrograms implements AutoCloseable {
                 overLife |= module.type().equals(Over.SIZE) || module.type().equals(Over.COLOR);
             }
             over[e] = overLife;
-            encodeOps(data, emitter.init(), 0, program, keys, assetSlots);
-            encodeOps(data, emitter.update(), CpuSimulation.UPDATE_SALTS, program, keys, assetSlots);
+            int inits = encodeOps(data, emitter.init(), 0, program, keys, assetSlots);
+            int updates = encodeOps(data, emitter.update(), CpuSimulation.UPDATE_SALTS, program, keys, assetSlots);
             int points = 0;
             for (Renderer r : emitter.renderers()) {
                 points = Math.max(points, trailPoints(r));
             }
             trails[e] = points;
-            program.values[header] = emitter.init().size() | emitter.update().size() << 8
+            program.values[header] = inits | updates << 8
                 | ((overLife ? PROGRAM_OVER : 0) | (points > 0 ? PROGRAM_TRAIL : 0)) << 16 | points << 24;
         }
         int wordStart = (int) take(wordRanges, Math.max(1, program.size), true);
@@ -378,11 +383,27 @@ final class ModulePrograms implements AutoCloseable {
         return r.settings().get(name) instanceof Number n ? n.floatValue() : fallback;
     }
 
-    private static void encodeOps(EffectData data, List<Module> modules, int salts, IntList program, Curves keys,
+    /**
+     * Encodes {@code modules}, each with its salt by its place in the list; of each collision chain only the first
+     * method the GPU has (ray queries where the device traces rays). Returns how many ops it encoded.
+     */
+    private int encodeOps(EffectData data, List<Module> modules, int salts, IntList program, Curves keys,
         java.util.function.ToIntFunction<AssetRef<?>> assetSlots) {
+        int encoded = 0;
+        boolean chosen = false;
         for (int m = 0; m < modules.size(); m++) {
             Module module = modules.get(m);
             ModuleType type = ModuleRegistry.BUILT_IN.type(module.type());
+            if (module.type().startsWith("collide.")) {
+                chosen &= module.value("fallback") instanceof Binding b && b.kind() == Binding.Kind.CONSTANT
+                    && b.value() * b.scale() >= 0.5f; // a method that is no fallback starts a chain
+                boolean here = type.runsOn(Target.GPU) && (type.capability() == Capability.NONE || rays);
+                if (chosen || !here) {
+                    continue;
+                }
+                chosen = true;
+            }
+            encoded++;
             int op = opcode(module.type());
             int at = program.add(0);
             program.add(salts + 16 * m);
@@ -407,6 +428,7 @@ final class ModulePrograms implements AutoCloseable {
             }
             program.values[at] = op | (program.size - at) << 8;
         }
+        return encoded;
     }
 
     private static int opcode(String type) {
@@ -433,6 +455,9 @@ final class ModulePrograms implements AutoCloseable {
             case Forces.ORBIT -> ParticleConstants.OP_ORBIT;
             case Forces.FIELD -> ParticleConstants.OP_FIELD;
             case Forces.SPEED_LIMIT -> ParticleConstants.OP_SPEED_LIMIT;
+            case Collide.COLLIDERS -> ParticleConstants.OP_COLLIDERS;
+            case Collide.HEIGHT -> ParticleConstants.OP_HEIGHT;
+            case Collide.DEPTH -> ParticleConstants.OP_DEPTH;
             default -> throw new IllegalArgumentException("No GPU module " + type + " (plugin modules come later)");
         };
     }

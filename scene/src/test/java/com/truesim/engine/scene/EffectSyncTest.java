@@ -191,6 +191,32 @@ class EffectSyncTest {
     }
 
     @Test
+    void aWorldGivesGpuEmittersItsHeightsAroundTheFirstViewer() {
+        com.truesim.scene.effects.ParticleWorld flat = new com.truesim.scene.effects.ParticleWorld() {
+            @Override
+            public double height(double x, double z) {
+                return 0;
+            }
+
+            @Override
+            public boolean raycast(double x, double y, double z, double dx, double dy, double dz, double max, Hit h) {
+                return false;
+            }
+        };
+        EffectSync sync = new EffectSync(effects, particles, flat, null);
+        assertThat(sync.simulation().world()).isSameAs(flat);
+        sync.clearViewers();
+        sync.addViewer(10, 2, 10);
+        sync.addViewer(500, 2, 500); // the first counts
+        frame(sync, FRAME);
+        assertThat(particles.heightRefreshes()).isOne();
+        sync.clearViewers();
+        sync.addViewer(300, 2, 300);
+        frame(sync, FRAME);
+        assertThat(particles.heightRefreshes()).isEqualTo(2);
+    }
+
+    @Test
     void pausedEffectsKeepTheirParticlesAndScaledOnesSlowDown() {
         EffectSync sync = new EffectSync(effects, particles, null, null);
         EffectData puffs = EffectData.builder().emitter("puffs", e -> e.spawn(Spawn.rate(30))

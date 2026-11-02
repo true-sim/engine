@@ -76,6 +76,7 @@ public final class ParticleSimulation implements Technique {
             });
         ParticlePush updatePush = new ParticlePush();
         g.pass("particle update").read(b.chunkCounts(), BufferAccess.STORAGE_READ)
+            .read(b.depth(), BufferAccess.STORAGE_READ)
             .write(b.particles(), BufferAccess.STORAGE_WRITE).write(b.side(), BufferAccess.STORAGE_WRITE)
             .write(b.state(), BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
@@ -93,6 +94,7 @@ public final class ParticleSimulation implements Technique {
             });
         ParticlePush spawnPush = new ParticlePush();
         g.pass("particle spawn").read(b.dispatch(), BufferAccess.INDIRECT).read(b.dispatch(), BufferAccess.STORAGE_READ)
+            .read(b.depth(), BufferAccess.STORAGE_READ)
             .write(b.particles(), BufferAccess.STORAGE_WRITE).write(b.side(), BufferAccess.STORAGE_WRITE)
             .write(b.state(), BufferAccess.STORAGE_WRITE)
             .record(ctx -> {

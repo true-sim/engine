@@ -10,6 +10,8 @@ import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.effects.Bind;
+import com.truesim.scene.effects.Collide;
+import com.truesim.scene.effects.ParticleWorld;
 import com.truesim.scene.effects.Effect;
 import com.truesim.scene.effects.ColorGradient;
 import com.truesim.scene.effects.EffectData;
@@ -29,9 +31,10 @@ import com.truesim.scene.effects.Spawn;
  * (flames carried with it in its frame, sparks thrown off with its velocity, smoke left behind in the world), a
  * fountain of sparks with streaks of trails over a column of smoke, and an orb circling it with a ribbon behind and a
  * beam reaching it from the fountain (the beam's end is the orb's node), and two clouds of red and blue puffs through
- * each other, each drawn back to front, and a swirl of motes in a vortex stirred by curl noise. Simulated on the GPU
- * and drawn in every view given a {@code ParticleDraw}. With the fox ({@link #dust}), its feet kick up dust on their
- * foot-down events and its survey's flickering curve drives the torch's intensity, frame by frame.
+ * each other, each drawn back to front, a swirl of motes in a vortex stirred by curl noise, and hail bouncing on the
+ * terrain. Simulated on the GPU and drawn in every view given a {@code ParticleDraw}. With the fox ({@link #dust}), its
+ * feet kick up dust on their foot-down events and its survey's flickering curve drives the torch's intensity, frame
+ * by frame.
  */
 final class DemoEffects implements AutoCloseable {
 
@@ -125,9 +128,19 @@ final class DemoEffects implements AutoCloseable {
                 Bind.random(-0.2f, 0.2f)), Init.lifetime(Bind.random(3, 4.5f)), Init.size(Bind.random(0.04f, 0.08f)),
             Init.color(Bind.color(0.4f, 1.6f, 2.4f, 1)))
         .update(Forces.vortex(Bind.constant(5), 3, 0, 1, 0), Forces.curl(Bind.constant(1.5f), 0.7f, 0.3f, 2),
-            Forces.gravity(Bind.constant(-0.1f)), Forces.drag(0.8f), Forces.speedLimit(4), Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0)
+            Forces.gravity(Bind.constant(-0.1f)), Forces.drag(0.8f), Forces.speedLimit(4),
+            Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0)
                 .linear(0.1f, 1, 1, 1, 1).linear(1, 0.6f, 0.3f, 1.2f, 0).build()))
         .render(Renderer.billboard(Renderer.Facing.POSITION).additive())).build();
+
+    /** Hail thrown up from a spout, bouncing on the terrain (its height field) until it settles. */
+    static final EffectData HAIL = EffectData.builder().emitter("hail", e -> e.spawn(Spawn.rate(70))
+        .init(Shape.cone(0.5f, 0.1f), Init.speed(Bind.random(3.5f, 6)), Init.lifetime(Bind.random(5, 7)),
+            Init.size(Bind.random(0.07f, 0.12f)), Init.color(Bind.color(0.85f, 0.95f, 1.6f, 1)))
+        .update(Forces.gravity(), Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 1).linear(0.85f, 1, 1, 1, 1)
+            .linear(1, 1, 1, 1, 0).build()))
+        .collide(Collide.height().bounce(0.45f).friction(0.25f))
+        .render(Renderer.billboard(Renderer.Facing.POSITION))).build();
 
     /** A ribbon behind an orb circling the fountain, narrowing to its tail. */
     static final EffectData RIBBON = EffectData.builder().emitter("ribbon", e -> e.spawn(Spawn.rate(60))
@@ -166,7 +179,18 @@ final class DemoEffects implements AutoCloseable {
         this.scene = scene;
         particles = new Particles(device, slots, 32 << 20);
         effects = new Effects(scene);
-        sync = new EffectSync(effects, particles);
+        sync = new EffectSync(effects, particles, new ParticleWorld() { // the terrain, for collision
+            @Override
+            public double height(double x, double z) {
+                return DemoMeshes.height(x, z);
+            }
+
+            @Override
+            public boolean raycast(double x, double y, double z, double dx, double dy, double dz, double max,
+                Hit hit) {
+                return false;
+            }
+        }, null);
         this.x = x;
         this.y = y;
         this.z = z;
@@ -181,6 +205,7 @@ final class DemoEffects implements AutoCloseable {
         effects.play(RIBBON, orb);
         effects.play(PUFFS, x + 3, DemoMeshes.height(x + 3, z - 1) + 1.2, z - 1);
         effects.play(SWIRL, x - 1, DemoMeshes.height(x - 1, z - 4) + 0.1, z - 4);
+        effects.play(HAIL, x + 2, DemoMeshes.height(x + 2, z + 3), z + 3);
         sync.beamEnd(effects.play(BEAM, fountain).offset(0, 0.3, 0).id(), 0, orb);
     }
 
@@ -226,6 +251,8 @@ final class DemoEffects implements AutoCloseable {
     /** Moves the effects on by {@code seconds}, after the scene's owner updated it; before the frame records. */
     void update(double seconds) {
         time += seconds;
+        sync.clearViewers();
+        sync.addViewer(x, y, z); // the height field around the effects
         place(time);
         if (bindings != null) {
             bindings.update(); // after the fox's animators

@@ -25,8 +25,7 @@ struct ParticlePush
     float* parameters;             // the frame's user parameter blocks
     uint* statistics;              // STATISTICS_HEADER words, then ALIVE and OVERFLOW per instance
     uint* dispatch;                // the spawn dispatch's group counts
-    Particle* uploads;             // the frame's CPU emitters' particles (uploadMain)
-    uint* cpu;                     // the CPU emitters' places in the list (uploadMain)
+    ParticleFrame* frame;          // colliders, the height field, the collision depth, the CPU emitters' uploads
     int targetDelta;               // particles from the half read to the half written
     int sideDelta;                 // side units likewise
     uint emitterCount;
@@ -299,6 +298,233 @@ float3 vectorOf<K : ICurveKeys>(Emitting m, K keys, uint op, uint salt, uint f, 
         value(m, keys, op, salt, f + 2, p));
 }
 
+/** Where a particle hit, in world axes about its emitter's origin: the contact (outside by its radius), the normal. */
+struct Hit
+{
+    bool hit;
+    float3 contact;
+    float3 normal;
+};
+
+Hit noHit()
+{
+    Hit h;
+    h.hit = false;
+    h.contact = 0;
+    h.normal = float3(0, 1, 0);
+    return h;
+}
+
+/** A hit at `contact` with normal `normal`. */
+Hit hitAt(float3 contact, float3 normal)
+{
+    Hit h;
+    h.hit = true;
+    h.contact = contact;
+    h.normal = normal;
+    return h;
+}
+
+/** Whether `q` from a collider's center `c` is within `reach` of it: pushed out along it (+Y from the very center). */
+Hit outOf(float3 c, float3 q, float reach)
+{
+    float d = length(q);
+    if (!(d < reach))
+    {
+        return noHit();
+    }
+    float3 n = d > 1e-6 ? q / d : float3(0, 1, 0);
+    return hitAt(c + n * reach, n);
+}
+
+/** Whether a particle of radius `r` moving from `a` to `b` ends touching collider `k` (centered at `c`). */
+Hit hitCollider(ParticleCollider k, float3 c, float r, float3 a, float3 b)
+{
+    float3 q = b - c;
+    if (k.kind == COLLIDER_PLANE)
+    {
+        float3 n = turn(k.rotation, float3(0, 1, 0));
+        float before = dot(a - c, n) - r;
+        float after = dot(q, n) - r;
+        return after < 0 && before >= -r ? hitAt(b - after * n, n) : noHit();
+    }
+    if (k.kind == COLLIDER_SPHERE)
+    {
+        return outOf(c, q, k.size.x + r);
+    }
+    if (k.kind == COLLIDER_CAPSULE)
+    {
+        float3 axis = turn(k.rotation, float3(0, 1, 0));
+        float3 e = axis * clamp(dot(q, axis), -k.size.y, k.size.y);
+        return outOf(c + e, q - e, k.size.x + r);
+    }
+    // a box: out through the face it is least deep behind
+    float4 back = float4(-k.rotation.xyz, k.rotation.w);
+    float3 l = turn(back, q);
+    float3 extent = k.size + r;
+    float3 depth = extent - abs(l);
+    if (!(depth.x > 0 && depth.y > 0 && depth.z > 0))
+    {
+        return noHit();
+    }
+    float3 face = 0;
+    if (depth.x <= depth.y && depth.x <= depth.z)
+    {
+        face.x = l.x < 0 ? -1 : 1;
+        l.x = face.x * extent.x;
+    }
+    else if (depth.y <= depth.z)
+    {
+        face.y = l.y < 0 ? -1 : 1;
+        l.y = face.y * extent.y;
+    }
+    else
+    {
+        face.z = l.z < 0 ? -1 : 1;
+        l.z = face.z * extent.z;
+    }
+    return hitAt(c + turn(k.rotation, l), turn(k.rotation, face));
+}
+
+/** The first of the frame's colliders in `layers` that the move from `a` to `b` ends touching. */
+Hit hitColliders(ParticleEmitter e, uint layers, float r, float3 a, float3 b)
+{
+    ParticleFrame* frame = push.frame;
+    ParticleCollider* colliders = frame.colliders;
+    uint n = frame.colliderCount;
+    for (uint i = 0; i < n; i++)
+    {
+        ParticleCollider k = colliders[i];
+        if ((k.layers & layers) == 0)
+        {
+            continue;
+        }
+        precise float3 high = k.positionHigh - e.originHigh;
+        precise float3 low = k.positionLow - e.originLow;
+        Hit h = hitCollider(k, high + low, r, a, b);
+        if (h.hit)
+        {
+            return h;
+        }
+    }
+    return noHit();
+}
+
+/** The height field at grid point (`x`, `z`), clamped to the grid. */
+float heightAt(float* heights, uint n, int x, int z)
+{
+    return heights[uint(clamp(z, 0, int(n) - 1)) * n + uint(clamp(x, 0, int(n) - 1))];
+}
+
+/** Whether the move ends below the height field's ground (with the radius): contact on it, normal from its slope. */
+Hit hitHeight(ParticleEmitter e, float r, float3 b)
+{
+    ParticleFrame* frame = push.frame;
+    float* heights = frame.heights;
+    uint n = frame.heightResolution;
+    if (n < 2)
+    {
+        return noHit();
+    }
+    float size = frame.heightSize;
+    precise float3 high = e.originHigh - frame.heightCenterHigh;
+    precise float3 low = e.originLow - frame.heightCenterLow;
+    float3 at = (high + low) + b;
+    float spacing = size / float(n - 1);
+    float2 grid = (at.xz + 0.5 * size) / spacing;
+    if (any(grid < 0) || any(grid > float(n - 1)))
+    {
+        return noHit();
+    }
+    int2 cell = min(int2(floor(grid)), int2(int(n) - 2, int(n) - 2));
+    float2 t = grid - float2(cell);
+    float h00 = heightAt(heights, n, cell.x, cell.y);
+    float h10 = heightAt(heights, n, cell.x + 1, cell.y);
+    float h01 = heightAt(heights, n, cell.x, cell.y + 1);
+    float h11 = heightAt(heights, n, cell.x + 1, cell.y + 1);
+    float ground = lerp(lerp(h00, h10, t.x), lerp(h01, h11, t.x), t.y);
+    precise float groundY = (ground - e.originHigh.y) - e.originLow.y;
+    if (!(groundY > b.y - r))
+    {
+        return noHit();
+    }
+    float dx = (lerp(h10, h11, t.y) - lerp(h00, h01, t.y)) / spacing;
+    float dz = (lerp(h01, h11, t.x) - lerp(h00, h10, t.x)) / spacing;
+    return hitAt(float3(b.x, groundY + r, b.z), normalize(float3(-dx, 1, -dz)));
+}
+
+/** The collision view's raw depth (reverse, 0 at infinity) at grid sample (`x`, `y`). */
+float depthAt(float* depth, uint width, uint height, int x, int y)
+{
+    return depth[DEPTH_HEADER + uint(clamp(y, 0, int(height) - 1)) * width + uint(clamp(x, 0, int(width) - 1))];
+}
+
+/** Grid sample (`x`, `y`) of the depth as a point relative to the view's camera. */
+float3 depthPoint(float4x4 inverse, float* depth, uint width, uint height, int x, int y)
+{
+    float2 ndc = (float2(x, y) + 0.5) / float2(width, height) * 2 - 1;
+    float4 p = mul(inverse, float4(ndc, depthAt(depth, width, height, x, y), 1));
+    return p.xyz / p.w;
+}
+
+/**
+ * Whether the move from `a` to `b` crosses the collision view's last depth: in front of it at the start, behind it
+ * (by less than `thickness`) at the end; the contact on that surface, the normal from its neighbours.
+ */
+Hit hitDepth(ParticleEmitter e, float r, float thickness, float3 a, float3 b)
+{
+    ParticleFrame* frame = push.frame;
+    if (frame.depthReady == 0)
+    {
+        return noHit();
+    }
+    float* depth = frame.depth;
+    float4x4 viewProjection;
+    float4x4 inverse;
+    for (uint i = 0; i < 16; i++)
+    {
+        viewProjection[i / 4][i % 4] = depth[i];
+        inverse[i / 4][i % 4] = depth[16 + i];
+    }
+    float3 cameraHigh = float3(depth[32], depth[33], depth[34]);
+    float3 cameraLow = float3(depth[35], depth[36], depth[37]);
+    uint width = uint(depth[38]);
+    uint height = uint(depth[39]);
+    precise float3 high = e.originHigh - cameraHigh;
+    precise float3 low = e.originLow - cameraLow;
+    float3 toOrigin = high + low;
+    float4 clip = mul(viewProjection, float4(toOrigin + b, 1));
+    if (clip.w <= 0)
+    {
+        return noHit();
+    }
+    float2 uv = clip.xy / clip.w * 0.5 + 0.5;
+    if (any(uv < 0) || any(uv >= 1))
+    {
+        return noHit();
+    }
+    int2 cell = int2(uv * float2(width, height));
+    float raw = depthAt(depth, width, height, cell.x, cell.y);
+    if (raw <= 0)
+    {
+        return noHit(); // the sky
+    }
+    float near = mul(viewProjection, float4(0, 0, 0, 1)).z;
+    float scene = near / raw;
+    float before = mul(viewProjection, float4(toOrigin + a, 1)).w;
+    if (!(clip.w + r > scene && clip.w < scene + thickness && before - r <= scene))
+    {
+        return noHit();
+    }
+    float3 surface = depthPoint(inverse, depth, width, height, cell.x, cell.y);
+    float3 across = depthPoint(inverse, depth, width, height, cell.x + 1, cell.y) - surface;
+    float3 up = depthPoint(inverse, depth, width, height, cell.x, cell.y + 1) - surface;
+    float3 n = cross(across, up);
+    n = dot(n, n) > 1e-12 ? normalize(n) : normalize(-surface);
+    n = dot(n, surface) > 0 ? -n : n; // towards the camera
+    return hitAt(surface - toOrigin + n * r, n);
+}
+
 /** How much of an attractor's strength reaches `distance`: falling to 0 at `radius` (0: all of it). */
 float falloff(float distance, float radius)
 {
@@ -306,15 +532,18 @@ float falloff(float distance, float radius)
 }
 
 /**
- * Moves `p` on by `h` seconds under the updaters (CpuSimulation.step): gravity, linear drag and wind integrated exactly,
- * the forces that depend on the position (curl noise, vortices, attractors, vector fields) from where it is at the
- * step's start, then orbits (exact turns) and speed limits, then the attributes over life from those at birth. Fields
- * are by their index in alphabetical order of their names.
+ * Moves `p` on by `h` seconds under the updaters (CpuSimulation.step): gravity, linear drag and wind integrated
+ * exactly, the forces that depend on the position (curl noise, vortices, attractors, vector fields) from where it is
+ * at the step's start, then orbits (exact turns) and speed limits, then collision (the first method of each chain the
+ * GPU has; stuck particles only age), then the attributes over life from those at birth. Fields are by their index in
+ * alphabetical order of their names.
  */
 void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, float4 color0, float size0, float h)
 {
     uint count = (m.program[0] >> 8) & 0xff;
     ParticleEmitter e = m.emitter;
+    p.flags &= ~PARTICLE_COLLIDED;
+    bool stuck = (p.flags & PARTICLE_STUCK) != 0; // frozen where it hit: it only ages
     float3 a = 0;
     float k = 0;
     uint op = first;
@@ -392,6 +621,9 @@ void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, floa
             break;
         case OP_ORBIT:
         case OP_SPEED_LIMIT:
+        case OP_COLLIDERS:
+        case OP_HEIGHT:
+        case OP_DEPTH:
             after = true;
             break;
         default:
@@ -399,6 +631,13 @@ void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, floa
             break;
         }
         op = skip(m, op);
+    }
+    if (stuck)
+    {
+        a = 0;
+        k = 0;
+        after = false;
+        p.velocity = 0;
     }
     float3 v = p.velocity;
     if (k == 0)
@@ -437,6 +676,63 @@ void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, floa
             if (speed > limit)
             {
                 p.velocity *= max(0.0, limit) / speed;
+            }
+        }
+        op = skip(m, op);
+    }
+    // Collision: the move from the step's start, in world axes about the origin (local-space particles turned out
+    // and back), against each method the program has; the first hit responds.
+    bool local = (e.flags & EMITTER_LOCAL) != 0;
+    float3 start = local ? turn(e.rotation, x) : x;
+    float4 back = float4(-e.rotation.xyz, e.rotation.w);
+    for (uint i = 0, op = first; after && i < count; i++)
+    {
+        uint code = m.program[op] & 0xff;
+        uint salt = m.program[op + 1];
+        if (code == OP_COLLIDERS || code == OP_HEIGHT || code == OP_DEPTH)
+        {
+            uint shift = code == OP_COLLIDERS ? 1 : 0; // colliders have their layers before the radius
+            float radius = value(m, keys, op, salt, 2 + shift, p);
+            radius = radius > 0 ? radius : 0.5 * p.size.x;
+            float3 end = local ? turn(e.rotation, p.position) : p.position;
+            Hit hit;
+            if (code == OP_COLLIDERS)
+            {
+                hit = hitColliders(e, uint(value(m, keys, op, salt, 2, p) + 0.5), radius, start, end);
+            }
+            else if (code == OP_HEIGHT)
+            {
+                hit = hitHeight(e, radius, end);
+            }
+            else
+            {
+                hit = hitDepth(e, radius, value(m, keys, op, salt, 5, p), start, end);
+            }
+            if (hit.hit)
+            {
+                uint response = uint(round(value(m, keys, op, salt, 3 + shift, p)));
+                p.flags |= PARTICLE_COLLIDED;
+                if (response == RESPONSE_KILL)
+                {
+                    kill = true;
+                    break;
+                }
+                float3 velocity = local ? turn(e.rotation, p.velocity) : p.velocity;
+                float into = dot(velocity, hit.normal);
+                if (response == RESPONSE_STICK || response == RESPONSE_SNAP)
+                {
+                    p.flags |= PARTICLE_STUCK;
+                    velocity = 0;
+                }
+                else if (into < 0)
+                {
+                    float keep = 1 - value(m, keys, op, salt, 1, p);
+                    float bounce = response == RESPONSE_BOUNCE ? -value(m, keys, op, salt, 4 + shift, p) : 0;
+                    velocity = (velocity - into * hit.normal) * keep + bounce * into * hit.normal;
+                }
+                p.position = local ? turn(back, hit.contact) : hit.contact;
+                p.velocity = local ? turn(back, velocity) : velocity;
+                break;
             }
         }
         op = skip(m, op);
@@ -957,14 +1253,15 @@ void argsMain(uint3 id : SV_DispatchThreadID)
 void uploadMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
 {
     // A row of groups per CPU emitter: its uploaded particles into its range of the half the frame writes.
-    uint* cpu = push.cpu;
+    ParticleFrame* frame = push.frame;
+    uint* cpu = frame.cpu;
     ParticleEmitter* emitters = push.emitters;
     ParticleEmitter e = emitters[cpu[group.y]];
     if (id.x >= e.demand)
     {
         return;
     }
-    Particle* uploads = push.uploads;
+    Particle* uploads = frame.uploads;
     Particle* source0 = push.source;
     Particle* target = source0 + push.targetDelta;
     target[e.first + id.x] = uploads[e.records + id.x];

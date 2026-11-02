@@ -29,7 +29,11 @@ import java.util.HashMap;
 import java.util.Map;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
+import com.truesim.engine.render.layout.ParticleColliderLayout;
+import com.truesim.engine.render.layout.ParticleFrameLayout;
 import com.truesim.scene.effects.CpuSimulation;
+import com.truesim.scene.effects.EffectColliders;
+import com.truesim.scene.effects.ParticleWorld;
 import com.truesim.scene.effects.EffectData;
 import com.truesim.scene.effects.EffectRuntime;
 import com.truesim.scene.effects.Effects;
@@ -125,6 +129,26 @@ public final class Particles implements AutoCloseable {
     private final Staging sortChunkStaged;
     private int sortedCount;
     private int sortChunkCount;
+    // What the simulation collides with (effects.md §2.7): the frame record, colliders, the height field, the depth
+    private final FrameBuffer frameTable;
+    private final Staging frameStaged = new Staging(ParticleFrameLayout.BYTES);
+    private final FrameBuffer colliderTable;
+    private final Staging colliderStaged = new Staging((long) ParticleColliderLayout.BYTES
+        * ParticleConstants.MAX_COLLIDERS);
+    private int colliderCount;
+    private ParticleWorld heightWorld;
+    private FrameBuffer heights;
+    private Staging heightStaged;
+    private int heightResolution;
+    private float heightSize;
+    private double heightX = Double.NaN;
+    private double heightZ = Double.NaN;
+    private double focusX;
+    private double focusZ;
+    private long heightRefreshes;
+    private final GpuBuffer depth;
+    private final ExternalBuffer depthImport;
+    private boolean depthReady;
 
     // Per effect slot: the effect followed, its programs, its emitters' instances (-1: none) and places in the frame's
     // list, its origin, where it was and its time at the last update.
@@ -250,8 +274,8 @@ public final class Particles implements AutoCloseable {
         ParticlePool p = null;
         ModulePrograms m = null;
         CpuEmitters c = null;
-        GpuBuffer[] made = new GpuBuffer[5];
-        FrameBuffer[] tables = new FrameBuffer[7];
+        GpuBuffer[] made = new GpuBuffer[6];
+        FrameBuffer[] tables = new FrameBuffer[9];
         try {
             p = new ParticlePool(device, budget);
             m = new ModulePrograms(device, slots);
@@ -262,6 +286,11 @@ public final class Particles implements AutoCloseable {
             made[2] = GpuBuffer.deviceLocal(device, statisticsBytes(maxEmitters), GPU_USAGE);
             made[3] = GpuBuffer.deviceLocal(device, 16, GPU_USAGE | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
             made[4] = GpuBuffer.deviceLocal(device, 4L * p.slots(), GPU_USAGE);
+            made[5] = GpuBuffer.deviceLocal(device, 4L * (ParticleConstants.DEPTH_HEADER
+                + (long) ParticleConstants.DEPTH_GRID * ParticleConstants.DEPTH_GRID), GPU_USAGE);
+            tables[7] = FrameBuffer.create(device, ParticleFrameLayout.BYTES, STORAGE, slots);
+            tables[8] = FrameBuffer.create(device, (long) ParticleColliderLayout.BYTES
+                * ParticleConstants.MAX_COLLIDERS, STORAGE, slots);
             tables[4] = FrameBuffer.create(device, 8L * maxEmitters, STORAGE, slots);
             tables[0] = FrameBuffer.create(device, (long) ParticleEmitterLayout.BYTES * maxEmitters, STORAGE, slots);
             tables[1] = FrameBuffer.create(device, 4L * p.slots() / ParticleConstants.CHUNK, STORAGE, slots);
@@ -300,6 +329,9 @@ public final class Particles implements AutoCloseable {
         statistics = made[2];
         dispatch = made[3];
         order = made[4];
+        depth = made[5];
+        frameTable = tables[7];
+        colliderTable = tables[8];
         ribbonList = tables[4];
         emitterTable = tables[0];
         chunkTable = tables[1];
@@ -314,6 +346,7 @@ public final class Particles implements AutoCloseable {
         statisticsImport = new ExternalBuffer("particle statistics", statistics);
         dispatchImport = new ExternalBuffer("particle spawn dispatch", dispatch);
         orderImport = new ExternalBuffer("particle ribbon order", order);
+        depthImport = new ExternalBuffer("particle collision depth", depth);
     }
 
     private static long statisticsBytes(int maxEmitters) {
@@ -434,6 +467,8 @@ public final class Particles implements AutoCloseable {
             }
         }
         list(effects);
+        colliders(effects.colliders());
+        refreshHeights();
         spawn(effects, spawns);
         upload();
         ribbons();
@@ -465,6 +500,22 @@ public final class Particles implements AutoCloseable {
         sortStaged.copyTo(sortList, 4L * sortedCount);
         sortChunkStaged.copyTo(sortChunks, 8L * sortChunkCount);
         cpuEmitters.finish();
+        colliderStaged.copyTo(colliderTable, (long) ParticleColliderLayout.BYTES * colliderCount);
+        Staging r = frameStaged;
+        r.putLong(ParticleFrameLayout.UPLOADS, cpuEmitters.recordsAddress());
+        r.putLong(ParticleFrameLayout.CPU, cpuEmitters.listAddress());
+        r.putLong(ParticleFrameLayout.COLLIDERS, colliderTable.deviceAddress());
+        r.putLong(ParticleFrameLayout.HEIGHTS, heights == null ? 0 : heights.deviceAddress());
+        r.putLong(ParticleFrameLayout.DEPTH, depth.deviceAddress());
+        r.putInt(ParticleFrameLayout.COLLIDER_COUNT, colliderCount);
+        r.putInt(ParticleFrameLayout.HEIGHT_RESOLUTION, heights == null ? 0 : heightResolution);
+        r.putFloat(ParticleFrameLayout.HEIGHT_SIZE, heightSize);
+        r.putInt(ParticleFrameLayout.DEPTH_READY, depthReady ? 1 : 0);
+        float hx = (float) heightX;
+        float hz = (float) heightZ;
+        r.putVector(ParticleFrameLayout.HEIGHT_CENTER_HIGH, hx, 0, hz);
+        r.putVector(ParticleFrameLayout.HEIGHT_CENTER_LOW, (float) (heightX - hx), 0, (float) (heightZ - hz));
+        r.copyTo(frameTable, ParticleFrameLayout.BYTES);
     }
 
     private void follow(long effect) {
@@ -882,6 +933,99 @@ public final class Particles implements AutoCloseable {
         }
     }
 
+    /** Writes the scene's colliders (at most {@code MAX_COLLIDERS}) for the frame. */
+    private void colliders(EffectColliders colliders) {
+        colliderCount = Math.min(colliders.count(), ParticleConstants.MAX_COLLIDERS);
+        for (int i = 0; i < colliderCount; i++) {
+            long at = (long) ParticleColliderLayout.BYTES * i;
+            double x = colliders.position(i, 0);
+            double y = colliders.position(i, 1);
+            double z = colliders.position(i, 2);
+            float hx = (float) x;
+            float hy = (float) y;
+            float hz = (float) z;
+            colliderStaged.putVector(at + ParticleColliderLayout.POSITION_HIGH, hx, hy, hz);
+            colliderStaged.putVector(at + ParticleColliderLayout.POSITION_LOW, (float) (x - hx), (float) (y - hy),
+                (float) (z - hz));
+            colliderStaged.putInt(at + ParticleColliderLayout.KIND, colliders.kind(i).ordinal());
+            colliderStaged.putInt(at + ParticleColliderLayout.LAYERS, colliders.layers(i));
+            for (int c = 0; c < 4; c++) {
+                colliderStaged.putFloat(at + ParticleColliderLayout.ROTATION + 4L * c,
+                    (float) colliders.rotation(i, c));
+            }
+            colliderStaged.putVector(at + ParticleColliderLayout.SIZE, colliders.size(i, 0), colliders.size(i, 1),
+                colliders.size(i, 2));
+        }
+    }
+
+    /**
+     * Lets {@code collide.height} modules collide with {@code world}'s heights on the GPU: a square of {@code size}
+     * metres around the {@link #heightFocus focus}, sampled at {@code resolution} by {@code resolution} points, taken
+     * again when the focus moves a quarter of it away. Null: none (height collision does nothing on the GPU).
+     */
+    @AllowAllocation("the height field set up")
+    public Particles heights(ParticleWorld world, float size, int resolution) {
+        if (world != null && (!(size > 0) || resolution < 2 || resolution > 4096)) {
+            throw new IllegalArgumentException("Not a height field: " + size + " m, " + resolution + " points");
+        }
+        if (heights != null) {
+            retired.add(heights);
+            heights = null;
+        }
+        heightWorld = world;
+        heightSize = size;
+        heightResolution = resolution;
+        heightX = Double.NaN;
+        if (world != null) {
+            long bytes = 4L * resolution * resolution;
+            heights = FrameBuffer.create(device, bytes, STORAGE, slots);
+            heightStaged = new Staging(bytes);
+        }
+        return this;
+    }
+
+    /** Where the height field centers: the camera, the player; it follows when it moves far enough. */
+    public void heightFocus(double x, double z) {
+        focusX = x;
+        focusZ = z;
+    }
+
+    /** How many times the height field was taken from the world since this was made. */
+    public long heightRefreshes() {
+        return heightRefreshes;
+    }
+
+    /** Takes the height field again around the focus where it moved a quarter of its size from the last center. */
+    private void refreshHeights() {
+        if (heightWorld == null || Math.abs(focusX - heightX) < 0.25 * heightSize
+            && Math.abs(focusZ - heightZ) < 0.25 * heightSize) {
+            return;
+        }
+        heightX = focusX;
+        heightZ = focusZ;
+        int n = heightResolution;
+        double spacing = heightSize / (n - 1.0);
+        for (int z = 0; z < n; z++) {
+            for (int x = 0; x < n; x++) {
+                double h = heightWorld.height(heightX - 0.5 * heightSize + x * spacing,
+                    heightZ - 0.5 * heightSize + z * spacing);
+                heightStaged.putFloat(4L * (z * n + x), Double.isNaN(h) ? -1e30f : (float) h);
+            }
+        }
+        heightStaged.copyTo(heights, 4L * n * n);
+        heightRefreshes++;
+    }
+
+    /** The collision depth's buffer, for the view's {@link ParticleCollisionDepth} to write. */
+    ExternalBuffer depthImport() {
+        return depthImport;
+    }
+
+    /** The collision view wrote its depth: depth collision has a frame to read from the next on. */
+    void depthCaptured() {
+        depthReady = true;
+    }
+
     private final float[] turned = new float[3];
 
     /** ({@code x}, {@code y}, {@code z}) turned by the inverse of the rotation ({@code qx}, ..., {@code qw}). */
@@ -1165,14 +1309,14 @@ public final class Particles implements AutoCloseable {
 
     /** The simulation's buffers as buffers of a build. */
     record Buffers(Buffer particles, Buffer side, Buffer state, Buffer chunkCounts, Buffer statistics,
-        Buffer dispatch, Buffer order) {
+        Buffer dispatch, Buffer order, Buffer depth) {
     }
 
     @AllowAllocation("building the graph, when it changes")
     Buffers importInto(GraphBuilder g) {
         return new Buffers(g.importBuffer(pool.graphBuffer()), g.importBuffer(pool.sideGraphBuffer()),
             g.importBuffer(stateImport), g.importBuffer(chunkCountsImport), g.importBuffer(statisticsImport),
-            g.importBuffer(dispatchImport), g.importBuffer(orderImport));
+            g.importBuffer(dispatchImport), g.importBuffer(orderImport), g.importBuffer(depthImport));
     }
 
     /** Whether this frame simulates: it was updated while it records, with emitters to move. */
@@ -1203,7 +1347,7 @@ public final class Particles implements AutoCloseable {
             .chunkCounts(chunkCounts.deviceAddress()).state(state.deviceAddress())
             .spawns(spawnRing.deviceAddress()).programs(programs.wordsAddress()).curves(programs.curvesAddress())
             .parameters(parameterBlocks.deviceAddress()).statistics(statistics.deviceAddress())
-            .dispatch(dispatch.deviceAddress()).uploads(cpuEmitters.recordsAddress()).cpu(cpuEmitters.listAddress())
+            .dispatch(dispatch.deviceAddress()).frame(frameTable.deviceAddress())
             .emitterCount(emitterCount).chunkCount(chunkCount);
     }
 
@@ -1405,6 +1549,12 @@ public final class Particles implements AutoCloseable {
         ribbonList.close();
         sortList.close();
         sortChunks.close();
+        frameTable.close();
+        colliderTable.close();
+        if (heights != null) {
+            heights.close();
+        }
+        depth.close();
         programs.close();
         cpuEmitters.close();
         pool.close();

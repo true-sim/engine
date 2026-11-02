@@ -58,6 +58,7 @@ import com.truesim.scene.assets.mesh.VertexAttribute;
 import com.truesim.scene.assets.mesh.VertexFormat;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.effects.Bind;
+import com.truesim.scene.effects.Collide;
 import com.truesim.scene.effects.ColorGradient;
 import com.truesim.scene.effects.CpuSimulation;
 import com.truesim.scene.effects.Effect;
@@ -525,6 +526,38 @@ class ParticleDrawTest {
         assertThat(writer.ended()).isTrue();
     }
 
+
+    @Test
+    void rainStopsOnAFloorTheDepthShows() {
+        // A floor 1 m below the camera, seen from above at a slant: rain sticks on it where the depth has it (green);
+        // rain without depth collision falls through and hides below it (red).
+        scene.set(0, wall, blackWall(), 0, -1, -6, (float) -Math.sqrt(0.5), 0, 0,
+            (float) Math.sqrt(0.5), 4, 4, 4);
+        camera.position(0, 1, 0).set(0, -0.35, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        view.port().add(new ParticleCollisionDepth(particles, view));
+        EffectData rain = EffectData.builder().emitter("e", e -> e.duration(1).spawn(Spawn.rate(300)).capacity(3000)
+            .init(Shape.box(4, 0, 3), Init.lifetime(10), Init.size(Bind.constant(0.12f)),
+                Init.velocity(Bind.constant(0), Bind.constant(-4), Bind.constant(0)),
+                Init.color(Bind.color(0, 1, 0, 1)))
+            .collide(Collide.depth(0.5f).stick()).render(sprite(Renderer.Facing.POSITION))).build();
+        EffectData through = EffectData.builder().emitter("e", e -> e.duration(1).spawn(Spawn.rate(300)).capacity(3000)
+            .init(Shape.box(4, 0, 3), Init.lifetime(10), Init.size(Bind.constant(0.12f)),
+                Init.velocity(Bind.constant(0), Bind.constant(-4), Bind.constant(0)),
+                Init.color(Bind.color(1, 0, 0, 1))).render(sprite(Renderer.Facing.POSITION))).build();
+        effects.play(rain, -2, 1.5, -6);
+        effects.play(through, 2, 1.5, -6);
+        int[] image = frames(240); // a second of rain, then three for it to land
+        int green = 0;
+        int red = 0;
+        for (int pixel : image) {
+            green += channel(pixel, 1) > 128 && channel(pixel, 0) < 64 ? 1 : 0;
+            red += channel(pixel, 0) > 128 && channel(pixel, 1) < 64 ? 1 : 0;
+        }
+        System.out.printf("Rain on a floor: %d green pixels (resting on it), %d red (fallen through)%n", green, red);
+        assertThat(green).as("rain resting on the floor").isGreaterThan(50);
+        assertThat(4 * red).as("rain fallen through, hidden below it").isLessThan(green);
+        assertThat(graph.passes()).contains("particle collision depth");
+    }
 
     /** An emitter of two particles the game writes, drawn sorted or not. */
     private static EffectData two(boolean sorted) {
