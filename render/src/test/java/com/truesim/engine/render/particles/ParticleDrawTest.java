@@ -242,9 +242,14 @@ class ParticleDrawTest {
 
     /** Frames of the runtime, the particles and the graph; the image read back after the last. */
     private int[] frames(int n) {
+        return frames(n, FRAME);
+    }
+
+    /** {@link #frames(int)} of {@code ticks} each: 0 for a paused world. */
+    private int[] frames(int n, long ticks) {
         for (int f = 0; f < n; f++) {
             nodes.update();
-            runtime.update(FRAME);
+            runtime.update(ticks);
             cpu.update();
             graph.beginFrame();
             particles.update(effects, runtime.spawns(), cpu);
@@ -683,6 +688,95 @@ class ParticleDrawTest {
         assertThat(coveredColumns(image, y, column(x - 0.7, -5), column(x - 0.1, -5), 0)).as("the trail")
             .isEqualTo(column(x - 0.1, -5) - column(x - 0.7, -5) + 1);
         assertThat(coveredColumns(image, y, 0, column(x - 1.2, -5), 0)).as("no older positions").isZero();
+    }
+
+    /** How many channels of {@code a} and {@code b} differ by more than 8 of 255. */
+    private static int differing(int[] a, int[] b) {
+        int n = 0;
+        for (int i = 0; i < a.length; i++) {
+            for (int c = 0; c < 3; c++) {
+                n += Math.abs(channel(a[i], c) - channel(b[i], c)) > 8 ? 1 : 0;
+            }
+        }
+        return n;
+    }
+
+    /** A moving torch: sparks inheriting its velocity, a trail of streaks and a ribbon behind it, all world space. */
+    private static EffectData torch() {
+        return EffectData.builder()
+            .emitter("sparks", e -> e.spawn(Spawn.rate(60)).init(Shape.cone(0.4f, 0.1f), Init.speed(Bind.random(1, 2)),
+                    Init.lifetime(Bind.random(0.5f, 1)), Init.size(Bind.random(0.3f, 0.5f)),
+                    Init.color(Bind.color(1, 0.5f, 0.2f, 1)))
+                .update(Forces.gravity(Bind.constant(0.2f)), Forces.drag(0.5f))
+                .render(Renderer.billboard(Renderer.Facing.POSITION).additive()))
+            .emitter("streaks", e -> e.spawn(Spawn.rate(10)).init(Init.speed(Bind.constant(1)),
+                    Init.lifetime(1), Init.size(Bind.constant(0.05f)), Init.color(Bind.color(0, 1, 0, 1)))
+                .render(Renderer.trail(6).additive()))
+            .emitter("ribbon", e -> e.spawn(Spawn.rate(30)).init(Init.lifetime(1), Init.size(Bind.constant(0.2f)),
+                    Init.color(Bind.color(0, 0, 1, 1)))
+                .render(Renderer.ribbon().additive()))
+            .build();
+    }
+
+    @Test
+    void anEffect7000KmOutDrawsAsAtTheOrigin() {
+        particles.rebaseDistance(0.5); // rebased every ten frames as it moves
+        int[][] images = new int[2][];
+        double[] bases = {0, 7_000_000.25};
+        long node = nodes.create();
+        for (int run = 0; run < 2; run++) {
+            double base = bases[run];
+            camera.position(base, 0, 0);
+            nodes.setTranslation(node, base - 1, -0.5, -4);
+            nodes.update();
+            Effect effect = effects.play(torch(), node).seed(9).inheritVelocity(0.5f);
+            for (int f = 0; f < 40; f++) {
+                nodes.setTranslation(node, base - 1 + 0.05 * f, -0.5 + 0.02 * f, -4);
+                images[run] = frames(1);
+            }
+            effect.kill();
+        }
+        int differing = differing(images[0], images[1]);
+        System.out.printf("7,000 km out against the origin: %d channels off by more than 8%n", differing);
+        assertThat(particles.rebases()).isGreaterThan(4);
+        assertThat(covered(images[0], 0, 40)).as("sparks drawn").isGreaterThan(30);
+        assertThat(covered(images[0], 1, 40)).as("streaks drawn").isGreaterThan(3);
+        assertThat(covered(images[0], 2, 40)).as("a ribbon drawn").isGreaterThan(30);
+        assertThat(differing).as("channels off by more than 8 of 255").isLessThan(images[0].length * 3 / 100);
+    }
+
+    @Test
+    void aPausedWorldFreezesEffectsWhileViewsDraw() {
+        long node = nodes.create();
+        nodes.setTranslation(node, 0, -0.5, -4);
+        effects.play(torch(), node).seed(4);
+        frames(20);
+        effects.pause(true); // every effect paused
+        int[] paused = frames(1);
+        assertThat(frames(5)).as("frozen, still drawn").isEqualTo(paused);
+        assertThat(covered(paused, 0, 40)).isGreaterThan(10);
+        effects.pause(false);
+        int[] stopped = frames(1, 0); // the world paused: a step of 0
+        assertThat(frames(5, 0)).isEqualTo(stopped);
+        assertThat(differing(frames(5), stopped)).as("moving again").isPositive();
+    }
+
+    @Test
+    void aReplacedAssetRestartsItsInstances() {
+        EffectData red = still(1, e -> e.init(Init.size(Bind.constant(1)), Init.color(Bind.color(1, 0, 0, 1)))
+            .render(sprite(Renderer.Facing.POSITION)));
+        EffectData green = still(1, e -> e.init(Init.size(Bind.constant(1)), Init.color(Bind.color(0, 1, 0, 1)))
+            .render(sprite(Renderer.Facing.POSITION)));
+        Effect effect = effects.play(red, 0, 0, -4);
+        int[] image = frames(3);
+        assertThat(at(image, SIZE / 2, SIZE / 2, 0)).isGreaterThan(250);
+        int range = particles.first(effect.id(), 0);
+        assertThat(effects.replace(red, green)).isOne();
+        image = frames(3);
+        assertThat(effect.alive()).isTrue();
+        assertThat(at(image, SIZE / 2, SIZE / 2, 0)).as("the old one's particles gone").isLessThan(5);
+        assertThat(at(image, SIZE / 2, SIZE / 2, 1)).as("the new one's drawn").isGreaterThan(250);
+        assertThat(particles.first(effect.id(), 0)).as("its range kept").isEqualTo(range);
     }
 
     @Test

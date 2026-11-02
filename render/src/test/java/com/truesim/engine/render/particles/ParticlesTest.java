@@ -415,7 +415,7 @@ class ParticlesTest {
         long node = scene.create();
         scene.setTranslation(node, 1, 2, 3);
         EffectData[] world = pair(e -> e.spawn(Spawn.rate(30)).init(Init.lifetime(3),
-            Init.velocity(Bind.constant(1), Bind.constant(0), Bind.constant(0))));
+            Init.velocity(Bind.constant(1), Bind.constant(0), Bind.constant(0))).update(Forces.gravity()));
         EffectData[] local = pair(e -> e.space(Space.LOCAL).spawn(Spawn.rate(30)).init(Init.lifetime(3),
             Init.velocity(Bind.constant(1), Bind.constant(0.5f), Bind.constant(0))).update(Forces.gravity()));
         long[] w = {effects.play(world[0], node).seed(5).id(), effects.play(world[1], node).seed(5).id()};
@@ -428,8 +428,7 @@ class ParticlesTest {
             }
             frame(FRAME);
         }
-        // World space: offsets from where it started. Gravity is left out under a turned node: CpuSimulation pulls
-        // world-space particles along the node's down there (reported), the GPU along the world's.
+        // World space: offsets from where it started, falling along world -Y under the turned node too.
         assertSame(w, 1, 2, 3, 1e-3);
         // Local space: in the emitter's frame on the GPU, in the world through the cursor.
         List<Gpu> gpu = gpu(l[0], 0);
@@ -446,6 +445,136 @@ class ParticlesTest {
             assertThat(effects.position(l[0], 1) + r[1]).isCloseTo(cursor.y(), within(1e-3));
             assertThat(effects.position(l[0], 2) + r[2]).isCloseTo(cursor.z(), within(1e-3));
         }
+    }
+
+    @Test
+    void farOutRebasedAndInheritingVelocityWorldSpaceMatchesTheReference() {
+        long node = scene.create();
+        double x0 = 7_000_000.25;
+        scene.setTranslation(node, x0, 2, 3);
+        scene.update(); // played there, its origin there
+        particles.rebaseDistance(1.5);
+        EffectData[] world = pair(e -> e.spawn(Spawn.rate(30)).init(Shape.sphere(0.2f), Init.lifetime(1.5f),
+            Init.speed(Bind.random(1, 2)), Init.size(Bind.random(0.1f, 0.2f))).update(Forces.gravity(), Forces.drag(0.3f))
+            .render(com.truesim.scene.effects.Renderer.trail(4)));
+        long[] w = {effects.play(world[0], node).seed(7).inheritVelocity(0.5f).id(),
+            effects.play(world[1], node).seed(7).inheritVelocity(0.5f).id()};
+        for (int f = 0; f < 40; f++) {
+            scene.setTranslation(node, x0 + 0.2 * f, 2, 3 - 0.1 * f); // 12 m/s: rebased every few frames
+            frame(FRAME);
+        }
+        assertThat(particles.rebases()).isGreaterThan(5);
+        assertThat(particles.origin(w[0], 0)).isNotEqualTo(x0);
+        assertSame(w, particles.origin(w[0], 0), particles.origin(w[0], 1), particles.origin(w[0], 2), 1e-3);
+        assertThat(particles.origin(0x7fff_0000_0000L, 0)).as("not followed").isNaN();
+        assertThatIllegalArgumentException().isThrownBy(() -> particles.rebaseDistance(0));
+    }
+
+    @Test
+    void updatesBetweenFramesAreForTheNextFrame() {
+        long[] pair = play(pair(e -> e.spawn(Spawn.burst(0, 12)).init(Init.lifetime(10))), 0, 0, 0, 3);
+        for (int f = 0; f < 3; f++) {
+            scene.update();
+            runtime.update(FRAME);
+            cpu.update();
+            particles.update(effects, runtime.spawns()); // before the frame begins
+            graph.beginFrame();
+            graph.submit(0, 0);
+        }
+        assertSame(pair, 0, 0, 0, 1e-4);
+    }
+
+    @Test
+    void endedEffectsStayWarmForTheNextOfTheirKind() {
+        EffectData[] brief = pair(e -> e.duration(0.05).spawn(Spawn.burst(0, 10)).init(Init.lifetime(0.05f)));
+        long free = particles.pool().freeSlots();
+        particles.warmFrames(10);
+        Effect first = effects.play(brief[0], 0, 0, 0);
+        frame(FRAME);
+        int range = particles.first(first.id(), 0);
+        for (int f = 0; f < 10 && first.alive(); f++) {
+            frame(FRAME);
+        }
+        frame(FRAME);
+        assertThat(particles.warmCount()).isOne();
+        assertThat(particles.pool().freeSlots()).as("kept").isLessThan(free);
+        assertThat(particles.programCount()).isOne();
+        Effect again = effects.play(brief[0], 0, 0, 0);
+        frame(FRAME);
+        assertThat(particles.warmCount()).isZero();
+        assertThat(particles.first(again.id(), 0)).as("the warm range").isEqualTo(range);
+        assertThat(gpu(again.id(), 0)).as("starting empty, then its burst").hasSize(10);
+        // At most a few per effect; given back when their time is up.
+        List<Effect> many = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            many.add(effects.play(brief[0], 0, 0, 0));
+        }
+        for (int f = 0; f < 6; f++) {
+            frame(FRAME);
+        }
+        assertThat(particles.warmCount()).isEqualTo(4);
+        for (int f = 0; f < 12; f++) {
+            frame(FRAME);
+        }
+        assertThat(particles.warmCount()).isZero();
+        assertThat(particles.pool().freeSlots()).isEqualTo(free);
+        assertThatIllegalArgumentException().isThrownBy(() -> particles.warmFrames(-1));
+    }
+
+    @Test
+    void warmRangesMakeRoomWhenThePoolIsFull() {
+        device.waitIdle();
+        graph.close();
+        particles.close();
+        poolCopy.close();
+        stateCopy.close();
+        target.close();
+        graph = new FrameGraph(device, 2);
+        start(ParticlePool.SLOT_BYTES * 1024L); // 1,024 slots
+        EffectData small = EffectData.builder().emitter("e", e -> e.capacity(600).duration(0.02)
+            .spawn(Spawn.burst(0, 1)).init(Init.lifetime(0.02f))).build();
+        EffectData big = EffectData.builder().emitter("e", e -> e.capacity(700).spawn(Spawn.rate(1))).build();
+        Effect brief = effects.play(small, 0, 0, 0);
+        for (int f = 0; f < 6 && brief.alive(); f++) {
+            frame(FRAME);
+        }
+        frame(FRAME);
+        assertThat(particles.warmCount()).isOne();
+        long effect = effects.play(big, 0, 0, 0).id();
+        frame(FRAME);
+        assertThat(particles.instance(effect, 0)).as("room made by the warm one").isNotNegative();
+        assertThat(particles.warmCount()).isZero();
+        assertThat(particles.unplaced()).isZero();
+    }
+
+    @Test
+    void replacedEffectsRestartKeepingRangesThatFit() {
+        EffectData three = EffectData.builder().emitter("a", e -> e.capacity(64).spawn(Spawn.burst(0, 3))
+            .init(Init.lifetime(10))).emitter("b", e -> e.capacity(64).spawn(Spawn.burst(0, 1)).init(
+                Init.lifetime(10))).build();
+        EffectData five = EffectData.builder().emitter("a", e -> e.capacity(64).spawn(Spawn.burst(0, 5))
+            .init(Init.lifetime(10))).emitter("b", e -> e.capacity(128).spawn(Spawn.burst(0, 1))
+            .init(Init.lifetime(10))).emitter("c", e -> e.capacity(64).space(Space.LOCAL).spawn(Spawn.burst(0, 2))
+            .init(Init.lifetime(10))).build();
+        Effect effect = effects.play(three, 0, 0, 0);
+        frame(FRAME);
+        frame(FRAME);
+        int a = particles.first(effect.id(), 0);
+        assertThat(gpu(effect.id(), 0)).hasSize(3);
+        effects.replace(three, five);
+        frame(FRAME);
+        frame(FRAME);
+        assertThat(effect.alive()).isTrue();
+        assertThat(particles.first(effect.id(), 0)).as("the same capacity: kept").isEqualTo(a);
+        assertThat(gpu(effect.id(), 0)).as("started over").hasSize(5);
+        assertThat(gpu(effect.id(), 1)).hasSize(1);
+        assertThat(gpu(effect.id(), 2)).hasSize(2);
+        // And back, to fewer emitters.
+        effects.replace(five, three);
+        frame(FRAME);
+        frame(FRAME);
+        assertThat(gpu(effect.id(), 0)).hasSize(3);
+        assertThat(particles.instance(effect.id(), 2)).isEqualTo(-1);
     }
 
     private static double[] rotate(double qx, double qy, double qz, double qw, double x, double y, double z) {
@@ -523,6 +652,7 @@ class ParticlesTest {
 
     @Test
     void endedEffectsGiveTheirRangesBack() {
+        particles.warmFrames(0);
         long free = particles.pool().freeSlots();
         EffectData brief = pair(e -> e.duration(0.05).spawn(Spawn.burst(0, 10)).init(Init.lifetime(0.1f)))[0];
         Effect effect = effects.play(brief, 0, 0, 0);

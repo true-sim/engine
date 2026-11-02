@@ -25,6 +25,9 @@ import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.VisibilityBufferShading;
+import com.truesim.engine.render.particles.ParticleDraw;
+import com.truesim.engine.render.particles.ParticleSimulation;
+import com.truesim.engine.render.particles.Particles;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -36,6 +39,7 @@ import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.assets.mesh.VertexAttribute;
 import com.truesim.scene.assets.mesh.VertexFormat;
 import com.truesim.scene.core.SceneGraph;
+import com.truesim.scene.effects.Effects;
 import com.truesim.scene.meshbuild.MeshBuilder;
 import com.truesim.scene.render.MaterialData;
 import com.truesim.scene.render.RenderAssets;
@@ -57,11 +61,14 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  * generated in the asset cache, 30,001 scene nodes with renderables, a {@link SceneSync} on shared
  * {@link SceneResources}, drawn by a frame graph with two frames in flight at 1920 x 1080. Prints the time to load
  * and upload, and per frame the time of each stage (scene, renderables, sync, the graph's recording and submission),
- * the whole frame and what the main thread allocated, for a still scene, a moving camera, moving rocks and rocks
- * coming and going. Run with {@code TRUESIM_BENCHMARK=true ./gradlew :engine-scene:test --tests '*SceneBenchmark'}.
+ * the whole frame and what the main thread allocated, for a still scene, a moving camera, moving rocks, rocks
+ * coming and going, and torches burning on 100 rocks through an {@link EffectSync} (in the sync's column). Run with {@code TRUESIM_BENCHMARK=true ./gradlew :engine-scene:test --tests '*SceneBenchmark'}.
  */
 @EnabledIfEnvironmentVariable(named = "TRUESIM_BENCHMARK", matches = "true")
 class SceneBenchmark {
+
+    /** The effects synced in the frame, in the scenario that has them. */
+    private static EffectSync fires;
 
     private static final int WIDTH = 1920;
     private static final int HEIGHT = 1080;
@@ -177,7 +184,9 @@ class SceneBenchmark {
                 .set(shaded.handle(), 0);
             ClusteredForwardShading forward = new ClusteredForwardShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_FORMAT_D32_SFLOAT);
-            port.add(forward).output(Keys.SCENE_COLOR, target);
+            Particles particles = new Particles(device, slots, 16 << 20);
+            graph.add(new ParticleSimulation(particles));
+            port.add(forward).add(new ParticleDraw(particles, main)).output(Keys.SCENE_COLOR, target);
             Stats unused = new Stats();
 
             // Loading: the meshes are generated in the background, uploaded as they arrive at frame boundaries.
@@ -214,6 +223,13 @@ class SceneBenchmark {
                         placed[3 * r + 2]);
                 }
             });
+            Effects effects = new Effects(scene);
+            for (int i = 0; i < 100; i++) {
+                effects.play(EffectSyncTest.torch(), rocks[i]).offset(0, 1, 0);
+            }
+            fires = new EffectSync(effects, particles, null, WRITERS > 1 ? jobs : null);
+            run("torches on 100 rocks", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> { });
+            fires = null;
             SplittableRandom churn = new SplittableRandom(3);
             run("100 rocks removed, 100 added", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> {
                 for (int i = 0; i < 100; i++) {
@@ -244,6 +260,7 @@ class SceneBenchmark {
                 cameraView.visibleMeshlets(), resources.meshCount(), resources.materialSetCount(), renderer.viewBytes(),
                 renderer.path() == MeshletRenderer.Path.MESH_SHADERS ? "mesh shaders" : "indexed");
             sync.close();
+            particles.close();
         }
     }
 
@@ -298,6 +315,9 @@ class SceneBenchmark {
         renderables.update();
         long t3 = System.nanoTime();
         sync.update();
+        if (fires != null) {
+            fires.update(1 / 60.0);
+        }
         cameraView.set(camera, 1, MeshletRenderer.MODE_LIT);
         long t4 = System.nanoTime();
         graph.submit(0, 0);

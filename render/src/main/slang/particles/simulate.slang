@@ -477,6 +477,10 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         Particle* source = push.source;
         p = source[e.first + local];
         keep = survives(p, e.dt);
+        if ((e.flags & EMITTER_LOCAL) == 0)
+        {
+            p.position += e.shift; // the origin rebased: the same place in the world
+        }
     }
     shared[lane] = keep ? 1 : 0;
     GroupMemoryBarrierWithGroupSync();
@@ -532,6 +536,13 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
             uint4* trail = sideSource0 + push.sideDelta + e.side + (to - e.first) * e.sideUnits
                 + (((header >> 16) & PROGRAM_OVER) != 0 ? 2 : 0);
             uint points = header >> 24;
+            if (any(e.shift != 0))
+            {
+                for (uint i = 1; i <= points; i++)
+                {
+                    trail[i] = uint4(asuint(asfloat(trail[i].xyz) + e.shift), 0);
+                }
+            }
             uint head = (trail[0].x + 1) % points;
             trail[0] = uint4(head, 0, 0, 0);
             trail[1 + head] = uint4(asuint(p.position), 0);
@@ -629,6 +640,9 @@ void place(ParticleEmitter e, ParticleSpawn r, inout Particle p, float age)
         q = e.rotation;
         float along = e.frame > 0 ? clamp(1 - age / e.frame, 0.0, 1.0) : 1.0;
         at = e.previous + (e.position - e.previous) * along;
+        p.velocity = turn(q, p.velocity) + e.inherited;
+        p.position = at + turn(q, p.position);
+        return;
     }
     p.position = at + turn(q, p.position);
     p.velocity = turn(q, p.velocity);

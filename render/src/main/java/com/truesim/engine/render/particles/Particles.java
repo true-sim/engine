@@ -74,6 +74,20 @@ public final class Particles implements AutoCloseable {
     public static final int MAX_TRAIL_PARTICLES = 65_536;
     /** Emitter instances at most, unless given. */
     public static final int DEFAULT_EMITTERS = 4096;
+    /**
+     * How far, in metres, an effect moves from the origin of its world-space particles along an axis before the origin
+     * moves to it, unless set: {@link CpuSimulation#REBASE_DISTANCE}, where float offsets are still precise to a
+     * millimetre.
+     */
+    public static final double REBASE_DISTANCE = CpuSimulation.REBASE_DISTANCE;
+    /**
+     * Frames an ended effect's emitter instances stay warm, unless set: their ranges and their effect's programs kept
+     * for the next instance of the same effect (a muzzle flash played again), about five seconds at 60 Hz.
+     */
+    public static final int WARM_FRAMES = 300;
+    /** Ended effects kept warm at most, and per effect data. */
+    private static final int WARM = 32;
+    private static final int WARM_PER_EFFECT = 4;
 
     private static final int STORAGE = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     private static final int GPU_USAGE = STORAGE | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -107,6 +121,7 @@ public final class Particles implements AutoCloseable {
     private double[] previous = new double[3 * 16];
     private long[] times = new long[16];
     private long[] seen = new long[16];
+    private int[] restarted = new int[16];
     private int highest; // one past the highest slot followed
     private Effects following;
     private long stamp;
@@ -126,6 +141,15 @@ public final class Particles implements AutoCloseable {
     private final int[] freeInstances;
     private int freeCount;
     private int unplaced;
+    private double rebaseDistance = REBASE_DISTANCE;
+    private long rebases;
+    private int warmFrames = WARM_FRAMES;
+
+    // Ended effects kept warm: their programs and instances (with their ranges), until a frame.
+    private final ModulePrograms.Block[] warmBlocks = new ModulePrograms.Block[WARM];
+    private final int[][] warmInstances = new int[WARM][];
+    private final long[] warmUntil = new long[WARM];
+    private int warmCount;
 
     // The frame's list.
     private final int[] listInstance;
@@ -307,13 +331,50 @@ public final class Particles implements AutoCloseable {
         return programs.size();
     }
 
+    /**
+     * Rebases an effect's world-space origin once it is {@code metres} away along an axis (default
+     * {@link #REBASE_DISTANCE}): its particles shift by the difference on the GPU, in the update pass, their world
+     * positions unchanged.
+     */
+    public Particles rebaseDistance(double metres) {
+        if (!(metres > 0)) {
+            throw new IllegalArgumentException("Not a distance: " + metres);
+        }
+        rebaseDistance = metres;
+        return this;
+    }
+
+    /** How many times an effect's origin was rebased since this was made. */
+    public long rebases() {
+        return rebases;
+    }
+
+    /**
+     * Keeps an ended effect's emitter instances (their ranges) and programs for {@code frames} frames (default
+     * {@link #WARM_FRAMES}; 0: given back at once) for the next instance of the same effect; at most a few per effect,
+     * and given back early when the pool lacks room.
+     */
+    public Particles warmFrames(int frames) {
+        if (frames < 0) {
+            throw new IllegalArgumentException("Not a frame count: " + frames);
+        }
+        warmFrames = frames;
+        return this;
+    }
+
+    /** Ended effects kept warm now. */
+    public int warmCount() {
+        return warmCount;
+    }
+
     // ---------------------------------------------------------------------------------------------- following effects
 
     /**
      * Follows {@code effects} as of their last advance and takes the frame's {@code spawns} (the runtime's): instances
      * of new effects take ranges, those of ended ones give them back, every instance moves on by its effect's time, and
-     * the spawns go to the GPU. Once per frame, while it records (after {@code beginFrame}); a frame without an update
-     * simulates nothing and draws what the frame before left. Allocates nothing once its tables have grown.
+     * the spawns go to the GPU. Once per frame, before the frame records (between frames, for the next one) or while it
+     * records (after {@code beginFrame}); a frame without an update simulates nothing and draws what the frame before
+     * left. Allocates nothing once its tables have grown.
      */
     public void update(Effects effects, SpawnRecords spawns) {
         update(effects, spawns, null);
@@ -326,7 +387,8 @@ public final class Particles implements AutoCloseable {
     public void update(Effects effects, SpawnRecords spawns, CpuSimulation simulation) {
         Objects.requireNonNull(effects, "effects");
         this.simulation = simulation;
-        long frames = slots.frames();
+        // Between frames, the update is for the frame about to begin
+        long frames = !slots.isSingle() && slots.current() < 0 ? slots.frames() + 1 : slots.frames();
         if (updatedAt != frames || slots.isSingle()) {
             source = written;
             target = 1 - written;
@@ -334,6 +396,7 @@ public final class Particles implements AutoCloseable {
             updatedAt = frames;
         }
         retired.release();
+        cool(false);
         programs.collect();
         following = effects;
         stamp++;
@@ -367,6 +430,8 @@ public final class Particles implements AutoCloseable {
                 end(slot);
             }
             start(slot, effect);
+        } else if (following.restarts(effect) != restarted[slot]) {
+            restart(slot, effect);
         }
         seen[slot] = stamp;
     }
@@ -382,29 +447,156 @@ public final class Particles implements AutoCloseable {
         previous = Arrays.copyOf(previous, 3 * length);
         times = Arrays.copyOf(times, length);
         seen = Arrays.copyOf(seen, length);
+        restarted = Arrays.copyOf(restarted, length);
     }
 
     /** Starts following {@code effect} in {@code slot}: its GPU emitters take instances and ranges. */
     @AllowAllocation("an effect starting: its emitters' lists grow with the most emitters an effect had")
     private void start(int slot, long effect) {
         EffectData data = following.data(effect);
-        ModulePrograms.Block block = programs.acquire(data);
         List<EmitterData> emitters = data.emitters();
-        if (instances[slot] == null || instances[slot].length < emitters.size()) {
-            instances[slot] = new int[emitters.size()];
-            places[slot] = new int[emitters.size()];
+        int warm = warmOf(data);
+        ModulePrograms.Block block;
+        if (warm >= 0) { // a warm one's instances and programs, ranges and all
+            block = warmBlocks[warm];
+            int[] own = warmInstances[warm];
+            warmInstances[warm] = instances[slot];
+            instances[slot] = own;
+            dropWarm(warm);
+        } else {
+            block = programs.acquire(data);
+            if (instances[slot] == null || instances[slot].length < emitters.size()) {
+                instances[slot] = new int[emitters.size()];
+            }
+            Arrays.fill(instances[slot], -1);
         }
-        Arrays.fill(instances[slot], -1);
+        if (places[slot] == null || places[slot].length < instances[slot].length) {
+            places[slot] = new int[instances[slot].length];
+        }
+        int[] own = instances[slot];
         for (int e = 0; e < emitters.size(); e++) {
-            instances[slot][e] = place(emitters.get(e), block.over[e], block.trails[e]); // CPU emitters too
+            if (own[e] >= 0) {
+                renew(own[e]);
+            } else {
+                own[e] = placeOrEvict(emitters.get(e), block.over[e], block.trails[e]); // CPU emitters too
+            }
         }
         ids[slot] = effect;
         blocks[slot] = block;
+        begin(slot, effect);
+    }
+
+    /** Starts {@code effect} in {@code slot} from its beginning: its time, origin and restarts. */
+    private void begin(int slot, long effect) {
         times[slot] = 0;
+        restarted[slot] = following.restarts(effect);
         for (int axis = 0; axis < 3; axis++) {
             origins[3 * slot + axis] = following.position(effect, axis);
             previous[3 * slot + axis] = origins[3 * slot + axis];
         }
+    }
+
+    /**
+     * Restarts the effect in {@code slot} with its new data ({@link Effects#replace}, a hot reload): instances whose
+     * emitter keeps its target, capacity and side units keep their ranges, starting empty; the others are given back
+     * and placed again.
+     */
+    @AllowAllocation("a hot reload")
+    private void restart(int slot, long effect) {
+        EffectData data = following.data(effect);
+        ModulePrograms.Block old = blocks[slot];
+        ModulePrograms.Block block = programs.acquire(data);
+        List<EmitterData> emitters = data.emitters();
+        int[] own = instances[slot];
+        int before = old.programs.length;
+        if (own.length < emitters.size()) {
+            own = Arrays.copyOf(own, emitters.size());
+            Arrays.fill(own, before, own.length, -1);
+            instances[slot] = own;
+            places[slot] = new int[own.length];
+        }
+        for (int e = 0; e < Math.max(before, emitters.size()); e++) {
+            int instance = e < before ? own[e] : -1;
+            if (instance >= 0 && (e >= emitters.size() || !fits(instance, emitters.get(e), block.over[e],
+                block.trails[e]))) {
+                give(instance);
+                instance = -1;
+            }
+            if (e < emitters.size()) {
+                if (instance >= 0) {
+                    renew(instance);
+                    local[instance] = !cpu[instance] && emitters.get(e).space() == Space.LOCAL;
+                } else {
+                    instance = placeOrEvict(emitters.get(e), block.over[e], block.trails[e]);
+                }
+            }
+            own[e] = instance;
+        }
+        programs.release(old);
+        blocks[slot] = block;
+        begin(slot, effect);
+    }
+
+    /** Whether {@code instance}'s ranges suit {@code emitter} as they are. */
+    private boolean fits(int instance, EmitterData emitter, boolean over, int trail) {
+        return capacities[instance] == emitter.capacity() && cpu[instance] == (emitter.target() == Target.CPU)
+            && sideUnits[instance] == sideUnits(emitter.capacity(), over, trail);
+    }
+
+    /** {@code instance} as new: no particles, nothing written to it, no beam end. */
+    private void renew(int instance) {
+        fresh[instance] = true;
+        beamEnded[instance] = false;
+        writers[instance] = null;
+    }
+
+    private static int sideUnits(int capacity, boolean over, int trail) {
+        return ((over ? 2 : 0) + (trail > 0 ? 1 + trail : 0)) * capacity;
+    }
+
+    /** {@link #place}, giving the warm instances back first if there is no room; counted when still none. */
+    private int placeOrEvict(EmitterData emitter, boolean over, int trail) {
+        int instance = place(emitter, over, trail);
+        if (instance < 0 && warmCount > 0) {
+            cool(true);
+            instance = place(emitter, over, trail);
+        }
+        if (instance < 0) {
+            unplaced++;
+        }
+        return instance;
+    }
+
+    /** The warm entry of {@code data}, or -1. */
+    private int warmOf(EffectData data) {
+        for (int k = 0; k < warmCount; k++) {
+            if (warmBlocks[k].data.equals(data)) {
+                return k;
+            }
+        }
+        return -1;
+    }
+
+    /** Gives back the warm effects whose time is up, or all of them. */
+    private void cool(boolean all) {
+        for (int k = warmCount - 1; k >= 0; k--) {
+            if (all || slots.frames() >= warmUntil[k]) {
+                give(warmInstances[k], warmBlocks[k]);
+                programs.release(warmBlocks[k]);
+                dropWarm(k);
+            }
+        }
+    }
+
+    /** Forgets warm entry {@code k}, the last taking its place. */
+    private void dropWarm(int k) {
+        int last = --warmCount;
+        int[] own = warmInstances[k];
+        warmBlocks[k] = warmBlocks[last];
+        warmInstances[k] = warmInstances[last];
+        warmUntil[k] = warmUntil[last];
+        warmInstances[last] = own; // kept for reuse
+        warmBlocks[last] = null;
     }
 
     /** An emitter instance with a range for {@code emitter}, or -1 where there is no room. */
@@ -412,7 +604,7 @@ public final class Particles implements AutoCloseable {
         int capacity = emitter.capacity();
         boolean room = freeCount > 0 && (trail == 0 || capacity <= MAX_TRAIL_PARTICLES);
         int first = room ? pool.allocate(capacity) : -1;
-        int units = ((over ? 2 : 0) + (trail > 0 ? 1 + trail : 0)) * capacity;
+        int units = sideUnits(capacity, over, trail);
         int side = ParticleConstants.NO_SIDE;
         if (first >= 0 && units > 0) {
             side = pool.allocateSide(units);
@@ -422,7 +614,6 @@ public final class Particles implements AutoCloseable {
             }
         }
         if (first < 0) {
-            unplaced++;
             return -1;
         }
         int instance = freeInstances[--freeCount];
@@ -430,37 +621,71 @@ public final class Particles implements AutoCloseable {
         capacities[instance] = capacity;
         sideFirsts[instance] = side;
         sideUnits[instance] = units;
-        fresh[instance] = true;
         cpu[instance] = emitter.target() == Target.CPU;
         local[instance] = !cpu[instance] && emitter.space() == Space.LOCAL; // CPU emitters upload world offsets
-        beamEnded[instance] = false;
-        writers[instance] = null;
+        renew(instance);
         return instance;
     }
 
-    /** Stops following the effect in {@code slot}: its instances give their ranges back. */
+    /**
+     * Stops following the effect in {@code slot}: its instances are kept warm for the next instance of its effect, with
+     * its programs, or give their ranges back.
+     */
     private void end(int slot) {
+        ModulePrograms.Block block = blocks[slot];
         int[] own = instances[slot];
-        for (int e = 0; e < blocks[slot].programs.length; e++) {
-            int instance = own[e];
-            if (instance < 0) {
-                continue;
+        for (int e = 0; e < block.programs.length; e++) {
+            if (own[e] >= 0 && writers[own[e]] != null) {
+                writers[own[e]].ended = true;
+                writers[own[e]] = null;
             }
-            // Frames run in order: what frames in flight do with the range comes before any later frame's use of it
-            pool.release(firsts[instance], capacities[instance]);
-            if (sideFirsts[instance] != ParticleConstants.NO_SIDE) {
-                pool.releaseSide(sideFirsts[instance], sideUnits[instance]);
-            }
-            freeInstances[freeCount++] = instance;
-            if (writers[instance] != null) {
-                writers[instance].ended = true;
-                writers[instance] = null;
-            }
-            own[e] = -1;
         }
-        programs.release(blocks[slot]);
+        if (warmFrames > 0 && warmCount < WARM && warmOf(block.data, WARM_PER_EFFECT)) {
+            int k = warmCount++;
+            warmBlocks[k] = block;
+            instances[slot] = warmInstances[k];
+            warmInstances[k] = own;
+            warmUntil[k] = slots.frames() + warmFrames;
+        } else {
+            give(own, block);
+            programs.release(block);
+        }
         blocks[slot] = null;
         ids[slot] = 0;
+    }
+
+    /** Whether fewer than {@code most} warm entries are of {@code data}. */
+    private boolean warmOf(EffectData data, int most) {
+        int count = 0;
+        for (int k = 0; k < warmCount; k++) {
+            if (warmBlocks[k].data.equals(data)) {
+                count++;
+            }
+        }
+        return count < most;
+    }
+
+    /** Gives the ranges of the instances in {@code own} of {@code block}'s emitters back. */
+    private void give(int[] own, ModulePrograms.Block block) {
+        for (int e = 0; e < block.programs.length; e++) {
+            if (own[e] >= 0) {
+                give(own[e]);
+                own[e] = -1;
+            }
+        }
+    }
+
+    private void give(int instance) {
+        // Frames run in order: what frames in flight do with the range comes before any later frame's use of it
+        pool.release(firsts[instance], capacities[instance]);
+        if (sideFirsts[instance] != ParticleConstants.NO_SIDE) {
+            pool.releaseSide(sideFirsts[instance], sideUnits[instance]);
+        }
+        freeInstances[freeCount++] = instance;
+        if (writers[instance] != null) {
+            writers[instance].ended = true;
+            writers[instance] = null;
+        }
     }
 
     /** Writes the frame's emitter list, chunk list and parameter blocks. */
@@ -492,6 +717,31 @@ public final class Particles implements AutoCloseable {
             float qz = (float) effects.rotation(effect, 2);
             float qw = (float) effects.rotation(effect, 3);
             int seed = effects.seed(effect);
+            // Far from its origin, the origin moves to it: the update shifts its world-space particles by the difference
+            double ox = origins[3 * slot];
+            double oy = origins[3 * slot + 1];
+            double oz = origins[3 * slot + 2];
+            float sx = 0;
+            float sy = 0;
+            float sz = 0;
+            if (Math.abs(x - ox) > rebaseDistance || Math.abs(y - oy) > rebaseDistance
+                || Math.abs(z - oz) > rebaseDistance) {
+                sx = (float) (ox - x);
+                sy = (float) (oy - y);
+                sz = (float) (oz - z);
+                ox = x;
+                oy = y;
+                oz = z;
+                origins[3 * slot] = x;
+                origins[3 * slot + 1] = y;
+                origins[3 * slot + 2] = z;
+                rebases++;
+            }
+            // The share of its velocity over the frame world-space newborn inherit
+            double inherit = frame > 0 ? effects.inheritVelocity(effect) / frame : 0;
+            float vx = (float) ((x - previous[3 * slot]) * inherit);
+            float vy = (float) ((y - previous[3 * slot + 1]) * inherit);
+            float vz = (float) ((z - previous[3 * slot + 2]) * inherit);
             int[] own = instances[slot];
             for (int e = 0; e < block.programs.length; e++) {
                 int instance = own[e];
@@ -540,11 +790,12 @@ public final class Particles implements AutoCloseable {
                     // world down turned into the emitter's frame: by the rotation's inverse
                     putVector(t, at + ParticleEmitterLayout.DOWN, -2 * (qw * qz + qx * qy),
                         -1 + 2 * (qx * qx + qz * qz), 2 * (qw * qx - qy * qz));
+                    putVector(t, at + ParticleEmitterLayout.SHIFT, 0, 0, 0);
+                    putVector(t, at + ParticleEmitterLayout.INHERITED, 0, 0, 0);
                 } else {
-                    double ox = origins[3 * slot];
-                    double oy = origins[3 * slot + 1];
-                    double oz = origins[3 * slot + 2];
                     putOrigin(t, at, ox, oy, oz);
+                    putVector(t, at + ParticleEmitterLayout.SHIFT, sx, sy, sz);
+                    putVector(t, at + ParticleEmitterLayout.INHERITED, vx, vy, vz);
                     putVector(t, at + ParticleEmitterLayout.POSITION, (float) (x - ox), (float) (y - oy),
                         (float) (z - oz));
                     putVector(t, at + ParticleEmitterLayout.PREVIOUS, (float) (previous[3 * slot] - ox),
@@ -1001,6 +1252,16 @@ public final class Particles implements AutoCloseable {
         }
         int[] own = instances[slot];
         return emitter >= 0 && emitter < blocks[slot].programs.length ? own[emitter] : -1;
+    }
+
+    /**
+     * Along {@code axis}, the world position {@code effect}'s world-space particles are offsets from as of the last
+     * update: where it started, rebased when it went far; NaN for an effect not followed.
+     */
+    public double origin(long effect, int axis) {
+        int slot = (int) effect;
+        return slot >= 0 && slot < highest && ids[slot] == effect ? origins[3 * slot + Objects.checkIndex(axis, 3)]
+            : Double.NaN;
     }
 
     /** Particles of GPU emitter {@code emitter} of {@code effect} as of the statistics, 0 without an instance. */

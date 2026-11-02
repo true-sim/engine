@@ -28,7 +28,7 @@ public struct Particle
 };
 
 /**
- * An emitter instance in this frame's list: 144 bytes, written by the CPU each frame. Its particles live in slots
+ * An emitter instance in this frame's list: 176 bytes, written by the CPU each frame. Its particles live in slots
  * [first, first + capacity) of each half of the pool.
  */
 [HostLayout]
@@ -57,6 +57,10 @@ public struct ParticleEmitter
     public uint demand;            // particles they ask for; a CPU emitter's uploaded particles
     public uint instance;          // its row of the state buffer (STATE_WORDS words), stable while it lives
     public uint sideUnits;         // 16-byte side units per particle
+    public float3 shift;           // added to its world-space particles this frame: the old origin minus the new
+    public uint pad0;
+    public float3 inherited;       // velocity its world-space newborn inherit: a share of the emitter's over the frame
+    public uint pad1;
 };
 
 /** A spawn record: 64 bytes, as scene-effects' SpawnRecords, written by the CPU each frame. */
