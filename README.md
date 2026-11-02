@@ -15,6 +15,7 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 | `engine-graph`    | `com.truesim.engine.graph`    | Frame graph: techniques plugged together by the results they provide and need |
 | `engine-render`   | `com.truesim.engine.render`   | GPU-driven meshlet rendering of scene's meshes: geometry pool, GPU culling and LOD; blur |
 | `engine-scene`    | `com.truesim.engine.scene`    | Draws scenes: scene's renderables and assets onto renderers, one view per scene and camera |
+| `engine-audio`    | `com.truesim.engine.audio`    | Sound: the mixer on an allocation-free audio thread, SDL3 output, offline rendering |
 | `engine-xr`       | `com.truesim.engine.xr`       | VR headsets through OpenXR: their eyes as frame graph views, a desktop mirror |
 
 ## Application
@@ -1164,6 +1165,37 @@ effects.replace(TORCH, editedTorch);                       // hot reload: instan
 - Interpolation between fixed steps (application-api D91) is not built: effects take nodes' world transforms as they
   are. 100 torches on rocks in the scene benchmark allocate 0 bytes per frame (median).
 
+## Audio
+
+`engine-audio` plays scene-audio's stores (design: scene's `docs/audio.md`): a mixer in Java on an allocation-free,
+lock-free audio thread, and SDL3's audio stream in push mode as the output (AU1, AU2).
+
+```java
+app.use(new Desktop(), new Audio());                  // optional: no device means silence and a log line
+Audio audio = engine.get(Audio.KEY).assets(cache);
+Sounds sounds = audio.sounds(scene);                  // advanced and synced by the plugin each frame
+sounds.listeners().device(cameraNode);
+sounds.fire(KNOCK, x, y, z);
+audio.ui().play(CLICK);
+```
+
+- **`AudioRenderer`**: commands in through a single-producer ring, blocks out, events (voices ended) back; offline with
+  `AudioRenderer.offline(AudioFormat.stereo(48_000))` and `render(frames)`, bit-identical for the same commands.
+  Voices resample with a cubic Hermite, ramp every gain, pan (VBAP on speaker layouts), attenuate, low-pass and
+  Doppler placed sounds, and keep the most audible 64 real (every 4 blocks; the others keep time). Buses from a
+  `BusLayout`, a look-ahead limiter on the master. `Fft` for the steps that need spectra.
+- **`AudioSync`** (game thread): the stores' change logs into commands at the clock's schedule point, clips acquired
+  and started when loaded (dropped past their max start delay), positions relative to each sound's nearest device
+  listener in doubles.
+- **Outputs**: `SdlOutput` (the device's own format, a Java platform thread with MMCSS "Pro Audio" and a
+  high-resolution timer on Windows, the queue kept at least a device buffer and a block deep, underruns counted and
+  guarded), `NullOutput`, `OfflineOutput`.
+- **Settings** (group "audio"): player volumes (saved with the app's settings), device, background rule; block size,
+  queue, voices and driver hidden.
+- **The collector**: run games with `-XX:+UseZGC`; under other collectors the queue starts 4 blocks deep.
+- **Tests without a device** use SDL's `dummy` driver and the `disk` driver for an end-to-end check;
+  `TRUESIM_AUDIO=true ./gradlew :engine-audio:test --tests '*AudioDeviceProbe*'` measures the real device.
+
 ## VR
 
 `engine-xr` drives a headset through its OpenXR runtime (SteamVR, Meta's, Monado), behind the engine's own API: no
@@ -1216,6 +1248,8 @@ shadows and colored lights circling the middle, to try what the engine does live
 title shows the frame rate, GPU time, render size and display encoding. Settings persist in
 `~/.truesim/demo.properties`.
 
+- With a sound device, six rocks drop ahead of the camera and knock where they land (the `Audio` plugin; without a
+  device it plays silently).
 - `-Pcharacter=<glTF-Sample-Assets>/Models/Fox/glTF/Fox.gltf` puts the Khronos fox in a clearing at (26, 26), through
   the whole animation path: surveying, cross-fading into a walk that speeds up into a run (a blend space) and back, its
   head looking at a circling light, its tail after a wagging point (FABRIK with limits), its four feet on the terrain
