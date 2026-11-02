@@ -629,6 +629,17 @@ float4 reactiveMain(ParticleVertex v) : SV_Target
     return float4(cover, cover, cover, cover);
 }
 
+/**
+ * The overdraw heat map (a debug view, effects step 18): each layer of particles adds a dim orange where it covers
+ * anything, so the scene glows by how many layers are drawn over each pixel: about ten to white.
+ */
+[shader("fragment")]
+float4 overdrawMain(ParticleVertex v) : SV_Target
+{
+    float4 c = shade(v);
+    return c.a > 0.004 || any(c.rgb > 0.004) ? float4(0.1, 0.05, 0.02, 0) : 0;
+}
+
 /** Fragment `v`'s premultiplied color: its texture, lighting, the opaque scene's depth test and soft fade. */
 float4 shade(ParticleVertex v)
 {

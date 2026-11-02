@@ -1079,9 +1079,39 @@ particles.update(effects, runtime.spawns());
   slot)`); without one a round sprite. The renderer's settings by name: `texture`, `stretch`, `soft`, `volume`,
   `flipbook.columns`, `flipbook.rows`, `flipbook.frames`, `flipbook.fps`, `flipbook.blend`.
 
+- **Scalability** (effects step 18): effect types' levels of detail reach the GPU, the drawn fraction fading over
+  0.3 s (each particle kept or faded out by its hash, the kept grown to keep the cover) and far emitters updating
+  every n frames, drawn moved on by their velocity between; budgets in bytes (`EffectRuntime.budget`, the pool's,
+  set by `EffectSync`): past three quarters the least significant spawn at half, past all of it they are culled, by
+  their types' priority first; renderers drawn at half resolution (`half`, or every billboard at low quality) into a
+  target of half the view's size, laid over it by a depth-aware upsample; `ParticleSimulation.async(true)` on the
+  async compute queue (not with mesh particles, mesh shapes or rays); `ParticleDraw.overdraw(true)`, a heat map.
+- **Shared simulations** (E23, `EffectData.Builder.shared(variants, nearDistance)`): an asset whose modules allow it
+  (GPU, local space, no collision, mesh shapes, mesh, light or beam renderers) simulates a few variants, each drawn at
+  every placement showing it, moved, turned and scaled as the placement is; placements near a viewer simulate on their
+  own, the swap faded. A thousand torches are six simulations.
+- **Particles as emitters** (E2, `ParticleEvent.emit(target, perSecond)`): fixed-point accumulators per particle,
+  children spread along the parent's path; ribbons per parent (`ribbons` 0), ordered by a radix sort of their parents'
+  spawn indices: 100,000 sparks each with a trail.
+- **A game's own modules** (`ParticleModules`, `particles.modules(...)`): Slang structs dispatched by a kernel variant
+  of the game's (`#define PARTICLE_MODULES`, then `#include "particles/simulate.slang"`); techniques may modify
+  `ParticleKeys.PARTICLES` after the simulation. Built in too: `Init.rotation`, `Init.frame`, `Shape.mesh(mode,
+  upward)`.
+- **Glass order** (`glass` 1: drawn by `ParticleDraw.beforeGlass`, tinted by the glass in front; 2: split at a view's
+  `ParticleKeys.GLASS_DEPTH`) and TAA hooks: the reactive mask (`ParticleKeys.REACTIVE`) and mesh particles'
+  transforms a frame before (`ParticleKeys.PREVIOUS_INSTANCES`).
+
 A million particles update in 0.27 ms on an RX 9070 XT under gravity and drag; 8 curves over life add 0.15 ms, whether
 they have 2 or 8 keys, evenly spaced or not, so the cost is the attributes kept from birth, not the key search
-(`ParticleBenchmark`, 2026-11-02).
+(`ParticleBenchmark`, 2026-11-02). More of `ParticleBenchmark` (RX 9070 XT, 2026-11-02):
+
+| | ms |
+|---|---|
+| a million particles: the view's sort (10,000: 0.064, 100,000: 0.109) | 0.73 |
+| a million unlit sparks drawn, 1920 x 1080 | 1.39 |
+| the simulation of a million, graphics queue / async compute: the frame's span | 2.79 / 2.60 |
+| 600 lit smoke puffs of 3 m over a Quest 3's eye (2064 x 2208): full / half resolution | 4.2 / 1.4 |
+| the same at 1920 x 1080 | 1.75 / 0.50 |
 
 **A scene's effects** (`engine-scene`): `EffectSync` follows a scene's `Effects` as `SceneSync` follows its
 renderables. Each frame (between frames or while one records) it runs the emitter logic and the CPU emitters and hands

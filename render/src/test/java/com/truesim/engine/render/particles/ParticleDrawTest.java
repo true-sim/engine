@@ -560,6 +560,20 @@ class ParticleDrawTest {
     }
 
     @Test
+    void theOverdrawHeatMapAddsALayerAtATime() {
+        view.port().remove(ParticleDraw.ID);
+        view.port().add(new ParticleDraw(particles, view).overdraw(true));
+        Consumer<EmitterData.Builder> faint = e -> e.init(Init.size(Bind.constant(2)),
+            Init.color(Bind.color(0.01f, 0.01f, 0.01f, 0.05f)));
+        effects.play(still(1, e -> faint.accept(e.render(sprite(Renderer.Facing.POSITION)))), -0.5, 0, -4);
+        effects.play(still(1, e -> faint.accept(e.render(sprite(Renderer.Facing.POSITION)))), 0.5, 0, -4.01);
+        int[] image = frames(3);
+        int one = at(image, 26, 32, 0);
+        assertThat(one).as("a layer, however faint").isCloseTo(26, within(3));
+        assertThat(at(image, 32, 32, 0)).as("two layers").isCloseTo(2 * one, within(3));
+    }
+
+    @Test
     void theReactiveMaskCoversWhereParticlesAre() {
         GpuBuffer mask = GpuBuffer.hostVisible(device, 4L * SIZE * SIZE, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         closeLater.add(mask);

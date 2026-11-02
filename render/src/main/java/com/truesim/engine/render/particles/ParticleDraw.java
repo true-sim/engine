@@ -88,6 +88,7 @@ public final class ParticleDraw implements Technique {
     private final Camera center;
     private final boolean before;
     private final Draws draws;
+    private boolean overdraw;
 
     /** {@code particles} as {@code view} sees them; added to {@code view}'s port, which closes what it makes. */
     public ParticleDraw(Particles particles, SceneView view) {
@@ -121,6 +122,15 @@ public final class ParticleDraw implements Technique {
         return new ParticleDraw(particles, view, center, true);
     }
 
+    /**
+     * Draws the overdraw heat map instead of the particles (a debug view, effects step 18): each layer adds a dim
+     * orange, about ten to white; the graph rebuilds.
+     */
+    public ParticleDraw overdraw(boolean on) {
+        overdraw = on;
+        return this;
+    }
+
     @Override
     public Id<ParticleDraw> id() {
         return before ? BEFORE_GLASS_ID : ID;
@@ -146,7 +156,7 @@ public final class ParticleDraw implements Technique {
     /** What the draws' passes and buffers follow: the sort's room, and whether anything is drawn at half resolution. */
     @Override
     public long buildVersion() {
-        return particles.sortSlots() * 2L + (particles.drawsHalf() ? 1 : 0);
+        return particles.sortSlots() * 4L + (particles.drawsHalf() ? 1 : 0) + (overdraw ? 2 : 0);
     }
 
     @Override
@@ -172,7 +182,8 @@ public final class ParticleDraw implements Technique {
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         Pipeline cull = g.computeProgram("shaders/particles/draw.spv", "cullMain", ParticleDrawPush.BYTES);
-        Pipeline[] pipelines = pipelines(color.format().vk(), false);
+        Pipeline[] pipelines = pipelines(color.format().vk(), overdraw ? Particles.DRAW_OVERDRAW
+            : Particles.DRAW_COLOR);
         Draws list = draws;
         com.truesim.engine.render.RenderView renderView = view.view();
         boolean paired = center != null;
@@ -250,10 +261,10 @@ public final class ParticleDraw implements Technique {
     }
 
     /** The pipelines of each renderer kind (none for meshes) into {@code format}, or for the reactive mask. */
-    private Pipeline[] pipelines(int format, boolean reactive) {
+    private Pipeline[] pipelines(int format, int mode) {
         Pipeline[] pipelines = new Pipeline[ParticleConstants.RENDER_BEAM + 1];
         for (int kind = 0; kind < pipelines.length; kind++) {
-            pipelines[kind] = kind == ParticleConstants.RENDER_MESH ? null : particles.pipeline(kind, format, reactive);
+            pipelines[kind] = kind == ParticleConstants.RENDER_MESH ? null : particles.pipeline(kind, format, mode);
         }
         return pipelines;
     }
@@ -282,7 +293,8 @@ public final class ParticleDraw implements Technique {
                         (height + 7) / 8, 1);
                 }
             });
-        Pipeline[] pipelines = pipelines(color.format().vk(), false);
+        Pipeline[] pipelines = pipelines(color.format().vk(), overdraw ? Particles.DRAW_OVERDRAW
+            : Particles.DRAW_COLOR);
         com.truesim.engine.render.RenderView renderView = view.view();
         ParticleDrawPush drawPush = new ParticleDrawPush();
         GraphBuilder.PassBuilder drawPass = g.pass("particle draw, half");
@@ -324,7 +336,7 @@ public final class ParticleDraw implements Technique {
     private void reactive(GraphBuilder g, Image color, Image depth, Buffer pool, Buffer side, Buffer order,
         ParticleSort.Order sorted, Buffer commands, Camera camera, Camera sortCenter, boolean paired) {
         Image mask = g.create("particle reactive mask", ImageDesc.of(Format.R8_UNORM, color.width(), color.height()));
-        Pipeline[] pipelines = pipelines(Format.R8_UNORM.vk(), true);
+        Pipeline[] pipelines = pipelines(Format.R8_UNORM.vk(), Particles.DRAW_REACTIVE);
         com.truesim.engine.render.RenderView renderView = view.view();
         Draws list = draws;
         ParticleDrawPush push = new ParticleDrawPush();

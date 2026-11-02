@@ -43,7 +43,6 @@ public final class ParticleSimulation implements Technique {
 
     private final Particles particles;
     private boolean async;
-    private boolean queue; // the build's: its passes on the async compute queue
 
     public ParticleSimulation(Particles particles) {
         this.particles = Objects.requireNonNull(particles, "particles");
@@ -94,7 +93,6 @@ public final class ParticleSimulation implements Technique {
         boolean traced = particles.rayTracing() != null;
         Buffer topLevel = traced ? g.request(new TopLevel(particles.rayTracing(), particles.rayRenderer())) : null;
         String variant = particles.modules() != null ? particles.modules().shader() : traced ? RAYS_SHADER : SHADER;
-        queue = async && particles.asyncAllowed();
         // With mesh shapes, the spawn reads the pool's meshes: after the scene upload and the deformation pass
         SceneData.Buffers scene = p0.meshRenderer() == null ? null : g.request(new SceneData(p0.meshRenderer()));
         Pipeline count = g.computeProgram(SHADER, "countMain", ParticlePush.BYTES);
@@ -472,7 +470,7 @@ public final class ParticleSimulation implements Technique {
 
     /** {@code pass}, on the async compute queue if the build's passes are. */
     private GraphBuilder.PassBuilder q(GraphBuilder.PassBuilder pass) {
-        return queue ? pass.async() : pass;
+        return async && particles.asyncAllowed() ? pass.async() : pass;
     }
 
     /** Dispatches a group per chunk (or emitter), in rows of up to 65,535 groups. */

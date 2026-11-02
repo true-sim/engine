@@ -2482,17 +2482,22 @@ public final class Particles implements AutoCloseable {
      * The pipeline drawing renderers of {@code kind} ({@code RENDER_*}: billboards, ribbons, trails, beams) into color
      * attachments of {@code format} (a VkFormat), made once.
      */
-    @AllowAllocation("a pipeline made once per kind and color format")
     Pipeline pipeline(int kind, int format) {
-        return pipeline(kind, format, false);
+        return pipeline(kind, format, DRAW_COLOR);
     }
 
+    /** Pipelines' fragment shaders: particles' color, the reactive mask's coverage, an overdraw heat map. */
+    static final int DRAW_COLOR = 0;
+    static final int DRAW_REACTIVE = 1;
+    static final int DRAW_OVERDRAW = 2;
+
     /**
-     * The pipeline drawing renderers of {@code kind} into {@code format}: premultiplied, or for the reactive mask
-     * ({@code reactive}) their coverage, added.
+     * The pipeline drawing renderers of {@code kind} into {@code format}: premultiplied ({@code DRAW_COLOR}), or added:
+     * their coverage for the reactive mask, a constant per layer for the overdraw heat map.
      */
-    Pipeline pipeline(int kind, int format, boolean reactive) {
-        int key = (format * 8 + kind) * 2 + (reactive ? 1 : 0);
+    @AllowAllocation("a pipeline made once per kind, color format and mode")
+    Pipeline pipeline(int kind, int format, int mode) {
+        int key = (format * 8 + kind) * 4 + mode;
         Pipeline pipeline = pipelines.get(key);
         if (pipeline == null) {
             String entry = switch (kind) {
@@ -2503,8 +2508,9 @@ public final class Particles implements AutoCloseable {
             };
             try (ShaderModule shaders = ShaderModule.load(device, "shaders/particles/draw.spv")) {
                 pipeline = Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, entry)
-                    .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, reactive ? "reactiveMain" : "fragmentMain")
-                    .color(format).blend(0, reactive ? Pipeline.Blend.ADDITIVE : Pipeline.Blend.PREMULTIPLIED).pushConstants(ParticleDrawPush.BYTES).doubleSided()
+                    .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, mode == DRAW_REACTIVE ? "reactiveMain"
+                        : mode == DRAW_OVERDRAW ? "overdrawMain" : "fragmentMain")
+                    .color(format).blend(0, mode == DRAW_COLOR ? Pipeline.Blend.PREMULTIPLIED : Pipeline.Blend.ADDITIVE).pushConstants(ParticleDrawPush.BYTES).doubleSided()
                     .build();
             }
             pipelines.put(key, pipeline);
@@ -2513,6 +2519,7 @@ public final class Particles implements AutoCloseable {
     }
 
     /** The pipeline laying half-resolution particles over a view of {@code format} (particles/upsample.slang). */
+    @AllowAllocation("a pipeline made once per color format")
     Pipeline upsamplePipeline(int format) {
         int key = -1 - format;
         Pipeline pipeline = pipelines.get(key);
