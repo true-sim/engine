@@ -552,11 +552,15 @@ final class ShowcaseEffects implements AutoCloseable {
         return new ParticleSimulation(particles).async(Boolean.getBoolean("truesim.demo.async"));
     }
 
-    /** Moves the effects on by {@code seconds}, after the crowd's update; before the frame records. */
-    void update(double seconds) {
+    /**
+     * Moves the effects on by {@code seconds} seen from {@code camera} (x, y, z: the viewer of levels of detail), after
+     * the crowd's update; before the frame records.
+     */
+    void update(double seconds, double[] camera) {
         time += seconds;
         sync.clearViewers();
-        sync.addViewer(x, DemoMeshes.height(x, z), z); // the height field around the arena
+        sync.addViewer(camera[0], camera[1], camera[2]); // distances, for levels of detail and shared torches
+        particles.heightFocus(x, z); // the height field around the arena
         // Gusting wind, turning slowly
         double heading = 0.15 * time;
         double strength = 1.5 + 1.2 * Maths.sin(0.7 * time) + 0.5 * Maths.sin(2.3 * time);

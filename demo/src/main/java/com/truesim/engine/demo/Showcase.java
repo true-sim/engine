@@ -143,7 +143,7 @@ public final class Showcase {
                 camera.position(eye[0], eye[1], eye[2]).set(target[0] - eye[0], target[1] - eye[1],
                     target[2] - eye[2], 0, 1, 0, Math.PI / 3, width, height, 0.05);
                 world.crowd().lod(eye[0], eye[2]);
-                effects.update(1 / 60.0);
+                effects.update(1 / 60.0, eye);
                 cascades.update();
                 graph.beginFrame();
                 graph.submit(0, 0);
@@ -237,7 +237,7 @@ public final class Showcase {
             cascades[0].update();
             cascades[1].update();
             long updated = System.nanoTime();
-            effects.update(1 / 72.0);
+            effects.update(1 / 72.0, eye);
             long synced = System.nanoTime();
             graph.beginFrame();
             long begun = System.nanoTime();
