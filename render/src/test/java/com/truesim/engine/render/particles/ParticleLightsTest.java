@@ -42,6 +42,7 @@ import com.truesim.engine.render.SceneGeometry;
 import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.VisibilityBufferShading;
+import com.truesim.engine.render.layout.ParticleConstants;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -124,6 +125,11 @@ class ParticleLightsTest {
 
     /** The graph: a grey floor 1 m below the camera, shaded forward or through the visibility buffer. */
     private void graph(boolean visibility, int budget) {
+        graph(visibility, budget, 16);
+    }
+
+    /** {@link #graph(boolean, int)} with room for {@code emitters} emitter instances. */
+    private void graph(boolean visibility, int budget, int emitters) {
         graph = new FrameGraph(device, 2);
         pool = new GeometryPool(device, GeometryPool.Capacity.of(64, 4, 4), graph.frameSlots());
         scene = new GpuScene(device, pool, 4, graph.frameSlots());
@@ -136,7 +142,9 @@ class ParticleLightsTest {
         scene.set(0, pool.add(floor()), grey, 0f, -1f, -4f, 0f, 0f, 0f, 1f, 1f, 1f, 1f);
         lights = new Lights(device, 4, 4, graph.frameSlots());
         lights.setCount(0); // no scene lights: only the particles'
-        particles = new Particles(device, graph.frameSlots(), 2 << 20, 16).lights(lights, budget);
+        // A chunk of slots each at least
+        long room = Math.max(2 << 20, (long) emitters * ParticleConstants.CHUNK * ParticlePool.SLOT_BYTES);
+        particles = new Particles(device, graph.frameSlots(), room, emitters).lights(lights, budget);
         int usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
             | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         target = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -315,5 +323,47 @@ class ParticleLightsTest {
         assertThatIllegalArgumentException().isThrownBy(() -> particles.lights(lights, -1));
         assertThatIllegalArgumentException().isThrownBy(() -> lights.gpuLights(-1));
         assertThat(lights.gpuCapacity()).isEqualTo(40);
+    }
+
+    @Test
+    void farReachingLightsOutrankNearOnesOfEqualBrightness() {
+        graph(false, 10);
+        // 20 sparks reaching 3 m and 20 flashes reaching 45 m, alike in brightness: the frame's 10 go to the flashes
+        effects.play(EffectData.builder()
+            .emitter("sparks", e -> e.capacity(20).spawn(Spawn.burst(0, 20)).init(Shape.sphere(1), Init.lifetime(100),
+                Init.color(Bind.color(1, 1, 1, 1))).render(Renderer.light(3, 1)))
+            .emitter("flashes", e -> e.capacity(20).spawn(Spawn.burst(0, 20)).init(Shape.sphere(1),
+                Init.lifetime(100), Init.color(Bind.color(1, 1, 1, 1))).render(Renderer.light(45, 1)))
+            .emitter("growing", e -> e.capacity(1).spawn(Spawn.burst(0, 1)).init(Init.lifetime(100),
+                Init.size(Bind.constant(4)), Init.color(Bind.color(1, 1, 1, 1)))
+                .render(Renderer.light(2, 1).set("radius.size", 8)))
+            .build(), 0, 5, -4);
+        frames(4);
+        MemorySegment m = copy.memory();
+        int count = m.get(ValueLayout.JAVA_INT, 0);
+        assertThat(count).isEqualTo(10);
+        int far = 0;
+        int growing = 0;
+        for (int i = 0; i < count; i++) {
+            float radius = m.get(ValueLayout.JAVA_FLOAT, 16 + 4L * LIGHT_WORDS * i + 12);
+            far += radius == 45 ? 1 : 0;
+            growing += radius == 64 ? 1 : 0; // 2 m times a size of 4 times 8
+        }
+        assertThat(growing).as("the light reaching 64 m by its size, the farthest").isOne();
+        assertThat(far).as("the rest the far reaching").isEqualTo(9);
+    }
+
+    @Test
+    void hundredsOfLightEmittersEachKeepTheirLight() {
+        // More emitters than the selection's threads take in one round: every one's light kept
+        graph(false, 400, 512);
+        EffectData glow = EffectData.builder().emitter("glow", e -> e.capacity(1).spawn(Spawn.burst(0, 1))
+            .init(Init.lifetime(100), Init.color(Bind.color(1, 1, 1, 1))).render(Renderer.light(1, 1))).build();
+        for (int i = 0; i < 300; i++) {
+            effects.play(glow, i % 20, 5, -4 - i / 20);
+        }
+        frames(4);
+        assertThat(particles.lightEmitterCount()).isEqualTo(300);
+        assertThat(copy.memory().get(ValueLayout.JAVA_INT, 0)).as("a light each").isEqualTo(300);
     }
 }

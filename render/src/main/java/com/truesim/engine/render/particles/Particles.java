@@ -99,6 +99,15 @@ public final class Particles implements AutoCloseable {
     /** Ended effects kept warm at most, and per effect data. */
     private static final int WARM = 32;
     private static final int WARM_PER_EFFECT = 4;
+    /**
+     * Frames after one that sent over half of {@code EVENT_SMALL} events in which the event radix sort's passes are
+     * recorded; past them the small sort alone runs, which keeps at most {@code EVENT_SMALL} a frame.
+     */
+    static final int EVENT_WINDOW = 60;
+    /** Event sorts {@link #eventSort} can force: both as the counts say, the small sort's alone, the radix sort's. */
+    static final int EVENTS_EITHER = 0;
+    static final int EVENTS_SMALL = 1;
+    static final int EVENTS_RADIX = 2;
 
     private static final int STORAGE = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     private static final int GPU_USAGE = STORAGE | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -289,6 +298,10 @@ public final class Particles implements AutoCloseable {
     private long eventsTotal;
     private long eventsDroppedTotal;
     private boolean sendsEvents;
+    // The last statistics' frame that sent over half of EVENT_SMALL events; whether the frame records the radix sort
+    private long eventsBusy = Long.MIN_VALUE;
+    private boolean radixEvents;
+    private int eventSort = EVENTS_EITHER;
     private long statisticsFrame = -1;
     private final Readback receiver = this::receive;
     private final Map<AssetRef<?>, Integer> textureSlots = new HashMap<>();
@@ -565,6 +578,8 @@ public final class Particles implements AutoCloseable {
             written = target;
             updatedAt = frames;
         }
+        radixEvents = eventSort == EVENTS_RADIX
+            || eventSort == EVENTS_EITHER && eventsBusy >= frames - EVENT_WINDOW;
         retired.release();
         meshTables.release();
         cool(false);
@@ -653,6 +668,9 @@ public final class Particles implements AutoCloseable {
             : lights.gpuLightsBuffer().deviceAddress());
         r.putInt(ParticleFrameLayout.LIGHT_EMITTER_COUNT, lightCount);
         r.putInt(ParticleFrameLayout.LIGHT_BUDGET, lightBudget);
+        r.putInt(ParticleFrameLayout.EVENT_LIMIT, radixEvents ? ParticleConstants.EVENT_CAPACITY
+            : ParticleConstants.EVENT_SMALL);
+        r.putInt(ParticleFrameLayout.SMALL_EVENTS, eventSort == EVENTS_RADIX ? 0 : ParticleConstants.EVENT_SMALL);
         GeometryPool meshes = meshRenderer == null ? null : meshRenderer.pool();
         r.putLong(ParticleFrameLayout.MESHES, meshes == null ? 0 : meshes.meshTable().deviceAddress());
         r.putLong(ParticleFrameLayout.POSITIONS, meshes == null ? 0 : meshes.positions().deviceAddress());
@@ -1174,7 +1192,10 @@ public final class Particles implements AutoCloseable {
     /**
      * Lists emitter {@code e} of {@code block} (at {@code index} of the list, instance {@code instance}) for the
      * particle lights if it has a light renderer: its budget ({@code max}, 64 by default), the share of its particles
-     * lit ({@code fraction}, all by default), their radius and intensity.
+     * lit ({@code fraction}, all by default), their radius and intensity, and the radius per metre of a particle's size
+     * ({@code radius.size}: when over 0, a light reaches {@code radius} times its particle's size times it, so a
+     * growing flash reaches farther). The frame's budget goes to the candidates reaching farthest: their brightness
+     * times their radius.
      */
     private void putLight(ModulePrograms.Block block, int e, int index, int instance) {
         if (lights == null || lightCount == ParticleConstants.MAX_LIGHT_EMITTERS) {
@@ -1190,6 +1211,7 @@ public final class Particles implements AutoCloseable {
                 lightStaged.putFloat(at + 8, ModulePrograms.setting(renderer, "fraction", 1));
                 lightStaged.putFloat(at + 12, ModulePrograms.setting(renderer, "radius", 1));
                 lightStaged.putFloat(at + 16, ModulePrograms.setting(renderer, "intensity", 1));
+                lightStaged.putFloat(at + 20, Math.max(0, ModulePrograms.setting(renderer, "radius.size", 0)));
                 largestLight = Math.max(largestLight, capacities[instance]);
                 return;
             }
@@ -2006,6 +2028,9 @@ public final class Particles implements AutoCloseable {
             ParticleConstants.STATISTICS_EVENTS));
         eventsDroppedTotal = Integer.toUnsignedLong(data.getAtIndex(ValueLayout.JAVA_INT,
             ParticleConstants.STATISTICS_EVENTS_DROPPED));
+        if (eventsTotal > ParticleConstants.EVENT_SMALL / 2) {
+            eventsBusy = Math.max(eventsBusy, frame);
+        }
         for (int i = 0; i < maxEmitters; i++) {
             aliveOf[i] = data.getAtIndex(ValueLayout.JAVA_INT, ParticleConstants.STATISTICS_HEADER + 2L * i);
             overflowOf[i] = data.getAtIndex(ValueLayout.JAVA_INT, ParticleConstants.STATISTICS_HEADER + 2L * i + 1);
@@ -2168,7 +2193,12 @@ public final class Particles implements AutoCloseable {
         return eventsTotal;
     }
 
-    /** Of them, dropped for want of room in the frame's event buffer. */
+    /**
+     * Of them, dropped for want of room in the frame's event buffer. The event radix sort's passes are recorded only
+     * while recent frames sent over half of {@code EVENT_SMALL} events (the statistics come a few frames late), so a
+     * sudden burst past {@code EVENT_SMALL} after quiet frames keeps {@code EVENT_SMALL} and drops the rest for those
+     * few frames.
+     */
     public long eventsDropped() {
         return eventsDroppedTotal;
     }
@@ -2176,6 +2206,16 @@ public final class Particles implements AutoCloseable {
     /** Whether the frame's emitters send events: the event passes run. */
     boolean sendsEvents() {
         return sendsEvents;
+    }
+
+    /** Whether the frame records the event radix sort's passes (else the small sort's alone sorts its events). */
+    boolean radixEvents() {
+        return radixEvents;
+    }
+
+    /** Forces an event sort for tests: {@link #EVENTS_EITHER} (as the counts say), {@link #EVENTS_SMALL}, or radix. */
+    void eventSort(int sort) {
+        eventSort = sort;
     }
 
     long eventKeysAddress() {

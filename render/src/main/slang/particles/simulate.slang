@@ -44,6 +44,10 @@ ConstantBuffer<ParticlePush> push;
 groupshared float cache[CURVE_CACHE];
 groupshared uint shared[CHUNK];
 groupshared int bounds[6];
+groupshared uint2 smallKeys[EVENT_SMALL];         // the small event sort's keys
+groupshared uint waveDigits[16 * SORT_THREADS / 4]; // its waves' counts of each digit (waves of 4 lanes or more)
+groupshared uint keyBits[2];                      // the bits any of its keys has, and those all have
+groupshared uint frameBuckets[LIGHT_BUCKETS];     // the light selection's frame histogram
 
 /** Curve keys from the group's copy of the emitter's block. */
 struct CurveCache : ICurveKeys
@@ -487,15 +491,15 @@ void send<K : ICurveKeys>(Emitting m, K keys, uint list, uint index, uint local,
             continue; // counted: sent, not kept
         }
         ParticleEmitter e = m.emitter;
-        bool local = (e.flags & EMITTER_LOCAL) != 0;
+        bool space = (e.flags & EMITTER_LOCAL) != 0; // local space: turned into world axes
         ParticleEventRecord r;
         r.target = target;
         r.count = children;
         r.seed = p.seed;
         r.salt = salt;
-        r.position = local ? turn(e.rotation, p.position) : p.position;
+        r.position = space ? turn(e.rotation, p.position) : p.position;
         r.parent = index;
-        r.velocity = local ? turn(e.rotation, p.velocity) : p.velocity;
+        r.velocity = space ? turn(e.rotation, p.velocity) : p.velocity;
         r.size = p.size.x;
         r.color = p.color;
         ParticleEventRecord* events = (ParticleEventRecord*) frame.events;
@@ -1762,37 +1766,198 @@ void argsMain(uint3 id : SV_DispatchThreadID)
 [numthreads(1, 1, 1)]
 void eventsArgsMain()
 {
-    // The events kept (sent, within the buffer) and the sort's dispatch over them; the statistics
+    // The events kept (sent, within the frame's limit), the radix sort's dispatch over them, or the small sort's (one
+    // group) when they fit it; the statistics
     ParticleFrame* frame = push.frame;
     uint* args = frame.eventArgs;
     uint sent = args[4];
-    uint kept = min(sent, EVENT_CAPACITY);
-    uint groups = (kept + SORT_GROUP - 1) / SORT_GROUP;
+    uint kept = min(sent, frame.eventLimit);
+    bool small = kept <= frame.smallEvents;
+    uint groups = small ? 0 : (kept + SORT_GROUP - 1) / SORT_GROUP;
     args[0] = min(groups, 65535u);
     args[1] = (groups + 65534) / 65535;
     args[2] = 1;
     args[3] = kept;
+    args[5] = small && kept > 0 ? 1 : 0;
+    args[6] = 1;
+    args[7] = 1;
     uint* statistics = push.statistics;
     statistics[STATISTICS_EVENTS] = sent;
     statistics[STATISTICS_EVENTS_DROPPED] = sent - kept;
 }
 
+/** The event key of the event at `index`: its target and its parent's emitter, for the second, stable sort. */
+uint targetKey(ParticleEventRecord* events, uint index)
+{
+    return events[index].target << 12 | events[index].parent;
+}
+
 [shader("compute")]
-[numthreads(SORT_GROUP, 1, 1)]
+[numthreads(SORT_THREADS, 1, 1)]
 void eventsRekeyMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
     // Sorted by parent, phase and event; now keyed by target and parent emitter for the second, stable sort
     ParticleFrame* frame = push.frame;
     uint* args = frame.eventArgs;
-    uint i = chunkOf(group) * SORT_GROUP + lane;
-    if (i >= args[3])
-    {
-        return;
-    }
     uint2* eventKeys = frame.eventKeys;
     ParticleEventRecord* events = (ParticleEventRecord*) frame.events;
-    uint index = eventKeys[i].y;
-    eventKeys[i] = uint2(events[index].target << 12 | events[index].parent, index);
+    for (uint k = 0; k < SORT_KEYS; k++)
+    {
+        uint i = chunkOf(group) * SORT_GROUP + k * SORT_THREADS + lane;
+        if (i < args[3])
+        {
+            uint index = eventKeys[i].y;
+            eventKeys[i] = uint2(targetKey(events, index), index);
+        }
+    }
+}
+
+/**
+ * The sum of `value` over the group's threads before `lane` (SORT_THREADS of them, in waves of consecutive threads):
+ * each wave's prefix sums, then the waves' sums scanned (sort.slang's). Every thread calls it together.
+ */
+uint exclusiveSum(uint value, uint lane)
+{
+    uint n = WaveGetLaneCount();
+    uint before = WavePrefixSum(value);
+    if (WaveGetLaneIndex() == n - 1)
+    {
+        shared[lane / n] = before + value; // SORT_THREADS / 4 waves at most: CHUNK
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (lane == 0)
+    {
+        uint sum = 0;
+        for (uint w = 0; w < SORT_THREADS / n; w++)
+        {
+            uint s = shared[w];
+            shared[w] = sum;
+            sum += s;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint result = shared[lane / n] + before;
+    GroupMemoryBarrierWithGroupSync(); // the waves' sums free for the next call
+    return result;
+}
+
+/** Keys of the small sort each thread takes. */
+static const uint SMALL_KEYS = EVENT_SMALL / SORT_THREADS;
+
+/**
+ * Sorts the first `n` keys of smallKeys by their first word, stably: the radix sort's passes of 4 bits, each key
+ * ranked as sortScatterMain ranks it, moved within group memory. A digit every key has alike leaves the order as it
+ * is, so its pass is left out. Every thread calls it together.
+ */
+void sortSmall(uint n, uint lane)
+{
+    uint size = WaveGetLaneCount();
+    uint wave = lane / size;
+    uint waves = SORT_THREADS / size;
+    uint first = wave * SMALL_KEYS * size + WaveGetLaneIndex();
+    uint4 below = lanesBelow();
+    if (lane == 0)
+    {
+        keyBits[0] = 0;
+        keyBits[1] = 0xffffffffu;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint any = 0;
+    uint all = 0xffffffffu;
+    for (uint i = lane; i < n; i += SORT_THREADS)
+    {
+        any |= smallKeys[i].x;
+        all &= smallKeys[i].x;
+    }
+    InterlockedOr(keyBits[0], WaveActiveBitOr(any));
+    InterlockedAnd(keyBits[1], WaveActiveBitAnd(all));
+    GroupMemoryBarrierWithGroupSync();
+    uint differing = keyBits[0] ^ keyBits[1];
+    for (uint shift = 0; shift < 32; shift += 4)
+    {
+        if (((differing >> shift) & 15) == 0)
+        {
+            continue; // the same for the whole group
+        }
+        DigitCounts counts = noDigits();
+        uint2 items[SMALL_KEYS];
+        uint ranks[SMALL_KEYS];
+        for (uint k = 0; k < SMALL_KEYS; k++)
+        {
+            uint i = first + k * size;
+            bool held = i < n;
+            items[k] = held ? smallKeys[i] : uint2(0, 0);
+            uint digit = (items[k].x >> shift) & 15;
+            DigitBallots row = digitBallots(held, digit);
+            ranks[k] = counts.of(digit) + countBits(row.lanes(digit) & below);
+            counts.add(row);
+        }
+        [unroll]
+        for (uint i = 0; i < 4; i++)
+        {
+            uint digit = WaveGetLaneIndex() + size * i;
+            if (digit < 16)
+            {
+                waveDigits[digit * waves + wave] = counts.kept[i];
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+        uint total = 16 * waves;
+        uint run = (total + SORT_THREADS - 1) / SORT_THREADS;
+        uint from = min(lane * run, total);
+        uint to = min(from + run, total);
+        uint sum = 0;
+        for (uint i = from; i < to; i++)
+        {
+            sum += waveDigits[i];
+        }
+        uint offset = exclusiveSum(sum, lane);
+        for (uint i = from; i < to; i++)
+        {
+            uint count = waveDigits[i];
+            waveDigits[i] = offset;
+            offset += count;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        for (uint k = 0; k < SMALL_KEYS; k++)
+        {
+            if (first + k * size < n)
+            {
+                smallKeys[waveDigits[((items[k].x >> shift) & 15) * waves + wave] + ranks[k]] = items[k];
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+}
+
+[shader("compute")]
+[numthreads(SORT_THREADS, 1, 1)]
+void eventsSmallMain(uint lane : SV_GroupIndex)
+{
+    // One group, when the frame keeps at most EVENT_SMALL events: the radix sort by parent, phase and event, the rekey
+    // and the second sort, in group memory; stable sorts of the same keys, so the same order
+    ParticleFrame* frame = push.frame;
+    uint* args = frame.eventArgs;
+    uint n = min(args[3], EVENT_SMALL);
+    uint2* eventKeys = frame.eventKeys;
+    ParticleEventRecord* events = (ParticleEventRecord*) frame.events;
+    for (uint i = lane; i < n; i += SORT_THREADS)
+    {
+        smallKeys[i] = eventKeys[i];
+    }
+    GroupMemoryBarrierWithGroupSync();
+    sortSmall(n, lane);
+    for (uint i = lane; i < n; i += SORT_THREADS)
+    {
+        uint index = smallKeys[i].y;
+        smallKeys[i] = uint2(targetKey(events, index), index);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    sortSmall(n, lane);
+    for (uint i = lane; i < n; i += SORT_THREADS)
+    {
+        eventKeys[i] = smallKeys[i];
+    }
 }
 
 [shader("compute")]
@@ -1918,9 +2083,12 @@ void instancesMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
 
 /**
  * Whether particle `k` of light emitter row `row` lights (alive, in the share lit, brighter than nothing): its light's
- * color into `color`, its bucket of brightness into `bucket`.
+ * color into `color`, its radius into `reach` (the emitter's, or that per metre of the particle's size), its bucket of
+ * reach into `bucket`. Candidates rank by their brightness (the color's brightest channel) times their radius, so a
+ * light reaching far outranks one as bright reaching near for the frame's budget; within an emitter of one radius that
+ * is their brightness.
  */
-bool lightCandidate(uint row, uint k, out Particle p, out float3 color, out uint bucket)
+bool lightCandidate(uint row, uint k, out Particle p, out float3 color, out float reach, out uint bucket)
 {
     ParticleFrame* frame = push.frame;
     uint* entries = frame.lightEmitters;
@@ -1929,6 +2097,7 @@ bool lightCandidate(uint row, uint k, out Particle p, out float3 color, out uint
     ParticleEmitter e = emitters[entry[0]];
     uint* state = push.state;
     color = 0;
+    reach = 0;
     bucket = 0;
     p = (Particle) 0;
     if (k >= state[e.instance * STATE_WORDS + STATE_ALIVE])
@@ -1943,12 +2112,14 @@ bool lightCandidate(uint row, uint k, out Particle p, out float3 color, out uint
         return false;
     }
     color = p.color.rgb * p.color.a * asfloat(entry[4]);
+    float perSize = asfloat(entry[5]);
+    reach = perSize > 0 ? asfloat(entry[3]) * p.size.x * perSize : asfloat(entry[3]);
     float brightness = max(color.r, max(color.g, color.b));
-    if (!(brightness > 0))
+    if (!(brightness > 0) || !(reach > 0))
     {
         return false;
     }
-    bucket = uint(clamp(log2(brightness) * 4 + 32, 0.0, float(LIGHT_BUCKETS - 1)));
+    bucket = uint(clamp(log2(brightness * reach) * 4 + 24, 0.0, float(LIGHT_BUCKETS - 1)));
     return true;
 }
 
@@ -1956,11 +2127,12 @@ bool lightCandidate(uint row, uint k, out Particle p, out float3 color, out uint
 [numthreads(64, 1, 1)]
 void lightsCountMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
 {
-    // A row of groups per light emitter: its candidates counted by brightness
+    // A row of groups per light emitter: its candidates counted by reach
     Particle p;
     float3 color;
+    float reach;
     uint bucket;
-    if (lightCandidate(group.y, id.x, p, color, bucket))
+    if (lightCandidate(group.y, id.x, p, color, reach, bucket))
     {
         ParticleFrame* frame = push.frame;
         uint* state = frame.lightState;
@@ -1988,15 +2160,22 @@ void threshold(uint* counts, uint budget, out uint at, out uint taken)
 }
 
 [shader("compute")]
-[numthreads(1, 1, 1)]
-void lightsThresholdMain()
+[numthreads(256, 1, 1)]
+void lightsThresholdMain(uint lane : SV_GroupIndex)
 {
-    // Each emitter keeps its brightest within its budget; of what they keep, the frame keeps its brightest within its
+    // One group: each emitter keeps its farthest reaching within its budget (a thread per emitter, the rows in turn),
+    // what they keep summed into the frame's histogram in group memory; of it, the frame keeps its farthest reaching
+    // within its budget
     ParticleFrame* frame = push.frame;
     uint* state = frame.lightState;
     uint* entries = frame.lightEmitters;
     uint* all = state + MAX_LIGHT_EMITTERS * LIGHT_STATE_WORDS;
-    for (uint row = 0; row < frame.lightEmitterCount; row++)
+    if (lane < LIGHT_BUCKETS)
+    {
+        frameBuckets[lane] = 0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    for (uint row = lane; row < frame.lightEmitterCount; row += 256)
     {
         uint* s = state + row * LIGHT_STATE_WORDS;
         uint at;
@@ -2006,14 +2185,38 @@ void lightsThresholdMain()
         s[LIGHT_BUCKETS + 1] = taken;
         for (uint q = at; q < LIGHT_BUCKETS; q++)
         {
-            all[q] += q == at ? taken : s[q];
+            uint n = q == at ? taken : s[q];
+            if (n > 0)
+            {
+                InterlockedAdd(frameBuckets[q], n);
+            }
         }
     }
-    uint at;
-    uint taken;
-    threshold(all, frame.lightBudget, at, taken);
-    all[LIGHT_BUCKETS] = at;
-    all[LIGHT_BUCKETS + 1] = taken;
+    GroupMemoryBarrierWithGroupSync();
+    if (lane < LIGHT_BUCKETS)
+    {
+        all[lane] = frameBuckets[lane];
+    }
+    if (lane == 0)
+    {
+        // threshold(), over the group's histogram
+        uint sum = 0;
+        uint at = 0;
+        uint taken = frameBuckets[0];
+        for (int q = int(LIGHT_BUCKETS) - 1; q >= 0; q--)
+        {
+            uint n = frameBuckets[q];
+            if (sum + n >= frame.lightBudget)
+            {
+                at = uint(q);
+                taken = frame.lightBudget - sum;
+                break;
+            }
+            sum += n;
+        }
+        all[LIGHT_BUCKETS] = at;
+        all[LIGHT_BUCKETS + 1] = taken;
+    }
 }
 
 /** Whether a candidate of bucket `bucket` stays within selection `s`: above its threshold, or among the first at it. */
@@ -2035,8 +2238,9 @@ void lightsWriteMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
     // A row of groups per light emitter: the candidates its budget and the frame's keep become point lights
     Particle p;
     float3 color;
+    float reach;
     uint bucket;
-    if (!lightCandidate(group.y, id.x, p, color, bucket))
+    if (!lightCandidate(group.y, id.x, p, color, reach, bucket))
     {
         return;
     }
@@ -2060,7 +2264,7 @@ void lightsWriteMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
     Light l;
     l.position = e.originHigh;
     l.positionLow = e.originLow + ((e.flags & EMITTER_LOCAL) != 0 ? turn(e.rotation, p.position) : p.position);
-    l.range = asfloat(entries[group.y * LIGHT_ENTRY_WORDS + 3]);
+    l.range = reach;
     l.color = color;
     l.type = POINT;
     l.direction = float3(0, -1, 0);

@@ -81,10 +81,16 @@ class ParticleSortTest {
         }
         assumeThat(instance.gpus()).as("no Vulkan 1.3 GPU").isNotEmpty();
         device = VulkanDevice.createHeadless(instance.bestGpu());
-        graph = new FrameGraph(device, 2);
-        particles = new Particles(device, graph.frameSlots(), 4 << 20, 16);
         int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         target = new GpuImage(device, 4, 4, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
+        build(4 << 20);
+    }
+
+    /** The graph: the simulation and the probe, over a pool of {@code budget} bytes. */
+    private void build(long budget) {
+        graph = new FrameGraph(device, 2);
+        particles = new Particles(device, graph.frameSlots(), budget, 16);
+        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         graph.add(new ParticleSimulation(particles)).add(new Probe()).output(PROBE, new ExternalImage("probe", 4, 4,
             Format.R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
             .set(target.handle(), target.view()));
@@ -201,6 +207,53 @@ class ParticleSortTest {
                 .isGreaterThanOrEqualTo(k == 300 ? -1 : 0);
             assertThat(seenBall[index(entry)]).isFalse();
             seenBall[index(entry)] = true;
+        }
+    }
+
+    @Test
+    void keysSortAsAStableSortAcrossGroupsAndPartGroups() {
+        device.waitIdle();
+        graph.close();
+        particles.close();
+        build(ParticlePool.SLOT_BYTES * 80_000L);
+        for (int n : new int[] {1, ParticleConstants.SORT_GROUP - 1, ParticleConstants.SORT_GROUP + 1, 70_000}) {
+            // Two sorted emitters, the second's keys above the first's; many equal distances among 70,000 in a ball
+            Effect small = effects.play(EffectData.builder().emitter("e", e -> e.capacity(5).spawn(Spawn.burst(0, 5))
+                .init(Shape.sphere(1), Init.lifetime(100)).render(Renderer.billboard(Renderer.Facing.POSITION)))
+                .build(), 0, 0, -3);
+            Effect ball = effects.play(EffectData.builder().emitter("e", e -> e.capacity(n).spawn(Spawn.burst(0, n))
+                .init(Shape.sphere(5), Init.lifetime(100)).render(Renderer.billboard(Renderer.Facing.POSITION)))
+                .build(), 0, 0, -20);
+            frames(5);
+            assertThat(args[3]).as("keys of " + n).isEqualTo(n + 5);
+            // A stable sort of the keys as written (each emitter's in index order): keys in order, equal keys by index
+            // The emitters in the frame's order, whichever slots the effects took
+            int run = args[5];
+            assertThat(run).isIn(5, n);
+            int equal = 0;
+            boolean[][] seen = {new boolean[run], new boolean[n + 5 - run]};
+            for (int k = 0; k < n + 5; k++) {
+                long entry = sorted[k];
+                int emitter = k < run ? 0 : 1;
+                assertThat(key(entry) >>> ParticleConstants.SORT_DEPTH_BITS).as("emitter of " + k).isEqualTo(emitter);
+                assertThat(seen[emitter][index(entry)]).isFalse();
+                seen[emitter][index(entry)] = true;
+                if (k > 0 && k != run) {
+                    int order = Integer.compareUnsigned(key(entry), key(sorted[k - 1]));
+                    assertThat(order).as("key " + k + " of " + n).isNotNegative();
+                    if (order == 0) {
+                        equal++;
+                        assertThat(index(entry)).as("equal key " + k + " of " + n)
+                            .isGreaterThan(index(sorted[k - 1]));
+                    }
+                }
+            }
+            if (n == 70_000) {
+                assertThat(equal).as("equal keys, kept in order").isGreaterThan(1000);
+            }
+            small.kill();
+            ball.kill();
+            frames(1);
         }
     }
 

@@ -197,9 +197,12 @@ public final class ParticleSimulation implements Technique {
 
     /**
      * The event passes (E9, effects.md §2.4), when the frame's emitters send events: "particle events args" (the events
-     * kept and the sort's dispatch), a radix sort by (parent, phase, event), "particle events rekey" (keys of target and
-     * parent emitter), a second, stable sort, and "particle events ranges" (each sorted event's first child, each
-     * target's first event and children), which the spawn args and the spawn read.
+     * kept and the sorts' dispatches), "particle events small" (when they are at most {@code EVENT_SMALL}: both sorts
+     * and the rekey in one group), else a radix sort by (parent, phase, event), "particle events rekey" (keys of target
+     * and parent emitter) and a second, stable sort; then "particle events ranges" (each sorted event's first child,
+     * each target's first event and children), which the spawn args and the spawn read. The GPU picks the sort by the
+     * events kept (the other's dispatches get no groups); the radix sort's 48 passes are recorded only while recent
+     * frames sent many events ({@link Particles#eventsDropped}), else the small sort takes at most its capacity.
      */
     @AllowAllocation("building the graph, when it changes")
     private void events(GraphBuilder g, Particles.Buffers b) {
@@ -215,13 +218,23 @@ public final class ParticleSimulation implements Technique {
                     ctx.dispatch(eventsArgs, p.push(argsPush), 1);
                 }
             });
+        Pipeline small = g.computeProgram(SHADER, "eventsSmallMain", ParticlePush.BYTES);
+        ParticlePush smallPush = new ParticlePush();
+        g.pass("particle events small").read(b.events(), BufferAccess.STORAGE_READ)
+            .read(b.eventArgs(), BufferAccess.INDIRECT).read(b.eventArgs(), BufferAccess.STORAGE_READ)
+            .write(b.eventKeys(), BufferAccess.STORAGE_WRITE)
+            .record(ctx -> {
+                if (p.simulating() && p.sendsEvents()) {
+                    ctx.dispatchIndirect(small, p.push(smallPush), b.eventArgs(), 20); // its dispatch: words 5 to 7
+                }
+            });
         sort(g, b, "particle events by parent");
         ParticlePush rekeyPush = new ParticlePush();
         g.pass("particle events rekey").read(b.events(), BufferAccess.STORAGE_READ)
             .read(b.eventArgs(), BufferAccess.INDIRECT).read(b.eventArgs(), BufferAccess.STORAGE_READ)
             .write(b.eventKeys(), BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
-                if (p.simulating() && p.sendsEvents()) {
+                if (p.simulating() && p.sendsEvents() && p.radixEvents()) {
                     ctx.dispatchIndirect(rekey, p.push(rekeyPush), b.eventArgs(), 0);
                 }
             });
@@ -237,7 +250,10 @@ public final class ParticleSimulation implements Technique {
             });
     }
 
-    /** A radix sort of the frame's event keys in place: 8 passes of 4 bits, with the particle sort's programs. */
+    /**
+     * A radix sort of the frame's event keys in place: 8 passes of 4 bits, with the particle sort's programs; recorded
+     * while recent frames sent many events.
+     */
     @AllowAllocation("building the graph, when it changes")
     private void sort(GraphBuilder g, Particles.Buffers b, String name) {
         Particles p = particles;
@@ -255,14 +271,14 @@ public final class ParticleSimulation implements Technique {
                 .read(b.eventArgs(), BufferAccess.INDIRECT).read(b.eventArgs(), BufferAccess.STORAGE_READ)
                 .write(b.eventCounts(), BufferAccess.STORAGE_WRITE)
                 .record(ctx -> {
-                    if (p.simulating() && p.sendsEvents()) {
+                    if (p.simulating() && p.sendsEvents() && p.radixEvents()) {
                         ctx.dispatchIndirect(count, countPush, b.eventArgs(), 0);
                     }
                 });
             g.pass(name + ", scan " + pass).read(b.eventArgs(), BufferAccess.STORAGE_READ)
                 .write(b.eventCounts(), BufferAccess.STORAGE_WRITE)
                 .record(ctx -> {
-                    if (p.simulating() && p.sendsEvents()) {
+                    if (p.simulating() && p.sendsEvents() && p.radixEvents()) {
                         ctx.dispatch(scan, countPush, 1);
                     }
                 });
@@ -270,7 +286,7 @@ public final class ParticleSimulation implements Technique {
                 .read(b.eventCounts(), BufferAccess.STORAGE_READ).read(b.eventArgs(), BufferAccess.INDIRECT)
                 .read(b.eventArgs(), BufferAccess.STORAGE_READ).write(target, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> {
-                    if (p.simulating() && p.sendsEvents()) {
+                    if (p.simulating() && p.sendsEvents() && p.radixEvents()) {
                         ctx.dispatchIndirect(scatter, countPush, b.eventArgs(), 0);
                     }
                 });
@@ -279,9 +295,9 @@ public final class ParticleSimulation implements Technique {
 
     /**
      * The particle lights (step 17b): "particle lights count" clears the selection and counts each light emitter's
-     * candidates by brightness, "particle lights threshold" finds where each emitter's budget and then the frame's
-     * start, "particle lights write" writes the kept as point lights into the lights the GPU writes, which the light
-     * binning reads after (it builds this first: Lights.writtenBy).
+     * candidates by reach (brightness times radius), "particle lights threshold" finds where each emitter's budget
+     * (a thread each) and then the frame's start, "particle lights write" writes the kept as point lights into the
+     * lights the GPU writes, which the light binning reads after (it builds this first: Lights.writtenBy).
      */
     @AllowAllocation("building the graph, when it changes")
     private void lights(GraphBuilder g, Particles.Buffers b) {

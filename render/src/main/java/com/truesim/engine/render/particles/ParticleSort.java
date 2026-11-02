@@ -17,9 +17,11 @@ import java.util.Objects;
  * each emitter's alive particles in a run of their own, farthest first, which {@link ParticleDraw} draws its sorted
  * billboards in. Keys are the emitter's place among the frame's sorted emitters (at most {@code SORT_EMITTERS}) above
  * the top 20 bits of the particle's squared distance from the center, sorted by an indirect radix sort of 4 bits a
- * pass (FidelityFX-style: count, scan, scatter), as many passes as the keys' bits need, even, at most 8. A request:
- * equal requests share one sort, so both eyes of a pair, drawn with the pair's center camera, sort once. Additive
- * renderers (and those {@code sorted(false)}) are not sorted; emitters draw as wholes back to front either way.
+ * pass (FidelityFX-style: count, scan, scatter; {@code SORT_GROUP} keys a group, each ranked among its digit's in the
+ * group with wave ballots and written straight to its place), as many passes as the keys' bits need, even, at most 8.
+ * A request: equal requests share one sort, so both eyes of a pair, drawn with the pair's center camera, sort once.
+ * Additive renderers (and those {@code sorted(false)}) are not sorted; emitters draw as wholes back to front either
+ * way.
  *
  * <pre>{@code
  * ParticleSort.Order order = g.request(new ParticleSort(particles, center, pool, state));

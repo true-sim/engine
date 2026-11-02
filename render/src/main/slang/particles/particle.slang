@@ -130,7 +130,8 @@ public struct ParticleFrame
     public uint pad1;
     public uint64_t events;        // ParticleEventRecord*: the frame's events, as the update appends them
     public uint2* eventKeys;       // their sort keys and indices, sorted in place (events sort with the sort's passes)
-    public uint* eventArgs;        // the event sort's dispatch (3 words), the events kept, those sent
+    public uint* eventArgs;        // the event sort's dispatch (3 words), the events kept, those sent, the small
+                                   // sort's dispatch (3 words)
     public uint* childPrefix;      // per sorted event: the children of the events before it
     public uint* targets;          // per effect: its emitters' places in the list (NO_EMITTER: none)
     public uint64_t rays;          // RayScene*: the frame's top level to trace collision rays into (rays variant); or 0
@@ -153,6 +154,9 @@ public struct ParticleFrame
     public uint* gpuLights;        // the lights the GPU writes (Lights.gpuLights): a count, three words, the lights
     public uint lightEmitterCount;
     public uint lightBudget;       // the most lights of all emitters
+    public uint eventLimit;        // the most events the frame keeps: EVENT_CAPACITY with the radix sort recorded,
+                                   // else EVENT_SMALL
+    public uint smallEvents;       // the most events the small sort takes: EVENT_SMALL, or 0 (the radix sort's alone)
 };
 
 
@@ -259,15 +263,22 @@ public static const uint CURVE_CACHE = 1024;
 public static const uint SORT_EMITTERS = 4096;
 /** Bits of a sort key below the emitter's place: the distance's (a float's top bits but the sign). */
 public static const uint SORT_DEPTH_BITS = 20;
-/** Keys a sort's groups take each. */
-public static const uint SORT_GROUP = 256;
+/** Keys a sort's groups take each: SORT_KEYS per thread. */
+public static const uint SORT_GROUP = 1024;
+/** Threads of a sort's groups. */
+public static const uint SORT_THREADS = 256;
+/** Keys each thread of a sort's groups takes. */
+public static const uint SORT_KEYS = 4;
 /** A draw not sorted. */
 public static const uint NO_SORT = 0xffffffffu;
 /** Particle lights (step 17b): emitters with light renderers a frame takes, at most. */
-public static const uint MAX_LIGHT_EMITTERS = 64;
-/** Brightness buckets of the selection: a quarter of an octave each, 2^-8 to 2^8. */
+public static const uint MAX_LIGHT_EMITTERS = 1024;
+/** Reach buckets of the selection (brightness times radius in metres): a quarter of an octave each, 2^-6 to 2^10. */
 public static const uint LIGHT_BUCKETS = 64;
-/** Words of a light emitter's entry: its place in the list, its budget, the share lit, radius, intensity, padding. */
+/**
+ * Words of a light emitter's entry: its place in the list, its budget, the share lit, radius, intensity, the radius per
+ * metre of a particle's size (0: the radius as it is), padding.
+ */
 public static const uint LIGHT_ENTRY_WORDS = 8;
 /** Words of a light emitter's selection: the bucket counts, the threshold bucket, how many it keeps, a counter. */
 public static const uint LIGHT_STATE_WORDS = 68;
@@ -391,6 +402,11 @@ public static const uint EVENT_WORDS = 8;
 public static const uint MAX_EVENTS = 8;
 /** Events a frame holds; more are dropped and counted. */
 public static const uint EVENT_CAPACITY = 65536;
+/**
+ * Events the small sort takes: one group sorts them in group memory (16 KB of keys). A frame that keeps no more takes
+ * it instead of the radix sort's passes.
+ */
+public static const uint EVENT_SMALL = 2048;
 /** The most children one event spawns (scene-effects' CpuSimulation.MAX_CHILDREN). */
 public static const uint MAX_CHILDREN = 255;
 /** No emitter: an event's target without an instance. */
@@ -650,4 +666,116 @@ public float3 relativeTo(ParticleEmitter e, float3 p, float3 high, float3 low)
     precise float3 l = e.originLow - low;
     float3 offset = (e.flags & EMITTER_LOCAL) != 0 ? turn(e.rotation, p) : p;
     return (h + l) + offset;
+}
+
+// ---------------------------------------------------------------------------------------------- radix sorts
+
+/** The set bits of a ballot's mask. */
+public uint countBits(uint4 mask)
+{
+    return countbits(mask.x) + countbits(mask.y) + countbits(mask.z) + countbits(mask.w);
+}
+
+/** The lanes of the wave below this one, as a ballot's mask. */
+public uint4 lanesBelow()
+{
+    uint lane = WaveGetLaneIndex();
+    uint4 below;
+    [unroll]
+    for (uint i = 0; i < 4; i++)
+    {
+        uint low = 32 * i;
+        below[i] = lane >= low + 32 ? 0xffffffffu : lane > low ? (1u << (lane - low)) - 1 : 0;
+    }
+    return below;
+}
+
+/**
+ * A row of a wave's sort keys, one a lane, as ballots: the lanes holding a key, and those whose key's 4-bit digit has
+ * each bit set. Any lane can tell from them which lanes hold a digit, and so how many; waves of up to 128 lanes.
+ */
+public struct DigitBallots
+{
+    public uint4 held;
+    public uint4 bits[4];
+
+    /** The lanes holding a key of digit `digit`. */
+    public uint4 lanes(uint digit)
+    {
+        uint4 m = held;
+        [unroll]
+        for (uint b = 0; b < 4; b++)
+        {
+            m &= ((digit >> b) & 1) != 0 ? bits[b] : ~bits[b];
+        }
+        return m;
+    }
+};
+
+/** The row of this lane's key of digit `digit` (when `held`): every lane of the wave calls it together. */
+public DigitBallots digitBallots(bool held, uint digit)
+{
+    DigitBallots r;
+    r.held = WaveActiveBallot(held);
+    [unroll]
+    for (uint b = 0; b < 4; b++)
+    {
+        r.bits[b] = WaveActiveBallot(((digit >> b) & 1) != 0);
+    }
+    return r;
+}
+
+/**
+ * Keys of each digit a wave's rows held so far: lane l keeps digits l, l + n, l + 2n and l + 3n of a wave of n lanes,
+ * so waves of 4 lanes or more keep all 16.
+ */
+public struct DigitCounts
+{
+    public uint kept[4];
+
+    /** The count of digit `digit`, from the lane keeping it: every lane of the wave calls it together. */
+    public uint of(uint digit)
+    {
+        uint n = WaveGetLaneCount();
+        uint count = 0;
+        [unroll]
+        for (uint i = 0; i < 4; i++)
+        {
+            if (i * n < 16) // the same for the whole wave
+            {
+                uint value = WaveReadLaneAt(kept[i], digit % n);
+                count = digit / n == i ? value : count;
+            }
+        }
+        return count;
+    }
+
+    /** Counts the keys of row `row`. */
+    [mutating]
+    public void add(DigitBallots row)
+    {
+        uint n = WaveGetLaneCount();
+        uint lane = WaveGetLaneIndex();
+        [unroll]
+        for (uint i = 0; i < 4; i++)
+        {
+            uint digit = lane + n * i;
+            if (digit < 16)
+            {
+                kept[i] += countBits(row.lanes(digit));
+            }
+        }
+    }
+};
+
+/** No keys counted yet. */
+public DigitCounts noDigits()
+{
+    DigitCounts c;
+    [unroll]
+    for (uint i = 0; i < 4; i++)
+    {
+        c.kept[i] = 0;
+    }
+    return c;
 }

@@ -559,6 +559,50 @@ class ParticlesTest {
     }
 
     @Test
+    void theSmallEventSortOrdersAsTheRadixSortDoes() {
+        // 1,900 events in a frame (two groups of the radix sort, within the small sort): two parents, two targets
+        EffectData data = EffectData.builder()
+            .emitter("a", e -> e.capacity(700).spawn(Spawn.burst(0, 700)).init(Shape.sphere(1), Init.lifetime(0.05f))
+                .event(ParticleEvent.onDeath("x", Bind.random(1, 3)), ParticleEvent.onDeath("y", Bind.constant(1))))
+            .emitter("b", e -> e.capacity(500).spawn(Spawn.burst(0, 500)).init(Shape.sphere(2), Init.lifetime(0.05f))
+                .event(ParticleEvent.onDeath("x", Bind.constant(1))))
+            .emitter("x", e -> e.capacity(3000).spawn(Spawn.fromEvents()).init(Init.lifetime(10), Init.inherit(1)))
+            .emitter("y", e -> e.capacity(700).spawn(Spawn.fromEvents()).init(Init.lifetime(10),
+                Init.speed(Bind.constant(1))))
+            .build();
+        long[][][] runs = new long[2][2][];
+        long sent = 0;
+        for (int run = 0; run < 2; run++) {
+            particles.eventSort(run == 0 ? Particles.EVENTS_SMALL : Particles.EVENTS_RADIX);
+            Effect played = effects.play(data, 0, 0, 0).seed(5);
+            for (int f = 0; f < 8; f++) {
+                frame(FRAME);
+                device.waitIdle();
+                sent = Math.max(sent, particles.events());
+                assertThat(particles.eventsDropped()).as("none dropped").isZero();
+            }
+            for (int e = 0; e < 2; e++) {
+                List<Gpu> children = gpu(played.id(), 2 + e);
+                runs[run][e] = new long[children.size()];
+                for (int i = 0; i < children.size(); i++) {
+                    Gpu p = children.get(i);
+                    runs[run][e][i] = (long) p.seed << 32 ^ Float.floatToIntBits(p.x)
+                        ^ (long) Float.floatToIntBits(p.z) << 7;
+                }
+            }
+            played.kill();
+            frame(FRAME);
+        }
+        particles.eventSort(Particles.EVENTS_EITHER);
+        assertThat(sent).as("over a radix group, within the small sort").isGreaterThan(ParticleConstants.SORT_GROUP)
+            .isLessThanOrEqualTo(ParticleConstants.EVENT_SMALL);
+        assertThat(runs[0][0]).hasSizeGreaterThan(1000);
+        assertThat(runs[0][1]).hasSize(700);
+        assertThat(runs[1][0]).as("children in the same slots, alike").containsExactly(runs[0][0]);
+        assertThat(runs[1][1]).containsExactly(runs[0][1]);
+    }
+
+    @Test
     void eventsBeyondTheBufferAreDroppedAndCounted() {
         device.waitIdle();
         graph.close();
@@ -572,18 +616,31 @@ class ParticlesTest {
         for (int k = 0; k < deaths.length; k++) {
             deaths[k] = ParticleEvent.onDeath("child", Bind.constant(1));
         }
-        effects.play(EffectData.builder()
+        EffectData many = EffectData.builder()
             .emitter("many", e -> e.spawn(Spawn.burst(0, 10_000)).init(Init.lifetime(0.05f)).event(deaths))
             .emitter("child", e -> e.capacity(1000).spawn(Spawn.fromEvents()).init(Init.lifetime(1)))
-            .build(), 0, 0, 0);
+            .build();
+        // After quiet frames only the small sort is recorded: the burst keeps what it takes
+        Effect first = effects.play(many, 0, 0, 0);
         boolean counted = false;
         for (int f = 0; f < 12 && !counted; f++) {
             frame(FRAME);
             device.waitIdle();
             counted = particles.eventsDropped() > 0;
         }
-        assertThat(counted).as("80,000 events, room for 65,536").isTrue();
+        assertThat(counted).as("80,000 events, room for the small sort's").isTrue();
         assertThat(particles.events()).isEqualTo(80_000);
+        assertThat(particles.eventsDropped()).isEqualTo(80_000 - ParticleConstants.EVENT_SMALL);
+        // Seen, the radix sort is recorded: the next burst keeps what the event buffer holds
+        first.kill();
+        effects.play(many, 0, 0, 0);
+        counted = false;
+        for (int f = 0; f < 12 && !counted; f++) {
+            frame(FRAME);
+            device.waitIdle();
+            counted = particles.eventsDropped() > 0 && particles.events() == 80_000;
+        }
+        assertThat(counted).as("80,000 events, room for 65,536").isTrue();
         assertThat(particles.eventsDropped()).isEqualTo(80_000 - ParticleConstants.EVENT_CAPACITY);
     }
 
