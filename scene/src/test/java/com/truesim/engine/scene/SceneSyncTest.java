@@ -477,6 +477,20 @@ class SceneSyncTest {
         device.waitIdle();
         // 2 to the right at 3 deep is a third of the view's width: 21 columns
         assertThat(litColumn(readbacks[0], 0)).as("posed, right").isCloseTo(rest + 21, within(2.0));
+        // Posed only when its joints move: not when nothing does, nor when a node it does not hang on does.
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(sync.posedCount()).isZero();
+        long elsewhere = scene.create();
+        scene.setTranslation(elsewhere, 5, 5, 5);
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(sync.posedCount()).isZero();
+        scene.setTranslation(right, 2, 0.5, 0);
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(sync.posedCount()).as("a joint moved").isOne();
+        scene.setTranslation(body, -1, 0, -3); // its own node, where it is: posed again, the same pose
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(sync.posedCount()).isOne();
+        scene.setTranslation(right, 2, 0, 0);
         // Without its skin the mesh draws as it is, at rest; the copy leaves the pool.
         int meshes = pool.meshCount();
         renderables.setSkin(body, null);

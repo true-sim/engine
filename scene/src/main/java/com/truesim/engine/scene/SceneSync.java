@@ -111,6 +111,19 @@ public final class SceneSync implements AutoCloseable {
     private boolean[] itemCopySkinned = new boolean[64]; // whether its copy was made with the skin's joints
     private int[] skinned = new int[64];
     private int skinnedCount;
+    // Copies to pose this update: those whose joints (or their ancestors in the model, or the mesh's node) moved, found
+    // in the scene's log through the nodes each copy watches (lists by node index; entries of copies gone are dropped
+    // as met). Copies with morph targets are posed every update: their weights are not logged.
+    private boolean[] poseDue = new boolean[64];
+    private int[] watchHead = filled(64);
+    private int[] watchItem = new int[64];
+    private int[] watchCopy = new int[64];
+    private int[] watchNext = new int[64];
+    private int watchCount;
+    private int watchFree = NONE;
+    private int[] stamp = new int[64]; // by node index: the registration that watched it last, against duplicates
+    private int stamps;
+    private int posed; // copies posed in the last update
     private final double[] relative = new double[12]; // the node's world transform, inverted
     private final double[] jointWorld = new double[12];
     private final double[] matrix = new double[12];
@@ -218,14 +231,19 @@ public final class SceneSync implements AutoCloseable {
             started = true;
             rebuild(); // the first update, or fell behind the renderables' log
         }
+        boolean poseAll = rewriteAll; // the first update, or behind the renderables' log
         if (!rewriteAll) {
-            // More changed nodes than half the instances (or more than the scene's log kept): rewriting every
-            // instance costs less than following the changes.
+            // Following the scene's log finds the moved instances and the copies whose joints moved; when it lost
+            // changes, everything is written and posed. More moved instances than half: rewriting every one costs
+            // less than picking them.
             int changed = scene.changeCountSince(since);
-            if (changed < 0 || changed > Math.max(instanceCount, itemCount) / 2) {
+            if (changed < 0 || changed > (watchCount + Math.max(instanceCount, itemCount)) / 2) {
+                // Lost changes, or most of what it watches moved: posing and writing all costs less than picking
                 rewriteAll = true;
+                poseAll = true;
             } else {
                 scene.changesSince(since, onSceneChange);
+                rewriteAll = movedCount > Math.max(instanceCount, itemCount) / 2;
             }
         }
         if (rewriteAll) {
@@ -259,8 +277,14 @@ public final class SceneSync implements AutoCloseable {
         for (int i = 0; i < count; i++) {
             fillEntries[i] = gpu.claim(itemSlot[fillItems[i]]);
         }
+        posed = 0;
         for (int i = 0; i < skinnedCount; i++) {
-            pose(skinned[i]);
+            int item = skinned[i];
+            if (poseAll || poseDue[item] || itemMesh[item].mesh.data.morphTargetCount() > 0) {
+                pose(item);
+                posed++;
+            }
+            poseDue[item] = false;
         }
         if (jobs != null && count >= PARALLEL) {
             jobs.parallelFor(count, GRAIN, fill);
@@ -276,6 +300,11 @@ public final class SceneSync implements AutoCloseable {
     /** How many renderables are drawn now: those whose meshes are on the GPU. */
     public int instanceCount() {
         return instanceCount;
+    }
+
+    /** How many deformed copies the last update posed: those whose joints moved, or with morph targets. */
+    public int posedCount() {
+        return posed;
     }
 
     /** How many renderables this scene has, drawn or waiting for their meshes. */
@@ -544,6 +573,93 @@ public final class SceneSync implements AutoCloseable {
             && itemSlot[item] != NONE) {
             markMoved(item);
         }
+        if (NodeChange.has(changes, NodeChange.TRANSFORM) && item < watchHead.length) {
+            watched(item);
+        }
+    }
+
+    /** Marks the copies watching node index {@code index} to pose; drops entries of copies gone. */
+    private void watched(int index) {
+        int previous = NONE;
+        int entry = watchHead[index];
+        while (entry != NONE) {
+            int next = watchNext[entry];
+            int item = watchItem[entry];
+            if (itemCopy[item] == watchCopy[entry]) {
+                poseDue[item] = true;
+                previous = entry;
+            } else { // its copy is gone: unlinked, free for the next
+                if (previous == NONE) {
+                    watchHead[index] = next;
+                } else {
+                    watchNext[previous] = next;
+                }
+                watchNext[entry] = watchFree;
+                watchFree = entry;
+            }
+            entry = next;
+        }
+    }
+
+    /**
+     * Has {@code item}'s copy watch the nodes whose moves change its pose: its own node, and each joint with its
+     * ancestors up to the first that is also an ancestor of its node (a common ancestor moves both alike).
+     */
+    @AllowAllocation("a skinned renderable drawn or changed")
+    private void watch(int item, SkinBinding skin, MeshData data) {
+        int registration = ++stamps;
+        int copy = itemCopy[item];
+        long node = itemNode[item];
+        watchNode(NodeHandle.index(node), item, copy, registration);
+        if (skin == null) {
+            return;
+        }
+        for (int j = 0; j < data.jointCount(); j++) {
+            for (long n = skin.joint(data.paletteJoint(j)); n != NodeHandle.NONE && scene.contains(n)
+                && !isAncestor(n, node); n = scene.parent(n)) {
+                watchNode(NodeHandle.index(n), item, copy, registration);
+            }
+        }
+    }
+
+    /** Whether {@code ancestor} is {@code node} or above it. */
+    private boolean isAncestor(long ancestor, long node) {
+        for (long n = node; n != NodeHandle.NONE; n = scene.parent(n)) {
+            if (n == ancestor) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @AllowAllocation("growing the watch lists")
+    private void watchNode(int index, int item, int copy, int registration) {
+        if (index >= watchHead.length) {
+            int old = watchHead.length;
+            int length = Math.max(index + 1, 2 * old);
+            watchHead = Arrays.copyOf(watchHead, length);
+            Arrays.fill(watchHead, old, length, NONE);
+            stamp = Arrays.copyOf(stamp, length);
+        }
+        if (stamp[index] == registration) {
+            return; // shared by two of its joints: once
+        }
+        stamp[index] = registration;
+        int entry = watchFree;
+        if (entry != NONE) {
+            watchFree = watchNext[entry];
+        } else {
+            if (watchCount == watchItem.length) {
+                watchItem = Arrays.copyOf(watchItem, 2 * watchCount);
+                watchCopy = Arrays.copyOf(watchCopy, 2 * watchCount);
+                watchNext = Arrays.copyOf(watchNext, 2 * watchCount);
+            }
+            entry = watchCount++;
+        }
+        watchItem[entry] = item;
+        watchCopy[entry] = copy;
+        watchNext[entry] = watchHead[index];
+        watchHead[index] = entry;
     }
 
     private void destroy(int item) {
@@ -600,6 +716,7 @@ public final class SceneSync implements AutoCloseable {
         movedItems = Arrays.copyOf(movedItems, length);
         itemCopy = Arrays.copyOf(itemCopy, length);
         itemCopySkinned = Arrays.copyOf(itemCopySkinned, length);
+        poseDue = Arrays.copyOf(poseDue, length);
         Arrays.fill(itemCopy, old, length, NONE);
         fillItems = new int[length];
         fillEntries = new int[length];
@@ -719,6 +836,7 @@ public final class SceneSync implements AutoCloseable {
         pool.deformation().add(copy, skinning ? data.jointCount() : 0, data);
         itemCopy[item] = copy;
         itemCopySkinned[item] = skinning;
+        watch(item, skinning ? skin : null, data);
         if (skinnedCount == skinned.length) {
             skinned = Arrays.copyOf(skinned, 2 * skinnedCount);
         }
