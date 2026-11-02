@@ -16,6 +16,8 @@ import com.truesim.scene.effects.ColorGradient;
 import com.truesim.scene.effects.Effect;
 import com.truesim.scene.effects.EffectData;
 import com.truesim.scene.effects.EffectParameter;
+import com.truesim.scene.effects.EffectType;
+import com.truesim.scene.effects.EmitterData;
 import com.truesim.scene.effects.Effects;
 import com.truesim.scene.effects.FloatCurve;
 import com.truesim.scene.effects.Forces;
@@ -26,6 +28,7 @@ import com.truesim.scene.effects.ParticleEvent;
 import com.truesim.scene.effects.ParticleWorld;
 import com.truesim.scene.effects.Renderer;
 import com.truesim.scene.effects.Shape;
+import com.truesim.scene.effects.Space;
 import com.truesim.scene.effects.Spawn;
 
 /**
@@ -54,15 +57,40 @@ final class ShowcaseEffects implements AutoCloseable {
         .linear(0.25f, 1, 0.78f, 0.45f, 1).linear(0.55f, 0.85f, 0.38f, 0.12f, 0.8f)
         .linear(0.8f, 0.5f, 0.1f, 0.025f, 0.3f).linear(1, 0.2f, 0.03f, 0.01f, 0).build();
 
-    /** A torch's fire, in the world: it rises as the torch sways. */
-    static final EffectData TORCH = fire(0.08f, 0.34f, 90, false, 8, 5);
-    /** The bonfire in the middle of the arena: the torch's layers, larger. */
-    static final EffectData BONFIRE = fire(0.55f, 0.85f, 300, false, 18, 14);
     /**
-     * A fox on fire: the same layers born on its skin as posed, its upward-facing parts the most (a mask over its
-     * texture coordinates), left behind as it runs.
+     * With {@code -Pglass=true} the fires draw before glass (effects step 21): a window in front of the bonfire tints
+     * it; sparks in front of the window draw after it, untinted.
      */
-    static final EffectData FOX_FIRE = fire(0, 0.3f, 900, true, 6, 3);
+    static final float GLASS = Boolean.getBoolean("truesim.demo.glass") ? 1 : 0;
+    /**
+     * Fires and smoke far away: fewer particles drawn (the rest fading out by their hash) and spawned, past 40 m
+     * moved every second frame, drawn moved on between (effects step 18).
+     */
+    static final EffectType FIRES = EffectType.builder("fires").lod(22, 0.7f, 1, 0.6f).lod(40, 0.45f, 2, 0.35f)
+        .build();
+    /**
+     * A torch's fire, shared (E23): six simulations in the torch's frame, each drawn at the torches showing it (they
+     * sway: placements move with their nodes; nothing is inherited); within 9 m of the camera a torch simulates on its
+     * own. Its light is an effect of its own per torch ({@link #TORCH_LIGHT}): lights are per instance.
+     */
+    static final EffectData TORCH = fire(0.08f, 0.34f, 90, false, 8, 5, true);
+    /**
+     * The crowd's dust: every footstep bursts into the shared instance of its 12 m cell (E22), so a hundred foxes'
+     * steps are a few instances (effects step 18's sync cost), each holding what that many steps leave.
+     */
+    static final EffectData CROWD_DUST = EffectData.builder(EffectType.builder("crowd dust").burstCell(12).build())
+        .parameter(DemoEffects.INTENSITY, 0.8f)
+        .emitter("dust", DemoEffects.DUST.emitters().get(0), e -> e.capacity(6000)).build();
+    /** A torch's flickering light. */
+    static final EffectData TORCH_LIGHT = EffectData.builder(FIRES).emitter("glow", e -> glow(e, false, 0.08f, 8, 5))
+        .build();
+    /** The bonfire in the middle of the arena: the torch's layers, larger, its smoke at half resolution. */
+    static final EffectData BONFIRE = fire(0.55f, 0.85f, 300, false, 18, 14, false);
+    /**
+     * A fox on fire: the same layers born on its skin as posed, its upward-facing parts the most (weighted by how far
+     * its surface faces up, effects step 20's module), left behind as it runs.
+     */
+    static final EffectData FOX_FIRE = fire(0, 0.3f, 900, true, 6, 3, false);
 
     /** Fireworks from one launcher: one to three rockets, each bursting into stars (and a flash) as it dies. */
     static final EffectData LAUNCH = EffectData.builder()
@@ -73,8 +101,9 @@ final class ShowcaseEffects implements AutoCloseable {
                     .linear(0.25f, 4, 2.6f, 0.6f, 1).linear(0.5f, 0.5f, 3.5f, 0.9f, 1).linear(0.75f, 0.7f, 1.2f, 4, 1)
                     .linear(1, 4, 0.6f, 3.5f, 1).build())))
             .update(Forces.gravity(), Forces.drag(0.15f))
+            // each rocket emits its trail, 40 sparks a second spread along its path (particles as emitters)
             .event(ParticleEvent.onDeath("stars", Bind.random(90, 130)), ParticleEvent.onDeath("flash",
-                Bind.constant(1)), ParticleEvent.every(0.025, "trail", Bind.constant(1)))
+                Bind.constant(1)), ParticleEvent.emit("trail", Bind.constant(40)))
             .render(Renderer.billboard(Renderer.Facing.VELOCITY).additive().set("stretch", 0.06f)
                 .asset("texture", EffectTextures.EMBER)))
         .emitter("trail", e -> e.capacity(600).spawn(Spawn.fromEvents()).init(Shape.sphere(0.05f),
@@ -147,7 +176,7 @@ final class ShowcaseEffects implements AutoCloseable {
             Over.size(FloatCurve.of(0, 0.6f, 1, 2.6f)),
             Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0).linear(0.15f, 1, 1, 1, 1).linear(1, 1, 1, 1, 0)
                 .build()))
-        .render(smoke(0.5f))).build();
+        .render(smoke(0.5f).set("half", 1))).build();
 
     /** A ribbon behind an orb, in its tint, narrowing to its tail. */
     static final EffectData RIBBON = EffectData.builder().parameter(TINT, 0.3f, 1.2f, 2, 1)
@@ -192,7 +221,8 @@ final class ShowcaseEffects implements AutoCloseable {
         instances = world.gpuScene();
         rock = world.rock();
         wood = world.woodMaterial();
-        particles = new Particles(device, slots, 128 << 20);
+        particles = new Particles(device, slots, Integer.getInteger("truesim.demo.sparks", 0) > 0 ? 256L << 20
+            : 128L << 20);
         textures = new Textures(device, slots);
         EffectTextures.register(particles, textures);
         EffectTextures.registerFoxMask(particles, textures, crowd.bodyMesh());
@@ -216,8 +246,7 @@ final class ShowcaseEffects implements AutoCloseable {
         // Every fox kicks up dust where its feet come down; a tenth of them burn
         bindings = new EffectBindings(effects, crowd.animators());
         for (int f = 0; f < 4; f++) {
-            bindings.onEvent(DemoCharacter.FEET[f], DemoEffects.DUST, crowd.feet()[f]).scale(DemoEffects.INTENSITY)
-                .minimumWeight(0.2f);
+            bindings.onEvent(DemoCharacter.FEET[f], CROWD_DUST, crowd.feet()[f]).minimumWeight(0.2f).burst();
         }
         int burning = 0;
         for (int i = 0; i < crowd.count(); i++) {
@@ -257,7 +286,8 @@ final class ShowcaseEffects implements AutoCloseable {
         place(0);
         scene.update();
         for (int t = 0; t < TORCHES; t++) {
-            effects.play(TORCH, torches[t]).inheritVelocity(0.6f);
+            effects.play(TORCH, torches[t]);
+            effects.play(TORCH_LIGHT, torches[t]);
         }
         float[][] tints = {{0.3f, 1.2f, 2.4f}, {2.4f, 0.5f, 1.6f}, {0.6f, 2.4f, 0.8f}};
         long center = scene.create();
@@ -280,6 +310,70 @@ final class ShowcaseEffects implements AutoCloseable {
         playAt(DemoEffects.SWIRL, radius + 2, 4.3);
         playAt(DUST_DEVIL, radius + 4, 5.4);
         playAt(DemoEffects.LIT_SMOKE, radius + 5, 1.7);
+        extras(world, ground);
+    }
+
+    /**
+     * What the showcase's options add: {@code -Ptorches=N} torches in all (the arena's eight, the rest standing in rings
+     * beyond it, every one a placement of the six shared fires); {@code -Psparks=N} sparks over the middle, each
+     * emitting a trail of its own (particles as emitters, a ribbon per parent); {@code -Pglass=true} windows in front of
+     * the bonfire with sparks before them.
+     */
+    private void extras(DemoScene world, double ground) {
+        int extra = Integer.getInteger("truesim.demo.torches", TORCHES) - TORCHES;
+        for (int t = 0, ring = 0, inRing = 0; t < extra; t++, inRing++) {
+            double r = radius + 6 + 4 * ring;
+            int around = (int) (2 * Math.PI * r / 3.5);
+            if (inRing == around) {
+                ring++;
+                inRing = 0;
+                r = radius + 6 + 4 * ring;
+                around = (int) (2 * Math.PI * r / 3.5);
+            }
+            double a = 2 * Math.PI * (inRing + 0.5 * (ring % 2)) / around;
+            double tx = x + r * Maths.cos(a);
+            double tz = z + r * Maths.sin(a);
+            double ty = DemoMeshes.height(tx, tz);
+            instances.add(rock, wood, 1, true, tx, ty + 0.8, tz, 0, 0, 0, 1, 0.05f, 0.85f, 0.05f);
+            instances.add(rock, wood, 1, true, tx, ty + 1.6, tz, 0, 0, 0, 1, 0.1f, 0.14f, 0.1f);
+            effects.play(TORCH, tx, ty + 1.72, tz);
+        }
+        int sparks = Integer.getInteger("truesim.demo.sparks", 0);
+        if (sparks > 0) {
+            effects.play(sparkTrails(sparks), x, ground + 3, z);
+        }
+        if (GLASS > 0) {
+            // A window of three panes between the bonfire and the camera's side, sparks before it
+            for (int p = -1; p <= 1; p++) {
+                instances.add(world.pane(), world.glassMaterial(), 1, false, x + 2.1 * p, ground + 1.5, z + 2.6, 0, 0,
+                    0, 1, 2, 2.8f, 1);
+            }
+            effects.play(DemoEffects.LIT_SPARKS, x + 0.6, ground, z + 4.2);
+        }
+    }
+
+    /**
+     * {@code count} sparks thrown up and falling, each emitting a trail of its own, 24 points a second, a ribbon per
+     * parent (effects step 19).
+     */
+    static EffectData sparkTrails(int count) {
+        ColorGradient hot = ColorGradient.builder().linear(0, 1.2f, 0.45f, 0.1f, 1).linear(0.5f, 1, 0.8f, 0.3f, 1)
+            .linear(1, 0.25f, 0.5f, 1.2f, 1).build();
+        return EffectData.builder()
+            .emitter("sparks", e -> e.capacity(count).spawn(Spawn.rate(count / 2.1f))
+                .init(Shape.sphere(0.5f), Init.velocity(Bind.random(-6, 6), Bind.random(4, 13), Bind.random(-6, 6)),
+                    Init.lifetime(Bind.random(1.4f, 2)), Init.size(Bind.constant(0.03f)), Init.color(Bind.random(hot)))
+                .update(Forces.gravity(Bind.constant(0.7f)), Forces.drag(0.5f), Over.color(ColorGradient.builder()
+                    .linear(0, 1, 1, 1, 1).linear(0.8f, 1, 0.7f, 0.5f, 1).linear(1, 0.6f, 0.3f, 0.1f, 0).build()))
+                .event(ParticleEvent.emit("trail", Bind.constant(24)))
+                .render(Renderer.billboard(Renderer.Facing.VELOCITY).additive().set("stretch", 0.05f)
+                    .asset("texture", EffectTextures.EMBER)))
+            .emitter("trail", e -> e.capacity(5 * count).spawn(Spawn.fromEvents())
+                .init(Init.lifetime(0.18f), Init.size(Bind.constant(0.025f)), Init.inherit(0, true, false))
+                .update(Over.color(ColorGradient.builder().linear(0, 0.8f, 0.8f, 0.8f, 1).linear(1, 0.4f, 0.2f, 0.1f, 0)
+                    .build()))
+                .render(Renderer.ribbon().additive().set("ribbons", 0).set("width.tail", 0f)))
+            .build();
     }
 
     /** Plays {@code effect} on the ground {@code r} from the arena's middle at angle {@code a}. */
@@ -294,19 +388,23 @@ final class ShowcaseEffects implements AutoCloseable {
      * through its upward mask), {@code size} across at their largest and {@code rate} a second, and a flickering light
      * reaching {@code reach} metres at {@code intensity}.
      */
-    static EffectData fire(float radius, float size, float rate, boolean skin, float reach, float intensity) {
+    static EffectData fire(float radius, float size, float rate, boolean skin, float reach, float intensity,
+        boolean shared) {
         float rise = (float) Math.sqrt(Math.max(size, 0.2f) / 0.26f); // larger fires rise faster
-        return EffectData.builder()
-            .emitter("core", e -> e.spawn(Spawn.rate(skin ? 260 : 18 + 40 * radius / 0.07f))
-                .init(on(skin, 0.7f * radius, Init.velocity(Bind.random(-0.05f, 0.05f), Bind.random(0.2f, 0.4f),
+        Space space = shared ? Space.LOCAL : Space.WORLD; // shared: in the torch's frame
+        EffectData.Builder fire = EffectData.builder(FIRES)
+            .emitter("core", e -> e.space(space).spawn(Spawn.rate(skin ? 260 : 18 + 40 * radius / 0.07f))
+                .init(on(skin, 0.7f * radius, Init.randomRotation(), Init.velocity(Bind.random(-0.05f, 0.05f),
+                    Bind.random(0.2f, 0.4f),
                         Bind.random(-0.05f, 0.05f)), Init.lifetime(Bind.random(0.15f, 0.3f)),
                     Init.size(Bind.random(0.8f * size, 1.1f * size)), Init.color(Bind.color(9, 4.2f, 1.3f, 0.3f))))
                 .update(Forces.drag(2), Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0)
                     .linear(0.3f, 1, 1, 1, 1).linear(1, 0.6f, 0.3f, 0.1f, 0).build()))
                 .render(Renderer.billboard(Renderer.Facing.POSITION).additive().set("soft", 0.15f)
-                    .asset("texture", EffectTextures.GLOW)))
-            .emitter("flames", e -> e.spawn(Spawn.rate(rate))
-                .init(on(skin, radius, Init.velocity(Bind.random(-0.12f, 0.12f), Bind.random(0.6f * rise,
+                    .set("glass", GLASS).asset("texture", EffectTextures.GLOW)))
+            .emitter("flames", e -> e.space(space).spawn(Spawn.rate(rate))
+                // each tongue from a frame of its own: born together, they do not repeat (step 20's module)
+                .init(on(skin, radius, Init.randomFrame(), Init.velocity(Bind.random(-0.12f, 0.12f), Bind.random(0.6f * rise,
                         1.1f * rise), Bind.random(-0.12f, 0.12f)), Init.lifetime(skin ? Bind.random(0.3f, 0.55f)
                         : Bind.random(0.45f, 0.8f)), Init.size(Bind.random(0.75f * size, 1.15f * size)),
                     Init.color(Bind.color(4.5f, 3.4f, 2.4f, skin ? 0.6f : 1))))
@@ -316,7 +414,7 @@ final class ShowcaseEffects implements AutoCloseable {
                     Forces.vortex(Bind.constant(skin ? 0 : 0.3f), skin ? 0 : 2.5f, 0, 1, 0),
                     Over.size(FloatCurve.of(0, 0.45f, 0.25f, 1, 0.7f, 0.85f, 1, 0.35f)), Over.color(COOLING))
                 .render(flames()))
-            .emitter("embers", e -> e.spawn(Spawn.rate(skin ? 40 : 8 + 30 * radius))
+            .emitter("embers", e -> e.space(space).spawn(Spawn.rate(skin ? 40 : 8 + 30 * radius))
                 .init(on(skin, radius, Init.velocity(Bind.random(-0.5f, 0.5f), Bind.random(1, 2.5f),
                         Bind.random(-0.5f, 0.5f)), Init.lifetime(Bind.random(1.2f, 2.5f)),
                     Init.size(Bind.random(0.02f, 0.04f)), Init.color(Bind.color(8, 3, 0.8f, 1))))
@@ -325,23 +423,29 @@ final class ShowcaseEffects implements AutoCloseable {
                     Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 1).linear(0.5f, 0.8f, 0.4f, 0.15f, 1)
                         .linear(1, 0.4f, 0.08f, 0, 0).build()))
                 .render(Renderer.billboard(Renderer.Facing.VELOCITY).additive().set("stretch", 0.04f)
-                    .asset("texture", EffectTextures.EMBER)))
-            .emitter("smoke", e -> e.spawn(Spawn.rate(skin ? 14 : 4 + 14 * radius))
-                .init(on(skin, radius, Init.velocity(Bind.random(-0.15f, 0.15f), Bind.random(0.8f * rise,
+                    .set("glass", GLASS).asset("texture", EffectTextures.EMBER)))
+            .emitter("smoke", e -> e.space(space).spawn(Spawn.rate(skin ? 14 : 4 + 14 * radius))
+                .init(on(skin, radius, Init.randomRotation(), Init.velocity(Bind.random(-0.15f, 0.15f), Bind.random(0.8f * rise,
                         1.2f * rise), Bind.random(-0.15f, 0.15f)), Init.lifetime(Bind.random(3.5f, 5)),
                     Init.size(Bind.random(1.6f * size, 2.4f * size)), Init.color(Bind.color(0.32f, 0.3f, 0.28f, 0.3f))))
                 .update(Forces.drag(0.5f), Forces.curl(Bind.constant(0.6f), 0.6f, 0.4f, 2), Forces.wind(0.5f),
                     Forces.gravity(Bind.constant(-0.02f)), Over.size(FloatCurve.of(0, 0.5f, 1, 3.5f)),
                     Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0).linear(0.12f, 1, 1, 1, 0)
                         .linear(0.3f, 1, 1, 1, 0.75f).linear(1, 1.5f, 1.5f, 1.5f, 0).build()))
-                .render(smoke(0.4f)))
-            .emitter("glow", e -> e.spawn(Spawn.rate(30))
-                .init(on(skin, 0.8f * radius, Init.velocity(Bind.constant(0), Bind.random(0.5f, 1),
-                        Bind.constant(0)), Init.lifetime(Bind.random(0.08f, 0.16f)),
-                    Init.color(Bind.random(ColorGradient.builder().linear(0, 0.45f, 0.2f, 0.05f, 1)
-                        .linear(1, 1, 0.5f, 0.16f, 1).build()))))
-                .render(Renderer.light(reach, intensity).set("max", 1)))
-            .build();
+                .render(radius > 0.3f ? smoke(0.4f).set("half", 1) : smoke(0.4f)));
+        if (shared) {
+            return fire.shared(6, 9).build();
+        }
+        return fire.emitter("glow", e -> glow(e, skin, radius, reach, intensity)).build();
+    }
+
+    /** A fire's flickering light (on a skin, or a disc of {@code radius}), reaching {@code reach} at {@code intensity}. */
+    private static void glow(EmitterData.Builder e, boolean skin, float radius, float reach, float intensity) {
+        e.spawn(Spawn.rate(30))
+            .init(on(skin, 0.8f * radius, Init.velocity(Bind.constant(0), Bind.random(0.5f, 1), Bind.constant(0)),
+                Init.lifetime(Bind.random(0.08f, 0.16f)), Init.color(Bind.random(ColorGradient.builder()
+                    .linear(0, 0.45f, 0.2f, 0.05f, 1).linear(1, 1, 0.5f, 0.16f, 1).build()))))
+            .render(Renderer.light(reach, intensity).set("max", 1));
     }
 
     /**
@@ -349,8 +453,7 @@ final class ShowcaseEffects implements AutoCloseable {
      * {@code rest}.
      */
     private static Module[] on(boolean skin, float radius, Module... rest) {
-        Module[] shape = skin ? new Module[] {Shape.mesh(Shape.SURFACE), Shape.mask(EffectTextures.FOX_MASK)}
-            : new Module[] {Shape.disc(radius)};
+        Module[] shape = skin ? new Module[] {Shape.mesh(Shape.SURFACE, 0.85f)} : new Module[] {Shape.disc(radius)};
         Module[] all = java.util.Arrays.copyOf(shape, shape.length + rest.length);
         System.arraycopy(rest, 0, all, shape.length, rest.length);
         return all;
@@ -359,6 +462,7 @@ final class ShowcaseEffects implements AutoCloseable {
     /** Flame tongues: the flipbook, stretched along their velocity, added. */
     private static Renderer flames() {
         return Renderer.billboard(Renderer.Facing.VELOCITY).additive().set("stretch", 0.3f).set("soft", 0.12f)
+            .set("glass", GLASS)
             .asset("texture", EffectTextures.FLAME).set("flipbook.columns", EffectTextures.FLAME_FRAMES)
             .set("flipbook.rows", EffectTextures.FLAME_FRAMES);
     }
@@ -366,6 +470,7 @@ final class ShowcaseEffects implements AutoCloseable {
     /** Smoke puffs: the smoke flipbook lit per pixel by its normals, sorted, soft by {@code soft} metres. */
     private static Renderer smoke(float soft) {
         return Renderer.billboard(Renderer.Facing.POSITION).lighting(Renderer.Lighting.PER_PIXEL).set("soft", soft)
+            .set("glass", GLASS)
             .asset("texture", EffectTextures.SMOKE).asset("normal", EffectTextures.SMOKE_NORMALS)
             .set("flipbook.columns", EffectTextures.SMOKE_FRAMES).set("flipbook.rows", EffectTextures.SMOKE_FRAMES);
     }
@@ -444,14 +549,18 @@ final class ShowcaseEffects implements AutoCloseable {
     }
 
     ParticleSimulation simulation() {
-        return new ParticleSimulation(particles);
+        return new ParticleSimulation(particles).async(Boolean.getBoolean("truesim.demo.async"));
     }
 
-    /** Moves the effects on by {@code seconds}, after the crowd's update; before the frame records. */
-    void update(double seconds) {
+    /**
+     * Moves the effects on by {@code seconds} seen from {@code camera} (x, y, z: the viewer of levels of detail), after
+     * the crowd's update; before the frame records.
+     */
+    void update(double seconds, double[] camera) {
         time += seconds;
         sync.clearViewers();
-        sync.addViewer(x, DemoMeshes.height(x, z), z); // the height field around the arena
+        sync.addViewer(camera[0], camera[1], camera[2]); // distances, for levels of detail and shared torches
+        particles.heightFocus(x, z); // the height field around the arena
         // Gusting wind, turning slowly
         double heading = 0.15 * time;
         double strength = 1.5 + 1.2 * Maths.sin(0.7 * time) + 0.5 * Maths.sin(2.3 * time);

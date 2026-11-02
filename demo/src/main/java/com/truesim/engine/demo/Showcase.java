@@ -21,6 +21,7 @@ import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ViewOptions;
+import com.truesim.engine.render.WeightedBlendedTransparency;
 import com.truesim.engine.render.particles.ParticleDraw;
 import com.truesim.engine.render.shadows.CascadedShadowMaps;
 import com.truesim.engine.vulkan.Format;
@@ -106,6 +107,10 @@ public final class Showcase {
             .add(head == null ? new ParticleDraw(effects.particles(), view)
                 : new ParticleDraw(effects.particles(), view, head))
             .add(cascades);
+        if (ShowcaseEffects.GLASS > 0) { // windows: blended glass, and the fires drawn before it
+            port.add(new WeightedBlendedTransparency(world.geometry(), view))
+                .add(ParticleDraw.beforeGlass(effects.particles(), view, head));
+        }
         return cascades;
     }
 
@@ -138,7 +143,7 @@ public final class Showcase {
                 camera.position(eye[0], eye[1], eye[2]).set(target[0] - eye[0], target[1] - eye[1],
                     target[2] - eye[2], 0, 1, 0, Math.PI / 3, width, height, 0.05);
                 world.crowd().lod(eye[0], eye[2]);
-                effects.update(1 / 60.0);
+                effects.update(1 / 60.0, eye);
                 cascades.update();
                 graph.beginFrame();
                 graph.submit(0, 0);
@@ -232,7 +237,7 @@ public final class Showcase {
             cascades[0].update();
             cascades[1].update();
             long updated = System.nanoTime();
-            effects.update(1 / 72.0);
+            effects.update(1 / 72.0, eye);
             long synced = System.nanoTime();
             graph.beginFrame();
             long begun = System.nanoTime();

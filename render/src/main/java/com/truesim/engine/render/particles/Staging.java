@@ -61,6 +61,11 @@ final class Staging {
         memory.set(F32, offset + 8, z);
     }
 
+    /** Copies {@code bytes} of its own from {@code from} to {@code to}, which it holds. */
+    void copy(long from, long to, long bytes) {
+        MemorySegment.copy(memory, from, memory, to, bytes);
+    }
+
     /** Copies its first {@code bytes} (if any) to the start of {@code target}, for the frame recording. */
     void copyTo(FrameBuffer target, long bytes) {
         if (bytes > 0) {

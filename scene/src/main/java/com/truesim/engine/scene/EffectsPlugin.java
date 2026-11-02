@@ -8,7 +8,12 @@ import com.truesim.engine.app.Stage;
 import com.truesim.engine.app.Startup;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.Rendering;
+import com.truesim.engine.render.Lights;
+import com.truesim.engine.render.MeshletRenderer;
+import com.truesim.engine.render.RayTracing;
+import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.SceneViews;
+import com.truesim.engine.render.particles.ParticleCollisionDepth;
 import com.truesim.engine.render.particles.ParticleDraw;
 import com.truesim.engine.render.particles.ParticleSimulation;
 import com.truesim.engine.render.particles.Particles;
@@ -124,11 +129,44 @@ public final class EffectsPlugin implements Plugin {
         return bindings;
     }
 
-    /** Draws the particles in every view of {@code views}, those made later too. */
+    /**
+     * Draws the particles in every view of {@code views}, those made later too: after the glass, and the renderers drawn
+     * before it ({@code glass} 1) by {@link ParticleDraw#beforeGlass}.
+     */
     @AllowAllocation("set up once")
     public void draw(SceneViews views) {
         Particles p = particles();
         Objects.requireNonNull(views, "views").addPerView(view -> new ParticleDraw(p, view));
+        views.addPerView(view -> ParticleDraw.beforeGlass(p, view, null));
+    }
+
+    /** Depth collision ({@code collide.depth}) collides with {@code view}'s last depth: the camera, a headset's eye. */
+    @AllowAllocation("set up once")
+    public EffectsPlugin collisionView(SceneView view) {
+        view.port().add(new ParticleCollisionDepth(particles(), view));
+        return this;
+    }
+
+    /**
+     * Mesh shapes emit from the renderables {@code sync} draws, and mesh particles take up to {@code instances} of
+     * {@code renderer}'s scene ({@link Particles#meshes(MeshletRenderer, int)}); after {@link #effects}.
+     */
+    public EffectsPlugin meshes(SceneSync sync, MeshletRenderer renderer, int instances) {
+        particles().meshes(renderer, instances);
+        sync().meshes(sync);
+        return this;
+    }
+
+    /** Particle light renderers light the scene through {@code lights}, at most {@code budget} a frame (null: none). */
+    public EffectsPlugin lights(Lights lights, int budget) {
+        particles().lights(lights, budget);
+        return this;
+    }
+
+    /** {@code collide.rays} traces into {@code renderer}'s top level where the device traces rays (null: none). */
+    public EffectsPlugin rays(RayTracing rayTracing, MeshletRenderer renderer) {
+        particles().rays(rayTracing, renderer);
+        return this;
     }
 
     @Override

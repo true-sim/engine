@@ -181,6 +181,14 @@ the guarded load still ran, speculated or flattened somewhere between Slang and 
   tests within seconds; with the pointer always naming a word that holds 0, the run passed.
 - Rule: never hand a shader a null pointer it may load through, even behind a branch; point it at a valid empty value.
 
+**A local variable shadowed the parameter a sort key was built from.** simulate.slang's `send` took the parent's slot
+as `uint local` and then declared `bool local` (its emitter's space) in the loop; the event key `local << 4 | ...` used
+the bool, so events of one parent emitter, phase and event kept the order of the atomic that appended them, not their
+parents' order. Slang compiled it without a warning (`-warnings-as-errors all`).
+- Proof: a reading of `send` (true-sim/engine, effects step 18's sort work, which renamed the bool `space`); the small
+  event sort's test compares two runs' children slot by slot.
+- Rule: in shaders, never reuse a parameter's name for a local; Slang does not warn.
+
 **Features and sharing must match the device.** Cube array image views failed validation until `imageCubeArray` was
 enabled, and on lavapipe (one queue family for graphics and compute) images failed when they listed that family twice
 for concurrent sharing.

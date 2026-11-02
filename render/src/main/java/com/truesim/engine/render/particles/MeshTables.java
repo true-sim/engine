@@ -131,7 +131,7 @@ final class MeshTables implements AutoCloseable {
                 packed[i++] = m << 8 | t;
             }
         }
-        GpuBuffer buffer = GpuBuffer.hostVisible(device, 24L * Math.max(count, 1), USAGE);
+        GpuBuffer buffer = GpuBuffer.hostVisible(device, 24L * Math.max(count, 1), USAGE, Particles.queues(device));
         MemorySegment memory = buffer.memory();
         write(memory, 0, packed, areas);
         write(memory, 12L * count, packed, volumes);

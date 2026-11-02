@@ -1,7 +1,9 @@
 package com.truesim.engine.render.particles;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.within;
+import static org.assertj.core.api.Assertions.withinPercentage;
 import static org.assertj.core.api.Assumptions.assumeThat;
 import static com.truesim.testing.AllocationAssertions.assertAllocationFree;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
@@ -270,6 +272,30 @@ class ParticleDrawTest {
         return pixels.memory().toArray(ValueLayout.JAVA_INT);
     }
 
+    /** {@link #frames(int)} through the runtime's decisions: drawn fractions, levels of detail, placements. */
+    private int[] runtimeFrames(int n) {
+        for (int f = 0; f < n; f++) {
+            nodes.update();
+            runtime.update(FRAME);
+            cpu.update();
+            graph.beginFrame();
+            particles.update(runtime, cpu);
+            view.set(1, MeshletRenderer.MODE_LIT);
+            graph.submit(0, 0);
+        }
+        device.waitIdle();
+        return pixels.memory().toArray(ValueLayout.JAVA_INT);
+    }
+
+    /** The sum of channel {@code c} over the image. */
+    private static long sum(int[] image, int c) {
+        long sum = 0;
+        for (int pixel : image) {
+            sum += channel(pixel, c);
+        }
+        return sum;
+    }
+
     private static int channel(int pixel, int c) {
         return (pixel >> (8 * c)) & 0xff;
     }
@@ -435,12 +461,177 @@ class ParticleDrawTest {
         }
     }
 
+    /** 60 dim additive sprites spread over a square of 6 m, 8 m away. */
+    private static EffectData spread(com.truesim.scene.effects.EffectType type) {
+        return EffectData.builder(type).emitter("e", e -> e.spawn(Spawn.burst(0, 60))
+            .init(Shape.box(6, 6, 0.1f), Init.lifetime(100), Init.size(Bind.constant(0.4f)),
+                Init.color(Bind.color(0.3f, 0, 0, 1)))
+            .render(sprite(Renderer.Facing.POSITION).additive())).build();
+    }
+
+    @Test
+    void levelsOfDetailDrawAFractionOfTheParticlesFadingTheRestOutAndKeepingTheirCover() {
+        runtime.addViewer(0, 0, 0);
+        com.truesim.scene.effects.Effect first = effects.play(spread(com.truesim.scene.effects.EffectType.DEFAULT), 0,
+            0, -8);
+        int[] full = runtimeFrames(3);
+        first.kill();
+        // Beyond 5 m, a third drawn: the change fades in over 0.3 s, not at once
+        long reducing = effects.play(spread(com.truesim.scene.effects.EffectType.builder("lod").lod(5, 1, 1, 0.33f)
+            .build()), 0, 0, -8).id();
+        runtimeFrames(1);
+        assertThat(runtime.drawn(reducing)).as("drawn as decided at once when it starts").isEqualTo(0.33f);
+        int[] reduced = runtimeFrames(3);
+        int differing = 0;
+        for (int i = 0; i < full.length; i++) {
+            differing += Math.abs(channel(full[i], 0) - channel(reduced[i], 0)) > 20 ? 1 : 0;
+        }
+        assertThat(differing).as("other particles drawn, larger").isGreaterThan(covered(full, 0, 10) / 4);
+        assertThat((double) sum(reduced, 0)).as("the kept grown to keep the cover").isCloseTo(sum(full, 0),
+            withinPercentage(40));
+    }
+
+    @Test
+    void halfResolutionParticlesLookAsFullOnesAndStayBehindTheEdgesOfNearerSurfaces() {
+        // A wall covering the left half nearer than the sprites, which cover the view
+        scene.set(0, wall, blackWall(), -2, 0, -3, 0, 0, 0, 1, 1, 4, 1);
+        Consumer<EmitterData.Builder> red = e -> e.init(Init.size(Bind.constant(8)),
+            Init.color(Bind.color(0.6f, 0, 0, 1)));
+        com.truesim.scene.effects.Effect first = effects.play(still(1, e -> red.accept(e.render(
+            sprite(Renderer.Facing.POSITION).additive()))), 0, 0, -4);
+        int[] full = frames(3);
+        first.kill();
+        effects.play(still(1, e -> red.accept(e.render(sprite(Renderer.Facing.POSITION).additive().set("half", 1)))),
+            0, 0, -4);
+        int[] half = frames(4);
+        assertThat(particles.drawsHalf()).isTrue();
+        int differing = 0;
+        for (int i = 0; i < full.length; i++) {
+            differing += Math.abs(channel(full[i], 0) - channel(half[i], 0)) > 24 ? 1 : 0;
+        }
+        assertThat(differing).as("pixels apart, at edges only").isLessThan(full.length / 20);
+        assertThat(at(half, 4, 32, 0)).as("the wall's middle stays dark").isLessThan(3);
+        assertThat(at(half, 50, 32, 0)).as("drawn beside it").isGreaterThan(60);
+    }
+
+    @Test
+    void placementsDrawTheirVariantsWhereTheyAreMovedScaledAndStoppedAlone() {
+        EffectData shared = EffectData.builder().emitter("e", e -> e.space(com.truesim.scene.effects.Space.LOCAL)
+                .spawn(Spawn.burst(0, 1)).duration(0.25).loops(0).init(Init.lifetime(0.5f), Init.size(Bind.constant(0.6f)),
+                    Init.color(Bind.color(0, 0.6f, 0, 1)))
+                .render(sprite(Renderer.Facing.POSITION).additive()))
+            .shared(1).build();
+        com.truesim.scene.effects.Effect left = effects.play(shared, -2, 0, -6);
+        com.truesim.scene.effects.Effect right = effects.play(shared, 2, 0, -6);
+        int[] image = runtimeFrames(3);
+        assertThat(particles.emitterCount()).as("one simulation").isEqualTo(1);
+        assertThat(at(image, 21, 32, 1)).as("drawn on the left").isGreaterThan(80);
+        assertThat(at(image, 43, 32, 1)).as("and on the right").isGreaterThan(80);
+        int small = covered(image, 1, 20);
+        right.scale(2.5f);
+        left.moveTo(-2, 2, -6);
+        image = runtimeFrames(2);
+        assertThat(at(image, 21, 32, 1)).as("moved away").isLessThan(20);
+        assertThat(at(image, 21, 21, 1)).as("to where it is now").isGreaterThan(80);
+        assertThat(covered(image, 1, 20)).as("scaled").isGreaterThan(2 * small);
+        assertThatIllegalStateException().isThrownBy(() -> left.inheritVelocity(1));
+        left.stop();
+        image = runtimeFrames(45);
+        assertThat(at(image, 21, 21, 1)).as("stopped: faded out").isLessThan(20);
+        assertThat(at(image, 43, 32, 1)).as("the other still").isGreaterThan(80);
+    }
+
+    @Test
+    void particlesBeforeGlassAreTintedByItAndThoseAfterItAreNot() {
+        int glass = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 1, 0.6f)).withRoughness(1))
+            .alphaBlend());
+        scene.set(0, wall, glass, 0, 0, -3, 0, 0, 0, 1, 4, 4, 4);
+        view.port().add(ParticleDraw.beforeGlass(particles, view, null));
+        Consumer<EmitterData.Builder> red = e -> e.init(Init.size(Bind.constant(1.5f)),
+            Init.color(Bind.color(1, 0, 0, 1)));
+        effects.play(still(1, e -> red.accept(e.render(sprite(Renderer.Facing.POSITION).set("glass", 1)))), -1.2, 0,
+            -5);
+        effects.play(still(1, e -> red.accept(e.render(sprite(Renderer.Facing.POSITION)))), 1.2, 0, -5);
+        int[] image = frames(3);
+        int before = at(image, 24, 32, 0);
+        int after = at(image, 40, 32, 0);
+        assertThat(after).as("after the glass: over it, untinted").isGreaterThan(200);
+        assertThat(before).as("before the glass: behind its tint").isLessThan(after - 60);
+    }
+
+    @Test
+    void theOverdrawHeatMapAddsALayerAtATime() {
+        view.port().remove(ParticleDraw.ID);
+        view.port().add(new ParticleDraw(particles, view).overdraw(true));
+        Consumer<EmitterData.Builder> faint = e -> e.init(Init.size(Bind.constant(2)),
+            Init.color(Bind.color(0.01f, 0.01f, 0.01f, 0.05f)));
+        effects.play(still(1, e -> faint.accept(e.render(sprite(Renderer.Facing.POSITION)))), -0.5, 0, -4);
+        effects.play(still(1, e -> faint.accept(e.render(sprite(Renderer.Facing.POSITION)))), 0.5, 0, -4.01);
+        int[] image = frames(3);
+        int one = at(image, 26, 32, 0);
+        assertThat(one).as("a layer, however faint").isCloseTo(26, within(3));
+        assertThat(at(image, 32, 32, 0)).as("two layers").isCloseTo(2 * one, within(3));
+    }
+
+    @Test
+    void theReactiveMaskCoversWhereParticlesAre() {
+        GpuBuffer mask = GpuBuffer.hostVisible(device, 4L * SIZE * SIZE, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        closeLater.add(mask);
+        view.port().add(new ReactiveCapture(mask));
+        effects.play(still(1, e -> e.init(Init.size(Bind.constant(1)), Init.color(Bind.color(0, 1, 0, 1)))
+            .render(sprite(Renderer.Facing.POSITION))), 1, 1, -4);
+        frames(3);
+        byte[] coverage = mask.memory().asSlice(0, (long) SIZE * SIZE).toArray(ValueLayout.JAVA_BYTE);
+        assertThat(Byte.toUnsignedInt(coverage[24 * SIZE + 40])).as("where the sprite is").isGreaterThan(200);
+        assertThat(Byte.toUnsignedInt(coverage[50 * SIZE + 10])).as("elsewhere").isZero();
+    }
+
+    /** Copies the view's reactive mask into {@code mask} (R8), its color as it is. */
+    private record ReactiveCapture(GpuBuffer mask) implements Technique {
+        @Override
+        public List<Key<?>> provides() {
+            return List.of();
+        }
+
+        @Override
+        public List<Key<?>> modifies() {
+            return List.of(Keys.SCENE_COLOR);
+        }
+
+        @Override
+        public Order order() {
+            return Order.at(Anchor.POST);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image color = g.modify(Keys.SCENE_COLOR);
+            Image reactive = g.require(ParticleKeys.REACTIVE);
+            g.pass("reactive capture").read(reactive, Access.TRANSFER_SRC).sideEffects().record(ctx -> {
+                    try (var stack = stackPush()) {
+                        VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
+                        region.bufferRowLength(SIZE).imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+                            .layerCount(1);
+                        region.imageExtent().set(SIZE, SIZE, 1);
+                        org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer(ctx.unsafe().commands(),
+                            ctx.unsafe().image(reactive), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mask.handle(), region);
+                    }
+                });
+            g.provide(Keys.SCENE_COLOR, color);
+        }
+    }
+
     @Test
     void aParticleDrawIsNamedAndDrawsOverTheBlendedMaterials() {
         ParticleDraw draw = new ParticleDraw(particles, view);
         assertThat(draw.id()).isEqualTo(ParticleDraw.ID);
-        assertThat(draw.provides()).isEmpty();
+        assertThat(draw.provides()).containsExactly(ParticleKeys.REACTIVE); // drawn where something requires it
         assertThat(draw.order()).isEqualTo(Order.at(Anchor.TRANSPARENT).after(com.truesim.engine.render.Transparency.ID));
+        ParticleDraw before = ParticleDraw.beforeGlass(particles, view, null);
+        assertThat(before.id()).isEqualTo(ParticleDraw.BEFORE_GLASS_ID);
+        assertThat(before.provides()).isEmpty();
+        assertThat(before.order()).isEqualTo(Order.at(Anchor.TRANSPARENT)
+            .before(com.truesim.engine.render.Transparency.ID));
     }
 
     /** Sparks and puffs, on {@code target}: non-chaotic modules, so the CPU and GPU stay within a pixel. */

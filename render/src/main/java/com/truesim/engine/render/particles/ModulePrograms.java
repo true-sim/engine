@@ -104,6 +104,10 @@ final class ModulePrograms implements AutoCloseable {
         final boolean[] sourced;
         /** Per emitter: its first mesh renderer's place among its renderers, -1 for none. */
         final int[] meshRenderers;
+        /** Per emitter: whether its particles emit (particles as emitters), keeping accumulators in its side range. */
+        final boolean[] emits;
+        /** Per emitter and renderer: how it is drawn, {@code DRAWN_*} bits. */
+        final int[][] drawn;
         int users;
         long releaseAt = -1;
 
@@ -124,10 +128,18 @@ final class ModulePrograms implements AutoCloseable {
             this.sorted = sorted;
             this.sourced = sourced;
             this.meshRenderers = meshRenderers;
+            this.emits = new boolean[programs.length];
+            this.drawn = new int[programs.length][];
         }
     }
 
     private static final int USAGE = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    /** A renderer drawn at half resolution ({@code half} 1), then laid over the view (effects step 18). */
+    static final int DRAWN_HALF = 1;
+    /** A renderer drawn before glass ({@code glass} 1): blended materials tint and refract it (step 21). */
+    static final int DRAWN_BEFORE_GLASS = 2;
+    /** A renderer split at the nearest glass ({@code glass} 2): behind it before glass, in front after (step 21). */
+    static final int DRAWN_SPLIT = 4;
 
     private final VulkanDevice device;
     private final FrameSlots slots;
@@ -150,8 +162,16 @@ final class ModulePrograms implements AutoCloseable {
 
     /** Whether collision chains may take ray queries: the device traces rays and the frame builds their structures. */
     private boolean rays;
+    private ParticleModules plugins;
+    private ModuleRegistry registry = ModuleRegistry.BUILT_IN;
 
     /** Lets collision chains take ray queries in effects encoded from now on, or not. */
+    /** Effects encoded from now on may name {@code plugins}' modules (null: built-in ones only). */
+    void plugins(ParticleModules plugins) {
+        this.plugins = plugins;
+        registry = plugins == null ? ModuleRegistry.BUILT_IN : plugins.registry();
+    }
+
     void rays(boolean rays) {
         this.rays = rays;
     }
@@ -162,9 +182,9 @@ final class ModulePrograms implements AutoCloseable {
         this.retired = new Retiring(slots);
         wordRanges = new RangeAllocator(4096);
         curveRanges = new RangeAllocator(4096);
-        words = GpuBuffer.hostVisible(device, 4L * wordRanges.capacity(), USAGE);
+        words = GpuBuffer.hostVisible(device, 4L * wordRanges.capacity(), USAGE, Particles.queues(device));
         try {
-            curves = GpuBuffer.hostVisible(device, 4L * curveRanges.capacity(), USAGE);
+            curves = GpuBuffer.hostVisible(device, 4L * curveRanges.capacity(), USAGE, Particles.queues(device));
         } catch (RuntimeException e) {
             words.close();
             throw e;
@@ -252,6 +272,7 @@ final class ModulePrograms implements AutoCloseable {
         boolean[][] sorted = new boolean[emitters.size()][];
         boolean[] sourced = new boolean[emitters.size()];
         int[] meshRenderers = new int[emitters.size()];
+        boolean[] emitting = new boolean[emitters.size()];
         for (int e = 0; e < emitters.size(); e++) {
             EmitterData emitter = emitters.get(e);
             List<Renderer> drawn = emitter.renderers();
@@ -290,6 +311,11 @@ final class ModulePrograms implements AutoCloseable {
             trails[e] = points;
             // Its events, after its updaters: kind and target, salt, count, chance, interval
             List<ParticleEvent> events = emitter.events();
+            boolean emits = false;
+            for (ParticleEvent event : events) {
+                emits |= event.kind() == ParticleEvent.Kind.EMIT;
+            }
+            emitting[e] = emits;
             if (!events.isEmpty()) {
                 program.add(events.size());
                 for (int k = 0; k < events.size(); k++) {
@@ -302,7 +328,8 @@ final class ModulePrograms implements AutoCloseable {
                 }
             }
             program.values[header] = inits | updates << 8 | ((overLife ? PROGRAM_OVER : 0)
-                | (points > 0 ? PROGRAM_TRAIL : 0) | (events.isEmpty() ? 0 : ParticleConstants.PROGRAM_EVENTS)) << 16
+                | (points > 0 ? PROGRAM_TRAIL : 0) | (events.isEmpty() ? 0 : ParticleConstants.PROGRAM_EVENTS)
+                | (emits ? ParticleConstants.PROGRAM_EMIT : 0)) << 16
                 | points << 24;
         }
         int wordStart = (int) take(wordRanges, Math.max(1, program.size), true);
@@ -317,11 +344,16 @@ final class ModulePrograms implements AutoCloseable {
         }
         Block block = new Block(data, wordStart, Math.max(1, program.size), curveStart, Math.max(1, keys.floats.size),
             starts, over, renderers, textures, trails, sorted, sourced, meshRenderers);
+        System.arraycopy(emitting, 0, block.emits, 0, emitting.length);
         for (int e = 0; e < emitters.size(); e++) {
             List<Renderer> drawn = emitters.get(e).renderers();
             block.extras[e] = new AssetRef<?>[drawn.size()];
+            block.drawn[e] = new int[drawn.size()];
             for (int r = 0; r < drawn.size(); r++) {
                 Renderer d = drawn.get(r);
+                int glass = (int) setting(d, "glass", 0);
+                block.drawn[e][r] = (setting(d, "half", 0) != 0 ? DRAWN_HALF : 0)
+                    | (glass == 1 ? DRAWN_BEFORE_GLASS : glass == 2 ? DRAWN_SPLIT : 0);
                 Object extra = d.settings().get(d.lighting() == Renderer.Lighting.SIX_WAY ? "texture.b" : "normal");
                 block.extras[e][r] = extra instanceof AssetRef<?> t ? t : null;
             }
@@ -345,7 +377,7 @@ final class ModulePrograms implements AutoCloseable {
         }
         long capacity = Math.max(2 * ranges.capacity(), ranges.capacity() + length);
         GpuBuffer old = program ? words : curves;
-        GpuBuffer grown = GpuBuffer.hostVisible(device, 4 * capacity, USAGE);
+        GpuBuffer grown = GpuBuffer.hostVisible(device, 4 * capacity, USAGE, Particles.queues(device));
         MemorySegment.copy(old.memory(), 0, grown.memory(), 0, old.size());
         retired.add(old); // frames in flight read it
         if (program) {
@@ -397,7 +429,8 @@ final class ModulePrograms implements AutoCloseable {
         w[at + ParticleRendererLayout.ROWS / 4] = rows;
         put(w, at, ParticleRendererLayout.FRAMES, frames);
         put(w, at, ParticleRendererLayout.RATE, rate);
-        w[at + ParticleRendererLayout.RIBBONS / 4] = Math.max(1, (int) setting(r, "ribbons", 1));
+        w[at + ParticleRendererLayout.RIBBONS / 4] = setting(r, "ribbons", 1) <= 0 ? 0
+            : Math.max(1, (int) setting(r, "ribbons", 1)); // 0: a ribbon per parent (particles as emitters)
         w[at + ParticleRendererLayout.STRIDE / 4] = Math.max(1, (int) setting(r, "stride", 1));
         put(w, at, ParticleRendererLayout.LOD_DISTANCE, setting(r, "lodDistance", 0));
         put(w, at, ParticleRendererLayout.WIDTH_TAIL, setting(r, "width.tail", 1));
@@ -430,7 +463,8 @@ final class ModulePrograms implements AutoCloseable {
 
     /** The strands of a ribbon renderer; 1 for other renderers. */
     static int ribbons(Renderer r) {
-        return r.kind() == Renderer.Kind.RIBBON ? Math.max(1, (int) setting(r, "ribbons", 1)) : 1;
+        return r.kind() != Renderer.Kind.RIBBON ? 1 : setting(r, "ribbons", 1) <= 0 ? 0
+            : Math.max(1, (int) setting(r, "ribbons", 1));
     }
 
     static float setting(Renderer r, String name, float fallback) {
@@ -447,7 +481,7 @@ final class ModulePrograms implements AutoCloseable {
         boolean chosen = false;
         for (int m = 0; m < modules.size(); m++) {
             Module module = modules.get(m);
-            ModuleType type = ModuleRegistry.BUILT_IN.type(module.type());
+            ModuleType type = registry.type(module.type());
             if (module.type().startsWith("collide.")) {
                 chosen &= module.value("fallback") instanceof Binding b && b.kind() == Binding.Kind.CONSTANT
                     && b.value() * b.scale() >= 0.5f; // a method that is no fallback starts a chain
@@ -458,7 +492,8 @@ final class ModulePrograms implements AutoCloseable {
                 chosen = true;
             }
             encoded++;
-            int op = opcode(module.type());
+            int plugin = plugins == null ? -1 : plugins.indexOf(module.type());
+            int op = plugin >= 0 ? ParticleConstants.OP_PLUGIN + plugin : opcode(module.type());
             int at = program.add(0);
             program.add(salts + 16 * m);
             List<String> names = type.fields().keySet().stream().sorted().toList();
@@ -498,6 +533,8 @@ final class ModulePrograms implements AutoCloseable {
             case Init.SIZE -> OP_SIZE;
             case Init.COLOR -> OP_COLOR;
             case Init.INHERIT -> ParticleConstants.OP_INHERIT;
+            case Init.ROTATION -> ParticleConstants.OP_ROTATION;
+            case Init.FRAME -> ParticleConstants.OP_FRAME;
             case Shape.MESH -> ParticleConstants.OP_MESH;
             case Shape.BONES -> ParticleConstants.OP_BONES;
             case Shape.MASK -> ParticleConstants.OP_MASK;

@@ -99,6 +99,7 @@ public final class EffectSync {
         scene = effects.scene();
         runtime = new EffectRuntime(effects, jobs);
         simulation = new CpuSimulation(runtime, world, jobs);
+        runtime.budget(particles.budget(), particles::bytes); // the pool's bytes: the least significant culled
         if (world != null) { // GPU emitters' height collision: the world's heights around the first viewer
             particles.heights(world, HEIGHT_FIELD_SIZE, HEIGHT_FIELD_RESOLUTION);
         }
@@ -277,7 +278,7 @@ public final class EffectSync {
     public void update(double seconds) {
         runtime.update(seconds);
         simulation.update();
-        particles.update(effects, runtime.spawns(), simulation);
+        particles.update(runtime, simulation);
         TransformArray world = scene.worldTransforms();
         MemorySegment s = world.segment();
         int kept = 0;

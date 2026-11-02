@@ -10,6 +10,10 @@ import com.truesim.scene.effects.Effect;
 import com.truesim.scene.effects.EffectData;
 import com.truesim.scene.effects.EffectParameter;
 import com.truesim.scene.effects.Effects;
+import com.truesim.common.math.TransformArray;
+import com.truesim.scene.core.NodeHandle;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.util.Arrays;
 import java.util.Objects;
 
@@ -31,8 +35,8 @@ import java.util.Objects;
  * <p>Events fire on the animator's updates only ({@link Animator#updateEvery}); effects attached to its joints follow
  * the joints every frame. Every animator of the {@link Animators} plays a binding's effect when it passes the event,
  * at the binding's joint of its own rig (a crowd sharing a rig shares the bindings); an animator whose skeleton has no
- * such joint plays nothing. Each effect played allocates its handle, as {@link Effects#play} does; curves allocate
- * nothing. Used from the scene's thread.
+ * such joint plays nothing. Effects are played by id ({@link Effects#start}), so neither they nor curves allocate.
+ * Used from the scene's thread.
  */
 public final class EffectBindings {
 
@@ -98,7 +102,6 @@ public final class EffectBindings {
         return played;
     }
 
-    @AllowAllocation("an effect played: its handle")
     private void fired(long node, AnimationEvent event, float weight) {
         Animator animator = null;
         for (EventBinding b : events) {
@@ -114,12 +117,40 @@ public final class EffectBindings {
             if (b.joint.index() >= animator.skeleton().size()) {
                 continue; // another rig's joint
             }
-            Effect effect = effects.play(b.effect, animator.node(b.joint)).offset(b.x, b.y, b.z);
+            long at = animator.node(b.joint);
+            if (b.burst) {
+                burst(b, at);
+                played++;
+                continue;
+            }
+            long effect = effects.start(b.effect, at); // by id: no handle
+            effects.offset(effect, b.x, b.y, b.z);
             if (b.weightTo != null) {
-                effect.set(b.weightTo, weight * b.weightScale);
+                effects.set(effect, b.weightTo, weight * b.weightScale);
             }
             played++;
         }
+    }
+
+    /**
+     * Bursts binding {@code b}'s effect into the shared instance of its cell (E22) where joint node {@code node} is (as
+     * of the last {@code scene.update()}), its offset turned by the joint, facing up.
+     */
+    private void burst(EventBinding b, long node) {
+        TransformArray world = effects.scene().worldTransforms();
+        MemorySegment s = world.segment();
+        long base = NodeHandle.index(node) * world.stride();
+        double qx = s.get(ValueLayout.JAVA_DOUBLE, base + 24);
+        double qy = s.get(ValueLayout.JAVA_DOUBLE, base + 32);
+        double qz = s.get(ValueLayout.JAVA_DOUBLE, base + 40);
+        double qw = s.get(ValueLayout.JAVA_DOUBLE, base + 48);
+        // The offset turned by the joint: v + 2w (q x v) + 2 q x (q x v)
+        double tx = 2 * (qy * b.z - qz * b.y);
+        double ty = 2 * (qz * b.x - qx * b.z);
+        double tz = 2 * (qx * b.y - qy * b.x);
+        effects.burst(b.effect, s.get(ValueLayout.JAVA_DOUBLE, base) + b.x + qw * tx + qy * tz - qz * ty,
+            s.get(ValueLayout.JAVA_DOUBLE, base + 8) + b.y + qw * ty + qz * tx - qx * tz,
+            s.get(ValueLayout.JAVA_DOUBLE, base + 16) + b.z + qw * tz + qx * ty - qy * tx, 0, 1, 0, 0);
     }
 
     /** An animation event playing an effect at a joint; its options are set up front. */
@@ -133,6 +164,7 @@ public final class EffectBindings {
         private double x;
         private double y;
         private double z;
+        private boolean burst;
 
         private EventBinding(AnimationEvent event, EffectData effect, Joint joint) {
             this.event = event;
@@ -155,6 +187,16 @@ public final class EffectBindings {
         /** Plays nothing for events weighing less than {@code weight}: a motion barely faded in. 0 by default. */
         public EventBinding minimumWeight(float weight) {
             least = weight;
+            return this;
+        }
+
+        /**
+         * Bursts the effect into the shared instance of its cell (E22, {@link Effects#burst}) rather than playing an
+         * instance of its own each time: a crowd's footsteps are a few instances, not hundreds. The weight sets no
+         * parameter then (a shared instance has one set), the minimum weight still applies.
+         */
+        public EventBinding burst() {
+            burst = true;
             return this;
         }
 

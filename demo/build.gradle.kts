@@ -7,8 +7,8 @@ description = "The engine's demo: a scene to try settings, HDR, dynamic resoluti
 dependencies {
     implementation(project(":engine-xr"))
     implementation(project(":engine-scene"))
-    implementation("com.truesim.scene:scene-meshbuild:0.54.0")
-    implementation("com.truesim.scene:scene-gltf:0.54.0")
+    implementation("com.truesim.scene:scene-meshbuild:0.56.0")
+    implementation("com.truesim.scene:scene-gltf:0.56.0")
 }
 
 application {
@@ -72,7 +72,7 @@ tasks.register<JavaExec>("showcase") {
     workingDir = rootProject.projectDir
     jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xmx4g")
     for (name in listOf("crowd", "character", "foxes", "rocks", "camera", "size", "frames", "first", "every", "out",
-        "stills", "exposure")) {
+        "stills", "exposure", "torches", "sparks", "glass", "async")) {
         providers.gradleProperty(name).orNull?.let { systemProperty("truesim.demo.$name", it) }
     }
 }

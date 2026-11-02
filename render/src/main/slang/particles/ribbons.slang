@@ -43,7 +43,7 @@ void orderMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     {
         if (base + lane < n)
         {
-            InterlockedAdd(offsets[particles[e.first + base + lane].spawnIndex % ribbons], 1);
+            InterlockedAdd(offsets[asuint(particles[e.first + base + lane].custom.y) % ribbons], 1);
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -61,7 +61,7 @@ void orderMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     for (uint base = 0; base < n; base += CHUNK)
     {
         uint i = base + lane;
-        uint ribbon = i < n ? particles[e.first + i].spawnIndex % ribbons : 0xffffffffu;
+        uint ribbon = i < n ? asuint(particles[e.first + i].custom.y) % ribbons : 0xffffffffu;
         ribbonOf[lane] = ribbon;
         GroupMemoryBarrierWithGroupSync();
         if (i < n)

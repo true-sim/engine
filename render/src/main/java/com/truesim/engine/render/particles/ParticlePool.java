@@ -48,9 +48,9 @@ public final class ParticlePool implements AutoCloseable {
         sideUnits = 2 * slots;
         chunks = new RangeAllocator(chunkCount);
         sides = new RangeAllocator(sideUnits);
-        particles = GpuBuffer.deviceLocal(device, 2L * slots * ParticleLayout.BYTES, USAGE);
+        particles = GpuBuffer.deviceLocal(device, 2L * slots * ParticleLayout.BYTES, USAGE, Particles.queues(device));
         try {
-            side = GpuBuffer.deviceLocal(device, 2L * sideUnits * 16, USAGE);
+            side = GpuBuffer.deviceLocal(device, 2L * sideUnits * 16, USAGE, Particles.queues(device));
         } catch (RuntimeException e) {
             particles.close();
             throw e;

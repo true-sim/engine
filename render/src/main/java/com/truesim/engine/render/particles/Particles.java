@@ -43,6 +43,7 @@ import com.truesim.scene.effects.EffectColliders;
 import com.truesim.scene.effects.ParticleWorld;
 import com.truesim.scene.effects.EffectData;
 import com.truesim.scene.effects.EffectRuntime;
+import com.truesim.scene.effects.EffectType;
 import com.truesim.scene.effects.Effects;
 import com.truesim.scene.effects.EmitterData;
 import com.truesim.scene.effects.Space;
@@ -68,7 +69,7 @@ import java.util.Objects;
  * graph.add(new ParticleSimulation(particles));
  * // each frame, while it records (after beginFrame):
  * runtime.update(seconds);
- * particles.update(effects, runtime.spawns());
+ * particles.update(runtime, null);             // or (effects, runtime.spawns()): without levels of detail, placements
  * }</pre>
  *
  * <p>World-space emitters' particles are float offsets from their effect's origin (its position when it started, two
@@ -85,6 +86,8 @@ public final class Particles implements AutoCloseable {
     public static final int MAX_TRAIL_PARTICLES = 65_536;
     /** Emitter instances at most, unless given. */
     public static final int DEFAULT_EMITTERS = 4096;
+    /** Records of a frame's list, per emitter instance it holds: placements of shared effects add records. */
+    private static final int PLACEMENT_RECORDS = 4;
     /**
      * How far, in metres, an effect moves from the origin of its world-space particles along an axis before the origin
      * moves to it, unless set: {@link CpuSimulation#REBASE_DISTANCE}, where float offsets are still precise to a
@@ -99,6 +102,15 @@ public final class Particles implements AutoCloseable {
     /** Ended effects kept warm at most, and per effect data. */
     private static final int WARM = 32;
     private static final int WARM_PER_EFFECT = 4;
+    /**
+     * Frames after one that sent over half of {@code EVENT_SMALL} events in which the event radix sort's passes are
+     * recorded; past them the small sort alone runs, which keeps at most {@code EVENT_SMALL} a frame.
+     */
+    static final int EVENT_WINDOW = 60;
+    /** Event sorts {@link #eventSort} can force: both as the counts say, the small sort's alone, the radix sort's. */
+    static final int EVENTS_EITHER = 0;
+    static final int EVENTS_SMALL = 1;
+    static final int EVENTS_RADIX = 2;
 
     private static final int STORAGE = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     private static final int GPU_USAGE = STORAGE | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -117,7 +129,7 @@ public final class Particles implements AutoCloseable {
     private final ExternalBuffer chunkCountsImport;
     private final ExternalBuffer statisticsImport;
     private final ExternalBuffer dispatchImport;
-    private final FrameBuffer emitterTable;
+    private FrameBuffer emitterTable;
     private final FrameBuffer chunkTable;
     private FrameBuffer spawnRing;
     private FrameBuffer parameterBlocks;
@@ -127,11 +139,20 @@ public final class Particles implements AutoCloseable {
     private final Staging spawnStaged = new Staging(256L * ParticleSpawnLayout.BYTES);
     private final Staging parameterStaged = new Staging(4L * 1024);
     private final Staging ribbonStaged;
+    // Ribbons per parent (particles as emitters): the emitters' places in the list, their chunks (place, chunk)
+    private static final int MAX_PARENT_RIBBONS = 64;
+    private final Staging parentRibbonStaged = new Staging(4L * MAX_PARENT_RIBBONS);
+    private final Staging parentChunkStaged = new Staging(8L * 64);
+    private final FrameBuffer parentRibbonList;
+    private FrameBuffer parentRibbonChunkTable;
+    private int parentRibbonCount;
+    private int parentRibbonChunks;
+    private boolean parentRibbonsSeen;
     private int parameterFloats;
     // The frame's sorted emitters (each one's place in the list) and the chunks of their ranges, for the sorts
     private final int[] sortOf;
-    private final FrameBuffer sortList;
-    private final FrameBuffer sortChunks;
+    private FrameBuffer sortList;
+    private FrameBuffer sortChunks;
     private final Staging sortStaged;
     private final Staging sortChunkStaged;
     private int sortedCount;
@@ -242,6 +263,18 @@ public final class Particles implements AutoCloseable {
     private final ParticleWriter[] writers;
     private final CpuEmitters cpuEmitters;
     private CpuSimulation simulation;
+    private ParticleModules modules;
+    private GpuBuffer previousInstances;
+    private ExternalBuffer previousImport;
+    private EffectRuntime runtime; // the update's: levels of detail, drawn fractions, placements' shares
+    private double[] owed = new double[16]; // per effect slot: seconds its held emitters have not moved
+    private long updates; // updates so far: emitters of reduced rates take turns by it
+    private int sortSlots;
+    private boolean halfSeen;
+    private long sortedSlots; // the frame's sorted records' capacities
+    private int drawCount; // records of the frame's list: the simulated emitters, then placements' records
+    private final boolean[] listHidden;
+    private final Effects.EffectVisitor placementVisitor = this::placement;
     private final int[] freeInstances;
     private int freeCount;
     private int unplaced;
@@ -289,6 +322,10 @@ public final class Particles implements AutoCloseable {
     private long eventsTotal;
     private long eventsDroppedTotal;
     private boolean sendsEvents;
+    // The last statistics' frame that sent over half of EVENT_SMALL events; whether the frame records the radix sort
+    private long eventsBusy = Long.MIN_VALUE;
+    private boolean radixEvents;
+    private int eventSort = EVENTS_EITHER;
     private long statisticsFrame = -1;
     private final Readback receiver = this::receive;
     private final Map<AssetRef<?>, Integer> textureSlots = new HashMap<>();
@@ -329,12 +366,14 @@ public final class Particles implements AutoCloseable {
             freeInstances[i] = maxEmitters - 1 - i; // the lowest first
         }
         freeCount = maxEmitters;
-        listInstance = new int[maxEmitters];
-        listSlot = new int[maxEmitters];
-        listEmitter = new int[maxEmitters];
-        listPosition = new double[3 * maxEmitters];
-        listRotation = new double[4 * maxEmitters];
-        listTime = new float[maxEmitters];
+        int records = PLACEMENT_RECORDS * maxEmitters; // placements draw records of their own
+        listInstance = new int[records];
+        listSlot = new int[records];
+        listEmitter = new int[records];
+        listPosition = new double[3 * records];
+        listRotation = new double[4 * records];
+        listTime = new float[records];
+        listHidden = new boolean[records];
         beamEnds = new double[3 * maxEmitters];
         beamEnded = new boolean[maxEmitters];
         demand = new int[maxEmitters];
@@ -344,7 +383,7 @@ public final class Particles implements AutoCloseable {
         overflowOf = new int[maxEmitters];
         emitterStaged = new Staging((long) ParticleEmitterLayout.BYTES * maxEmitters);
         ribbonStaged = new Staging(8L * maxEmitters);
-        sortOf = new int[maxEmitters];
+        sortOf = new int[records];
         sortStaged = new Staging(4L * Math.min(maxEmitters, ParticleConstants.SORT_EMITTERS));
         ParticlePool p = null;
         ModulePrograms m = null;
@@ -356,38 +395,38 @@ public final class Particles implements AutoCloseable {
             m = new ModulePrograms(device, slots);
             m.assetSlots(this::textureSlot);
             c = new CpuEmitters(device, slots, maxEmitters);
-            made[0] = GpuBuffer.deviceLocal(device, 4L * ParticleConstants.STATE_WORDS * maxEmitters, GPU_USAGE);
-            made[1] = GpuBuffer.deviceLocal(device, 8L * p.slots() / ParticleConstants.CHUNK, GPU_USAGE);
-            made[2] = GpuBuffer.deviceLocal(device, statisticsBytes(maxEmitters), GPU_USAGE);
-            made[3] = GpuBuffer.deviceLocal(device, 16, GPU_USAGE | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
-            made[4] = GpuBuffer.deviceLocal(device, 4L * p.slots(), GPU_USAGE);
+            made[0] = GpuBuffer.deviceLocal(device, 4L * ParticleConstants.STATE_WORDS * maxEmitters, GPU_USAGE, Particles.queues(device));
+            made[1] = GpuBuffer.deviceLocal(device, 8L * p.slots() / ParticleConstants.CHUNK, GPU_USAGE, Particles.queues(device));
+            made[2] = GpuBuffer.deviceLocal(device, statisticsBytes(maxEmitters), GPU_USAGE, Particles.queues(device));
+            made[3] = GpuBuffer.deviceLocal(device, 16, GPU_USAGE | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, Particles.queues(device));
+            made[4] = GpuBuffer.deviceLocal(device, 4L * p.slots(), GPU_USAGE, Particles.queues(device));
             made[5] = GpuBuffer.deviceLocal(device, 4L * (ParticleConstants.DEPTH_HEADER
-                + (long) ParticleConstants.DEPTH_GRID * ParticleConstants.DEPTH_GRID), GPU_USAGE);
+                + (long) ParticleConstants.DEPTH_GRID * ParticleConstants.DEPTH_GRID), GPU_USAGE, Particles.queues(device));
             long events = ParticleConstants.EVENT_CAPACITY;
-            made[6] = GpuBuffer.deviceLocal(device, ParticleEventRecordLayout.BYTES * events, GPU_USAGE);
-            made[7] = GpuBuffer.deviceLocal(device, 8 * events, GPU_USAGE);
-            made[8] = GpuBuffer.deviceLocal(device, 8 * events, GPU_USAGE);
-            made[9] = GpuBuffer.deviceLocal(device, 32, GPU_USAGE | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
-            made[10] = GpuBuffer.deviceLocal(device, 4L * 16 * (events / ParticleConstants.SORT_GROUP), GPU_USAGE);
-            made[11] = GpuBuffer.deviceLocal(device, 4 * events, GPU_USAGE);
+            made[6] = GpuBuffer.deviceLocal(device, ParticleEventRecordLayout.BYTES * events, GPU_USAGE, Particles.queues(device));
+            made[7] = GpuBuffer.deviceLocal(device, 8 * events, GPU_USAGE, Particles.queues(device));
+            made[8] = GpuBuffer.deviceLocal(device, 8 * events, GPU_USAGE, Particles.queues(device));
+            made[9] = GpuBuffer.deviceLocal(device, 32, GPU_USAGE | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, Particles.queues(device));
+            made[10] = GpuBuffer.deviceLocal(device, 4L * 16 * (events / ParticleConstants.SORT_GROUP), GPU_USAGE, Particles.queues(device));
+            made[11] = GpuBuffer.deviceLocal(device, 4 * events, GPU_USAGE, Particles.queues(device));
             made[12] = GpuBuffer.deviceLocal(device, 4L * ParticleConstants.LIGHT_STATE_WORDS
-                * (ParticleConstants.MAX_LIGHT_EMITTERS + 1), GPU_USAGE);
-            tables[9] = FrameBuffer.create(device, 4L * maxEmitters, STORAGE, slots);
-            tables[10] = FrameBuffer.create(device, 16L * ParticleSourceLayout.BYTES, STORAGE, slots);
-            tables[11] = FrameBuffer.create(device, 4L * maxEmitters, STORAGE, slots);
+                * (ParticleConstants.MAX_LIGHT_EMITTERS + 1), GPU_USAGE, Particles.queues(device));
+            tables[9] = FrameBuffer.create(device, 4L * maxEmitters, STORAGE, slots, Particles.queues(device));
+            tables[10] = FrameBuffer.create(device, 16L * ParticleSourceLayout.BYTES, STORAGE, slots, Particles.queues(device));
+            tables[11] = FrameBuffer.create(device, 4L * maxEmitters, STORAGE, slots, Particles.queues(device));
             tables[12] = FrameBuffer.create(device, 4L * ParticleConstants.LIGHT_ENTRY_WORDS
-                * ParticleConstants.MAX_LIGHT_EMITTERS, STORAGE, slots);
-            tables[7] = FrameBuffer.create(device, ParticleFrameLayout.BYTES, STORAGE, slots);
+                * ParticleConstants.MAX_LIGHT_EMITTERS, STORAGE, slots, Particles.queues(device));
+            tables[7] = FrameBuffer.create(device, ParticleFrameLayout.BYTES, STORAGE, slots, Particles.queues(device));
             tables[8] = FrameBuffer.create(device, (long) ParticleColliderLayout.BYTES
-                * ParticleConstants.MAX_COLLIDERS, STORAGE, slots);
-            tables[4] = FrameBuffer.create(device, 8L * maxEmitters, STORAGE, slots);
-            tables[0] = FrameBuffer.create(device, (long) ParticleEmitterLayout.BYTES * maxEmitters, STORAGE, slots);
-            tables[1] = FrameBuffer.create(device, 4L * p.slots() / ParticleConstants.CHUNK, STORAGE, slots);
-            tables[2] = FrameBuffer.create(device, 256L * ParticleSpawnLayout.BYTES, STORAGE, slots);
-            tables[3] = FrameBuffer.create(device, 4L * 1024, STORAGE, slots);
+                * ParticleConstants.MAX_COLLIDERS, STORAGE, slots, Particles.queues(device));
+            tables[4] = FrameBuffer.create(device, 8L * maxEmitters, STORAGE, slots, Particles.queues(device));
+            tables[0] = FrameBuffer.create(device, (long) ParticleEmitterLayout.BYTES * maxEmitters, STORAGE, slots, Particles.queues(device));
+            tables[1] = FrameBuffer.create(device, 4L * p.slots() / ParticleConstants.CHUNK, STORAGE, slots, Particles.queues(device));
+            tables[2] = FrameBuffer.create(device, 256L * ParticleSpawnLayout.BYTES, STORAGE, slots, Particles.queues(device));
+            tables[3] = FrameBuffer.create(device, 4L * 1024, STORAGE, slots, Particles.queues(device));
             tables[5] = FrameBuffer.create(device, 4L * Math.min(maxEmitters, ParticleConstants.SORT_EMITTERS),
-                STORAGE, slots);
-            tables[6] = FrameBuffer.create(device, 8L * p.slots() / ParticleConstants.CHUNK, STORAGE, slots);
+                STORAGE, slots, Particles.queues(device));
+            tables[6] = FrameBuffer.create(device, 8L * p.slots() / ParticleConstants.CHUNK, STORAGE, slots, Particles.queues(device));
         } catch (RuntimeException e) {
             for (FrameBuffer table : tables) {
                 if (table != null) {
@@ -411,6 +450,7 @@ public final class Particles implements AutoCloseable {
             throw e;
         }
         pool = p;
+        sortSlots = p.slots();
         programs = m;
         cpuEmitters = c;
         state = made[0];
@@ -437,6 +477,8 @@ public final class Particles implements AutoCloseable {
         frameTable = tables[7];
         colliderTable = tables[8];
         ribbonList = tables[4];
+        parentRibbonList = FrameBuffer.create(device, 4L * MAX_PARENT_RIBBONS, STORAGE, slots, queues(device));
+        parentRibbonChunkTable = FrameBuffer.create(device, 8L * 64, STORAGE, slots, queues(device));
         emitterTable = tables[0];
         chunkTable = tables[1];
         spawnRing = tables[2];
@@ -463,6 +505,49 @@ public final class Particles implements AutoCloseable {
         return 4L * (ParticleConstants.STATISTICS_HEADER + 2L * maxEmitters);
     }
 
+    /**
+     * The queue families buffers the simulation and draws use are shared by: graphics and async compute, so the
+     * simulation may run on either queue ({@link ParticleSimulation#async}).
+     */
+    static int[] queues(VulkanDevice device) {
+        return new int[] {device.graphics().family(), device.compute().family()};
+    }
+
+    /**
+     * What {@code effect} costs the pool, in bytes: each GPU and CPU emitter's range at its capacity as placed (two
+     * particles a slot) and its side units (two halves), for budgets ({@code EffectRuntime.budget}).
+     */
+    public long bytes(EffectData effect) {
+        long bytes = 0;
+        for (EmitterData e : effect.emitters()) {
+            long capacity = ParticlePool.chunksOf(placedCapacity(e, effect.type())) * (long) ParticleConstants.CHUNK;
+            bytes += capacity * 2 * ParticleLayout.BYTES + 2L * 16 * sideUnits((int) capacity, true, false, 0);
+        }
+        return bytes;
+    }
+
+    /** The pool's bytes: what budgets keep effects within. */
+    public long budget() {
+        return (long) pool.slots() * ParticlePool.SLOT_BYTES;
+    }
+
+    /**
+     * {@code emitter}'s capacity as its range is placed: a GPU emitter's scaled by its effect type's spawn scale at the
+     * quality ({@code effects.quality}), at least a chunk; a CPU emitter's as authored (it uploads what it simulates).
+     */
+    int placedCapacity(EmitterData emitter) {
+        return placedCapacity(emitter, EffectType.DEFAULT);
+    }
+
+    private int placedCapacity(EmitterData emitter, EffectType type) {
+        float scale = type.spawnScale(quality);
+        if (emitter.target() == Target.CPU || scale >= 1) {
+            return emitter.capacity();
+        }
+        return Math.max(Math.min(emitter.capacity(), ParticleConstants.CHUNK),
+            (int) Math.ceil(emitter.capacity() * (double) scale));
+    }
+
     VulkanDevice device() {
         return device;
     }
@@ -473,7 +558,33 @@ public final class Particles implements AutoCloseable {
 
     /** Whether there is anything to draw: an update listed emitter instances. */
     boolean drawable() {
-        return updatedAt >= 0 && emitterCount > 0;
+        return updatedAt >= 0 && drawCount > 0;
+    }
+
+    /**
+     * Whether views draw particles at half resolution: at low quality, or since an effect with a renderer drawn so
+     * ({@code half} 1) played; a change rebuilds the draws' graph.
+     */
+    boolean drawsHalf() {
+        return halfSeen || quality == com.truesim.scene.effects.Quality.LOW;
+    }
+
+    /** Records of the frame's list the draws read: its emitter instances, then placements' records. */
+    int drawCount() {
+        return drawCount;
+    }
+
+    /**
+     * Whether the record at {@code index} of the frame's list is not drawn as itself: a variant of a shared effect,
+     * drawn at its placements only.
+     */
+    boolean listHidden(int index) {
+        return listHidden[index];
+    }
+
+    /** Whether the record at {@code index} of the frame's list is a placement's: drawn, never simulated. */
+    boolean listPlacement(int index) {
+        return index >= emitterCount;
     }
 
     /** The pool. */
@@ -555,8 +666,25 @@ public final class Particles implements AutoCloseable {
      * has a {@link #writer} of, else as {@code simulation} (null: none) left them, after its own update.
      */
     public void update(Effects effects, SpawnRecords spawns, CpuSimulation simulation) {
+        update(effects, spawns, simulation, null);
+    }
+
+    /**
+     * {@link #update(Effects, SpawnRecords, CpuSimulation)} of {@code runtime}'s effects and spawns, as it decided
+     * them: emitters draw their effects' {@link EffectRuntime#drawn drawn fractions} (the others fading out by their
+     * hash), update every {@link EffectRuntime#updateEvery n frames} (moved on by the time between, and drawn moved on
+     * by their velocities in the frames between), and placements of shared effects draw their variants' particles
+     * where they are, at their shares ({@link EffectRuntime#placementWeight}).
+     */
+    public void update(EffectRuntime runtime, CpuSimulation simulation) {
+        update(runtime.effects(), runtime.spawns(), simulation, runtime);
+    }
+
+    private void update(Effects effects, SpawnRecords spawns, CpuSimulation simulation, EffectRuntime runtime) {
         Objects.requireNonNull(effects, "effects");
         this.simulation = simulation;
+        this.runtime = runtime;
+        updates++;
         // Between frames, the update is for the frame about to begin
         long frames = !slots.isSingle() && slots.current() < 0 ? slots.frames() + 1 : slots.frames();
         if (updatedAt != frames || slots.isSingle()) {
@@ -565,6 +693,8 @@ public final class Particles implements AutoCloseable {
             written = target;
             updatedAt = frames;
         }
+        radixEvents = eventSort == EVENTS_RADIX
+            || eventSort == EVENTS_EITHER && eventsBusy >= frames - EVENT_WINDOW;
         retired.release();
         meshTables.release();
         cool(false);
@@ -591,11 +721,16 @@ public final class Particles implements AutoCloseable {
         }
         copyTables();
         following = null;
+        this.runtime = null;
     }
 
     /** Hands the frame's tables to the GPU: a copy each, into frame buffers grown where they must. */
     private void copyTables() {
-        emitterStaged.copyTo(emitterTable, (long) ParticleEmitterLayout.BYTES * emitterCount);
+        long emitterBytes = (long) ParticleEmitterLayout.BYTES * drawCount;
+        if (emitterTable.size() < emitterBytes) {
+            emitterTable = grown(emitterTable, emitterBytes);
+        }
+        emitterStaged.copyTo(emitterTable, emitterBytes);
         chunkStaged.copyTo(chunkTable, 4L * chunkCount);
         long spawnBytes = (long) ParticleSpawnLayout.BYTES * recordCount;
         if (spawnRing.size() < spawnBytes) {
@@ -608,6 +743,11 @@ public final class Particles implements AutoCloseable {
         }
         parameterStaged.copyTo(parameterBlocks, parameterBytes);
         ribbonStaged.copyTo(ribbonList, 8L * ribbonCount);
+        parentRibbonStaged.copyTo(parentRibbonList, 4L * parentRibbonCount);
+        if (parentRibbonChunkTable.size() < 8L * parentRibbonChunks) {
+            parentRibbonChunkTable = grown(parentRibbonChunkTable, 8L * parentRibbonChunks);
+        }
+        parentChunkStaged.copyTo(parentRibbonChunkTable, 8L * parentRibbonChunks);
         long sourceBytes = (long) ParticleSourceLayout.BYTES * sourceCount;
         if (sourceTable.size() < sourceBytes) {
             sourceTable = grown(sourceTable, sourceBytes);
@@ -615,7 +755,13 @@ public final class Particles implements AutoCloseable {
         sourceStaged.copyTo(sourceTable, sourceBytes);
         meshStaged.copyTo(meshList, 4L * meshCount);
         lightStaged.copyTo(lightList, 4L * ParticleConstants.LIGHT_ENTRY_WORDS * lightCount);
+        if (sortList.size() < 4L * sortedCount) {
+            sortList = grown(sortList, 4L * sortedCount);
+        }
         sortStaged.copyTo(sortList, 4L * sortedCount);
+        if (sortChunks.size() < 8L * sortChunkCount) {
+            sortChunks = grown(sortChunks, 8L * sortChunkCount);
+        }
         sortChunkStaged.copyTo(sortChunks, 8L * sortChunkCount);
         cpuEmitters.finish();
         colliderStaged.copyTo(colliderTable, (long) ParticleColliderLayout.BYTES * colliderCount);
@@ -652,7 +798,13 @@ public final class Particles implements AutoCloseable {
         r.putLong(ParticleFrameLayout.GPU_LIGHTS, lights == null || lights.gpuLightsBuffer() == null ? 0
             : lights.gpuLightsBuffer().deviceAddress());
         r.putInt(ParticleFrameLayout.LIGHT_EMITTER_COUNT, lightCount);
+        r.putInt(ParticleFrameLayout.MESH_BASE, meshBase);
+        r.putLong(ParticleFrameLayout.PREVIOUS_INSTANCES, previousInstances == null ? depth.deviceAddress()
+            : previousInstances.deviceAddress());
         r.putInt(ParticleFrameLayout.LIGHT_BUDGET, lightBudget);
+        r.putInt(ParticleFrameLayout.EVENT_LIMIT, radixEvents ? ParticleConstants.EVENT_CAPACITY
+            : ParticleConstants.EVENT_SMALL);
+        r.putInt(ParticleFrameLayout.SMALL_EVENTS, eventSort == EVENTS_RADIX ? 0 : ParticleConstants.EVENT_SMALL);
         GeometryPool meshes = meshRenderer == null ? null : meshRenderer.pool();
         r.putLong(ParticleFrameLayout.MESHES, meshes == null ? 0 : meshes.meshTable().deviceAddress());
         r.putLong(ParticleFrameLayout.POSITIONS, meshes == null ? 0 : meshes.positions().deviceAddress());
@@ -685,6 +837,9 @@ public final class Particles implements AutoCloseable {
     }
 
     private void follow(long effect) {
+        if (following.placement(effect)) {
+            return; // it draws its variant: nothing of its own to simulate
+        }
         int slot = (int) effect;
         if (slot >= ids.length) {
             grow(slot + 1);
@@ -713,6 +868,7 @@ public final class Particles implements AutoCloseable {
         times = Arrays.copyOf(times, length);
         seen = Arrays.copyOf(seen, length);
         restarted = Arrays.copyOf(restarted, length);
+        owed = Arrays.copyOf(owed, length);
     }
 
     /** Starts following {@code effect} in {@code slot}: its GPU emitters take instances and ranges. */
@@ -742,8 +898,8 @@ public final class Particles implements AutoCloseable {
         for (int e = 0; e < emitters.size(); e++) {
             if (own[e] >= 0) {
                 renew(own[e]);
-            } else {
-                own[e] = placeOrEvict(emitters.get(e), block.over[e], block.trails[e]); // CPU emitters too
+            } else { // CPU emitters too
+                own[e] = placeOrEvict(emitters.get(e), data.type(), block.over[e], block.emits[e], block.trails[e]);
             }
         }
         ids[slot] = effect;
@@ -754,6 +910,7 @@ public final class Particles implements AutoCloseable {
     /** Starts {@code effect} in {@code slot} from its beginning: its time, origin and restarts. */
     private void begin(int slot, long effect) {
         times[slot] = 0;
+        owed[slot] = 0;
         restarted[slot] = following.restarts(effect);
         for (int axis = 0; axis < 3; axis++) {
             origins[3 * slot + axis] = following.position(effect, axis);
@@ -782,8 +939,8 @@ public final class Particles implements AutoCloseable {
         }
         for (int e = 0; e < Math.max(before, emitters.size()); e++) {
             int instance = e < before ? own[e] : -1;
-            if (instance >= 0 && (e >= emitters.size() || !fits(instance, emitters.get(e), block.over[e],
-                block.trails[e]))) {
+            if (instance >= 0 && (e >= emitters.size() || !fits(instance, emitters.get(e), data.type(),
+                block.over[e], block.emits[e], block.trails[e]))) {
                 give(instance);
                 instance = -1;
             }
@@ -792,7 +949,8 @@ public final class Particles implements AutoCloseable {
                     renew(instance);
                     local[instance] = !cpu[instance] && emitters.get(e).space() == Space.LOCAL;
                 } else {
-                    instance = placeOrEvict(emitters.get(e), block.over[e], block.trails[e]);
+                    instance = placeOrEvict(emitters.get(e), data.type(), block.over[e], block.emits[e],
+                        block.trails[e]);
                 }
             }
             own[e] = instance;
@@ -803,9 +961,10 @@ public final class Particles implements AutoCloseable {
     }
 
     /** Whether {@code instance}'s ranges suit {@code emitter} as they are. */
-    private boolean fits(int instance, EmitterData emitter, boolean over, int trail) {
-        return capacities[instance] == emitter.capacity() && cpu[instance] == (emitter.target() == Target.CPU)
-            && sideUnits[instance] == sideUnits(emitter.capacity(), over, trail)
+    private boolean fits(int instance, EmitterData emitter, EffectType type, boolean over, boolean emits, int trail) {
+        int capacity = placedCapacity(emitter, type);
+        return capacities[instance] == capacity && cpu[instance] == (emitter.target() == Target.CPU)
+            && sideUnits[instance] == sideUnits(capacity, over, emits, trail)
             && (meshFirsts[instance] >= 0) == (meshIds != null && meshRendered(emitter));
     }
 
@@ -819,16 +978,20 @@ public final class Particles implements AutoCloseable {
         jointCounts[instance] = 0;
     }
 
-    private static int sideUnits(int capacity, boolean over, int trail) {
-        return ((over ? 2 : 0) + (trail > 0 ? 1 + trail : 0)) * capacity;
+    /**
+     * Side units of a range of {@code capacity}: attributes from birth (2 a particle), emit accumulators (1: four of
+     * them), the trail's ring (a head and its points).
+     */
+    private static int sideUnits(int capacity, boolean over, boolean emits, int trail) {
+        return ((over ? 2 : 0) + (emits ? 1 : 0) + (trail > 0 ? 1 + trail : 0)) * capacity;
     }
 
     /** {@link #place}, giving the warm instances back first if there is no room; counted when still none. */
-    private int placeOrEvict(EmitterData emitter, boolean over, int trail) {
-        int instance = place(emitter, over, trail);
+    private int placeOrEvict(EmitterData emitter, EffectType type, boolean over, boolean emits, int trail) {
+        int instance = place(emitter, type, over, emits, trail);
         if (instance < 0 && warmCount > 0) {
             cool(true);
-            instance = place(emitter, over, trail);
+            instance = place(emitter, type, over, emits, trail);
         }
         if (instance < 0) {
             unplaced++;
@@ -869,11 +1032,11 @@ public final class Particles implements AutoCloseable {
     }
 
     /** An emitter instance with a range for {@code emitter}, or -1 where there is no room. */
-    private int place(EmitterData emitter, boolean over, int trail) {
-        int capacity = emitter.capacity();
+    private int place(EmitterData emitter, EffectType type, boolean over, boolean emits, int trail) {
+        int capacity = placedCapacity(emitter, type);
         boolean room = freeCount > 0 && (trail == 0 || capacity <= MAX_TRAIL_PARTICLES);
         int first = room ? pool.allocate(capacity) : -1;
-        int units = sideUnits(capacity, over, trail);
+        int units = sideUnits(capacity, over, emits, trail);
         int side = ParticleConstants.NO_SIDE;
         if (first >= 0 && units > 0) {
             side = pool.allocateSide(units);
@@ -980,6 +1143,7 @@ public final class Particles implements AutoCloseable {
         parameterFloats = 0;
         sortedCount = 0;
         sortChunkCount = 0;
+        sortedSlots = 0;
         targetCount = 0;
         sourceCount = 0;
         meshCount = 0;
@@ -994,6 +1158,13 @@ public final class Particles implements AutoCloseable {
             }
             ModulePrograms.Block block = blocks[slot];
             EffectData data = block.data;
+            if (!halfSeen) {
+                for (int[] drawn : block.drawn) {
+                    for (int d : drawn) {
+                        halfSeen |= (d & ModulePrograms.DRAWN_HALF) != 0;
+                    }
+                }
+            }
             int floats = data.parameterFloats();
             int parameterOffset = parameterFloats;
             if (floats > 0) {
@@ -1002,7 +1173,15 @@ public final class Particles implements AutoCloseable {
             }
             long time = effects.time(effect);
             double frame = (time - times[slot]) * 1e-6;
-            float dt = (float) Math.min(CpuSimulation.MAX_STEP, frame);
+            // A reduced update rate (levels of detail): held still between updates, then moved on by the time owed
+            boolean decided = runtime != null && runtime.decided(effect); // else as for an update without a runtime
+            int every = decided ? runtime.updateEvery(effect) : 1;
+            boolean held = every > 1 && (updates + slot) % every != 0;
+            double step = held ? 0 : frame + owed[slot];
+            owed[slot] = held ? owed[slot] + frame : 0;
+            float dt = (float) Math.min(CpuSimulation.MAX_STEP * every, step);
+            float drawn = decided ? runtime.drawn(effect) : 1;
+            boolean hidden = effects.variant(effect);
             double x = effects.position(effect, 0);
             double y = effects.position(effect, 1);
             double z = effects.position(effect, 2);
@@ -1072,11 +1251,18 @@ public final class Particles implements AutoCloseable {
                 t.putInt(at + ParticleEmitterLayout.FLAGS, (fresh[instance] ? ParticleConstants.EMITTER_NEW : 0)
                     | (local[instance] ? ParticleConstants.EMITTER_LOCAL : 0)
                     | (cpu[instance] ? ParticleConstants.EMITTER_CPU : 0)
-                    | (meshFirsts[instance] >= 0 && block.meshRenderers[e] >= 0 ? ParticleConstants.EMITTER_MESH : 0));
+                    | (meshFirsts[instance] >= 0 && block.meshRenderers[e] >= 0 ? ParticleConstants.EMITTER_MESH : 0)
+                    | (held && !cpu[instance] && !fresh[instance] ? ParticleConstants.EMITTER_HELD : 0)
+                    | (hidden ? ParticleConstants.EMITTER_HIDDEN : 0));
+                t.putFloat(at + ParticleEmitterLayout.DRAWN, drawn);
+                t.putFloat(at + ParticleEmitterLayout.FADE, 1);
+                t.putFloat(at + ParticleEmitterLayout.SCALE, 1);
+                t.putFloat(at + ParticleEmitterLayout.HELD, held ? (float) owed[slot] : 0);
+                listHidden[index] = hidden;
                 t.putInt(at + ParticleEmitterLayout.SIDE, sideFirsts[instance]);
                 t.putInt(at + ParticleEmitterLayout.SEED, EffectRuntime.emitterSeed(seed, e));
                 t.putFloat(at + ParticleEmitterLayout.DT, dt);
-                t.putFloat(at + ParticleEmitterLayout.FRAME, (float) frame);
+                t.putFloat(at + ParticleEmitterLayout.FRAME, (float) Math.min(step, CpuSimulation.MAX_STEP * every));
                 putVector(t, at + ParticleEmitterLayout.ROTATION, qx, qy, qz);
                 t.putFloat(at + ParticleEmitterLayout.ROTATION + 12, qw);
                 t.putInt(at + ParticleEmitterLayout.PARAMETERS, parameterOffset);
@@ -1126,22 +1312,97 @@ public final class Particles implements AutoCloseable {
                     chunkStaged.putInt(4L * chunkCount++, index);
                 }
                 sortOf[index] = ParticleConstants.NO_SORT;
-                if (sortedCount < ParticleConstants.SORT_EMITTERS && sorted(block.sorted[e])) {
-                    // CPU emitters too: their particles are in their ranges like any
-                    int place = sortedCount++;
-                    sortOf[index] = place;
-                    sortStaged.putInt(4L * place, index);
-                    for (int c = 0; c < ParticlePool.chunksOf(capacities[instance]); c++) {
-                        sortChunkStaged.putInt(8L * sortChunkCount, place);
-                        sortChunkStaged.putInt(8L * sortChunkCount + 4, c);
-                        sortChunkCount++;
-                    }
+                if (!hidden) { // CPU emitters too: their particles are in their ranges like any
+                    sortable(index, block, e, instance);
                 }
             }
             times[slot] = time;
             previous[3 * slot] = x;
             previous[3 * slot + 1] = y;
             previous[3 * slot + 2] = z;
+        }
+        drawCount = emitterCount;
+        effects.forEach(placementVisitor);
+        if (sortedSlots > sortSlots) {
+            sortSlots = (int) Math.min(Integer.MAX_VALUE / 8, sortedSlots + sortedSlots / 2);
+        }
+    }
+
+    /** Lists the record at {@code index} (of emitter {@code e} of {@code block}, instance {@code instance}) for sorting. */
+    private void sortable(int index, ModulePrograms.Block block, int e, int instance) {
+        if (sortedCount < ParticleConstants.SORT_EMITTERS && sorted(block.sorted[e])) {
+            int place = sortedCount++;
+            sortOf[index] = place;
+            sortedSlots += capacities[instance];
+            sortStaged.room(4L * sortedCount);
+            sortStaged.putInt(4L * place, index);
+            int chunks = ParticlePool.chunksOf(capacities[instance]);
+            sortChunkStaged.room(8L * (sortChunkCount + chunks));
+            for (int c = 0; c < chunks; c++) {
+                sortChunkStaged.putInt(8L * sortChunkCount, place);
+                sortChunkStaged.putInt(8L * sortChunkCount + 4, c);
+                sortChunkCount++;
+            }
+        }
+    }
+
+    /**
+     * Adds placement {@code effect}'s records to the frame's list, if it is shown (not culled, its share of its variant
+     * above 0) and its variant is simulated: a copy of each of its variant's records at the placement's origin,
+     * rotation and scale, faded by its share, which the draws and sorts read and the simulation never reaches.
+     */
+    private void placement(long effect) {
+        Effects effects = following;
+        if (!effects.placement(effect)) {
+            return;
+        }
+        long variant = effects.variantOf(effect);
+        int slot = (int) variant;
+        if (runtime != null && !runtime.decided(effect)) {
+            return; // played since the runtime's update: drawn from the next on
+        }
+        float weight = runtime == null ? 1 : runtime.culled(effect) ? 0 : runtime.placementWeight(effect);
+        if (variant == 0 || slot >= highest || ids[slot] != variant || !(weight > 0)) {
+            return;
+        }
+        float drawn = runtime == null ? 1 : runtime.drawn(effect);
+        double x = effects.position(effect, 0);
+        double y = effects.position(effect, 1);
+        double z = effects.position(effect, 2);
+        int[] own = instances[slot];
+        ModulePrograms.Block block = blocks[slot];
+        for (int e = 0; e < block.programs.length; e++) {
+            int instance = own[e];
+            if (instance < 0 || drawCount == listInstance.length) {
+                continue;
+            }
+            int from = places[slot][e];
+            int index = drawCount++;
+            long at = (long) ParticleEmitterLayout.BYTES * index;
+            emitterStaged.room(at + ParticleEmitterLayout.BYTES);
+            emitterStaged.copy((long) ParticleEmitterLayout.BYTES * from, at, ParticleEmitterLayout.BYTES);
+            putOrigin(emitterStaged, (int) at, x, y, z);
+            for (int c = 0; c < 4; c++) {
+                emitterStaged.putFloat(at + ParticleEmitterLayout.ROTATION + 4L * c, (float) effects.rotation(effect, c));
+            }
+            emitterStaged.putInt(at + ParticleEmitterLayout.FLAGS, ParticleConstants.EMITTER_LOCAL
+                | ParticleConstants.EMITTER_PLACEMENT);
+            emitterStaged.putFloat(at + ParticleEmitterLayout.DRAWN, drawn);
+            emitterStaged.putFloat(at + ParticleEmitterLayout.FADE, weight);
+            emitterStaged.putFloat(at + ParticleEmitterLayout.SCALE, effects.scale(effect));
+            listInstance[index] = instance;
+            listSlot[index] = slot;
+            listEmitter[index] = e;
+            listPosition[3 * index] = x;
+            listPosition[3 * index + 1] = y;
+            listPosition[3 * index + 2] = z;
+            for (int c = 0; c < 4; c++) {
+                listRotation[4 * index + c] = effects.rotation(effect, c);
+            }
+            listTime[index] = listTime[from];
+            listHidden[index] = false;
+            sortOf[index] = ParticleConstants.NO_SORT;
+            sortable(index, block, e, instance);
         }
     }
 
@@ -1174,7 +1435,10 @@ public final class Particles implements AutoCloseable {
     /**
      * Lists emitter {@code e} of {@code block} (at {@code index} of the list, instance {@code instance}) for the
      * particle lights if it has a light renderer: its budget ({@code max}, 64 by default), the share of its particles
-     * lit ({@code fraction}, all by default), their radius and intensity.
+     * lit ({@code fraction}, all by default), their radius and intensity, and the radius per metre of a particle's size
+     * ({@code radius.size}: when over 0, a light reaches {@code radius} times its particle's size times it, so a
+     * growing flash reaches farther). The frame's budget goes to the candidates reaching farthest: their brightness
+     * times their radius.
      */
     private void putLight(ModulePrograms.Block block, int e, int index, int instance) {
         if (lights == null || lightCount == ParticleConstants.MAX_LIGHT_EMITTERS) {
@@ -1190,6 +1454,7 @@ public final class Particles implements AutoCloseable {
                 lightStaged.putFloat(at + 8, ModulePrograms.setting(renderer, "fraction", 1));
                 lightStaged.putFloat(at + 12, ModulePrograms.setting(renderer, "radius", 1));
                 lightStaged.putFloat(at + 16, ModulePrograms.setting(renderer, "intensity", 1));
+                lightStaged.putFloat(at + 20, Math.max(0, ModulePrograms.setting(renderer, "radius.size", 0)));
                 largestLight = Math.max(largestLight, capacities[instance]);
                 return;
             }
@@ -1319,7 +1584,7 @@ public final class Particles implements AutoCloseable {
         heightX = Double.NaN;
         if (world != null) {
             long bytes = 4L * resolution * resolution;
-            heights = FrameBuffer.create(device, bytes, STORAGE, slots);
+            heights = FrameBuffer.create(device, bytes, STORAGE, slots, Particles.queues(device));
             heightStaged = new Staging(bytes);
         }
         return this;
@@ -1373,6 +1638,31 @@ public final class Particles implements AutoCloseable {
     }
 
     /**
+     * Lets effects name the game's own modules of {@code modules} (step 20; null: built-in ones only): effects encoded
+     * from now on, simulated by its kernel variant, which then takes the place of the rays variant too (its plugin
+     * modules and ray collision do not mix; chains fall back). Set before effects play.
+     */
+    public Particles modules(ParticleModules modules) {
+        this.modules = modules;
+        programs.plugins(modules);
+        if (modules != null) {
+            programs.rays(false);
+        }
+        setup++;
+        return this;
+    }
+
+    /** The game's own modules, or null. */
+    ParticleModules modules() {
+        return modules;
+    }
+
+    /** Whether the frame's simulation may run on the async compute queue ({@link ParticleSimulation#async}). */
+    boolean asyncAllowed() {
+        return meshRenderer == null && rayTracing == null;
+    }
+
+    /**
      * Lets mesh shapes emit from the meshes of {@code renderer}'s geometry pool (null: none): the simulation reads its
      * buffers, a skinned mesh's posed copy after the deformation pass. Set before effects play; what each emitter
      * emits from, its {@link #sources} name.
@@ -1407,8 +1697,19 @@ public final class Particles implements AutoCloseable {
             meshBase = meshScene.reserveGpuRange(instances);
             meshScene.writtenBy(ParticleKeys.PARTICLES);
             meshIds = new com.truesim.engine.render.RangeAllocator(instances);
+            if (previousInstances != null) {
+                retired.add(previousInstances);
+            }
+            previousInstances = GpuBuffer.deviceLocal(device, (long) com.truesim.engine.render.layout.InstanceLayout
+                .BYTES * instances, GPU_USAGE, queues(device));
+            previousImport = new ExternalBuffer("particle previous instances", previousInstances);
         }
         return this;
+    }
+
+    /** Mesh particles' transforms a frame before, per slot of their range ({@link ParticleKeys#PREVIOUS_INSTANCES}). */
+    ExternalBuffer previousInstances() {
+        return previousImport;
     }
 
     /**
@@ -1692,7 +1993,7 @@ public final class Particles implements AutoCloseable {
     @AllowAllocation("a table growing")
     private FrameBuffer grown(FrameBuffer old, long bytes) {
         retired.add(old);
-        return FrameBuffer.create(device, Math.max(bytes, 2 * old.size()), STORAGE, slots);
+        return FrameBuffer.create(device, Math.max(bytes, 2 * old.size()), STORAGE, slots, Particles.queues(device));
     }
 
     /** Writes the frame's spawn records into the ring, grouped by emitter in the list's order. */
@@ -1788,21 +2089,46 @@ public final class Particles implements AutoCloseable {
     /** Lists the frame's GPU emitters with ribbons of several strands, for their order. */
     private void ribbons() {
         ribbonCount = 0;
+        parentRibbonCount = 0;
+        parentRibbonChunks = 0;
         for (int i = 0; i < emitterCount; i++) {
             if (cpu[listInstance[i]]) {
                 continue;
             }
             int strands = 1;
+            boolean parents = false;
             List<Renderer> renderers = blocks[listSlot[i]].data.emitters().get(listEmitter[i]).renderers();
             for (int r = 0; r < renderers.size(); r++) {
-                strands = Math.max(strands, ModulePrograms.ribbons(renderers.get(r)));
+                int n = ModulePrograms.ribbons(renderers.get(r));
+                parents |= n == 0;
+                strands = Math.max(strands, n);
             }
-            if (strands > 1) {
+            if (parents && parentRibbonCount < MAX_PARENT_RIBBONS) {
+                // A ribbon per parent: ordered by the radix sort of (place, parent) keys
+                int place = parentRibbonCount++;
+                parentRibbonsSeen = true;
+                parentRibbonStaged.putInt(4L * place, i);
+                int chunks = ParticlePool.chunksOf(capacities[listInstance[i]]);
+                parentChunkStaged.room(8L * (parentRibbonChunks + chunks));
+                for (int c = 0; c < chunks; c++) {
+                    parentChunkStaged.putInt(8L * parentRibbonChunks, place);
+                    parentChunkStaged.putInt(8L * parentRibbonChunks + 4, c);
+                    parentRibbonChunks++;
+                }
+            } else if (strands > 1) {
                 ribbonStaged.putInt(8L * ribbonCount, i);
                 ribbonStaged.putInt(8L * ribbonCount + 4, strands);
                 ribbonCount++;
             }
         }
+    }
+
+    /**
+     * Keys a view's sort has room for: the pool's slots, or as many as the frame's sorted records may hold if more
+     * (placements draw their variants' particles again), grown by half again; a change rebuilds the draws' graph.
+     */
+    int sortSlots() {
+        return sortSlots;
     }
 
     /** Emitters of the frame's list drawing sorted billboards (at most {@code SORT_EMITTERS}). */
@@ -1836,6 +2162,29 @@ public final class Particles implements AutoCloseable {
     /** Emitters whose ribbons the frame orders. */
     int ribbonCount() {
         return ribbonCount;
+    }
+
+    /** Emitters whose ribbons go a ribbon per parent, ordered by the radix sort (at most 64). */
+    int parentRibbonCount() {
+        return parentRibbonCount;
+    }
+
+    /** Chunks of their ranges. */
+    int parentRibbonChunks() {
+        return parentRibbonChunks;
+    }
+
+    /** Whether any emitter drew a ribbon per parent since this was made: the simulation sorts their keys from then. */
+    boolean parentRibbons() {
+        return parentRibbonsSeen;
+    }
+
+    long parentRibbonListAddress() {
+        return parentRibbonList.deviceAddress();
+    }
+
+    long parentRibbonChunksAddress() {
+        return parentRibbonChunkTable.deviceAddress();
     }
 
     long ribbonListAddress() {
@@ -2006,6 +2355,9 @@ public final class Particles implements AutoCloseable {
             ParticleConstants.STATISTICS_EVENTS));
         eventsDroppedTotal = Integer.toUnsignedLong(data.getAtIndex(ValueLayout.JAVA_INT,
             ParticleConstants.STATISTICS_EVENTS_DROPPED));
+        if (eventsTotal > ParticleConstants.EVENT_SMALL / 2) {
+            eventsBusy = Math.max(eventsBusy, frame);
+        }
         for (int i = 0; i < maxEmitters; i++) {
             aliveOf[i] = data.getAtIndex(ValueLayout.JAVA_INT, ParticleConstants.STATISTICS_HEADER + 2L * i);
             overflowOf[i] = data.getAtIndex(ValueLayout.JAVA_INT, ParticleConstants.STATISTICS_HEADER + 2L * i + 1);
@@ -2096,6 +2448,16 @@ public final class Particles implements AutoCloseable {
         return textureSlot(blocks[listSlot[index]].extras[listEmitter[index]][r]);
     }
 
+    /**
+     * Its renderer {@code r}'s {@code DRAWN_*} bits as drawn: half resolution for every billboard at low quality
+     * ({@code effects.quality}), as authored otherwise.
+     */
+    int rendererDrawn(int index, int r) {
+        int drawn = blocks[listSlot[index]].drawn[listEmitter[index]][r];
+        return quality == com.truesim.scene.effects.Quality.LOW && rendererKind(index, r)
+            == ParticleConstants.RENDER_BILLBOARD ? drawn | ModulePrograms.DRAWN_HALF : drawn;
+    }
+
     /** Its renderer {@code r}'s texture slot. */
     int rendererTexture(int index, int r) {
         return textureSlot(blocks[listSlot[index]].textures[listEmitter[index]][r]);
@@ -2124,9 +2486,22 @@ public final class Particles implements AutoCloseable {
      * The pipeline drawing renderers of {@code kind} ({@code RENDER_*}: billboards, ribbons, trails, beams) into color
      * attachments of {@code format} (a VkFormat), made once.
      */
-    @AllowAllocation("a pipeline made once per kind and color format")
     Pipeline pipeline(int kind, int format) {
-        int key = format * 8 + kind;
+        return pipeline(kind, format, DRAW_COLOR);
+    }
+
+    /** Pipelines' fragment shaders: particles' color, the reactive mask's coverage, an overdraw heat map. */
+    static final int DRAW_COLOR = 0;
+    static final int DRAW_REACTIVE = 1;
+    static final int DRAW_OVERDRAW = 2;
+
+    /**
+     * The pipeline drawing renderers of {@code kind} into {@code format}: premultiplied ({@code DRAW_COLOR}), or added:
+     * their coverage for the reactive mask, a constant per layer for the overdraw heat map.
+     */
+    @AllowAllocation("a pipeline made once per kind, color format and mode")
+    Pipeline pipeline(int kind, int format, int mode) {
+        int key = (format * 8 + kind) * 4 + mode;
         Pipeline pipeline = pipelines.get(key);
         if (pipeline == null) {
             String entry = switch (kind) {
@@ -2137,9 +2512,27 @@ public final class Particles implements AutoCloseable {
             };
             try (ShaderModule shaders = ShaderModule.load(device, "shaders/particles/draw.spv")) {
                 pipeline = Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, entry)
-                    .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, "fragmentMain").color(format)
-                    .blend(0, Pipeline.Blend.PREMULTIPLIED).pushConstants(ParticleDrawPush.BYTES).doubleSided()
+                    .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, mode == DRAW_REACTIVE ? "reactiveMain"
+                        : mode == DRAW_OVERDRAW ? "overdrawMain" : "fragmentMain")
+                    .color(format).blend(0, mode == DRAW_COLOR ? Pipeline.Blend.PREMULTIPLIED : Pipeline.Blend.ADDITIVE).pushConstants(ParticleDrawPush.BYTES).doubleSided()
                     .build();
+            }
+            pipelines.put(key, pipeline);
+        }
+        return pipeline;
+    }
+
+    /** The pipeline laying half-resolution particles over a view of {@code format} (particles/upsample.slang). */
+    @AllowAllocation("a pipeline made once per color format")
+    Pipeline upsamplePipeline(int format) {
+        int key = -1 - format;
+        Pipeline pipeline = pipelines.get(key);
+        if (pipeline == null) {
+            try (ShaderModule shaders = ShaderModule.load(device, "shaders/particles/upsample.spv")) {
+                pipeline = Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, "upsampleVertexMain")
+                    .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, "upsampleMain").color(format)
+                    .blend(0, Pipeline.Blend.PREMULTIPLIED)
+                    .pushConstants(com.truesim.engine.render.layout.ParticleUpsamplePush.BYTES).doubleSided().build();
             }
             pipelines.put(key, pipeline);
         }
@@ -2168,7 +2561,12 @@ public final class Particles implements AutoCloseable {
         return eventsTotal;
     }
 
-    /** Of them, dropped for want of room in the frame's event buffer. */
+    /**
+     * Of them, dropped for want of room in the frame's event buffer. The event radix sort's passes are recorded only
+     * while recent frames sent over half of {@code EVENT_SMALL} events (the statistics come a few frames late), so a
+     * sudden burst past {@code EVENT_SMALL} after quiet frames keeps {@code EVENT_SMALL} and drops the rest for those
+     * few frames.
+     */
     public long eventsDropped() {
         return eventsDroppedTotal;
     }
@@ -2176,6 +2574,16 @@ public final class Particles implements AutoCloseable {
     /** Whether the frame's emitters send events: the event passes run. */
     boolean sendsEvents() {
         return sendsEvents;
+    }
+
+    /** Whether the frame records the event radix sort's passes (else the small sort's alone sorts its events). */
+    boolean radixEvents() {
+        return radixEvents;
+    }
+
+    /** Forces an event sort for tests: {@link #EVENTS_EITHER} (as the counts say), {@link #EVENTS_SMALL}, or radix. */
+    void eventSort(int sort) {
+        eventSort = sort;
     }
 
     long eventKeysAddress() {
@@ -2250,6 +2658,8 @@ public final class Particles implements AutoCloseable {
         dispatch.close();
         order.close();
         ribbonList.close();
+        parentRibbonList.close();
+        parentRibbonChunkTable.close();
         sortList.close();
         sortChunks.close();
         frameTable.close();
@@ -2269,6 +2679,9 @@ public final class Particles implements AutoCloseable {
         meshList.close();
         lightList.close();
         lightState.close();
+        if (previousInstances != null) {
+            previousInstances.close();
+        }
         if (lights != null) {
             lights.notWrittenBy(ParticleKeys.PARTICLES);
         }

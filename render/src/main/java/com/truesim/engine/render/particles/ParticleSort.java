@@ -17,9 +17,11 @@ import java.util.Objects;
  * each emitter's alive particles in a run of their own, farthest first, which {@link ParticleDraw} draws its sorted
  * billboards in. Keys are the emitter's place among the frame's sorted emitters (at most {@code SORT_EMITTERS}) above
  * the top 20 bits of the particle's squared distance from the center, sorted by an indirect radix sort of 4 bits a
- * pass (FidelityFX-style: count, scan, scatter), as many passes as the keys' bits need, even, at most 8. A request:
- * equal requests share one sort, so both eyes of a pair, drawn with the pair's center camera, sort once. Additive
- * renderers (and those {@code sorted(false)}) are not sorted; emitters draw as wholes back to front either way.
+ * pass (FidelityFX-style: count, scan, scatter; {@code SORT_GROUP} keys a group, each ranked among its digit's in the
+ * group with wave ballots and written straight to its place), as many passes as the keys' bits need, even, at most 8.
+ * A request: equal requests share one sort, so both eyes of a pair, drawn with the pair's center camera, sort once.
+ * Additive renderers (and those {@code sorted(false)}) are not sorted; emitters draw as wholes back to front either
+ * way.
  *
  * <pre>{@code
  * ParticleSort.Order order = g.request(new ParticleSort(particles, center, pool, state));
@@ -61,7 +63,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Order build(GraphBuilder g) {
-        int slots = particles.pool().slots();
+        int slots = particles.sortSlots();
         long groups = (slots + ParticleConstants.SORT_GROUP - 1) / ParticleConstants.SORT_GROUP;
         Buffer a = g.createBuffer("particle sort keys", 8L * slots);
         Buffer b = g.createBuffer("particle sort keys, other", 8L * slots);
@@ -78,7 +80,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
         g.pass("particle sort args").read(state, BufferAccess.STORAGE_READ).write(args, BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
                 if (p.sortedCount() > 0) {
-                    ctx.dispatch(argsProgram, common(argsPush, p, camera).args(ctx.address(args)), 1);
+                    ctx.dispatch(argsProgram, common(argsPush, p, camera, slots).args(ctx.address(args)), 1);
                 }
             });
         ParticleSortPush keysPush = new ParticleSortPush();
@@ -87,7 +89,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
             .record(ctx -> {
                 if (p.sortedCount() > 0) {
                     int chunks = p.sortChunkCount();
-                    ctx.dispatch(keys, common(keysPush, p, camera).args(ctx.address(args)).target(ctx.address(a)),
+                    ctx.dispatch(keys, common(keysPush, p, camera, slots).args(ctx.address(args)).target(ctx.address(a)),
                         Math.min(chunks, PassContext.MAX_GROUPS), (chunks + PassContext.MAX_GROUPS - 1)
                             / PassContext.MAX_GROUPS, 1);
                 }
@@ -102,7 +104,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
                 .write(histogram, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> {
                     if (index < passes(p.sortedCount()) && p.sortedCount() > 0) {
-                        ctx.dispatchIndirect(count, common(countPush, p, camera).args(ctx.address(args))
+                        ctx.dispatchIndirect(count, common(countPush, p, camera, slots).args(ctx.address(args))
                             .histogram(ctx.address(histogram)).source(ctx.address(source)), args, 0);
                     }
                 });
@@ -111,7 +113,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
                 .write(histogram, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> {
                     if (index < passes(p.sortedCount()) && p.sortedCount() > 0) {
-                        ctx.dispatch(scan, common(scanPush, p, camera).args(ctx.address(args))
+                        ctx.dispatch(scan, common(scanPush, p, camera, slots).args(ctx.address(args))
                             .histogram(ctx.address(histogram)), 1);
                     }
                 });
@@ -121,7 +123,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
                 .read(args, BufferAccess.STORAGE_READ).write(target, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> {
                     if (index < passes(p.sortedCount()) && p.sortedCount() > 0) {
-                        ctx.dispatchIndirect(scatter, common(scatterPush, p, camera).args(ctx.address(args))
+                        ctx.dispatchIndirect(scatter, common(scatterPush, p, camera, slots).args(ctx.address(args))
                             .histogram(ctx.address(histogram)).source(ctx.address(source)).target(ctx.address(target)),
                             args, 0);
                     }
@@ -131,7 +133,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
     }
 
     /** Sets what every pass shares. */
-    private static ParticleSortPush common(ParticleSortPush push, Particles p, Camera center) {
+    private static ParticleSortPush common(ParticleSortPush push, Particles p, Camera center, int capacity) {
         double x = center.position(0);
         double y = center.position(1);
         double z = center.position(2);
@@ -140,7 +142,7 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
         float hz = (float) z;
         return push.particles(p.particlesAddress()).emitters(p.emitterTableAddress()).state(p.stateAddress())
             .list(p.sortListAddress()).chunks(p.sortChunksAddress()).centerHigh(hx, hy, hz)
-            .centerLow((float) (x - hx), (float) (y - hy), (float) (z - hz)).sortedCount(p.sortedCount())
+            .centerLow((float) (x - hx), (float) (y - hy), (float) (z - hz)).sortedCount(p.sortedCount()).capacity(capacity)
             .chunkCount(p.sortChunkCount());
     }
 }
