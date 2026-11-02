@@ -141,7 +141,7 @@ class EffectBindingsTest {
         for (int f = 0; f < 4; f++) {
             animators.update(0.5);
         }
-        assertThat(fx.played()).isEqualTo(100);
+        assertThat(fx.played()).as("a step a second").isEqualTo(60);
     }
 
     @Test
