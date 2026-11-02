@@ -178,6 +178,25 @@ Streaming 12 ray-traced meshes a frame took the render thread 6 to 11.6 ms, a 90
 - Rule: what runs while frames do (streaming, adding, removing) records into a frame and frees through the frame
   slots; `submitAndWait` and `waitIdle` are for setup and shutdown only.
 
+**A top level refitted while an instance lost its bottom level read address 0 and lost the device.** Instances
+without a bottom level got reference 0 (inactive). When a skinned renderable's copy was dropped and a new one made,
+its instance named the new copy, whose level was not built yet, while nothing else the top level is built from had
+changed: the top level was refitted with an instance gone from active to inactive. The spec forbids it ("Any
+transition between the active and inactive states requires a full acceleration structure rebuild", acceleration
+structure update rules); the validation layers reported nothing; the RX 9070 XT faulted reading address 0.
+- Proof: `SceneSyncTest.rayTracingTracesTheScenesMeshesAndPosedCopies` lost the device in four runs of four
+  ("invalid read at 0x0 ... in no buffer"), and passes with the fix (true-sim/engine, scene ray tracing PR).
+- Rule: an instance left out of a top level names an empty bottom level with mask 0, never reference 0; anything else
+  that changes which instances are active rebuilds the top level instead of refitting it.
+
+**A build transform of a flat mesh was not invertible.** Bottom levels scale quantized positions by the mesh's box;
+a flat quad's box has no height, so the scale was 0 on one axis (VUID-VkTransformMatrixKHR-matrix-03799). The
+transform lives in a buffer, so only GPU-assisted validation saw it; ordinary validation stayed quiet.
+- Proof: `gpuAssistedValidation(true)` on `SceneSyncTest` reported the VUID for the test's squares, and nothing with
+  a least scale (`BottomLevels.scale`).
+- Rule: build transforms never scale by 0; run ray tracing tests with GPU-assisted validation once after changing
+  what builds read from buffers.
+
 **A layout computed twice, from two sizes.** The visibility buffer's per-bin tile lists were spaced by the whole image's
 tile count where Java dispatched them and by the render region's where `resolve.slang` classified into them. With
 dynamic resolution every bin past 0 read another bin's header: its pixels went unshaded, and its indirect dispatch

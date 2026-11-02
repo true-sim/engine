@@ -559,7 +559,7 @@ Drawing and shading are separate, and each is swappable:
   `ModelData.spawn`) or morph targets (`Renderables.setMorphWeights`), posing them each update from their joints'
   world transforms and weights; scene-animation's `Animators` move the joints and, through
   `animators.morphSink(renderables::setMorphWeights)`, the weights. Meshlet paths only
-  for now; ray-traced copies come with BLAS refits.
+  for now; ray tracing traces each copy through a bottom level of its own, refitted as it is posed (Ray tracing).
   - `MeshletGeometry`: a renderer's meshlets, with cluster LOD.
   - `ClassicLodGeometry`: the same instances drawn the classic way.
     - It takes discrete LODs (`MeshBuilder.buildDiscrete`) or flat meshes, added with `add(mesh, data)`.
@@ -644,6 +644,20 @@ try (RayTracing rayTracing = new RayTracing(device, pool, 100_000)) { // at most
 - **Top level on the GPU, every frame:** a compute pass turns the renderer's instances into acceleration structure
   instances, and the top level is rebuilt from them. Nothing per instance is written on the CPU, and recording
   allocates nothing.
+- **Scene content traced as drawn:** `resources.rayTracing(rayTracing)` gives every mesh a `SceneResources` uploads a
+  bottom level (its finest detail level, or the one a function picks), built in frames as above, meshes uploaded
+  before included; each leaves with its mesh.
+- **Skinned and morphing copies refitted:** each deformed copy (`GeometryPool.addDeformed`, made by `SceneSync` for
+  skinned and morphing renderables, or `rayTracing.addDeformed(copy, sourceData, level)` by hand) has a refittable
+  bottom level read straight from its quantized positions, the build transform following the box it is posed in.
+  `TopLevel` requests a pass after the deformation pass (`BottomLevelUpdates`, "bottom level refits") that builds new
+  copies' levels and refits those skinned that frame, all in one command; the top level is then refitted too. Copies of
+  one mesh share its triangles. A refit's error does not grow from refit to refit (it is the pose's distance from the
+  one built), so copies are not rebuilt unless asked (`rayTracing.rebuildEvery(refits)`): with a build every 120
+  refits, 1000 foxes' refits went from 0.30 to 0.37 ms a frame to 0.57 to 0.63, and tracing changed less than noise.
+  Devices whose bottom levels cannot read the quantized positions leave copies out.
+- **Instances without a bottom level** are left out (mask 0) through an empty bottom level, never a null reference:
+  an instance turning inactive or active between a top level's build and its refit is not allowed, and lost the device.
 - **Shaders** import `raytracing.slang` for `occluded(scene, origin, direction, tMin, tMax)`, a ray query that stops at
   the first hit.
 
@@ -1064,7 +1078,10 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
   9950X3D and RX 9070 XT (2026-11-02), 1000 foxes: CPU 1.75 ms in the animators and 1.69 ms in the scene sync, GPU
   0.27 ms skinning 1000 copies; with level of detail by distance (every frame within 15 m, every second to 40 m, every
   fourth beyond) 0.77 ms and 0.70 ms, GPU 0.12 ms skinning 350. The scene sync poses only the copies whose joints
-  moved, found in the scene's log (or every copy, when most of what they watch moved).
+  moved, found in the scene's log (or every copy, when most of what they watch moved). With `--args="rays"` (the sun's
+  shadows ray-traced inline, visibility buffer shading) every copy's bottom level is refitted as it is skinned: 1000
+  foxes 0.30 to 0.37 ms a frame on the GPU ("bottom level refits"; the top level 0.04 ms), with level of detail 0.13 ms
+  for 350 (2026-11-02). `-PrebuildEvery=n` rebuilds each copy's level every n refits.
 - `--args="--vr"` adds a headset through OpenXR (SteamVR, Quest Link, ...): both eyes render the scene, the left
   thumbstick walks, triggers buzz, `P` shows the left eye on the desktop for people watching.
 - `--args="--validation"` turns Vulkan validation on and prints the error count at exit; `--seconds=10` quits by

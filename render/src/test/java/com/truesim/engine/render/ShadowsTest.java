@@ -451,6 +451,79 @@ class ShadowsTest {
     }
 
     @Test
+    void deformedCopiesCastRayTracedShadowsAsPosed() {
+        assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
+        rayTracing = new RayTracing(device, pool, 16);
+        assumeThat(rayTracing.quantizedVertices()).as("copies' levels read quantized positions").isTrue();
+        // The floating quad is a skinned copy: its ray-traced shadow follows its joints, its bottom level refitted.
+        MeshData skinned = GraphTechniquesTest.skinnedQuad();
+        int source = pool.add(skinned);
+        int copy = pool.addDeformed(source);
+        Deformation deformation = pool.deformation();
+        deformation.add(copy, 2);
+        rayTracing.add(quad, quadMesh, quadMesh.levels().size() - 1);
+        assertThatIllegalArgumentException().isThrownBy(() -> rayTracing.addDeformed(source, skinned, 0));
+        assertThatIllegalArgumentException().isThrownBy(() -> rayTracing.addDeformed(copy,
+            MeshletRendererTest.grid(2, 2, false, VertexFormat.POSITIONS_ONLY), 0)); // not its mesh
+        assertThat(rayTracing.addDeformed(copy, skinned, 0)).isTrue();
+        assertThatIllegalStateException().isThrownBy(() -> rayTracing.addDeformed(copy, skinned, 0));
+        assertThatIllegalStateException().isThrownBy(() -> rayTracing.add(copy, skinned, 0));
+        assertThat(rayTracing.bottomLevelAdded(copy)).isTrue();
+        assertThat(rayTracing.hasBottomLevel(copy)).as("built in a frame").isFalse();
+        assertThat(rayTracing.pendingBottomLevels()).isOne();
+        assertThatIllegalArgumentException().isThrownBy(() -> rayTracing.rebuildEvery(0));
+        scene.set(1, copy, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        double[] sun = {-Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z};
+        try (Lights lights = new Lights(device, 4, 4)) {
+            lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
+            double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
+            InlineRayShadows rays = new InlineRayShadows(rayTracing, view, lights, 0, 0).offset(2e-3f);
+            pose(deformation, copy, 0);
+            expectShadow(visibility(geometry), "the posed copy", shadow, lights, rays);
+            assertThat(rayTracing.hasBottomLevel(copy)).isTrue();
+            assertThat(rayTracing.pendingBottomLevels()).isZero();
+            assertThat(rayTracing.bottomLevelBytes()).isPositive();
+            // Its joints move it 1.5 right: refitted, the shadow with it, none where it was.
+            pose(deformation, copy, 1.5);
+            byte[] moved = expectShadow(visibility(geometry), "moved by its joints",
+                new double[] {shadow[0] + 1.5, shadow[1]}, lights, rays);
+            assertThat(floor(moved, this, shadow[0] - 0.4, shadow[1])).as("where it was")
+                .isGreaterThan((int) (floor(moved, this, 3, -2) * 0.9));
+            assertThat(rayTracing.bottomLevelRefits()).as("refitted").isPositive();
+            assertThat(rayTracing.bottomLevelRebuilds()).isZero();
+            // Posed as before: nothing refitted, the top level stands.
+            long builds = rayTracing.topLevelBuilds();
+            frame(colorTarget, 4);
+            assertThat(rayTracing.bottomLevelsUpdatedLastFrame()).isZero();
+            assertThat(rayTracing.topLevelBuilds()).isEqualTo(builds);
+            // A build in place after every refit: the shadow as posed all the same.
+            rayTracing.rebuildEvery(1);
+            pose(deformation, copy, -1);
+            expectShadow(visibility(geometry), "rebuilt", new double[] {shadow[0] - 1, shadow[1]}, lights, rays);
+            assertThat(rayTracing.bottomLevelRebuilds()).as("built anew in place").isPositive();
+            // The copy leaves the pool: its bottom level with it.
+            scene.remove(1);
+            pool.remove(copy);
+            assertThat(rayTracing.bottomLevelAdded(copy)).isFalse();
+            assertThat(rayTracing.hasBottomLevel(copy)).isFalse();
+            byte[] gone = frame(colorTarget, 4);
+            assertThat(floor(gone, this, shadow[0] - 1, shadow[1])).as("no shadow left")
+                .isGreaterThan((int) (floor(gone, this, 3, -2) * 0.9));
+            pool.remove(source);
+        }
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
+    /** Poses {@link GraphTechniquesTest#skinnedQuad()}'s copy {@code copy} moved {@code dx} along x by both joints. */
+    private static void pose(Deformation deformation, int copy, double dx) {
+        for (int joint = 0; joint < 2; joint++) {
+            deformation.joint(copy, joint, 1, 0, 0, dx, 0, 1, 0, 0, 0, 0, 1, 0);
+        }
+        deformation.bounds(copy, -1 + dx, 0, -1, 1 + dx, 0, 1, Math.abs(dx));
+    }
+
+    @Test
     void eachSceneHasATopLevelOfItsOwn() {
         assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
         rayTracing = new RayTracing(device, pool, 16);

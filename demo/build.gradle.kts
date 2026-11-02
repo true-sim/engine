@@ -46,6 +46,7 @@ tasks.register<JavaExec>("stereoBench") {
     providers.gradleProperty("foxes").orNull?.let { systemProperty("truesim.demo.foxes", it) }
     providers.gradleProperty("crowd").orNull?.let { systemProperty("truesim.demo.crowd", it) }
     providers.gradleProperty("foxLod").orNull?.let { systemProperty("truesim.demo.foxLod", it) }
+    providers.gradleProperty("rebuildEvery").orNull?.let { systemProperty("truesim.demo.rebuildEvery", it) }
 }
 
 // Hitches while content streams (StreamBench): ./gradlew :engine-demo:streamBench

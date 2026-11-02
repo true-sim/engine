@@ -15,7 +15,7 @@ import java.util.Objects;
  * to the ray tracing's {@link RayTracing#origin origin}: a shared request, so every ray-traced technique of every view
  * (masks, inline shadows) uses one build, and moves its rays by its camera's position less the origin. Its result is the
  * structure, which passes tracing rays read ({@link BufferAccess#ACCELERATION_STRUCTURE_READ}), so the graph orders them
- * after the build.
+ * after the build. The deformed copies' bottom levels are refitted before it ({@link BottomLevelUpdates}).
  */
 public record TopLevel(RayTracing rayTracing, MeshletRenderer renderer) implements Request<Buffer> {
 
@@ -29,7 +29,9 @@ public record TopLevel(RayTracing rayTracing, MeshletRenderer renderer) implemen
     public Buffer build(GraphBuilder g) {
         rayTracing.follow(renderer.scene()); // grown with it, between frames
         SceneData.Buffers scene = g.request(new SceneData(renderer));
-        GraphBuilder.PassBuilder pass = g.pass("top level").read(scene.instances(), BufferAccess.STORAGE_READ);
+        Buffer bottoms = g.request(new BottomLevelUpdates(rayTracing, renderer)); // deformed copies refitted first
+        GraphBuilder.PassBuilder pass = g.pass("top level").read(scene.instances(), BufferAccess.STORAGE_READ)
+            .read(bottoms, BufferAccess.STORAGE_READ);
         Buffer structure = rayTracing.declareTopLevelBuild(g, pass, renderer.scene());
         pass.record(ctx -> rayTracing.buildTopLevel(ctx.unsafe().commands(), renderer, true));
         return structure;

@@ -6,6 +6,7 @@ import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.render.GeometryPool;
 import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.Materials;
+import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.scene.SceneResources;
 import com.truesim.engine.scene.SceneSync;
@@ -66,13 +67,20 @@ final class DemoCharacter implements AutoCloseable {
     private boolean moving;
     private double last;
 
-    /** The fox from {@code file}, at world ({@code x}, {@code z}) on the terrain, drawn into {@code gpu}. */
+    /**
+     * The fox from {@code file}, at world ({@code x}, {@code z}) on the terrain, drawn into {@code gpu}; traced by
+     * {@code rayTracing}, if not null.
+     */
     DemoCharacter(VulkanDevice device, FrameSlots slots, GeometryPool pool, Materials materials, GpuScene gpu,
-        Path file, double x, double z) throws InterruptedException {
+        Path file, double x, double z,
+        RayTracing rayTracing) throws InterruptedException {
         this.x = x;
         this.z = z;
         textures = new Textures(device, slots);
         resources = new SceneResources(cache, pool, materials, textures);
+        if (rayTracing != null) {
+            resources.rayTracing(rayTracing); // its meshes and skinned copies traced
+        }
         sync = new SceneSync(resources, renderables, gpu);
         PathAssets paths = new PathAssets(cache);
         paths.mounts().add("character", PathSource.folder(file.getParent()));

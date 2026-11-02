@@ -832,8 +832,7 @@ public final class SceneSync implements AutoCloseable {
         if (!wanted) {
             return;
         }
-        int copy = pool.addDeformed(source);
-        pool.deformation().add(copy, skinning ? data.jointCount() : 0, data);
+        int copy = resources.addCopy(source, skinning ? data.jointCount() : 0, data);
         itemCopy[item] = copy;
         itemCopySkinned[item] = skinning;
         watch(item, skinning ? skin : null, data);
@@ -849,7 +848,7 @@ public final class SceneSync implements AutoCloseable {
         if (itemCopy[item] == NONE) {
             return;
         }
-        resources.pool().remove(itemCopy[item]); // after its instance stops naming it: written this update
+        resources.removeCopy(itemCopy[item]); // after its instance stops naming it: written this update
         itemCopy[item] = NONE;
         for (int i = 0; i < skinnedCount; i++) {
             if (skinned[i] == item) {
