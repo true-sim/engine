@@ -560,6 +560,12 @@ Drawing and shading are separate, and each is swappable:
   world transforms and weights; scene-animation's `Animators` move the joints and, through
   `animators.morphSink(renderables::setMorphWeights)`, the weights. Meshlet paths only
   for now; ray tracing traces each copy through a bottom level of its own, refitted as it is posed (Ray tracing).
+  Animated material values (glTF's `KHR_animation_pointer`: colors, factors, texture transforms) go into the material
+  table in place, for every renderable drawing the material: `resources.animate(material, "baseColor", values, 0, 4)`,
+  or animators' pointer tracks through `animators.pointerSink(resources.pointerSink().andThen(visibility))` (a
+  scene-render `NodeVisibility` hides and shows nodes by layers). The material converts once more when a value of it is
+  first animated, an animated texture getting a transform slot of its own; each change after that allocates nothing.
+  Lights and cameras are the application's: it reads their animated values from the same sink or `Animator.value`.
   - `MeshletGeometry`: a renderer's meshlets, with cluster LOD.
   - `ClassicLodGeometry`: the same instances drawn the classic way.
     - It takes discrete LODs (`MeshBuilder.buildDiscrete`) or flat meshes, added with `add(mesh, data)`.

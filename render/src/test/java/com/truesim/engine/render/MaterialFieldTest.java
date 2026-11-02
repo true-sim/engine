@@ -18,6 +18,16 @@ class MaterialFieldTest {
     }
 
     @Test
+    void fieldsAreFoundByPathOnTheirRecord() {
+        assertThat(MaterialField.find(MetallicRoughnessParameters.class, "baseColor"))
+            .isSameAs(MetallicRoughnessParameters.BASE_COLOR);
+        assertThat(MaterialField.find(MetallicRoughnessParameters.class, "roughness"))
+            .isSameAs(MetallicRoughnessParameters.ROUGHNESS);
+        assertThat(MaterialField.find(MetallicRoughnessParameters.class, "flakes")).isNull();
+        assertThat(MaterialField.find(String.class, "baseColor")).as("not a record of fields").isNull();
+    }
+
+    @Test
     void bufferFieldsAreTheirOwnKind() {
         MaterialField buffer = MaterialField.buffer(MetallicRoughnessParameters.class, "data", 8);
         assertThat(buffer.kind()).isEqualTo(MaterialField.Kind.BUFFER);

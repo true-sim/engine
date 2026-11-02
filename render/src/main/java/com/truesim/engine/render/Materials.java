@@ -691,6 +691,18 @@ public final class Materials implements AutoCloseable {
         followMasks(id, field, offset, 4 * field.count());
     }
 
+    /**
+     * Component {@code component} of field {@code field} of material {@code id} as the table holds it now, updates in
+     * place included ({@link #material} keeps the material as it was set): for tools and tests. Allocates nothing.
+     */
+    public float value(int id, MaterialField field, int component) {
+        if (field.kind() == MaterialField.Kind.BUFFER || component < 0 || component >= field.count()) {
+            throw new IllegalArgumentException(field + " has no float " + component);
+        }
+        long offset = fieldOffset(id, field) + 4L * component;
+        return field.kind() == MaterialField.Kind.I32 ? table.getInt(offset) : table.getFloat(offset);
+    }
+
     private long fieldOffset(int id, MaterialField field) {
         Material material = material(id);
         long offset = heapStart + heapUnit[id] * ALIGNMENT;

@@ -7,8 +7,8 @@ description = "The engine's demo: a scene to try settings, HDR, dynamic resoluti
 dependencies {
     implementation(project(":engine-xr"))
     implementation(project(":engine-scene"))
-    implementation("com.truesim.scene:scene-meshbuild:0.42.0")
-    implementation("com.truesim.scene:scene-gltf:0.42.0")
+    implementation("com.truesim.scene:scene-meshbuild:0.43.0")
+    implementation("com.truesim.scene:scene-gltf:0.43.0")
 }
 
 application {

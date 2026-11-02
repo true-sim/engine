@@ -1,5 +1,10 @@
 package com.truesim.engine.render;
 
+import com.truesim.annotations.AllowAllocation;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -20,6 +25,26 @@ public final class MaterialField {
         /** A buffer's address ({@code T*} in Slang), set as a buffer. */
         BUFFER
     }
+
+    /** Each generated record's fields by path, as its constants give them: found once per record. */
+    private static final ClassValue<Map<String, MaterialField>> BY_PATH = new ClassValue<>() {
+        @Override
+        @AllowAllocation("once per record")
+        protected Map<String, MaterialField> computeValue(Class<?> record) {
+            Map<String, MaterialField> fields = new HashMap<>();
+            for (Field constant : record.getFields()) {
+                if (Modifier.isStatic(constant.getModifiers()) && constant.getType() == MaterialField.class) {
+                    try {
+                        MaterialField field = (MaterialField) constant.get(null);
+                        fields.put(field.path(), field);
+                    } catch (IllegalAccessException e) {
+                        throw new IllegalStateException(e); // public: not thrown
+                    }
+                }
+            }
+            return Map.copyOf(fields);
+        }
+    };
 
     private final Class<?> owner;
     private final String path;
@@ -70,6 +95,14 @@ public final class MaterialField {
 
     public static MaterialField floats(Class<?> owner, String path, int offset, int count) {
         return new MaterialField(owner, path, offset, Kind.FLOATS, count, 0, 0);
+    }
+
+    /**
+     * The field at {@code path} of generated record {@code record} (one of its constants), or null if it has none: for a
+     * field named by data, such as an animated material value. Allocates nothing once the record's fields are known.
+     */
+    public static MaterialField find(Class<?> record, String path) {
+        return BY_PATH.get(record).get(path);
     }
 
     /** The record it is a field of. */
