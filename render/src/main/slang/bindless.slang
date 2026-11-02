@@ -17,6 +17,10 @@ public TextureCube<float4> cubes[];
 [[vk::binding(0, 0)]]
 public Texture2DArray<float4> textureArrays[];
 
+// And for 3D textures (particles' vector fields).
+[[vk::binding(0, 0)]]
+public Texture3D<float4> volumes[];
+
 [[vk::binding(1, 0)]]
 public SamplerState samplers[21];
 

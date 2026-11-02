@@ -9,6 +9,7 @@
 // their curve keys sit in a block per effect, which the update keeps in group-shared memory per chunk. The same
 // arithmetic as scene-effects' CpuSimulation, the reference the tests compare against.
 import particle;
+import bindless;
 
 struct ParticlePush
 {
@@ -223,32 +224,179 @@ uint updaters(Emitting m)
     return op;
 }
 
+/** The lattice value of value noise at `c` for `seed`, in [-1, 1) (scene-effects' CurlNoise.lattice). */
+float lattice(int3 c, uint seed)
+{
+    return float(combine(combine(combine(seed, uint(c.x)), uint(c.y)), uint(c.z)) >> 8) * (2.0 / 16777216.0) - 1;
+}
+
+/** Value noise for `seed` at `x` and its gradient: (value, d/dx, d/dy, d/dz) (CurlNoise.noise). */
+float4 noise(float3 x, uint seed)
+{
+    float3 f = floor(x);
+    int3 i = int3(f);
+    float3 t = x - f;
+    float3 u = t * t * t * (t * (t * 6 - 15) + 10);
+    float3 du = 30 * t * t * (t - 1) * (t - 1);
+    float a = lattice(i, seed);
+    float b = lattice(i + int3(1, 0, 0), seed);
+    float c = lattice(i + int3(0, 1, 0), seed);
+    float d = lattice(i + int3(1, 1, 0), seed);
+    float e = lattice(i + int3(0, 0, 1), seed);
+    float g1 = lattice(i + int3(1, 0, 1), seed);
+    float g = lattice(i + int3(0, 1, 1), seed);
+    float h = lattice(i + int3(1, 1, 1), seed);
+    float k1 = b - a;
+    float k2 = c - a;
+    float k3 = e - a;
+    float k4 = a - b - c + d;
+    float k5 = a - c - e + g;
+    float k6 = a - b - e + g1;
+    float k7 = -a + b + c - d + e - g1 - g + h;
+    return float4(a + k1 * u.x + k2 * u.y + k3 * u.z + k4 * u.x * u.y + k5 * u.y * u.z + k6 * u.z * u.x
+            + k7 * u.x * u.y * u.z,
+        du.x * (k1 + k4 * u.y + k6 * u.z + k7 * u.y * u.z), du.y * (k2 + k5 * u.z + k4 * u.x + k7 * u.z * u.x),
+        du.z * (k3 + k6 * u.x + k5 * u.y + k7 * u.x * u.y));
+}
+
+/** Curl noise at `x` (CurlNoise.curl): the curl of three channels' potential, over octaves. */
+float3 curlNoise(float3 x, float frequency, float drift, uint octaves, uint seed)
+{
+    float3 curl = 0;
+    float scale = frequency;
+    float weight = 1;
+    for (uint o = 0; o < octaves; o++)
+    {
+        float3 s = x * scale + drift;
+        float4 n0 = noise(s, seed);
+        float4 n1 = noise(s, seed + 1);
+        float4 n2 = noise(s, seed + 2);
+        curl += weight * float3(n2.z - n1.w, n0.w - n2.y, n1.y - n0.z);
+        scale *= 2;
+        weight *= 0.5;
+    }
+    return curl;
+}
+
+/** The unit axis (x, y, z) of the emitter's frame in its particles' space: turned for world-space ones; +Y for none. */
+float3 frameAxis(ParticleEmitter e, float3 v)
+{
+    float3 a = (e.flags & EMITTER_LOCAL) != 0 ? v : turn(e.rotation, v);
+    float length2 = dot(a, a);
+    return length2 > 1e-12 ? a * rsqrt(length2) : float3(0, 1, 0);
+}
+
+/** A vector of the emitter's frame in its particles' space. */
+float3 frameVector(ParticleEmitter e, float3 v)
+{
+    return (e.flags & EMITTER_LOCAL) != 0 ? v : turn(e.rotation, v);
+}
+
+/** Field `f`, `f + 1` and `f + 2` of the op at `op` as a vector. */
+float3 vectorOf<K : ICurveKeys>(Emitting m, K keys, uint op, uint salt, uint f, Particle p)
+{
+    return float3(value(m, keys, op, salt, f, p), value(m, keys, op, salt, f + 1, p),
+        value(m, keys, op, salt, f + 2, p));
+}
+
+/** How much of an attractor's strength reaches `distance`: falling to 0 at `radius` (0: all of it). */
+float falloff(float distance, float radius)
+{
+    return radius > 0 ? max(0.0, 1 - distance / radius) : 1.0;
+}
+
 /**
- * Moves `p` on by `h` seconds under the updaters (CpuSimulation.step): gravity and linear drag integrated exactly, each
- * evaluated at the particle's state before the step, then the attributes over life from those at birth.
+ * Moves `p` on by `h` seconds under the updaters (CpuSimulation.step): gravity, linear drag and wind integrated exactly,
+ * the forces that depend on the position (curl noise, vortices, attractors, vector fields) from where it is at the
+ * step's start, then orbits (exact turns) and speed limits, then the attributes over life from those at birth. Fields
+ * are by their index in alphabetical order of their names.
  */
 void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, float4 color0, float size0, float h)
 {
     uint count = (m.program[0] >> 8) & 0xff;
+    ParticleEmitter e = m.emitter;
     float3 a = 0;
     float k = 0;
     uint op = first;
     bool over = false;
+    bool kill = false;
+    bool after = false;
+    // Where the emitter is in its particles' space: its frame's origin, or its offset from theirs
+    float3 center = (e.flags & EMITTER_LOCAL) != 0 ? 0 : e.position;
+    float3 x = p.position;
     for (uint i = 0; i < count; i++)
     {
         uint code = m.program[op] & 0xff;
         uint salt = m.program[op + 1];
-        if (code == OP_GRAVITY)
+        switch (code)
         {
-            a += m.emitter.down * (GRAVITY * value(m, keys, op, salt, 0, p));
-        }
-        else if (code == OP_DRAG)
-        {
+        case OP_GRAVITY:
+            a += e.down * (GRAVITY * value(m, keys, op, salt, 0, p));
+            break;
+        case OP_DRAG:
             k += value(m, keys, op, salt, 0, p);
-        }
-        else
-        {
+            break;
+        case OP_WIND: // coupling, gusts, scale: a drag towards the wind, exact
+            float coupling = value(m, keys, op, salt, 0, p);
+            float gust = noise(float3(e.time * GUST_RATE, 0, 0), combine(e.seed, salt + 8)).x;
+            k += coupling;
+            a += e.wind * (coupling * value(m, keys, op, salt, 2, p) * (1 + value(m, keys, op, salt, 1, p) * gust));
+            break;
+        case OP_CURL: // frequency, octaves, speed, strength
+            uint octaves = uint(clamp(round(value(m, keys, op, salt, 1, p)), 1.0, 4.0));
+            a += value(m, keys, op, salt, 3, p) * curlNoise(x, value(m, keys, op, salt, 0, p),
+                e.time * value(m, keys, op, salt, 2, p), octaves, combine(e.seed, salt + 8));
+            break;
+        case OP_VORTEX: // axis x, y, z, pull, strength
+            float3 axis = frameAxis(e, vectorOf(m, keys, op, salt, 0, p));
+            float3 d = x - center;
+            float3 across = d - axis * dot(d, axis);
+            float r = length(across);
+            if (r > 1e-6)
+            {
+                a += (value(m, keys, op, salt, 4, p) * cross(axis, across) - value(m, keys, op, salt, 3, p) * across)
+                    / r;
+            }
+            break;
+        case OP_POINT_FORCE: // kill radius, radius, strength, x, y, z
+            float3 to = center + frameVector(e, vectorOf(m, keys, op, salt, 3, p)) - x;
+            float distance = length(to);
+            kill = kill || distance < value(m, keys, op, salt, 0, p);
+            if (distance > 1e-6)
+            {
+                a += to / distance * (value(m, keys, op, salt, 2, p)
+                    * falloff(distance, value(m, keys, op, salt, 1, p)));
+            }
+            break;
+        case OP_LINE: // axis x, y, z, radius, strength, x, y, z
+            float3 from = x - center - frameVector(e, vectorOf(m, keys, op, salt, 5, p));
+            float3 along = frameAxis(e, vectorOf(m, keys, op, salt, 0, p));
+            float3 off = from - along * dot(from, along);
+            float apart = length(off);
+            if (apart > 1e-6)
+            {
+                a -= off / apart * (value(m, keys, op, salt, 4, p) * falloff(apart, value(m, keys, op, salt, 3, p)));
+            }
+            break;
+        case OP_FIELD: // field, size x, y, z, strength, tile: in the emitter's frame, about it
+            uint slot = m.program[op + 2];
+            if (slot != NO_TEXTURE)
+            {
+                float3 local = x - center;
+                local = (e.flags & EMITTER_LOCAL) != 0 ? local : turn(float4(-e.rotation.xyz, e.rotation.w), local);
+                float3 uvw = local / vectorOf(m, keys, op, salt, 1, p) + 0.5;
+                uint sampler = value(m, keys, op, salt, 5, p) > 0.5 ? LINEAR_REPEAT : LINEAR_CLAMP;
+                float3 field = volumes[NonUniformResourceIndex(slot)].SampleLevel(samplers[sampler], uvw, 0).xyz;
+                a += frameVector(e, field) * value(m, keys, op, salt, 4, p);
+            }
+            break;
+        case OP_ORBIT:
+        case OP_SPEED_LIMIT:
+            after = true;
+            break;
+        default:
             over = true;
+            break;
         }
         op = skip(m, op);
     }
@@ -267,6 +415,36 @@ void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, floa
         p.velocity = terminal + (v - terminal) * decay;
     }
     p.age += h;
+    for (uint i = 0, op = first; after && i < count; i++)
+    {
+        uint code = m.program[op] & 0xff;
+        uint salt = m.program[op + 1];
+        if (code == OP_ORBIT) // axis x, y, z, speed: a turn about the axis, exact
+        {
+            float3 axis = frameAxis(e, vectorOf(m, keys, op, salt, 0, p));
+            float angle = value(m, keys, op, salt, 3, p) * h;
+            float c = cos(angle);
+            float s = sin(angle);
+            float3 q = p.position - center;
+            p.position = center + q * c + cross(axis, q) * s + axis * (dot(axis, q) * (1 - c));
+            float3 w = p.velocity;
+            p.velocity = w * c + cross(axis, w) * s + axis * (dot(axis, w) * (1 - c));
+        }
+        else if (code == OP_SPEED_LIMIT)
+        {
+            float limit = value(m, keys, op, salt, 0, p);
+            float speed = length(p.velocity);
+            if (speed > limit)
+            {
+                p.velocity *= max(0.0, limit) / speed;
+            }
+        }
+        op = skip(m, op);
+    }
+    if (kill)
+    {
+        p.lifetime = p.age; // within an attractor's kill radius: dead from now, gone at the next count
+    }
     if (!over)
     {
         return;

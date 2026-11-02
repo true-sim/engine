@@ -37,6 +37,9 @@ import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanException;
 import com.truesim.engine.vulkan.VulkanInstance;
 import com.truesim.scene.core.SceneGraph;
+import com.truesim.scene.assets.AssetId;
+import com.truesim.scene.assets.AssetRef;
+import com.truesim.scene.assets.AssetType;
 import com.truesim.scene.effects.Bind;
 import com.truesim.scene.effects.ColorGradient;
 import com.truesim.scene.effects.CpuSimulation;
@@ -370,6 +373,104 @@ class ParticlesTest {
                 Init.velocity(Bind.constant(3), Bind.random(5, 10), Bind.constant(-1))).update(forces),
                 60, FRAME, 2e-3);
         }
+    }
+
+    @Test
+    void forcesMatchTheReference() {
+        effects.wind(3, 0, -1);
+        Module[][] cases = {
+            {Forces.orbit(Bind.constant(2), 0.3f, 1, 0)},
+            {Forces.vortex(Bind.constant(3), 0.5f, 0, 1, 0.2f)},
+            {Forces.point(Bind.constant(4), 1, 0.5f, 0).with("radius", 3f).with("killRadius", 0.3f)},
+            {Forces.line(Bind.constant(2), 1, 0, 0).with("y", 0.5f).with("radius", 4f)},
+            {Forces.curl(Bind.constant(3), 0.8f, 0.4f, 2)},
+            {Forces.wind(1.5f, 1, 0.5f), Forces.gravity(Bind.constant(0.2f))},
+            {Forces.gravity(), Forces.speedLimit(2)},
+            {Forces.drag(0.5f), Forces.orbit(1.5f), Forces.vortex(1), Forces.speedLimit(3)}};
+        for (Module[] forces : cases) {
+            compare(e -> e.spawn(Spawn.rate(40)).init(Shape.sphere(1.5f), Init.lifetime(10),
+                Init.velocity(Bind.random(-1, 1), Bind.random(0, 2), Bind.random(-1, 1))).update(forces),
+                20, FRAME, 1e-2);
+        }
+    }
+
+    @Test
+    void orbitsKeepTheirRadiusOnTheGpu() {
+        long effect = effects.play(EffectData.builder().emitter("e", e -> e.spawn(Spawn.burst(0, 50))
+            .init(Shape.sphere(2), Init.lifetime(100)).update(Forces.orbit(3))).build(), 4, 1, -2).id();
+        frame(1L);
+        frame(FRAME);
+        List<Gpu> start = gpu(effect, 0);
+        for (int f = 0; f < 60; f++) {
+            frame(FRAME);
+        }
+        List<Gpu> end = gpu(effect, 0);
+        assertThat(end).hasSameSizeAs(start);
+        for (int i = 0; i < start.size(); i++) {
+            Gpu a = start.get(i);
+            Gpu b = end.get(i);
+            assertThat(Math.sqrt(b.x * b.x + b.z * b.z)).as("radius about the axis")
+                .isCloseTo(Math.sqrt(a.x * a.x + a.z * a.z), within(1e-3));
+            assertThat((double) b.y).isCloseTo(a.y, within(1e-4));
+        }
+    }
+
+    @Test
+    void localSpaceForcesMatchTheReference() {
+        long node = scene.create();
+        scene.setTranslation(node, 1, 2, 3);
+        scene.setRotation(node, Math.sin(0.4) * 0.6, Math.sin(0.4) * 0.8, 0, Math.cos(0.4));
+        effects.wind(2, 0, 1);
+        EffectData[] local = pair(e -> e.space(Space.LOCAL).spawn(Spawn.rate(30)).init(Shape.sphere(1),
+            Init.lifetime(3)).update(Forces.vortex(Bind.constant(2), 0.3f, 1, 1, 0), Forces.wind(1),
+            Forces.point(Bind.constant(1), 0, 1, 0), Forces.orbit(Bind.constant(1), 0, 0, 1)));
+        long[] l = {effects.play(local[0], node).seed(6).id(), effects.play(local[1], node).seed(6).id()};
+        for (int f = 0; f < 20; f++) {
+            frame(FRAME);
+        }
+        List<Gpu> gpu = gpu(l[0], 0);
+        cpu.particles(l[1], 0, cursor);
+        assertThat(gpu).hasSize(cursor.count()).isNotEmpty();
+        double qx = effects.rotation(l[0], 0);
+        double qy = effects.rotation(l[0], 1);
+        double qz = effects.rotation(l[0], 2);
+        double qw = effects.rotation(l[0], 3);
+        for (Gpu p : gpu) {
+            cursor.next();
+            double[] r = rotate(qx, qy, qz, qw, p.x, p.y, p.z);
+            assertThat(effects.position(l[0], 0) + r[0]).isCloseTo(cursor.x(), within(1e-2));
+            assertThat(effects.position(l[0], 1) + r[1]).isCloseTo(cursor.y(), within(1e-2));
+            assertThat(effects.position(l[0], 2) + r[2]).isCloseTo(cursor.z(), within(1e-2));
+        }
+    }
+
+    @Test
+    void vectorFieldsPushParticlesByTheirTexels() {
+        AssetRef<?> up = AssetRef.of(AssetType.of("test.field", String.class, s -> 0), new AssetId(0, 1));
+        AssetRef<?> missing = AssetRef.of(AssetType.of("test.field", String.class, s -> 0), new AssetId(0, 2));
+        float[] vectors = new float[3 * 4 * 4 * 4];
+        for (int i = 0; i < 64; i++) {
+            vectors[3 * i + 1] = 2; // 2 m/s² up everywhere
+            vectors[3 * i] = (i & 3) < 2 ? 1 : -1; // and +-1 along x by the cell's column
+        }
+        try (VectorField field = VectorField.of(device, 4, 4, 4, vectors)) {
+            particles.texture(up, field.slot());
+            long pushed = effects.play(EffectData.builder().emitter("e", e -> e.spawn(Spawn.burst(0, 10))
+                .init(Init.lifetime(100)).update(Forces.field(up, 1.5f, 8).with("tile", 1f))).build(), 0, 0, 0).id();
+            long still = effects.play(EffectData.builder().emitter("e", e -> e.spawn(Spawn.burst(0, 10))
+                .init(Init.lifetime(100)).update(Forces.field(missing, 1, 8))).build(), 0, 0, 0).id();
+            for (int f = 0; f < 30; f++) {
+                frame(FRAME);
+            }
+            for (Gpu p : gpu(pushed, 0)) {
+                assertThat((double) p.vy).as("up at 3 m/s²").isCloseTo(3 * p.age, within(1e-2));
+            }
+            for (Gpu p : gpu(still, 0)) {
+                assertThat(p.vy).as("no field registered: no force").isZero();
+            }
+            device.waitIdle();
+        }
+        assertThatIllegalArgumentException().isThrownBy(() -> VectorField.of(device, 2, 2, 2, new float[3]));
     }
 
     @Test

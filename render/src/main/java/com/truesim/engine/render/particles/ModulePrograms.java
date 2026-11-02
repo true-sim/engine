@@ -28,6 +28,7 @@ import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.render.RangeAllocator;
+import com.truesim.engine.render.layout.ParticleConstants;
 import com.truesim.engine.render.layout.ParticleRendererLayout;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -125,6 +126,14 @@ final class ModulePrograms implements AutoCloseable {
     private final Map<EffectData, Block> blocks = new HashMap<>();
     private Block[] releasing = new Block[8];
     private int releasingCount;
+
+    /** Sampled slots of assets modules name (vector fields), as they are when an effect is encoded. */
+    private java.util.function.ToIntFunction<AssetRef<?>> assetSlots = asset -> ParticleConstants.NO_TEXTURE;
+
+    /** Resolves the assets modules name to sampled slots with {@code slots} from now on. */
+    void assetSlots(java.util.function.ToIntFunction<AssetRef<?>> slots) {
+        assetSlots = slots;
+    }
 
     ModulePrograms(VulkanDevice device, FrameSlots slots) {
         this.device = device;
@@ -242,8 +251,8 @@ final class ModulePrograms implements AutoCloseable {
                 overLife |= module.type().equals(Over.SIZE) || module.type().equals(Over.COLOR);
             }
             over[e] = overLife;
-            encodeOps(data, emitter.init(), 0, program, keys);
-            encodeOps(data, emitter.update(), CpuSimulation.UPDATE_SALTS, program, keys);
+            encodeOps(data, emitter.init(), 0, program, keys, assetSlots);
+            encodeOps(data, emitter.update(), CpuSimulation.UPDATE_SALTS, program, keys, assetSlots);
             int points = 0;
             for (Renderer r : emitter.renderers()) {
                 points = Math.max(points, trailPoints(r));
@@ -369,7 +378,8 @@ final class ModulePrograms implements AutoCloseable {
         return r.settings().get(name) instanceof Number n ? n.floatValue() : fallback;
     }
 
-    private static void encodeOps(EffectData data, List<Module> modules, int salts, IntList program, Curves keys) {
+    private static void encodeOps(EffectData data, List<Module> modules, int salts, IntList program, Curves keys,
+        java.util.function.ToIntFunction<AssetRef<?>> assetSlots) {
         for (int m = 0; m < modules.size(); m++) {
             Module module = modules.get(m);
             ModuleType type = ModuleRegistry.BUILT_IN.type(module.type());
@@ -386,6 +396,12 @@ final class ModulePrograms implements AutoCloseable {
                     case Binding b -> binding(data, b, program, keys);
                     case ColorBinding c -> color(data, c, program, keys);
                     case FloatCurve c -> program.add(keys.curve(c));
+                    case AssetRef<?> asset -> { // its sampled slot, padded to a binding's words
+                        program.add(assetSlots.applyAsInt(asset));
+                        for (int w = 1; w < BINDING_WORDS; w++) {
+                            program.add(0);
+                        }
+                    }
                     default -> program.add(keys.gradient((ColorGradient) value));
                 }
             }
@@ -409,6 +425,14 @@ final class ModulePrograms implements AutoCloseable {
             case Forces.DRAG -> OP_DRAG;
             case Over.SIZE -> OP_OVER_SIZE;
             case Over.COLOR -> OP_OVER_COLOR;
+            case Forces.WIND -> ParticleConstants.OP_WIND;
+            case Forces.CURL -> ParticleConstants.OP_CURL;
+            case Forces.VORTEX -> ParticleConstants.OP_VORTEX;
+            case Forces.POINT -> ParticleConstants.OP_POINT_FORCE;
+            case Forces.LINE -> ParticleConstants.OP_LINE;
+            case Forces.ORBIT -> ParticleConstants.OP_ORBIT;
+            case Forces.FIELD -> ParticleConstants.OP_FIELD;
+            case Forces.SPEED_LIMIT -> ParticleConstants.OP_SPEED_LIMIT;
             default -> throw new IllegalArgumentException("No GPU module " + type + " (plugin modules come later)");
         };
     }

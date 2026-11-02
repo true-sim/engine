@@ -255,6 +255,7 @@ public final class Particles implements AutoCloseable {
         try {
             p = new ParticlePool(device, budget);
             m = new ModulePrograms(device, slots);
+            m.assetSlots(this::textureSlot);
             c = new CpuEmitters(device, slots, maxEmitters);
             made[0] = GpuBuffer.deviceLocal(device, 4L * ParticleConstants.STATE_WORDS * maxEmitters, GPU_USAGE);
             made[1] = GpuBuffer.deviceLocal(device, 8L * p.slots() / ParticleConstants.CHUNK, GPU_USAGE);
@@ -832,6 +833,7 @@ public final class Particles implements AutoCloseable {
                 t.putInt(at + ParticleEmitterLayout.INSTANCE, instance);
                 t.putInt(at + ParticleEmitterLayout.SIDE_UNITS, sideUnits[instance] == 0 ? 0
                     : sideUnits[instance] / capacities[instance]);
+                t.putFloat(at + ParticleEmitterLayout.TIME, listTime[index]);
                 if (local[instance]) {
                     putOrigin(t, at, x, y, z);
                     putVector(t, at + ParticleEmitterLayout.POSITION, 0, 0, 0);
@@ -841,6 +843,9 @@ public final class Particles implements AutoCloseable {
                         -1 + 2 * (qx * qx + qz * qz), 2 * (qw * qx - qy * qz));
                     putVector(t, at + ParticleEmitterLayout.SHIFT, 0, 0, 0);
                     putVector(t, at + ParticleEmitterLayout.INHERITED, 0, 0, 0);
+                    // the world's wind likewise, by the rotation's inverse
+                    turnBack(effects.wind(0), effects.wind(1), effects.wind(2), qx, qy, qz, qw);
+                    putVector(t, at + ParticleEmitterLayout.WIND, turned[0], turned[1], turned[2]);
                 } else {
                     putOrigin(t, at, ox, oy, oz);
                     putVector(t, at + ParticleEmitterLayout.SHIFT, sx, sy, sz);
@@ -850,6 +855,7 @@ public final class Particles implements AutoCloseable {
                     putVector(t, at + ParticleEmitterLayout.PREVIOUS, (float) (previous[3 * slot] - ox),
                         (float) (previous[3 * slot + 1] - oy), (float) (previous[3 * slot + 2] - oz));
                     putVector(t, at + ParticleEmitterLayout.DOWN, 0, -1, 0);
+                    putVector(t, at + ParticleEmitterLayout.WIND, effects.wind(0), effects.wind(1), effects.wind(2));
                 }
                 fresh[instance] = false;
                 int chunks = cpu[instance] ? 0 : ParticlePool.chunksOf(capacities[instance]);
@@ -874,6 +880,18 @@ public final class Particles implements AutoCloseable {
             previous[3 * slot + 1] = y;
             previous[3 * slot + 2] = z;
         }
+    }
+
+    private final float[] turned = new float[3];
+
+    /** ({@code x}, {@code y}, {@code z}) turned by the inverse of the rotation ({@code qx}, ..., {@code qw}). */
+    private void turnBack(float x, float y, float z, float qx, float qy, float qz, float qw) {
+        float cx = 2 * (-qy * z + qz * y);
+        float cy = 2 * (-qz * x + qx * z);
+        float cz = 2 * (-qx * y + qy * x);
+        turned[0] = x + qw * cx - qy * cz + qz * cy;
+        turned[1] = y + qw * cy - qz * cx + qx * cz;
+        turned[2] = z + qw * cz - qx * cy + qy * cx;
     }
 
     private static boolean sorted(boolean[] renderers) {
