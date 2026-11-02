@@ -94,9 +94,14 @@ public final class ParticleDraw implements Technique {
         Image depth = g.require(Keys.SCENE_DEPTH);
         Buffer pool = g.require(ParticleKeys.PARTICLES);
         Buffer state = g.require(ParticleKeys.STATE);
+        Buffer side = g.require(ParticleKeys.SIDE);
+        Buffer order = g.require(ParticleKeys.RIBBON_ORDER);
         Buffer commands = g.createBuffer("particle draws", 16L * MAX_DRAWS);
         Pipeline cull = g.computeProgram("shaders/particles/draw.spv", "cullMain", ParticleDrawPush.BYTES);
-        Pipeline billboards = particles.billboards(color.format().vk());
+        Pipeline[] pipelines = new Pipeline[ParticleConstants.RENDER_BEAM + 1];
+        for (int kind = 0; kind < pipelines.length; kind++) {
+            pipelines[kind] = kind == ParticleConstants.RENDER_MESH ? null : particles.pipeline(kind, color.format().vk());
+        }
         Draws list = draws;
         Camera camera = view.camera();
         com.truesim.engine.render.RenderView renderView = view.view();
@@ -110,22 +115,23 @@ public final class ParticleDraw implements Technique {
                 }
             });
         ParticleDrawPush drawPush = new ParticleDrawPush();
-        g.pass("particle draw").read(pool, BufferAccess.DRAW_READ).read(commands, BufferAccess.INDIRECT)
+        g.pass("particle draw").read(pool, BufferAccess.DRAW_READ).read(side, BufferAccess.DRAW_READ)
+            .read(order, BufferAccess.DRAW_READ).read(commands, BufferAccess.INDIRECT)
             .read(depth, Access.SAMPLED_FRAGMENT).attach(color, Load.LOAD, Store.STORE).region()
             .record(ctx -> {
                 int n = list.prepare(ctx.frame(), camera);
                 list.common(drawPush, renderView.address()).depth(ctx.sampled(depth));
                 for (int i = 0; i < n; i++) {
-                    list.set(drawPush, i);
-                    ctx.drawIndirect(billboards, drawPush, commands, 16L * i, 1);
+                    ctx.drawIndirect(pipelines[list.set(drawPush, i, camera)], drawPush, commands, 16L * i, 1);
                 }
             });
         g.provide(Keys.SCENE_COLOR, color);
     }
 
     /**
-     * A view's draws in a frame: each billboard renderer of each emitter instance, back to front, written once per
-     * frame by whichever of the passes records first (they may record on two threads).
+     * A view's draws in a frame: each renderer of each emitter instance (but meshes, and trails of CPU emitters, which
+     * keep no past positions), back to front, written once per frame by whichever of the passes records first (they
+     * may record on two threads).
      */
     static final class Draws implements AutoCloseable {
         private final Particles particles;
@@ -133,6 +139,8 @@ public final class ParticleDraw implements Technique {
         private final int[] emitter = new int[MAX_DRAWS];
         private final int[] renderer = new int[MAX_DRAWS];
         private final int[] texture = new int[MAX_DRAWS];
+        private final int[] kind = new int[MAX_DRAWS];
+        private final int[] index = new int[MAX_DRAWS];
         private final double[] distance = new double[MAX_DRAWS];
         private long frame = -1;
         private int count;
@@ -160,7 +168,9 @@ public final class ParticleDraw implements Technique {
                 double dz = particles.listPosition(e, 2) - camera.position(2);
                 double d = dx * dx + dy * dy + dz * dz;
                 for (int r = 0; r < particles.renderers(e) && count < MAX_DRAWS; r++) {
-                    if (particles.rendererKind(e, r) != ParticleConstants.RENDER_BILLBOARD) {
+                    int k = particles.rendererKind(e, r);
+                    if (k == ParticleConstants.RENDER_MESH
+                        || k == ParticleConstants.RENDER_TRAIL && particles.listCpu(e)) {
                         continue;
                     }
                     // Insertion in order, farthest first: emitters as wholes, back to front
@@ -169,12 +179,16 @@ public final class ParticleDraw implements Technique {
                         emitter[at] = emitter[at - 1];
                         renderer[at] = renderer[at - 1];
                         texture[at] = texture[at - 1];
+                        kind[at] = kind[at - 1];
+                        index[at] = index[at - 1];
                         distance[at] = distance[at - 1];
                         at--;
                     }
                     emitter[at] = e;
                     renderer[at] = particles.rendererWord(e, r);
                     texture[at] = particles.rendererTexture(e, r);
+                    kind[at] = k;
+                    index[at] = r;
                     distance[at] = d;
                 }
             }
@@ -194,12 +208,20 @@ public final class ParticleDraw implements Technique {
         /** Sets what every pass of the frame shares. */
         ParticleDrawPush common(ParticleDrawPush push, long view) {
             return push.particles(particles.particlesAddress()).emitters(particles.emitterTableAddress()).view(view)
-                .words(particles.wordsAddress()).state(particles.stateAddress());
+                .words(particles.wordsAddress()).state(particles.stateAddress()).side(particles.sideAddress())
+                .order(particles.orderAddress());
         }
 
-        /** Sets draw {@code i}. */
-        void set(ParticleDrawPush push, int i) {
-            push.draw(i).emitter(emitter[i]).renderer(renderer[i]).texture(texture[i]);
+        /** Sets draw {@code i} as seen from {@code camera}; returns its renderer's kind. */
+        int set(ParticleDrawPush push, int i, Camera camera) {
+            int e = emitter[i];
+            push.draw(i).emitter(e).renderer(renderer[i]).texture(texture[i]).time(particles.listTime(e));
+            if (kind[i] == ParticleConstants.RENDER_BEAM) {
+                push.end((float) (particles.beamEnd(e, index[i], 0) - camera.position(0)),
+                    (float) (particles.beamEnd(e, index[i], 1) - camera.position(1)),
+                    (float) (particles.beamEnd(e, index[i], 2) - camera.position(2)));
+            }
+            return kind[i];
         }
 
         @Override

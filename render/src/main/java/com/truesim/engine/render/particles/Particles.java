@@ -35,6 +35,7 @@ import com.truesim.scene.effects.EffectRuntime;
 import com.truesim.scene.effects.Effects;
 import com.truesim.scene.effects.EmitterData;
 import com.truesim.scene.effects.Space;
+import com.truesim.scene.effects.Renderer;
 import com.truesim.scene.effects.SpawnRecords;
 import com.truesim.scene.effects.Target;
 import java.lang.foreign.MemorySegment;
@@ -66,6 +67,11 @@ import java.util.Objects;
  */
 public final class Particles implements AutoCloseable {
 
+    /**
+     * The most particles an emitter with trails holds: each copies its past positions with the survivors every frame
+     * (16 bytes a point).
+     */
+    public static final int MAX_TRAIL_PARTICLES = 65_536;
     /** Emitter instances at most, unless given. */
     public static final int DEFAULT_EMITTERS = 4096;
 
@@ -126,6 +132,14 @@ public final class Particles implements AutoCloseable {
     private final int[] listSlot;
     private final int[] listEmitter;
     private final double[] listPosition;
+    private final double[] listRotation;
+    private final float[] listTime;
+    private final double[] beamEnds;
+    private final boolean[] beamEnded;
+    private final GpuBuffer order;
+    private final ExternalBuffer orderImport;
+    private final FrameBuffer ribbonList;
+    private int ribbonCount;
     private final int[] demand;
     private final int[] recordStart;
     private final int[] recordFill;
@@ -147,7 +161,7 @@ public final class Particles implements AutoCloseable {
     private long statisticsFrame = -1;
     private final Readback receiver = this::receive;
     private final Map<AssetRef<?>, Integer> textureSlots = new HashMap<>();
-    private final Map<Integer, Pipeline> billboards = new HashMap<>();
+    private final Map<Integer, Pipeline> pipelines = new HashMap<>();
 
     /** Particles in a pool of {@code budget} bytes, with up to {@value #DEFAULT_EMITTERS} emitter instances. */
     public Particles(VulkanDevice device, FrameSlots slots, long budget) {
@@ -181,6 +195,10 @@ public final class Particles implements AutoCloseable {
         listSlot = new int[maxEmitters];
         listEmitter = new int[maxEmitters];
         listPosition = new double[3 * maxEmitters];
+        listRotation = new double[4 * maxEmitters];
+        listTime = new float[maxEmitters];
+        beamEnds = new double[3 * maxEmitters];
+        beamEnded = new boolean[maxEmitters];
         demand = new int[maxEmitters];
         recordStart = new int[maxEmitters];
         recordFill = new int[maxEmitters];
@@ -189,8 +207,8 @@ public final class Particles implements AutoCloseable {
         ParticlePool p = null;
         ModulePrograms m = null;
         CpuEmitters c = null;
-        GpuBuffer[] made = new GpuBuffer[4];
-        FrameBuffer[] tables = new FrameBuffer[4];
+        GpuBuffer[] made = new GpuBuffer[5];
+        FrameBuffer[] tables = new FrameBuffer[5];
         try {
             p = new ParticlePool(device, budget);
             m = new ModulePrograms(device, slots);
@@ -199,6 +217,8 @@ public final class Particles implements AutoCloseable {
             made[1] = GpuBuffer.deviceLocal(device, 8L * p.slots() / ParticleConstants.CHUNK, GPU_USAGE);
             made[2] = GpuBuffer.deviceLocal(device, statisticsBytes(maxEmitters), GPU_USAGE);
             made[3] = GpuBuffer.deviceLocal(device, 16, GPU_USAGE | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+            made[4] = GpuBuffer.deviceLocal(device, 4L * p.slots(), GPU_USAGE);
+            tables[4] = FrameBuffer.create(device, 8L * maxEmitters, STORAGE, slots);
             tables[0] = FrameBuffer.create(device, (long) ParticleEmitterLayout.BYTES * maxEmitters, STORAGE, slots);
             tables[1] = FrameBuffer.create(device, 4L * p.slots() / ParticleConstants.CHUNK, STORAGE, slots);
             tables[2] = FrameBuffer.create(device, 256L * ParticleSpawnLayout.BYTES, STORAGE, slots);
@@ -232,6 +252,8 @@ public final class Particles implements AutoCloseable {
         chunkCounts = made[1];
         statistics = made[2];
         dispatch = made[3];
+        order = made[4];
+        ribbonList = tables[4];
         emitterTable = tables[0];
         chunkTable = tables[1];
         spawnRing = tables[2];
@@ -240,6 +262,7 @@ public final class Particles implements AutoCloseable {
         chunkCountsImport = new ExternalBuffer("particle chunk counts", chunkCounts);
         statisticsImport = new ExternalBuffer("particle statistics", statistics);
         dispatchImport = new ExternalBuffer("particle spawn dispatch", dispatch);
+        orderImport = new ExternalBuffer("particle ribbon order", order);
     }
 
     private static long statisticsBytes(int maxEmitters) {
@@ -323,6 +346,7 @@ public final class Particles implements AutoCloseable {
         list(effects);
         spawn(effects, spawns);
         upload();
+        ribbons();
         for (int i = 0; i < emitterCount; i++) {
             int at = ParticleEmitterLayout.BYTES * i;
             emitterTable.putInt(at + ParticleEmitterLayout.RECORDS, recordStart[i]);
@@ -372,7 +396,7 @@ public final class Particles implements AutoCloseable {
         }
         Arrays.fill(instances[slot], -1);
         for (int e = 0; e < emitters.size(); e++) {
-            instances[slot][e] = place(emitters.get(e), block.over[e]); // CPU emitters too: uploaded into it
+            instances[slot][e] = place(emitters.get(e), block.over[e], block.trails[e]); // CPU emitters too
         }
         ids[slot] = effect;
         blocks[slot] = block;
@@ -384,12 +408,13 @@ public final class Particles implements AutoCloseable {
     }
 
     /** An emitter instance with a range for {@code emitter}, or -1 where there is no room. */
-    private int place(EmitterData emitter, boolean over) {
+    private int place(EmitterData emitter, boolean over, int trail) {
         int capacity = emitter.capacity();
-        int first = freeCount == 0 ? -1 : pool.allocate(capacity);
-        int units = over ? 2 * capacity : 0;
+        boolean room = freeCount > 0 && (trail == 0 || capacity <= MAX_TRAIL_PARTICLES);
+        int first = room ? pool.allocate(capacity) : -1;
+        int units = ((over ? 2 : 0) + (trail > 0 ? 1 + trail : 0)) * capacity;
         int side = ParticleConstants.NO_SIDE;
-        if (first >= 0 && over) {
+        if (first >= 0 && units > 0) {
             side = pool.allocateSide(units);
             if (side < 0) {
                 pool.release(first, capacity);
@@ -408,6 +433,7 @@ public final class Particles implements AutoCloseable {
         fresh[instance] = true;
         cpu[instance] = emitter.target() == Target.CPU;
         local[instance] = !cpu[instance] && emitter.space() == Space.LOCAL; // CPU emitters upload world offsets
+        beamEnded[instance] = false;
         writers[instance] = null;
         return instance;
     }
@@ -479,6 +505,11 @@ public final class Particles implements AutoCloseable {
                 listPosition[3 * index] = x;
                 listPosition[3 * index + 1] = y;
                 listPosition[3 * index + 2] = z;
+                listRotation[4 * index] = qx;
+                listRotation[4 * index + 1] = qy;
+                listRotation[4 * index + 2] = qz;
+                listRotation[4 * index + 3] = qw;
+                listTime[index] = (float) (time * 1e-6);
                 places[slot][e] = index;
                 demand[index] = 0;
                 int at = ParticleEmitterLayout.BYTES * index;
@@ -661,6 +692,95 @@ public final class Particles implements AutoCloseable {
         return writers[instance];
     }
 
+    /** Lists the frame's GPU emitters with ribbons of several strands, for their order. */
+    private void ribbons() {
+        ribbonCount = 0;
+        for (int i = 0; i < emitterCount; i++) {
+            if (cpu[listInstance[i]]) {
+                continue;
+            }
+            int strands = 1;
+            List<Renderer> renderers = blocks[listSlot[i]].data.emitters().get(listEmitter[i]).renderers();
+            for (int r = 0; r < renderers.size(); r++) {
+                strands = Math.max(strands, ModulePrograms.ribbons(renderers.get(r)));
+            }
+            if (strands > 1) {
+                ribbonList.putInt(8L * ribbonCount, i);
+                ribbonList.putInt(8L * ribbonCount + 4, strands);
+                ribbonCount++;
+            }
+        }
+    }
+
+    /** Emitters whose ribbons the frame orders. */
+    int ribbonCount() {
+        return ribbonCount;
+    }
+
+    long ribbonListAddress() {
+        return ribbonList.deviceAddress();
+    }
+
+    long orderAddress() {
+        return order.deviceAddress();
+    }
+
+    /** The side arrays' half the frame wrote, by address. */
+    long sideAddress() {
+        return pool.sideBuffer().deviceAddress() + 16L * written * pool.sideUnits();
+    }
+
+    /**
+     * Ends the beams of emitter {@code emitter} of playing effect {@code effect} at world position ({@code x},
+     * {@code y}, {@code z}) from now on: another node, a target. Without one a beam reaches its {@code length} along the
+     * emitter's +Y. Allocates nothing.
+     */
+    public void beamEnd(long effect, int emitter, double x, double y, double z) {
+        int instance = instance(effect, emitter);
+        if (instance < 0) {
+            throw new IllegalArgumentException("Not an emitter with room of a playing effect: " + emitter + " of "
+                + Long.toHexString(effect));
+        }
+        beamEnds[3 * instance] = x;
+        beamEnds[3 * instance + 1] = y;
+        beamEnds[3 * instance + 2] = z;
+        beamEnded[instance] = true;
+    }
+
+    /**
+     * Along {@code axis}, where beam renderer {@code r} of the emitter at {@code index} of the frame's list ends: as
+     * given, or its length along the emitter's +Y.
+     */
+    double beamEnd(int index, int r, int axis) {
+        int instance = listInstance[index];
+        if (beamEnded[instance]) {
+            return beamEnds[3 * instance + axis];
+        }
+        Renderer renderer = blocks[listSlot[index]].data.emitters().get(listEmitter[index]).renderers().get(r);
+        double length = ModulePrograms.setting(renderer, "length", 1);
+        double qx = listRotation[4 * index];
+        double qy = listRotation[4 * index + 1];
+        double qz = listRotation[4 * index + 2];
+        double qw = listRotation[4 * index + 3];
+        // +Y turned by the rotation
+        double up = switch (axis) {
+            case 0 -> 2 * (qx * qy - qw * qz);
+            case 1 -> 1 - 2 * (qx * qx + qz * qz);
+            default -> 2 * (qy * qz + qw * qx);
+        };
+        return listPosition[3 * index + axis] + length * up;
+    }
+
+    /** The effect time of the emitter at {@code index} of the frame's list, in seconds. */
+    float listTime(int index) {
+        return listTime[index];
+    }
+
+    /** Whether the emitter at {@code index} of the frame's list is a CPU emitter. */
+    boolean listCpu(int index) {
+        return cpu[listInstance[index]];
+    }
+
     /** CPU emitters uploaded in the last update. */
     int cpuEmitterCount() {
         return cpuEmitters.emitters();
@@ -686,14 +806,14 @@ public final class Particles implements AutoCloseable {
 
     /** The simulation's buffers as buffers of a build. */
     record Buffers(Buffer particles, Buffer side, Buffer state, Buffer chunkCounts, Buffer statistics,
-        Buffer dispatch) {
+        Buffer dispatch, Buffer order) {
     }
 
     @AllowAllocation("building the graph, when it changes")
     Buffers importInto(GraphBuilder g) {
         return new Buffers(g.importBuffer(pool.graphBuffer()), g.importBuffer(pool.sideGraphBuffer()),
             g.importBuffer(stateImport), g.importBuffer(chunkCountsImport), g.importBuffer(statisticsImport),
-            g.importBuffer(dispatchImport));
+            g.importBuffer(dispatchImport), g.importBuffer(orderImport));
     }
 
     /** Whether this frame simulates: it was updated while it records, with emitters to move. */
@@ -825,18 +945,28 @@ public final class Particles implements AutoCloseable {
         return state.deviceAddress();
     }
 
-    /** The billboard pipeline drawing into color attachments of {@code format} (a VkFormat), made once. */
-    @AllowAllocation("a pipeline made once per color format")
-    Pipeline billboards(int format) {
-        Pipeline pipeline = billboards.get(format);
+    /**
+     * The pipeline drawing renderers of {@code kind} ({@code RENDER_*}: billboards, ribbons, trails, beams) into color
+     * attachments of {@code format} (a VkFormat), made once.
+     */
+    @AllowAllocation("a pipeline made once per kind and color format")
+    Pipeline pipeline(int kind, int format) {
+        int key = format * 8 + kind;
+        Pipeline pipeline = pipelines.get(key);
         if (pipeline == null) {
+            String entry = switch (kind) {
+                case ParticleConstants.RENDER_RIBBON -> "ribbonMain";
+                case ParticleConstants.RENDER_TRAIL -> "trailMain";
+                case ParticleConstants.RENDER_BEAM -> "beamMain";
+                default -> "billboardMain";
+            };
             try (ShaderModule shaders = ShaderModule.load(device, "shaders/particles/draw.spv")) {
-                pipeline = Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, "vertexMain")
+                pipeline = Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, entry)
                     .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, "fragmentMain").color(format)
                     .blend(0, Pipeline.Blend.PREMULTIPLIED).pushConstants(ParticleDrawPush.BYTES).doubleSided()
                     .build();
             }
-            billboards.put(format, pipeline);
+            pipelines.put(key, pipeline);
         }
         return pipeline;
     }
@@ -893,7 +1023,7 @@ public final class Particles implements AutoCloseable {
 
     @Override
     public void close() {
-        billboards.values().forEach(Pipeline::close);
+        pipelines.values().forEach(Pipeline::close);
         emitterTable.close();
         chunkTable.close();
         spawnRing.close();
@@ -902,6 +1032,8 @@ public final class Particles implements AutoCloseable {
         chunkCounts.close();
         statistics.close();
         dispatch.close();
+        order.close();
+        ribbonList.close();
         programs.close();
         cpuEmitters.close();
         pool.close();

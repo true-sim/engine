@@ -21,12 +21,14 @@ import static com.truesim.engine.render.layout.ParticleConstants.OP_SPEED;
 import static com.truesim.engine.render.layout.ParticleConstants.OP_SPHERE;
 import static com.truesim.engine.render.layout.ParticleConstants.OP_VELOCITY;
 import static com.truesim.engine.render.layout.ParticleConstants.PROGRAM_OVER;
+import static com.truesim.engine.render.layout.ParticleConstants.PROGRAM_TRAIL;
 import static com.truesim.engine.render.layout.ParticleConstants.RENDERER_WORDS;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.render.RangeAllocator;
+import com.truesim.engine.render.layout.ParticleRendererLayout;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Retiring;
@@ -88,11 +90,13 @@ final class ModulePrograms implements AutoCloseable {
         final int[][] renderers;
         /** Per emitter and renderer: its texture's asset, or null. */
         final AssetRef<?>[][] textures;
+        /** Per emitter: the past positions its trails keep per particle, 0 for none. */
+        final int[] trails;
         int users;
         long releaseAt = -1;
 
         Block(EffectData data, int words, int wordLength, int curves, int curveLength, int[] programs,
-            boolean[] over, int[][] renderers, AssetRef<?>[][] textures) {
+            boolean[] over, int[][] renderers, AssetRef<?>[][] textures, int[] trails) {
             this.data = data;
             this.words = words;
             this.wordLength = wordLength;
@@ -102,6 +106,7 @@ final class ModulePrograms implements AutoCloseable {
             this.over = over;
             this.renderers = renderers;
             this.textures = textures;
+            this.trails = trails;
         }
     }
 
@@ -209,6 +214,7 @@ final class ModulePrograms implements AutoCloseable {
         int[] starts = new int[emitters.size()];
         boolean[] over = new boolean[emitters.size()];
         int[][] renderers = new int[emitters.size()][];
+        int[] trails = new int[emitters.size()];
         AssetRef<?>[][] textures = new AssetRef<?>[emitters.size()][];
         for (int e = 0; e < emitters.size(); e++) {
             EmitterData emitter = emitters.get(e);
@@ -232,8 +238,13 @@ final class ModulePrograms implements AutoCloseable {
             over[e] = overLife;
             encodeOps(data, emitter.init(), 0, program, keys);
             encodeOps(data, emitter.update(), CpuSimulation.UPDATE_SALTS, program, keys);
+            int points = 0;
+            for (Renderer r : emitter.renderers()) {
+                points = Math.max(points, trailPoints(r));
+            }
+            trails[e] = points;
             program.values[header] = emitter.init().size() | emitter.update().size() << 8
-                | (overLife ? PROGRAM_OVER : 0) << 16;
+                | ((overLife ? PROGRAM_OVER : 0) | (points > 0 ? PROGRAM_TRAIL : 0)) << 16 | points << 24;
         }
         int wordStart = (int) take(wordRanges, Math.max(1, program.size), true);
         int curveStart = (int) take(curveRanges, Math.max(1, keys.floats.size), false);
@@ -254,7 +265,7 @@ final class ModulePrograms implements AutoCloseable {
             }
         }
         return new Block(data, wordStart, Math.max(1, program.size), curveStart, Math.max(1, keys.floats.size), starts,
-            over, renderers, textures);
+            over, renderers, textures, trails);
     }
 
     /** A range of {@code length} units of the words (or curves), the buffer grown if there is no room. */
@@ -278,12 +289,19 @@ final class ModulePrograms implements AutoCloseable {
     }
 
     /**
-     * A renderer's record ({@code RENDERER_WORDS} words, particle.slang's {@code ParticleRenderer}); returns its first
-     * word. Settings by name: {@code stretch} (velocity facing: extra length per m/s, in sizes), {@code soft} (metres of
-     * fade into the opaque scene), {@code volume} (1: that fade by the view ray's path through a sphere),
-     * {@code flipbook.columns} and {@code flipbook.rows} (frames in the texture), {@code flipbook.frames} (frames
-     * played; all by default), {@code flipbook.fps} (frames per second of age, looping; 0 by default: the frames over
-     * the particle's life) and {@code flipbook.blend} (0: frames not blended).
+     * A renderer's record ({@code RENDERER_WORDS} words, particle.slang's {@code ParticleRenderer}, at the offsets its
+     * generated layout gives); returns its first word. Settings by name: {@code stretch} (velocity facing: extra length
+     * per m/s, in sizes), {@code soft} (metres of fade into the opaque scene), {@code volume} (1: that fade by the view
+     * ray's path through a sphere), {@code flipbook.columns} and {@code flipbook.rows} (frames in the texture),
+     * {@code flipbook.frames} (frames played; all by default), {@code flipbook.fps} (frames per second of age,
+     * looping; 0 by default: the frames over the particle's life), {@code flipbook.blend} (0: frames not blended);
+     * ribbons: {@code ribbons} (strands, particle i in strand i % ribbons; 1 by default), {@code stride} (every
+     * stride-th particle a point), {@code lodDistance} (the stride doubles each time the distance doubles past it);
+     * ribbons, trails and beams: {@code width.tail} and {@code width.head} (the width at either end, in sizes; 1),
+     * {@code tile} (particles, points or metres per texture repeat; 0 by default: stretched over the strip); trails:
+     * {@code points}; beams: {@code segments} (16), {@code noise} (metres sideways), {@code width} (metres, 0.1),
+     * {@code length} (metres along the emitter's +Y without an end given, 1), {@code color.r}, {@code color.g},
+     * {@code color.b}, {@code color.a} (white).
      */
     private static int renderer(Renderer r, IntList program) {
         int columns = Math.max(1, (int) setting(r, "flipbook.columns", 1));
@@ -293,23 +311,55 @@ final class ModulePrograms implements AutoCloseable {
         int flags = (setting(r, "volume", 0) != 0 ? DRAW_VOLUME : 0)
             | (frames > 1 && setting(r, "flipbook.blend", 1) != 0 ? DRAW_BLEND_FRAMES : 0)
             | (rate > 0 ? DRAW_LOOP : 0);
-        int at = program.add(r.kind().ordinal());
-        program.add(r.facing() == null ? 0 : r.facing().ordinal());
-        program.add(flags);
-        program.add(Float.floatToRawIntBits(r.alphaToAdd()));
-        program.add(Float.floatToRawIntBits(setting(r, "stretch", 0)));
-        program.add(Float.floatToRawIntBits(setting(r, "soft", 0)));
-        program.add(columns);
-        program.add(rows);
-        program.add(Float.floatToRawIntBits(frames));
-        program.add(Float.floatToRawIntBits(rate));
-        program.add(0);
-        program.add(0);
-        assert program.size - at == RENDERER_WORDS;
+        int at = program.size;
+        for (int i = 0; i < RENDERER_WORDS; i++) {
+            program.add(0);
+        }
+        int[] w = program.values;
+        w[at + ParticleRendererLayout.KIND / 4] = r.kind().ordinal();
+        w[at + ParticleRendererLayout.FACING / 4] = r.facing() == null ? 0 : r.facing().ordinal();
+        w[at + ParticleRendererLayout.FLAGS / 4] = flags;
+        put(w, at, ParticleRendererLayout.ALPHA_TO_ADD, r.alphaToAdd());
+        put(w, at, ParticleRendererLayout.STRETCH, setting(r, "stretch", 0));
+        put(w, at, ParticleRendererLayout.SOFT, setting(r, "soft", 0));
+        w[at + ParticleRendererLayout.COLUMNS / 4] = columns;
+        w[at + ParticleRendererLayout.ROWS / 4] = rows;
+        put(w, at, ParticleRendererLayout.FRAMES, frames);
+        put(w, at, ParticleRendererLayout.RATE, rate);
+        w[at + ParticleRendererLayout.RIBBONS / 4] = Math.max(1, (int) setting(r, "ribbons", 1));
+        w[at + ParticleRendererLayout.STRIDE / 4] = Math.max(1, (int) setting(r, "stride", 1));
+        put(w, at, ParticleRendererLayout.LOD_DISTANCE, setting(r, "lodDistance", 0));
+        put(w, at, ParticleRendererLayout.WIDTH_TAIL, setting(r, "width.tail", 1));
+        put(w, at, ParticleRendererLayout.WIDTH_HEAD, setting(r, "width.head", 1));
+        put(w, at, ParticleRendererLayout.TILE, setting(r, "tile", 0));
+        w[at + ParticleRendererLayout.POINTS / 4] = trailPoints(r);
+        w[at + ParticleRendererLayout.SEGMENTS / 4] = Math.max(1, (int) setting(r, "segments", 16));
+        put(w, at, ParticleRendererLayout.NOISE, setting(r, "noise", 0));
+        put(w, at, ParticleRendererLayout.WIDTH, setting(r, "width", 0.1f));
+        put(w, at, ParticleRendererLayout.LENGTH, setting(r, "length", 1));
+        put(w, at, ParticleRendererLayout.COLOR, setting(r, "color.r", 1));
+        put(w, at, ParticleRendererLayout.COLOR + 4, setting(r, "color.g", 1));
+        put(w, at, ParticleRendererLayout.COLOR + 8, setting(r, "color.b", 1));
+        put(w, at, ParticleRendererLayout.COLOR + 12, setting(r, "color.a", 1));
+        assert ParticleRendererLayout.BYTES == 4 * RENDERER_WORDS;
         return at;
     }
 
-    private static float setting(Renderer r, String name, float fallback) {
+    private static void put(int[] words, int at, int offset, float value) {
+        words[at + offset / 4] = Float.floatToRawIntBits(value);
+    }
+
+    /** The past positions a trail renderer keeps per particle; 0 for other renderers. */
+    static int trailPoints(Renderer r) {
+        return r.kind() == Renderer.Kind.TRAIL ? Math.max(2, (int) setting(r, "points", 2)) : 0;
+    }
+
+    /** The strands of a ribbon renderer; 1 for other renderers. */
+    static int ribbons(Renderer r) {
+        return r.kind() == Renderer.Kind.RIBBON ? Math.max(1, (int) setting(r, "ribbons", 1)) : 1;
+    }
+
+    static float setting(Renderer r, String name, float fallback) {
         return r.settings().get(name) instanceof Number n ? n.floatValue() : fallback;
     }
 

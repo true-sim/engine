@@ -14,6 +14,11 @@ public final class ParticleKeys {
      */
     public static final Key<Buffer> STATE = Key.buffer("truesim.particleState");
 
+    /** The side arrays, both halves: attributes kept from birth and trails' past positions. */
+    public static final Key<Buffer> SIDE = Key.buffer("truesim.particleSide");
+    /** Per slot of the pool, each range of ribbons of several strands in ribbon order. */
+    public static final Key<Buffer> RIBBON_ORDER = Key.buffer("truesim.particleRibbonOrder");
+
     private ParticleKeys() {
     }
 }
