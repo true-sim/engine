@@ -102,6 +102,7 @@ public final class StereoBench {
                 }
                 owned.add(effects);
                 effects.debris(world.renderer(), world.rock(), world.rockMaterial(), 5, -3); // rocks casting shadows
+                effects.sparkLights(world.lights(), 6.5, -1); // sparks lighting the ground and the rocks
                 graph.add(effects.simulation());
             }
             for (int e = 0; e < 2; e++) {

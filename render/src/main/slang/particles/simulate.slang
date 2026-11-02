@@ -1914,6 +1914,166 @@ void instancesMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
     instances[e.meshFirst + k] = r;
 }
 
+// ---------------------------------------------------------------------------------------------- particle lights
+
+/**
+ * Whether particle `k` of light emitter row `row` lights (alive, in the share lit, brighter than nothing): its light's
+ * color into `color`, its bucket of brightness into `bucket`.
+ */
+bool lightCandidate(uint row, uint k, out Particle p, out float3 color, out uint bucket)
+{
+    ParticleFrame* frame = push.frame;
+    uint* entries = frame.lightEmitters;
+    uint* entry = entries + row * LIGHT_ENTRY_WORDS;
+    ParticleEmitter* emitters = push.emitters;
+    ParticleEmitter e = emitters[entry[0]];
+    uint* state = push.state;
+    color = 0;
+    bucket = 0;
+    p = (Particle) 0;
+    if (k >= state[e.instance * STATE_WORDS + STATE_ALIVE])
+    {
+        return false;
+    }
+    Particle* source0 = push.source;
+    Particle* written = source0 + push.targetDelta;
+    p = written[e.first + k];
+    if ((p.flags & PARTICLE_DEAD) != 0 || p.age >= p.lifetime || !(random(p.seed, 0x7100) < asfloat(entry[2])))
+    {
+        return false;
+    }
+    color = p.color.rgb * p.color.a * asfloat(entry[4]);
+    float brightness = max(color.r, max(color.g, color.b));
+    if (!(brightness > 0))
+    {
+        return false;
+    }
+    bucket = uint(clamp(log2(brightness) * 4 + 32, 0.0, float(LIGHT_BUCKETS - 1)));
+    return true;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lightsCountMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
+{
+    // A row of groups per light emitter: its candidates counted by brightness
+    Particle p;
+    float3 color;
+    uint bucket;
+    if (lightCandidate(group.y, id.x, p, color, bucket))
+    {
+        ParticleFrame* frame = push.frame;
+        uint* state = frame.lightState;
+        InterlockedAdd(state[group.y * LIGHT_STATE_WORDS + bucket], 1);
+    }
+}
+
+/** The bucket from which the brightest `budget` of `counts` start, into `at`, and how many of it they take. */
+void threshold(uint* counts, uint budget, out uint at, out uint taken)
+{
+    uint sum = 0;
+    at = 0;
+    taken = counts[0];
+    for (int q = int(LIGHT_BUCKETS) - 1; q >= 0; q--)
+    {
+        uint n = counts[q];
+        if (sum + n >= budget)
+        {
+            at = uint(q);
+            taken = budget - sum;
+            return;
+        }
+        sum += n;
+    }
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void lightsThresholdMain()
+{
+    // Each emitter keeps its brightest within its budget; of what they keep, the frame keeps its brightest within its
+    ParticleFrame* frame = push.frame;
+    uint* state = frame.lightState;
+    uint* entries = frame.lightEmitters;
+    uint* all = state + MAX_LIGHT_EMITTERS * LIGHT_STATE_WORDS;
+    for (uint row = 0; row < frame.lightEmitterCount; row++)
+    {
+        uint* s = state + row * LIGHT_STATE_WORDS;
+        uint at;
+        uint taken;
+        threshold(s, entries[row * LIGHT_ENTRY_WORDS + 1], at, taken);
+        s[LIGHT_BUCKETS] = at;
+        s[LIGHT_BUCKETS + 1] = taken;
+        for (uint q = at; q < LIGHT_BUCKETS; q++)
+        {
+            all[q] += q == at ? taken : s[q];
+        }
+    }
+    uint at;
+    uint taken;
+    threshold(all, frame.lightBudget, at, taken);
+    all[LIGHT_BUCKETS] = at;
+    all[LIGHT_BUCKETS + 1] = taken;
+}
+
+/** Whether a candidate of bucket `bucket` stays within selection `s`: above its threshold, or among the first at it. */
+bool kept(uint* s, uint bucket)
+{
+    if (bucket != s[LIGHT_BUCKETS])
+    {
+        return bucket > s[LIGHT_BUCKETS];
+    }
+    uint before;
+    InterlockedAdd(s[LIGHT_BUCKETS + 2], 1, before);
+    return before < s[LIGHT_BUCKETS + 1];
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lightsWriteMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
+{
+    // A row of groups per light emitter: the candidates its budget and the frame's keep become point lights
+    Particle p;
+    float3 color;
+    uint bucket;
+    if (!lightCandidate(group.y, id.x, p, color, bucket))
+    {
+        return;
+    }
+    ParticleFrame* frame = push.frame;
+    uint* state = frame.lightState;
+    if (!kept(state + group.y * LIGHT_STATE_WORDS, bucket)
+        || !kept(state + MAX_LIGHT_EMITTERS * LIGHT_STATE_WORDS, bucket))
+    {
+        return;
+    }
+    uint* lights = frame.gpuLights;
+    uint slot;
+    InterlockedAdd(lights[0], 1, slot);
+    if (slot >= frame.lightBudget)
+    {
+        return;
+    }
+    uint* entries = frame.lightEmitters;
+    ParticleEmitter* emitters = push.emitters;
+    ParticleEmitter e = emitters[entries[group.y * LIGHT_ENTRY_WORDS]];
+    Light l;
+    l.position = e.originHigh;
+    l.positionLow = e.originLow + ((e.flags & EMITTER_LOCAL) != 0 ? turn(e.rotation, p.position) : p.position);
+    l.range = asfloat(entries[group.y * LIGHT_ENTRY_WORDS + 3]);
+    l.color = color;
+    l.type = POINT;
+    l.direction = float3(0, -1, 0);
+    l.cosOuter = 0;
+    l.cosInner = 0;
+    l.shadowFirst = -1;
+    l.shadowCount = 0;
+    l.pad = 0;
+    l.pad1 = 0;
+    Light* written = (Light*) (lights + 4);
+    written[slot] = l;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void uploadMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)

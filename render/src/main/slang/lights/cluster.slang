@@ -12,6 +12,9 @@ struct ClusterPush
     uint height;
     float far;                 // where the last slice ends
     uint lightCount;
+    uint* written;             // the lights the GPU writes (Lights.gpuLights): a count, three words, then the lights;
+                               // or null
+    uint writtenCapacity;      // the most of them
 };
 
 [[vk::push_constant]]
@@ -57,13 +60,27 @@ void clusterMain(uint3 id : SV_DispatchThreadID, uint local : SV_GroupIndex)
         min(min(from.y * near, from.y * far), min(to.y * near, to.y * far)) / sy, near);
     float3 hi = float3(max(max(from.x * near, from.x * far), max(to.x * near, to.x * far)) / sx,
         max(max(from.y * near, from.y * far), max(to.y * near, to.y * far)) / sy, far);
+    // The lights the GPU wrote this frame (particle lights) come after the scene's: copied into the list for shading
+    uint* written = push.written;
+    uint extra = written == nullptr ? 0 : min(written[0], push.writtenCapacity);
+    Light* source = (Light*) (written + 4);
+    for (uint i = id.x; i < extra; i += 64 * ((clusters + 63) / 64))
+    {
+        h.extra[i] = source[i];
+    }
+    if (id.x == 0)
+    {
+        push.header[0].extraCount = extra;
+    }
+    uint total = push.lightCount + extra;
     uint count = 0;
-    for (uint first = 0; first < push.lightCount; first += 64)
+    for (uint first = 0; first < total; first += 64)
     {
         GroupMemoryBarrierWithGroupSync();
-        if (first + local < push.lightCount)
+        if (first + local < total)
         {
-            Light light = h.relativeTo(h.lights[first + local]);
+            uint index = first + local;
+            Light light = h.relativeTo(index < push.lightCount ? h.lights[index] : source[index - push.lightCount]);
             float3 p = light.position;
             float radius = light.range;
             if (light.type == SPOT && light.cosOuter > 0)
@@ -90,7 +107,7 @@ void clusterMain(uint3 id : SV_DispatchThreadID, uint local : SV_GroupIndex)
         {
             continue;
         }
-        uint batch = min(64, push.lightCount - first);
+        uint batch = min(64, total - first);
         for (uint i = 0; i < batch; i++)
         {
             float4 sphere = spheres[i];

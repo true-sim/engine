@@ -179,6 +179,16 @@ public final class Particles implements AutoCloseable {
     private int largestMesh;
     private int meshUnplaced;
     private int[] holes = new int[16]; // ranges given back whose slots the next frame clears: first id, count
+    // Particle lights (step 17b): the lights they write into, their budget, the frame's light emitters, the selection
+    private com.truesim.engine.render.Lights lights;
+    private int lightBudget;
+    private final FrameBuffer lightList;
+    private final Staging lightStaged = new Staging(4L * ParticleConstants.LIGHT_ENTRY_WORDS
+        * ParticleConstants.MAX_LIGHT_EMITTERS);
+    private int lightCount;
+    private int largestLight;
+    private final GpuBuffer lightState;
+    private final ExternalBuffer lightStateImport;
     private int holeCount;
     private final Map<AssetRef<?>, long[]> meshAssets = new HashMap<>();
     // Events (E9): the frame's records, their sort keys (two buffers), the sort's counts and dispatch, each sorted
@@ -339,8 +349,8 @@ public final class Particles implements AutoCloseable {
         ParticlePool p = null;
         ModulePrograms m = null;
         CpuEmitters c = null;
-        GpuBuffer[] made = new GpuBuffer[12];
-        FrameBuffer[] tables = new FrameBuffer[12];
+        GpuBuffer[] made = new GpuBuffer[13];
+        FrameBuffer[] tables = new FrameBuffer[13];
         try {
             p = new ParticlePool(device, budget);
             m = new ModulePrograms(device, slots);
@@ -360,9 +370,13 @@ public final class Particles implements AutoCloseable {
             made[9] = GpuBuffer.deviceLocal(device, 32, GPU_USAGE | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
             made[10] = GpuBuffer.deviceLocal(device, 4L * 16 * (events / ParticleConstants.SORT_GROUP), GPU_USAGE);
             made[11] = GpuBuffer.deviceLocal(device, 4 * events, GPU_USAGE);
+            made[12] = GpuBuffer.deviceLocal(device, 4L * ParticleConstants.LIGHT_STATE_WORDS
+                * (ParticleConstants.MAX_LIGHT_EMITTERS + 1), GPU_USAGE);
             tables[9] = FrameBuffer.create(device, 4L * maxEmitters, STORAGE, slots);
             tables[10] = FrameBuffer.create(device, 16L * ParticleSourceLayout.BYTES, STORAGE, slots);
             tables[11] = FrameBuffer.create(device, 4L * maxEmitters, STORAGE, slots);
+            tables[12] = FrameBuffer.create(device, 4L * ParticleConstants.LIGHT_ENTRY_WORDS
+                * ParticleConstants.MAX_LIGHT_EMITTERS, STORAGE, slots);
             tables[7] = FrameBuffer.create(device, ParticleFrameLayout.BYTES, STORAGE, slots);
             tables[8] = FrameBuffer.create(device, (long) ParticleColliderLayout.BYTES
                 * ParticleConstants.MAX_COLLIDERS, STORAGE, slots);
@@ -414,6 +428,9 @@ public final class Particles implements AutoCloseable {
         targetTable = tables[9];
         sourceTable = tables[10];
         meshList = tables[11];
+        lightList = tables[12];
+        lightState = made[12];
+        lightStateImport = new ExternalBuffer("particle light selection", lightState);
         meshStaged = new Staging(4L * maxEmitters);
         meshTables = new MeshTables(device, slots);
         targetStaged = new Staging(4L * maxEmitters);
@@ -597,6 +614,7 @@ public final class Particles implements AutoCloseable {
         }
         sourceStaged.copyTo(sourceTable, sourceBytes);
         meshStaged.copyTo(meshList, 4L * meshCount);
+        lightStaged.copyTo(lightList, 4L * ParticleConstants.LIGHT_ENTRY_WORDS * lightCount);
         sortStaged.copyTo(sortList, 4L * sortedCount);
         sortChunkStaged.copyTo(sortChunks, 8L * sortChunkCount);
         cpuEmitters.finish();
@@ -629,6 +647,12 @@ public final class Particles implements AutoCloseable {
         r.putLong(ParticleFrameLayout.SOURCES, sourceTable.deviceAddress());
         r.putLong(ParticleFrameLayout.INSTANCES, meshScene == null ? 0 : meshScene.instanceAddress());
         r.putLong(ParticleFrameLayout.MESH_EMITTERS, meshList.deviceAddress());
+        r.putLong(ParticleFrameLayout.LIGHT_EMITTERS, lightList.deviceAddress());
+        r.putLong(ParticleFrameLayout.LIGHT_STATE, lightState.deviceAddress());
+        r.putLong(ParticleFrameLayout.GPU_LIGHTS, lights == null || lights.gpuLightsBuffer() == null ? 0
+            : lights.gpuLightsBuffer().deviceAddress());
+        r.putInt(ParticleFrameLayout.LIGHT_EMITTER_COUNT, lightCount);
+        r.putInt(ParticleFrameLayout.LIGHT_BUDGET, lightBudget);
         GeometryPool meshes = meshRenderer == null ? null : meshRenderer.pool();
         r.putLong(ParticleFrameLayout.MESHES, meshes == null ? 0 : meshes.meshTable().deviceAddress());
         r.putLong(ParticleFrameLayout.POSITIONS, meshes == null ? 0 : meshes.positions().deviceAddress());
@@ -960,6 +984,8 @@ public final class Particles implements AutoCloseable {
         sourceCount = 0;
         meshCount = 0;
         largestMesh = 0;
+        lightCount = 0;
+        largestLight = 0;
         sendsEvents = false;
         for (int slot = 0; slot < highest; slot++) {
             long effect = ids[slot];
@@ -1092,6 +1118,7 @@ public final class Particles implements AutoCloseable {
                 }
                 t.putInt(at + ParticleEmitterLayout.SOURCE, source);
                 putMesh(t, at, block, e, index, instance);
+                putLight(block, e, index, instance);
                 fresh[instance] = false;
                 sendsEvents |= !blocks[slot].data.emitters().get(e).events().isEmpty();
                 int chunks = cpu[instance] ? 0 : ParticlePool.chunksOf(capacities[instance]);
@@ -1142,6 +1169,31 @@ public final class Particles implements AutoCloseable {
         t.putInt(at + ParticleEmitterLayout.MESH_RENDERER, block.renderers[e][r]);
         meshStaged.putInt(4L * meshCount++, index);
         largestMesh = Math.max(largestMesh, capacities[instance]);
+    }
+
+    /**
+     * Lists emitter {@code e} of {@code block} (at {@code index} of the list, instance {@code instance}) for the
+     * particle lights if it has a light renderer: its budget ({@code max}, 64 by default), the share of its particles
+     * lit ({@code fraction}, all by default), their radius and intensity.
+     */
+    private void putLight(ModulePrograms.Block block, int e, int index, int instance) {
+        if (lights == null || lightCount == ParticleConstants.MAX_LIGHT_EMITTERS) {
+            return;
+        }
+        List<Renderer> renderers = block.data.emitters().get(e).renderers();
+        for (int r = 0; r < renderers.size(); r++) {
+            Renderer renderer = renderers.get(r);
+            if (renderer.kind() == Renderer.Kind.LIGHT) {
+                long at = 4L * ParticleConstants.LIGHT_ENTRY_WORDS * lightCount++;
+                lightStaged.putInt(at, index);
+                lightStaged.putInt(at + 4, Math.max(0, (int) ModulePrograms.setting(renderer, "max", 64)));
+                lightStaged.putFloat(at + 8, ModulePrograms.setting(renderer, "fraction", 1));
+                lightStaged.putFloat(at + 12, ModulePrograms.setting(renderer, "radius", 1));
+                lightStaged.putFloat(at + 16, ModulePrograms.setting(renderer, "intensity", 1));
+                largestLight = Math.max(largestLight, capacities[instance]);
+                return;
+            }
+        }
     }
 
     /** Whether {@code emitter} draws meshes. */
@@ -1406,6 +1458,62 @@ public final class Particles implements AutoCloseable {
             org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT,
             org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT | org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT);
+    }
+
+    /**
+     * Lets light renderers write point lights into {@code lights}' lights the GPU writes ({@link
+     * com.truesim.engine.render.Lights#gpuLights}), at most {@code budget} a frame for all emitters, the brightest kept
+     * (and each emitter's brightest within its own {@code max}); {@code ClusteredLights} bins them after the scene's,
+     * so both shading techniques, every view and lit particles see them. They cast no shadows; nothing is read back.
+     * Null: none. Set before the graph builds.
+     */
+    public Particles lights(com.truesim.engine.render.Lights lights, int budget) {
+        if (budget < 0) {
+            throw new IllegalArgumentException("Not a light budget: " + budget);
+        }
+        if (this.lights != null) {
+            this.lights.notWrittenBy(ParticleKeys.PARTICLES);
+            this.lights.gpuLights(0);
+        }
+        this.lights = lights;
+        lightBudget = lights == null ? 0 : budget;
+        if (lights != null) {
+            lights.gpuLights(budget);
+            lights.writtenBy(ParticleKeys.PARTICLES);
+        }
+        setup++;
+        return this;
+    }
+
+    /** The lights particle lights go into, or null. */
+    com.truesim.engine.render.Lights lights() {
+        return lights;
+    }
+
+    /** Emitters of the last update's list with light renderers (at most {@code MAX_LIGHT_EMITTERS}). */
+    int lightEmitterCount() {
+        return lightCount;
+    }
+
+    /** The largest capacity among them. */
+    int largestLightEmitter() {
+        return largestLight;
+    }
+
+    /** The light selection's buffer, as a graph imports it. */
+    ExternalBuffer lightStateImport() {
+        return lightStateImport;
+    }
+
+    /** Clears the light selection and the GPU's lights' count for the frame, in {@code commands}; a barrier after. */
+    void clearLights(org.lwjgl.vulkan.VkCommandBuffer commands, long state, long written) {
+        com.truesim.engine.vulkan.Commands.fillBuffer(commands, state, 0, lightState.size(), 0);
+        com.truesim.engine.vulkan.Commands.fillBuffer(commands, written, 0, 16, 0);
+        com.truesim.engine.vulkan.Barriers.memory(commands, org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+                | org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     }
 
     /** Whether mesh particles are set up: their instances written before culling. */
@@ -2159,6 +2267,11 @@ public final class Particles implements AutoCloseable {
         targetTable.close();
         sourceTable.close();
         meshList.close();
+        lightList.close();
+        lightState.close();
+        if (lights != null) {
+            lights.notWrittenBy(ParticleKeys.PARTICLES);
+        }
         if (meshScene != null) {
             meshScene.notWrittenBy(ParticleKeys.PARTICLES);
         }

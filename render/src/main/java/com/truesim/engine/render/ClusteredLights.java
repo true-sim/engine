@@ -37,9 +37,11 @@ import org.lwjgl.system.MemoryStack;
  * by a thread per cluster testing the lights' spheres against its box. {@code graph.replace} swaps it for another
  * binning; shading reads any of them through {@code lights.slang}'s {@code ILightList}.
  *
- * <p>The light list is one buffer: the common header ({@code LightListHeader}), a count per cluster, then the slots.
- * Fixed slots per cluster: no atomics, a deterministic order, and overflow reported in the header (the most lights a
- * cluster wanted).
+ * <p>The light list is one buffer: the common header ({@code LightListHeader}), a count per cluster, the slots, then
+ * the lights the GPU wrote this frame ({@link Lights#gpuLights}: particle lights), which it bins after the scene's,
+ * counting them on the GPU (no readback), copied there for shading. Their writers are built first
+ * ({@link Lights#writtenBy}), so they are this frame's. Fixed slots per cluster: no atomics, a deterministic order, and
+ * overflow reported in the header (the most lights a cluster wanted).
  *
  * <pre>{@code
  * view.port().add(new ClusteredLights(lights, view));   // the view's shading techniques find it by key
@@ -47,7 +49,7 @@ import org.lwjgl.system.MemoryStack;
  */
 public final class ClusteredLights implements Technique {
 
-    static final int HEADER_BYTES = 112;
+    static final int HEADER_BYTES = 128;
     private static final int CLUSTERS = LightsConstants.CLUSTERS;
 
     /** Tile size, in pixels across and down. */
@@ -189,17 +191,29 @@ public final class ClusteredLights implements Technique {
         int down = tilesDown();
         Pipeline pipeline = g.computeProgram("shaders/lights/cluster.spv", "clusterMain", ClusterPush.BYTES);
         ClusterPush push = new ClusterPush().far(far());
+        // The lights the GPU writes (particle lights): their writers first, so they are this frame's
+        for (Key<?> key : List.copyOf(lights.writers())) {
+            g.optional(key);
+        }
+        Buffer written = lights.gpuLightsBuffer() == null ? null : g.importBuffer(lights.gpuLightsBuffer());
+        int extra = lights.gpuCapacity();
+        // The header, the counts and slots, then room for the lights the GPU wrote, copied for shading
         Buffer list = g.createBuffer("light clusters",
-            HEADER_BYTES + 4L * clusters(across, down) * (1 + maxPerCluster()));
-        g.pass("light clusters")
+            HEADER_BYTES + 4L * clusters(across, down) * (1 + maxPerCluster()) + (long) Lights.LIGHT_BYTES * extra);
+        GraphBuilder.PassBuilder pass = g.pass("light clusters");
+        if (written != null) {
+            pass.read(written, BufferAccess.STORAGE_READ);
+        }
+        pass
             .write(list, BufferAccess.TRANSFER_DST)
             .write(list, BufferAccess.STORAGE_WRITE)
             .async()
-            .record(ctx -> cluster(ctx, pipeline, list, push, across, down));
+            .record(ctx -> cluster(ctx, pipeline, list, push, across, down, written, extra));
         g.provide(Keys.LIGHT_LIST, list);
     }
 
-    private void cluster(PassContext ctx, Pipeline pipeline, Buffer list, ClusterPush push, int across, int down) {
+    private void cluster(PassContext ctx, Pipeline pipeline, Buffer list, ClusterPush push, int across, int down,
+        Buffer written, int extra) {
         int clusters = clusters(across, down);
         long header = ctx.address(list);
         long counts = header + HEADER_BYTES;
@@ -229,13 +243,16 @@ public final class ClusteredLights implements Technique {
                 memPutFloat(data + 80 + 4L * axis, high);
                 memPutFloat(data + 96 + 4L * axis, (float) (p - high));
             }
+            memPutLong(data + 112, counts + 4L * clusters * (1 + maxPerCluster())); // the GPU's lights, copied
+            memPutInt(data + 120, 0);
             Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(list), 0, HEADER_BYTES, data);
             Barriers.memory(ctx.unsafe().commands(), VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
             // The tiles map onto the render region (dynamic resolution); the grid has room for all of the images.
             ctx.dispatch(pipeline, push.width(port.regionWidth()).height(port.regionHeight())
-                .viewProjection(camera.viewProjection()).header(header).lightCount(lights.count()), (clusters + 63) / 64);
+                .viewProjection(camera.viewProjection()).header(header).lightCount(lights.count())
+                .written(written == null ? 0 : ctx.address(written)).writtenCapacity(extra), (clusters + 63) / 64);
         }
     }
 }

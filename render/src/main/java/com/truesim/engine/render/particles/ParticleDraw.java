@@ -195,7 +195,7 @@ public final class ParticleDraw implements Technique {
     }
 
     /**
-     * A view's draws in a frame: each renderer of each emitter instance (but meshes, and trails of CPU emitters, which
+     * A view's draws in a frame: each renderer of each emitter instance (but meshes and lights, and trails of CPU emitters, which
      * keep no past positions), back to front, written once per frame by whichever of the passes records first (they
      * may record on two threads), with what each draw reads: its emitter, renderer, texture, sorted run and beam end.
      */
@@ -246,7 +246,7 @@ public final class ParticleDraw implements Technique {
                 double d = dx * dx + dy * dy + dz * dz;
                 for (int r = 0; r < particles.renderers(e) && count < MAX_DRAWS; r++) {
                     int k = particles.rendererKind(e, r);
-                    if (k == ParticleConstants.RENDER_MESH
+                    if (k == ParticleConstants.RENDER_MESH || k == ParticleConstants.RENDER_LIGHT
                         || k == ParticleConstants.RENDER_TRAIL && particles.listCpu(e)) {
                         continue;
                     }
