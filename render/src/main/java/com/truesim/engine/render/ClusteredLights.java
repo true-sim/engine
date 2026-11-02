@@ -252,7 +252,9 @@ public final class ClusteredLights implements Technique {
             // The tiles map onto the render region (dynamic resolution); the grid has room for all of the images.
             ctx.dispatch(pipeline, push.width(port.regionWidth()).height(port.regionHeight())
                 .viewProjection(camera.viewProjection()).header(header).lightCount(lights.count())
-                .written(written == null ? 0 : ctx.address(written)).writtenCapacity(extra), (clusters + 63) / 64);
+                // Without lights the GPU writes, a count of 0 all the same (the header's own), never a null pointer
+                .written(written == null ? header + 120 : ctx.address(written)).writtenCapacity(extra),
+                (clusters + 63) / 64);
         }
     }
 }
