@@ -10,6 +10,7 @@ import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.layout.ParticlePush;
 import com.truesim.engine.render.layout.ParticleRibbonPush;
+import com.truesim.engine.render.layout.ParticleSortPush;
 import com.truesim.engine.render.shadows.TopLevel;
 import com.truesim.engine.vulkan.Pipeline;
 import java.util.List;
@@ -33,6 +34,7 @@ public final class ParticleSimulation implements Technique {
     public static final Id<ParticleSimulation> ID = Id.of("truesim.particleSimulation", ParticleSimulation.class);
     private static final String SHADER = "shaders/particles/simulate.spv";
     private static final String RAYS_SHADER = "shaders/particles/simulate_rays.spv";
+    private static final String SORT_SHADER = "shaders/particles/sort.spv";
 
     private final Particles particles;
 
@@ -75,7 +77,7 @@ public final class ParticleSimulation implements Technique {
             });
         ParticlePush scanPush = new ParticlePush();
         g.pass("particle scan").write(b.chunkCounts(), BufferAccess.STORAGE_WRITE)
-            .write(b.state(), BufferAccess.STORAGE_WRITE)
+            .write(b.state(), BufferAccess.STORAGE_WRITE).write(b.eventArgs(), BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
                 if (p.simulating()) {
                     dispatchChunks(ctx, scan, p.push(scanPush), p.emitterCount());
@@ -89,12 +91,14 @@ public final class ParticleSimulation implements Technique {
         updatePass.read(b.chunkCounts(), BufferAccess.STORAGE_READ)
             .read(b.depth(), BufferAccess.STORAGE_READ)
             .write(b.particles(), BufferAccess.STORAGE_WRITE).write(b.side(), BufferAccess.STORAGE_WRITE)
-            .write(b.state(), BufferAccess.STORAGE_WRITE)
+            .write(b.state(), BufferAccess.STORAGE_WRITE).write(b.events(), BufferAccess.STORAGE_WRITE)
+            .write(b.eventKeys(), BufferAccess.STORAGE_WRITE).write(b.eventArgs(), BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
                 if (p.simulating()) {
                     dispatchChunks(ctx, update, p.push(updatePush), p.chunkCount());
                 }
             });
+        events(g, b);
         ParticlePush spawnArgsPush = new ParticlePush();
         g.pass("particle spawn args").write(b.state(), BufferAccess.STORAGE_WRITE)
             .write(b.statistics(), BufferAccess.STORAGE_WRITE).write(b.dispatch(), BufferAccess.STORAGE_WRITE)
@@ -109,11 +113,13 @@ public final class ParticleSimulation implements Technique {
             spawnPass.read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ);
         }
         spawnPass.read(b.dispatch(), BufferAccess.INDIRECT).read(b.dispatch(), BufferAccess.STORAGE_READ)
-            .read(b.depth(), BufferAccess.STORAGE_READ)
+            .read(b.depth(), BufferAccess.STORAGE_READ).read(b.events(), BufferAccess.STORAGE_READ)
+            .read(b.eventKeys(), BufferAccess.STORAGE_READ).read(b.eventArgs(), BufferAccess.STORAGE_READ)
+            .read(b.childPrefix(), BufferAccess.STORAGE_READ)
             .write(b.particles(), BufferAccess.STORAGE_WRITE).write(b.side(), BufferAccess.STORAGE_WRITE)
             .write(b.state(), BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
-                if (p.simulating() && p.recordCount() > 0) {
+                if (p.simulating() && (p.recordCount() > 0 || p.sendsEvents())) {
                     ctx.dispatchIndirect(spawn, p.push(spawnPush), b.dispatch(), 0);
                 }
             });
@@ -150,6 +156,88 @@ public final class ParticleSimulation implements Technique {
         g.provide(ParticleKeys.STATE, b.state());
         g.provide(ParticleKeys.SIDE, b.side());
         g.provide(ParticleKeys.RIBBON_ORDER, b.order());
+    }
+
+    /**
+     * The event passes (E9, effects.md §2.4), when the frame's emitters send events: "particle events args" (the events
+     * kept and the sort's dispatch), a radix sort by (parent, phase, event), "particle events rekey" (keys of target and
+     * parent emitter), a second, stable sort, and "particle events ranges" (each sorted event's first child, each
+     * target's first event and children), which the spawn args and the spawn read.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    private void events(GraphBuilder g, Particles.Buffers b) {
+        Particles p = particles;
+        Pipeline eventsArgs = g.computeProgram(SHADER, "eventsArgsMain", ParticlePush.BYTES);
+        Pipeline rekey = g.computeProgram(SHADER, "eventsRekeyMain", ParticlePush.BYTES);
+        Pipeline ranges = g.computeProgram(SHADER, "eventsRangesMain", ParticlePush.BYTES);
+        ParticlePush argsPush = new ParticlePush();
+        g.pass("particle events args").write(b.eventArgs(), BufferAccess.STORAGE_WRITE)
+            .write(b.statistics(), BufferAccess.STORAGE_WRITE)
+            .record(ctx -> {
+                if (p.simulating() && p.sendsEvents()) {
+                    ctx.dispatch(eventsArgs, p.push(argsPush), 1);
+                }
+            });
+        sort(g, b, "particle events by parent");
+        ParticlePush rekeyPush = new ParticlePush();
+        g.pass("particle events rekey").read(b.events(), BufferAccess.STORAGE_READ)
+            .read(b.eventArgs(), BufferAccess.INDIRECT).read(b.eventArgs(), BufferAccess.STORAGE_READ)
+            .write(b.eventKeys(), BufferAccess.STORAGE_WRITE)
+            .record(ctx -> {
+                if (p.simulating() && p.sendsEvents()) {
+                    ctx.dispatchIndirect(rekey, p.push(rekeyPush), b.eventArgs(), 0);
+                }
+            });
+        sort(g, b, "particle events by target");
+        ParticlePush rangesPush = new ParticlePush();
+        g.pass("particle events ranges").read(b.events(), BufferAccess.STORAGE_READ)
+            .read(b.eventKeys(), BufferAccess.STORAGE_READ).read(b.eventArgs(), BufferAccess.STORAGE_READ)
+            .write(b.childPrefix(), BufferAccess.STORAGE_WRITE).write(b.state(), BufferAccess.STORAGE_WRITE)
+            .record(ctx -> {
+                if (p.simulating() && p.sendsEvents()) {
+                    ctx.dispatch(ranges, p.push(rangesPush), 1);
+                }
+            });
+    }
+
+    /** A radix sort of the frame's event keys in place: 8 passes of 4 bits, with the particle sort's programs. */
+    @AllowAllocation("building the graph, when it changes")
+    private void sort(GraphBuilder g, Particles.Buffers b, String name) {
+        Particles p = particles;
+        Pipeline count = g.computeProgram(SORT_SHADER, "sortCountMain", ParticleSortPush.BYTES);
+        Pipeline scan = g.computeProgram(SORT_SHADER, "sortScanMain", ParticleSortPush.BYTES);
+        Pipeline scatter = g.computeProgram(SORT_SHADER, "sortScatterMain", ParticleSortPush.BYTES);
+        for (int pass = 0; pass < 8; pass++) {
+            Buffer source = pass % 2 == 0 ? b.eventKeys() : b.eventKeysOther();
+            Buffer target = pass % 2 == 0 ? b.eventKeysOther() : b.eventKeys();
+            long from = pass % 2 == 0 ? p.eventKeysAddress() : p.eventKeysOtherAddress();
+            long to = pass % 2 == 0 ? p.eventKeysOtherAddress() : p.eventKeysAddress();
+            ParticleSortPush countPush = new ParticleSortPush().shift(4 * pass).args(p.eventArgsAddress())
+                .histogram(p.eventCountsAddress()).source(from).target(to);
+            g.pass(name + ", count " + pass).read(source, BufferAccess.STORAGE_READ)
+                .read(b.eventArgs(), BufferAccess.INDIRECT).read(b.eventArgs(), BufferAccess.STORAGE_READ)
+                .write(b.eventCounts(), BufferAccess.STORAGE_WRITE)
+                .record(ctx -> {
+                    if (p.simulating() && p.sendsEvents()) {
+                        ctx.dispatchIndirect(count, countPush, b.eventArgs(), 0);
+                    }
+                });
+            g.pass(name + ", scan " + pass).read(b.eventArgs(), BufferAccess.STORAGE_READ)
+                .write(b.eventCounts(), BufferAccess.STORAGE_WRITE)
+                .record(ctx -> {
+                    if (p.simulating() && p.sendsEvents()) {
+                        ctx.dispatch(scan, countPush, 1);
+                    }
+                });
+            g.pass(name + ", scatter " + pass).read(source, BufferAccess.STORAGE_READ)
+                .read(b.eventCounts(), BufferAccess.STORAGE_READ).read(b.eventArgs(), BufferAccess.INDIRECT)
+                .read(b.eventArgs(), BufferAccess.STORAGE_READ).write(target, BufferAccess.STORAGE_WRITE)
+                .record(ctx -> {
+                    if (p.simulating() && p.sendsEvents()) {
+                        ctx.dispatchIndirect(scatter, countPush, b.eventArgs(), 0);
+                    }
+                });
+        }
     }
 
     /** Dispatches a group per chunk (or emitter), in rows of up to 65,535 groups. */
