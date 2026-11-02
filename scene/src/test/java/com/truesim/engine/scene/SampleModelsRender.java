@@ -62,6 +62,7 @@ import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.gltf.Gltf;
 import com.truesim.scene.render.ImageImporter;
 import com.truesim.scene.render.ModelData;
+import com.truesim.scene.render.NodeVisibility;
 import com.truesim.scene.render.RadianceImporter;
 import com.truesim.scene.render.TextureData;
 import com.truesim.scene.render.RenderAssets;
@@ -75,6 +76,7 @@ import java.util.List;
 import java.util.stream.Stream;
 import javax.imageio.ImageIO;
 import com.truesim.scene.animation.AnimationClip;
+import com.truesim.scene.animation.AnimationPointer;
 import com.truesim.scene.animation.Animators;
 import com.truesim.scene.animation.ClipState;
 import org.junit.jupiter.api.Test;
@@ -86,6 +88,8 @@ import org.lwjgl.vulkan.VkBufferImageCopy;
  * renderer is right and red crosses where it is not. Each model is framed from the front (+z), lit by its own glTF
  * lights where it has some (KHR_lights_punctual) or else the sun, and the sky, or with {@code -PgltfEnvironment=a.hdr}
  * an HDR environment (lighting and background) besides; tone mapped with Khronos PBR Neutral. Skipped without the samples; {@code -PgltfModels=A,B} picks models.
+ * Posed by {@code -PgltfAnimation=t1,t2}, a clip's pointer tracks animate materials (in the material table), node
+ * visibility (through layers, lights of hidden nodes going dark) and the model's lights.
  */
 class SampleModelsRender {
 
@@ -143,11 +147,23 @@ class SampleModelsRender {
             double[] bounds = bounds(model, world, tasks, cache);
             SceneGraph scene = new SceneGraph(new ChangeClock());
             Renderables renderables = new Renderables(scene);
-            long[] nodes = model.spawn(scene, renderables, scene.create());
+            NodeVisibility visibility = new NodeVisibility(scene);
+            long[] nodes = model.spawn(scene, renderables, scene.create(), visibility);
             // -PgltfAnimation=t1,t2,...: the model's first clip (or -PgltfClip=name) posed at each time, an image each
             String times = System.getProperty("truesim.gltf.animation");
             Animators animators = new Animators(scene);
             animators.morphSink(renderables::setMorphWeights); // animated morph weights drawn
+            // Pointer tracks: materials into the table, visibility by layers, lights' values kept for them
+            double[][] lightValues = lightValues(model);
+            animators.pointerSink(resources.pointerSink().andThen(visibility).andThen((animator, pointer, values,
+                offset, count) -> {
+                if (pointer.target() == AnimationPointer.Target.LIGHT && pointer.index() < lightValues.length) {
+                    int at = List.of(LIGHT_VALUES).indexOf(pointer.property());
+                    if (at >= 0) {
+                        System.arraycopy(values, offset, lightValues[pointer.index()], at, count);
+                    }
+                }
+            }));
             ClipState playing = null;
             if (times != null && !model.animations().isEmpty()) {
                 String name = System.getProperty("truesim.gltf.clip");
@@ -179,7 +195,7 @@ class SampleModelsRender {
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
             GpuBuffer readback = GpuBuffer.hostVisible(device, SIZE * SIZE * 8L, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
             closing.add(readback);
-            Lights lights = lights(device, model, world, bounds);
+            Lights lights = lights(device, model, world, bounds, lightValues, nodes, visibility);
             if (lights != null) {
                 closing.add(lights);
                 port.add(new ClusteredLights(lights, main));
@@ -224,6 +240,12 @@ class SampleModelsRender {
                 int slot = graph.beginFrame();
                 slots.begin(slot);
                 tasks.drainCompleted();
+                if (playing != null) {
+                    animators.update(0); // the same pose: materials drawn since the last frame get its values too
+                    if (lights != null) {
+                        lights(lights, model, world, bounds, lightValues, nodes, visibility);
+                    }
+                }
                 scene.update();
                 renderables.update();
                 sync.update();
@@ -271,20 +293,44 @@ class SampleModelsRender {
         return world;
     }
 
+    /** What of a light pointer tracks animate, in the order {@link #lightValues} keeps them. */
+    private static final String[] LIGHT_VALUES = {"color", "color.g", "color.b", "intensity", "range",
+        "innerConeAngle", "outerConeAngle"};
+
+    /** Each of the model's lights' values as {@link #LIGHT_VALUES} names them, at rest. */
+    private static double[][] lightValues(ModelData model) {
+        double[][] values = new double[model.lights().size()][];
+        for (int i = 0; i < values.length; i++) {
+            ModelData.Light l = model.lights().get(i);
+            values[i] = new double[] {l.r(), l.g(), l.b(), l.intensity(), l.range(), l.innerCone(), l.outerCone()};
+        }
+        return values;
+    }
+
     /**
      * The model's own lights (glTF's KHR_lights_punctual) at their nodes, as the renderer's: intensity times color
-     * (lux for directional lights, candela, the illuminance at 1 m, for the others); null without any.
+     * (lux for directional lights, candela, the illuminance at 1 m, for the others), their values as animated
+     * ({@code values}), dark on hidden nodes; null without any.
      */
-    private static Lights lights(VulkanDevice device, ModelData model, double[][] world, double[] bounds) {
-        List<ModelData.Node> nodes = model.nodes();
+    private static Lights lights(VulkanDevice device, ModelData model, double[][] world, double[] bounds,
+        double[][] values, long[] placed, NodeVisibility visibility) {
         int count = 0;
-        for (ModelData.Node n : nodes) {
+        for (ModelData.Node n : model.nodes()) {
             count += n.light() >= 0 ? 1 : 0;
         }
         if (count == 0) {
             return null;
         }
         Lights lights = new Lights(device, count, 1);
+        lights(lights, model, world, bounds, values, placed, visibility);
+        return lights;
+    }
+
+    /** Sets {@code lights} to the model's lights as {@link #lights(VulkanDevice, ModelData, double[][], double[],
+     * double[][], long[], NodeVisibility)} makes them. */
+    private static void lights(Lights lights, ModelData model, double[][] world, double[] bounds, double[][] values,
+        long[] placed, NodeVisibility visibility) {
+        List<ModelData.Node> nodes = model.nodes();
         double reach = 10 * Math.max(1, Math.max(bounds[3] - bounds[0], Math.max(bounds[4] - bounds[1],
             bounds[5] - bounds[2])));
         int index = 0;
@@ -293,25 +339,25 @@ class SampleModelsRender {
                 continue;
             }
             ModelData.Light l = model.lights().get(nodes.get(i).light());
+            double[] v = values[nodes.get(i).light()];
             double[] m = world[i];
             double length = Math.sqrt(m[8] * m[8] + m[9] * m[9] + m[10] * m[10]);
             float dx = (float) (-m[8] / length); // lights shine along their node's -z
             float dy = (float) (-m[9] / length);
             float dz = (float) (-m[10] / length);
-            float r = (float) (l.r() * l.intensity());
-            float g = (float) (l.g() * l.intensity());
-            float b = (float) (l.b() * l.intensity());
-            float range = (float) (l.range() > 0 ? l.range() : reach);
+            double intensity = visibility.shown(placed[i]) ? v[3] : 0;
+            float r = (float) (v[0] * intensity);
+            float g = (float) (v[1] * intensity);
+            float b = (float) (v[2] * intensity);
+            float range = (float) (v[4] > 0 ? v[4] : reach);
             switch (l.kind()) {
                 case DIRECTIONAL -> lights.directional(index, dx, dy, dz, r, g, b);
                 case POINT -> lights.point(index, m[12], m[13], m[14], range, r, g, b);
-                case SPOT -> lights.spot(index, m[12], m[13], m[14], range, r, g, b, dx, dy, dz, l.innerCone(),
-                    l.outerCone());
+                case SPOT -> lights.spot(index, m[12], m[13], m[14], range, r, g, b, dx, dy, dz, v[5], v[6]);
             }
             index++;
         }
-        lights.setCount(count);
-        return lights;
+        lights.setCount(index);
     }
 
     /** The model's box in world space: min x, y, z, max x, y, z, its meshes' boxes moved by their nodes. */

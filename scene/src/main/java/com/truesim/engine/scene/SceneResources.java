@@ -12,6 +12,7 @@ import com.truesim.common.math.color.Color;
 import com.truesim.engine.render.GeometryPool;
 import com.truesim.engine.render.Material;
 import com.truesim.engine.render.MaterialFeature;
+import com.truesim.engine.render.MaterialField;
 import com.truesim.engine.render.MaterialFeatures;
 import com.truesim.engine.render.MaterialType;
 import com.truesim.engine.render.MaterialValues;
@@ -20,6 +21,8 @@ import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.TextureSampler;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.materials.TextureTransformParameters;
+import com.truesim.scene.animation.AnimationPointer;
+import com.truesim.scene.animation.Animators;
 import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.mesh.MeshData;
@@ -64,6 +67,10 @@ import org.slf4j.LoggerFactory;
  * {@link #awaitLoaded} blocks until every asset the scenes use is there. Given a lane ({@link #prepareOn}), meshes and
  * textures are made ready for the GPU on its threads (their data copied into staging memory), so the main thread only
  * places them.
+ *
+ * <p>Animated material values ({@link #animate}, or animators' pointer tracks through {@link #pointerSink()}: glTF's
+ * {@code KHR_animation_pointer}) are written into the material table in place, for every renderable drawing the
+ * material, allocating nothing once the material has been converted with them.
  *
  * <pre>{@code
  * resources.loading(SceneResources.Loading.WHOLE)                 // the application's default: no pop-in
@@ -246,11 +253,69 @@ public final class SceneResources implements AutoCloseable {
         boolean failed;
         final List<TextureEntry> textures = new ArrayList<>(4);
         final Set<MaterialSet> users = new java.util.LinkedHashSet<>(); // in the order they came: deterministic
+        final List<MaterialSet> userList = new ArrayList<>(2); // the same, by index: walked each frame it animates
+        Animated[] animated = new Animated[0];
+        // Its texture transforms as last converted: offset x, y, rotation, scale x, y per slot
+        final float[] transforms = new float[5 * TextureSampler.TRANSFORMS];
 
         MaterialEntry(AssetRef<MaterialData> ref) {
             this.ref = ref;
         }
+
+        /** Its animated value {@code property}, or null. Allocates nothing. */
+        Animated animated(String property) {
+            for (Animated a : animated) {
+                if (a.property == property || a.property.equals(property)) {
+                    return a;
+                }
+            }
+            return null;
+        }
+
+        /** Its animated value {@code name} of {@code feature} ("" for the parameters) set so far, or null. */
+        Animated animated(String feature, String name) {
+            for (Animated a : animated) {
+                if (a.count > 0 && a.name.equals(name) && a.feature.equals(feature)) {
+                    return a;
+                }
+            }
+            return null;
+        }
     }
+
+    /**
+     * A value of a material animated in place ({@link #animate}): a field of its parameters or of a feature's, or a
+     * texture's transform; where it goes in the material's block is found as the material converts.
+     */
+    @AllowAllocation("a material value first animated")
+    private static final class Animated {
+        final String property; // as given: name, or feature:name
+        final String feature;  // "" for the parameters
+        final String name;
+        final float[] value = new float[4];
+        int count;
+        MaterialField field; // where it goes, or null
+        int transform;       // or a texture transform's slot (1 to 8), 0 for none
+        int part;            // of which it is the offset (0), rotation (1) or scale (2)
+
+        Animated(String property) {
+            this.property = property;
+            int colon = property.indexOf(':');
+            this.feature = colon < 0 ? "" : property.substring(0, colon);
+            this.name = property.substring(colon + 1);
+        }
+    }
+
+    /** The texture transform fields by slot. */
+    private static final MaterialField[] TRANSFORM_FIELDS = {TextureTransformParameters.TRANSFORM1,
+        TextureTransformParameters.TRANSFORM2, TextureTransformParameters.TRANSFORM3,
+        TextureTransformParameters.TRANSFORM4, TextureTransformParameters.TRANSFORM5,
+        TextureTransformParameters.TRANSFORM6, TextureTransformParameters.TRANSFORM7,
+        TextureTransformParameters.TRANSFORM8};
+    /** The parts of a texture transform a material's data names, as glTF's importer names them. */
+    private static final String[] TRANSFORM_PARTS = {"Offset", "Rotation", "Scale"};
+
+    private final Animators.PointerSink pointerSink = this::pointed;
 
     /** A texture some materials use: its bindless slot once uploaded. */
     private static final class TextureEntry {
@@ -359,6 +424,144 @@ public final class SceneResources implements AutoCloseable {
     void removeCopy(int copy) {
         copies.remove(copy);
         pool.remove(copy);
+    }
+
+    /**
+     * Sets material {@code material}'s value {@code property} to {@code values[offset..offset + count)} for every
+     * renderable drawing it, in place: an animated value, as glTF's {@code KHR_animation_pointer} animates materials.
+     * {@code property} names it as the material's data does: a parameter ({@code baseColor}, {@code emissive}), a
+     * feature's prefixed by the feature and a colon ({@code clearcoat:strength}), or a texture's transform
+     * ({@code baseColorTextureOffset}, {@code clearcoat:normalTextureRotation}, {@code ...Scale}). The material converts
+     * once more the first time a value of it is animated; from then on each change is written into the table, allocating
+     * nothing. A material no renderable draws, or a value its type has no field for, is ignored; a value outside its
+     * field's range keeps the one before. Kept while the material is drawn, through its texture arriving and the like.
+     */
+    public void animate(AssetRef<MaterialData> material, String property, double[] values, int offset, int count) {
+        Objects.checkFromIndexSize(offset, count, values.length);
+        MaterialEntry entry = materialEntries.get(material);
+        if (entry == null) {
+            return;
+        }
+        Animated a = entry.animated(property);
+        boolean added = a == null;
+        if (added) {
+            a = animated(entry, property);
+        }
+        int n = Math.min(count, 4);
+        if (n > 0 && a.field != null && a.field.kind() == MaterialField.Kind.F32
+            && !a.field.accepts((float) values[offset])) {
+            return; // out of its range: kept as it was
+        }
+        boolean changed = n != a.count;
+        for (int c = 0; c < n; c++) {
+            float v = (float) values[offset + c];
+            changed |= v != a.value[c];
+            a.value[c] = v;
+        }
+        a.count = n;
+        if (added) {
+            markDirty(entry); // converted with it: where it goes found then
+        } else if (changed && entry.data != null) {
+            write(entry, a);
+        }
+    }
+
+    /**
+     * Where animators' pointer values go for their materials ({@link AnimationPointer.Target#MATERIAL}, as
+     * {@link #animate}): {@code animators.pointerSink(resources.pointerSink())}, combined with the game's sink for lights
+     * and cameras and a {@code NodeVisibility} for visibility. Ignores other targets.
+     */
+    public Animators.PointerSink pointerSink() {
+        return pointerSink;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void pointed(com.truesim.scene.animation.Animator animator, AnimationPointer pointer, double[] values,
+        int offset, int count) {
+        if (pointer.target() == AnimationPointer.Target.MATERIAL && pointer.asset().type() == RenderAssets.MATERIAL) {
+            animate((AssetRef<MaterialData>) pointer.asset(), pointer.property(), values, offset, count);
+        }
+    }
+
+    /** {@code entry}'s new animated value {@code property}. */
+    @AllowAllocation("a material value first animated")
+    private static Animated animated(MaterialEntry entry, String property) {
+        Animated a = new Animated(property);
+        entry.animated = java.util.Arrays.copyOf(entry.animated, entry.animated.length + 1);
+        entry.animated[entry.animated.length - 1] = a;
+        return a;
+    }
+
+    /** Writes {@code a} into every material id holding {@code entry} whose block is as converted. */
+    private void write(MaterialEntry entry, Animated a) {
+        if (a.field == null && a.transform == 0) {
+            return;
+        }
+        for (int u = 0; u < entry.userList.size(); u++) {
+            MaterialSet set = entry.userList.get(u);
+            if (set.dirty) {
+                continue; // converts again before it draws, with the value
+            }
+            for (int s = 0; s < set.entries.length; s++) {
+                if (set.entries[s] == entry) {
+                    write(set.first + s, entry, a);
+                }
+            }
+        }
+    }
+
+    /** Writes {@code a} into material {@code id}, which holds {@code entry} as converted. */
+    private void write(int id, MaterialEntry entry, Animated a) {
+        float[] v = a.value;
+        if (a.transform > 0) {
+            float[] t = entry.transforms;
+            int at = 5 * (a.transform - 1);
+            if (a.part == 1) {
+                t[at + 2] = v[0];
+            } else {
+                t[at + 3 * (a.part / 2)] = v[0];
+                t[at + 3 * (a.part / 2) + 1] = v[1];
+            }
+            materials.update(id, TRANSFORM_FIELDS[a.transform - 1], t[at], t[at + 1], t[at + 3], t[at + 4]);
+            int first = a.transform <= 4 ? 0 : 20; // the four rotations of its half
+            materials.update(id, first == 0 ? TextureTransformParameters.ROTATIONS1TO4
+                : TextureTransformParameters.ROTATIONS5TO8, t[first + 2], t[first + 7], t[first + 12], t[first + 17]);
+        } else if (a.field.kind() == MaterialField.Kind.F32) {
+            materials.update(id, a.field, v[0]);
+        } else {
+            materials.update(id, a.field, v[0], v[1], v[2], v[3]);
+        }
+    }
+
+    /**
+     * Finds where {@code entry}'s animated values go in {@code material}, converted from it: fields of its parameters'
+     * record ({@code features} giving each feature's), or the texture transforms {@code transforms} gave slots.
+     */
+    @AllowAllocation("materials change rarely")
+    private static void place(MaterialEntry entry, Material material, Map<String, Class<?>> features,
+        Transforms transforms) {
+        transforms.copyInto(entry.transforms);
+        for (Animated a : entry.animated) {
+            a.field = null;
+            a.transform = 0;
+            for (int p = 0; p < TRANSFORM_PARTS.length; p++) {
+                String part = TRANSFORM_PARTS[p];
+                if (a.name.endsWith("Texture" + part)) {
+                    String texture = a.name.substring(0, a.name.length() - part.length());
+                    a.transform = transforms.slot(a.feature + ":" + texture);
+                    a.part = p;
+                }
+            }
+            if (a.transform > 0 && a.count < (a.part == 1 ? 1 : 2)) {
+                a.transform = 0;
+            }
+            Class<?> record = a.feature.isEmpty() ? material.parameters().getClass() : features.get(a.feature);
+            MaterialField field = a.transform == 0 && record != null ? MaterialField.find(record, a.name) : null;
+            if (field != null && (field.kind() == MaterialField.Kind.F32 && a.count >= 1
+                || field.kind() == MaterialField.Kind.FLOATS && a.count >= field.count())) {
+                a.field = field;
+            }
+        }
     }
 
     /**
@@ -763,12 +966,15 @@ public final class SceneResources implements AutoCloseable {
                 entry.failed = true;
             }
         }
-        entry.users.add(set); // a set, so a set listed twice is held once
+        if (entry.users.add(set)) { // a set, so a set listed twice is held once
+            entry.userList.add(set);
+        }
         return entry;
     }
 
     private void releaseMaterial(MaterialEntry entry, MaterialSet set) {
         entry.users.remove(set);
+        entry.userList.remove(set);
         if (!entry.users.isEmpty()) {
             return;
         }
@@ -907,11 +1113,19 @@ public final class SceneResources implements AutoCloseable {
             problem(entry, "no material type " + d.type() + " is registered: it draws as the default");
             return Material.DEFAULT;
         }
+        MaterialEntry animated = entry != null && entry.data != null && entry.animated.length > 0 ? entry : null;
+        if (animated != null) {
+            for (Animated a : animated.animated) {
+                a.field = null; // until placed in what converts
+                a.transform = 0;
+            }
+        }
         try {
             Set<String> read = new HashSet<>();
             Transforms transforms = new Transforms();
+            Map<String, Class<?>> featureRecords = new HashMap<>();
             Material material = new Material(type, type.fromValues().apply(new DataValues(d.values(), "", read,
-                transforms))).doubleSided(d.doubleSided());
+                transforms, animated, ""))).doubleSided(d.doubleSided());
             if (d.alphaMode() == MaterialData.AlphaMode.MASK) {
                 material = material.alphaMask(d.alphaCutoff());
             } else if (d.alphaMode() == MaterialData.AlphaMode.BLEND) {
@@ -921,19 +1135,23 @@ public final class SceneResources implements AutoCloseable {
             for (String name : d.features()) {
                 Set<String> readOfFeature = new HashSet<>();
                 MaterialFeature feature = MaterialFeatures.fromValues(name, new DataValues(d.feature(name), "",
-                    readOfFeature, transforms));
+                    readOfFeature, transforms, animated, name));
                 if (feature == null) {
                     problem(entry, "no material feature " + name + ": it is shown without it");
                 } else if (((type.allowedFeatures() | Material.EVERY_TYPES_FEATURES) & feature.feature()) == 0) {
                     problem(entry, "material type " + type.name() + " allows no " + name + ": it is shown without it");
                 } else {
                     material = material.feature(feature);
+                    featureRecords.put(name, feature.getClass());
                     unread(entry, d.feature(name), readOfFeature, name + ": ");
                 }
             }
             TextureTransformParameters moved = transforms.feature();
             if (moved != null) {
                 material = material.feature(moved);
+            }
+            if (animated != null) {
+                place(animated, material, featureRecords, transforms);
             }
             return material;
         } catch (IllegalArgumentException e) {
@@ -972,12 +1190,35 @@ public final class SceneResources implements AutoCloseable {
         private final String prefix;
         private final Set<String> read; // the names asked for, by path
         private final Transforms transforms; // the material's texture transforms, gathered as textures are read
+        private final MaterialEntry animated; // whose animated values take the data's place, or null
+        private final String feature; // the feature read ("" for the parameters), for its animated values
 
-        DataValues(MaterialData.Values values, String prefix, Set<String> read, Transforms transforms) {
+        DataValues(MaterialData.Values values, String prefix, Set<String> read, Transforms transforms,
+            MaterialEntry animated, String feature) {
             this.values = values;
             this.prefix = prefix;
             this.read = read;
             this.transforms = transforms;
+            this.animated = animated;
+            this.feature = feature;
+        }
+
+        /** The animated value at {@code path}, or null. */
+        private Animated animated(String path) {
+            return animated == null ? null : animated.animated(feature, path);
+        }
+
+        /** The floats at {@code path}: its animated value's where {@code min} to {@code max} wide, or the data's. */
+        private float[] floatsAt(String path, int min, int max) {
+            Animated a = animated(path);
+            return a != null && a.count >= min && a.count <= max ? java.util.Arrays.copyOf(a.value, a.count)
+                : values.floats(path);
+        }
+
+        /** The float at {@code path}: its animated value's, or the data's, or {@code fallback}. */
+        private float f32At(String path, float fallback) {
+            Animated a = animated(path);
+            return a != null ? a.value[0] : values.f32(path, fallback);
         }
 
         private String name(String name) {
@@ -987,7 +1228,7 @@ public final class SceneResources implements AutoCloseable {
 
         @Override
         public float f32(String name, float fallback) {
-            return values.f32(name(name), fallback);
+            return f32At(name(name), fallback);
         }
 
         @Override
@@ -1021,7 +1262,7 @@ public final class SceneResources implements AutoCloseable {
         }
 
         private float[] floats(String name, int min, int max) {
-            float[] v = values.floats(name(name));
+            float[] v = floatsAt(name(name), min, max);
             if (v != null && (v.length < min || v.length > max)) {
                 throw new IllegalArgumentException(prefix + name + " is " + min + (max > min ? " to " + max : "")
                     + " floats, not " + v.length);
@@ -1042,9 +1283,11 @@ public final class SceneResources implements AutoCloseable {
             int wrapS = values.i32(name(name + "WrapS"), REPEAT);
             int wrapT = values.i32(name(name + "WrapT"), REPEAT);
             int magFilter = values.i32(name(name + "MagFilter"), -1);
-            float[] offset = values.floats(name(name + "Offset"));
-            float rotation = values.f32(name(name + "Rotation"), 0);
-            float[] scale = values.floats(name(name + "Scale"));
+            float[] offset = floatsAt(name(name + "Offset"), 2, 2);
+            float rotation = f32At(name(name + "Rotation"), 0);
+            float[] scale = floatsAt(name(name + "Scale"), 2, 2);
+            boolean moving = animated(prefix + name + "Offset") != null || animated(prefix + name + "Rotation") != null
+                || animated(prefix + name + "Scale") != null;
             if (ref == null) {
                 return fallback;
             }
@@ -1060,8 +1303,9 @@ public final class SceneResources implements AutoCloseable {
             } else if (texCoord != 0) {
                 throw new IllegalArgumentException(prefix + name + "TexCoord: UV sets 0 and 1, not " + texCoord);
             }
-            if (offset != null || scale != null || rotation != 0) {
-                slot = TextureSampler.transform(slot, transforms.add(prefix + name, offset, rotation, scale));
+            if (moving || offset != null || scale != null || rotation != 0) {
+                slot = TextureSampler.transform(slot, transforms.add(feature + ":" + prefix + name, offset, rotation,
+                    scale, moving));
             }
             return slot;
         }
@@ -1079,24 +1323,36 @@ public final class SceneResources implements AutoCloseable {
 
         @Override
         public MaterialValues nested(String name) {
-            return new DataValues(values, prefix + name + ".", read, transforms);
+            return new DataValues(values, prefix + name + ".", read, transforms, animated, feature);
         }
     }
 
-    /** A material's texture transforms, as its textures name them: each distinct one once, up to eight. */
+    /**
+     * A material's texture transforms, as its textures name them: each distinct one once, up to eight; an animated
+     * texture's a slot of its own, so writing it moves no other texture.
+     */
     @AllowAllocation("materials change rarely")
     static final class Transforms {
         private final java.util.List<float[]> transforms = new java.util.ArrayList<>(); // offset xy, rotation, scale xy
+        private final java.util.List<String> owners = new java.util.ArrayList<>(); // an animated texture's, else null
 
         /** The number (1 to 8) of the transform {@code offset}, {@code rotation}, {@code scale} (null: defaults). */
         int add(String texture, float[] offset, float rotation, float[] scale) {
+            return add(texture, offset, rotation, scale, false);
+        }
+
+        /**
+         * The number (1 to 8) of {@code texture}'s transform {@code offset}, {@code rotation}, {@code scale} (null:
+         * defaults): a slot of its own if {@code own} (an animated texture's), else shared with an equal one's.
+         */
+        int add(String texture, float[] offset, float rotation, float[] scale, boolean own) {
             if (offset != null && offset.length != 2 || scale != null && scale.length != 2) {
                 throw new IllegalArgumentException(texture + ": a transform's offset and scale are 2 floats each");
             }
             float[] t = {offset == null ? 0 : offset[0], offset == null ? 0 : offset[1], rotation,
                 scale == null ? 1 : scale[0], scale == null ? 1 : scale[1]};
-            for (int i = 0; i < transforms.size(); i++) {
-                if (java.util.Arrays.equals(transforms.get(i), t)) {
+            for (int i = 0; i < transforms.size() && !own; i++) {
+                if (owners.get(i) == null && java.util.Arrays.equals(transforms.get(i), t)) {
                     return i + 1;
                 }
             }
@@ -1105,7 +1361,22 @@ public final class SceneResources implements AutoCloseable {
                     + " texture transforms");
             }
             transforms.add(t);
+            owners.add(own ? texture : null);
             return transforms.size();
+        }
+
+        /** The number (1 to 8) of animated {@code texture}'s own transform, or 0 if it has none. */
+        int slot(String texture) {
+            int i = owners.indexOf(texture);
+            return i + 1;
+        }
+
+        /** Copies them into {@code out}: offset x, y, rotation, scale x, y per slot, the defaults past them. */
+        void copyInto(float[] out) {
+            for (int i = 0; i < TextureSampler.TRANSFORMS; i++) {
+                float[] t = i < transforms.size() ? transforms.get(i) : new float[] {0, 0, 0, 1, 1};
+                System.arraycopy(t, 0, out, 5 * i, 5);
+            }
         }
 
         /** The feature holding them; null for none. */

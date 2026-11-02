@@ -53,6 +53,8 @@ import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.scene.materials.Tinted;
 import com.truesim.engine.scene.materials.TintedParameters;
 import com.truesim.engine.render.Materials;
+import com.truesim.engine.render.MaterialField;
+import com.truesim.scene.animation.AnimationPointer;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.shadows.TopLevel;
@@ -1026,6 +1028,111 @@ class SceneSyncTest {
         assertThatIllegalArgumentException().isThrownBy(() -> many.add("t9", null, 9, null))
             .withMessageContaining("at most 8 texture transforms");
         assertThat(new SceneResources.Transforms().feature()).isNull();
+    }
+
+    @Test
+    void animatedMaterialValuesAreWrittenInPlaceForEveryRenderableDrawingThem() throws InterruptedException {
+        AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 71);
+        // Two textures with the same transform: the animated one gets a slot of its own
+        AssetRef<MaterialData> lamp = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
+            (glow, seed) -> MaterialData.builder(MR).set("baseColor", 0.5f, 0.5f, 0.5f, 1)
+                .texture("baseColorTexture", white).set("baseColorTextureOffset", 0.5f, 0f)
+                .texture("emissiveTexture", white).set("emissiveTextureOffset", 0.5f, 0f)
+                .texture("normalTexture", white)
+                .feature("clearcoat", coat -> coat.set("strength", 0.2f).texture("normalTexture", white))
+                .build(), new Glow(1, 1, 1), 71);
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        long node = facing(scene, 0, 0, -3);
+        renderables.set(node, SQUARE, List.of(lamp));
+        for (int round = 0; round < 4; round++) {
+            update(scene, renderables, sync);
+            load();
+        }
+        // First animated: the material converts with the values, then each change goes in place
+        resources.animate(lamp, "baseColor", new double[] {9, 1, 0, 0, 1}, 1, 4);
+        resources.animate(lamp, "clearcoat:strength", new double[] {0.7}, 0, 1);
+        resources.animate(lamp, "roughness", new double[] {0.3}, 0, 1);
+        resources.animate(lamp, "baseColorTextureOffset", new double[] {0.25, 0}, 0, 2);
+        resources.animate(lamp, "normalTextureRotation", new double[] {0.5}, 0, 1);
+        resources.animate(lamp, "clearcoat:normalTextureScale", new double[] {2, 2}, 0, 2);
+        resources.animate(lamp, "emissiveTextureScale", new double[] {3}, 0, 1);  // too few values: as converted
+        resources.animate(lamp, "flakes", new double[] {1}, 0, 1);               // no such field: ignored
+        resources.animate(lamp, "sheen:sheenRoughnessFactor", new double[] {1}, 0, 1); // no sheen shown: ignored
+        resources.animate(lamp, "baseColorTexture", new double[] {3}, 0, 1);     // a texture slot: not animated
+        resources.animate(RED, "baseColor", new double[] {0, 0, 1, 1}, 0, 4);    // drawn by nothing here
+        update(scene, renderables, sync);
+        int id = sync.firstMaterialOf(node);
+        Material made = materials.material(id);
+        MetallicRoughnessParameters p = (MetallicRoughnessParameters) made.parameters();
+        assertThat(p.baseColor()).isEqualTo(new Color(1, 0, 0, 1));
+        assertThat(p.roughness()).isEqualTo(0.3f);
+        TextureTransformParameters converted = made.features().stream()
+            .filter(f -> f instanceof TextureTransformParameters).map(f -> (TextureTransformParameters) f)
+            .findFirst().orElseThrow();
+        int baseSlot = TextureSampler.transformOf(p.baseColorTexture());
+        int emissiveSlot = TextureSampler.transformOf(p.emissiveTexture());
+        assertThat(baseSlot).as("its own").isNotEqualTo(emissiveSlot).isPositive();
+        assertThat(TextureSampler.transformOf(p.normalTexture())).as("animated from no transform").isPositive();
+        assertThat(converted.transform1()).isEqualTo(new Vec4(0.25, 0, 1, 1));
+        // In place: the table changes, the material as set does not
+        resources.animate(lamp, "baseColor", new double[] {0, 1, 0, 1}, 0, 4);
+        resources.animate(lamp, "baseColor", new double[] {0, 1, 0, 1}, 0, 4); // unchanged
+        resources.animate(lamp, "clearcoat:strength", new double[] {0.9}, 0, 1);
+        resources.animate(lamp, "roughness", new double[] {2}, 0, 1);            // out of range: not written
+        resources.animate(lamp, "baseColorTextureOffset", new double[] {0.75, 0.5}, 0, 2);
+        resources.animate(lamp, "normalTextureRotation", new double[] {1.5}, 0, 1);
+        resources.animate(lamp, "clearcoat:normalTextureScale", new double[] {4, 5}, 0, 2);
+        resources.animate(lamp, "flakes", new double[] {2}, 0, 1);
+        assertThat(materials.material(id)).isSameAs(made);
+        assertThat(materials.value(id, MetallicRoughnessParameters.BASE_COLOR, 1)).isEqualTo(1);
+        assertThat(materials.value(id, MetallicRoughnessParameters.BASE_COLOR, 0)).isZero();
+        assertThat(materials.value(id, ClearcoatParameters.STRENGTH, 0)).isEqualTo(0.9f);
+        assertThat(materials.value(id, MetallicRoughnessParameters.ROUGHNESS, 0)).isEqualTo(0.3f);
+        MaterialField[] slots = {TextureTransformParameters.TRANSFORM1, TextureTransformParameters.TRANSFORM2,
+            TextureTransformParameters.TRANSFORM3, TextureTransformParameters.TRANSFORM4};
+        assertThat(materials.value(id, slots[baseSlot - 1], 0)).isEqualTo(0.75f);
+        assertThat(materials.value(id, slots[baseSlot - 1], 1)).isEqualTo(0.5f);
+        assertThat(materials.value(id, slots[emissiveSlot - 1], 0)).as("not moved with it").isEqualTo(0.5f);
+        int normalSlot = TextureSampler.transformOf(p.normalTexture());
+        assertThat(materials.value(id, TextureTransformParameters.ROTATIONS1TO4, normalSlot - 1)).isEqualTo(1.5f);
+        ClearcoatParameters coat = made.features().stream().filter(f -> f instanceof ClearcoatParameters)
+            .map(f -> (ClearcoatParameters) f).findFirst().orElseThrow();
+        int coatSlot = TextureSampler.transformOf(coat.normalTexture());
+        assertThat(materials.value(id, slots[coatSlot - 1], 2)).isEqualTo(4);
+        assertThat(materials.value(id, slots[coatSlot - 1], 3)).isEqualTo(5);
+        assertThatIllegalArgumentException().isThrownBy(() -> materials.value(id, ClearcoatParameters.STRENGTH, 1));
+        assertThat(materials.value(id, MetallicRoughnessParameters.BASE_COLOR_TEXTURE, 0)).isEqualTo(
+            p.baseColorTexture());
+        // Through animators' pointer sink: materials only; another renderable of it converts with the values
+        AnimationPointer color = new AnimationPointer("/materials/0/pbrMetallicRoughness/baseColorFactor",
+            AnimationPointer.Target.MATERIAL, 0, "baseColor", lamp, 1, 1, 1, 1);
+        AnimationPointer intensity = new AnimationPointer("/extensions/KHR_lights_punctual/lights/0/intensity",
+            AnimationPointer.Target.LIGHT, 0, "intensity", null, 1);
+        AnimationPointer mesh = new AnimationPointer("/meshes/0", AnimationPointer.Target.MATERIAL, 0, "baseColor",
+            SQUARE, 1);
+        resources.pointerSink().value(null, color, new double[] {0, 0, 1, 1}, 0, 4);
+        resources.pointerSink().value(null, intensity, new double[] {5}, 0, 1);
+        resources.pointerSink().value(null, mesh, new double[] {5}, 0, 1);
+        assertThat(materials.value(id, MetallicRoughnessParameters.BASE_COLOR, 2)).isEqualTo(1);
+        long second = facing(scene, 1, 0, -3);
+        renderables.set(second, SQUARE, List.of(lamp, RED));
+        update(scene, renderables, sync);
+        assertThat(((MetallicRoughnessParameters) materials.material(sync.firstMaterialOf(second)).parameters())
+            .baseColor()).isEqualTo(new Color(0, 0, 1, 1));
+        double[] values = new double[4];
+        int[] frame = {0};
+        com.truesim.testing.AllocationAssertions.assertAllocationFree(() -> {
+            values[0] = 0.01 * (frame[0]++ % 50);
+            resources.animate(lamp, "baseColor", values, 0, 4);
+            resources.animate(lamp, "baseColorTextureOffset", values, 0, 2);
+        });
+        // Let go of, it is forgotten
+        renderables.remove(node);
+        renderables.remove(second);
+        update(scene, renderables, sync);
+        resources.animate(lamp, "baseColor", new double[] {1, 1, 1, 1}, 0, 4);
     }
 
     @Test
