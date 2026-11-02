@@ -1022,6 +1022,40 @@ Renderables keep their instance ids while drawn, are on their nodes' layers and 
 materials' masked alpha and double-sidedness follow (blended alpha draws opaque until transparents come). Not
 followed yet: lights and cameras from the scene.
 
+## Particles
+
+`engine-render`'s `particles` package simulates scene-effects' effects (`EffectData`, played in `Effects`, spawned by
+`EffectRuntime`) on the GPU, as the scene repository's `docs/effects.md` designs them. Every GPU emitter of a playing
+effect is an emitter instance with a range of the shared `ParticlePool` (two copies of 64-byte particles, the layout
+generated from `particles/particle.slang`), reserved from its capacity in chunks of 64 slots. Each effect's emitters
+are encoded once into module programs and curve keys (`ModulePrograms`), which one interpreting kernel runs.
+
+```java
+Particles particles = new Particles(device, graph.frameSlots(), 64 << 20);   // a pool budget in bytes
+graph.add(new ParticleSimulation(particles));        // provides ParticleKeys.PARTICLES and STATE
+// each frame, after beginFrame:
+runtime.update(seconds);
+particles.update(effects, runtime.spawns());
+```
+
+- **A frame's simulation** (`ParticleSimulation`, on the graphics queue): count the survivors of each chunk, scan
+  them per emitter, update them (forces integrated exactly, attributes over life from curve keys kept in group-shared
+  memory per chunk) and copy them in order into the other half of the pool, clamp each emitter's spawns to its room
+  (overflow counted), spawn the newborn a thread each from the spawn records (placed along the emitter's motion by
+  birth time), then keep the counts. Spawn order is kept across chunks; values depend only on seeds, never on slots,
+  threads or atomics.
+- **The same as the Java reference:** the kernel runs scene-effects' `CpuSimulation` modules with the same hash,
+  salts and order; the tests run each module's asset as a GPU and a CPU emitter side by side and compare particle by
+  particle, and check the hash against scene-effects' `hash-vectors.csv`.
+- **World and local space:** world-space particles are float offsets from their effect's origin (two floats per axis
+  on the GPU); local-space ones live in the emitter's frame.
+- **Statistics** (alive, spawned, dropped; per instance and in all) come back through a readback a few frames late,
+  for budgets and debugging.
+
+A million particles update in 0.27 ms on an RX 9070 XT under gravity and drag; 8 curves over life add 0.15 ms, whether
+they have 2 or 8 keys, evenly spaced or not, so the cost is the attributes kept from birth, not the key search
+(`ParticleBenchmark`, 2026-11-02).
+
 ## VR
 
 `engine-xr` drives a headset through its OpenXR runtime (SteamVR, Meta's, Monado), behind the engine's own API: no
