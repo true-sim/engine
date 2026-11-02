@@ -21,11 +21,13 @@ import java.util.Objects;
 /**
  * The frame's particle simulation (effects.md §2.4): a frame technique, once a frame for every view, providing the pool
  * ({@link ParticleKeys#PARTICLES}) and the emitter instances' state ({@link ParticleKeys#STATE}). Its passes, on the
- * graphics queue: "particle count" (survivors per chunk), "particle scan" (their slots, per emitter), "particle update"
+ * graphics queue (or the async compute queue, {@link #async}): "particle count" (survivors per chunk), "particle scan" (their slots, per emitter), "particle update"
  * (the updaters, survivors copied in order into the other half), "particle spawn args" (spawns within room, overflow
  * counted), "particle spawn" (the newborn, indirect), "particle upload" (CPU emitters' particles into their ranges),
  * "particle args" (counts for the next frame), "particle ribbons" (ribbons of several strands ordered by strand and
- * spawn index), and the statistics' readback. A frame {@link Particles#update} was not called in simulates nothing.
+ * spawn index; ribbons per parent by "particle ribbon keys", a radix sort and "particle ribbon order"), and the
+ * statistics' readback. A frame {@link Particles#update} was not called in simulates nothing. With a game's own modules
+ * ({@link Particles#modules}) the update and spawn take its kernel variant.
  * With mesh shapes ({@link Particles#meshes}) the spawn reads the renderer's geometry pool, so it runs after the scene
  * upload and the deformation pass; with mesh particles, "particle instances" writes their instances into the scene's
  * range the GPU writes, and the whole simulation runs before the scene is culled (effects.md §2.4's early group).

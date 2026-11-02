@@ -69,7 +69,7 @@ import java.util.Objects;
  * graph.add(new ParticleSimulation(particles));
  * // each frame, while it records (after beginFrame):
  * runtime.update(seconds);
- * particles.update(effects, runtime.spawns());
+ * particles.update(runtime, null);             // or (effects, runtime.spawns()): without levels of detail, placements
  * }</pre>
  *
  * <p>World-space emitters' particles are float offsets from their effect's origin (its position when it started, two
