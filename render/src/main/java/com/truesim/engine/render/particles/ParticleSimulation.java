@@ -83,10 +83,8 @@ public final class ParticleSimulation implements Technique {
             });
         ParticlePush updatePush = new ParticlePush();
         GraphBuilder.PassBuilder updatePass = g.pass("particle update");
-        GraphBuilder.PassBuilder spawnPass = g.pass("particle spawn");
         if (traced) {
             updatePass.read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ);
-            spawnPass.read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ);
         }
         updatePass.read(b.chunkCounts(), BufferAccess.STORAGE_READ)
             .read(b.depth(), BufferAccess.STORAGE_READ)
@@ -106,6 +104,10 @@ public final class ParticleSimulation implements Technique {
                 }
             });
         ParticlePush spawnPush = new ParticlePush();
+        GraphBuilder.PassBuilder spawnPass = g.pass("particle spawn"); // after the spawn args, as declared
+        if (traced) {
+            spawnPass.read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ);
+        }
         spawnPass.read(b.dispatch(), BufferAccess.INDIRECT).read(b.dispatch(), BufferAccess.STORAGE_READ)
             .read(b.depth(), BufferAccess.STORAGE_READ)
             .write(b.particles(), BufferAccess.STORAGE_WRITE).write(b.side(), BufferAccess.STORAGE_WRITE)
