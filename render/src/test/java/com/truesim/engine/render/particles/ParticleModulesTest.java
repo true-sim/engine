@@ -2,6 +2,7 @@ package com.truesim.engine.render.particles;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 import static org.assertj.core.api.Assumptions.assumeThat;
@@ -25,7 +26,6 @@ import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
-import com.truesim.engine.render.layout.ParticleConstants;
 import com.truesim.engine.render.layout.ParticleLayout;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -35,12 +35,15 @@ import com.truesim.engine.vulkan.VulkanException;
 import com.truesim.engine.vulkan.VulkanInstance;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.effects.Bind;
+import com.truesim.scene.effects.CpuSimulation;
 import com.truesim.scene.effects.EffectData;
 import com.truesim.scene.effects.EffectRuntime;
 import com.truesim.scene.effects.Effects;
+import com.truesim.scene.effects.Forces;
 import com.truesim.scene.effects.Init;
 import com.truesim.scene.effects.InvalidEffectException;
 import com.truesim.scene.effects.Module;
+import com.truesim.scene.effects.ModuleRegistry;
 import com.truesim.scene.effects.ModuleType;
 import com.truesim.scene.effects.Spawn;
 import com.truesim.scene.effects.Target;
@@ -53,19 +56,16 @@ import org.junit.jupiter.api.Test;
 import org.lwjgl.vulkan.VkBufferCopy;
 
 /**
- * A game's own particle modules (effects step 20), as {@code CustomPassTest} does for passes: a force and an
- * initializer in a kernel variant of the test's (test/particlegust.slang), registered with {@link ParticleModules}, and
- * a technique of the game's modifying the particles ({@code modify(PARTICLES)}) after the simulation, before anything
- * reads them.
+ * A game's own particle modules (effects step 20, E24), as {@code CustomPassTest} does for passes: a force (with a Java
+ * twin) and an initializer of the test's (test/particlegust.slang), which the build collects with the built-in modules
+ * into the test's kernel variants and {@link TestBuiltInModules}, and a technique of the game's modifying the
+ * particles ({@code modify(PARTICLES)}) after the simulation, before anything reads them.
  */
 class ParticleModulesTest {
 
     private static final long FRAME = 16_667;
     private static final Key<Image> PROBE = Key.image("test.moduleProbe");
-    static final ModuleType GUST = ModuleType.builder("game.gust", ModuleType.Stage.UPDATE).targets(Target.GPU)
-        .field("strength", Bind.constant(1)).build();
-    static final ModuleType TINT = ModuleType.builder("game.tint", ModuleType.Stage.INIT).targets(Target.GPU)
-        .field("blue", Bind.constant(1)).build();
+    private final ParticleModules modules = TestBuiltInModules.MODULES;
 
     private VulkanInstance instance;
     private VulkanDevice device;
@@ -76,7 +76,7 @@ class ParticleModulesTest {
     private final SceneGraph scene = new SceneGraph(new ChangeClock());
     private final Effects effects = new Effects(scene);
     private final EffectRuntime runtime = new EffectRuntime(effects);
-    private final ParticleModules modules = new ParticleModules("shaders/test/particlegust.spv", List.of(GUST, TINT));
+    private final CpuSimulation cpu = new CpuSimulation(runtime, null);
 
     @BeforeEach
     void start() {
@@ -175,8 +175,9 @@ class ParticleModulesTest {
     private void frames(int n) {
         for (int f = 0; f < n; f++) {
             runtime.update(FRAME);
+            cpu.update();
             graph.beginFrame();
-            particles.update(runtime, null);
+            particles.update(runtime, cpu);
             graph.submit(0, 0);
         }
         device.waitIdle();
@@ -203,22 +204,55 @@ class ParticleModulesTest {
         assertThat((double) read(first, 0, ParticleLayout.VELOCITY)).isCloseTo(2 * t, within(0.02));
         assertThat(read(first, 0, ParticleLayout.COLOR + 8)).as("tinted at birth").isEqualTo(0.5f);
         assertThat(read(first, 0, ParticleLayout.COLOR)).isZero();
-        assertThat(modules.registry().type("game.gust")).isEqualTo(GUST);
-        assertThat(modules.indexOf("game.tint")).isEqualTo(1);
-        assertThat(modules.indexOf("nothing")).isEqualTo(-1);
+        // Generated: the built-in modules first, then the test's, in the order of their declarations
+        int gust = modules.opcode("game.gust");
+        assertThat(gust).isEqualTo(BuiltInModules.MODULES.names().size());
+        assertThat(modules.opcode("game.tint")).isEqualTo(gust + 1);
+        assertThat(modules.opcode("nothing")).isEqualTo(-1);
+        assertThat(modules.names().subList(0, gust)).isEqualTo(BuiltInModules.MODULES.names());
+        assertThat(modules.stages(gust)).isEqualTo(ParticleModules.STAGE_UPDATE);
+        assertThat(modules.stages(gust + 1)).isEqualTo(ParticleModules.STAGE_INIT);
+        ModuleType type = modules.registry().type("game.gust");
+        assertThat(type.fields().get("strength").fallback()).isEqualTo(Bind.constant(1));
+        assertThat(type.twin()).isInstanceOf(GustTwin.class);
+        assertThat(modules.registry().type("game.tint").runsOn(Target.CPU)).as("no twin: GPU only").isFalse();
+        assertThat(modules.shader(true)).isEqualTo("shaders/particle-modules/TestBuiltInModulesRays.spv");
+        assertThat(BuiltInModules.MODULES.shader(false)).as("engine-render's own kernels").isNull();
+    }
+
+    @Test
+    void aJavaTwinMovesCpuEmittersAsTheGpuDoes() {
+        EffectData data = EffectData.builder()
+            .emitter("gpu", e -> e.spawn(Spawn.burst(0, 1)).init(Init.lifetime(100))
+                .update(Module.of("game.gust").with("strength", Bind.constant(2))))
+            .emitter("cpu", e -> e.target(Target.CPU).spawn(Spawn.burst(0, 1)).init(Init.lifetime(100))
+                .update(Module.of("game.gust").with("strength", Bind.constant(2))))
+            .build(modules.registry());
+        long effect = effects.play(data, 0, 0, 0).id();
+        frames(30);
+        float gpu = read(particles.first(effect, 0), 0, ParticleLayout.POSITION);
+        float onCpu = read(particles.first(effect, 1), 0, ParticleLayout.POSITION);
+        assertThat(gpu).isGreaterThan(0.1f);
+        assertThat((double) onCpu).isCloseTo(gpu, within(1e-4));
     }
 
     @Test
     void effectsNamingThemNeedTheirRegistryAndModulesTheirFieldsFew() {
         assertThatThrownBy(() -> EffectData.builder().emitter("e", e -> e.spawn(Spawn.burst(0, 1))
             .update(Module.of("game.gust"))).build()).isInstanceOf(InvalidEffectException.class);
-        ModuleType.Builder many = ModuleType.builder("game.many", ModuleType.Stage.UPDATE);
-        for (int f = 0; f <= ParticleModules.MAX_FIELDS; f++) {
-            many.field("f" + f, Bind.constant(0));
+        // engine-render's built-in modules, as their Slang declares them, are scene-effects' built-in ones
+        for (ModuleType type : BuiltInModules.OWN) {
+            assertThat(type).isEqualTo(ModuleRegistry.BUILT_IN.type(type.name()));
         }
-        ModuleType tooMany = many.build();
-        assertThatIllegalArgumentException().isThrownBy(() -> new ParticleModules("x.spv", List.of(tooMany)));
+        assertThat(BuiltInModules.MODULES.registry().names()).isEqualTo(ModuleRegistry.BUILT_IN.names());
+        assertThat(BuiltInModules.MODULES.types()).isEqualTo(BuiltInModules.OWN);
+        ModuleType wrong = ModuleType.builder(Forces.GRAVITY, ModuleType.Stage.UPDATE).build();
+        assertThatIllegalStateException().isThrownBy(() -> ParticleModules.of("", new String[] {Forces.GRAVITY},
+            new int[] {ParticleModules.STAGE_FORCE}, List.of(List.of(wrong)))).withMessageContaining("disagrees");
+        assertThatIllegalArgumentException().isThrownBy(() -> ParticleModules.of("", new String[] {"a"}, new int[0],
+            List.of()));
         assertThat(particles.modules(null)).isSameAs(particles);
+        assertThat(particles.modules()).isSameAs(BuiltInModules.MODULES);
     }
 
     @Test
@@ -231,6 +265,5 @@ class ParticleModulesTest {
         int first = particles.first(effect, 0);
         assertThat(read(first, 0, ParticleLayout.COLOR + 12)).as("modified").isEqualTo(0.25f);
         assertThat(read(first, 1, ParticleLayout.COLOR + 12)).as("as simulated").isEqualTo(1);
-        assertThat(ParticleConstants.OP_PLUGIN).isEqualTo(64);
     }
 }

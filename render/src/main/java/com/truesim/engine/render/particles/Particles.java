@@ -263,7 +263,7 @@ public final class Particles implements AutoCloseable {
     private final ParticleWriter[] writers;
     private final CpuEmitters cpuEmitters;
     private CpuSimulation simulation;
-    private ParticleModules modules;
+    private ParticleModules modules = BuiltInModules.MODULES;
     private GpuBuffer previousInstances;
     private ExternalBuffer previousImport;
     private EffectRuntime runtime; // the update's: levels of detail, drawn fractions, placements' shares
@@ -1638,21 +1638,18 @@ public final class Particles implements AutoCloseable {
     }
 
     /**
-     * Lets effects name the game's own modules of {@code modules} (step 20; null: built-in ones only): effects encoded
-     * from now on, simulated by its kernel variant, which then takes the place of the rays variant too (its plugin
-     * modules and ray collision do not mix; chains fall back). Set before effects play.
+     * Lets effects name the modules of {@code modules} (E24: a game's generated listing, with the built-in modules and
+     * its own; null: {@link BuiltInModules#MODULES}): effects encoded from now on, simulated by its kernel variants
+     * (with ray collision where {@link #rays} allows it). Set before effects play.
      */
     public Particles modules(ParticleModules modules) {
-        this.modules = modules;
-        programs.plugins(modules);
-        if (modules != null) {
-            programs.rays(false);
-        }
+        this.modules = modules == null ? BuiltInModules.MODULES : modules;
+        programs.modules(this.modules);
         setup++;
         return this;
     }
 
-    /** The game's own modules, or null. */
+    /** The kernel's modules. */
     ParticleModules modules() {
         return modules;
     }

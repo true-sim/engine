@@ -1,54 +1,33 @@
-// For tests: a game's own particle modules (effects step 20) in a kernel variant of its own. "game.gust" pushes
-// particles along +X by its strength in metres per second squared; "game.tint" turns newborn blue. The simulation's
-// entry points ([shader("compute")] countMain, updateMain, spawnMain, ...) come from the include.
-#define PARTICLE_MODULES
+// For tests: a game's own particle modules (effects.md E24), which the build collects with the built-in ones into
+// kernel variants of the test's (particle-modules/TestBuiltInModules.slang and its rays variant) and lists in
+// TestBuiltInModules. "game.gust" pushes particles along +X by its strength in metres per second squared, on the CPU
+// too (its Java twin, GustTwin); "game.tint" turns newborn blue.
+module particlegust;
+
 import particles.particle;
 
-/** Pushes particles along +X: value 0, its strength. */
-struct Gust : IParticleModule
+/** Pushes particles along +X by its strength, in m/s^2. */
+[ParticleModule("game.gust")]
+[ModuleTwin("com.truesim.engine.render.particles.GustTwin")]
+public struct Gust
 {
-    static void init(inout Particle p, ParticleModuleInput in)
-    {
-    }
+    public float strength = 1;
 
-    static void update(inout Particle p, ParticleModuleInput in)
+    public void update(inout ParticleStep s, inout Particle p)
     {
-        p.velocity.x += in.values[0] * in.h;
-        p.position.x += 0.5 * in.values[0] * in.h * in.h;
+        p.velocity.x += strength * s.h;
+        p.position.x += 0.5 * strength * s.h * s.h;
     }
 };
 
-/** Newborn blue, by the share given: value 0. */
-struct Tint : IParticleModule
+/** Newborn blue, by the share given. */
+[ParticleModule("game.tint")]
+public struct Tint
 {
-    static void init(inout Particle p, ParticleModuleInput in)
-    {
-        p.color = float4(0, 0, in.values[0], 1);
-    }
+    public float blue = 1;
 
-    static void update(inout Particle p, ParticleModuleInput in)
+    public void init(inout ParticleInit s, inout Particle p)
     {
+        p.color = float4(0, 0, blue, 1);
     }
 };
-
-/** The game's modules by their index: as ParticleModules lists their types. */
-struct ParticleModules
-{
-    static void init(uint i, inout Particle p, ParticleModuleInput in)
-    {
-        if (i == 1)
-        {
-            Tint.init(p, in);
-        }
-    }
-
-    static void update(uint i, inout Particle p, ParticleModuleInput in)
-    {
-        if (i == 0)
-        {
-            Gust.update(p, in);
-        }
-    }
-};
-
-#include "particles/simulate.slang"

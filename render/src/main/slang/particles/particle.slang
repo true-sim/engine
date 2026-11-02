@@ -261,30 +261,110 @@ public struct ParticleDrawRecord
     public uint64_t lights;        // LightListHeader*: the view's light list, for lit renderers; or 0: the sun
 };
 
-/** The most float fields a plugin module reads (ParticleModules.MAX_FIELDS). */
-public static const uint PLUGIN_FIELDS = 8;
-
-/** What a plugin module (effects step 20) reads beside its particle: its fields evaluated, the step and its frame. */
-public struct ParticleModuleInput
-{
-    public float values[8];        // its float fields, in alphabetical order of their names
-    public float h;                // the step, in seconds (0 for initializers)
-    public float time;             // its effect's time, in seconds
-    public uint salt;              // its salts' first: random(p.seed, salt + i) draws its own values
-    public bool local;             // the particle lives in its emitter's frame
-    public float3 down;            // world down in the particle's frame
-    public float3 wind;            // the world's wind in the particle's frame, m/s
-};
+// ---------------------------------------------------------------------------------------------- modules
 
 /**
- * A game's own particle module (effects step 20): an initializer (`init`, at birth) or updater (`update`, each step
- * after the built-in forces have moved the particle), dispatched by the game's kernel variant's ParticleModules type.
+ * A particle module (E24, effects.md): an initializer or updater the build collects into the one interpreting kernel.
+ * Its struct's fields are its parameters, in alphabetical order of their names: `float` a float binding, ModuleColor a
+ * color binding, ModuleCurve a curve over the particle's life and ModuleGradient a gradient over it (both read at its
+ * age), ModuleTexture an asset's sampled slot; each initializer is its fallback. Its functions are its stages, run in
+ * this order: `init(inout ParticleInit s, inout Particle p)` at birth; then each step `force(inout ParticleStep s,
+ * Particle p)` before the motion (forces summed into s.a and s.k), `after(inout ParticleStep s, inout Particle p)` after
+ * it, `collide(inout ParticleStep s, Particle p)` returning a ParticleHit (the first hit of the program ends the
+ * collision), `update(inout ParticleStep s, inout Particle p)` after the collision and `over(inout ParticleStep s,
+ * Particle p)` scaling the attributes from birth. A module's stages all run at birth or all each step.
  */
-public interface IParticleModule
+[__AttributeUsage(_AttributeTargets.Struct)]
+public struct ParticleModuleAttribute { string name; };
+
+/** A module needing a device capability (scene-effects' Capability, e.g. "RAY_QUERY"): only in its kernel variant. */
+[__AttributeUsage(_AttributeTargets.Struct)]
+public struct ModuleCapabilityAttribute { string capability; };
+
+/** A module CPU emitters may have too, simulated by `twin`, a Java class (scene-effects' ModuleTwin). */
+[__AttributeUsage(_AttributeTargets.Struct)]
+public struct ModuleTwinAttribute { string twin; };
+
+/** A module CPU emitters may have too, simulated by scene-effects' CpuSimulation itself. */
+[__AttributeUsage(_AttributeTargets.Struct)]
+public struct BuiltInTwinAttribute {};
+
+/** A field that is a color binding: the color for the particle. */
+public typealias ModuleColor = float4;
+/** A field that is a curve over the particle's life: its value at the particle's age. */
+public typealias ModuleCurve = float;
+/** A field that is a gradient over the particle's life: its color at the particle's age. */
+public typealias ModuleGradient = float4;
+/** A field that is an asset, a texture: its sampled slot, or NO_TEXTURE. */
+public typealias ModuleTexture = uint;
+
+/** What initializers read, and what they leave for the ones after them. */
+public struct ParticleInit
 {
-    static void init(inout Particle p, ParticleModuleInput in);
-    static void update(inout Particle p, ParticleModuleInput in);
+    public ParticleEmitter emitter;
+    public ParticleFrame* frame;   // the frame's emission sources (mesh and bone shapes)
+    public uint salt;              // the module's salts' first: its fields draw salt + field, its own draws salt + 8 on
+    public float3 direction;       // the shape's direction, which speed moves along
+    public float2 uv;              // the mesh shape's texture coordinates, for masks
+    public bool textured;          // whether there are any
+    public bool masked;            // a shape or mask left the particle out: born dead
+    public float4 color0;          // its color at birth, which gradients over life scale
+    public float size0;            // its size at birth, likewise
 };
+
+/** What updaters read and sum over a step. */
+public struct ParticleStep
+{
+    public ParticleEmitter emitter;
+    public ParticleFrame* frame;   // colliders, the height field, the collision depth, the top level
+    public uint salt;              // as ParticleInit's
+    public float h;                // the step, in seconds
+    public float3 center;          // where the emitter is in its particles' space
+    public float3 start;           // the particle's position at the step's start: forces act from there
+    public float3 a;               // force: the acceleration, integrated exactly with the drag
+    public float k;                // force: the linear drag coefficient
+    public bool kill;              // the particle dies after this step
+    public float3 from;            // collide: the move, in world axes about the origin
+    public float3 to;
+    public float4 color;           // over: the color and size from birth, scaled
+    public float size;
+    public bool colored;           // over: whether to write them
+    public bool sized;
+};
+
+/** Where a particle hit, in world axes about its emitter's origin, and how it responds. */
+public struct ParticleHit
+{
+    public bool hit;
+    public float3 contact;         // outside by its radius
+    public float3 normal;
+    public uint response;          // RESPONSE_*
+    public float friction;         // of the speed along the surface, the share lost
+    public float restitution;      // of the speed into it, the share bounced back
+};
+
+/** No hit. */
+public ParticleHit noHit()
+{
+    ParticleHit h;
+    h.hit = false;
+    h.contact = 0;
+    h.normal = float3(0, 1, 0);
+    h.response = RESPONSE_BOUNCE;
+    h.friction = 0;
+    h.restitution = 0;
+    return h;
+}
+
+/** A hit at `contact` with normal `normal`. */
+public ParticleHit hitAt(float3 contact, float3 normal)
+{
+    ParticleHit h = noHit();
+    h.hit = true;
+    h.contact = contact;
+    h.normal = normal;
+    return h;
+}
 
 /** Lightings: scene-effects' Renderer.Lighting, in order. */
 public static const uint LIGHTING_UNLIT = 0;
@@ -401,41 +481,6 @@ public static const uint RENDERER_WORDS = 28;
 /** A draw without a texture. */
 public static const uint NO_TEXTURE = 0xffffffffu;
 
-/** Module operations, as ModulePrograms encodes them: initializers, then updaters. */
-public static const uint OP_POINT = 0;
-public static const uint OP_SPHERE = 1;
-public static const uint OP_BOX = 2;
-public static const uint OP_CONE = 3;
-public static const uint OP_DISC = 4;
-public static const uint OP_LIFETIME = 5;
-public static const uint OP_SPEED = 6;
-public static const uint OP_VELOCITY = 7;
-public static const uint OP_SIZE = 8;
-public static const uint OP_COLOR = 9;
-public static const uint OP_GRAVITY = 10;
-public static const uint OP_DRAG = 11;
-public static const uint OP_OVER_SIZE = 12;
-public static const uint OP_OVER_COLOR = 13;
-public static const uint OP_WIND = 14;
-public static const uint OP_CURL = 15;
-public static const uint OP_VORTEX = 16;
-public static const uint OP_POINT_FORCE = 17;
-public static const uint OP_LINE = 18;
-public static const uint OP_ORBIT = 19;
-public static const uint OP_FIELD = 20;
-public static const uint OP_SPEED_LIMIT = 21;
-public static const uint OP_COLLIDERS = 22;
-public static const uint OP_HEIGHT = 23;
-public static const uint OP_DEPTH = 24;
-public static const uint OP_RAYS = 25;
-public static const uint OP_INHERIT = 26;
-public static const uint OP_MESH = 27;
-public static const uint OP_BONES = 28;
-public static const uint OP_MASK = 29;
-public static const uint OP_ROTATION = 30;
-public static const uint OP_FRAME = 31;
-/** Plugin modules (step 20): their opcodes from here on, in the order registered (ParticleModules). */
-public static const uint OP_PLUGIN = 64;
 /** Events: scene-effects' ParticleEvent.Kind, in order; an emitter's events follow its updaters, EVENT_WORDS each. */
 public static const uint EVENT_BIRTH = 0;
 public static const uint EVENT_DEATH = 1;
