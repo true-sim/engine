@@ -16,6 +16,7 @@ import com.truesim.engine.render.MaterialFeatures;
 import com.truesim.engine.render.MaterialType;
 import com.truesim.engine.render.MaterialValues;
 import com.truesim.engine.render.Materials;
+import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.TextureSampler;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.materials.TextureTransformParameters;
@@ -73,6 +74,10 @@ import org.slf4j.LoggerFactory;
  * world.update();                                                 // all of it drawn from the next frame
  * // a loading screen instead keeps drawing frames, updating the scenes, until resources.loaded()
  * }</pre>
+ *
+ * <p>Given a {@link RayTracing} over its pool ({@link #rayTracing}), every mesh it uploads gets a bottom level, built in
+ * frames, and every deformed copy a scene draws (skinned or morphing renderables) one of its own, refitted as it is
+ * posed: the scenes' instances are traced as they are drawn. Each leaves with its mesh.
  */
 public final class SceneResources implements AutoCloseable {
 
@@ -110,6 +115,9 @@ public final class SceneResources implements AutoCloseable {
     private TaskScheduler workerTasks; // the scheduler of the workers, which hands what they made over
     private int preparing; // meshes and textures being made ready on the workers
     private boolean closed;
+    private RayTracing rayTracing; // or null: no bottom levels
+    private java.util.function.ToIntFunction<MeshData> rayLevel;
+    private final Map<Integer, MeshData> copies = new HashMap<>(); // the scenes' deformed copies, by pool mesh
 
     /**
      * Hears what keeps a scene from drawing as its data says, which is otherwise only logged: games show it, count it
@@ -279,6 +287,78 @@ public final class SceneResources implements AutoCloseable {
 
     public Textures textures() {
         return textures;
+    }
+
+    /**
+     * Gives every mesh in the pool a bottom level in {@code rayTracing} (over this pool), from its finest detail level:
+     * the meshes uploaded already and those to come, deformed copies included. Null stops adding them; those made
+     * stay until their meshes leave.
+     */
+    public SceneResources rayTracing(RayTracing rayTracing) {
+        return rayTracing(rayTracing, mesh -> mesh.levels().size() - 1);
+    }
+
+    /**
+     * Like {@link #rayTracing(RayTracing)}, from the detail level {@code level} picks for each mesh (0 the coarsest, as
+     * {@link MeshData#levels()} orders them): a coarser one traces faster, for soft effects. Copies of one mesh share
+     * its first copy's level.
+     */
+    @AllowAllocation("set up rarely")
+    public SceneResources rayTracing(RayTracing rayTracing, java.util.function.ToIntFunction<MeshData> level) {
+        if (rayTracing != null && rayTracing.pool() != pool) {
+            throw new IllegalArgumentException("The ray tracing traces another pool");
+        }
+        this.rayLevel = Objects.requireNonNull(level, "level");
+        this.rayTracing = rayTracing;
+        if (rayTracing != null) {
+            for (Mesh mesh : meshes.values()) {
+                if (mesh.uploaded()) {
+                    trace(mesh.id, mesh.data);
+                }
+            }
+            for (Map.Entry<Integer, MeshData> copy : copies.entrySet()) {
+                traceCopy(copy.getKey(), copy.getValue());
+            }
+        }
+        return this;
+    }
+
+    /** The ray tracing its meshes get bottom levels in, or null. */
+    public RayTracing rayTracing() {
+        return rayTracing;
+    }
+
+    /** Pool mesh {@code id}, uploaded from {@code data}: a bottom level, with ray tracing, unless it has one. */
+    private void trace(int id, MeshData data) {
+        if (rayTracing != null && !rayTracing.bottomLevelAdded(id)) {
+            rayTracing.add(id, data, rayLevel.applyAsInt(data));
+        }
+    }
+
+    private void traceCopy(int copy, MeshData data) {
+        if (rayTracing != null && !rayTracing.bottomLevelAdded(copy)) {
+            rayTracing.addDeformed(copy, data, rayLevel.applyAsInt(data));
+        }
+    }
+
+    /**
+     * A copy of uploaded pool mesh {@code source} ({@code data}) for one renderable to deform, with {@code joints}
+     * joints posed by the pool's {@code Deformation}; with ray tracing, a bottom level of its own.
+     */
+    @AllowAllocation("a skinned renderable drawn or changed")
+    int addCopy(int source, int joints, MeshData data) {
+        int copy = pool.addDeformed(source);
+        pool.deformation().add(copy, joints, data);
+        copies.put(copy, data);
+        traceCopy(copy, data);
+        return copy;
+    }
+
+    /** Removes copy {@code copy} ({@link #addCopy}), its bottom level with it. */
+    @AllowAllocation("a skinned renderable dropped")
+    void removeCopy(int copy) {
+        copies.remove(copy);
+        pool.remove(copy);
     }
 
     /**
@@ -574,6 +654,7 @@ public final class SceneResources implements AutoCloseable {
             return;
         }
         mesh.id = id;
+        trace(id, mesh.data);
         for (int i = 0; i < mesh.users.size(); i++) {
             mesh.users.get(i).uploaded(mesh);
         }

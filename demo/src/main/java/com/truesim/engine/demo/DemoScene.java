@@ -8,6 +8,7 @@ import com.truesim.engine.render.Lights;
 import com.truesim.engine.render.Material;
 import com.truesim.engine.render.Materials;
 import com.truesim.engine.render.MeshletRenderer;
+import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.SceneGeometry;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.vulkan.FrameSlots;
@@ -19,7 +20,9 @@ import java.util.SplittableRandom;
  * What the demo draws: rolling terrain with rocks on it, some of them spinning (instances changing every frame), lit by
  * the sun and colored lights circling the middle (lights changing every frame). With
  * {@code -Dtruesim.demo.character=<path to the Khronos Fox.gltf>}, an animated fox stands among them
- * ({@link DemoCharacter}).
+ * ({@link DemoCharacter}). With ray tracing ({@link #DemoScene(VulkanDevice, FrameSlots, int, int, boolean)}), every
+ * mesh has a bottom level: the terrain and rock as added, the fox's and the crowd's through their scene resources, their
+ * skinned copies refitted as they move.
  */
 final class DemoScene implements AutoCloseable {
 
@@ -41,13 +44,28 @@ final class DemoScene implements AutoCloseable {
     private final int[] rockMaterials = new int[ROCKS];
     private final DemoCharacter character;
     private final FoxCrowd crowd;
+    private final RayTracing rayTracing; // or null
 
     DemoScene(VulkanDevice device, FrameSlots slots, int colorFormat, int depthFormat) {
+        this(device, slots, colorFormat, depthFormat, false);
+    }
+
+    /** The scene, with ray tracing where {@code rays} and the device has it. */
+    DemoScene(VulkanDevice device, FrameSlots slots, int colorFormat, int depthFormat, boolean rays) {
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 1 << 16, 8), slots);
+        rayTracing = rays && device.rayTracing() ? new RayTracing(device, pool, ROCKS + 16) : null;
+        if (rayTracing != null && Integer.getInteger("truesim.demo.rebuildEvery") != null) {
+            rayTracing.rebuildEvery(Integer.getInteger("truesim.demo.rebuildEvery")); // refits between builds
+        }
         System.out.println("Building meshes (cluster hierarchies)...");
         MeshData terrainMesh = DemoMeshes.terrain(TERRAIN_SIZE);
         int terrain = pool.add(terrainMesh);
-        rock = pool.add(DemoMeshes.rock(4));
+        MeshData rockMesh = DemoMeshes.rock(4);
+        rock = pool.add(rockMesh);
+        if (rayTracing != null) {
+            rayTracing.add(terrain, terrainMesh, terrainMesh.levels().size() - 1);
+            rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
+        }
         materials = new Materials(device, 64, slots);
         MetallicRoughnessParameters base = MetallicRoughnessParameters.DEFAULTS;
         int ground = materials.add(new Material(base.withBaseColor(new Color(0.35f, 0.45f, 0.25f, 1))
@@ -90,11 +108,11 @@ final class DemoScene implements AutoCloseable {
         String file = System.getProperty("truesim.demo.character");
         try {
             character = file == null ? null : new DemoCharacter(device, slots, pool, materials, scene,
-                java.nio.file.Path.of(file), CHARACTER_X, CHARACTER_Z);
+                java.nio.file.Path.of(file), CHARACTER_X, CHARACTER_Z, rayTracing);
             int foxes = Integer.getInteger("truesim.demo.foxes", 0);
             crowd = foxes == 0 ? null : new FoxCrowd(device, slots, pool, materials, scene, java.nio.file.Path.of(
                 System.getProperty("truesim.demo.crowd", file == null ? "Fox.gltf" : file)), foxes,
-                Boolean.getBoolean("truesim.demo.foxLod"), 30, 30);
+                Boolean.getBoolean("truesim.demo.foxLod"), 30, 30, rayTracing);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(e);
@@ -112,6 +130,11 @@ final class DemoScene implements AutoCloseable {
 
     Lights lights() {
         return lights;
+    }
+
+    /** Its ray tracing, or null without. */
+    RayTracing rayTracing() {
+        return rayTracing;
     }
 
     /** The world at {@code seconds}: rocks spun, lights moved. Before the frame records. */
@@ -167,6 +190,9 @@ final class DemoScene implements AutoCloseable {
         }
         lights.close();
         renderer.close();
+        if (rayTracing != null) {
+            rayTracing.close();
+        }
         scene.close();
         materials.close();
         pool.close();

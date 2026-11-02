@@ -63,8 +63,9 @@ public final class Commands {
     private static final int WAIT_FENCES = 32;
     private static final int RESET_FENCES = 33;
     private static final int PRESENT = 34;
+    private static final int BUILD_STRUCTURES = 35;
     // Immutable entries: a thread seeing an older one only wraps the address again.
-    private static final Fn[] FUNCTIONS = new Fn[35];
+    private static final Fn[] FUNCTIONS = new Fn[36];
 
     static {
         java.util.Arrays.fill(FUNCTIONS, NONE);
@@ -114,6 +115,8 @@ public final class Commands {
         handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
     private static final MethodHandle H_RESET_FENCES =
         handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle H_BUILD_STRUCTURES =
+        handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_LONG));
     private static final MethodHandle H_PRESENT = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
     private static final MethodHandle H_SUBMIT = LINKER.downcallHandle(
         FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_LONG));
@@ -404,6 +407,19 @@ public final class Commands {
             .vkCmdEndDebugUtilsLabelEXT;
         try {
             H_NONE.invokeExact(function(END_LABEL, address), commands.address());
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /**
+     * {@code vkCmdBuildAccelerationStructuresKHR}: {@code count} build infos at {@code infos}, and at {@code ranges} a
+     * pointer per info to its range infos. Devices with ray tracing only.
+     */
+    public static void buildAccelerationStructures(VkCommandBuffer commands, int count, long infos, long ranges) {
+        try {
+            H_BUILD_STRUCTURES.invokeExact(function(BUILD_STRUCTURES,
+                of(commands).vkCmdBuildAccelerationStructuresKHR), commands.address(), count, infos, ranges);
         } catch (Throwable e) {
             throw failed(e);
         }

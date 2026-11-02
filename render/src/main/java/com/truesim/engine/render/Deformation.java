@@ -72,6 +72,7 @@ public final class Deformation {
     private float[] bounds = new float[7 * 64];
     private boolean[] posed = new boolean[64];
     private boolean[] changed = new boolean[64]; // posed anew since its last skinning: skinned again
+    private int[] skins = new int[64]; // how many times it was skinned: ray tracing refits it when this changes
     // Morph targets by source mesh number, uploaded once while copies of it are added: their bytes' start in morphData
     // (offsets per vertex and one more, then the records) and how many copies use them. Ranges let go wait for the
     // frames that may read them.
@@ -138,6 +139,7 @@ public final class Deformation {
             bounds = Arrays.copyOf(bounds, 7 * length);
             posed = Arrays.copyOf(posed, length);
             changed = Arrays.copyOf(changed, length);
+            skins = Arrays.copyOf(skins, length);
         }
         int slotCount = Math.max(1, joints + (targets + MATRIX_FLOATS - 1) / MATRIX_FLOATS);
         long first = matrixRanges.allocate(slotCount, 1);
@@ -158,6 +160,7 @@ public final class Deformation {
         matrixSlots[copy] = slotCount;
         added[copy] = true;
         posed[copy] = false;
+        skins[copy] = 0;
         matrices.asSlice(4L * MATRIX_FLOATS * first, 4L * MATRIX_FLOATS * slotCount).fill((byte) 0); // weights 0
         if (copyCount == copies.length) {
             copies = Arrays.copyOf(copies, 2 * copyCount);
@@ -254,6 +257,31 @@ public final class Deformation {
     /** How many copies the frame recorded last skinned: those whose pose changed. */
     public int skinnedLastFrame() {
         return skinned;
+    }
+
+    /**
+     * How many times copy {@code copy} was skinned, in frames recorded so far: 0 while it draws as its source.
+     */
+    int skins(int copy) {
+        return copy < added.length && added[copy] ? skins[copy] : 0;
+    }
+
+    /**
+     * Whether copy {@code copy} has bounds: skinned in every frame from the one recorded after its first, its positions
+     * quantized in its box ({@link #boxMin}); before, they are its source's.
+     */
+    boolean posed(int copy) {
+        return copy < added.length && added[copy] && posed[copy];
+    }
+
+    /** Along {@code axis}, the corner of the box copy {@code copy} was last posed in ({@link #bounds}). */
+    float boxMin(int copy, int axis) {
+        return bounds[7 * copy + axis];
+    }
+
+    /** Along {@code axis}, the size of the box copy {@code copy} was last posed in. */
+    float boxExtent(int copy, int axis) {
+        return bounds[7 * copy + 3 + axis];
     }
 
     /** How many copies it poses. */
@@ -392,6 +420,7 @@ public final class Deformation {
             set(push, copy, matrixBase).vertices(meshlets);
             ctx.dispatch(spheres, push, (meshlets + 63) / 64);
             changed[copy] = false;
+            skins[copy]++;
         }
         // Everything after reads them: culling, drawing, ray tracing
         Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,

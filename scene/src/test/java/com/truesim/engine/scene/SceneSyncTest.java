@@ -54,6 +54,8 @@ import com.truesim.engine.scene.materials.Tinted;
 import com.truesim.engine.scene.materials.TintedParameters;
 import com.truesim.engine.render.Materials;
 import com.truesim.engine.render.MeshletRenderer;
+import com.truesim.engine.render.RayTracing;
+import com.truesim.engine.render.shadows.TopLevel;
 import com.truesim.engine.render.RenderView;
 import com.truesim.engine.render.SceneGeometry;
 import com.truesim.engine.render.SceneView;
@@ -145,6 +147,7 @@ class SceneSyncTest {
     private SceneResources resources;
     private final List<AutoCloseable> closing = new ArrayList<>();
     private final List<RenderView> cameraViews = new ArrayList<>(); // set to the camera every frame
+    private RayTracing tracing; // graphs made while set build its top level every frame
 
     @BeforeEach
     void start() {
@@ -292,6 +295,28 @@ class SceneSyncTest {
         }
     }
 
+    /** Builds the top level of a renderer's scene every frame, as a technique tracing rays does. */
+    private record Traced(RayTracing rayTracing, MeshletRenderer renderer) implements Technique {
+        @Override
+        public List<Key<?>> provides() {
+            return List.of();
+        }
+
+        @Override
+        public List<Key<?>> modifies() {
+            return List.of(Keys.SCENE_COLOR); // so it is built: what it adds is the top level
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image color = g.modify(Keys.SCENE_COLOR);
+            com.truesim.engine.graph.Buffer top = g.request(new TopLevel(rayTracing, renderer));
+            g.pass("trace").read(top, com.truesim.engine.graph.BufferAccess.ACCELERATION_STRUCTURE_READ).sideEffects()
+                .record(ctx -> { });
+            g.provide(Keys.SCENE_COLOR, color);
+        }
+    }
+
     /**
      * A graph drawing {@code sync}'s instances with a renderer of its own, in a rendering mode, reading every frame back;
      * its camera's sync is the last of {@link #cameraViews}, made with {@code options}.
@@ -317,6 +342,9 @@ class SceneSyncTest {
         ExternalImage output = new ExternalImage("target", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
         port.add(shading).add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+        if (tracing != null) {
+            port.add(new Traced(tracing, renderer));
+        }
         return graph;
     }
 
@@ -509,6 +537,92 @@ class SceneSyncTest {
         frame(List.of(graph), List.of(sync), camera);
         assertThat(pool.deformation().size()).isZero();
         assertThat(sync.instanceCount()).isZero();
+    }
+
+    @Test
+    void rayTracingTracesTheScenesMeshesAndPosedCopies() throws InterruptedException {
+        assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
+        tracing = closing(new RayTracing(device, pool, INSTANCES));
+        assumeThat(tracing.quantizedVertices()).as("copies' levels read quantized positions").isTrue();
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        GpuBuffer[] readbacks = {readback(), readback()};
+        FrameGraph graph = graph(sync, false, readbacks);
+        long still = facing(scene, 1, 0, -3);
+        renderables.set(still, SQUARE, List.of(RED));
+        long body = facing(scene, -1, 0, -3);
+        long left = scene.create(body);
+        long right = scene.create(body);
+        float[] identities = new float[32];
+        for (int i = 0; i < 4; i++) {
+            identities[5 * i] = 1;
+            identities[16 + 5 * i] = 1;
+        }
+        renderables.set(body, SKINNED, List.of(RED));
+        renderables.setSkin(body, new SkinBinding(new long[] {left, right}, identities));
+        settle(List.of(graph), List.of(sync));
+        int square = sync.meshOf(still);
+        int copy = copyOf(sync.meshOf(body));
+        assertThat(tracing.bottomLevelAdded(square)).as("drawn before ray tracing came").isFalse();
+        // Given later, it takes the meshes there and the copies; built in frames.
+        org.assertj.core.api.Assertions.assertThatNullPointerException()
+            .isThrownBy(() -> resources.rayTracing(tracing, null));
+        resources.rayTracing(tracing);
+        assertThat(resources.rayTracing()).isSameAs(tracing);
+        assertThat(tracing.bottomLevelAdded(square)).isTrue();
+        assertThat(tracing.bottomLevelAdded(sync.meshOf(body))).isTrue();
+        assertThat(tracing.bottomLevelAdded(copy)).isTrue();
+        resources.rayTracing(tracing); // again: nothing added twice
+        for (int frame = 0; frame < 12 && tracing.pendingBottomLevels() > 0; frame++) {
+            frame(List.of(graph), List.of(sync), camera);
+        }
+        assertThat(tracing.pendingBottomLevels()).isZero();
+        assertThat(tracing.hasBottomLevel(square)).isTrue();
+        assertThat(tracing.hasBottomLevel(copy)).isTrue();
+        // Its joints move: its level refitted after the skinning; still, none.
+        long refits = tracing.bottomLevelRefits();
+        scene.setTranslation(left, 2, 0, 0);
+        scene.setTranslation(right, 2, 0, 0);
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(tracing.bottomLevelRefits()).isEqualTo(refits + 1);
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(tracing.bottomLevelsUpdatedLastFrame()).isZero();
+        // Without its skin the copy leaves, its level with it; skinned again, a new copy has one from the start.
+        renderables.setSkin(body, null);
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(tracing.bottomLevelAdded(copy)).isFalse();
+        renderables.setSkin(body, new SkinBinding(new long[] {left, right}, identities));
+        frame(List.of(graph), List.of(sync), camera);
+        int again = copyOf(sync.meshOf(body));
+        assertThat(tracing.bottomLevelAdded(again)).isTrue();
+        for (int frame = 0; frame < 12 && tracing.pendingBottomLevels() > 0; frame++) {
+            frame(List.of(graph), List.of(sync), camera);
+        }
+        assertThat(tracing.hasBottomLevel(again)).isTrue();
+        // Meshes uploaded later get theirs too; leaving the pool, they go.
+        long late = facing(scene, 0, 1, -3);
+        renderables.set(late, SMALL, List.of(GREEN));
+        settle(List.of(graph), List.of(sync));
+        int small = sync.meshOf(late);
+        assertThat(tracing.bottomLevelAdded(small)).isTrue();
+        resources.rayTracing(null);
+        renderables.remove(late);
+        renderables.remove(body);
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(tracing.bottomLevelAdded(small)).isFalse();
+        assertThat(tracing.bottomLevelAdded(again)).isFalse();
+        device.waitIdle();
+    }
+
+    /** The pool's deformed copy of mesh {@code source}: the one there is. */
+    private int copyOf(int source) {
+        for (int mesh = 0; mesh < pool.meshSlots(); mesh++) {
+            if (pool.contains(mesh) && pool.deformedFrom(mesh) == source) {
+                return mesh;
+            }
+        }
+        throw new AssertionError("No copy of " + source);
     }
 
     /** A 2 x 2 square facing up whose morph target moves it 2 along x. */

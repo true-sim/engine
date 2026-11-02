@@ -19,7 +19,6 @@ import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_PIPELINE_STAGE_ACCELE
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
 import static org.lwjgl.vulkan.KHRAccelerationStructure.VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
-import static org.lwjgl.vulkan.KHRAccelerationStructure.nvkCmdBuildAccelerationStructuresKHR;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_READ_BIT;
@@ -61,6 +60,9 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  *   <li>a bottom-level acceleration structure per mesh ({@link #add}), built once from one of its detail levels,
  *       straight from the pool's quantized positions (the mesh's box as the build transform) where the GPU
  *       takes that vertex format, from decoded positions where not, then compacted;</li>
+ *   <li>one per deformed copy ({@link #addDeformed}), refittable: refitted after the deformation pass in each frame
+ *       that skinned the copy ({@link #updateBottomLevels}), and if asked built anew in place every
+ *       {@link #rebuildEvery} refits;</li>
  *   <li>a top-level one per scene, rebuilt on the GPU when its instances change ({@link #buildTopLevel}) from the
  *       scene's instance buffer by a compute pass: no work per instance on the CPU. It is relative to a world position, its
  *       {@link #origin(double, double, double) origin}: anything traces into it by subtracting that from its world
@@ -124,6 +126,7 @@ public final class RayTracing implements AutoCloseable {
         long builtMaterials; // the materials' version: which instances are masked
         long builtVersion;
         long builtBottoms;
+        long builtRefits; // the deformed copies' levels' changes
         int builtCount; // the instances of the last build: a refit keeps their number
         int refits; // since the last full build: refits loosen the tree, so a build comes every MAX_REFITS
         double builtX;
@@ -283,6 +286,11 @@ public final class RayTracing implements AutoCloseable {
         return tops.values().iterator().next();
     }
 
+    /** The geometry pool whose meshes it traces. */
+    public GeometryPool pool() {
+        return pool;
+    }
+
     /** Whether bottom levels read the pool's quantized positions as they are (else decoded copies). */
     public boolean quantizedVertices() {
         return structures.quantized();
@@ -353,6 +361,66 @@ public final class RayTracing implements AutoCloseable {
     /** Whether pool mesh {@code mesh} has a bottom level its instances are traced through. */
     public boolean hasBottomLevel(int mesh) {
         return bottoms.hasBottomLevel(mesh);
+    }
+
+    /** Whether pool mesh {@code mesh} has a bottom level, traced or on its way ({@link #add}, {@link #addDeformed}). */
+    public boolean bottomLevelAdded(int mesh) {
+        return bottoms.added(mesh);
+    }
+
+    /**
+     * Gives deformed copy {@code copy} ({@link GeometryPool#addDeformed}; {@code data} is its source's mesh) a bottom
+     * level of its own from detail level {@code level}, refittable, read straight from the copy's positions: built in
+     * the first frame its triangles are on the GPU, traced from the frame after that one finished, refitted in each
+     * frame that skins the copy, after the deformation pass and before top levels are built ({@code TopLevel} requests
+     * the pass that does it). Copies of one source share its triangles, the first copy's level. It leaves with the
+     * copy ({@link GeometryPool#remove}). Returns false, and adds nothing, on devices whose bottom levels cannot read
+     * the pool's quantized positions ({@link #quantizedVertices}): the copy's instances are left out of top levels.
+     */
+    @AllowAllocation("adding a copy")
+    public boolean addDeformed(int copy, MeshData data, int level) {
+        return bottoms.deformed().add(copy, data, level);
+    }
+
+    /**
+     * Records the deformed copies' bottom levels' builds and refits for the frame ({@link #addDeformed}), with
+     * barriers around them: in a pass after the deformation pass and before the top levels' builds, as
+     * {@code BottomLevelUpdates} adds. Copies already refitted for their last skinning record nothing, so passes of
+     * several scenes may call it. Allocates nothing, but for copies' first builds.
+     */
+    public void updateBottomLevels(VkCommandBuffer commands) {
+        bottoms.followPool();
+        bottoms.deformed().update(commands);
+    }
+
+    /**
+     * Refits of a deformed copy's bottom level between its builds in place: none at first (never rebuilt). A refit
+     * keeps the tree built for the pose of its build and moves its boxes to the vertices of now, so its error does not
+     * grow from refit to refit: it is the current pose's distance from the built one, which for a character cycling
+     * through clips near its bind pose stays small. For meshes deforming far from where they were built (a ragdoll
+     * lying down, large morphs), a build every so many refits restores the tree; builds cost far more than refits
+     * (1,000 Khronos foxes on an RX 9070 XT: refits 0.30 to 0.37 ms a frame; with a build every 120 refits, about 8 a
+     * frame, 0.57 to 0.63 ms), and the stereo benchmark showed no change in tracing it could tell from noise. At most
+     * 32 builds a frame: the rest wait, refitted. Copies made together rebuild in different frames.
+     */
+    public RayTracing rebuildEvery(int refits) {
+        bottoms.deformed().rebuildEvery(refits);
+        return this;
+    }
+
+    /** How many times deformed copies' bottom levels were refitted, of all copies. */
+    public long bottomLevelRefits() {
+        return bottoms.deformed().refits();
+    }
+
+    /** How many times deformed copies' bottom levels were built anew in place, after {@link #rebuildEvery} refits. */
+    public long bottomLevelRebuilds() {
+        return bottoms.deformed().rebuilds();
+    }
+
+    /** How many deformed copies' bottom levels the frame recorded last built, refitted or rebuilt. */
+    public int bottomLevelsUpdatedLastFrame() {
+        return bottoms.deformed().updatedLastFrame();
     }
 
     /** How many bottom levels are on their way: staged, building or compacting. */
@@ -433,11 +501,12 @@ public final class RayTracing implements AutoCloseable {
         long materials = scene.materials() == null ? 0 : scene.materials().version();
         boolean same = t.built && t.builtBottoms == bottoms.version() && originX == t.builtX && originY == t.builtY
             && originZ == t.builtZ && t.builtMaterials == materials;
-        if (same && scene.version() == t.builtVersion) {
+        long refitted = bottoms.deformed().changes();
+        if (same && scene.version() == t.builtVersion && refitted == t.builtRefits) {
             return; // nothing it was built from changed
         }
-        // Instances moved (or changed), the same number of them, the same bottom levels and origin: refitted, the tree
-        // kept, unless enough refits have loosened it. Else built anew.
+        // Instances moved (or changed), or bottom levels were refitted, the same number of instances, the same bottom
+        // levels and origin: refitted, the tree kept, unless enough refits have loosened it. Else built anew.
         boolean refit = same && count == t.builtCount && t.refits < MAX_REFITS;
         t.refits = refit ? t.refits + 1 : 0;
         topLevelRefits += refit ? 1 : 0;
@@ -445,6 +514,7 @@ public final class RayTracing implements AutoCloseable {
         t.builtCount = count;
         t.builtVersion = scene.version();
         t.builtBottoms = bottoms.version();
+        t.builtRefits = refitted;
         t.builtMaterials = materials;
         t.builtX = originX;
         t.builtY = originY;
@@ -461,6 +531,7 @@ public final class RayTracing implements AutoCloseable {
             memPutLong(push + InstancesPush.BOTTOM, bottoms.tableAddress());
             memPutLong(push + InstancesPush.MATERIALS, scene.materialsAddress()); // masked instances are not opaque
             memPutLong(push + InstancesPush.RECORDS, t.instancesAddress);
+            memPutLong(push + InstancesPush.EMPTY, bottoms.emptyAddress()); // left out, yet active: refits stay valid
             memPutInt(push + InstancesPush.COUNT, count);
             putOrigin(push + InstancesPush.ORIGIN_X, push + InstancesPush.ORIGIN_LOW_X, originX);
             putOrigin(push + InstancesPush.ORIGIN_Y, push + InstancesPush.ORIGIN_LOW_Y, originY);
@@ -506,7 +577,7 @@ public final class RayTracing implements AutoCloseable {
             memPutInt(range + VkAccelerationStructureBuildRangeInfoKHR.PRIMITIVECOUNT, count);
             long ranges = stack.nmalloc(8, 8);
             memPutAddress(ranges, range);
-            nvkCmdBuildAccelerationStructuresKHR(commands, 1, info, ranges);
+            Commands.buildAccelerationStructures(commands, 1, info, ranges);
         }
         if (!declared) {
             Barriers.memory(commands, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,

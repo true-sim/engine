@@ -38,7 +38,9 @@ import java.util.Map;
  * eye repeats). {@code ./gradlew :engine-demo:stereoBench}; {@code --args="visibility"} shades through the visibility
  * buffer, {@code shared} gives both eyes one set of shadow cascades, {@code rebuild} times what rebuilds cost the
  * render thread, {@code capture} writes frame 100 for RenderDoc (launched through {@code renderdoccmd capture}), {@code noshadows}
- * leaves the sun's cascades out.
+ * leaves the sun's cascades out, {@code rays} traces the sun's shadows instead (inline ray queries from visibility buffer
+ * shading, on devices with ray tracing): every mesh has a bottom level, skinned copies' refitted each frame they move
+ * (the pass "bottom level refits").
  */
 public final class StereoBench {
 
@@ -55,6 +57,8 @@ public final class StereoBench {
         boolean rebuilds = List.of(args).contains("rebuild"); // what a rebuild costs the render thread
         boolean capture = List.of(args).contains("capture"); // one frame for RenderDoc, launched by renderdoccmd
         boolean shadows = !List.of(args).contains("noshadows"); // without the sun's cascades: what they cost shading
+        boolean rays = List.of(args).contains("rays"); // the sun's shadows ray-traced
+        visibility |= rays; // shading that traces inline
         int color = VK_FORMAT_R16G16B16A16_SFLOAT;
         int depth = VK_FORMAT_D32_SFLOAT;
         try (VulkanInstance instance = VulkanInstance.builder().applicationName("stereo bench").surfaces(false)
@@ -62,7 +66,10 @@ public final class StereoBench {
                  .build();
              VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
              FrameGraph graph = new FrameGraph(device, 2).timings(true);
-             DemoScene world = new DemoScene(device, graph.frameSlots(), color, depth)) {
+             DemoScene world = new DemoScene(device, graph.frameSlots(), color, depth, rays)) {
+            if (rays && world.rayTracing() == null) {
+                throw new IllegalStateException("The device has no ray tracing");
+            }
             int usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
             List<AutoCloseable> owned = new ArrayList<>();
             List<GpuImage> targets = new ArrayList<>();
@@ -88,7 +95,10 @@ public final class StereoBench {
                 port.add(visibility ? new VisibilityBufferShading(world.geometry(), view, color, depth)
                         : new ClusteredForwardShading(world.geometry(), view, color, depth))
                     .add(new ClusteredLights(world.lights(), view));
-                if (shadows) {
+                if (rays) {
+                    port.add(new com.truesim.engine.render.shadows.InlineRayShadows(world.rayTracing(), view.view(),
+                        world.lights(), 0, 0));
+                } else if (shadows) {
                     port.add(shared ? (e == 0 ? sharedCascades : sharedCascades.share()) : add(cascades,
                         new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, view, 3, 2048,
                             ViewOptions.shadow(1 << 16, 1 << 22), 150)));
@@ -275,6 +285,9 @@ public final class StereoBench {
         }
         if (pass.startsWith("meshlet") || pass.startsWith("classic")) {
             return "camera draws (per eye)";
+        }
+        if (pass.startsWith("bottom level") || pass.startsWith("top level")) {
+            return "ray tracing structures";
         }
         if (pass.startsWith("light clusters")) {
             return "light clusters (per eye)";

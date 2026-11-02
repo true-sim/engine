@@ -89,6 +89,8 @@ final class BottomLevels {
     private final List<Pending> pending = new ArrayList<>();
     private final FrameSlots.FrameStart start = this::recordStart;
     private final java.util.function.IntConsumer forgetMesh = this::remove;
+    private final DeformedBottomLevels deformed; // the pool's deformed copies'
+    private final Structure empty; // one degenerate triangle: what instances without a level name
     private boolean closed;
 
     /** A bottom level on its way: inputs staged; built at a frame's start; compacted at a later one; then in place. */
@@ -141,10 +143,75 @@ final class BottomLevels {
         table = GpuBuffer.hostVisible(device, (long) BottomLevelLayout.BYTES * meshes,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
         table.memory().fill((byte) 0);
+        deformed = new DeformedBottomLevels(device, pool, structures, this);
+        empty = buildEmpty();
         pool.onRemove(forgetMesh);
         if (deferred) {
             slots.register(start);
         }
+    }
+
+    /**
+     * A level of one degenerate triangle, built once at setup (waited for): top levels name it for instances left out,
+     * which are then never inactive, as an instance turning inactive or active between a build and a refit is not
+     * allowed ("Any transition between the active and inactive states requires a full acceleration structure
+     * rebuild", the spec's acceleration structure update rules).
+     */
+    private Structure buildEmpty() {
+        int usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+            | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        try (MemoryStack stack = stackPush();
+             GpuBuffer vertices = GpuBuffer.hostVisible(device, 36, usage)) {
+            vertices.memory().fill((byte) 0);
+            VkAccelerationStructureGeometryKHR.Buffer geometry = VkAccelerationStructureGeometryKHR.calloc(1, stack)
+                .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR)
+                .geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR)
+                .flags(VK_GEOMETRY_OPAQUE_BIT_KHR);
+            geometry.geometry().triangles()
+                .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR)
+                .vertexFormat(VK_FORMAT_R32G32B32_SFLOAT)
+                .vertexStride(12)
+                .maxVertex(2)
+                .indexType(org.lwjgl.vulkan.KHRAccelerationStructure.VK_INDEX_TYPE_NONE_KHR);
+            geometry.geometry().triangles().vertexData().deviceAddress(vertices.deviceAddress());
+            VkAccelerationStructureBuildGeometryInfoKHR.Buffer info = VkAccelerationStructureBuildGeometryInfoKHR
+                .calloc(1, stack);
+            info.put(0, buildInfo(stack, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+                VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR, geometry));
+            VkAccelerationStructureBuildSizesInfoKHR sizes = structures.sizes(stack, info.get(0), 1);
+            Structure built = structures.create(sizes.accelerationStructureSize(),
+                VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
+            try (GpuBuffer scratch = structures.scratch(sizes.buildScratchSize())) {
+                info.get(0).dstAccelerationStructure(built.handle()).scratchData()
+                    .deviceAddress(structures.align(scratch.deviceAddress()));
+                VkAccelerationStructureBuildRangeInfoKHR.Buffer range = VkAccelerationStructureBuildRangeInfoKHR
+                    .calloc(1, stack).primitiveCount(1);
+                PointerBuffer ranges = stack.pointers(range.address());
+                device.submitAndWait(device.graphics(), commands ->
+                    vkCmdBuildAccelerationStructuresKHR(commands, info, ranges));
+            }
+            return built;
+        }
+    }
+
+    /** The address of the level instances without one of their own name: it holds nothing they could hit. */
+    long emptyAddress() {
+        return empty.address();
+    }
+
+    /** The deformed copies' levels. */
+    DeformedBottomLevels deformed() {
+        return deformed;
+    }
+
+    /** A level was added to the table or left it: top levels are built anew. */
+    void changed() {
+        version++;
+    }
+
+    /** Counts {@code delta} more bytes of levels. */
+    void addBytes(long delta) {
+        bytes += delta;
     }
 
     /** The table's address: a {@code BottomLevel} per pool mesh. It moves as the pool grows. */
@@ -191,7 +258,7 @@ final class BottomLevels {
         if (mesh >= bottom.length) {
             growMeshes();
         }
-        if (bottom[mesh] != null || pendingOf[mesh] != null) {
+        if (bottom[mesh] != null || pendingOf[mesh] != null || deformed.has(mesh)) {
             throw new IllegalStateException("Mesh " + mesh + " has a bottom level already");
         }
         if (deferred) {
@@ -203,7 +270,7 @@ final class BottomLevels {
         int firstMeshlet = chosen.firstMeshlet();
         int lastMeshlet = firstMeshlet + chosen.meshletCount() - 1;
         int firstIndex = data.meshletTriangleOffset(firstMeshlet);
-        describeBottom(mesh, data, chosen);
+        describe(mesh, data, chosen);
         int endIndex = data.meshletTriangleOffset(lastMeshlet) + 3 * data.meshletTriangleCount(lastMeshlet);
         int triangles = (endIndex - firstIndex) / 3;
         int usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
@@ -229,7 +296,7 @@ final class BottomLevels {
                 MemorySegment rows = transform.memory().asSlice(alignedOffset(transform), 48);
                 for (int axis = 0; axis < 3; axis++) {
                     for (int column = 0; column < 4; column++) {
-                        double value = column == axis ? data.boxExtent(axis) : column == 3 ? data.boxMin(axis) : 0;
+                        double value = column == axis ? scale(data.boxExtent(axis)) : column == 3 ? data.boxMin(axis) : 0;
                         rows.setAtIndex(ValueLayout.JAVA_FLOAT, 4L * axis + column, (float) value);
                     }
                 }
@@ -321,8 +388,23 @@ final class BottomLevels {
         }
     }
 
+    /**
+     * A build transform's scale for a box {@code extent} long: never 0, as the transform must be invertible
+     * (VUID-VkTransformMatrixKHR-matrix-03799) and a flat mesh's box has no height. Positions along such an axis are
+     * all at its corner, which any scale keeps.
+     */
+    static float scale(double extent) {
+        return (float) Math.max(extent, MIN_SCALE);
+    }
+
+    /** The least build transform scale: well above the smallest floats, so a transform of three is invertible. */
+    static final double MIN_SCALE = 1e-6;
+
     /** Mesh {@code mesh}'s bottom level's address in the table shaders read ({@code BottomLevel}), 0 for none. */
-    private void setBottom(int mesh, long address) {
+    void setBottom(int mesh, long address) {
+        if (mesh >= bottom.length) {
+            growMeshes();
+        }
         table.memory().set(ValueLayout.JAVA_LONG_UNALIGNED, (long) BottomLevelLayout.BYTES * mesh
             + BottomLevelLayout.ADDRESS, address);
     }
@@ -331,7 +413,10 @@ final class BottomLevels {
      * What rays alpha-testing mesh {@code mesh}'s triangles look up ({@code BottomLevel}): the level its bottom level
      * is built from, the triangle its first is, and how many submeshes (instance materials) its meshlets name.
      */
-    private void describeBottom(int mesh, MeshData data, MeshLevel level) {
+    void describe(int mesh, MeshData data, MeshLevel level) {
+        if (mesh >= bottom.length) {
+            growMeshes();
+        }
         int submeshes = 0;
         for (int m = level.firstMeshlet(); m < level.firstMeshlet() + level.meshletCount(); m++) {
             submeshes = Math.max(submeshes, data.meshletSubmesh(m) + 1);
@@ -349,7 +434,7 @@ final class BottomLevels {
     @AllowAllocation("building, once per mesh")
     private void addDeferred(int mesh, MeshData data, int level) {
         MeshLevel chosen = data.levels().get(level);
-        describeBottom(mesh, data, chosen);
+        describe(mesh, data, chosen);
         int firstMeshlet = chosen.firstMeshlet();
         int lastMeshlet = firstMeshlet + chosen.meshletCount() - 1;
         int firstIndex = data.meshletTriangleOffset(firstMeshlet);
@@ -375,7 +460,7 @@ final class BottomLevels {
             MemorySegment rows = transform.memory().asSlice(alignedOffset(transform), 48);
             for (int axis = 0; axis < 3; axis++) {
                 for (int column = 0; column < 4; column++) {
-                    double value = column == axis ? data.boxExtent(axis) : column == 3 ? data.boxMin(axis) : 0;
+                    double value = column == axis ? scale(data.boxExtent(axis)) : column == 3 ? data.boxMin(axis) : 0;
                     rows.setAtIndex(ValueLayout.JAVA_FLOAT, 4L * axis + column, (float) value);
                 }
             }
@@ -406,6 +491,7 @@ final class BottomLevels {
     /** As {@link RayTracing#remove} says. */
     @AllowAllocation("removing, once per mesh")
     void remove(int mesh) {
+        deformed.remove(mesh);
         if (mesh >= bottom.length) {
             return; // never added
         }
@@ -430,12 +516,18 @@ final class BottomLevels {
 
     /** Whether pool mesh {@code mesh} has a bottom level its instances are traced through. */
     boolean hasBottomLevel(int mesh) {
-        return mesh < bottom.length && bottom[mesh] != null;
+        return mesh >= 0 && mesh < bottom.length && bottom[mesh] != null || deformed.traced(mesh);
+    }
+
+    /** Whether pool mesh {@code mesh} has a bottom level, traced or on its way. */
+    boolean added(int mesh) {
+        return mesh >= 0 && mesh < bottom.length && (bottom[mesh] != null || pendingOf[mesh] != null)
+            || deformed.has(mesh);
     }
 
     /** How many bottom levels are on their way: staged, building or compacting. */
     int pendingBottomLevels() {
-        return pending.size();
+        return pending.size() + deformed.pending();
     }
 
     /**
@@ -617,6 +709,8 @@ final class BottomLevels {
             freeInputs(p);
         }
         pending.clear();
+        deformed.close();
+        structures.destroy(empty);
         pool.stopFollowing(forgetMesh);
         for (Structure structure : bottom) {
             if (structure != null) {

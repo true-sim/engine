@@ -7,6 +7,7 @@ import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.render.GeometryPool;
 import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.Materials;
+import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.scene.SceneResources;
 import com.truesim.engine.scene.SceneSync;
@@ -55,6 +56,7 @@ final class FoxCrowd implements AutoCloseable {
     private final Animators animators;
     private final SceneSync sync;
     private final GeometryPool pool;
+    private final RayTracing rayTracing; // or null
     private final Animator[] crowd;
     private final LookAt look;
     private final FabrikChain tail;
@@ -63,18 +65,25 @@ final class FoxCrowd implements AutoCloseable {
     private long animating;
     private long syncing;
     private long skinned;
+    private long refitted; // bottom levels built or refitted, with ray tracing
     private int timed;
     private int updates;
 
     /**
      * {@code count} foxes from {@code file} drawn into {@code gpu}; with {@code lod}, updated less often the further
-     * they are from ({@code eyeX}, {@code eyeZ}).
+     * they are from ({@code eyeX}, {@code eyeZ}); traced by {@code rayTracing}, if not null (its copies' bottom levels
+     * refitted as they are skinned).
      */
     FoxCrowd(VulkanDevice device, FrameSlots slots, GeometryPool pool, Materials materials, GpuScene gpu, Path file,
-        int count, boolean lod, double eyeX, double eyeZ) throws InterruptedException {
+        int count, boolean lod, double eyeX, double eyeZ,
+        RayTracing rayTracing) throws InterruptedException {
         this.pool = pool;
+        this.rayTracing = rayTracing;
         textures = new Textures(device, slots);
         resources = new SceneResources(cache, pool, materials, textures);
+        if (rayTracing != null) {
+            resources.rayTracing(rayTracing); // its meshes and skinned copies traced
+        }
         sync = new SceneSync(resources, renderables, gpu, jobs);
         animators = new Animators(scene, jobs);
         PathAssets paths = new PathAssets(cache);
@@ -170,6 +179,7 @@ final class FoxCrowd implements AutoCloseable {
     void recorded() {
         if (updates > 30) {
             skinned += pool.deformation().skinnedLastFrame();
+            refitted += rayTracing == null ? 0 : rayTracing.bottomLevelsUpdatedLastFrame();
         }
     }
 
@@ -177,8 +187,10 @@ final class FoxCrowd implements AutoCloseable {
     String report() {
         return String.format(java.util.Locale.ROOT, "Fox crowd, %d foxes: CPU per update %.3f ms animators (sampling,"
             + " blending, solvers, writing) + %.3f ms scene sync (joint matrices, bounds); GPU skinned %.0f copies per"
-            + " frame", crowd.length, animating / 1e6 / Math.max(1, timed), syncing / 1e6 / Math.max(1, timed),
-            skinned / (double) Math.max(1, timed));
+            + " frame%s", crowd.length, animating / 1e6 / Math.max(1, timed), syncing / 1e6 / Math.max(1, timed),
+            skinned / (double) Math.max(1, timed), rayTracing == null ? "" : String.format(java.util.Locale.ROOT,
+                "; ray tracing refitted %.0f bottom levels per frame (%d rebuilt in all)",
+                refitted / (double) Math.max(1, timed), rayTracing.bottomLevelRebuilds()));
     }
 
     @Override
