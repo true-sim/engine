@@ -11,6 +11,7 @@ import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.effects.Bind;
 import com.truesim.scene.effects.Collide;
+import com.truesim.scene.effects.ParticleEvent;
 import com.truesim.scene.effects.ParticleWorld;
 import com.truesim.scene.effects.Effect;
 import com.truesim.scene.effects.ColorGradient;
@@ -31,10 +32,10 @@ import com.truesim.scene.effects.Spawn;
  * (flames carried with it in its frame, sparks thrown off with its velocity, smoke left behind in the world), a
  * fountain of sparks with streaks of trails over a column of smoke, and an orb circling it with a ribbon behind and a
  * beam reaching it from the fountain (the beam's end is the orb's node), and two clouds of red and blue puffs through
- * each other, each drawn back to front, a swirl of motes in a vortex stirred by curl noise, and hail bouncing on the
- * terrain. Simulated on the GPU and drawn in every view given a {@code ParticleDraw}. With the fox ({@link #dust}), its
- * feet kick up dust on their foot-down events and its survey's flickering curve drives the torch's intensity, frame
- * by frame.
+ * each other, each drawn back to front, a swirl of motes in a vortex stirred by curl noise, hail bouncing on the
+ * terrain, and fireworks bursting on the death of a burst. Simulated on the GPU and drawn in every view given a {@code
+ * ParticleDraw}. With the fox ({@link #dust}), its feet kick up dust on their foot-down events and its survey's
+ * flickering curve drives the torch's intensity, frame by frame.
  */
 final class DemoEffects implements AutoCloseable {
 
@@ -142,6 +143,31 @@ final class DemoEffects implements AutoCloseable {
         .collide(Collide.height().bounce(0.45f).friction(0.25f))
         .render(Renderer.billboard(Renderer.Facing.POSITION))).build();
 
+    /** Fireworks: rockets bursting into stars on their death, the stars into sparkles on theirs (events). */
+    static final EffectData FIREWORKS = EffectData.builder()
+        .emitter("rockets", e -> e.spawn(Spawn.rate(1.2f)).init(Shape.disc(0.5f),
+                Init.lifetime(Bind.random(1.1f, 1.5f)),
+                Init.velocity(Bind.random(-1.5f, 1.5f), Bind.random(11, 14), Bind.random(-1.5f, 1.5f)),
+                Init.size(Bind.constant(0.12f)), Init.color(Bind.random(ColorGradient.builder()
+                    .linear(0, 4, 0.8f, 0.3f, 1).linear(0.33f, 0.4f, 3.5f, 0.8f, 1).linear(0.66f, 0.6f, 1, 4, 1)
+                    .linear(1, 4, 0.6f, 3.5f, 1).build())))
+            .update(Forces.gravity(), Forces.drag(0.2f))
+            .event(ParticleEvent.onDeath("stars", Bind.random(60, 90)))
+            .render(Renderer.billboard(Renderer.Facing.VELOCITY).additive().set("stretch", 0.1f)))
+        .emitter("stars", e -> e.capacity(500).spawn(Spawn.fromEvents())
+            .init(Shape.sphere(0.2f), Init.speed(Bind.random(4, 7)), Init.lifetime(Bind.random(1.2f, 1.8f)),
+                Init.size(Bind.random(0.15f, 0.22f)), Init.inherit(0.3f, true, false))
+            .update(Forces.gravity(Bind.constant(0.4f)), Forces.drag(1.2f),
+                Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 1).linear(0.7f, 1, 0.8f, 0.6f, 1)
+                    .linear(1, 0.5f, 0.2f, 0.1f, 0).build()))
+            .event(ParticleEvent.onDeath("sparkles", Bind.constant(3)).chance(0.5f))
+            .render(Renderer.billboard(Renderer.Facing.VELOCITY).additive().set("stretch", 0.06f)))
+        .emitter("sparkles", e -> e.capacity(800).spawn(Spawn.fromEvents())
+            .init(Shape.sphere(0.1f), Init.speed(Bind.random(0.5f, 1.5f)), Init.lifetime(Bind.random(0.3f, 0.6f)),
+                Init.size(Bind.constant(0.05f)), Init.color(Bind.color(3, 3, 2.5f, 1)))
+            .update(Forces.gravity(Bind.constant(0.2f)))
+            .render(Renderer.billboard(Renderer.Facing.POSITION).additive())).build();
+
     /** A ribbon behind an orb circling the fountain, narrowing to its tail. */
     static final EffectData RIBBON = EffectData.builder().emitter("ribbon", e -> e.spawn(Spawn.rate(60))
         .init(Init.lifetime(1.5f), Init.size(Bind.constant(0.3f)), Init.color(Bind.color(0.3f, 1.2f, 2, 1)))
@@ -206,6 +232,7 @@ final class DemoEffects implements AutoCloseable {
         effects.play(PUFFS, x + 3, DemoMeshes.height(x + 3, z - 1) + 1.2, z - 1);
         effects.play(SWIRL, x - 1, DemoMeshes.height(x - 1, z - 4) + 0.1, z - 4);
         effects.play(HAIL, x + 2, DemoMeshes.height(x + 2, z + 3), z + 3);
+        effects.play(FIREWORKS, x - 6, DemoMeshes.height(x - 6, z - 8), z - 8);
         sync.beamEnd(effects.play(BEAM, fountain).offset(0, 0.3, 0).id(), 0, orb);
     }
 

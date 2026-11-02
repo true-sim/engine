@@ -42,6 +42,7 @@ import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.AssetType;
 import com.truesim.scene.effects.Bind;
 import com.truesim.scene.effects.Collide;
+import com.truesim.scene.effects.ParticleEvent;
 import com.truesim.scene.effects.ParticleWorld;
 import com.truesim.scene.effects.ColorGradient;
 import com.truesim.scene.effects.CpuSimulation;
@@ -475,6 +476,160 @@ class ParticlesTest {
             assertThat(cursor.y()).isCloseTo(0.05, within(1e-3));
             assertThat(p.flags & ParticleConstants.PARTICLE_STUCK).isNotZero();
         }
+    }
+
+    /** Fireworks: a rocket bursting into stars on its death, each into sparkles on theirs (scene's EventsTest). */
+    private static EffectData fireworks(Target target) {
+        return EffectData.builder()
+            .emitter("rocket", e -> e.target(target).spawn(Spawn.burst(0, 2)).init(Shape.disc(0.5f),
+                    Init.lifetime(0.3f), Init.velocity(Bind.random(-1, 1), Bind.constant(8), Bind.constant(0)),
+                    Init.color(Bind.color(1, 0.5f, 0.2f, 1)), Init.size(Bind.constant(0.4f)))
+                .update(Forces.gravity()).event(ParticleEvent.onDeath("stars", Bind.random(10, 20))))
+            .emitter("stars", e -> e.target(target).capacity(40).spawn(Spawn.fromEvents())
+                .init(Shape.point(), Init.speed(Bind.constant(4)), Init.lifetime(Bind.random(0.2f, 0.3f)),
+                    Init.inherit(0.5f))
+                .update(Forces.gravity(), Forces.drag(0.5f))
+                .event(ParticleEvent.onDeath("sparkles", Bind.constant(3)).chance(0.7f)))
+            .emitter("sparkles", e -> e.target(target).capacity(120).spawn(Spawn.fromEvents())
+                .init(Shape.sphere(0.1f), Init.lifetime(2), Init.inherit(0, true, false)))
+            .build();
+    }
+
+    /** Emitter {@code emitter} of GPU effect {@code gpu} against the CPU's of {@code cpuEffect}, in order. */
+    private void assertSameEmitter(long gpu, long cpuEffect, int emitter, double ox, double oy, double oz) {
+        List<Gpu> list = gpu(gpu, emitter);
+        cpu.particles(cpuEffect, emitter, cursor);
+        assertThat(list).as("emitter " + emitter).hasSize(cursor.count());
+        for (Gpu p : list) {
+            cursor.next();
+            String which = "emitter " + emitter + " particle " + p.index;
+            assertThat(Integer.toUnsignedLong(p.index)).as(which).isEqualTo(cursor.spawnIndex());
+            assertThat(p.seed).as("seed of " + which).isEqualTo(cursor.seed());
+            assertThat(ox + p.x).as("x of " + which).isCloseTo(cursor.x(), within(1e-2));
+            assertThat(oy + p.y).as("y of " + which).isCloseTo(cursor.y(), within(1e-2));
+            assertThat(oz + p.z).as("z of " + which).isCloseTo(cursor.z(), within(1e-2));
+            assertThat(p.r).as("red of " + which).isCloseTo(cursor.color(0), within(1e-4f));
+            assertThat(p.size).as("size of " + which).isCloseTo(cursor.size(), within(1e-4f));
+        }
+    }
+
+    @Test
+    void fireworksBurstOnTheDeathOfABurstAsTheReferenceDoes() {
+        long gpuEffect = effects.play(fireworks(Target.GPU), 2, 1, -3).seed(77).id();
+        long cpuEffect = effects.play(fireworks(Target.CPU), 2, 1, -3).seed(77).id();
+        int[] seen = new int[3];
+        for (int f = 0; f < 50; f++) {
+            frame(FRAME);
+            if (f % 5 == 4) {
+                for (int e = 0; e < 3; e++) {
+                    assertSameEmitter(gpuEffect, cpuEffect, e, 2, 1, -3);
+                    seen[e] = Math.max(seen[e], gpu(gpuEffect, e).size());
+                }
+            }
+        }
+        assertThat(seen[1]).as("stars burst").isGreaterThan(15);
+        assertThat(seen[2]).as("and sparkles from them").isGreaterThan(15);
+        device.waitIdle();
+        frame(FRAME);
+        frame(FRAME);
+        device.waitIdle();
+        assertThat(particles.events()).as("no events this late").isZero();
+    }
+
+    @Test
+    void theSameChildrenInTwoRuns() {
+        long[][] runs = new long[2][];
+        for (int run = 0; run < 2; run++) {
+            Effect played = effects.play(fireworks(Target.GPU), 0, 0, 0).seed(9);
+            long id = played.id();
+            for (int f = 0; f < 45; f++) {
+                frame(FRAME);
+            }
+            List<Gpu> sparkles = gpu(id, 2);
+            runs[run] = new long[sparkles.size()];
+            for (int i = 0; i < sparkles.size(); i++) {
+                Gpu p = sparkles.get(i);
+                runs[run][i] = (long) p.seed << 32 ^ Float.floatToIntBits(p.x) ^ (long) Float.floatToIntBits(p.y) << 7;
+            }
+            played.kill();
+            frame(FRAME);
+        }
+        assertThat(runs[0]).isNotEmpty();
+        assertThat(runs[1]).as("slots, seeds and places alike").containsExactly(runs[0]);
+    }
+
+    @Test
+    void eventsBeyondTheBufferAreDroppedAndCounted() {
+        device.waitIdle();
+        graph.close();
+        particles.close();
+        poolCopy.close();
+        stateCopy.close();
+        target.close();
+        graph = new FrameGraph(device, 2);
+        start(ParticlePool.SLOT_BYTES * 12_000L);
+        ParticleEvent[] deaths = new ParticleEvent[8];
+        for (int k = 0; k < deaths.length; k++) {
+            deaths[k] = ParticleEvent.onDeath("child", Bind.constant(1));
+        }
+        effects.play(EffectData.builder()
+            .emitter("many", e -> e.spawn(Spawn.burst(0, 10_000)).init(Init.lifetime(0.05f)).event(deaths))
+            .emitter("child", e -> e.capacity(1000).spawn(Spawn.fromEvents()).init(Init.lifetime(1)))
+            .build(), 0, 0, 0);
+        boolean counted = false;
+        for (int f = 0; f < 12 && !counted; f++) {
+            frame(FRAME);
+            device.waitIdle();
+            counted = particles.eventsDropped() > 0;
+        }
+        assertThat(counted).as("80,000 events, room for 65,536").isTrue();
+        assertThat(particles.events()).isEqualTo(80_000);
+        assertThat(particles.eventsDropped()).isEqualTo(80_000 - ParticleConstants.EVENT_CAPACITY);
+    }
+
+    @Test
+    void aThousandImpactsInAFrameAreOneInstance() {
+        EffectData impact = EffectData.builder().emitter("chips", e -> e.capacity(4000).duration(0.1)
+            .spawn(Spawn.burst(0, 3)).init(Init.lifetime(1), Init.speed(Bind.random(1, 2)), Shape.cone(0.5f, 0)))
+            .build();
+        java.util.SplittableRandom random = new java.util.SplittableRandom(4);
+        for (int i = 0; i < 1000; i++) {
+            effects.burst(impact, random.nextDouble(1, 30), 0, random.nextDouble(1, 30), 0, 1, 0, i);
+        }
+        frame(FRAME);
+        frame(FRAME);
+        frame(FRAME);
+        device.waitIdle();
+        assertThat(particles.emitterCount()).as("one shared instance in the cell, one draw").isOne();
+        assertThat(particles.alive()).isEqualTo(3000);
+    }
+
+    @Test
+    void localEmittersSendAndReceiveEvents() {
+        long node = scene.create();
+        scene.setTranslation(node, 1, 2, 3);
+        scene.setRotation(node, Math.sin(0.4), 0, 0, Math.cos(0.4));
+        scene.update();
+        EffectData[] both = new EffectData[2];
+        for (Target target : new Target[] {Target.GPU, Target.CPU}) {
+            both[target.ordinal()] = EffectData.builder()
+                .emitter("parent", e -> e.target(target).space(Space.LOCAL).spawn(Spawn.rate(20))
+                    .init(Init.lifetime(0.2f), Init.velocity(Bind.constant(0), Bind.constant(1), Bind.constant(0)))
+                    .event(ParticleEvent.onBirth("child", Bind.constant(1)), ParticleEvent.every(0.05, "world",
+                        Bind.constant(1))))
+                .emitter("child", e -> e.target(target).space(Space.LOCAL).capacity(40).spawn(Spawn.fromEvents())
+                    .init(Init.lifetime(0.5f), Init.inherit(1)))
+                .emitter("world", e -> e.target(target).capacity(80).spawn(Spawn.fromEvents())
+                    .init(Init.lifetime(0.5f)))
+                .build();
+        }
+        long g = effects.play(both[Target.GPU.ordinal()], node).seed(3).id();
+        long c = effects.play(both[Target.CPU.ordinal()], node).seed(3).id();
+        for (int f = 0; f < 20; f++) {
+            frame(FRAME);
+        }
+        assertThat(gpu(g, 1)).hasSize(cpu.count(c, 1)).isNotEmpty();
+        assertSameEmitter(g, c, 2, 1, 2, 3);
     }
 
     @Test

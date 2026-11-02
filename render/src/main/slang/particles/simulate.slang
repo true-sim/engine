@@ -205,12 +205,80 @@ void initialize<K : ICurveKeys>(Emitting m, K keys, inout Particle p, inout floa
             size0 = value(m, keys, op, salt, 0, p);
             p.size = size0;
             break;
+        case OP_INHERIT:
+            break; // read when an event spawns the particle (inheritFrom)
         default: // OP_COLOR
             color0 = colorOf(m, keys, op, salt, p);
             p.color = color0;
             break;
         }
         op = skip(m, op);
+    }
+}
+
+/** The word of the program's event list (its count, then EVENT_WORDS per event), after its updaters. */
+uint eventList(Emitting m, uint first)
+{
+    uint op = first;
+    for (uint i = 0; i < ((m.program[0] >> 8) & 0xff); i++)
+    {
+        op = skip(m, op);
+    }
+    return op;
+}
+
+/**
+ * Sends particle `p`'s events of phase `phase` (0: birth and death, as it was; 1: periodic and collision, after its
+ * step, its age crossing a multiple of the interval from `before`), from slot `local` of emitter `index`'s range in
+ * the half read: each with its chance and count, appended to the frame's events with its sort key (CpuSimulation.send).
+ */
+void send<K : ICurveKeys>(Emitting m, K keys, uint list, uint index, uint local, Particle p, uint phase, bool birth,
+    bool death, bool collision, float before)
+{
+    ParticleFrame* frame = push.frame;
+    uint count = m.program[list];
+    for (uint k = 0; k < min(count, MAX_EVENTS); k++)
+    {
+        uint at = list + 1 + k * EVENT_WORDS;
+        uint kind = m.program[at] & 0xff;
+        float interval = asfloat(m.program[at + 7]);
+        bool sent = kind == EVENT_BIRTH ? birth : kind == EVENT_DEATH ? death : kind == EVENT_COLLISION ? collision
+            : kind == EVENT_PERIODIC && phase == 1 && floor(p.age / interval) > floor(before / interval);
+        uint salt = m.program[at + 1];
+        if (!sent || !(random(p.seed, salt + 15) < asfloat(m.program[at + 6])))
+        {
+            continue;
+        }
+        uint children = uint(clamp(round(value(m, keys, at, salt, 0, p)), 0.0, float(MAX_CHILDREN)));
+        uint* targets = frame.targets;
+        uint target = targets[m.emitter.targets + (m.program[at] >> 8)];
+        if (children == 0 || target == NO_EMITTER)
+        {
+            continue;
+        }
+        uint* args = frame.eventArgs;
+        uint slot;
+        InterlockedAdd(args[4], 1, slot);
+        if (slot >= EVENT_CAPACITY)
+        {
+            continue; // counted: sent, not kept
+        }
+        ParticleEmitter e = m.emitter;
+        bool local = (e.flags & EMITTER_LOCAL) != 0;
+        ParticleEventRecord r;
+        r.target = target;
+        r.count = children;
+        r.seed = p.seed;
+        r.salt = salt;
+        r.position = local ? turn(e.rotation, p.position) : p.position;
+        r.parent = index;
+        r.velocity = local ? turn(e.rotation, p.velocity) : p.velocity;
+        r.size = p.size.x;
+        r.color = p.color;
+        ParticleEventRecord* events = (ParticleEventRecord*) frame.events;
+        events[slot] = r;
+        uint2* eventKeys = frame.eventKeys;
+        eventKeys[slot] = uint2(local << 4 | phase << 3 | k, slot);
     }
 }
 
@@ -971,6 +1039,15 @@ void scanMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         if ((e.flags & EMITTER_NEW) != 0)
         {
             state[at + STATE_OVERFLOW] = 0;
+            state[at + STATE_EVENT_INDEX] = 0;
+        }
+        state[at + STATE_EVENT_CHILDREN] = 0;
+        if (index == 0)
+        {
+            ParticleFrame* frame = push.frame;
+            uint* args = frame.eventArgs;
+            args[3] = 0;
+            args[4] = 0;
         }
         for (uint b = 0; b < 3; b++)
         {
@@ -1015,8 +1092,12 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
     }
     resetBounds(lane);
     uint local = (chunk - e.chunks) * CHUNK + lane;
-    Particle p;
+    Particle p = {};
     bool keep = false;
+    uint header0 = m.program[0];
+    bool sends = ((header0 >> 16) & PROGRAM_EVENTS) != 0;
+    uint list = sends ? eventList(m, updaters(m)) : 0;
+    bool born = false;
     if (local < aliveOf(e))
     {
         Particle* source = push.source;
@@ -1025,6 +1106,14 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         if ((e.flags & EMITTER_LOCAL) == 0)
         {
             p.position += e.shift; // the origin rebased: the same place in the world
+        }
+        born = (p.flags & PARTICLE_NEWBORN) != 0;
+        p.flags &= ~PARTICLE_NEWBORN;
+        if (sends && !keep && (p.flags & PARTICLE_DEAD) == 0)
+        {
+            CurveBuffer dying;
+            dying.block = block;
+            send(m, dying, list, chunks[chunk], local, p, 0, born, true, false, p.age);
         }
     }
     shared[lane] = keep ? 1 : 0;
@@ -1058,6 +1147,13 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
             }
         }
         uint first = updaters(m);
+        float before = p.age;
+        CurveBuffer events;
+        events.block = block;
+        if (sends && born)
+        {
+            send(m, events, list, chunks[chunk], local, p, 0, true, false, false, before);
+        }
         if (cached)
         {
             CurveCache keys;
@@ -1068,6 +1164,10 @@ void updateMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
             CurveBuffer keys;
             keys.block = block;
             step(m, keys, first, p, color0, size0, e.dt);
+        }
+        if (sends)
+        {
+            send(m, events, list, chunks[chunk], local, p, 1, false, false, (p.flags & PARTICLE_COLLIDED) != 0, before);
         }
         Particle* source0 = push.source;
         Particle* target = source0 + push.targetDelta;
@@ -1116,9 +1216,9 @@ void spawnArgsMain(uint lane : SV_GroupIndex)
         ParticleEmitter e = emitters[i];
         uint at = e.instance * STATE_WORDS;
         uint survivors = state[at + STATE_SURVIVORS];
-        uint spawned = (e.flags & EMITTER_CPU) != 0 ? 0 : min(e.demand, e.capacity - survivors);
+        uint demand = (e.flags & EMITTER_CPU) != 0 ? 0 : e.demand + state[at + STATE_EVENT_CHILDREN];
+        uint spawned = min(demand, e.capacity - survivors);
         state[at + STATE_SPAWNED] = spawned;
-        uint demand = (e.flags & EMITTER_CPU) != 0 ? 0 : e.demand;
         state[at + STATE_OVERFLOW] += demand - spawned;
         dropped += demand - spawned;
         survived += survivors;
@@ -1193,6 +1293,146 @@ void place(ParticleEmitter e, ParticleSpawn r, inout Particle p, float age)
     p.velocity = turn(q, p.velocity);
 }
 
+/** Writes newborn `p` (with `color0` and `size0` from birth) into slot `slot` of emitter `e`'s range, and its box. */
+void store(ParticleEmitter e, uint at, uint slot, Particle p, float4 color0, float size0, uint header)
+{
+    Particle* source0 = push.source;
+    Particle* target = source0 + push.targetDelta;
+    target[e.first + slot] = p;
+    uint* state = push.state;
+    if (e.side != NO_SIDE)
+    {
+        uint4* sideSource0 = push.sideSource;
+        uint4* sideTarget = sideSource0 + push.sideDelta;
+        uint s = e.side + slot * e.sideUnits;
+        if (((header >> 16) & PROGRAM_OVER) != 0)
+        {
+            sideTarget[s] = asuint(color0);
+            sideTarget[s + 1] = uint4(asuint(size0), 0, 0, 0);
+        }
+        if (((header >> 16) & PROGRAM_TRAIL) != 0)
+        {
+            // A trail starts where its particle is: no streak back to the origin
+            uint4* trail = sideTarget + s + (((header >> 16) & PROGRAM_OVER) != 0 ? 2 : 0);
+            trail[0] = uint4(0, 0, 0, 0);
+            for (uint i = 0; i < (header >> 24); i++)
+            {
+                trail[1 + i] = uint4(asuint(p.position), 0);
+            }
+        }
+    }
+    if ((p.flags & PARTICLE_DEAD) == 0)
+    {
+        float r2 = 0.5 * max(p.size.x, p.size.y);
+        uint b = at + STATE_BOUNDS;
+        InterlockedMin(state[b], uint(ordered(p.position.x - r2)) ^ 0x80000000u);
+        InterlockedMin(state[b + 1], uint(ordered(p.position.y - r2)) ^ 0x80000000u);
+        InterlockedMin(state[b + 2], uint(ordered(p.position.z - r2)) ^ 0x80000000u);
+        InterlockedMax(state[b + 3], uint(ordered(p.position.x + r2)) ^ 0x80000000u);
+        InterlockedMax(state[b + 4], uint(ordered(p.position.y + r2)) ^ 0x80000000u);
+        InterlockedMax(state[b + 5], uint(ordered(p.position.z + r2)) ^ 0x80000000u);
+    }
+}
+
+/**
+ * Newborn `k` of emitter `e`, child `j` of the frame's events into it (CpuSimulation.spawnEvents): its event the last
+ * sorted one whose children start at or before it; seeded from its parent, initialized, placed at its parent (its
+ * shapes about it), taking what its init.inherit says; born at the frame's end.
+ */
+void spawnChild(ParticleEmitter e, uint at, uint k, uint j)
+{
+    ParticleFrame* frame = push.frame;
+    uint* state = push.state;
+    uint* prefix = frame.childPrefix;
+    uint* args = frame.eventArgs;
+    uint first = state[at + STATE_EVENT_FIRST];
+    uint global = prefix[first] + j;
+    uint low = first;
+    uint high = args[3] - 1;
+    while (low < high)
+    {
+        uint middle = (low + high + 1) >> 1;
+        if (prefix[middle] <= global)
+        {
+            low = middle;
+        }
+        else
+        {
+            high = middle - 1;
+        }
+    }
+    uint2* eventKeys = frame.eventKeys;
+    ParticleEventRecord* events = (ParticleEventRecord*) frame.events;
+    ParticleEventRecord r = events[eventKeys[low].y];
+    uint c = global - prefix[low];
+    Particle p;
+    p.position = 0;
+    p.velocity = 0;
+    p.age = 0;
+    p.lifetime = 1;
+    p.color = 1;
+    p.size = 0.1;
+    p.rotation = 0;
+    p.seed = combine(combine(r.seed, r.salt), c);
+    p.spawnIndex = state[at + STATE_EVENT_INDEX] + j;
+    p.flags = PARTICLE_NEWBORN;
+    p.custom = 0;
+    float4 color0 = 1;
+    float size0 = 0.1;
+    Emitting m = emitting(e);
+    float* curves = push.curves;
+    CurveBuffer keys;
+    keys.block = curves + e.curves;
+    initialize(m, keys, p, color0, size0);
+    if (p.lifetime <= 0)
+    {
+        p.flags |= PARTICLE_DEAD;
+    }
+    // What it takes of its parent: init.inherit's color, size, velocity
+    float inherit = 0;
+    bool color = false;
+    bool size = false;
+    uint op = 1;
+    for (uint i = 0; i < (m.program[0] & 0xff); i++)
+    {
+        if ((m.program[op] & 0xff) == OP_INHERIT)
+        {
+            uint salt = m.program[op + 1];
+            color = value(m, keys, op, salt, 0, p) >= 0.5;
+            size = value(m, keys, op, salt, 1, p) >= 0.5;
+            inherit = value(m, keys, op, salt, 2, p);
+        }
+        op = skip(m, op);
+    }
+    ParticleEmitter* emitters = push.emitters;
+    ParticleEmitter parent = emitters[r.parent];
+    precise float3 high3 = parent.originHigh - e.originHigh;
+    precise float3 low3 = parent.originLow - e.originLow;
+    float3 from = (high3 + low3) + r.position;
+    float4 back = float4(-e.rotation.xyz, e.rotation.w);
+    if ((e.flags & EMITTER_LOCAL) != 0)
+    {
+        p.position += turn(back, from);
+        p.velocity += turn(back, r.velocity * inherit);
+    }
+    else
+    {
+        p.position = from + turn(e.rotation, p.position);
+        p.velocity = turn(e.rotation, p.velocity) + r.velocity * inherit;
+    }
+    if (color)
+    {
+        p.color *= r.color;
+        color0 = p.color;
+    }
+    if (size)
+    {
+        p.size *= r.size;
+        size0 = p.size.x;
+    }
+    store(e, at, state[at + STATE_SURVIVORS] + k, p, color0, size0, m.program[0]);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void spawnMain(uint3 id : SV_DispatchThreadID)
@@ -1223,6 +1463,11 @@ void spawnMain(uint3 id : SV_DispatchThreadID)
     ParticleEmitter e = emitters[low];
     uint at = e.instance * STATE_WORDS;
     uint k = t - state[at + STATE_SPAWN_OFFSET];
+    if (k >= e.demand)
+    {
+        spawnChild(e, at, k, k - e.demand);
+        return;
+    }
     // Its record: the last whose particles start at or before k.
     ParticleSpawn* spawns = push.spawns;
     uint r = e.records;
@@ -1243,7 +1488,7 @@ void spawnMain(uint3 id : SV_DispatchThreadID)
     p.rotation = 0;
     p.spawnIndex = record.firstIndex + j;
     p.seed = combine(e.seed, p.spawnIndex);
-    p.flags = (record.flags & SPAWN_PREWARM) != 0 ? PARTICLE_PREWARM : 0;
+    p.flags = ((record.flags & SPAWN_PREWARM) != 0 ? PARTICLE_PREWARM : 0) | PARTICLE_NEWBORN;
     p.custom = 0;
     float4 color0 = 1;
     float size0 = 0.1;
@@ -1261,43 +1506,7 @@ void spawnMain(uint3 id : SV_DispatchThreadID)
         place(e, record, p, age);
         step(m, keys, updaters(m), p, color0, size0, age);
     }
-    uint slot = state[at + STATE_SURVIVORS] + k;
-    Particle* source0 = push.source;
-    Particle* target = source0 + push.targetDelta;
-    target[e.first + slot] = p;
-    if (e.side != NO_SIDE)
-    {
-        uint4* sideSource0 = push.sideSource;
-        uint4* sideTarget = sideSource0 + push.sideDelta;
-        uint s = e.side + slot * e.sideUnits;
-        uint header = m.program[0];
-        if (((header >> 16) & PROGRAM_OVER) != 0)
-        {
-            sideTarget[s] = asuint(color0);
-            sideTarget[s + 1] = uint4(asuint(size0), 0, 0, 0);
-        }
-        if (((header >> 16) & PROGRAM_TRAIL) != 0)
-        {
-            // A trail starts where its particle is: no streak back to the origin
-            uint4* trail = sideTarget + s + (((header >> 16) & PROGRAM_OVER) != 0 ? 2 : 0);
-            trail[0] = uint4(0, 0, 0, 0);
-            for (uint i = 0; i < (header >> 24); i++)
-            {
-                trail[1 + i] = uint4(asuint(p.position), 0);
-            }
-        }
-    }
-    if ((p.flags & PARTICLE_DEAD) == 0)
-    {
-        float r2 = 0.5 * max(p.size.x, p.size.y);
-        uint b = at + STATE_BOUNDS;
-        InterlockedMin(state[b], uint(ordered(p.position.x - r2)) ^ 0x80000000u);
-        InterlockedMin(state[b + 1], uint(ordered(p.position.y - r2)) ^ 0x80000000u);
-        InterlockedMin(state[b + 2], uint(ordered(p.position.z - r2)) ^ 0x80000000u);
-        InterlockedMax(state[b + 3], uint(ordered(p.position.x + r2)) ^ 0x80000000u);
-        InterlockedMax(state[b + 4], uint(ordered(p.position.y + r2)) ^ 0x80000000u);
-        InterlockedMax(state[b + 5], uint(ordered(p.position.z + r2)) ^ 0x80000000u);
-    }
+    store(e, at, state[at + STATE_SURVIVORS] + k, p, color0, size0, m.program[0]);
 }
 
 [shader("compute")]
@@ -1312,11 +1521,101 @@ void argsMain(uint3 id : SV_DispatchThreadID)
     uint* state = push.state;
     uint instance = emitters[id.x].instance;
     uint at = instance * STATE_WORDS;
-    uint alive = state[at + STATE_SURVIVORS] + state[at + STATE_SPAWNED];
+    uint spawned = state[at + STATE_SPAWNED];
+    uint alive = state[at + STATE_SURVIVORS] + spawned;
     state[at + STATE_ALIVE] = alive;
+    uint fromRecords = (emitters[id.x].flags & EMITTER_CPU) != 0 ? 0 : min(emitters[id.x].demand, spawned);
+    state[at + STATE_EVENT_INDEX] += spawned - fromRecords;
     uint* statistics = push.statistics;
     statistics[STATISTICS_HEADER + 2 * instance] = alive;
     statistics[STATISTICS_HEADER + 2 * instance + 1] = state[at + STATE_OVERFLOW];
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void eventsArgsMain()
+{
+    // The events kept (sent, within the buffer) and the sort's dispatch over them; the statistics
+    ParticleFrame* frame = push.frame;
+    uint* args = frame.eventArgs;
+    uint sent = args[4];
+    uint kept = min(sent, EVENT_CAPACITY);
+    uint groups = (kept + SORT_GROUP - 1) / SORT_GROUP;
+    args[0] = min(groups, 65535u);
+    args[1] = (groups + 65534) / 65535;
+    args[2] = 1;
+    args[3] = kept;
+    uint* statistics = push.statistics;
+    statistics[STATISTICS_EVENTS] = sent;
+    statistics[STATISTICS_EVENTS_DROPPED] = sent - kept;
+}
+
+[shader("compute")]
+[numthreads(SORT_GROUP, 1, 1)]
+void eventsRekeyMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    // Sorted by parent, phase and event; now keyed by target and parent emitter for the second, stable sort
+    ParticleFrame* frame = push.frame;
+    uint* args = frame.eventArgs;
+    uint i = chunkOf(group) * SORT_GROUP + lane;
+    if (i >= args[3])
+    {
+        return;
+    }
+    uint2* eventKeys = frame.eventKeys;
+    ParticleEventRecord* events = (ParticleEventRecord*) frame.events;
+    uint index = eventKeys[i].y;
+    eventKeys[i] = uint2(events[index].target << 12 | events[index].parent, index);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void eventsRangesMain(uint lane : SV_GroupIndex)
+{
+    // One group: each sorted event's first child among all (an exclusive scan of their counts), each target's first
+    // event and its children
+    ParticleFrame* frame = push.frame;
+    uint* args = frame.eventArgs;
+    uint n = args[3];
+    uint run = (n + 63) / 64;
+    uint from = min(lane * run, n);
+    uint to = min(from + run, n);
+    uint2* eventKeys = frame.eventKeys;
+    ParticleEventRecord* events = (ParticleEventRecord*) frame.events;
+    uint sum = 0;
+    for (uint i = from; i < to; i++)
+    {
+        sum += events[eventKeys[i].y].count;
+    }
+    shared[lane] = sum;
+    GroupMemoryBarrierWithGroupSync();
+    if (lane == 0)
+    {
+        uint total = 0;
+        for (uint i = 0; i < 64; i++)
+        {
+            uint s = shared[i];
+            shared[i] = total;
+            total += s;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint offset = shared[lane];
+    uint* prefix = frame.childPrefix;
+    uint* state = push.state;
+    ParticleEmitter* emitters = push.emitters;
+    for (uint i = from; i < to; i++)
+    {
+        ParticleEventRecord r = events[eventKeys[i].y];
+        prefix[i] = offset;
+        offset += r.count;
+        uint at = emitters[r.target].instance * STATE_WORDS;
+        if (i == 0 || events[eventKeys[i - 1].y].target != r.target)
+        {
+            state[at + STATE_EVENT_FIRST] = i;
+        }
+        InterlockedAdd(state[at + STATE_EVENT_CHILDREN], r.count);
+    }
 }
 
 [shader("compute")]

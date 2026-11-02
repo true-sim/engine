@@ -60,7 +60,7 @@ public struct ParticleEmitter
     public float3 shift;           // added to its world-space particles this frame: the old origin minus the new
     public float time;             // its effect's time at the frame's end, in seconds: noise drifts and gusts by it
     public float3 inherited;       // velocity its world-space newborn inherit: a share of the emitter's over the frame
-    public uint pad1;
+    public uint targets;           // its effect's emitters' places in the list, from here in the frame's target table
     public float3 wind;            // the world's wind in its particles' frame, m/s
     public uint pad2;
 };
@@ -101,11 +101,34 @@ public struct ParticleFrame
     public uint pad0;
     public float3 heightCenterLow;
     public uint pad1;
+    public uint64_t events;        // ParticleEventRecord*: the frame's events, as the update appends them
+    public uint2* eventKeys;       // their sort keys and indices, sorted in place (events sort with the sort's passes)
+    public uint* eventArgs;        // the event sort's dispatch (3 words), the events kept, those sent
+    public uint* childPrefix;      // per sorted event: the children of the events before it
+    public uint* targets;          // per effect: its emitters' places in the list (NO_EMITTER: none)
     public uint64_t rays;          // RayScene*: the frame's top level to trace collision rays into (rays variant); or 0
     public float3 raysOriginHigh;  // the ray tracing's origin, which the top level is relative to
     public uint pad2;
     public float3 raysOriginLow;
     public uint pad3;
+};
+
+/**
+ * An event a particle sent (E9, effects.md §2.7): what it spawns and a snapshot of its parent, which the children read
+ * (source attributes). 64 bytes, appended by the update; sorted by (target, parent emitter, parent, phase, event).
+ */
+[HostLayout]
+public struct ParticleEventRecord
+{
+    public uint target;            // the emitter it spawns: its place in the frame's list
+    public uint count;             // children
+    public uint seed;              // the parent's seed
+    public uint salt;              // the event's salt
+    public float3 position;        // the parent, from its emitter's origin, in world axes
+    public uint parent;            // the parent's emitter: its place in the list
+    public float3 velocity;        // the parent's velocity, in world axes
+    public float size;             // the parent's size
+    public float4 color;           // the parent's color
 };
 
 /** A spawn record: 64 bytes, as scene-effects' SpawnRecords, written by the CPU each frame. */
@@ -195,6 +218,7 @@ public static const uint PARTICLE_DEAD = 1;               // leaves at the next 
 public static const uint PARTICLE_PREWARM = 2;            // born before its effect started
 public static const uint PARTICLE_STUCK = 4;              // stuck where it hit: it only ages (CpuSimulation.STUCK)
 public static const uint PARTICLE_COLLIDED = 8;           // it hit something in its last step
+public static const uint PARTICLE_NEWBORN = 16;           // born in the last frame: its birth events go out next
 
 /** Emitter flags. */
 public static const uint EMITTER_NEW = 1;                 // its first frame: no particles yet
@@ -212,6 +236,9 @@ public static const uint STATE_SURVIVORS = 1;             // of the frame before
 public static const uint STATE_SPAWNED = 2;               // born this frame
 public static const uint STATE_SPAWN_OFFSET = 3;          // its first newborn among the frame's
 public static const uint STATE_OVERFLOW = 4;              // particles dropped for want of room, since it started
+public static const uint STATE_EVENT_FIRST = 5;           // its first event among the frame's sorted ones
+public static const uint STATE_EVENT_CHILDREN = 6;        // the children the frame's events ask of it
+public static const uint STATE_EVENT_INDEX = 7;           // spawn indices its events' children took, since it started
 public static const uint STATE_BOUNDS = 8;                // the particles' box: min x, y, z, then max (ordered ints)
 
 /** The statistics buffer: the frame's totals, then ALIVE and OVERFLOW per emitter instance. */
@@ -220,6 +247,8 @@ public static const uint STATISTICS_ALIVE = 0;
 public static const uint STATISTICS_SPAWNED = 1;
 public static const uint STATISTICS_OVERFLOW = 2;         // dropped this frame
 public static const uint STATISTICS_EMITTERS = 3;
+public static const uint STATISTICS_EVENTS = 4;           // events sent this frame
+public static const uint STATISTICS_EVENTS_DROPPED = 5;   // of them, dropped for want of room in the event buffer
 
 /** Renderer kinds: scene-effects' Renderer.Kind, in order. */
 public static const uint RENDER_BILLBOARD = 0;
@@ -269,6 +298,22 @@ public static const uint OP_COLLIDERS = 22;
 public static const uint OP_HEIGHT = 23;
 public static const uint OP_DEPTH = 24;
 public static const uint OP_RAYS = 25;
+public static const uint OP_INHERIT = 26;
+/** Events: scene-effects' ParticleEvent.Kind, in order; an emitter's events follow its updaters, EVENT_WORDS each. */
+public static const uint EVENT_BIRTH = 0;
+public static const uint EVENT_DEATH = 1;
+public static const uint EVENT_COLLISION = 2;
+public static const uint EVENT_PERIODIC = 3;
+public static const uint EVENT_EMIT = 4;
+public static const uint EVENT_WORDS = 8;
+/** The most events an emitter sends on the GPU (their place takes 3 bits of the sort key). */
+public static const uint MAX_EVENTS = 8;
+/** Events a frame holds; more are dropped and counted. */
+public static const uint EVENT_CAPACITY = 65536;
+/** The most children one event spawns (scene-effects' CpuSimulation.MAX_CHILDREN). */
+public static const uint MAX_CHILDREN = 255;
+/** No emitter: an event's target without an instance. */
+public static const uint NO_EMITTER = 0xffffffffu;
 /** Collider kinds: scene-effects' EffectColliders.Kind, in order. */
 public static const uint COLLIDER_PLANE = 0;
 public static const uint COLLIDER_SPHERE = 1;
@@ -311,6 +356,8 @@ public static const uint COLOR_WORDS = 5;
 public static const uint PROGRAM_OVER = 1;
 /** Program header bits: it keeps a trail of past positions (their count in the header's top 8 bits). */
 public static const uint PROGRAM_TRAIL = 2;
+/** Program header bits: its particles send events (listed after its updaters). */
+public static const uint PROGRAM_EVENTS = 4;
 /** Curve header bits (above the key count and the stride): keys evenly spaced, indexed directly. */
 public static const uint CURVE_EVEN = 1;
 /** Interpolations: scene-effects' Interpolation, in order. */

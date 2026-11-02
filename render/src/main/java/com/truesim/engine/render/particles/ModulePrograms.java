@@ -40,6 +40,7 @@ import com.truesim.scene.effects.ColorBinding;
 import com.truesim.scene.effects.Capability;
 import com.truesim.scene.effects.Collide;
 import com.truesim.scene.effects.ColorGradient;
+import com.truesim.scene.effects.ParticleEvent;
 import com.truesim.scene.effects.CpuSimulation;
 import com.truesim.scene.effects.EffectData;
 import com.truesim.scene.effects.EmitterData;
@@ -268,8 +269,22 @@ final class ModulePrograms implements AutoCloseable {
                 points = Math.max(points, trailPoints(r));
             }
             trails[e] = points;
-            program.values[header] = inits | updates << 8
-                | ((overLife ? PROGRAM_OVER : 0) | (points > 0 ? PROGRAM_TRAIL : 0)) << 16 | points << 24;
+            // Its events, after its updaters: kind and target, salt, count, chance, interval
+            List<ParticleEvent> events = emitter.events();
+            if (!events.isEmpty()) {
+                program.add(events.size());
+                for (int k = 0; k < events.size(); k++) {
+                    ParticleEvent event = events.get(k);
+                    program.add(event.kind().ordinal() | data.emitter(event.target()) << 8);
+                    program.add(CpuSimulation.EVENT_SALTS + 16 * k);
+                    binding(data, event.count(), program, keys);
+                    program.add(Float.floatToRawIntBits(event.chance()));
+                    program.add(Float.floatToRawIntBits((float) event.interval()));
+                }
+            }
+            program.values[header] = inits | updates << 8 | ((overLife ? PROGRAM_OVER : 0)
+                | (points > 0 ? PROGRAM_TRAIL : 0) | (events.isEmpty() ? 0 : ParticleConstants.PROGRAM_EVENTS)) << 16
+                | points << 24;
         }
         int wordStart = (int) take(wordRanges, Math.max(1, program.size), true);
         int curveStart = (int) take(curveRanges, Math.max(1, keys.floats.size), false);
@@ -448,6 +463,7 @@ final class ModulePrograms implements AutoCloseable {
             case Init.VELOCITY -> OP_VELOCITY;
             case Init.SIZE -> OP_SIZE;
             case Init.COLOR -> OP_COLOR;
+            case Init.INHERIT -> ParticleConstants.OP_INHERIT;
             case Forces.GRAVITY -> OP_GRAVITY;
             case Forces.DRAG -> OP_DRAG;
             case Over.SIZE -> OP_OVER_SIZE;

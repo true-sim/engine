@@ -32,6 +32,7 @@ import java.util.Map;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.render.layout.ParticleColliderLayout;
+import com.truesim.engine.render.layout.ParticleEventRecordLayout;
 import com.truesim.engine.render.layout.ParticleFrameLayout;
 import com.truesim.scene.effects.CpuSimulation;
 import com.truesim.scene.effects.EffectColliders;
@@ -154,6 +155,23 @@ public final class Particles implements AutoCloseable {
     private long frameRecorded = -1;
     private RayTracing rayTracing;
     private MeshletRenderer rayRenderer;
+    // Events (E9): the frame's records, their sort keys (two buffers), the sort's counts and dispatch, each sorted
+    // event's first child; and each effect's emitters' places, for their targets
+    private final GpuBuffer events;
+    private final GpuBuffer eventKeys;
+    private final GpuBuffer eventKeysOther;
+    private final GpuBuffer eventArgs;
+    private final GpuBuffer eventCounts;
+    private final GpuBuffer childPrefix;
+    private final ExternalBuffer eventsImport;
+    private final ExternalBuffer eventKeysImport;
+    private final ExternalBuffer eventKeysOtherImport;
+    private final ExternalBuffer eventArgsImport;
+    private final ExternalBuffer eventCountsImport;
+    private final ExternalBuffer childPrefixImport;
+    private final FrameBuffer targetTable;
+    private final Staging targetStaged;
+    private int targetCount;
 
     // Per effect slot: the effect followed, its programs, its emitters' instances (-1: none) and places in the frame's
     // list, its origin, where it was and its time at the last update.
@@ -226,6 +244,9 @@ public final class Particles implements AutoCloseable {
     private long aliveTotal;
     private long spawnedTotal;
     private long overflowTotal;
+    private long eventsTotal;
+    private long eventsDroppedTotal;
+    private boolean sendsEvents;
     private long statisticsFrame = -1;
     private final Readback receiver = this::receive;
     private final Map<AssetRef<?>, Integer> textureSlots = new HashMap<>();
@@ -279,8 +300,8 @@ public final class Particles implements AutoCloseable {
         ParticlePool p = null;
         ModulePrograms m = null;
         CpuEmitters c = null;
-        GpuBuffer[] made = new GpuBuffer[6];
-        FrameBuffer[] tables = new FrameBuffer[9];
+        GpuBuffer[] made = new GpuBuffer[12];
+        FrameBuffer[] tables = new FrameBuffer[10];
         try {
             p = new ParticlePool(device, budget);
             m = new ModulePrograms(device, slots);
@@ -293,6 +314,14 @@ public final class Particles implements AutoCloseable {
             made[4] = GpuBuffer.deviceLocal(device, 4L * p.slots(), GPU_USAGE);
             made[5] = GpuBuffer.deviceLocal(device, 4L * (ParticleConstants.DEPTH_HEADER
                 + (long) ParticleConstants.DEPTH_GRID * ParticleConstants.DEPTH_GRID), GPU_USAGE);
+            long events = ParticleConstants.EVENT_CAPACITY;
+            made[6] = GpuBuffer.deviceLocal(device, ParticleEventRecordLayout.BYTES * events, GPU_USAGE);
+            made[7] = GpuBuffer.deviceLocal(device, 8 * events, GPU_USAGE);
+            made[8] = GpuBuffer.deviceLocal(device, 8 * events, GPU_USAGE);
+            made[9] = GpuBuffer.deviceLocal(device, 32, GPU_USAGE | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+            made[10] = GpuBuffer.deviceLocal(device, 4L * 16 * (events / ParticleConstants.SORT_GROUP), GPU_USAGE);
+            made[11] = GpuBuffer.deviceLocal(device, 4 * events, GPU_USAGE);
+            tables[9] = FrameBuffer.create(device, 4L * maxEmitters, STORAGE, slots);
             tables[7] = FrameBuffer.create(device, ParticleFrameLayout.BYTES, STORAGE, slots);
             tables[8] = FrameBuffer.create(device, (long) ParticleColliderLayout.BYTES
                 * ParticleConstants.MAX_COLLIDERS, STORAGE, slots);
@@ -335,6 +364,14 @@ public final class Particles implements AutoCloseable {
         dispatch = made[3];
         order = made[4];
         depth = made[5];
+        this.events = made[6];
+        eventKeys = made[7];
+        eventKeysOther = made[8];
+        eventArgs = made[9];
+        eventCounts = made[10];
+        childPrefix = made[11];
+        targetTable = tables[9];
+        targetStaged = new Staging(4L * maxEmitters);
         frameTable = tables[7];
         colliderTable = tables[8];
         ribbonList = tables[4];
@@ -352,6 +389,12 @@ public final class Particles implements AutoCloseable {
         dispatchImport = new ExternalBuffer("particle spawn dispatch", dispatch);
         orderImport = new ExternalBuffer("particle ribbon order", order);
         depthImport = new ExternalBuffer("particle collision depth", depth);
+        eventsImport = new ExternalBuffer("particle events", this.events);
+        eventKeysImport = new ExternalBuffer("particle event keys", eventKeys);
+        eventKeysOtherImport = new ExternalBuffer("particle event keys, other", eventKeysOther);
+        eventArgsImport = new ExternalBuffer("particle event args", eventArgs);
+        eventCountsImport = new ExternalBuffer("particle event counts", eventCounts);
+        childPrefixImport = new ExternalBuffer("particle event children", childPrefix);
     }
 
     private static long statisticsBytes(int maxEmitters) {
@@ -506,6 +549,7 @@ public final class Particles implements AutoCloseable {
         sortChunkStaged.copyTo(sortChunks, 8L * sortChunkCount);
         cpuEmitters.finish();
         colliderStaged.copyTo(colliderTable, (long) ParticleColliderLayout.BYTES * colliderCount);
+        targetStaged.copyTo(targetTable, 4L * targetCount);
     }
 
     /**
@@ -525,6 +569,11 @@ public final class Particles implements AutoCloseable {
         r.putLong(ParticleFrameLayout.COLLIDERS, colliderTable.deviceAddress());
         r.putLong(ParticleFrameLayout.HEIGHTS, heights == null ? 0 : heights.deviceAddress());
         r.putLong(ParticleFrameLayout.DEPTH, depth.deviceAddress());
+        r.putLong(ParticleFrameLayout.EVENTS, events.deviceAddress());
+        r.putLong(ParticleFrameLayout.EVENT_KEYS, eventKeys.deviceAddress());
+        r.putLong(ParticleFrameLayout.EVENT_ARGS, eventArgs.deviceAddress());
+        r.putLong(ParticleFrameLayout.CHILD_PREFIX, childPrefix.deviceAddress());
+        r.putLong(ParticleFrameLayout.TARGETS, targetTable.deviceAddress());
         r.putInt(ParticleFrameLayout.COLLIDER_COUNT, colliderCount);
         r.putInt(ParticleFrameLayout.HEIGHT_RESOLUTION, heights == null ? 0 : heightResolution);
         r.putFloat(ParticleFrameLayout.HEIGHT_SIZE, heightSize);
@@ -824,6 +873,8 @@ public final class Particles implements AutoCloseable {
         parameterFloats = 0;
         sortedCount = 0;
         sortChunkCount = 0;
+        targetCount = 0;
+        sendsEvents = false;
         for (int slot = 0; slot < highest; slot++) {
             long effect = ids[slot];
             if (effect == 0) {
@@ -874,12 +925,18 @@ public final class Particles implements AutoCloseable {
             float vy = (float) ((y - previous[3 * slot + 1]) * inherit);
             float vz = (float) ((z - previous[3 * slot + 2]) * inherit);
             int[] own = instances[slot];
+            int targets = targetCount;
+            targetCount += block.programs.length;
+            for (int e = 0; e < block.programs.length; e++) {
+                targetStaged.putInt(4L * (targets + e), ParticleConstants.NO_EMITTER);
+            }
             for (int e = 0; e < block.programs.length; e++) {
                 int instance = own[e];
                 if (instance < 0) {
                     continue;
                 }
                 int index = emitterCount++;
+                targetStaged.putInt(4L * (targets + e), index);
                 listInstance[index] = instance;
                 listSlot[index] = slot;
                 listEmitter[index] = e;
@@ -915,6 +972,7 @@ public final class Particles implements AutoCloseable {
                 t.putInt(at + ParticleEmitterLayout.SIDE_UNITS, sideUnits[instance] == 0 ? 0
                     : sideUnits[instance] / capacities[instance]);
                 t.putFloat(at + ParticleEmitterLayout.TIME, listTime[index]);
+                t.putInt(at + ParticleEmitterLayout.TARGETS, targets);
                 if (local[instance]) {
                     putOrigin(t, at, x, y, z);
                     putVector(t, at + ParticleEmitterLayout.POSITION, 0, 0, 0);
@@ -939,6 +997,7 @@ public final class Particles implements AutoCloseable {
                     putVector(t, at + ParticleEmitterLayout.WIND, effects.wind(0), effects.wind(1), effects.wind(2));
                 }
                 fresh[instance] = false;
+                sendsEvents |= !blocks[slot].data.emitters().get(e).events().isEmpty();
                 int chunks = cpu[instance] ? 0 : ParticlePool.chunksOf(capacities[instance]);
                 for (int c = 0; c < chunks; c++) {
                     chunkStaged.putInt(4L * chunkCount++, index);
@@ -1363,14 +1422,17 @@ public final class Particles implements AutoCloseable {
 
     /** The simulation's buffers as buffers of a build. */
     record Buffers(Buffer particles, Buffer side, Buffer state, Buffer chunkCounts, Buffer statistics,
-        Buffer dispatch, Buffer order, Buffer depth) {
+        Buffer dispatch, Buffer order, Buffer depth, Buffer events, Buffer eventKeys, Buffer eventKeysOther,
+        Buffer eventArgs, Buffer eventCounts, Buffer childPrefix) {
     }
 
     @AllowAllocation("building the graph, when it changes")
     Buffers importInto(GraphBuilder g) {
         return new Buffers(g.importBuffer(pool.graphBuffer()), g.importBuffer(pool.sideGraphBuffer()),
             g.importBuffer(stateImport), g.importBuffer(chunkCountsImport), g.importBuffer(statisticsImport),
-            g.importBuffer(dispatchImport), g.importBuffer(orderImport), g.importBuffer(depthImport));
+            g.importBuffer(dispatchImport), g.importBuffer(orderImport), g.importBuffer(depthImport),
+            g.importBuffer(eventsImport), g.importBuffer(eventKeysImport), g.importBuffer(eventKeysOtherImport),
+            g.importBuffer(eventArgsImport), g.importBuffer(eventCountsImport), g.importBuffer(childPrefixImport));
     }
 
     /** Whether this frame simulates: it was updated while it records, with emitters to move. */
@@ -1430,6 +1492,10 @@ public final class Particles implements AutoCloseable {
             ParticleConstants.STATISTICS_SPAWNED));
         overflowTotal = Integer.toUnsignedLong(data.getAtIndex(ValueLayout.JAVA_INT,
             ParticleConstants.STATISTICS_OVERFLOW));
+        eventsTotal = Integer.toUnsignedLong(data.getAtIndex(ValueLayout.JAVA_INT,
+            ParticleConstants.STATISTICS_EVENTS));
+        eventsDroppedTotal = Integer.toUnsignedLong(data.getAtIndex(ValueLayout.JAVA_INT,
+            ParticleConstants.STATISTICS_EVENTS_DROPPED));
         for (int i = 0; i < maxEmitters; i++) {
             aliveOf[i] = data.getAtIndex(ValueLayout.JAVA_INT, ParticleConstants.STATISTICS_HEADER + 2L * i);
             overflowOf[i] = data.getAtIndex(ValueLayout.JAVA_INT, ParticleConstants.STATISTICS_HEADER + 2L * i + 1);
@@ -1545,6 +1611,37 @@ public final class Particles implements AutoCloseable {
         return spawnedTotal;
     }
 
+    /** Events sent in that frame. */
+    public long events() {
+        return eventsTotal;
+    }
+
+    /** Of them, dropped for want of room in the frame's event buffer. */
+    public long eventsDropped() {
+        return eventsDroppedTotal;
+    }
+
+    /** Whether the frame's emitters send events: the event passes run. */
+    boolean sendsEvents() {
+        return sendsEvents;
+    }
+
+    long eventKeysAddress() {
+        return eventKeys.deviceAddress();
+    }
+
+    long eventKeysOtherAddress() {
+        return eventKeysOther.deviceAddress();
+    }
+
+    long eventArgsAddress() {
+        return eventArgs.deviceAddress();
+    }
+
+    long eventCountsAddress() {
+        return eventCounts.deviceAddress();
+    }
+
     /** Particles dropped in that frame for want of room in their ranges. */
     public long overflow() {
         return overflowTotal;
@@ -1609,6 +1706,13 @@ public final class Particles implements AutoCloseable {
             heights.close();
         }
         depth.close();
+        events.close();
+        eventKeys.close();
+        eventKeysOther.close();
+        eventArgs.close();
+        eventCounts.close();
+        childPrefix.close();
+        targetTable.close();
         programs.close();
         cpuEmitters.close();
         pool.close();
