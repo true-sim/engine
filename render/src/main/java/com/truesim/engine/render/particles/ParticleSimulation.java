@@ -1,6 +1,7 @@
 package com.truesim.engine.render.particles;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.common.graph.Id;
@@ -9,6 +10,7 @@ import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.layout.ParticlePush;
 import com.truesim.engine.render.layout.ParticleRibbonPush;
+import com.truesim.engine.render.shadows.TopLevel;
 import com.truesim.engine.vulkan.Pipeline;
 import java.util.List;
 import java.util.Objects;
@@ -30,6 +32,7 @@ public final class ParticleSimulation implements Technique {
 
     public static final Id<ParticleSimulation> ID = Id.of("truesim.particleSimulation", ParticleSimulation.class);
     private static final String SHADER = "shaders/particles/simulate.spv";
+    private static final String RAYS_SHADER = "shaders/particles/simulate_rays.spv";
 
     private final Particles particles;
 
@@ -51,11 +54,15 @@ public final class ParticleSimulation implements Technique {
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
         Particles.Buffers b = particles.importInto(g);
+        // With ray collision, the update and spawn take the rays variant, after the frame's top level
+        boolean traced = particles.rayTracing() != null;
+        Buffer topLevel = traced ? g.request(new TopLevel(particles.rayTracing(), particles.rayRenderer())) : null;
+        String variant = traced ? RAYS_SHADER : SHADER;
         Pipeline count = g.computeProgram(SHADER, "countMain", ParticlePush.BYTES);
         Pipeline scan = g.computeProgram(SHADER, "scanMain", ParticlePush.BYTES);
-        Pipeline update = g.computeProgram(SHADER, "updateMain", ParticlePush.BYTES);
+        Pipeline update = g.computeProgram(variant, "updateMain", ParticlePush.BYTES);
         Pipeline spawnArgs = g.computeProgram(SHADER, "spawnArgsMain", ParticlePush.BYTES);
-        Pipeline spawn = g.computeProgram(SHADER, "spawnMain", ParticlePush.BYTES);
+        Pipeline spawn = g.computeProgram(variant, "spawnMain", ParticlePush.BYTES);
         Pipeline args = g.computeProgram(SHADER, "argsMain", ParticlePush.BYTES);
         Particles p = particles;
         ParticlePush countPush = new ParticlePush();
@@ -75,7 +82,13 @@ public final class ParticleSimulation implements Technique {
                 }
             });
         ParticlePush updatePush = new ParticlePush();
-        g.pass("particle update").read(b.chunkCounts(), BufferAccess.STORAGE_READ)
+        GraphBuilder.PassBuilder updatePass = g.pass("particle update");
+        GraphBuilder.PassBuilder spawnPass = g.pass("particle spawn");
+        if (traced) {
+            updatePass.read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ);
+            spawnPass.read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ);
+        }
+        updatePass.read(b.chunkCounts(), BufferAccess.STORAGE_READ)
             .read(b.depth(), BufferAccess.STORAGE_READ)
             .write(b.particles(), BufferAccess.STORAGE_WRITE).write(b.side(), BufferAccess.STORAGE_WRITE)
             .write(b.state(), BufferAccess.STORAGE_WRITE)
@@ -93,7 +106,7 @@ public final class ParticleSimulation implements Technique {
                 }
             });
         ParticlePush spawnPush = new ParticlePush();
-        g.pass("particle spawn").read(b.dispatch(), BufferAccess.INDIRECT).read(b.dispatch(), BufferAccess.STORAGE_READ)
+        spawnPass.read(b.dispatch(), BufferAccess.INDIRECT).read(b.dispatch(), BufferAccess.STORAGE_READ)
             .read(b.depth(), BufferAccess.STORAGE_READ)
             .write(b.particles(), BufferAccess.STORAGE_WRITE).write(b.side(), BufferAccess.STORAGE_WRITE)
             .write(b.state(), BufferAccess.STORAGE_WRITE)

@@ -18,6 +18,8 @@ import com.truesim.engine.render.layout.ParticleEmitterLayout;
 import com.truesim.engine.render.layout.ParticleLayout;
 import com.truesim.engine.render.layout.ParticlePush;
 import com.truesim.engine.render.layout.ParticleSpawnLayout;
+import com.truesim.engine.render.MeshletRenderer;
+import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.render.layout.ParticleDrawPush;
@@ -150,6 +152,8 @@ public final class Particles implements AutoCloseable {
     private final ExternalBuffer depthImport;
     private boolean depthReady;
     private long frameRecorded = -1;
+    private RayTracing rayTracing;
+    private MeshletRenderer rayRenderer;
 
     // Per effect slot: the effect followed, its programs, its emitters' instances (-1: none) and places in the frame's
     // list, its origin, where it was and its time at the last update.
@@ -529,6 +533,17 @@ public final class Particles implements AutoCloseable {
         float hz = (float) heightZ;
         r.putVector(ParticleFrameLayout.HEIGHT_CENTER_HIGH, hx, 0, hz);
         r.putVector(ParticleFrameLayout.HEIGHT_CENTER_LOW, (float) (heightX - hx), 0, (float) (heightZ - hz));
+        if (rayTracing != null) {
+            r.putLong(ParticleFrameLayout.RAYS, rayTracing.sceneAddress(rayRenderer.scene()));
+            double ox = rayTracing.origin(0);
+            double oy = rayTracing.origin(1);
+            double oz = rayTracing.origin(2);
+            r.putVector(ParticleFrameLayout.RAYS_ORIGIN_HIGH, (float) ox, (float) oy, (float) oz);
+            r.putVector(ParticleFrameLayout.RAYS_ORIGIN_LOW, (float) (ox - (float) ox), (float) (oy - (float) oy),
+                (float) (oz - (float) oz));
+        } else {
+            r.putLong(ParticleFrameLayout.RAYS, 0);
+        }
         r.copyTo(frameTable, ParticleFrameLayout.BYTES);
         return frameTable.deviceAddress();
     }
@@ -1029,6 +1044,30 @@ public final class Particles implements AutoCloseable {
         }
         heightStaged.copyTo(heights, 4L * n * n);
         heightRefreshes++;
+    }
+
+    /**
+     * Lets {@code collide.rays} modules trace their collision rays into the frame's top level of {@code renderer}'s
+     * scene (E10, the rays kernel variant, ordered after the top level's build), where the device traces rays; on other
+     * devices, and for effects encoded before this, chains fall back to their next method (depth, say). Set before
+     * effects play; null: no ray collision.
+     */
+    public Particles rays(RayTracing rayTracing, MeshletRenderer renderer) {
+        boolean traced = rayTracing != null && device.rayTracing();
+        this.rayTracing = traced ? rayTracing : null;
+        this.rayRenderer = traced ? Objects.requireNonNull(renderer, "renderer") : null;
+        programs.rays(traced);
+        return this;
+    }
+
+    /** The ray tracing collision rays go into, or null. */
+    RayTracing rayTracing() {
+        return rayTracing;
+    }
+
+    /** The renderer whose scene's top level they trace. */
+    MeshletRenderer rayRenderer() {
+        return rayRenderer;
     }
 
     /** The collision depth's buffer, for the view's {@link ParticleCollisionDepth} to write. */

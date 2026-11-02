@@ -10,6 +10,9 @@
 // arithmetic as scene-effects' CpuSimulation, the reference the tests compare against.
 import particle;
 import bindless;
+#ifdef PARTICLE_RAYS
+import raytracing;
+#endif
 
 struct ParticlePush
 {
@@ -525,6 +528,69 @@ Hit hitDepth(ParticleEmitter e, float r, float thickness, float3 a, float3 b)
     return hitAt(surface - toOrigin + n * r, n);
 }
 
+#ifdef PARTICLE_RAYS
+/** The distance along the ray to the nearest triangle of `scene`'s top level within `far`, or -1 (opaque, all). */
+float nearest(RayScene* scene, float3 origin, float3 direction, float far)
+{
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = 0;
+    ray.TMax = far;
+    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    query.TraceRayInline(scenes[scene.slot], RAY_FLAG_NONE, 0xff, ray);
+    while (query.Proceed())
+    {
+    }
+    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? query.CommittedRayT() : -1;
+}
+
+/**
+ * Whether the move from `a` to `b` (the radius further) crosses a triangle of the frame's top level: the contact the
+ * radius before it, the normal from two more rays beside the first (or against the move where they miss).
+ */
+Hit hitRays(ParticleEmitter e, float r, float3 a, float3 b)
+{
+    ParticleFrame* frame = push.frame;
+    uint64_t address = frame.rays;
+    float3 d = b - a;
+    float length = length(d);
+    if (address == 0 || length < 1e-6)
+    {
+        return noHit();
+    }
+    RayScene* scene = (RayScene*) address;
+    precise float3 high = e.originHigh - frame.raysOriginHigh;
+    precise float3 low = e.originLow - frame.raysOriginLow;
+    float3 from = (high + low) + a;
+    d /= length;
+    float t = nearest(scene, from, d, length + r);
+    if (t < 0)
+    {
+        return noHit();
+    }
+    float3 side = normalize(cross(d, abs(d.y) < 0.9 ? float3(0, 1, 0) : float3(1, 0, 0)));
+    float3 up = cross(side, d);
+    float apart = max(0.01, r);
+    float t1 = nearest(scene, from + side * apart, d, length + r + 4 * apart);
+    float t2 = nearest(scene, from + up * apart, d, length + r + 4 * apart);
+    float3 n = -d;
+    if (t1 >= 0 && t2 >= 0)
+    {
+        float3 p = d * t;
+        float3 c = cross(side * apart + d * t1 - p, up * apart + d * t2 - p);
+        n = dot(c, c) > 1e-12 ? normalize(c) : -d;
+        n = dot(n, d) > 0 ? -n : n;
+    }
+    return hitAt(a + d * max(0.0, t - r), n);
+}
+#else
+Hit hitRays(ParticleEmitter e, float r, float3 a, float3 b)
+{
+    return noHit(); // the base variant: programs have no ray collision here
+}
+#endif
+
 /** How much of an attractor's strength reaches `distance`: falling to 0 at `radius` (0: all of it). */
 float falloff(float distance, float radius)
 {
@@ -624,6 +690,7 @@ void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, floa
         case OP_COLLIDERS:
         case OP_HEIGHT:
         case OP_DEPTH:
+        case OP_RAYS:
             after = true;
             break;
         default:
@@ -689,7 +756,7 @@ void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, floa
     {
         uint code = m.program[op] & 0xff;
         uint salt = m.program[op + 1];
-        if (code == OP_COLLIDERS || code == OP_HEIGHT || code == OP_DEPTH)
+        if (code == OP_COLLIDERS || code == OP_HEIGHT || code == OP_DEPTH || code == OP_RAYS)
         {
             uint shift = code == OP_COLLIDERS ? 1 : 0; // colliders have their layers before the radius
             float radius = value(m, keys, op, salt, 2 + shift, p);
@@ -703,6 +770,10 @@ void step<K : ICurveKeys>(Emitting m, K keys, uint first, inout Particle p, floa
             else if (code == OP_HEIGHT)
             {
                 hit = hitHeight(e, radius, end);
+            }
+            else if (code == OP_RAYS)
+            {
+                hit = hitRays(e, radius, start, end);
             }
             else
             {
