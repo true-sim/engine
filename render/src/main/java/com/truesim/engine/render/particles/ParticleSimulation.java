@@ -173,6 +173,9 @@ public final class ParticleSimulation implements Technique {
                     }
                 });
         }
+        if (p.lights() != null && p.lights().gpuLightsBuffer() != null) {
+            lights(g, b);
+        }
         Pipeline ribbons = g.computeProgram("shaders/particles/ribbons.spv", "orderMain", ParticleRibbonPush.BYTES);
         ParticleRibbonPush ribbonPush = new ParticleRibbonPush();
         g.pass("particle ribbons").read(b.particles(), BufferAccess.STORAGE_READ)
@@ -272,6 +275,52 @@ public final class ParticleSimulation implements Technique {
                     }
                 });
         }
+    }
+
+    /**
+     * The particle lights (step 17b): "particle lights count" clears the selection and counts each light emitter's
+     * candidates by brightness, "particle lights threshold" finds where each emitter's budget and then the frame's
+     * start, "particle lights write" writes the kept as point lights into the lights the GPU writes, which the light
+     * binning reads after (it builds this first: Lights.writtenBy).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    private void lights(GraphBuilder g, Particles.Buffers b) {
+        Particles p = particles;
+        Buffer written = g.importBuffer(p.lights().gpuLightsBuffer());
+        Buffer state = g.importBuffer(p.lightStateImport());
+        Pipeline count = g.computeProgram(SHADER, "lightsCountMain", ParticlePush.BYTES);
+        Pipeline threshold = g.computeProgram(SHADER, "lightsThresholdMain", ParticlePush.BYTES);
+        Pipeline write = g.computeProgram(SHADER, "lightsWriteMain", ParticlePush.BYTES);
+        ParticlePush countPush = new ParticlePush();
+        g.pass("particle lights count").read(b.particles(), BufferAccess.STORAGE_READ)
+            .read(b.state(), BufferAccess.STORAGE_READ).write(state, BufferAccess.TRANSFER_DST)
+            .write(state, BufferAccess.STORAGE_WRITE).write(written, BufferAccess.TRANSFER_DST)
+            .record(ctx -> {
+                if (p.simulating()) { // else the lights of the frame before stay, as the particles do
+                    p.clearLights(ctx.unsafe().commands(), ctx.unsafe().buffer(state), ctx.unsafe().buffer(written));
+                    if (p.lightEmitterCount() > 0) {
+                        ctx.dispatch(count, p.push(countPush), (p.largestLightEmitter() + 63) / 64,
+                            p.lightEmitterCount(), 1);
+                    }
+                }
+            });
+        ParticlePush thresholdPush = new ParticlePush();
+        g.pass("particle lights threshold").write(state, BufferAccess.STORAGE_WRITE)
+            .record(ctx -> {
+                if (p.simulating() && p.lightEmitterCount() > 0) {
+                    ctx.dispatch(threshold, p.push(thresholdPush), 1);
+                }
+            });
+        ParticlePush writePush = new ParticlePush();
+        g.pass("particle lights write").read(b.particles(), BufferAccess.STORAGE_READ)
+            .read(b.state(), BufferAccess.STORAGE_READ).write(state, BufferAccess.STORAGE_WRITE)
+            .write(written, BufferAccess.STORAGE_WRITE)
+            .record(ctx -> {
+                if (p.simulating() && p.lightEmitterCount() > 0) {
+                    ctx.dispatch(write, p.push(writePush), (p.largestLightEmitter() + 63) / 64,
+                        p.lightEmitterCount(), 1);
+                }
+            });
     }
 
     /** Dispatches a group per chunk (or emitter), in rows of up to 65,535 groups. */

@@ -147,6 +147,12 @@ public struct ParticleFrame
     public uint* meshletTriangles; // and triangles, 3 bytes each
     public uint64_t instances;     // Instance*: the scene's instances, whose range the GPU writes holds mesh particles
     public uint* meshEmitters;     // the frame's emitters with a mesh renderer: their places in the list
+    public uint* lightEmitters;    // the frame's emitters with a light renderer: LIGHT_ENTRY_WORDS each
+    public uint* lightState;       // the light selection's histograms and thresholds: LIGHT_STATE_WORDS per emitter,
+                                   // then the frame's
+    public uint* gpuLights;        // the lights the GPU writes (Lights.gpuLights): a count, three words, the lights
+    public uint lightEmitterCount;
+    public uint lightBudget;       // the most lights of all emitters
 };
 
 
@@ -257,6 +263,14 @@ public static const uint SORT_DEPTH_BITS = 20;
 public static const uint SORT_GROUP = 256;
 /** A draw not sorted. */
 public static const uint NO_SORT = 0xffffffffu;
+/** Particle lights (step 17b): emitters with light renderers a frame takes, at most. */
+public static const uint MAX_LIGHT_EMITTERS = 64;
+/** Brightness buckets of the selection: a quarter of an octave each, 2^-8 to 2^8. */
+public static const uint LIGHT_BUCKETS = 64;
+/** Words of a light emitter's entry: its place in the list, its budget, the share lit, radius, intensity, padding. */
+public static const uint LIGHT_ENTRY_WORDS = 8;
+/** Words of a light emitter's selection: the bucket counts, the threshold bucket, how many it keeps, a counter. */
+public static const uint LIGHT_STATE_WORDS = 68;
 /** Joints a bone shape runs along at most. */
 public static const uint MAX_JOINTS = 16;
 /** An emitter without an emission source, and a source without a mesh. */
@@ -319,6 +333,7 @@ public static const uint RENDER_MESH = 1;
 public static const uint RENDER_RIBBON = 2;
 public static const uint RENDER_TRAIL = 3;
 public static const uint RENDER_BEAM = 4;
+public static const uint RENDER_LIGHT = 5;
 /** Billboard facings: scene-effects' Renderer.Facing, in order. */
 public static const uint FACING_POSITION = 0;
 public static const uint FACING_VIEW_PLANE = 1;

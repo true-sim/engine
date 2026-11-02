@@ -64,6 +64,12 @@ public final class Lights implements AutoCloseable {
     private final int shadowCapacity;
     private int count;
     private boolean[] taken; // ids add() handed out and remove() did not take back
+    // Lights the GPU writes each frame (particle lights, effects.md §2.5): a count, three words, then the lights; the
+    // keys whose producers write them, built before the lights are binned
+    private com.truesim.engine.vulkan.GpuBuffer written;
+    private com.truesim.engine.graph.ExternalBuffer writtenImport;
+    private int writtenCapacity;
+    private final java.util.List<com.truesim.engine.graph.Key<?>> writers = new java.util.ArrayList<>();
 
     /**
      * Room for {@code capacity} lights and {@code shadowCapacity} shadow maps, one copy of them: for frames the caller
@@ -283,6 +289,63 @@ public final class Lights implements AutoCloseable {
         return count;
     }
 
+    /**
+     * Makes room for {@code capacity} lights the GPU writes each frame (particle lights; 0: none): a device-local buffer
+     * of a count, three words and the lights ({@code lights.slang}'s {@code Light}, at world positions), which the
+     * binning ({@link ClusteredLights}) takes after these lights, counting them on the GPU; they cast no shadows. The
+     * writer resets the count each frame. Set up before the graph builds.
+     */
+    @AllowAllocation("set up rarely")
+    public Lights gpuLights(int capacity) {
+        if (capacity < 0) {
+            throw new IllegalArgumentException("Not a light count: " + capacity);
+        }
+        if (written != null) {
+            retiring.add(written);
+            written = null;
+            writtenImport = null;
+        }
+        writtenCapacity = capacity;
+        if (capacity > 0) {
+            written = com.truesim.engine.vulkan.GpuBuffer.deviceLocal(device, 16L + (long) LIGHT_BYTES * capacity,
+                usage | org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                    | org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, families);
+            writtenImport = new com.truesim.engine.graph.ExternalBuffer("gpu lights", written);
+        }
+        return this;
+    }
+
+    /** The most lights the GPU writes, 0 for none. */
+    public int gpuCapacity() {
+        return writtenCapacity;
+    }
+
+    /** The buffer of lights the GPU writes, as a frame graph imports it, or null. */
+    public com.truesim.engine.graph.ExternalBuffer gpuLightsBuffer() {
+        return writtenImport;
+    }
+
+    /**
+     * Notes that the technique providing {@code key} writes the lights the GPU writes: the binning builds it first, so
+     * its writes come before the binning reads them in the frame.
+     */
+    @AllowAllocation("set up once")
+    public void writtenBy(com.truesim.engine.graph.Key<?> key) {
+        if (!writers.contains(key)) {
+            writers.add(Objects.requireNonNull(key, "key"));
+        }
+    }
+
+    /** Stops noting {@code key}. */
+    public void notWrittenBy(com.truesim.engine.graph.Key<?> key) {
+        writers.remove(key);
+    }
+
+    /** The keys whose producers write the lights the GPU writes. */
+    java.util.List<com.truesim.engine.graph.Key<?>> writers() {
+        return writers;
+    }
+
     /** The lights' device address, for passes reading them (e.g. a light's shadow technique). */
     public long lightsAddress() {
         return lights.deviceAddress();
@@ -291,6 +354,9 @@ public final class Lights implements AutoCloseable {
     @Override
     public void close() {
         lights.close();
+        if (written != null) {
+            written.close();
+        }
         for (ShadowTable table : tables.values()) {
             table.close();
         }

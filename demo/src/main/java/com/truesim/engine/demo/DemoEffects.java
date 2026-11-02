@@ -138,6 +138,20 @@ final class DemoEffects implements AutoCloseable {
                 .set("soft", 0.5f)))
         .build();
 
+    /**
+     * Sparks that light what is near: velocity-facing additive streaks bouncing on the terrain, half of them point lights
+     * (the brightest 48 kept), dimming as they cool, lighting the ground and the rocks beside them.
+     */
+    static final EffectData LIT_SPARKS = EffectData.builder().emitter("sparks", e -> e.spawn(Spawn.rate(160))
+        .init(Shape.cone(0.4f, 0.05f), Init.speed(Bind.random(3, 6)), Init.lifetime(Bind.random(1, 1.8f)),
+            Init.size(Bind.random(0.03f, 0.05f)), Init.color(Bind.color(4, 1.8f, 0.5f, 1)))
+        .update(Forces.gravity(), Forces.drag(0.3f), Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 1)
+            .linear(0.6f, 0.8f, 0.45f, 0.2f, 1).linear(1, 0.3f, 0.05f, 0, 0).build()))
+        .collide(Collide.height().bounce(0.4f).friction(0.3f))
+        .render(Renderer.billboard(Renderer.Facing.VELOCITY).additive().set("stretch", 0.08f),
+            Renderer.light(2.5f, 0.5f).set("max", 48).set("fraction", 0.5f)))
+        .build();
+
     /** Sparks: velocity-facing and additive, cooling as they fall. */
     static final EffectData SPARKS = EffectData.builder().emitter("sparks", e -> e.spawn(Spawn.rate(400))
         .init(Shape.cone(0.35f, 0.05f), Init.speed(Bind.random(4, 8)), Init.lifetime(Bind.random(0.8f, 1.8f)),
@@ -331,6 +345,15 @@ final class DemoEffects implements AutoCloseable {
         particles.meshes(renderer, 1024);
         particles.mesh(ROCK, rock, material);
         effects.play(DEBRIS, x + dx, DemoMeshes.height(x + dx, z + dz), z + dz);
+    }
+
+    /**
+     * Sparks lighting what is near at ({@code dx}, {@code dz}) from the effects' place: particle lights in
+     * {@code lights}, at most 256 a frame.
+     */
+    void sparkLights(com.truesim.engine.render.Lights lights, double dx, double dz) {
+        particles.lights(lights, 256);
+        effects.play(LIT_SPARKS, x + dx, DemoMeshes.height(x + dx, z + dz), z + dz);
     }
 
     /** The bindings with the fox, or null. */

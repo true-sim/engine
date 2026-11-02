@@ -94,8 +94,12 @@ public struct LightListHeader
     public float4 floats;          // (clusters: near, slices per unit of log depth, maxPerCluster as bits, 0)
     public float3 camera;          // the world position of the camera it shades for, high part
     public uint pad1;
-    public float3 cameraLow;       // and the rest; 112 bytes in all
+    public float3 cameraLow;       // and the rest
     public uint pad2;
+    public Light* extra;           // the lights the GPU wrote this frame (particle lights), after the lights: copied
+                                   // here by the binning; light lightCount + i is extra[i]
+    public uint extraCount;        // how many (written by the binning)
+    public uint pad3;              // 128 bytes in all
 
     /** `light` as this list's shading sees it: its position relative to the camera. */
     public Light relativeTo(Light light)
@@ -112,6 +116,13 @@ public struct LightListHeader
      */
     public Light handOut(uint index)
     {
+        if (index >= lightCount) // a light the GPU wrote: casting no shadows
+        {
+            Light g = relativeTo(extra[index - lightCount]);
+            g.shadowFirst = -1;
+            g.shadowCount = 0;
+            return g;
+        }
         Light r = relativeTo(lights[index]);
         int2 range = ((int2*)((uint64_t)shadows + 128 * uint64_t(shadowCapacity)))[index];
         r.shadowFirst = range.x;
@@ -147,6 +158,9 @@ public LightListHeader loadHeader(LightListHeader* h)
     r.pad1 = 0;
     r.cameraLow = h[0].cameraLow;
     r.pad2 = 0;
+    r.extra = h[0].extra;
+    r.extraCount = h[0].extraCount;
+    r.pad3 = 0;
     return r;
 }
 

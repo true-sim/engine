@@ -599,15 +599,22 @@ float4 fragmentMain(ParticleVertex v) : SV_Target
         {
             // Its normal map's (tangent space: right, up, towards the camera), else a sphere's: a round puff
             float2 d = 2 * v.uv - 1;
-            float3 m = v.draw.z != NO_TEXTURE ? frame(r, v.draw.z, v.frames.x, v.uv).xyz * 2 - 1
-                : float3(d.x, -d.y, sqrt(saturate(1 - dot(d, d))));
+            float3 m = float3(d.x, -d.y, sqrt(saturate(1 - dot(d, d))));
+            if (v.draw.z != NO_TEXTURE) // branches, not selects: no sample of a slot that is not there
+            {
+                m = frame(r, v.draw.z, v.frames.x, v.uv).xyz * 2 - 1;
+            }
             n = normalize(v.right * m.x + v.up * m.y + v.forward * m.z);
             color.rgb *= particleLight(lightsOf(v), v.world, n, v.right, v.up, 1, 0, 0, pixel, depth);
         }
         else
         {
             // Six-way maps: the texture's right, top, back and alpha, the second's left, bottom, front and emission
-            float4 b = v.draw.z != NO_TEXTURE ? frame(r, v.draw.z, v.frames.x, v.uv) : float4(texel.rgb, 0);
+            float4 b = float4(texel.rgb, 0);
+            if (v.draw.z != NO_TEXTURE)
+            {
+                b = frame(r, v.draw.z, v.frames.x, v.uv);
+            }
             float4 a = texel;
             color = float4(v.color.rgb * (particleLight(lightsOf(v), v.world, n, v.right, v.up, 2, a, b, pixel, depth)
                 + b.a),
