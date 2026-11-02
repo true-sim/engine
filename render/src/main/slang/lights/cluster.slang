@@ -80,7 +80,17 @@ void clusterMain(uint3 id : SV_DispatchThreadID, uint local : SV_GroupIndex)
         if (first + local < total)
         {
             uint index = first + local;
-            Light light = h.relativeTo(index < push.lightCount ? h.lights[index] : source[index - push.lightCount]);
+            // Loaded on one side only: a select would load both, the GPU's lights through a null pointer without them
+            Light stored;
+            if (index < push.lightCount)
+            {
+                stored = h.lights[index];
+            }
+            else
+            {
+                stored = source[index - push.lightCount];
+            }
+            Light light = h.relativeTo(stored);
             float3 p = light.position;
             float radius = light.range;
             if (light.type == SPOT && light.cosOuter > 0)
