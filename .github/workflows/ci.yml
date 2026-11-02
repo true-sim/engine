@@ -28,7 +28,21 @@ jobs:
           fi
       # Pinned Mesa lavapipe and validation layer, offscreen SDL; tests must run validated.
       - uses: true-sim/build-logic/.github/actions/setup-vulkan@61314fb2c79472f89f95c8ffd001ee53e904b02a # main, 2026-10-27
+        id: vulkan
         if: steps.changes.outputs.code == 'true'
+      # Mesa's shader cache: lavapipe compiles shader variants as frames first draw with them, and a cold cache cost the
+      # particle tests minutes (docs/pitfalls.md). Content-addressed by Mesa, so a stale entry is never used, only
+      # unused; the key names the driver and the shaders, and each run saves what it added for the next.
+      - if: steps.changes.outputs.code == 'true'
+        run: echo "MESA_SHADER_CACHE_DIR=$RUNNER_TEMP/mesa-shader-cache" >> "$GITHUB_ENV"
+      - uses: actions/cache@v6
+        if: steps.changes.outputs.code == 'true'
+        with:
+          path: ${{ runner.temp }}/mesa-shader-cache
+          key: mesa-shaders-${{ steps.vulkan.outputs.driver }}-${{ hashFiles('*/src/*/slang/**') }}-${{ github.run_id }}
+          restore-keys: |
+            mesa-shaders-${{ steps.vulkan.outputs.driver }}-${{ hashFiles('*/src/*/slang/**') }}-
+            mesa-shaders-${{ steps.vulkan.outputs.driver }}-
       - uses: actions/setup-java@v6
         if: steps.changes.outputs.code == 'true'
         with:
