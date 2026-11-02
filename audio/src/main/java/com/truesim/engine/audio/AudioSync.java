@@ -30,10 +30,11 @@ import java.util.Arrays;
  * sync.update();           // after it, and after sounds.advance()
  * }</pre>
  *
- * <p>Voices take renderer slots first fit, so an offline render of the same calls is the same. Positions: the
- * listener is the store's first device listener (split screen's nearest-listener rule comes with 3D, §6 step 7); its
- * world position and rotation and the instance's are doubles, and only the listener-relative position becomes floats,
- * so a sound 7,000 km out pans as one at the origin. Allocation-free once grown.
+ * <p>Voices take renderer slots first fit, so an offline render of the same calls is the same. Positions: each placed
+ * instance is heard from its nearest device listener (with 10 % hysteresis; a change cross-fades over 50 ms); its world
+ * position and the listener's are doubles, and only the listener-relative position becomes floats, so a sound
+ * 7,000 km out pans and Dopplers as one at the origin. The renderer attenuates, filters, pans and chooses the real
+ * voices (AU7). Allocation-free once grown.
  */
 public final class AudioSync {
 
@@ -61,7 +62,6 @@ public final class AudioSync {
     private long dropped;
     private final Sounds.Visitor changes = this::changed;
     private final AudioRenderer.EventVisitor endings = this::ended;
-    private final double[] listener = new double[7];
 
     /** An instance followed: its voices' slots and state. */
     private static final class Track {
@@ -77,6 +77,12 @@ public final class AudioSync {
         long added;
         boolean gone;
         boolean stopped;
+        boolean placed;
+        long listener;
+        long placedAt;
+        final double[] previous = new double[3];
+        double previousDistance;
+        float doppler = 1;
 
         @AllowAllocation("a sound with more voices than any before")
         void grow(int n) {
@@ -172,12 +178,12 @@ public final class AudioSync {
         for (int s = 0; s < stores.length; s++) {
             Sounds store = stores[s];
             storeNow = s;
+            listeners(s);
             long now = store.clock().now();
             if (!store.changesSince(marks[s], changes)) {
                 rebuild(s);
             }
             marks[s] = now;
-            listener(store);
         }
         for (int t = 0; t < tracks.length; t++) {
             Track track = tracks[t];
@@ -262,6 +268,9 @@ public final class AudioSync {
         track.added = store.now();
         track.gone = false;
         track.stopped = false;
+        track.placed = false;
+        track.listener = 0;
+        track.doppler = 1;
         for (int v = 0; v < track.voices; v++) {
             track.slots[v] = -1;
             track.starts[v] = 0;
@@ -386,8 +395,9 @@ public final class AudioSync {
             return; // every slot taken: it waits (logical voices beyond the renderer's are for step 7)
         }
         Sounds store = stores[track.store];
-        int flags = (store.voiceLoops(track.id, v) ? Voices.LOOP : 0)
-            | (placed(track) ? Voices.SPATIAL : 0);
+        int flags = (store.voiceLoops(track.id, v) ? Voices.LOOP : 0) | (placed(track) ? Voices.SPATIAL : 0)
+            | track.sound.priority().ordinal() << Voices.PRIORITY_SHIFT
+            | track.sound.virtualization().ordinal() << Voices.VIRTUAL_SHIFT;
         Bus bus = store.isUi() ? Bus.UI : track.sound.bus();
         if (!commands.play(slot, clip, at, 0, gain(track, v), pitch(track, v), bus, flags, 0, track.id)) {
             return; // the ring is full: tried again next frame
@@ -401,6 +411,11 @@ public final class AudioSync {
         track.slots[v] = slot;
         track.starts[v] = at;
         track.state[v] = PLAYING;
+        if (placed(track)) {
+            track.placed = false; // placed at once, the others again with it
+            storeNow = track.store;
+            place(t);
+        }
     }
 
     private int firstFree() {
@@ -439,10 +454,10 @@ public final class AudioSync {
         finishIfDone(t);
     }
 
-    /** Voice {@code v}'s gain: drawn and by parameters, times the instance's volume. */
+    /** Voice {@code v}'s gain: drawn and by parameters, times the instance's volume (distance is the renderer's). */
     private float gain(Track track, int v) {
         Sounds store = stores[track.store];
-        return store.voiceGain(track.id, v) * Decibels.gain(store.volume(track.id)) * distanceGain(track);
+        return store.voiceGain(track.id, v) * Decibels.gain(store.volume(track.id));
     }
 
     /** Voice {@code v}'s pitch: drawn and by parameters, the instance's, and its time scale (0 while holding: 1). */
@@ -458,48 +473,85 @@ public final class AudioSync {
 
     // ---------------------------------------------------------------- positions
 
-    /** The store's listener: its first device listener's position and rotation, or the origin unrotated. */
-    private void listener(Sounds store) {
-        Arrays.fill(listener, 0);
-        listener[6] = 1;
-        if (store.isUi()) {
-            return;
+    /** Speed of sound for Doppler, metres a second. */
+    static final double SOUND_SPEED = 343;
+    /** A jump of the relative position larger than this in a frame is a teleport: no Doppler from it. */
+    static final double TELEPORT = 50;
+
+    /** The store's device listeners: id, then position (3) and rotation (4), by store; grown as needed. */
+    private long[][] deviceIds = new long[0][];
+    private double[][] devices = new double[0][];
+    private int[] deviceCounts = new int[0];
+    private final Listeners.Visitor collect = this::collect;
+
+    /** Collects store {@code s}'s device listeners and where they are, as of its last advance. */
+    private void listeners(int s) {
+        if (deviceIds.length <= s) {
+            growListeners(s + 1);
         }
-        Listeners listeners = store.listeners();
-        listenerFirst = 0;
-        listeners.forEach(firstDevice);
-        if (listenerFirst != 0) {
-            for (int i = 0; i < 3; i++) {
-                listener[i] = listeners.position(listenerFirst, i);
-            }
-            for (int i = 0; i < 4; i++) {
-                listener[3 + i] = listeners.rotation(listenerFirst, i);
-            }
+        deviceCounts[s] = 0;
+        if (!stores[s].isUi()) {
+            stores[s].listeners().forEach(collect);
         }
     }
 
-    private long listenerFirst;
-    private final Listeners.Visitor firstDevice = this::firstDevice;
-
-    private void firstDevice(long listenerId) {
-        if (listenerFirst == 0 && !stores[storeNow].listeners().rendering(listenerId)) {
-            listenerFirst = listenerId;
+    @AllowAllocation("a store or listener more than before")
+    private void growListeners(int stores) {
+        int n = deviceIds.length;
+        deviceIds = Arrays.copyOf(deviceIds, stores);
+        devices = Arrays.copyOf(devices, stores);
+        deviceCounts = Arrays.copyOf(deviceCounts, stores);
+        for (int s = n; s < stores; s++) {
+            deviceIds[s] = new long[4];
+            devices[s] = new double[28];
         }
+    }
+
+    @AllowAllocation("a listener more than before")
+    private void growDevices(int s) {
+        deviceIds[s] = Arrays.copyOf(deviceIds[s], 2 * deviceIds[s].length);
+        devices[s] = Arrays.copyOf(devices[s], 2 * devices[s].length);
+    }
+
+    private void collect(long listener) {
+        int s = storeNow;
+        Listeners listeners = stores[s].listeners();
+        if (listeners.rendering(listener)) {
+            return;
+        }
+        int n = deviceCounts[s];
+        if (n == deviceIds[s].length) {
+            growDevices(s);
+        }
+        deviceIds[s][n] = listener;
+        double[] d = devices[s];
+        for (int i = 0; i < 3; i++) {
+            d[7 * n + i] = listeners.position(listener, i);
+        }
+        for (int i = 0; i < 4; i++) {
+            d[7 * n + 3 + i] = listeners.rotation(listener, i);
+        }
+        deviceCounts[s] = n + 1;
     }
 
     private final double[] relative = new double[3];
 
-    /** Where track {@code t}'s instance is relative to its store's listener, into {@link #relative}: doubles. */
-    private void relative(Track track) {
+    /**
+     * Where track {@code track}'s instance is relative to device listener {@code n} of its store, into
+     * {@link #relative}: in doubles until here, with the store's listener at the origin unrotated when it has none.
+     */
+    private void relative(Track track, int n) {
         Sounds store = stores[track.store];
-        double dx = store.position(track.id, 0) - listener[0];
-        double dy = store.position(track.id, 1) - listener[1];
-        double dz = store.position(track.id, 2) - listener[2];
+        double[] d = devices[track.store];
+        boolean none = n < 0;
+        double dx = store.position(track.id, 0) - (none ? 0 : d[7 * n]);
+        double dy = store.position(track.id, 1) - (none ? 0 : d[7 * n + 1]);
+        double dz = store.position(track.id, 2) - (none ? 0 : d[7 * n + 2]);
         // by the listener's inverse rotation: v + 2w (q x v) + 2 q x (q x v), q conjugated
-        double qx = -listener[3];
-        double qy = -listener[4];
-        double qz = -listener[5];
-        double qw = listener[6];
+        double qx = none ? 0 : -d[7 * n + 3];
+        double qy = none ? 0 : -d[7 * n + 4];
+        double qz = none ? 0 : -d[7 * n + 5];
+        double qw = none ? 1 : d[7 * n + 6];
         double tx = 2 * (qy * dz - qz * dy);
         double ty = 2 * (qz * dx - qx * dz);
         double tz = 2 * (qx * dy - qy * dx);
@@ -508,29 +560,80 @@ public final class AudioSync {
         relative[2] = dz + qw * tz + qx * ty - qy * tx;
     }
 
-    /** The distance gain of a placed track now; 1 for 2D. */
-    private float distanceGain(Track track) {
-        if (!placed(track)) {
-            return 1;
+    /**
+     * The device listener track {@code track} is heard from (§2.10, split screen): its nearest, keeping the one it has
+     * unless another is more than 10 % nearer. -1 when the store has none.
+     */
+    private int nearest(Track track) {
+        int count = deviceCounts[track.store];
+        if (count == 0) {
+            return -1;
         }
-        relative(track);
-        double d = Math.sqrt(relative[0] * relative[0] + relative[1] * relative[1] + relative[2] * relative[2]);
-        Attenuation a = track.sound.attenuation();
-        return a.gain((float) d);
+        Sounds store = stores[track.store];
+        double[] d = devices[track.store];
+        int best = -1;
+        double bestDistance = Double.POSITIVE_INFINITY;
+        double current = Double.POSITIVE_INFINITY;
+        int at = -1;
+        for (int n = 0; n < count; n++) {
+            double dx = store.position(track.id, 0) - d[7 * n];
+            double dy = store.position(track.id, 1) - d[7 * n + 1];
+            double dz = store.position(track.id, 2) - d[7 * n + 2];
+            double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (distance < bestDistance) {
+                best = n;
+                bestDistance = distance;
+            }
+            if (deviceIds[track.store][n] == track.listener) {
+                at = n;
+                current = distance;
+            }
+        }
+        return at >= 0 && bestDistance >= current * 0.9 ? at : best;
     }
 
-    /** Pans and attenuates track {@code t}'s playing voices for where it is now. */
+    /**
+     * Places track {@code t}'s playing voices for where its instance is now: listener-relative position (doubles until
+     * then), the Doppler ratio from the change of its distance over the frame (relative positions, so float
+     * cancellation never happens; none after a teleport or a change of listener), and the attenuation, for the
+     * renderer to spatialize. A change of listener cross-fades over 50 ms.
+     */
     private void place(int t) {
         Track track = tracks[t];
-        relative(track);
+        Sounds store = stores[track.store];
+        int n = nearest(track);
+        long listener = n < 0 ? 0 : deviceIds[track.store][n];
+        boolean changed = track.placed && listener != track.listener;
+        relative(track, n);
         double x = relative[0];
+        double y = relative[1];
         double z = relative[2];
-        double horizontal = Math.sqrt(x * x + z * z);
-        float pan = horizontal < 1e-6 ? 0 : (float) (x / horizontal); // right of the listener: -z is ahead
+        double distance = Math.sqrt(x * x + y * y + z * z);
+        double dt = (double) (store.now() - track.placedAt) / Sounds.TICKS_PER_SECOND;
+        double jump = Math.sqrt((x - track.previous[0]) * (x - track.previous[0])
+            + (y - track.previous[1]) * (y - track.previous[1]) + (z - track.previous[2]) * (z - track.previous[2]));
+        float doppler = 1;
+        if (track.placed && !changed && dt > 0 && jump < TELEPORT && track.sound.doppler() > 0) {
+            double radial = (distance - track.previousDistance) / dt; // receding: positive
+            double ratio = Math.max(0.5, Math.min(2, SOUND_SPEED / (SOUND_SPEED + radial)));
+            doppler = (float) (1 + (ratio - 1) * track.sound.doppler());
+            track.doppler = doppler;
+        } else if (track.placed && dt <= 0) {
+            doppler = track.doppler; // no time passed: the same as last frame
+        }
+        if (dt > 0 || !track.placed) {
+            track.previous[0] = x;
+            track.previous[1] = y;
+            track.previous[2] = z;
+            track.previousDistance = distance;
+            track.placedAt = store.now();
+        }
+        track.placed = true;
+        track.listener = listener;
+        Attenuation attenuation = track.sound.attenuation();
         for (int v = 0; v < track.voices; v++) {
             if (track.state[v] == PLAYING) {
-                commands.pan(track.slots[v], pan);
-                commands.gain(track.slots[v], gain(track, v), 1.0 / 60);
+                commands.spatial(track.slots[v], (float) x, (float) y, (float) z, doppler, attenuation, changed);
             }
         }
     }

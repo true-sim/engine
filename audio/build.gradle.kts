@@ -26,7 +26,7 @@ tasks.test {
 // The real-device probe (AudioDeviceProbe): TRUESIM_AUDIO=true ./gradlew :engine-audio:test --tests '*AudioDeviceProbe*'
 // [-Ptruesim.audio.seconds=600] [-Ptruesim.audio.garbage=true] [-Ptruesim.audio.zgc=true] [-Ptruesim.audio.minimised=true]
 tasks.test {
-    for (name in listOf("seconds", "garbage", "minimised")) {
+    for (name in listOf("seconds", "garbage", "minimised", "proofs")) {
         providers.gradleProperty("truesim.audio.$name").orNull?.let { systemProperty("truesim.audio.$name", it) }
     }
     if (providers.gradleProperty("truesim.audio.zgc").orNull == "true") {

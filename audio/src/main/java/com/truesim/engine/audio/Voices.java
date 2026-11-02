@@ -1,6 +1,8 @@
 package com.truesim.engine.audio;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.common.math.Maths;
+import com.truesim.scene.audio.Attenuation;
 import com.truesim.scene.audio.AudioClip;
 import com.truesim.scene.audio.Bus;
 import java.lang.foreign.MemorySegment;
@@ -12,6 +14,15 @@ import java.util.Arrays;
  * its rate, ramps its gain per sample, runs its envelope (fades for starts from an offset, stops, kills and pauses),
  * pans and sums into its bus. Slots are mixed in slot order, so the same commands sum the same floats in the same
  * order (AU10). Used on the audio thread only; allocation-free.
+ *
+ * <p>Placed voices (§2.8) are mixed to mono and take from their listener-relative position the attenuation's gain,
+ * spread and air low-pass (a one-pole filter), the direction's pan (equal power, or VBAP on speakers) and the Doppler
+ * ratio (smoothed over 50 ms); a new place ramps over a block, a change of listener over 50 ms. Every 4 blocks the
+ * most audible voices within the budget are real (AU7): audibility is the gain after attenuation, fades and the bus,
+ * times the priority's weight; below -60 dB a voice goes virtual even with budget left, and comes back above -57 dB;
+ * the highest priority is never virtual by budget. A voice going virtual fades out over 10 ms and then keeps time (its
+ * position moves on without reading samples; a loop wraps), or ends, as its virtualization says; one coming back
+ * fades in over 20 ms where it would be.
  */
 final class Voices {
 
@@ -21,8 +32,23 @@ final class Voices {
 
     /** Flags of a voice. */
     static final int LOOP = 1;
-    /** Placed in 3D: the clip is mixed to mono and panned by direction (step 7). */
+    /** Placed in 3D: the clip is mixed to mono and panned by direction. */
     static final int SPATIAL = 1 << 1;
+    /** The priority's ordinal (0 lowest to 4 highest), in 3 bits from here. */
+    static final int PRIORITY_SHIFT = 4;
+    /** The virtualization's ordinal (keep time, kill, kill if finite), in 2 bits from here. */
+    static final int VIRTUAL_SHIFT = 8;
+
+    static final byte REAL = 0;
+    static final byte TO_VIRTUAL = 1;
+    static final byte VIRTUAL = 2;
+    static final byte TO_REAL = 3;
+
+    /** Real voices at most by default (AU7). */
+    static final int DEFAULT_BUDGET = 64;
+    private static final float SILENT = 0.001f; // -60 dB
+    private static final float AUDIBLE = 0.0014125f; // -57 dB: 3 dB of hysteresis
+    private static final float[] PRIORITY_WEIGHTS = {1 / 16f, 1 / 4f, 1, 4, 16};
 
     private static final ValueLayout.OfShort SHORT = ValueLayout.JAVA_SHORT_UNALIGNED;
     private static final ValueLayout.OfFloat FLOAT = ValueLayout.JAVA_FLOAT_UNALIGNED;
@@ -62,6 +88,29 @@ final class Voices {
     private final float[] pans;
     private final float[] panFrom;
     private final float[] panTo;
+    private final float[] panTarget;
+    private final int[] spatialLeft;
+    private final float[] pitches;
+    private final Attenuation[] attenuations;
+    private final float[] where;
+    private final boolean[] placed;
+    private final float[] attFrom;
+    private final float[] attTo;
+    private final float[] attTarget;
+    private final float[] lowPass;
+    private final float[] lowCoef;
+    private final float[] dopplerTargets;
+    private final float[] dopplers;
+    private final byte[] reality;
+    private final float[] realGains;
+    private final float[] audibility;
+    private final float[] scratch;
+    private final float dopplerAlpha;
+    private final int crossfadeBlocks;
+    private int budget = DEFAULT_BUDGET;
+    private int real;
+    private int virtual;
+    private int blocks;
     private int highest;
     private long ended;
 
@@ -101,6 +150,50 @@ final class Voices {
         pans = new float[capacity];
         panFrom = new float[capacity * channels];
         panTo = new float[capacity * channels];
+        panTarget = new float[capacity * channels];
+        spatialLeft = new int[capacity];
+        pitches = new float[capacity];
+        attenuations = new Attenuation[capacity];
+        where = new float[3 * capacity];
+        placed = new boolean[capacity];
+        attFrom = new float[capacity];
+        attTo = new float[capacity];
+        attTarget = new float[capacity];
+        lowPass = new float[capacity];
+        lowCoef = new float[capacity];
+        dopplerTargets = new float[capacity];
+        dopplers = new float[capacity];
+        reality = new byte[capacity];
+        realGains = new float[capacity];
+        audibility = new float[capacity];
+        scratch = new float[capacity];
+        dopplerAlpha = (float) (1 - Maths.exp(-(double) AudioFormat.DEFAULT_BLOCK / rate / 0.05));
+        crossfadeBlocks = Math.max(1, (int) Math.ceil(0.05 * rate / AudioFormat.DEFAULT_BLOCK));
+    }
+
+    /** Sets the real voices at most. */
+    void budget(int voices) {
+        budget = voices;
+    }
+
+    /** Voices real at the last choice. */
+    int real() {
+        return real;
+    }
+
+    /** Voices virtual at the last choice. */
+    int virtual() {
+        return virtual;
+    }
+
+    /** Whether {@code slot} is real (or fading in or out). */
+    boolean isReal(int slot) {
+        return reality[slot] != VIRTUAL;
+    }
+
+    /** Where {@code slot} is in its clip, in clip frames. */
+    double position(int slot) {
+        return positions[slot];
     }
 
     int capacity() {
@@ -139,6 +232,20 @@ final class Voices {
         loopEnds[slot] = clip.loopEnd();
         starts[slot] = start;
         baseRates[slot] = (double) clip.rate() / rate;
+        pitches[slot] = pitch;
+        dopplers[slot] = 1;
+        dopplerTargets[slot] = 1;
+        attenuations[slot] = null;
+        placed[slot] = false;
+        attFrom[slot] = 1;
+        attTo[slot] = 1;
+        attTarget[slot] = 1;
+        lowPass[slot] = 0;
+        lowCoef[slot] = 1;
+        spatialLeft[slot] = 0;
+        reality[slot] = REAL;
+        realGains[slot] = 1;
+        audibility[slot] = 1;
         rates[slot] = baseRates[slot] * pitch;
         rateTargets[slot] = rates[slot];
         positions[slot] = offset * clip.rate();
@@ -157,7 +264,64 @@ final class Voices {
         pans[slot] = pan;
         panGains(slot, panTo);
         System.arraycopy(panTo, slot * channels, panFrom, slot * channels, channels);
+        System.arraycopy(panTo, slot * channels, panTarget, slot * channels, channels);
         highest = Math.max(highest, slot + 1);
+    }
+
+    /**
+     * Places {@code slot} at ({@code x}, {@code y}, {@code z}) relative to its listener (metres; x right, y up, -z
+     * ahead), attenuated as {@code attenuation} says, with the Doppler ratio {@code doppler}; {@code crossfade} when
+     * the listener changed (split screen): the change ramps over 50 ms.
+     */
+    void spatial(int slot, float x, float y, float z, float doppler, Attenuation attenuation, boolean crossfade) {
+        where[3 * slot] = x;
+        where[3 * slot + 1] = y;
+        where[3 * slot + 2] = z;
+        dopplerTargets[slot] = doppler;
+        attenuations[slot] = attenuation;
+        boolean first = !placed[slot];
+        placed[slot] = true;
+        place(slot);
+        if (first) { // the first place: taken at once, not ramped from the middle
+            int o = slot * channels;
+            System.arraycopy(panTarget, o, panFrom, o, channels);
+            System.arraycopy(panTarget, o, panTo, o, channels);
+            attFrom[slot] = attTarget[slot];
+            attTo[slot] = attTarget[slot];
+            dopplers[slot] = doppler;
+            spatialLeft[slot] = 0;
+        } else {
+            spatialLeft[slot] = crossfade ? crossfadeBlocks : 1;
+        }
+    }
+
+    /** The targets of a placed voice from where it is: gain, pan, low-pass. Called at changes, not per block. */
+    private void place(int slot) {
+        Attenuation a = attenuations[slot];
+        float x = where[3 * slot];
+        float y = where[3 * slot + 1];
+        float z = where[3 * slot + 2];
+        float distance = (float) Math.sqrt(x * x + y * y + z * z);
+        attTarget[slot] = a.gain(distance);
+        double azimuth = Maths.atan2(x, -z);
+        panner.direction(azimuth, a.spread(distance), panTarget, slot * channels);
+        float cutoff = a.lowPass(distance);
+        lowCoef[slot] = cutoff <= 0 ? 1 : (float) (1 - Maths.exp(-2 * Math.PI * Math.min(cutoff, 0.45 * rate) / rate));
+    }
+
+    /** Moves a placed voice's gain and pan a block towards their targets, and its Doppler ratio. */
+    private void stepSpatial(int slot) {
+        int o = slot * channels;
+        int left = spatialLeft[slot];
+        if (left > 0) {
+            for (int c = 0; c < channels; c++) {
+                panTo[o + c] = panFrom[o + c] + (panTarget[o + c] - panFrom[o + c]) / left;
+            }
+            attTo[slot] = attFrom[slot] + (attTarget[slot] - attFrom[slot]) / left;
+            spatialLeft[slot] = left - 1;
+        }
+        dopplers[slot] += (dopplerTargets[slot] - dopplers[slot]) * dopplerAlpha;
+        rateTargets[slot] = baseRates[slot] * pitches[slot] * dopplers[slot];
     }
 
     /** Moves the gain to {@code gain} over {@code frames} (64 at least, so nothing clicks). */
@@ -170,7 +334,8 @@ final class Voices {
 
     /** Sets the pitch: a playback-rate ratio on top of the clip's rate, reached over the next block. */
     void pitch(int slot, float pitch) {
-        rateTargets[slot] = baseRates[slot] * pitch;
+        pitches[slot] = pitch;
+        rateTargets[slot] = baseRates[slot] * pitch * dopplers[slot];
     }
 
     /** Sets the 2D pan, −1 left to 1 right, reached over the next block. */
@@ -204,6 +369,7 @@ final class Voices {
 
     private void end(int slot) {
         states[slot] = FREE;
+        attenuations[slot] = null;
         clips[slot] = null;
         segments[slot] = null;
         buses[slot] = null;
@@ -273,6 +439,9 @@ final class Voices {
      * {@code blockStart}; ended voices go to {@code events} as ENDED.
      */
     void render(BusGraph graph, long blockStart, int frames, Ring events) {
+        if (blocks++ % 4 == 0) {
+            choose(graph, blockStart, events);
+        }
         int top = 0;
         for (int slot = 0; slot < highest; slot++) {
             if (states[slot] == FREE) {
@@ -283,11 +452,130 @@ final class Voices {
                 continue;
             }
             states[slot] = PLAYING;
-            if (!renderVoice(slot, graph.buffer(busIndex[slot]), blockStart, frames)) {
+            if (placed[slot]) {
+                stepSpatial(slot);
+            }
+            boolean alive = reality[slot] == VIRTUAL ? keepTime(slot, blockStart, frames)
+                : renderVoice(slot, graph.buffer(busIndex[slot]), blockStart, frames);
+            if (!alive) {
                 ended(slot, blockStart + frames, events);
             }
         }
         highest = top;
+    }
+
+    /**
+     * Chooses the real voices: those at or above -60 dB (-57 dB to come back), the most audible within the budget, and
+     * the highest priority beyond it. Voices dropping out fade over 10 ms, then keep time or end.
+     */
+    private void choose(BusGraph graph, long now, Ring events) {
+        int candidates = 0;
+        int highestPriority = 0;
+        for (int slot = 0; slot < highest; slot++) {
+            if (states[slot] == FREE) {
+                continue;
+            }
+            float a = Math.abs(gainTargets[slot]) * envelopeTargets[slot] * attTarget[slot]
+                * graph.gain(busIndex[slot]);
+            boolean wasReal = reality[slot] == REAL || reality[slot] == TO_REAL;
+            boolean audible = a >= (wasReal ? SILENT : AUDIBLE);
+            int priority = Math.min(4, flags[slot] >>> PRIORITY_SHIFT & 7);
+            audibility[slot] = audible ? a * PRIORITY_WEIGHTS[priority] : 0;
+            if (audible && priority == 4) {
+                highestPriority++;
+            } else if (audible) {
+                scratch[candidates++] = audibility[slot];
+            }
+        }
+        int room = Math.max(0, budget - highestPriority);
+        float least = candidates <= room ? 0 : kth(scratch, candidates, candidates - room);
+        real = 0;
+        virtual = 0;
+        for (int slot = 0; slot < highest; slot++) {
+            if (states[slot] == FREE) {
+                continue;
+            }
+            boolean highestOne = (flags[slot] >>> PRIORITY_SHIFT & 7) >= 4;
+            boolean keep = audibility[slot] > 0 && (highestOne || audibility[slot] >= least);
+            if (keep) {
+                real++;
+                if (reality[slot] == VIRTUAL || reality[slot] == TO_VIRTUAL) {
+                    reality[slot] = TO_REAL; // where it would be, fading in
+                }
+            } else {
+                virtual++;
+                if (reality[slot] == REAL || reality[slot] == TO_REAL) {
+                    int mode = flags[slot] >>> VIRTUAL_SHIFT & 3;
+                    if (mode == 1 || mode == 2 && (flags[slot] & LOOP) == 0) {
+                        stop(slot, now, (int) (0.01f * rate), now, events); // ends rather than keeping time
+                    } else {
+                        reality[slot] = TO_VIRTUAL;
+                    }
+                }
+            }
+        }
+    }
+
+    /** The value {@code k} places from the bottom of the first {@code n} values of {@code values}: a quickselect. */
+    private static float kth(float[] values, int n, int k) {
+        int low = 0;
+        int high = n - 1;
+        while (low < high) {
+            float pivot = values[(low + high) >>> 1];
+            int i = low;
+            int j = high;
+            while (i <= j) {
+                while (values[i] < pivot) {
+                    i++;
+                }
+                while (values[j] > pivot) {
+                    j--;
+                }
+                if (i <= j) {
+                    float t = values[i];
+                    values[i] = values[j];
+                    values[j] = t;
+                    i++;
+                    j--;
+                }
+            }
+            if (k <= j) {
+                high = j;
+            } else if (k >= i) {
+                low = i;
+            } else {
+                return values[k];
+            }
+        }
+        return values[k];
+    }
+
+    /** A virtual voice's block: its position moves on as if it played; false when a one-shot reached its end. */
+    private boolean keepTime(int slot, long blockStart, int frames) {
+        int from = (int) Math.max(0, starts[slot] - blockStart);
+        double moved = 0.5 * (rates[slot] + rateTargets[slot]) * (frames - from);
+        rates[slot] = rateTargets[slot];
+        int o = slot * channels;
+        System.arraycopy(panTo, o, panFrom, o, channels);
+        attFrom[slot] = attTo[slot];
+        if (ending[slot]) {
+            return false; // stopping, and out of earshot: over at once
+        }
+        if (envelopeTargets[slot] == 0 && envelopes[slot] == 0) {
+            return true; // paused: held
+        }
+        double position = positions[slot] + moved;
+        if ((flags[slot] & LOOP) != 0) {
+            long loopStart = loopStarts[slot];
+            long length = loopEnds[slot] - loopStart;
+            if (position >= loopEnds[slot]) {
+                position -= length * Math.floor((position - loopStart) / length);
+            }
+        } else if (position >= clipFrames[slot]) {
+            return false;
+        }
+        positions[slot] = position;
+        return true;
     }
 
     /** Renders one voice into {@code out}; false when it ended. */
@@ -308,7 +596,19 @@ final class Voices {
         long loopLength = loopEnd - loopStarts[slot];
         long end = clipFrames[slot];
         boolean alive = true;
+        boolean spatial = (flags[slot] & SPATIAL) != 0;
+        float att = attFrom[slot];
+        float attStep = (attTo[slot] - att) / frames;
+        float realGain = realGains[slot];
+        float realStep = reality[slot] == TO_REAL ? 1 / (0.02f * rate)
+            : reality[slot] == TO_VIRTUAL ? -1 / (0.01f * rate) : 0;
+        float low = lowPass[slot];
+        float coef = lowCoef[slot];
         for (int f = from; f < frames; f++) {
+            att += attStep;
+            if (realStep != 0) {
+                realGain = Math.max(0, Math.min(1, realGain + realStep));
+            }
             if (gainLeft[slot] > 0) {
                 gain += gainSteps[slot];
                 if (--gainLeft[slot] == 0) {
@@ -329,7 +629,7 @@ final class Voices {
                 continue; // paused: held where it is
             }
             float t = (float) (f + 1) / frames;
-            float g = gain * env;
+            float g = gain * env * att * realGain;
             if (stereo) {
                 float l = read(slot, position, 0, loop) * g;
                 float r = read(slot, position, 1, loop) * g;
@@ -337,11 +637,13 @@ final class Voices {
                 out[f * channels + 1] += r * (panFrom[o + 1] + (panTo[o + 1] - panFrom[o + 1]) * t);
             } else {
                 float s = read(slot, position, 0, loop);
-                for (int c = 1; c < clipChannels[slot] && (flags[slot] & SPATIAL) != 0; c++) {
-                    s += read(slot, position, c, loop);
-                }
-                if ((flags[slot] & SPATIAL) != 0) {
+                if (spatial) {
+                    for (int c = 1; c < clipChannels[slot]; c++) {
+                        s += read(slot, position, c, loop);
+                    }
                     s /= clipChannels[slot];
+                    low += coef * (s - low); // the air's low-pass: one pole
+                    s = low;
                 }
                 s *= g;
                 for (int c = 0; c < channels; c++) {
@@ -360,6 +662,14 @@ final class Voices {
         rates[slot] = rateTargets[slot];
         gains[slot] = gain;
         envelopes[slot] = env;
+        lowPass[slot] = low;
+        attFrom[slot] = attTo[slot];
+        realGains[slot] = realGain;
+        if (reality[slot] == TO_REAL && realGain >= 1) {
+            reality[slot] = REAL;
+        } else if (reality[slot] == TO_VIRTUAL && realGain <= 0) {
+            reality[slot] = VIRTUAL;
+        }
         System.arraycopy(panTo, o, panFrom, o, channels);
         return alive;
     }

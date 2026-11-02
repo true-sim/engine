@@ -100,6 +100,35 @@ class AudioDeviceProbe {
         return s;
     }
 
+    /** What a block costs with 1,000 placed loops, 64 of them real (the others keep time), choosing every 4 blocks. */
+    @Test
+    void renderCostWithAThousandLogicalVoices() {
+        try (AudioRenderer r = new AudioRenderer(AudioFormat.stereo(48_000), 1_024)) {
+            AudioClip tone = Clips.sine(44_100, 220, 0.02f, 44_100);
+            com.truesim.scene.audio.Attenuation a = com.truesim.scene.audio.Attenuation.builder().distance(1, 2_000)
+                .lowPass(20_000, 2_000).spread(1, 0).build();
+            for (int v = 0; v < 1_000; v++) {
+                r.commands().play(v, tone, 0, 0, 0.5f, 0.8f + (v % 50) * 0.01f, Bus.SFX,
+                    Voices.LOOP | Voices.SPATIAL, 0, v);
+                r.commands().spatial(v, (v % 7) - 3, 0, -(1 + v), 1, a, false);
+            }
+            float[] out = new float[512];
+            for (int i = 0; i < 20_000; i++) {
+                r.render(out, 0, 256);
+            }
+            long[] times = new long[5_000];
+            for (int i = 0; i < times.length; i++) {
+                long t = System.nanoTime();
+                r.render(out, 0, 256);
+                times[i] = System.nanoTime() - t;
+            }
+            Arrays.sort(times);
+            System.out.printf("PROBE render cost, 1,000 placed voices (%d real), 256 frames: median %.1f us,"
+                    + " p99 %.1f us, max %.1f us%n", r.realVoices(), times[times.length / 2] / 1e3,
+                times[times.length * 99 / 100] / 1e3, times[times.length - 1] / 1e3);
+        }
+    }
+
     /** What a block costs offline: 64 voices of a looping clip at varied pitches, cubic, panned, two buses. */
     @Test
     void renderCostPerBlock() {

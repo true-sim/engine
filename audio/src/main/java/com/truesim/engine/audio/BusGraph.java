@@ -97,6 +97,11 @@ final class BusGraph {
         return extra[i];
     }
 
+    /** Bus {@code i}'s gain now (its volume, mute and extra gain), for audibility. */
+    float gain(int i) {
+        return current[i];
+    }
+
     /** Zeroes every buffer: the start of a block. */
     void clear() {
         for (float[] b : buffers) {

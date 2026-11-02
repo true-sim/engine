@@ -1,6 +1,7 @@
 package com.truesim.engine.audio;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.scene.audio.Attenuation;
 import com.truesim.scene.audio.AudioClip;
 import com.truesim.scene.audio.Bus;
 import com.truesim.scene.audio.BusLayout;
@@ -42,6 +43,8 @@ public final class AudioRenderer implements AutoCloseable {
     static final int PAN = 7;
     static final int LAYOUT = 8;
     static final int BUS_GAIN = 9;
+    static final int SPATIAL = 10;
+    static final int BUDGET = 11;
 
     /** Receives events. */
     @FunctionalInterface
@@ -96,6 +99,26 @@ public final class AudioRenderer implements AutoCloseable {
     /** The commands' producer side: used by one thread. */
     public Commands commands() {
         return producer;
+    }
+
+    /** Voices real at the last choice (every 4 blocks). */
+    public int realVoices() {
+        return voices.real();
+    }
+
+    /** Voices virtual at the last choice. */
+    public int virtualVoices() {
+        return voices.virtual();
+    }
+
+    /** Whether voice {@code slot} is real now (fading in or out too): for tests and meters, on the audio thread. */
+    boolean isReal(int slot) {
+        return voices.isReal(slot);
+    }
+
+    /** Where voice {@code slot} is in its clip, in clip frames: for tests, on the audio thread. */
+    double position(int slot) {
+        return voices.position(slot);
     }
 
     /** How many voice slots it has. */
@@ -200,6 +223,9 @@ public final class AudioRenderer implements AutoCloseable {
                 case PAUSE -> voices.pause(slot, values[v] != 0, frame);
                 case LAYOUT -> layout((BusGraph) r.refs[c]);
                 case BUS_GAIN -> graph.extraGain(slot, (float) values[v]);
+                case SPATIAL -> voices.spatial(slot, (float) values[v], (float) values[v + 1], (float) values[v + 2],
+                    (float) values[v + 3], (Attenuation) r.refs[c], values[v + 4] != 0);
+                case BUDGET -> voices.budget(slot);
                 default -> throw new IllegalStateException("Unknown audio command " + r.opcodes[c]);
             }
             r.release();
@@ -308,6 +334,33 @@ public final class AudioRenderer implements AutoCloseable {
         /** The layout last sent. */
         public BusLayout layout() {
             return sent.layout();
+        }
+
+        /**
+         * Places voice {@code slot} at ({@code x}, {@code y}, {@code z}) relative to its listener (x right, y up, -z
+         * ahead, metres), attenuated by {@code attenuation}, at Doppler ratio {@code doppler}; {@code crossfade} when
+         * its listener changed, so the change ramps over 50 ms.
+         */
+        public boolean spatial(int slot, float x, float y, float z, float doppler, Attenuation attenuation,
+                boolean crossfade) {
+            int c = claim(SPATIAL, slot, 0);
+            if (c < 0) {
+                return false;
+            }
+            int v = c * Ring.VALUES;
+            commands.values[v] = x;
+            commands.values[v + 1] = y;
+            commands.values[v + 2] = z;
+            commands.values[v + 3] = doppler;
+            commands.values[v + 4] = crossfade ? 1 : 0;
+            commands.refs[c] = attenuation;
+            commands.publish();
+            return true;
+        }
+
+        /** Sets the real voices at most (AU7: 64 by default). */
+        public boolean budget(int voices) {
+            return send(BUDGET, voices, 0, 0, 0);
         }
 
         /** Sets {@code bus}'s extra gain (a player volume, a snapshot), reached over a block. */

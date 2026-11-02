@@ -314,18 +314,25 @@ public final class SdlOutput implements AudioOutput {
                 renderer.warmUp(block);
             }
             boolean resumed = false;
+            long pushedAt = System.nanoTime();
+            int pushedQueue = 0;
             while (running) {
                 int queued = queued() / (channels * 4);
                 int low = lowFrames();
                 if (queued < low) {
-                    if (queued == 0 && resumed) {
+                    // an empty queue alone is no underrun: the device takes a whole buffer at once and may hold it
+                    // yet; it ran dry when more time passed since the last push than that push left it to play
+                    long now = System.nanoTime();
+                    if (queued == 0 && resumed && (now - pushedAt) * rate > (pushedQueue + deviceFrames) * 1e9) {
                         underrun();
                     }
                     renderer.render(block, 0, size);
                     MemorySegment.copy(block, 0, buffer, JAVA_FLOAT, 0, block.length);
                     put(buffer.address(), bytes);
                     blocks++;
-                    renderer.clock().publish(renderer.frame(), System.nanoTime(), queued + size);
+                    pushedAt = System.nanoTime();
+                    pushedQueue = queued + size;
+                    renderer.clock().publish(renderer.frame(), pushedAt, pushedQueue);
                     continue;
                 }
                 if (!resumed) { // the queue holds its low mark: the device may start pulling

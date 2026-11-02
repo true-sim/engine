@@ -97,6 +97,7 @@ class RendererTest {
             assertThat((double) out[2 * f + 1]).as("music at half, right").isCloseTo(0.125, within(1e-5));
             assertThat(r.commands().layout().contains(Bus.MUSIC)).isTrue();
             r.commands().layout(BusLayout.builder().bus(Bus.SFX, b -> b.volume(-6.0206)).build()); // voices playing
+            r.render(1_024); // the voice of the muted bus was virtual: it comes back over 20 ms
             float[] swapped = r.render(1_024);
             // music and the muted voice bus are not in it: their sounds go into the master
             assertThat((double) swapped[2 * 1_000]).isCloseTo(0.125 + 0.25 * CENTRE, within(1e-5));
