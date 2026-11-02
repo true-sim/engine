@@ -14,19 +14,35 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # Only Markdown changed (docs): the required check passes without building. Any doubt builds.
+      - id: changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if files=$(git diff --name-only "$BASE" HEAD 2>/dev/null) && [ -n "$files" ] && ! echo "$files" | grep -qv '\.md$'; then
+            echo "Only Markdown changed, build skipped:"; echo "$files"
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
       # Pinned Mesa lavapipe and validation layer, offscreen SDL; tests must run validated.
       - uses: true-sim/build-logic/.github/actions/setup-vulkan@61314fb2c79472f89f95c8ffd001ee53e904b02a # main, 2026-10-27
+        if: steps.changes.outputs.code == 'true'
       - uses: actions/setup-java@v6
+        if: steps.changes.outputs.code == 'true'
         with:
           distribution: temurin
           java-version: 27
       - uses: gradle/actions/setup-gradle@v6
+        if: steps.changes.outputs.code == 'true'
       - run: ./gradlew build
+        if: steps.changes.outputs.code == 'true'
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v7
-        if: always()
+        if: always() && steps.changes.outputs.code == 'true'
         with:
           name: reports
           path: |
