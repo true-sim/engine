@@ -1034,7 +1034,7 @@ are encoded once into module programs and curve keys (`ModulePrograms`), which o
 Particles particles = new Particles(device, graph.frameSlots(), 64 << 20);   // a pool budget in bytes
 graph.add(new ParticleSimulation(particles));        // provides ParticleKeys.PARTICLES and STATE
 sceneViews.addPerView(view -> new ParticleDraw(particles, view));
-// each frame, after beginFrame:
+// each frame, before or after beginFrame:
 runtime.update(seconds);
 particles.update(effects, runtime.spawns());
 ```
@@ -1055,8 +1055,8 @@ particles.update(effects, runtime.spawns());
     "particle ribbons" pass;
   - trails through each particle's last positions (`Renderer.trail(points)`), kept in a ring in its side range, copied
     with the survivors; emitters with trails hold at most `Particles.MAX_TRAIL_PARTICLES`;
-  - beams of noisy segments from the emitter to an end (`particles.beamEnd(effect, emitter, x, y, z)`: another node, a
-    target), or up its `length` along the emitter's +Y;
+  - beams of noisy segments from the emitter to an end (`particles.beamEnd(effect, emitter, x, y, z)`, or a node
+    through `EffectSync.beamEnd`), or up its `length` along the emitter's +Y;
   - textures stretched over a strip or tiled (`tile`), widths from tail to head (`width.tail`, `width.head`).
   10,000 sparks with trails of 16 points: update 0.027 ms, draw 0.083 ms on an RX 9070 XT (64 x 64 pixels).
 - **CPU emitters** (E1: `Target.CPU`, simulated by scene-effects' `CpuSimulation`, which gameplay reads): given
@@ -1082,6 +1082,34 @@ particles.update(effects, runtime.spawns());
 A million particles update in 0.27 ms on an RX 9070 XT under gravity and drag; 8 curves over life add 0.15 ms, whether
 they have 2 or 8 keys, evenly spaced or not, so the cost is the attributes kept from birth, not the key search
 (`ParticleBenchmark`, 2026-11-02).
+
+**A scene's effects** (`engine-scene`): `EffectSync` follows a scene's `Effects` as `SceneSync` follows its
+renderables. Each frame (between frames or while one records) it runs the emitter logic and the CPU emitters and hands
+the frame to `Particles`. As a plugin, `EffectsPlugin` puts the simulation in the frame graph and syncs one world's
+effects after the game's update, with the quality setting `effects.quality` and the pool's `effects.budgetMegabytes`.
+
+```java
+app.use(new Rendering(), new EffectsPlugin());
+EffectsPlugin fx = engine.get(EffectsPlugin.KEY);
+Effects effects = fx.effects(scene);                       // synced every frame from now on
+fx.draw(sceneViews);                                      // a ParticleDraw in every view
+Effect torch = effects.play(TORCH, handNode).offset(0, 0.4, 0).inheritVelocity(1);   // joints are nodes: sockets
+fx.sync().beamEnd(zap.id(), 0, targetNode);                 // a beam from its emitter to another node
+effects.replace(TORCH, editedTorch);                       // hot reload: instances restart, handles kept
+```
+
+- **Attached** effects follow their node (a joint's for a socket, with an offset); world-space emitters spawn along its
+  motion and inherit `inheritVelocity` of it; local-space ones carry their particles along. Stop, kill, time scales
+  and pauses (an effect's, all effects', or a paused world's step of 0) act through the emitter records, so paused
+  effects stay as they are while every view draws them (tested).
+- **Origin rebasing:** once an effect is `Particles.REBASE_DISTANCE` (4,096 m) from the origin of its world-space
+  particles, the origin moves to it and the update pass shifts its particles (and trails) by the difference: an effect
+  7,000 km out draws the same image as at the origin (tested, rebasing every ten frames).
+- **Pooling:** an ended effect's ranges and programs stay warm for `Particles.WARM_FRAMES` (300) for the next instance
+  of the same asset (at most 4 per asset, given back early when the pool lacks room); a replaced asset's instances keep
+  the ranges that still fit.
+- Interpolation between fixed steps (application-api D91) is not built: effects take nodes' world transforms as they
+  are. 100 torches on rocks in the scene benchmark allocate 0 bytes per frame (median).
 
 ## VR
 
