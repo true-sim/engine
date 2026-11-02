@@ -14,10 +14,10 @@ import com.truesim.scene.effects.ParticleCursor;
 
 /**
  * CPU emitters on the GPU side (E1, effects.md §2.9): each frame the particles of every CPU emitter, as
- * {@link CpuSimulation} left them or as the game wrote them ({@link ParticleWriter}), written as particle records into a
- * per-frame mapped buffer, which the simulation's "particle upload" copies into the emitters' ranges of the pool. From
- * then on drawing, culling and LOD do not know where a particle was simulated. 80 bytes per particle per frame: for
- * small counts. Allocates nothing once its buffer has grown to the particles uploaded.
+ * {@link CpuSimulation} left them or as the game wrote them ({@link ParticleWriter}), written as particle records into
+ * plain memory and copied into a per-frame mapped buffer once, which the simulation's "particle upload" copies into the
+ * emitters' ranges of the pool. From then on drawing, culling and LOD do not know where a particle was simulated. 80
+ * bytes per particle per frame: for small counts. Allocates nothing once its buffer has grown to the particles uploaded.
  */
 final class CpuEmitters implements AutoCloseable {
 
@@ -29,6 +29,8 @@ final class CpuEmitters implements AutoCloseable {
     private final ParticleCursor cursor = new ParticleCursor();
     private FrameBuffer records;
     private final FrameBuffer list;
+    private final Staging recordsStaged = new Staging(256L * ParticleLayout.BYTES);
+    private final Staging listStaged;
     private int uploaded;
     private int emitters;
     private int largest;
@@ -46,6 +48,7 @@ final class CpuEmitters implements AutoCloseable {
         this.slots = slots;
         this.retired = new Retiring(slots);
         list = FrameBuffer.create(device, 4L * maxEmitters, USAGE, slots);
+        listStaged = new Staging(4L * maxEmitters);
         try {
             records = FrameBuffer.create(device, 256L * ParticleLayout.BYTES, USAGE, slots);
         } catch (RuntimeException e) {
@@ -60,6 +63,16 @@ final class CpuEmitters implements AutoCloseable {
         uploaded = 0;
         emitters = 0;
         largest = 0;
+    }
+
+    /** Hands the frame's particles and list to the GPU: a copy each. */
+    void finish() {
+        long bytes = (long) ParticleLayout.BYTES * uploaded;
+        if (records.size() < bytes) {
+            grow(bytes);
+        }
+        recordsStaged.copyTo(records, bytes);
+        listStaged.copyTo(list, 4L * emitters);
     }
 
     /** CPU emitters uploaded this frame. */
@@ -122,40 +135,31 @@ final class CpuEmitters implements AutoCloseable {
             }
             uploaded += n;
         }
-        list.putInt(4L * emitters++, place);
+        listStaged.putInt(4L * emitters++, place);
         largest = Math.max(largest, uploaded - first);
         return first;
     }
 
     private void room(int particles) {
-        long bytes = (long) ParticleLayout.BYTES * particles;
-        if (records.size() < bytes) {
-            grow(bytes);
-        }
+        recordsStaged.room((long) ParticleLayout.BYTES * particles);
     }
 
     @AllowAllocation("the upload growing")
     private void grow(long bytes) {
-        FrameBuffer old = records;
-        records = FrameBuffer.create(device, Math.max(bytes, 2 * old.size()), USAGE, slots);
-        records.copyFrom(old, 0, 0, (long) ParticleLayout.BYTES * uploaded);
-        retired.add(old);
+        retired.add(records);
+        records = FrameBuffer.create(device, Math.max(bytes, 2 * records.size()), USAGE, slots);
     }
 
     private void put(int i, double x, double y, double z, float vx, float vy, float vz, float age, float lifetime,
         float r, float g, float b, float a, float size, float rotation, int seed, int index) {
         long at = (long) ParticleLayout.BYTES * i;
-        FrameBuffer f = records;
+        Staging f = recordsStaged;
         float px = (float) x;
         float py = (float) y;
         float pz = (float) z;
-        f.putFloat(at + ParticleLayout.POSITION, px);
-        f.putFloat(at + ParticleLayout.POSITION + 4, py);
-        f.putFloat(at + ParticleLayout.POSITION + 8, pz);
+        f.putVector(at + ParticleLayout.POSITION, px, py, pz);
         f.putFloat(at + ParticleLayout.AGE, age);
-        f.putFloat(at + ParticleLayout.VELOCITY, vx);
-        f.putFloat(at + ParticleLayout.VELOCITY + 4, vy);
-        f.putFloat(at + ParticleLayout.VELOCITY + 8, vz);
+        f.putVector(at + ParticleLayout.VELOCITY, vx, vy, vz);
         f.putFloat(at + ParticleLayout.LIFETIME, lifetime);
         f.putFloat(at + ParticleLayout.COLOR, r);
         f.putFloat(at + ParticleLayout.COLOR + 4, g);

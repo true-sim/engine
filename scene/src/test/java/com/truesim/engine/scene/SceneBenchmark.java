@@ -229,6 +229,9 @@ class SceneBenchmark {
             }
             fires = new EffectSync(effects, particles, null, WRITERS > 1 ? jobs : null);
             run("torches on 100 rocks", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> { });
+            // Then as they burn on, every emitter full (the embers live 2 s) and the code compiled
+            run("torches on 100 rocks, burning 2 s", 120, graph, slots, tasks, scene, renderables, sync, cameraView,
+                camera, frame -> { });
             fires = null;
             SplittableRandom churn = new SplittableRandom(3);
             run("100 rocks removed, 100 added", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> {
@@ -289,12 +292,18 @@ class SceneBenchmark {
 
     private static void run(String scenario, FrameGraph graph, FrameSlots slots, TaskScheduler tasks,
         SceneGraph scene, Renderables renderables, SceneSync sync, RenderView cameraView, Camera camera, Change change) {
+        run(scenario, 2, graph, slots, tasks, scene, renderables, sync, cameraView, camera, change);
+    }
+
+    /** A scenario measured over {@code FRAMES} frames after {@code warmup} frames not measured. */
+    private static void run(String scenario, int warmup, FrameGraph graph, FrameSlots slots, TaskScheduler tasks,
+        SceneGraph scene, Renderables renderables, SceneSync sync, RenderView cameraView, Camera camera, Change change) {
         if (!scenario.contains(SCENARIO)) {
             return;
         }
         Stats stats = new Stats();
-        for (int frame = -2; frame < FRAMES; frame++) {
-            change.before(frame + 2);
+        for (int frame = -warmup; frame < FRAMES; frame++) {
+            change.before(frame + warmup);
             frame(graph, slots, tasks, scene, renderables, sync, cameraView, camera, stats, Math.max(frame, 0));
         }
         stats.print(scenario);
