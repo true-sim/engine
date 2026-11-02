@@ -62,7 +62,11 @@ void clusterMain(uint3 id : SV_DispatchThreadID, uint local : SV_GroupIndex)
         max(max(from.y * near, from.y * far), max(to.y * near, to.y * far)) / sy, far);
     // The lights the GPU wrote this frame (particle lights) come after the scene's: copied into the list for shading
     uint* written = push.written;
-    uint extra = written == nullptr ? 0 : min(written[0], push.writtenCapacity);
+    uint extra = 0;
+    if (written != nullptr) // not a select: it would load through the null pointer too
+    {
+        extra = min(written[0], push.writtenCapacity);
+    }
     Light* source = (Light*) (written + 4);
     for (uint i = id.x; i < extra; i += 64 * ((clusters + 63) / 64))
     {
