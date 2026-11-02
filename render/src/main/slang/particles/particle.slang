@@ -101,6 +101,11 @@ public struct ParticleFrame
     public uint pad0;
     public float3 heightCenterLow;
     public uint pad1;
+    public uint64_t rays;          // RayScene*: the frame's top level to trace collision rays into (rays variant); or 0
+    public float3 raysOriginHigh;  // the ray tracing's origin, which the top level is relative to
+    public uint pad2;
+    public float3 raysOriginLow;
+    public uint pad3;
 };
 
 /** A spawn record: 64 bytes, as scene-effects' SpawnRecords, written by the CPU each frame. */
@@ -263,6 +268,7 @@ public static const uint OP_SPEED_LIMIT = 21;
 public static const uint OP_COLLIDERS = 22;
 public static const uint OP_HEIGHT = 23;
 public static const uint OP_DEPTH = 24;
+public static const uint OP_RAYS = 25;
 /** Collider kinds: scene-effects' EffectColliders.Kind, in order. */
 public static const uint COLLIDER_PLANE = 0;
 public static const uint COLLIDER_SPHERE = 1;

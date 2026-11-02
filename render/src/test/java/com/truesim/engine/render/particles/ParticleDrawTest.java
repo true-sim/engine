@@ -539,7 +539,8 @@ class ParticleDrawTest {
             .init(Shape.box(4, 0, 3), Init.lifetime(10), Init.size(Bind.constant(0.12f)),
                 Init.velocity(Bind.constant(0), Bind.constant(-4), Bind.constant(0)),
                 Init.color(Bind.color(0, 1, 0, 1)))
-            .collide(Collide.depth(0.5f).stick()).render(sprite(Renderer.Facing.POSITION))).build();
+            .collide(Collide.rays().orElse(Collide.depth(0.5f)).stick()).render(sprite(Renderer.Facing.POSITION)))
+            .build(); // no ray collision set up: the depth after the rays
         EffectData through = EffectData.builder().emitter("e", e -> e.duration(1).spawn(Spawn.rate(300)).capacity(3000)
             .init(Shape.box(4, 0, 3), Init.lifetime(10), Init.size(Bind.constant(0.12f)),
                 Init.velocity(Bind.constant(0), Bind.constant(-4), Bind.constant(0)),
@@ -557,6 +558,40 @@ class ParticleDrawTest {
         assertThat(green).as("rain resting on the floor").isGreaterThan(50);
         assertThat(4 * red).as("rain fallen through, hidden below it").isLessThan(green);
         assertThat(graph.passes()).contains("particle collision depth");
+    }
+
+    @Test
+    void rayCollisionHitsOffScreen() {
+        assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
+        try (com.truesim.engine.render.RayTracing rays = new com.truesim.engine.render.RayTracing(device, pool, 16)) {
+            MeshData floor = quad();
+            rays.add(wall, floor, floor.levels().size() - 1);
+            particles.rays(rays, renderer);
+            assertThat(particles.rayTracing()).isSameAs(rays);
+            scene.set(0, wall, blackWall(), 0, -1, -6, (float) -Math.sqrt(0.5), 0, 0, (float) Math.sqrt(0.5), 4, 4,
+                4);
+            // Looking away from the floor (no depth of it): rays still find it
+            camera.position(0, 1, 0).set(0, 0.3, 1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            effects.play(EffectData.builder().emitter("e", e -> e.duration(1).spawn(Spawn.rate(300)).capacity(3000)
+                .init(Shape.box(4, 0, 3), Init.lifetime(10), Init.size(Bind.constant(0.12f)),
+                    Init.velocity(Bind.constant(0), Bind.constant(-4), Bind.constant(0)),
+                    Init.color(Bind.color(0, 1, 0, 1)))
+                .collide(Collide.rays().orElse(Collide.depth()).stick()).render(sprite(Renderer.Facing.POSITION)))
+                .build(), 0, 1.5, -6);
+            frames(240);
+            assertThat(graph.passes()).contains("top level");
+            // Turned to the floor: the rain rests on it
+            camera.position(0, 1, 0).set(0, -0.35, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            int[] image = frames(3);
+            int green = 0;
+            for (int pixel : image) {
+                green += channel(pixel, 1) > 128 && channel(pixel, 0) < 64 ? 1 : 0;
+            }
+            System.out.printf("Rain traced onto a floor off screen: %d green pixels%n", green);
+            assertThat(green).as("rain resting on the floor it could not see").isGreaterThan(50);
+            device.waitIdle();
+            particles.rays(null, null);
+        }
     }
 
     /** An emitter of two particles the game writes, drawn sorted or not. */

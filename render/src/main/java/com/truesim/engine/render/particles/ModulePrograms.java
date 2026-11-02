@@ -140,6 +140,11 @@ final class ModulePrograms implements AutoCloseable {
     /** Whether collision chains may take ray queries: the device traces rays and the frame builds their structures. */
     private boolean rays;
 
+    /** Lets collision chains take ray queries in effects encoded from now on, or not. */
+    void rays(boolean rays) {
+        this.rays = rays;
+    }
+
     ModulePrograms(VulkanDevice device, FrameSlots slots) {
         this.device = device;
         this.slots = slots;
@@ -458,6 +463,7 @@ final class ModulePrograms implements AutoCloseable {
             case Collide.COLLIDERS -> ParticleConstants.OP_COLLIDERS;
             case Collide.HEIGHT -> ParticleConstants.OP_HEIGHT;
             case Collide.DEPTH -> ParticleConstants.OP_DEPTH;
+            case Collide.RAYS -> ParticleConstants.OP_RAYS;
             default -> throw new IllegalArgumentException("No GPU module " + type + " (plugin modules come later)");
         };
     }
