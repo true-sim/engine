@@ -9,7 +9,7 @@ import java.util.Arrays;
  * ranges. Units are whatever the caller counts in (vertices, meshlets, bytes).
  */
 @AllowAllocation("growing the free list, when meshes are added or removed")
-final class RangeAllocator {
+public final class RangeAllocator {
 
     private long capacity;
     // Free ranges, sorted by start, never touching (touching ones are merged).
@@ -18,7 +18,7 @@ final class RangeAllocator {
     private int count;
     private long free;
 
-    RangeAllocator(long capacity) {
+    public RangeAllocator(long capacity) {
         this.capacity = capacity;
         if (capacity > 0) {
             starts[0] = 0;
@@ -28,12 +28,12 @@ final class RangeAllocator {
         free = capacity;
     }
 
-    long capacity() {
+    public long capacity() {
         return capacity;
     }
 
     /** Grows to {@code capacity}: the new room is free, joined to a free range at the old end. */
-    void grow(long capacity) {
+    public void grow(long capacity) {
         if (capacity <= this.capacity) {
             throw new IllegalArgumentException("Grows to more than " + this.capacity + ": " + capacity);
         }
@@ -43,12 +43,12 @@ final class RangeAllocator {
     }
 
     /** How much is free in all, though perhaps not in one piece. */
-    long free() {
+    public long free() {
         return free;
     }
 
     /** Whether {@link #allocate} would find {@code length} units in a row (alignment 1). Allocates nothing. */
-    boolean fits(long length) {
+    public boolean fits(long length) {
         for (int i = 0; i < count; i++) {
             if (lengths[i] >= length) {
                 return true;
@@ -61,7 +61,7 @@ final class RangeAllocator {
      * The start of a free range of {@code length} units beginning at a multiple of {@code alignment}, now in use; -1
      * when none is free. The first such range wins.
      */
-    long allocate(long length, long alignment) {
+    public long allocate(long length, long alignment) {
         if (length == 0) {
             return 0;
         }
@@ -96,7 +96,7 @@ final class RangeAllocator {
     }
 
     /** Gives [start, start + length) back, merging it with free neighbors. */
-    void release(long start, long length) {
+    public void release(long start, long length) {
         if (length == 0) {
             return;
         }
@@ -145,7 +145,7 @@ final class RangeAllocator {
     }
 
     /** How many free pieces there are, e.g. for tests. */
-    int pieces() {
+    public int pieces() {
         return count;
     }
 }
