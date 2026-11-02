@@ -1033,6 +1033,7 @@ are encoded once into module programs and curve keys (`ModulePrograms`), which o
 ```java
 Particles particles = new Particles(device, graph.frameSlots(), 64 << 20);   // a pool budget in bytes
 graph.add(new ParticleSimulation(particles));        // provides ParticleKeys.PARTICLES and STATE
+sceneViews.addPerView(view -> new ParticleDraw(particles, view));
 // each frame, after beginFrame:
 runtime.update(seconds);
 particles.update(effects, runtime.spawns());
@@ -1051,6 +1052,15 @@ particles.update(effects, runtime.spawns());
   on the GPU); local-space ones live in the emitter's frame.
 - **Statistics** (alive, spawned, dropped; per instance and in all) come back through a readback a few frames late,
   for budgets and debugging.
+- **Drawing** (`ParticleDraw`, a technique per view, `addPerView`): each emitter instance's GPU box is culled against
+  the view's frustum (its indirect draw gets no instances), then every billboard renderer draws, emitters as wholes
+  back to front by distance, after the blended materials (`Transparency.ID`), within the view's render region.
+  Billboards face the camera's position, the view plane, their velocity (stretched by speed) or their emitter's up
+  axis; blending is premultiplied, alpha to additive by the renderer's `alphaToAdd`; flipbooks play over life or by
+  age, frames blended; soft particles fade into the opaque depth over a distance, or by the view ray's path through
+  the particle's sphere (`volume`); unlit. Textures are bindless slots given per asset (`particles.texture(ref,
+  slot)`); without one a round sprite. The renderer's settings by name: `texture`, `stretch`, `soft`, `volume`,
+  `flipbook.columns`, `flipbook.rows`, `flipbook.frames`, `flipbook.fps`, `flipbook.blend`.
 
 A million particles update in 0.27 ms on an RX 9070 XT under gravity and drag; 8 curves over life add 0.15 ms, whether
 they have 2 or 8 keys, evenly spaced or not, so the cost is the attributes kept from birth, not the key search
@@ -1113,6 +1123,8 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
   head looking at a circling light, its tail after a wagging point (FABRIK with limits), its four feet on the terrain
   (foot placement), skinned on the GPU. The stereo bench takes it too, with `-Peye=x,y,z,tx,ty,tz` for a camera of its
   own (`g+h` for heights above the ground), `-Pframes=780` and `-PpngFrames=108,612 -Ppng=fox.png` for images.
+- `-Peffect=x,y,z` (`g+h` for heights above the ground) plays the demo's particle effects there in the stereo bench:
+  a fountain of sparks over a column of smoke.
 - `./gradlew :engine-demo:stereoBench -Pfoxes=1000 -Pcrowd=<path to Fox.gltf> [-PfoxLod=true]` adds a crowd of foxes,
   each with the whole rig and a GPU-skinned copy, and reports what animating them costs per frame. On a Ryzen 9
   9950X3D and RX 9070 XT (2026-11-02), 1000 foxes: CPU 1.75 ms in the animators and 1.69 ms in the scene sync, GPU

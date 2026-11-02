@@ -77,6 +77,37 @@ public struct ParticleSpawn
     public float pad2;
 };
 
+/**
+ * How an emitter's particles are drawn: one of its renderers (scene-effects' Renderer), encoded with its effect's
+ * programs. 48 bytes.
+ */
+[HostLayout]
+public struct ParticleRenderer
+{
+    public uint kind;              // RENDER_*
+    public uint facing;            // FACING_*: how billboards turn
+    public uint flags;             // DRAW_*
+    public float alphaToAdd;       // 0 alpha blended, 1 additive, premultiplied either way
+    public float stretch;          // velocity-facing: extra length per metre per second, in sizes
+    public float soft;             // metres over which it fades into the opaque scene; 0: a hard edge
+    public uint columns;           // a flipbook's frames across its texture
+    public uint rows;              // and down
+    public float frames;           // frames it plays
+    public float rate;             // frames per second of age; 0: the frames over its life
+    public float pad0;
+    public float pad1;
+};
+
+/** A draw of one renderer of one emitter instance in a view: 16 bytes, written by the CPU each frame. */
+[HostLayout]
+public struct ParticleDrawRecord
+{
+    public uint emitter;           // the emitter's place in the frame's list
+    public uint renderer;          // its renderer's word in the program buffer
+    public uint texture;           // its texture's sampled slot; NO_TEXTURE: a round sprite
+    public uint pad;
+};
+
 /** Slots per chunk: the simulation's groups each take one chunk of one emitter. */
 public static const uint CHUNK = 64;
 /** Floats of an effect's curve keys the update keeps in group-shared memory; longer blocks are read in place. */
@@ -111,6 +142,27 @@ public static const uint STATISTICS_ALIVE = 0;
 public static const uint STATISTICS_SPAWNED = 1;
 public static const uint STATISTICS_OVERFLOW = 2;         // dropped this frame
 public static const uint STATISTICS_EMITTERS = 3;
+
+/** Renderer kinds: scene-effects' Renderer.Kind, in order. */
+public static const uint RENDER_BILLBOARD = 0;
+public static const uint RENDER_MESH = 1;
+public static const uint RENDER_RIBBON = 2;
+public static const uint RENDER_TRAIL = 3;
+public static const uint RENDER_BEAM = 4;
+/** Billboard facings: scene-effects' Renderer.Facing, in order. */
+public static const uint FACING_POSITION = 0;
+public static const uint FACING_VIEW_PLANE = 1;
+public static const uint FACING_VELOCITY = 2;
+public static const uint FACING_AXIS = 3;
+public static const uint FACING_FREE = 4;
+/** Draw flags. */
+public static const uint DRAW_VOLUME = 1;                 // the soft fade by the view ray's path through a sphere
+public static const uint DRAW_BLEND_FRAMES = 2;           // a flipbook's frames blended
+public static const uint DRAW_LOOP = 4;                   // a flipbook played by age loops
+/** Words of a renderer record. */
+public static const uint RENDERER_WORDS = 12;
+/** A draw without a texture. */
+public static const uint NO_TEXTURE = 0xffffffffu;
 
 /** Module operations, as ModulePrograms encodes them: initializers, then updaters. */
 public static const uint OP_POINT = 0;
@@ -317,7 +369,7 @@ public float4 gradient<K : ICurveKeys>(K keys, uint c, float t)
 // ---------------------------------------------------------------------------------------------- positions
 
 /** `v` turned by the unit quaternion `q`. */
-public float3 rotate(float4 q, float3 v)
+public float3 turn(float4 q, float3 v)
 {
     float3 c = 2 * cross(q.xyz, v);
     return v + q.w * c + cross(q.xyz, c);
@@ -334,4 +386,26 @@ public int ordered(float f)
 public float unordered(int i)
 {
     return asfloat(i >= 0 ? i : i ^ 0x7fffffff);
+}
+
+/** The emitter instance's box from the state: min x, y, z, max x, y, z; min above max while it has no particles. */
+public void stateBounds(uint* state, uint instance, out float3 low, out float3 high)
+{
+    uint at = instance * STATE_WORDS + STATE_BOUNDS;
+    low = float3(unordered(int(state[at] ^ 0x80000000u)), unordered(int(state[at + 1] ^ 0x80000000u)),
+        unordered(int(state[at + 2] ^ 0x80000000u)));
+    high = float3(unordered(int(state[at + 3] ^ 0x80000000u)), unordered(int(state[at + 4] ^ 0x80000000u)),
+        unordered(int(state[at + 5] ^ 0x80000000u)));
+}
+
+/**
+ * A position of emitter `e`'s particles (offsets from its origin, or in its frame for local space) relative to a
+ * camera at `high` + `low`: the origin's high parts and the rest apart, so floats near the camera stay precise.
+ */
+public float3 relativeTo(ParticleEmitter e, float3 p, float3 high, float3 low)
+{
+    precise float3 h = e.originHigh - high;
+    precise float3 l = e.originLow - low;
+    float3 offset = (e.flags & EMITTER_LOCAL) != 0 ? turn(e.rotation, p) : p;
+    return (h + l) + offset;
 }

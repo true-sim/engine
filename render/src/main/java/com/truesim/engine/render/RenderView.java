@@ -452,7 +452,7 @@ public final class RenderView implements AutoCloseable {
     }
 
     /** The shaders' View, for passes drawing it. */
-    long address() {
+    public long address() {
         return renderer.viewConstants().deviceAddress() + base;
     }
 

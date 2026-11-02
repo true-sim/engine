@@ -83,6 +83,17 @@ public final class StereoBench {
             CascadedShadowMaps sharedCascades = new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, eyes[0],
                 3, 2048, ViewOptions.shadow(1 << 16, 1 << 22), 150).margin(0.064f);
             owned.add(sharedCascades);
+            // -Ptruesim.demo.effect=x,y,z: the demo's effects there (g+h: h above the ground)
+            String effect = System.getProperty("truesim.demo.effect");
+            DemoEffects effects = null;
+            if (effect != null) {
+                String[] v = effect.split(",");
+                double fx = Double.parseDouble(v[0]);
+                double fz = Double.parseDouble(v[2]);
+                effects = new DemoEffects(device, graph.frameSlots(), fx, height(v[1], fx, fz), fz);
+                owned.add(effects);
+                graph.add(effects.simulation());
+            }
             for (int e = 0; e < 2; e++) {
                 GpuImage target = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage,
                     VK_IMAGE_ASPECT_COLOR_BIT);
@@ -95,6 +106,9 @@ public final class StereoBench {
                 port.add(visibility ? new VisibilityBufferShading(world.geometry(), view, color, depth)
                         : new ClusteredForwardShading(world.geometry(), view, color, depth))
                     .add(new ClusteredLights(world.lights(), view));
+                if (effects != null) {
+                    port.add(new com.truesim.engine.render.particles.ParticleDraw(effects.particles(), view));
+                }
                 if (rays) {
                     port.add(new com.truesim.engine.render.shadows.InlineRayShadows(world.rayTracing(), view.view(),
                         world.lights(), 0, 0));
@@ -160,6 +174,9 @@ public final class StereoBench {
                     renderDoc.start();
                 }
                 graph.beginFrame();
+                if (effects != null) {
+                    effects.update(1 / 72.0);
+                }
                 graph.submit(0, 0);
                 world.recorded();
                 // -Ptruesim.demo.pngFrames=60,180: the left eye of those frames too, next to the png named
