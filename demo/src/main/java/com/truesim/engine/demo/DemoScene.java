@@ -26,6 +26,14 @@ import java.util.SplittableRandom;
  */
 final class DemoScene implements AutoCloseable {
 
+    /**
+     * A showcase's arena ({@link Showcase}): rocks cleared from a circle of {@code radius} about ({@code x}, {@code z}),
+     * {@code foxes} foxes from {@code fox} roaming in it ({@link FoxCrowd}), at dusk: the sun low, dim and orange, the
+     * circling lights off, so fires and fireworks light the ground.
+     */
+    record Arena(double x, double z, double radius, java.nio.file.Path fox, int foxes) {
+    }
+
     static final int TERRAIN_SIZE = 256;
     /** Where the fox stands, if there is one: in front of the benchmark's camera. */
     static final double CHARACTER_X = 26;
@@ -45,6 +53,8 @@ final class DemoScene implements AutoCloseable {
     private final float[] rocks = new float[ROCKS * 5]; // x, y, z, scale, spin speed (0: still)
     private final int[] rockMaterials = new int[ROCKS];
     private final int rockMaterial;
+    private final int woodMaterial;
+    private final Arena arena; // or null
     private final DemoCharacter character;
     private final FoxCrowd crowd;
     private final RayTracing rayTracing; // or null
@@ -55,6 +65,17 @@ final class DemoScene implements AutoCloseable {
 
     /** The scene, with ray tracing where {@code rays} and the device has it. */
     DemoScene(VulkanDevice device, FrameSlots slots, int colorFormat, int depthFormat, boolean rays) {
+        this(device, slots, colorFormat, depthFormat, rays, null);
+    }
+
+    /** The scene around a showcase's {@code arena}, at dusk. */
+    DemoScene(VulkanDevice device, FrameSlots slots, int colorFormat, int depthFormat, Arena arena) {
+        this(device, slots, colorFormat, depthFormat, false, arena);
+    }
+
+    private DemoScene(VulkanDevice device, FrameSlots slots, int colorFormat, int depthFormat, boolean rays,
+        Arena arena) {
+        this.arena = arena;
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 1 << 16, 8), slots);
         rayTracing = rays && device.rayTracing() ? new RayTracing(device, pool, ROCKS + 16) : null;
         if (rayTracing != null && Integer.getInteger("truesim.demo.rebuildEvery") != null) {
@@ -81,22 +102,28 @@ final class DemoScene implements AutoCloseable {
             materials.add(new Material(base.withBaseColor(new Color(0.2f, 0.4f, 0.9f, 1)).withRoughness(0.2f))),
         };
         rockMaterial = palette[0];
+        woodMaterial = materials.add(new Material(base.withBaseColor(new Color(0.12f, 0.07f, 0.04f, 1))
+            .withRoughness(0.95f)));
         scene = new GpuScene(device, pool, ROCKS + 16, slots);
         scene.setMaterials(materials);
         renderer = new MeshletRenderer(device, scene, colorFormat, depthFormat, slots);
         geometry = SceneGeometry.meshlets(renderer);
         scene.set(0, terrain, ground, 0f, 0f, 0f, 0f, 0f, 0f, 1f, 1f, 1f, 1f);
         SplittableRandom random = new SplittableRandom(7);
-        boolean clearing = System.getProperty("truesim.demo.character") != null;
+        boolean clearing = arena != null || System.getProperty("truesim.demo.character") != null;
+        double clearX = arena == null ? CHARACTER_X : arena.x();
+        double clearZ = arena == null ? CHARACTER_Z : arena.z();
+        double clear = arena == null ? 12 : arena.radius();
         for (int i = 0; i < ROCKS; i++) {
             double x = random.nextDouble(-TERRAIN_SIZE / 2.0 + 4, TERRAIN_SIZE / 2.0 - 4);
             double z = random.nextDouble(-TERRAIN_SIZE / 2.0 + 4, TERRAIN_SIZE / 2.0 - 4);
-            double dx = x - CHARACTER_X;
-            double dz = z - CHARACTER_Z;
+            double dx = x - clearX;
+            double dz = z - clearZ;
             double away = Math.sqrt(dx * dx + dz * dz);
-            if (clearing && away < 12) { // a clearing for the fox: rocks pushed out of it
-                x = CHARACTER_X + dx / Math.max(away, 1e-3) * 12;
-                z = CHARACTER_Z + dz / Math.max(away, 1e-3) * 12;
+            if (clearing && away < clear) { // a clearing for the fox (the arena): rocks pushed out of it, spread
+                double out = arena == null ? clear : clear * (1 + 0.6 * away / clear);
+                x = clearX + dx / Math.max(away, 1e-3) * out;
+                z = clearZ + dz / Math.max(away, 1e-3) * out;
             }
             float scale = (float) (0.3 + 1.7 * Maths.pow(random.nextDouble(), 3));
             rocks[5 * i] = (float) x;
@@ -112,7 +139,8 @@ final class DemoScene implements AutoCloseable {
             character = file == null ? null : new DemoCharacter(device, slots, pool, materials, scene,
                 java.nio.file.Path.of(file), CHARACTER_X, CHARACTER_Z, rayTracing);
             int foxes = Integer.getInteger("truesim.demo.foxes", 0);
-            crowd = foxes == 0 ? null : new FoxCrowd(device, slots, pool, materials, scene, java.nio.file.Path.of(
+            crowd = arena != null ? new FoxCrowd(device, slots, pool, materials, scene, arena)
+                : foxes == 0 ? null : new FoxCrowd(device, slots, pool, materials, scene, java.nio.file.Path.of(
                 System.getProperty("truesim.demo.crowd", file == null ? "Fox.gltf" : file)), foxes,
                 Boolean.getBoolean("truesim.demo.foxLod"), 30, 30, rayTracing);
         } catch (InterruptedException e) {
@@ -144,6 +172,21 @@ final class DemoScene implements AutoCloseable {
         return rockMaterial;
     }
 
+    /** A dark wood: torches' poles. */
+    int woodMaterial() {
+        return woodMaterial;
+    }
+
+    /** The instances drawn. */
+    GpuScene gpuScene() {
+        return scene;
+    }
+
+    /** The crowd of foxes, or null without. */
+    FoxCrowd crowd() {
+        return crowd;
+    }
+
     /** The fox, or null without. */
     DemoCharacter character() {
         return character;
@@ -161,6 +204,15 @@ final class DemoScene implements AutoCloseable {
             float s = rocks[5 * i + 3];
             scene.set(i + 1, rock, rockMaterials[i], rocks[5 * i], rocks[5 * i + 1], rocks[5 * i + 2], 0,
                 (float) Maths.sin(angle / 2), 0, (float) Maths.cos(angle / 2), s, s, s);
+        }
+        if (arena != null) {
+            // Dusk: a low orange sun, the circling lights off; the crowd looks at a point circling above the middle
+            lights.directional(0, -0.75f, -0.32f, -0.58f, 0.9f, 0.45f, 0.22f);
+            lights.setCount(1);
+            double a = seconds * 0.4;
+            crowd.update(seconds, arena.x() + 6 * Maths.cos(a), DemoMeshes.height(arena.x(), arena.z()) + 2,
+                arena.z() + 6 * Maths.sin(a));
+            return;
         }
         lights.directional(0, -0.4f, -0.8f, -0.45f, 2.5f, 2.3f, 2.0f);
         for (int l = CIRCLING_LIGHTS; l < POINT_LIGHTS; l++) {

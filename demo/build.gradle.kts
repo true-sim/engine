@@ -62,3 +62,17 @@ tasks.register<JavaExec>("streamBench") {
     jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xmx4g")
     providers.gradleProperty("jfr").orNull?.let { jvmArgs("-XX:StartFlightRecording=filename=$it,settings=profile") }
 }
+
+// The effects showcase (Showcase): ./gradlew :engine-demo:showcase -Pcrowd=<path to Fox.gltf> [--args=measure]
+tasks.register<JavaExec>("showcase") {
+    group = "application"
+    description = "A hundred foxes, fire, fireworks and debris at once: frames to PNG files, or frame times measured."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "com.truesim.engine.demo.Showcase"
+    workingDir = rootProject.projectDir
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xmx4g")
+    for (name in listOf("crowd", "character", "foxes", "rocks", "camera", "size", "frames", "first", "every", "out",
+        "stills", "exposure")) {
+        providers.gradleProperty(name).orNull?.let { systemProperty("truesim.demo.$name", it) }
+    }
+}

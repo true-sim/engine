@@ -53,6 +53,7 @@ public final class GpuTimings implements AutoCloseable {
     private double[] millis = new double[0];
     private long results; // native, RESULT_BYTES per query of one slot
     private long frame = -1;
+    private double span = Double.NaN; // the first timed pass's start to the last one's end
 
     @AllowAllocation("set up once")
     GpuTimings(VulkanDevice device, int slots) {
@@ -90,6 +91,7 @@ public final class GpuTimings implements AutoCloseable {
         millis = new double[passes];
         Arrays.fill(millis, Double.NaN);
         frame = -1;
+        span = Double.NaN;
         if (passes == 0) {
             return;
         }
@@ -131,12 +133,23 @@ public final class GpuTimings implements AutoCloseable {
             Vulkan.check(result, "Could not read the timestamps");
         }
         boolean any = false;
+        long earliest = 0;
+        long latest = 0;
+        long mask = -1;
         for (int i = 0; i < passes; i++) {
             long start = results + 2L * i * RESULT_BYTES;
             long end = start + RESULT_BYTES;
             if (memGetLong(start + 8) != 0 && memGetLong(end + 8) != 0) {
                 long ticks = (memGetLong(end) - memGetLong(start)) & validMask[family[i]];
                 millis[i] = ticks * nanosPerTick / 1e6;
+                if (!any) {
+                    earliest = memGetLong(start);
+                    latest = memGetLong(end);
+                    mask = validMask[family[i]];
+                } else {
+                    earliest = memGetLong(start) - earliest < 0 ? memGetLong(start) : earliest;
+                    latest = memGetLong(end) - latest > 0 ? memGetLong(end) : latest;
+                }
                 any = true;
             } else {
                 millis[i] = Double.NaN;
@@ -144,6 +157,7 @@ public final class GpuTimings implements AutoCloseable {
         }
         if (any) {
             this.frame = frame;
+            span = ((latest - earliest) & mask) * nanosPerTick / 1e6;
         }
         Commands.resetQueryPool(device.handle(), pool, first, 2 * passes);
     }
@@ -172,6 +186,15 @@ public final class GpuTimings implements AutoCloseable {
             }
         }
         return total;
+    }
+
+    /**
+     * The frame's GPU time, in milliseconds: from the first timed pass's start to the last one's end, the gaps between
+     * passes and between submits included (where {@link #totalMillis} sums the passes alone); {@code NaN} before the
+     * first finished frame.
+     */
+    public double spanMillis() {
+        return span;
     }
 
     /** The frame the timings are of (counted by the graph from 1), or -1 before the first finished. */
