@@ -50,6 +50,8 @@ final class DemoScene implements AutoCloseable {
     private final Lights lights;
     private final SceneGeometry geometry;
     private final int rock;
+    private final int pane;
+    private final int glassMaterial;
     private final float[] rocks = new float[ROCKS * 5]; // x, y, z, scale, spin speed (0: still)
     private final int[] rockMaterials = new int[ROCKS];
     private final int rockMaterial;
@@ -86,6 +88,7 @@ final class DemoScene implements AutoCloseable {
         int terrain = pool.add(terrainMesh);
         MeshData rockMesh = DemoMeshes.rock(4);
         rock = pool.add(rockMesh);
+        pane = pool.add(DemoMeshes.pane());
         if (rayTracing != null) {
             rayTracing.add(terrain, terrainMesh, terrainMesh.levels().size() - 1);
             rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
@@ -104,6 +107,8 @@ final class DemoScene implements AutoCloseable {
         rockMaterial = palette[0];
         woodMaterial = materials.add(new Material(base.withBaseColor(new Color(0.12f, 0.07f, 0.04f, 1))
             .withRoughness(0.95f)));
+        glassMaterial = materials.add(new Material(base.withBaseColor(new Color(0.35f, 0.6f, 0.85f, 0.45f))
+            .withRoughness(0.05f)).alphaBlend().doubleSided(true));
         scene = new GpuScene(device, pool, ROCKS + 16, slots);
         scene.setMaterials(materials);
         renderer = new MeshletRenderer(device, scene, colorFormat, depthFormat, slots);
@@ -170,6 +175,16 @@ final class DemoScene implements AutoCloseable {
     /** The plain rock material. */
     int rockMaterial() {
         return rockMaterial;
+    }
+
+    /** A unit square pane facing +Z, in the pool: windows. */
+    int pane() {
+        return pane;
+    }
+
+    /** Tinted glass, blended: windows. */
+    int glassMaterial() {
+        return glassMaterial;
     }
 
     /** A dark wood: torches' poles. */

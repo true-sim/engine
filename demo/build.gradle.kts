@@ -72,7 +72,7 @@ tasks.register<JavaExec>("showcase") {
     workingDir = rootProject.projectDir
     jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xmx4g")
     for (name in listOf("crowd", "character", "foxes", "rocks", "camera", "size", "frames", "first", "every", "out",
-        "stills", "exposure")) {
+        "stills", "exposure", "torches", "sparks", "glass", "async")) {
         providers.gradleProperty(name).orNull?.let { systemProperty("truesim.demo.$name", it) }
     }
 }

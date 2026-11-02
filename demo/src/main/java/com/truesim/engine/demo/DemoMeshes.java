@@ -49,6 +49,15 @@ final class DemoMeshes {
             .attribute(VertexAttribute.NORMAL, normals(positions, indices)).submesh(indices).buildHierarchy();
     }
 
+    /** A square of 1 by 1 in the XY plane about the origin, facing +Z: a window pane. */
+    static MeshData pane() {
+        float[] positions = {-0.5f, -0.5f, 0, 0.5f, -0.5f, 0, 0.5f, 0.5f, 0, -0.5f, 0.5f, 0};
+        int[] indices = {0, 1, 2, 0, 2, 3};
+        float[] normals = {0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1};
+        return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL), 4).positions(positions)
+            .attribute(VertexAttribute.NORMAL, normals).submesh(indices).buildHierarchy();
+    }
+
     /**
      * A bumpy rock: an icosahedron subdivided {@code subdivisions} times (20 x 4^subdivisions triangles), with noise on
      * the radius.
