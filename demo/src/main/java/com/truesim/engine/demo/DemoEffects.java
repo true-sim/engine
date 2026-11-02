@@ -4,11 +4,13 @@ import com.truesim.common.math.Maths;
 import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.render.particles.ParticleSimulation;
 import com.truesim.engine.render.particles.Particles;
+import com.truesim.engine.scene.EffectBindings;
 import com.truesim.engine.scene.EffectSync;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.effects.Bind;
+import com.truesim.scene.effects.Effect;
 import com.truesim.scene.effects.ColorGradient;
 import com.truesim.scene.effects.EffectData;
 import com.truesim.scene.effects.EffectParameter;
@@ -27,7 +29,8 @@ import com.truesim.scene.effects.Spawn;
  * (flames carried with it in its frame, sparks thrown off with its velocity, smoke left behind in the world), a
  * fountain of sparks with streaks of trails over a column of smoke, and an orb circling it with a ribbon behind and a
  * beam reaching it from the fountain (the beam's end is the orb's node). Simulated on the GPU and drawn in every view
- * given a {@code ParticleDraw}.
+ * given a {@code ParticleDraw}. With the fox ({@link #dust}), its feet kick up dust on their foot-down events and its
+ * survey's flickering curve drives the torch's intensity, frame by frame.
  */
 final class DemoEffects implements AutoCloseable {
 
@@ -59,6 +62,17 @@ final class DemoEffects implements AutoCloseable {
                 Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0).linear(0.12f, 1, 1, 1, 1)
                     .linear(1, 1, 1, 1, 0).build()))
             .render(Renderer.billboard(Renderer.Facing.POSITION).set("soft", 0.5f).set("volume", 1)))
+        .build();
+
+    /** Dust kicked up by a foot coming down: as much as the event weighs. */
+    static final EffectData DUST = EffectData.builder().parameter(INTENSITY, 1)
+        .emitter("dust", e -> e.duration(0.05).capacity(16).spawn(Spawn.burst(0, Bind.param(INTENSITY).times(14)))
+            .init(Shape.disc(0.06f), Init.velocity(Bind.random(-0.35f, 0.35f), Bind.random(0.15f, 0.5f),
+                Bind.random(-0.35f, 0.35f)), Init.lifetime(Bind.random(0.9f, 1.6f)), Init.size(Bind.random(0.06f, 0.12f)),
+                Init.color(Bind.color(0.55f, 0.45f, 0.32f, 0.7f)))
+            .update(Forces.gravity(Bind.constant(0.05f)), Forces.drag(2.5f), Over.size(FloatCurve.of(0, 1, 1, 3.5f)),
+                Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0.9f).linear(1, 1, 1, 1, 0).build()))
+            .render(Renderer.billboard(Renderer.Facing.POSITION).set("soft", 0.1f)))
         .build();
 
     /** Sparks: velocity-facing and additive, cooling as they fall. */
@@ -103,6 +117,8 @@ final class DemoEffects implements AutoCloseable {
     private final double z;
     private final long torch;
     private final long orb;
+    private final Effect torchFire;
+    private EffectBindings bindings;
     private double time;
 
     /** The demo's effects at ({@code x}, {@code y}, {@code z}) in a scene of their own, in a pool of 32 MB. */
@@ -128,7 +144,7 @@ final class DemoEffects implements AutoCloseable {
         scene.setTranslation(fountain, x, y, z);
         place(0);
         scene.update();
-        effects.play(TORCH, torch).offset(0, 1.1, 0).inheritVelocity(1);
+        torchFire = effects.play(TORCH, torch).offset(0, 1.1, 0).inheritVelocity(1);
         effects.play(SPARKS, fountain);
         effects.play(RIBBON, orb);
         sync.beamEnd(effects.play(BEAM, fountain).offset(0, 0.3, 0).id(), 0, orb);
@@ -141,6 +157,20 @@ final class DemoEffects implements AutoCloseable {
         scene.setTranslation(torch, tx, DemoMeshes.height(tx, tz), tz);
         scene.setTranslation(orb, x + 2 * Maths.cos(1.5 * t), y + 1.5 + 0.4 * Maths.sin(3 * t),
             z + 2 * Maths.sin(1.5 * t));
+    }
+
+    /** Dust at the fox's feet on its foot-down events, and the torch flickering with its survey's curve. */
+    void dust(DemoCharacter fox) {
+        bindings = new EffectBindings(effects, fox.animators());
+        for (int f = 0; f < 4; f++) {
+            bindings.onEvent(DemoCharacter.FEET[f], DUST, fox.feet()[f]).scale(INTENSITY).minimumWeight(0.2f);
+        }
+        bindings.curve(fox.animator(), DemoCharacter.FLICKER, torchFire, INTENSITY).map(0.9, 0.4);
+    }
+
+    /** The bindings with the fox, or null. */
+    EffectBindings bindings() {
+        return bindings;
     }
 
     Effects effects() {
@@ -163,6 +193,9 @@ final class DemoEffects implements AutoCloseable {
     void update(double seconds) {
         time += seconds;
         place(time);
+        if (bindings != null) {
+            bindings.update(); // after the fox's animators
+        }
         scene.update(); // the torch and the orb where they are now
         sync.update(seconds);
     }

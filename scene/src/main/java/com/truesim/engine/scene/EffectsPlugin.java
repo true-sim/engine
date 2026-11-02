@@ -14,6 +14,7 @@ import com.truesim.engine.render.particles.ParticleSimulation;
 import com.truesim.engine.render.particles.Particles;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
+import com.truesim.scene.animation.Animators;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.effects.Effects;
 import com.truesim.scene.effects.Quality;
@@ -22,8 +23,9 @@ import java.util.Objects;
 
 /**
  * Particle effects as a plugin (effects.md §2.2): the GPU side ({@link Particles}) with its simulation in the frame
- * graph, a world's {@link Effects} synced every frame after the game's update ({@link EffectSync}), a
- * {@link ParticleDraw} per scene view on request, and the quality setting {@link #QUALITY}. Named so beside scene-effects' {@code Effects}, the store it fills.
+ * graph, a world's {@link Effects} synced every frame after the game's update ({@link EffectSync}), with its
+ * {@link EffectBindings} from animation evaluated first, a {@link ParticleDraw} per scene view on request, and the
+ * quality setting {@link #QUALITY}. Named so beside scene-effects' {@code Effects}, the store it fills.
  *
  * <pre>{@code
  * app.use(new Rendering(), new EffectsPlugin());
@@ -31,6 +33,7 @@ import java.util.Objects;
  * Effects effects = fx.effects(scene);                       // the world's effects, synced each frame
  * fx.draw(sceneViews);                                      // a ParticleDraw in every view of the scene
  * effects.play(TORCH_FIRE, torchNode);
+ * fx.bindings(animators).onEvent(LEFT_FOOT_DOWN, DUST, footL).scale(INTENSITY);
  * }</pre>
  *
  * <p>One world's effects per plugin: the pool follows one {@link Effects}. The world's time is the frame's delta
@@ -53,6 +56,7 @@ public final class EffectsPlugin implements Plugin {
     private EngineSettings settings;
     private Particles particles;
     private EffectSync sync;
+    private EffectBindings bindings;
 
     @Override
     public PluginKey<EffectsPlugin> key() {
@@ -110,6 +114,16 @@ public final class EffectsPlugin implements Plugin {
         return sync;
     }
 
+    /** Animation driving the world's effects ({@link #effects}), evaluated each frame before they sync; once. */
+    @AllowAllocation("set up once")
+    public EffectBindings bindings(Animators animators) {
+        if (bindings != null) {
+            throw new IllegalStateException("The effects plugin has bindings already");
+        }
+        bindings = new EffectBindings(sync().effects(), animators);
+        return bindings;
+    }
+
     /** Draws the particles in every view of {@code views}, those made later too. */
     @AllowAllocation("set up once")
     public void draw(SceneViews views) {
@@ -119,6 +133,9 @@ public final class EffectsPlugin implements Plugin {
 
     @Override
     public void afterUpdate(Frame frame) {
+        if (bindings != null) {
+            bindings.update();
+        }
         if (sync != null) {
             sync.update(frame.delta());
         }
