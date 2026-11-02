@@ -117,6 +117,14 @@ public final class Particles implements AutoCloseable {
     private final Staging parameterStaged = new Staging(4L * 1024);
     private final Staging ribbonStaged;
     private int parameterFloats;
+    // The frame's sorted emitters (each one's place in the list) and the chunks of their ranges, for the sorts
+    private final int[] sortOf;
+    private final FrameBuffer sortList;
+    private final FrameBuffer sortChunks;
+    private final Staging sortStaged;
+    private final Staging sortChunkStaged;
+    private int sortedCount;
+    private int sortChunkCount;
 
     // Per effect slot: the effect followed, its programs, its emitters' instances (-1: none) and places in the frame's
     // list, its origin, where it was and its time at the last update.
@@ -237,11 +245,13 @@ public final class Particles implements AutoCloseable {
         overflowOf = new int[maxEmitters];
         emitterStaged = new Staging((long) ParticleEmitterLayout.BYTES * maxEmitters);
         ribbonStaged = new Staging(8L * maxEmitters);
+        sortOf = new int[maxEmitters];
+        sortStaged = new Staging(4L * Math.min(maxEmitters, ParticleConstants.SORT_EMITTERS));
         ParticlePool p = null;
         ModulePrograms m = null;
         CpuEmitters c = null;
         GpuBuffer[] made = new GpuBuffer[5];
-        FrameBuffer[] tables = new FrameBuffer[5];
+        FrameBuffer[] tables = new FrameBuffer[7];
         try {
             p = new ParticlePool(device, budget);
             m = new ModulePrograms(device, slots);
@@ -256,6 +266,9 @@ public final class Particles implements AutoCloseable {
             tables[1] = FrameBuffer.create(device, 4L * p.slots() / ParticleConstants.CHUNK, STORAGE, slots);
             tables[2] = FrameBuffer.create(device, 256L * ParticleSpawnLayout.BYTES, STORAGE, slots);
             tables[3] = FrameBuffer.create(device, 4L * 1024, STORAGE, slots);
+            tables[5] = FrameBuffer.create(device, 4L * Math.min(maxEmitters, ParticleConstants.SORT_EMITTERS),
+                STORAGE, slots);
+            tables[6] = FrameBuffer.create(device, 8L * p.slots() / ParticleConstants.CHUNK, STORAGE, slots);
         } catch (RuntimeException e) {
             for (FrameBuffer table : tables) {
                 if (table != null) {
@@ -291,7 +304,10 @@ public final class Particles implements AutoCloseable {
         chunkTable = tables[1];
         spawnRing = tables[2];
         parameterBlocks = tables[3];
+        sortList = tables[5];
+        sortChunks = tables[6];
         chunkStaged = new Staging(4L * p.slots() / ParticleConstants.CHUNK);
+        sortChunkStaged = new Staging(8L * p.slots() / ParticleConstants.CHUNK);
         stateImport = new ExternalBuffer("particle state", state);
         chunkCountsImport = new ExternalBuffer("particle chunk counts", chunkCounts);
         statisticsImport = new ExternalBuffer("particle statistics", statistics);
@@ -445,6 +461,8 @@ public final class Particles implements AutoCloseable {
         }
         parameterStaged.copyTo(parameterBlocks, parameterBytes);
         ribbonStaged.copyTo(ribbonList, 8L * ribbonCount);
+        sortStaged.copyTo(sortList, 4L * sortedCount);
+        sortChunkStaged.copyTo(sortChunks, 8L * sortChunkCount);
         cpuEmitters.finish();
     }
 
@@ -722,6 +740,8 @@ public final class Particles implements AutoCloseable {
         emitterCount = 0;
         chunkCount = 0;
         parameterFloats = 0;
+        sortedCount = 0;
+        sortChunkCount = 0;
         for (int slot = 0; slot < highest; slot++) {
             long effect = ids[slot];
             if (effect == 0) {
@@ -836,12 +856,33 @@ public final class Particles implements AutoCloseable {
                 for (int c = 0; c < chunks; c++) {
                     chunkStaged.putInt(4L * chunkCount++, index);
                 }
+                sortOf[index] = ParticleConstants.NO_SORT;
+                if (sortedCount < ParticleConstants.SORT_EMITTERS && sorted(block.sorted[e])) {
+                    // CPU emitters too: their particles are in their ranges like any
+                    int place = sortedCount++;
+                    sortOf[index] = place;
+                    sortStaged.putInt(4L * place, index);
+                    for (int c = 0; c < ParticlePool.chunksOf(capacities[instance]); c++) {
+                        sortChunkStaged.putInt(8L * sortChunkCount, place);
+                        sortChunkStaged.putInt(8L * sortChunkCount + 4, c);
+                        sortChunkCount++;
+                    }
+                }
             }
             times[slot] = time;
             previous[3 * slot] = x;
             previous[3 * slot + 1] = y;
             previous[3 * slot + 2] = z;
         }
+    }
+
+    private static boolean sorted(boolean[] renderers) {
+        for (boolean sorted : renderers) {
+            if (sorted) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void putParameters(Effects effects, long effect, int offset, int floats) {
@@ -982,6 +1023,34 @@ public final class Particles implements AutoCloseable {
                 ribbonCount++;
             }
         }
+    }
+
+    /** Emitters of the frame's list drawing sorted billboards (at most {@code SORT_EMITTERS}). */
+    int sortedCount() {
+        return sortedCount;
+    }
+
+    /** Chunks of their ranges. */
+    int sortChunkCount() {
+        return sortChunkCount;
+    }
+
+    /** The place among the frame's sorted emitters of the emitter at {@code index} of its list, or {@code NO_SORT}. */
+    int sortOf(int index) {
+        return sortOf[index];
+    }
+
+    /** Whether renderer {@code r} of the emitter at {@code index} of the frame's list draws sorted. */
+    boolean rendererSorted(int index, int r) {
+        return blocks[listSlot[index]].sorted[listEmitter[index]][r];
+    }
+
+    long sortListAddress() {
+        return sortList.deviceAddress();
+    }
+
+    long sortChunksAddress() {
+        return sortChunks.deviceAddress();
     }
 
     /** Emitters whose ribbons the frame orders. */
@@ -1316,6 +1385,8 @@ public final class Particles implements AutoCloseable {
         dispatch.close();
         order.close();
         ribbonList.close();
+        sortList.close();
+        sortChunks.close();
         programs.close();
         cpuEmitters.close();
         pool.close();

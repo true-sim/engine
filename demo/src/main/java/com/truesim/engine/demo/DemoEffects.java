@@ -28,9 +28,10 @@ import com.truesim.scene.effects.Spawn;
  * The demo's effects, played on nodes of a scene and drawn through an {@link EffectSync}: a torch swaying on its node
  * (flames carried with it in its frame, sparks thrown off with its velocity, smoke left behind in the world), a
  * fountain of sparks with streaks of trails over a column of smoke, and an orb circling it with a ribbon behind and a
- * beam reaching it from the fountain (the beam's end is the orb's node). Simulated on the GPU and drawn in every view
- * given a {@code ParticleDraw}. With the fox ({@link #dust}), its feet kick up dust on their foot-down events and its
- * survey's flickering curve drives the torch's intensity, frame by frame.
+ * beam reaching it from the fountain (the beam's end is the orb's node), and two clouds of red and blue puffs through
+ * each other, each drawn back to front. Simulated on the GPU and drawn in every view given a {@code ParticleDraw}. With
+ * the fox ({@link #dust}), its feet kick up dust on their foot-down events and its survey's flickering curve drives
+ * the torch's intensity, frame by frame.
  */
 final class DemoEffects implements AutoCloseable {
 
@@ -97,6 +98,27 @@ final class DemoEffects implements AutoCloseable {
             .render(Renderer.trail(12).additive().set("width.tail", 0.1f)))
         .build();
 
+    /**
+     * Two clouds of puffs, red and blue, through each other: each emitter's puffs drawn back to front (sorted, the
+     * default for alpha-blended billboards), the emitters as wholes.
+     */
+    static final EffectData PUFFS = EffectData.builder()
+        .emitter("red", e -> e.spawn(Spawn.rate(14)).init(Shape.sphere(0.9f),
+                Init.velocity(Bind.random(-0.1f, 0.1f), Bind.random(0.05f, 0.2f), Bind.random(-0.1f, 0.1f)),
+                Init.lifetime(Bind.random(4, 6)), Init.size(Bind.random(0.5f, 0.8f)),
+                Init.color(Bind.color(0.9f, 0.15f, 0.1f, 0.85f)))
+            .update(Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0).linear(0.15f, 1, 1, 1, 1)
+                .linear(0.8f, 1, 1, 1, 1).linear(1, 1, 1, 1, 0).build()))
+            .render(Renderer.billboard(Renderer.Facing.POSITION).set("soft", 0.2f)))
+        .emitter("blue", e -> e.spawn(Spawn.rate(14)).init(Shape.sphere(0.9f),
+                Init.velocity(Bind.random(-0.1f, 0.1f), Bind.random(0.05f, 0.2f), Bind.random(-0.1f, 0.1f)),
+                Init.lifetime(Bind.random(4, 6)), Init.size(Bind.random(0.5f, 0.8f)),
+                Init.color(Bind.color(0.1f, 0.3f, 0.95f, 0.85f)))
+            .update(Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0).linear(0.15f, 1, 1, 1, 1)
+                .linear(0.8f, 1, 1, 1, 1).linear(1, 1, 1, 1, 0).build()))
+            .render(Renderer.billboard(Renderer.Facing.POSITION).set("soft", 0.2f)))
+        .build();
+
     /** A ribbon behind an orb circling the fountain, narrowing to its tail. */
     static final EffectData RIBBON = EffectData.builder().emitter("ribbon", e -> e.spawn(Spawn.rate(60))
         .init(Init.lifetime(1.5f), Init.size(Bind.constant(0.3f)), Init.color(Bind.color(0.3f, 1.2f, 2, 1)))
@@ -147,6 +169,7 @@ final class DemoEffects implements AutoCloseable {
         torchFire = effects.play(TORCH, torch).offset(0, 1.1, 0).inheritVelocity(1);
         effects.play(SPARKS, fountain);
         effects.play(RIBBON, orb);
+        effects.play(PUFFS, x + 3, DemoMeshes.height(x + 3, z - 1) + 1.2, z - 1);
         sync.beamEnd(effects.play(BEAM, fountain).offset(0, 0.3, 0).id(), 0, orb);
     }
 

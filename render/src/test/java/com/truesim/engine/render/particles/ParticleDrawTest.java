@@ -111,6 +111,8 @@ class ParticleDrawTest {
     private ExternalImage output;
     private GpuBuffer pixels;
     private SceneView view;
+    private SceneGeometry geometry;
+    private final java.util.ArrayList<AutoCloseable> closeLater = new java.util.ArrayList<>();
     private Camera camera;
     private int wall;
     private final SceneGraph nodes = new SceneGraph(new ChangeClock());
@@ -150,7 +152,7 @@ class ParticleDrawTest {
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
         pixels = GpuBuffer.hostVisible(device, 4L * SIZE * SIZE, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1); // at the origin, looking down -z
-        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+        geometry = SceneGeometry.meshlets(renderer);
         ViewPort port = graph.addView("main").size(SIZE, SIZE);
         view = geometry.createView(port, camera, ViewOptions.of(256, 1 << 12).withOcclusion(true));
         port.add(new ClusteredForwardShading(geometry, view, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
@@ -166,6 +168,13 @@ class ParticleDrawTest {
             device.waitIdle();
             int errors = instance.validationErrors();
             graph.close();
+            for (AutoCloseable c : closeLater) {
+                try {
+                    c.close();
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }
             particles.close();
             pixels.close();
             target.close();
@@ -516,6 +525,98 @@ class ParticleDrawTest {
         assertThat(writer.ended()).isTrue();
     }
 
+
+    /** An emitter of two particles the game writes, drawn sorted or not. */
+    private static EffectData two(boolean sorted) {
+        return EffectData.builder().emitter("e", e -> e.target(Target.CPU).capacity(2).spawn(Spawn.rate(1))
+            .render(sprite(Renderer.Facing.POSITION).sorted(sorted))).build();
+    }
+
+    @Test
+    void sortedParticlesDrawBackToFrontSeenFromEitherSide() {
+        // Near blue written first, far red second, both in the middle of the image.
+        Effect sorted = effects.play(two(true), 0, 0, -4);
+        frames(1);
+        particles.writer(sorted.id(), 0).next().position(0, 0, -3).size(1).color(0, 0, 1, 1).next()
+            .position(0, 0, -5).size(1).color(1, 0, 0, 1);
+        int[] image = frames(3);
+        assertThat(at(image, 32, 32, 2)).as("the near blue over the far red").isGreaterThan(240);
+        assertThat(at(image, 32, 32, 0)).isLessThan(15);
+        camera.position(0, 0, -8).set(0, 0, 1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        image = frames(3);
+        assertThat(at(image, 32, 32, 0)).as("from the other side the red is near").isGreaterThan(240);
+        assertThat(at(image, 32, 32, 2)).isLessThan(15);
+        assertThat(graph.passes()).contains("particle sort args", "particle sort keys", "particle sort scatter 5");
+        // Unsorted, the one written last covers whatever the side.
+        sorted.kill();
+        Effect unsorted = effects.play(two(false), 0, 0, -4);
+        frames(1);
+        particles.writer(unsorted.id(), 0).next().position(0, 0, -5).size(1).color(1, 0, 0, 1).next()
+            .position(0, 0, -3).size(1).color(0, 0, 1, 1);
+        image = frames(3);
+        assertThat(at(image, 32, 32, 2)).as("unsorted: written last, the far blue").isGreaterThan(240);
+        assertThat(particles.sortedCount()).isZero();
+    }
+
+    @Test
+    void overlappingEmittersDrawAsWholesBackToFrontSeenFromEitherSide() {
+        Consumer<EmitterData.Builder> setup = e -> e.render(sprite(Renderer.Facing.POSITION));
+        effects.play(still(4, e -> setup.accept(e.init(Init.size(Bind.constant(1)),
+            Init.color(Bind.color(1, 0, 0, 1))))), 0, 0, -3);
+        effects.play(still(4, e -> setup.accept(e.init(Init.size(Bind.constant(1)),
+            Init.color(Bind.color(0, 0, 1, 1))))), 0, 0, -5);
+        int[] image = frames(3);
+        assertThat(at(image, 32, 32, 0)).as("the near red emitter over the blue").isGreaterThan(240);
+        camera.position(0, 0, -8).set(0, 0, 1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        image = frames(3);
+        assertThat(at(image, 32, 32, 2)).as("from the other side the blue").isGreaterThan(240);
+        assertThat(particles.sortedCount()).isEqualTo(2);
+    }
+
+    @Test
+    void theEyesOfAPairShareOneSortAndFaceTheirCenter() {
+        // Two eyes above and below the camera, their pair's center far to the left: a sprite ahead of them faces the
+        // center, so both see it edge on, and the camera's own view sees it whole.
+        Camera center = new Camera().position(-6, 0, -4).set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        GpuBuffer[] eyePixels = new GpuBuffer[2];
+        GpuImage[] eyeTargets = new GpuImage[2];
+        int usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+            | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        SceneView[] eyes = new SceneView[2];
+        for (int e = 0; e < 2; e++) {
+            eyePixels[e] = GpuBuffer.hostVisible(device, 4L * SIZE * SIZE, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            closeLater.add(eyePixels[e]);
+            eyeTargets[e] = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage,
+                VK_IMAGE_ASPECT_COLOR_BIT);
+            closeLater.add(eyeTargets[e]);
+            Camera eye = new Camera().position(0, e == 0 ? 0.5 : -0.5, 0).set(0, 0, -1, 0, 1, 0, Math.PI / 2,
+                SIZE, SIZE, 0.1);
+            ViewPort port = graph.addView(e == 0 ? "left" : "right").size(SIZE, SIZE);
+            eyes[e] = geometry.createView(port, eye, ViewOptions.of(256, 1 << 12));
+            port.add(new ClusteredForwardShading(geometry, eyes[e], VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0)).add(new WeightedBlendedTransparency(geometry, eyes[e]))
+                .add(new ParticleDraw(particles, eyes[e], center)).add(new Capture(eyePixels[e]))
+                .output(Keys.SCENE_COLOR, new ExternalImage("eye " + e, SIZE, SIZE, Format.R8G8B8A8_UNORM, usage,
+                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+                    .set(eyeTargets[e].handle(), eyeTargets[e].view()));
+        }
+        effects.play(still(1, e -> e.init(Init.size(Bind.constant(2)), Init.color(Bind.color(1, 1, 1, 1)))
+            .render(sprite(Renderer.Facing.POSITION))), 0, 0, -4);
+        for (int f = 0; f < 3; f++) {
+            eyes[0].set(1, MeshletRenderer.MODE_LIT);
+            eyes[1].set(1, MeshletRenderer.MODE_LIT);
+            frames(1);
+        }
+        int[] own = pixels.memory().toArray(ValueLayout.JAVA_INT);
+        assertThat(covered(own, 0, 128)).as("the camera's own view: 2 m at 4 m, whole").isBetween(230, 290);
+        for (int e = 0; e < 2; e++) {
+            int[] image = eyePixels[e].memory().toArray(ValueLayout.JAVA_INT);
+            assertThat(covered(image, 0, 128)).as("eye " + e + ": edge on").isLessThan(20);
+        }
+        assertThat(graph.passes().stream().filter("particle sort keys"::equals).count())
+            .as("one sort for the camera, one for the pair").isEqualTo(2);
+        assertThat(graph.passes().stream().filter("particle draw"::equals).count()).isEqualTo(3);
+    }
 
     /** The screen column of world x at depth {@code z} (the camera at the origin looking down -z, 90 degrees). */
     private static int column(double x, double z) {

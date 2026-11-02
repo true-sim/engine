@@ -115,20 +115,33 @@ public struct ParticleRenderer
     public uint pad2;
 };
 
-/** A draw of one renderer of one emitter instance in a view: 16 bytes, written by the CPU each frame. */
+/**
+ * A draw of one renderer of one emitter instance in a view: 32 bytes, written by the CPU each frame. Draws of one
+ * pipeline next to each other in the view's order are one indirect multi-draw, each reading its record by draw index.
+ */
 [HostLayout]
 public struct ParticleDrawRecord
 {
     public uint emitter;           // the emitter's place in the frame's list
     public uint renderer;          // its renderer's word in the program buffer
     public uint texture;           // its texture's sampled slot; NO_TEXTURE: a round sprite
-    public uint pad;
+    public uint sort;              // its emitter's place among the frame's sorted emitters; NO_SORT: drawn unsorted
+    public float3 end;             // beams: the end, relative to the camera
+    public float time;             // the effect's time, in seconds: beams' noise
 };
 
 /** Slots per chunk: the simulation's groups each take one chunk of one emitter. */
 public static const uint CHUNK = 64;
 /** Floats of an effect's curve keys the update keeps in group-shared memory; longer blocks are read in place. */
 public static const uint CURVE_CACHE = 1024;
+/** The most sorted emitters a frame has: their places take the sort keys' top bits. */
+public static const uint SORT_EMITTERS = 4096;
+/** Bits of a sort key below the emitter's place: the distance's (a float's top bits but the sign). */
+public static const uint SORT_DEPTH_BITS = 20;
+/** Keys a sort's groups take each. */
+public static const uint SORT_GROUP = 256;
+/** A draw not sorted. */
+public static const uint NO_SORT = 0xffffffffu;
 /** A side range that is not there. */
 public static const uint NO_SIDE = 0xffffffffu;
 

@@ -19,6 +19,7 @@ import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.render.Camera;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -33,6 +34,7 @@ import com.truesim.scene.effects.Forces;
 import com.truesim.scene.effects.Init;
 import com.truesim.scene.effects.Module;
 import com.truesim.scene.effects.Over;
+import com.truesim.scene.effects.Renderer;
 import com.truesim.scene.effects.Shape;
 import com.truesim.scene.effects.Spawn;
 import java.util.ArrayList;
@@ -43,8 +45,9 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 /**
  * What curves (E18: keys searched per particle, cached per chunk) cost the update: a million particles under gravity
  * and drag, then with 8 curves over life of 2 keys, 8 keys and 8 evenly spaced keys (the reviewer note on E18: bake
- * long curves if they cost over 15 % of the update). GPU time of the "particle update" pass, median of 60 frames. Run
- * with {@code TRUESIM_BENCHMARK=true ./gradlew :engine-render:test --tests '*ParticleBenchmark*'}.
+ * long curves if they cost over 15 % of the update). GPU time of the "particle update" pass, median of 60 frames. And
+ * what the sort of a view costs at 10,000, 100,000 and a million particles of one sorted emitter (every "particle
+ * sort" pass). Run with {@code TRUESIM_BENCHMARK=true ./gradlew :engine-render:test --tests '*ParticleBenchmark*'}.
  */
 @EnabledIfEnvironmentVariable(named = "TRUESIM_BENCHMARK", matches = "true")
 class ParticleBenchmark {
@@ -70,6 +73,79 @@ class ParticleBenchmark {
                 System.out.printf("  + %s: %.3f ms (curves %.0f %% of the update)%n", c[0], ms,
                     100 * (ms - base) / ms);
             }
+        }
+    }
+
+    @Test
+    void sortTimes() {
+        try (VulkanInstance instance = VulkanInstance.builder().applicationName("bench").surfaces(false).build();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
+            System.out.println("Particle sort of a view, one sorted emitter, " + instance.bestGpu().name());
+            for (int n : new int[] {10_000, 100_000, PARTICLES}) {
+                System.out.printf("  %,d particles: %.3f ms%n", n, sort(device, n));
+            }
+        }
+    }
+
+    /** The median time of the passes sorting {@code n} particles of one emitter for a camera. */
+    private static double sort(VulkanDevice device, int n) {
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Effects effects = new Effects(scene);
+        EffectRuntime runtime = new EffectRuntime(effects);
+        EffectData data = EffectData.builder().emitter("e", e -> e.spawn(Spawn.burst(0, n))
+            .init(Shape.sphere(5), Init.lifetime(1000))
+            .render(Renderer.billboard(Renderer.Facing.POSITION))).build();
+        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        Camera camera = new Camera().position(0, 0, 20).set(0, 0, -1, 0, 1, 0, Math.PI / 2, 64, 64, 0.1);
+        try (FrameGraph graph = new FrameGraph(device, 2);
+             Particles particles = new Particles(device, graph.frameSlots(),
+                 (long) n * ParticlePool.SLOT_BYTES + (1 << 20), 16);
+             GpuImage target = new GpuImage(device, 4, 4, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT)) {
+            graph.timings(true);
+            graph.add(new ParticleSimulation(particles)).add(new SortProbe(particles, camera)).output(PROBE,
+                new ExternalImage("probe", 4, 4, Format.R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view()));
+            effects.play(data, 0, 0, 0);
+            List<Double> times = new ArrayList<>();
+            for (int f = 0; f < 80; f++) {
+                runtime.update(16_667L);
+                graph.beginFrame();
+                particles.update(effects, runtime.spawns());
+                graph.submit(0, 0);
+                GpuTimings timings = graph.timings();
+                double sum = 0;
+                for (int i = 0; f >= 20 && i < timings.count(); i++) {
+                    if (timings.pass(i).startsWith("particle sort") && !Double.isNaN(timings.millis(i))) {
+                        sum += timings.millis(i);
+                    }
+                }
+                if (f >= 20) {
+                    times.add(sum);
+                }
+            }
+            device.waitIdle();
+            assertThat(particles.alive()).isEqualTo(n);
+            times.sort(null);
+            return times.get(times.size() / 2);
+        }
+    }
+
+    /** Requests a sort for {@code camera}, so it runs. */
+    private record SortProbe(Particles particles, Camera camera) implements Technique {
+        @Override
+        public List<Key<?>> provides() {
+            return List.of(PROBE);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            var pool = g.require(ParticleKeys.PARTICLES);
+            var state = g.require(ParticleKeys.STATE);
+            ParticleSort.Order order = g.request(new ParticleSort(particles, camera, pool, state));
+            Image image = g.create("probe", ImageDesc.of(Format.R8G8B8A8_UNORM, 4, 4));
+            g.pass("probe").read(order.sorted(), BufferAccess.STORAGE_READ).write(image, Access.TRANSFER_DST)
+                .record(ctx -> ctx.clear(image.mip(0), 0, 0, 0, 1));
+            g.provide(PROBE, image);
         }
     }
 

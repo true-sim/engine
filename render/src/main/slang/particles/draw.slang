@@ -1,13 +1,15 @@
 // Drawing particles in a view (effects.md §2.5): cullMain, a thread per draw, tests each emitter instance's GPU box
 // against the view's frustum and writes its indirect draw (its renderer's vertices per instance, as many instances as
-// it has particles, or none). The vertex shaders: billboardMain turns each particle into a quad facing the camera's
-// position, the view plane, along its velocity or about its emitter's up axis, with its flipbook frames; ribbonMain
-// draws a segment of the strip through the emitter's particles in spawn order (every stride-th, ribbon by ribbon where
-// they interleave), its head at the emitter; trailMain a particle's strip through its past positions; beamMain a beam
-// of noisy segments between the emitter and an end. Strips face the camera, their width tapering from tail to head,
-// their texture stretched over them or tiled. fragmentMain samples the texture (or a round sprite, a soft-edged strip),
-// tests the opaque depth itself, fades softly into it by depth or by the view ray's path through the particle's
-// sphere, and writes premultiplied color: alpha blended, additive, or between them (alpha to add).
+// it has particles, or none). Draws of one pipeline next to each other are one multi-draw, each reading its record by
+// its draw index. The vertex shaders: billboardMain turns each particle (in the view's sorted order, for sorted
+// emitters) into a quad facing the camera's position (a pair of eyes' center), the view plane, along its velocity or
+// about its emitter's up axis, with its flipbook frames; ribbonMain draws a segment of the strip through the emitter's
+// particles in spawn order (every stride-th, ribbon by ribbon where they interleave), its head at the emitter;
+// trailMain a particle's strip through its past positions; beamMain a beam of noisy segments between the emitter and an
+// end. Strips face the camera, their width tapering from tail to head, their texture stretched over them or tiled.
+// fragmentMain samples the texture (or a round sprite, a soft-edged strip), tests the opaque depth itself, fades softly
+// into it by depth or by the view ray's path through the particle's sphere, and writes premultiplied color: alpha
+// blended, additive, or between them (alpha to add).
 import particle;
 import meshlets.common;
 import bindless;
@@ -19,18 +21,17 @@ struct ParticleDrawPush
     View* view;                    // the view drawn
     uint* words;                   // the program buffer: the renderers' records
     uint* state;                   // the emitter instances' state
-    ParticleDrawRecord* draws;     // this view's draws (cullMain)
+    ParticleDrawRecord* draws;     // this view's draws
     uint* commands;                // their indirect draws (cullMain)
     uint4* side;                   // the side arrays' half written this frame: trails
     uint* order;                   // ribbons of several strands: each range in ribbon order
+    uint2* sorted;                 // the view's sort: each sorted emitter's keys and indices, farthest first
+    uint* sortArgs;                // and from word 4 on, each sorted emitter's first key in it
+    float3 facing;                 // what billboards and strips face, from the camera: a pair's center, or 0
     uint drawCount;                // (cullMain)
-    uint draw;                     // the draw recorded: its place in the list
-    uint emitter;                  // its emitter's place in the frame's list
-    uint renderer;                 // its renderer's word
-    uint texture;                  // its texture's sampled slot, or NO_TEXTURE
+    uint first;                    // the first draw of the multi-draw recorded: each reads its record by draw index
     uint depth;                    // the scene's depth, sampled slot
-    float3 end;                    // beams: the end, relative to the camera
-    float time;                    // the effect's time, in seconds: beams' noise
+    uint paired;                   // 1 for an eye of a pair: view-plane billboards face the center instead
 };
 
 [[vk::push_constant]]
@@ -99,7 +100,15 @@ struct ParticleVertex
     float2 uv : TEXCOORD0;         // across the quad (strips: u along, v across)
     float3 sphere : TEXCOORD1;     // the particle's view distance, its radius, and the fragment's own view distance
     nointerpolation uint4 frames : TEXCOORD2; // flipbook frames, their blend as 16-bit fixed point, and the kind
+    nointerpolation uint2 draw : TEXCOORD3;   // its draw's renderer word and texture slot
 };
+
+/** The record of draw `index` of the multi-draw recorded. */
+ParticleDrawRecord drawAt(uint index)
+{
+    ParticleDrawRecord* draws = push.draws;
+    return draws[push.first + index];
+}
 
 /** Row `r` of a view-projection matrix, without its last column: the camera's axes, scaled. */
 float3 row(float4x4 m, uint r)
@@ -116,6 +125,7 @@ ParticleVertex nothing()
     o.uv = 0;
     o.sphere = 0;
     o.frames = 0;
+    o.draw = 0;
     return o;
 }
 
@@ -127,11 +137,20 @@ float2 corner(uint vertex)
 }
 
 [shader("vertex")]
-ParticleVertex billboardMain(uint vertex : SV_VertexID, uint index : SV_InstanceID)
+ParticleVertex billboardMain(uint vertex : SV_VertexID, uint instance : SV_InstanceID, uint drawIndex : SV_DrawIndex)
 {
     ParticleVertex o;
+    ParticleDrawRecord d = drawAt(drawIndex);
     ParticleEmitter* emitters = push.emitters;
-    ParticleEmitter e = emitters[push.emitter];
+    ParticleEmitter e = emitters[d.emitter];
+    uint index = instance;
+    if (d.sort != NO_SORT)
+    {
+        // Back to front: the emitter's run of the sort (its dead particles draw nothing, as unsorted)
+        uint* sortArgs = push.sortArgs;
+        uint2* sorted = push.sorted;
+        index = sorted[sortArgs[4 + d.sort] + instance].y;
+    }
     Particle* particles = push.particles;
     Particle p = particles[e.first + index];
     View* view = push.view;
@@ -140,14 +159,15 @@ ParticleVertex billboardMain(uint vertex : SV_VertexID, uint index : SV_Instance
     {
         return nothing();
     }
-    ParticleRenderer r = rendererAt(push.renderer);
+    ParticleRenderer r = rendererAt(d.renderer);
     float3 center = relativeTo(e, p.position, view.position, view.positionLow);
     float3 velocity = (e.flags & EMITTER_LOCAL) != 0 ? turn(e.rotation, p.velocity) : p.velocity;
-    float3 toCamera = normalize(-center);
+    // Towards the camera, or for both eyes of a pair their center: one orientation, no rivalry between the eyes
+    float3 toCamera = normalize(push.facing - center);
     float3 right;
     float3 up;
     float2 half = 0.5 * p.size;
-    if (r.facing == FACING_VIEW_PLANE)
+    if (r.facing == FACING_VIEW_PLANE && push.paired == 0)
     {
         right = normalize(row(viewProjection, 0));
         up = -normalize(row(viewProjection, 1));
@@ -195,6 +215,7 @@ ParticleVertex billboardMain(uint vertex : SV_VertexID, uint index : SV_Instance
     uint f1 = loop ? (f0 + 1) % uint(frames) : min(f0 + 1, uint(frames) - 1);
     float blend = (r.flags & DRAW_BLEND_FRAMES) != 0 ? t - floor(t) : 0;
     o.frames = uint4(f0, f1, uint(blend * 65535), RENDER_BILLBOARD);
+    o.draw = uint2(d.renderer, d.texture);
     return o;
 }
 
@@ -212,13 +233,14 @@ struct StripPoint
  * after `b` (the same point where there is none): each end turned to face the camera across its tangent, so
  * neighbouring segments meet.
  */
-ParticleVertex segment(StripPoint before, StripPoint a, StripPoint b, StripPoint after, uint vertex, uint kind)
+ParticleVertex segment(StripPoint before, StripPoint a, StripPoint b, StripPoint after, uint vertex, uint kind,
+    ParticleDrawRecord d)
 {
     float2 xy = corner(vertex);
     bool atB = xy.x > 0;
     StripPoint p = atB ? b : a;
     float3 tangent = atB ? after.position - a.position : b.position - before.position;
-    float3 side = cross(tangent, -p.position);
+    float3 side = cross(tangent, push.facing - p.position);
     side = dot(side, side) > 1e-20 ? normalize(side) : float3(0, 1, 0);
     float3 world = p.position + side * (0.5 * p.width * xy.y);
     View* view = push.view;
@@ -229,6 +251,7 @@ ParticleVertex segment(StripPoint before, StripPoint a, StripPoint b, StripPoint
     o.uv = float2(p.u, 0.5 - 0.5 * xy.y);
     o.sphere = float3(o.position.w, 0.5 * p.width, o.position.w);
     o.frames = uint4(0, 0, 0, kind);
+    o.draw = uint2(d.renderer, d.texture);
     return o;
 }
 
@@ -247,11 +270,12 @@ StripPoint stripPoint(ParticleEmitter e, ParticleRenderer r, uint i, float along
 }
 
 [shader("vertex")]
-ParticleVertex ribbonMain(uint vertex : SV_VertexID, uint index : SV_InstanceID)
+ParticleVertex ribbonMain(uint vertex : SV_VertexID, uint index : SV_InstanceID, uint drawIndex : SV_DrawIndex)
 {
+    ParticleDrawRecord d = drawAt(drawIndex);
     ParticleEmitter* emitters = push.emitters;
-    ParticleEmitter e = emitters[push.emitter];
-    ParticleRenderer r = rendererAt(push.renderer);
+    ParticleEmitter e = emitters[d.emitter];
+    ParticleRenderer r = rendererAt(d.renderer);
     uint* state = push.state;
     uint n = state[e.instance * STATE_WORDS + STATE_ALIVE];
     Particle* particles = push.particles;
@@ -278,7 +302,7 @@ ParticleVertex ribbonMain(uint vertex : SV_VertexID, uint index : SV_InstanceID)
         float scale = 1.0 / max(float(n), 1.0);
         StripPoint a = stripPoint(e, r, i0, i0 * scale, r.tile > 0 ? particles[e.first + i0].spawnIndex / r.tile : i0 * scale);
         StripPoint b = stripPoint(e, r, i1, i1 * scale, r.tile > 0 ? particles[e.first + i1].spawnIndex / r.tile : i1 * scale);
-        return segment(stripPoint(e, r, ib, 0, 0), a, b, stripPoint(e, r, ia, 0, 0), vertex, RENDER_RIBBON);
+        return segment(stripPoint(e, r, ib, 0, 0), a, b, stripPoint(e, r, ia, 0, 0), vertex, RENDER_RIBBON, d);
     }
     // One ribbon: every stride-th particle by spawn index, then its head at the emitter (no first-frame gap).
     uint stride = max(r.stride, 1u);
@@ -321,15 +345,16 @@ ParticleVertex ribbonMain(uint vertex : SV_VertexID, uint index : SV_InstanceID)
                 view.positionLow);
         }
     }
-    return segment(p[0], p[1], p[2], p[3], vertex, RENDER_RIBBON);
+    return segment(p[0], p[1], p[2], p[3], vertex, RENDER_RIBBON, d);
 }
 
 [shader("vertex")]
-ParticleVertex trailMain(uint vertex : SV_VertexID, uint index : SV_InstanceID)
+ParticleVertex trailMain(uint vertex : SV_VertexID, uint index : SV_InstanceID, uint drawIndex : SV_DrawIndex)
 {
+    ParticleDrawRecord d = drawAt(drawIndex);
     ParticleEmitter* emitters = push.emitters;
-    ParticleEmitter e = emitters[push.emitter];
-    ParticleRenderer r = rendererAt(push.renderer);
+    ParticleEmitter e = emitters[d.emitter];
+    ParticleRenderer r = rendererAt(d.renderer);
     Particle* particles = push.particles;
     Particle p = particles[e.first + index];
     if ((p.flags & PARTICLE_DEAD) != 0 || p.age >= p.lifetime)
@@ -358,7 +383,7 @@ ParticleVertex trailMain(uint vertex : SV_VertexID, uint index : SV_InstanceID)
         sp.u = r.tile > 0 ? float(j) / r.tile : along;
         q[k + 1] = sp;
     }
-    return segment(q[0], q[1], q[2], q[3], vertex, RENDER_TRAIL);
+    return segment(q[0], q[1], q[2], q[3], vertex, RENDER_TRAIL, d);
 }
 
 /** A smooth value in about [-1, 1] along a beam at `t`, moving with time. */
@@ -368,16 +393,17 @@ float wave(float t, float time, float phase)
 }
 
 [shader("vertex")]
-ParticleVertex beamMain(uint vertex : SV_VertexID)
+ParticleVertex beamMain(uint vertex : SV_VertexID, uint drawIndex : SV_DrawIndex)
 {
+    ParticleDrawRecord d = drawAt(drawIndex);
     ParticleEmitter* emitters = push.emitters;
-    ParticleEmitter e = emitters[push.emitter];
-    ParticleRenderer r = rendererAt(push.renderer);
+    ParticleEmitter e = emitters[d.emitter];
+    ParticleRenderer r = rendererAt(d.renderer);
     View* view = push.view;
     float3 start = relativeTo(e, (e.flags & EMITTER_LOCAL) != 0 ? 0 : e.position, view.position, view.positionLow);
-    float3 end = push.end;
+    float3 end = d.end;
     float3 direction = end - start;
-    float3 side = cross(direction, -start);
+    float3 side = cross(direction, push.facing - start);
     side = dot(side, side) > 1e-20 ? normalize(side) : float3(0, 1, 0);
     uint m = max(r.segments, 1u);
     uint s = vertex / 6;
@@ -386,32 +412,33 @@ ParticleVertex beamMain(uint vertex : SV_VertexID)
     {
         float t = float(clamp(int(s) + k, 0, int(m))) / float(m);
         StripPoint sp;
-        sp.position = start + direction * t + side * (r.noise * sin(3.14159265 * t) * wave(t, push.time, 0));
+        sp.position = start + direction * t + side * (r.noise * sin(3.14159265 * t) * wave(t, d.time, 0));
         sp.width = r.width * lerp(r.widthTail, r.widthHead, t);
         sp.color = r.color;
         sp.u = r.tile > 0 ? t * length(direction) / r.tile : t;
         q[k + 1] = sp;
     }
-    return segment(q[0], q[1], q[2], q[3], vertex, RENDER_BEAM);
+    return segment(q[0], q[1], q[2], q[3], vertex, RENDER_BEAM, d);
 }
 
-/** Frame `f` of the flipbook at `uv` within it. */
-float4 frame(ParticleRenderer r, uint f, float2 uv)
+/** Frame `f` of the flipbook in texture slot `texture` at `uv` within it. */
+float4 frame(ParticleRenderer r, uint texture, uint f, float2 uv)
 {
     uint columns = max(r.columns, 1u);
     uint rows = max(r.rows, 1u);
     float2 cell = float2(f % columns, f / columns);
-    return textures[NonUniformResourceIndex(push.texture)].Sample(samplers[LINEAR_CLAMP],
+    return textures[NonUniformResourceIndex(texture)].Sample(samplers[LINEAR_CLAMP],
         (cell + uv) / float2(columns, rows));
 }
 
 [shader("fragment")]
 float4 fragmentMain(ParticleVertex v) : SV_Target
 {
-    ParticleRenderer r = rendererAt(push.renderer);
+    ParticleRenderer r = rendererAt(v.draw.x);
+    uint texture = v.draw.y;
     bool strip = v.frames.w != RENDER_BILLBOARD;
     float4 texel;
-    if (push.texture == NO_TEXTURE)
+    if (texture == NO_TEXTURE)
     {
         // a round sprite, or a strip soft at its edges
         float2 d = strip ? float2(0, 2 * v.uv.y - 1) : 2 * v.uv - 1;
@@ -419,14 +446,14 @@ float4 fragmentMain(ParticleVertex v) : SV_Target
     }
     else if (strip)
     {
-        texel = textures[NonUniformResourceIndex(push.texture)].Sample(samplers[LINEAR_REPEAT], v.uv);
+        texel = textures[NonUniformResourceIndex(texture)].Sample(samplers[LINEAR_REPEAT], v.uv);
     }
     else
     {
-        texel = frame(r, v.frames.x, v.uv);
+        texel = frame(r, texture, v.frames.x, v.uv);
         if (v.frames.z != 0)
         {
-            texel = lerp(texel, frame(r, v.frames.y, v.uv), float(v.frames.z) / 65535.0);
+            texel = lerp(texel, frame(r, texture, v.frames.y, v.uv), float(v.frames.z) / 65535.0);
         }
     }
     float4 color = v.color * texel;
