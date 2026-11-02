@@ -92,11 +92,13 @@ final class ModulePrograms implements AutoCloseable {
         final AssetRef<?>[][] textures;
         /** Per emitter: the past positions its trails keep per particle, 0 for none. */
         final int[] trails;
+        /** Per emitter and renderer: whether it draws billboards back to front. */
+        final boolean[][] sorted;
         int users;
         long releaseAt = -1;
 
         Block(EffectData data, int words, int wordLength, int curves, int curveLength, int[] programs,
-            boolean[] over, int[][] renderers, AssetRef<?>[][] textures, int[] trails) {
+            boolean[] over, int[][] renderers, AssetRef<?>[][] textures, int[] trails, boolean[][] sorted) {
             this.data = data;
             this.words = words;
             this.wordLength = wordLength;
@@ -107,6 +109,7 @@ final class ModulePrograms implements AutoCloseable {
             this.renderers = renderers;
             this.textures = textures;
             this.trails = trails;
+            this.sorted = sorted;
         }
     }
 
@@ -216,14 +219,17 @@ final class ModulePrograms implements AutoCloseable {
         int[][] renderers = new int[emitters.size()][];
         int[] trails = new int[emitters.size()];
         AssetRef<?>[][] textures = new AssetRef<?>[emitters.size()][];
+        boolean[][] sorted = new boolean[emitters.size()][];
         for (int e = 0; e < emitters.size(); e++) {
             EmitterData emitter = emitters.get(e);
             List<Renderer> drawn = emitter.renderers();
             renderers[e] = new int[drawn.size()];
             textures[e] = new AssetRef<?>[drawn.size()];
+            sorted[e] = new boolean[drawn.size()];
             for (int r = 0; r < drawn.size(); r++) {
                 renderers[e][r] = renderer(drawn.get(r), program);
                 textures[e][r] = drawn.get(r).settings().get("texture") instanceof AssetRef<?> t ? t : null;
+                sorted[e][r] = drawn.get(r).sorted() && drawn.get(r).kind() == Renderer.Kind.BILLBOARD;
             }
             if (emitter.target() != Target.GPU) {
                 starts[e] = -1;
@@ -265,7 +271,7 @@ final class ModulePrograms implements AutoCloseable {
             }
         }
         return new Block(data, wordStart, Math.max(1, program.size), curveStart, Math.max(1, keys.floats.size), starts,
-            over, renderers, textures, trails);
+            over, renderers, textures, trails, sorted);
     }
 
     /** A range of {@code length} units of the words (or curves), the buffer grown if there is no room. */

@@ -40,7 +40,8 @@ import java.util.Map;
  * render thread, {@code capture} writes frame 100 for RenderDoc (launched through {@code renderdoccmd capture}), {@code noshadows}
  * leaves the sun's cascades out, {@code rays} traces the sun's shadows instead (inline ray queries from visibility buffer
  * shading, on devices with ray tracing): every mesh has a bottom level, skinned copies' refitted each frame they move
- * (the pass "bottom level refits").
+ * (the pass "bottom level refits"). With {@code -Peffect=x,y,z} the demo's effects play there, drawn in both eyes as a
+ * pair: one particle sort for both, billboards facing their center.
  */
 public final class StereoBench {
 
@@ -74,6 +75,7 @@ public final class StereoBench {
             List<AutoCloseable> owned = new ArrayList<>();
             List<GpuImage> targets = new ArrayList<>();
             Camera[] eyes = {new Camera(), new Camera()};
+            Camera head = new Camera(); // the eyes' center: particles sort once for both and face it
             List<ViewPort> ports = new ArrayList<>();
             if (rebuilds) {
                 graph.timings(false); // timings make a rebuild wait for the GPU
@@ -113,7 +115,7 @@ public final class StereoBench {
                         : new ClusteredForwardShading(world.geometry(), view, color, depth))
                     .add(new ClusteredLights(world.lights(), view));
                 if (effects != null) {
-                    port.add(new com.truesim.engine.render.particles.ParticleDraw(effects.particles(), view));
+                    port.add(new com.truesim.engine.render.particles.ParticleDraw(effects.particles(), view, head));
                 }
                 if (rays) {
                     port.add(new com.truesim.engine.render.shadows.InlineRayShadows(world.rayTracing(), view.view(),
@@ -157,6 +159,9 @@ public final class StereoBench {
                             0, Math.PI / 3, WIDTH, HEIGHT, 0.05);
                     }
                 }
+                head.position(0.5 * (eyes[0].position(0) + eyes[1].position(0)),
+                    0.5 * (eyes[0].position(1) + eyes[1].position(1)),
+                    0.5 * (eyes[0].position(2) + eyes[1].position(2)));
                 if (shared) {
                     sharedCascades.update();
                 }
@@ -320,6 +325,15 @@ public final class StereoBench {
         }
         if (pass.startsWith("output")) {
             return "output copies";
+        }
+        if (pass.startsWith("particle sort")) {
+            return "particle sort (per pair)";
+        }
+        if (pass.startsWith("particle cull") || pass.startsWith("particle draw")) {
+            return "particle draws (per eye)";
+        }
+        if (pass.startsWith("particle")) {
+            return "particle simulation";
         }
         return "other (" + pass + ")";
     }
