@@ -149,6 +149,7 @@ public final class Particles implements AutoCloseable {
     private final GpuBuffer depth;
     private final ExternalBuffer depthImport;
     private boolean depthReady;
+    private long frameRecorded = -1;
 
     // Per effect slot: the effect followed, its programs, its emitters' instances (-1: none) and places in the frame's
     // list, its origin, where it was and its time at the last update.
@@ -501,6 +502,19 @@ public final class Particles implements AutoCloseable {
         sortChunkStaged.copyTo(sortChunks, 8L * sortChunkCount);
         cpuEmitters.finish();
         colliderStaged.copyTo(colliderTable, (long) ParticleColliderLayout.BYTES * colliderCount);
+    }
+
+    /**
+     * The frame record's address for the frame recording, written the first time a pass asks in the frame: the frame
+     * buffers' addresses it holds name the copies of the slot recording (pitfalls: a frame buffer's address names the
+     * copy of the slot current when it was taken), and updates may come between frames.
+     */
+    private synchronized long frameRecord() {
+        long frame = slots.frames();
+        if (frameRecorded == frame && !slots.isSingle()) {
+            return frameTable.deviceAddress();
+        }
+        frameRecorded = frame;
         Staging r = frameStaged;
         r.putLong(ParticleFrameLayout.UPLOADS, cpuEmitters.recordsAddress());
         r.putLong(ParticleFrameLayout.CPU, cpuEmitters.listAddress());
@@ -516,6 +530,7 @@ public final class Particles implements AutoCloseable {
         r.putVector(ParticleFrameLayout.HEIGHT_CENTER_HIGH, hx, 0, hz);
         r.putVector(ParticleFrameLayout.HEIGHT_CENTER_LOW, (float) (heightX - hx), 0, (float) (heightZ - hz));
         r.copyTo(frameTable, ParticleFrameLayout.BYTES);
+        return frameTable.deviceAddress();
     }
 
     private void follow(long effect) {
@@ -1347,7 +1362,7 @@ public final class Particles implements AutoCloseable {
             .chunkCounts(chunkCounts.deviceAddress()).state(state.deviceAddress())
             .spawns(spawnRing.deviceAddress()).programs(programs.wordsAddress()).curves(programs.curvesAddress())
             .parameters(parameterBlocks.deviceAddress()).statistics(statistics.deviceAddress())
-            .dispatch(dispatch.deviceAddress()).frame(frameTable.deviceAddress())
+            .dispatch(dispatch.deviceAddress()).frame(frameRecord())
             .emitterCount(emitterCount).chunkCount(chunkCount);
     }
 
