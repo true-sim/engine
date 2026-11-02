@@ -136,6 +136,7 @@ public final class ParticleDraw implements Technique {
     static final class Draws implements AutoCloseable {
         private final Particles particles;
         private final FrameBuffer records;
+        private final Staging staged = new Staging((long) ParticleDrawRecordLayout.BYTES * MAX_DRAWS);
         private final int[] emitter = new int[MAX_DRAWS];
         private final int[] renderer = new int[MAX_DRAWS];
         private final int[] texture = new int[MAX_DRAWS];
@@ -194,10 +195,11 @@ public final class ParticleDraw implements Technique {
             }
             for (int i = 0; i < count; i++) {
                 long at = (long) ParticleDrawRecordLayout.BYTES * i;
-                records.putInt(at + ParticleDrawRecordLayout.EMITTER, emitter[i]);
-                records.putInt(at + ParticleDrawRecordLayout.RENDERER, renderer[i]);
-                records.putInt(at + ParticleDrawRecordLayout.TEXTURE, texture[i]);
+                staged.putInt(at + ParticleDrawRecordLayout.EMITTER, emitter[i]);
+                staged.putInt(at + ParticleDrawRecordLayout.RENDERER, renderer[i]);
+                staged.putInt(at + ParticleDrawRecordLayout.TEXTURE, texture[i]);
             }
+            staged.copyTo(records, (long) ParticleDrawRecordLayout.BYTES * count);
             return count;
         }
 

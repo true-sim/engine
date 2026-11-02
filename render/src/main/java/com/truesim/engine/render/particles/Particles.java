@@ -110,6 +110,13 @@ public final class Particles implements AutoCloseable {
     private final FrameBuffer chunkTable;
     private FrameBuffer spawnRing;
     private FrameBuffer parameterBlocks;
+    // The frame's tables as written, each copied to its frame buffer once the update is done
+    private final Staging emitterStaged;
+    private final Staging chunkStaged;
+    private final Staging spawnStaged = new Staging(256L * ParticleSpawnLayout.BYTES);
+    private final Staging parameterStaged = new Staging(4L * 1024);
+    private final Staging ribbonStaged;
+    private int parameterFloats;
 
     // Per effect slot: the effect followed, its programs, its emitters' instances (-1: none) and places in the frame's
     // list, its origin, where it was and its time at the last update.
@@ -228,6 +235,8 @@ public final class Particles implements AutoCloseable {
         recordFill = new int[maxEmitters];
         aliveOf = new int[maxEmitters];
         overflowOf = new int[maxEmitters];
+        emitterStaged = new Staging((long) ParticleEmitterLayout.BYTES * maxEmitters);
+        ribbonStaged = new Staging(8L * maxEmitters);
         ParticlePool p = null;
         ModulePrograms m = null;
         CpuEmitters c = null;
@@ -282,6 +291,7 @@ public final class Particles implements AutoCloseable {
         chunkTable = tables[1];
         spawnRing = tables[2];
         parameterBlocks = tables[3];
+        chunkStaged = new Staging(4L * p.slots() / ParticleConstants.CHUNK);
         stateImport = new ExternalBuffer("particle state", state);
         chunkCountsImport = new ExternalBuffer("particle chunk counts", chunkCounts);
         statisticsImport = new ExternalBuffer("particle statistics", statistics);
@@ -412,11 +422,30 @@ public final class Particles implements AutoCloseable {
         ribbons();
         for (int i = 0; i < emitterCount; i++) {
             int at = ParticleEmitterLayout.BYTES * i;
-            emitterTable.putInt(at + ParticleEmitterLayout.RECORDS, recordStart[i]);
-            emitterTable.putInt(at + ParticleEmitterLayout.RECORD_COUNT, recordFill[i] - recordStart[i]);
-            emitterTable.putInt(at + ParticleEmitterLayout.DEMAND, demand[i]);
+            emitterStaged.putInt(at + ParticleEmitterLayout.RECORDS, recordStart[i]);
+            emitterStaged.putInt(at + ParticleEmitterLayout.RECORD_COUNT, recordFill[i] - recordStart[i]);
+            emitterStaged.putInt(at + ParticleEmitterLayout.DEMAND, demand[i]);
         }
+        copyTables();
         following = null;
+    }
+
+    /** Hands the frame's tables to the GPU: a copy each, into frame buffers grown where they must. */
+    private void copyTables() {
+        emitterStaged.copyTo(emitterTable, (long) ParticleEmitterLayout.BYTES * emitterCount);
+        chunkStaged.copyTo(chunkTable, 4L * chunkCount);
+        long spawnBytes = (long) ParticleSpawnLayout.BYTES * recordCount;
+        if (spawnRing.size() < spawnBytes) {
+            spawnRing = grown(spawnRing, spawnBytes);
+        }
+        spawnStaged.copyTo(spawnRing, spawnBytes);
+        long parameterBytes = 4L * parameterFloats;
+        if (parameterBlocks.size() < parameterBytes) {
+            parameterBlocks = grown(parameterBlocks, parameterBytes);
+        }
+        parameterStaged.copyTo(parameterBlocks, parameterBytes);
+        ribbonStaged.copyTo(ribbonList, 8L * ribbonCount);
+        cpuEmitters.finish();
     }
 
     private void follow(long effect) {
@@ -692,7 +721,7 @@ public final class Particles implements AutoCloseable {
     private void list(Effects effects) {
         emitterCount = 0;
         chunkCount = 0;
-        int parameterFloats = 0;
+        parameterFloats = 0;
         for (int slot = 0; slot < highest; slot++) {
             long effect = ids[slot];
             if (effect == 0) {
@@ -763,7 +792,7 @@ public final class Particles implements AutoCloseable {
                 places[slot][e] = index;
                 demand[index] = 0;
                 int at = ParticleEmitterLayout.BYTES * index;
-                FrameBuffer t = emitterTable;
+                Staging t = emitterStaged;
                 t.putInt(at + ParticleEmitterLayout.FIRST, firsts[instance]);
                 t.putInt(at + ParticleEmitterLayout.CAPACITY, capacities[instance]);
                 t.putInt(at + ParticleEmitterLayout.PROGRAM, block.programs[e]);
@@ -805,7 +834,7 @@ public final class Particles implements AutoCloseable {
                 fresh[instance] = false;
                 int chunks = cpu[instance] ? 0 : ParticlePool.chunksOf(capacities[instance]);
                 for (int c = 0; c < chunks; c++) {
-                    chunkTable.putInt(4L * chunkCount++, index);
+                    chunkStaged.putInt(4L * chunkCount++, index);
                 }
             }
             times[slot] = time;
@@ -820,16 +849,13 @@ public final class Particles implements AutoCloseable {
             parameterScratch = new float[Math.max(floats, 2 * parameterScratch.length)];
         }
         effects.parameters(effect, parameterScratch, 0);
-        long bytes = 4L * (offset + floats);
-        if (parameterBlocks.size() < bytes) {
-            parameterBlocks = grown(parameterBlocks, bytes);
-        }
+        parameterStaged.room(4L * (offset + floats));
         for (int i = 0; i < floats; i++) {
-            parameterBlocks.putFloat(4L * (offset + i), parameterScratch[i]);
+            parameterStaged.putFloat(4L * (offset + i), parameterScratch[i]);
         }
     }
 
-    private static void putOrigin(FrameBuffer t, int at, double x, double y, double z) {
+    private static void putOrigin(Staging t, int at, double x, double y, double z) {
         float hx = (float) x;
         float hy = (float) y;
         float hz = (float) z;
@@ -837,10 +863,8 @@ public final class Particles implements AutoCloseable {
         putVector(t, at + ParticleEmitterLayout.ORIGIN_LOW, (float) (x - hx), (float) (y - hy), (float) (z - hz));
     }
 
-    private static void putVector(FrameBuffer t, long at, float x, float y, float z) {
-        t.putFloat(at, x);
-        t.putFloat(at + 4, y);
-        t.putFloat(at + 8, z);
+    private static void putVector(Staging t, long at, float x, float y, float z) {
+        t.putVector(at, x, y, z);
     }
 
     /** A frame buffer of at least {@code bytes} for {@code old}, which frames in flight may still read. */
@@ -867,10 +891,7 @@ public final class Particles implements AutoCloseable {
             recordFill[i] = recordStart[i];
         }
         recordCount = total;
-        long bytes = (long) ParticleSpawnLayout.BYTES * Math.max(1, total);
-        if (spawnRing.size() < bytes) {
-            spawnRing = grown(spawnRing, bytes);
-        }
+        spawnStaged.room((long) ParticleSpawnLayout.BYTES * total);
         for (int i = 0; i < n; i++) {
             int index = placeOf(spawns, i);
             if (index < 0) {
@@ -879,7 +900,7 @@ public final class Particles implements AutoCloseable {
             int slot = (int) spawns.effect(i);
             int at = ParticleSpawnLayout.BYTES * recordFill[index]++;
             int count = spawns.count(i);
-            FrameBuffer r = spawnRing;
+            Staging r = spawnStaged;
             r.putInt(at + ParticleSpawnLayout.EMITTER, index);
             r.putInt(at + ParticleSpawnLayout.COUNT, count);
             r.putInt(at + ParticleSpawnLayout.BEFORE, demand[index]);
@@ -918,9 +939,9 @@ public final class Particles implements AutoCloseable {
             recordFill[i] = first;
             demand[i] = cpuEmitters.uploaded() - before;
             long at = (long) ParticleEmitterLayout.BYTES * i;
-            putVector(emitterTable, at + ParticleEmitterLayout.POSITION, cpuEmitters.lowX, cpuEmitters.lowY,
+            putVector(emitterStaged, at + ParticleEmitterLayout.POSITION, cpuEmitters.lowX, cpuEmitters.lowY,
                 cpuEmitters.lowZ);
-            putVector(emitterTable, at + ParticleEmitterLayout.PREVIOUS, cpuEmitters.highX, cpuEmitters.highY,
+            putVector(emitterStaged, at + ParticleEmitterLayout.PREVIOUS, cpuEmitters.highX, cpuEmitters.highY,
                 cpuEmitters.highZ);
         }
     }
@@ -956,8 +977,8 @@ public final class Particles implements AutoCloseable {
                 strands = Math.max(strands, ModulePrograms.ribbons(renderers.get(r)));
             }
             if (strands > 1) {
-                ribbonList.putInt(8L * ribbonCount, i);
-                ribbonList.putInt(8L * ribbonCount + 4, strands);
+                ribbonStaged.putInt(8L * ribbonCount, i);
+                ribbonStaged.putInt(8L * ribbonCount + 4, strands);
                 ribbonCount++;
             }
         }

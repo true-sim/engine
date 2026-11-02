@@ -29,6 +29,16 @@ the same `beginFrame` allocated in the scene benchmark: in the test, the JIT hap
 - Proof: [#132](https://github.com/true-sim/engine/pull/132) (`Format.ALL`).
 - Rule: keep `values()` in a static field.
 
+**A `FrameBuffer` written field by field costs about 150 ns a field.** Each `putInt` or `putFloat` writes the master,
+the open slot's write-combined copy and, under a lock, the other slots' missed pages. `Particles.update` wrote 300
+emitter records and 2,000 CPU-emitter particles that way, about 53,000 writes: 8.3 ms a frame once the torches of the
+scene benchmark burned (embers alive), most of the "sync" column.
+- Proof: the scene benchmark's torches, timed per stage of `EffectSync.update` over 1,300 frames: `Particles.update`
+  8.3 ms before, 0.065 ms with the tables written into native memory and copied into their frame buffers once per
+  frame (true-sim/engine, effects CPU cost PR; `particles/Staging`).
+- Rule: tables rewritten every frame are written into plain memory and handed to the frame buffer with one `put`;
+  per-field writes are for a few fields that change.
+
 ## Frame graph
 
 **A write is visible to nothing until a barrier.** The compiler once marked a write's own stage and access visible, so
