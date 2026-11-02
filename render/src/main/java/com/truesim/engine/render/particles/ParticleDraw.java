@@ -19,6 +19,7 @@ import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.SceneView;
+import com.truesim.engine.render.ShadowInputs;
 import com.truesim.engine.render.Transparency;
 import com.truesim.engine.render.layout.ParticleConstants;
 import com.truesim.engine.render.layout.ParticleDrawPush;
@@ -55,7 +56,7 @@ public final class ParticleDraw implements Technique {
 
     public static final Id<ParticleDraw> ID = Id.of("truesim.particleDraw", ParticleDraw.class);
     /** Draws a view has room for: renderers of emitter instances. */
-    public static final int MAX_DRAWS = 4096;
+    public static final int MAX_DRAWS = ParticleConstants.MAX_DRAWS;
 
     private final Particles particles;
     private final SceneView view;
@@ -116,7 +117,10 @@ public final class ParticleDraw implements Technique {
         Camera camera = view.camera();
         Camera sortCenter = center == null ? camera : center;
         ParticleSort.Order sorted = g.request(new ParticleSort(particles, sortCenter, pool, state));
-        Buffer commands = g.createBuffer("particle draws", 16L * MAX_DRAWS);
+        // The indirect draws, then each slot's light (per-vertex lighting): four words a particle of the pool
+        Buffer commands = g.createBuffer("particle draws", 16L * MAX_DRAWS + 16L * particles.pool().slots());
+        Buffer lights = g.optional(Keys.LIGHT_LIST);
+        ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         Pipeline cull = g.computeProgram("shaders/particles/draw.spv", "cullMain", ParticleDrawPush.BYTES);
         Pipeline[] pipelines = new Pipeline[ParticleConstants.RENDER_BEAM + 1];
         for (int kind = 0; kind < pipelines.length; kind++) {
@@ -126,23 +130,56 @@ public final class ParticleDraw implements Technique {
         com.truesim.engine.render.RenderView renderView = view.view();
         boolean paired = center != null;
         ParticleDrawPush cullPush = new ParticleDrawPush();
-        g.pass("particle cull").read(state, BufferAccess.STORAGE_READ).write(commands, BufferAccess.STORAGE_WRITE)
+        GraphBuilder.PassBuilder culling = g.pass("particle cull");
+        if (lights != null) {
+            culling.read(lights, BufferAccess.STORAGE_READ); // its address in the draws' records
+        }
+        culling.read(state, BufferAccess.STORAGE_READ).write(commands, BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
-                int n = list.prepare(ctx.frame(), camera);
+                int n = list.prepare(ctx.frame(), camera, lights == null ? 0 : ctx.address(lights));
                 if (n > 0) {
                     ctx.dispatch(cull, list.common(cullPush, renderView.address(), camera, sortCenter, paired)
                         .commands(ctx.address(commands)).drawCount(n), (n + 63) / 64);
                 }
             });
+        Pipeline light = g.computeProgram("shaders/particles/draw.spv", "lightMain", ParticleDrawPush.BYTES);
+        ParticleDrawPush lightPush = new ParticleDrawPush();
+        GraphBuilder.PassBuilder lighting = g.pass("particle lighting").read(pool, BufferAccess.STORAGE_READ)
+            .read(state, BufferAccess.STORAGE_READ).write(commands, BufferAccess.STORAGE_WRITE);
+        if (lights != null) {
+            lighting.read(lights, BufferAccess.STORAGE_READ);
+            shadows.readBy(lighting, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
+        }
+        lighting.record(ctx -> {
+            int n = list.prepare(ctx.frame(), camera, lights == null ? 0 : ctx.address(lights));
+            if (n > 0 && list.vertexLit() > 0) {
+                if (shadows != null) {
+                    shadows.prepare(ctx);
+                }
+                ctx.dispatch(light, list.common(lightPush, renderView.address(), camera, sortCenter, paired)
+                    .commands(ctx.address(commands)),
+                    (list.largestLit() + 63) / 64, n, 1);
+            }
+        });
         ParticleDrawPush drawPush = new ParticleDrawPush();
-        g.pass("particle draw").read(pool, BufferAccess.DRAW_READ).read(side, BufferAccess.DRAW_READ)
+        GraphBuilder.PassBuilder drawPass = g.pass("particle draw");
+        if (lights != null) {
+            drawPass.read(lights, BufferAccess.DRAW_READ);
+            shadows.readBy(drawPass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
+        }
+        drawPass.read(pool, BufferAccess.DRAW_READ).read(side, BufferAccess.DRAW_READ)
             .read(order, BufferAccess.DRAW_READ).read(sorted.sorted(), BufferAccess.DRAW_READ)
             .read(sorted.args(), BufferAccess.DRAW_READ).read(commands, BufferAccess.INDIRECT)
+            .read(commands, BufferAccess.DRAW_READ)
             .read(depth, Access.SAMPLED_FRAGMENT).attach(color, Load.LOAD, Store.STORE).region()
             .record(ctx -> {
-                int n = list.prepare(ctx.frame(), camera);
+                int n = list.prepare(ctx.frame(), camera, lights == null ? 0 : ctx.address(lights));
+                if (shadows != null && list.lit() > 0) {
+                    shadows.prepare(ctx);
+                }
                 list.common(drawPush, renderView.address(), camera, sortCenter, paired).depth(ctx.sampled(depth))
-                    .sorted(ctx.address(sorted.sorted())).sortArgs(ctx.address(sorted.args()));
+                    .sorted(ctx.address(sorted.sorted())).sortArgs(ctx.address(sorted.args()))
+                    .commands(ctx.address(commands));
                 // Runs of draws of one pipeline: a multi-draw each, in order
                 for (int i = 0; i < n; ) {
                     int kind = list.kind(i);
@@ -175,6 +212,9 @@ public final class ParticleDraw implements Technique {
         private final boolean[] sorted = new boolean[MAX_DRAWS];
         private long frame = -1;
         private int count;
+        private int lit; // draws lit at all, and per vertex, and the most particles of those per vertex
+        private int vertexLit;
+        private int largestLit;
 
         @AllowAllocation("made with its view")
         Draws(Particles particles) {
@@ -183,13 +223,19 @@ public final class ParticleDraw implements Technique {
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, particles.slots());
         }
 
-        /** Lists the frame's draws seen from {@code camera} once per frame; returns how many there are. */
-        synchronized int prepare(long frame, Camera camera) {
+        /**
+         * Lists the frame's draws seen from {@code camera} once per frame, lit by the light list at {@code lights}
+         * (0: the sun); returns how many there are.
+         */
+        synchronized int prepare(long frame, Camera camera, long lights) {
             if (frame == this.frame) {
                 return count;
             }
             this.frame = frame;
             count = 0;
+            lit = 0;
+            vertexLit = 0;
+            largestLit = 0;
             if (!particles.drawable()) {
                 return 0;
             }
@@ -234,6 +280,16 @@ public final class ParticleDraw implements Technique {
                 staged.putInt(at + ParticleDrawRecordLayout.SORT, sorted[i] ? particles.sortOf(e)
                     : ParticleConstants.NO_SORT);
                 staged.putFloat(at + ParticleDrawRecordLayout.TIME, particles.listTime(e));
+                int lighting = kind[i] == ParticleConstants.RENDER_BILLBOARD ? particles.rendererLighting(e, index[i])
+                    : ParticleConstants.LIGHTING_UNLIT;
+                staged.putInt(at + ParticleDrawRecordLayout.LIGHTING, lighting);
+                staged.putInt(at + ParticleDrawRecordLayout.EXTRA, particles.rendererExtra(e, index[i]));
+                staged.putLong(at + ParticleDrawRecordLayout.LIGHTS, lights);
+                lit += lighting != ParticleConstants.LIGHTING_UNLIT ? 1 : 0;
+                if (lighting == ParticleConstants.LIGHTING_VERTEX) {
+                    vertexLit++;
+                    largestLit = Math.max(largestLit, particles.capacityOf(e));
+                }
                 if (kind[i] == ParticleConstants.RENDER_BEAM) {
                     staged.putVector(at + ParticleDrawRecordLayout.END,
                         (float) (particles.beamEnd(e, index[i], 0) - camera.position(0)),
@@ -257,6 +313,21 @@ public final class ParticleDraw implements Technique {
                     (float) (center.position(1) - camera.position(1)),
                     (float) (center.position(2) - camera.position(2)))
                 .paired(paired ? 1 : 0);
+        }
+
+        /** Draws of the frame lit at all. */
+        int lit() {
+            return lit;
+        }
+
+        /** Draws of the frame lit per vertex. */
+        int vertexLit() {
+            return vertexLit;
+        }
+
+        /** The largest capacity among their emitters. */
+        int largestLit() {
+            return largestLit;
         }
 
         /** Draw {@code i}'s renderer's kind. */

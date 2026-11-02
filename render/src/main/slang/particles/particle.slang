@@ -221,7 +221,7 @@ public struct ParticleRenderer
 };
 
 /**
- * A draw of one renderer of one emitter instance in a view: 32 bytes, written by the CPU each frame. Draws of one
+ * A draw of one renderer of one emitter instance in a view: 48 bytes, written by the CPU each frame. Draws of one
  * pipeline next to each other in the view's order are one indirect multi-draw, each reading its record by draw index.
  */
 [HostLayout]
@@ -233,8 +233,18 @@ public struct ParticleDrawRecord
     public uint sort;              // its emitter's place among the frame's sorted emitters; NO_SORT: drawn unsorted
     public float3 end;             // beams: the end, relative to the camera
     public float time;             // the effect's time, in seconds: beams' noise
+    public uint lighting;          // LIGHTING_*: its renderer's, lowered by the quality
+    public uint extra;             // its second texture's sampled slot: a normal map, six-way maps' second; or NO_TEXTURE
+    public uint64_t lights;        // LightListHeader*: the view's light list, for lit renderers; or 0: the sun
 };
 
+/** Lightings: scene-effects' Renderer.Lighting, in order. */
+public static const uint LIGHTING_UNLIT = 0;
+public static const uint LIGHTING_VERTEX = 1;
+public static const uint LIGHTING_PIXEL = 2;
+public static const uint LIGHTING_SIX_WAY = 3;
+/** Draws a view has room for: renderers of emitter instances. */
+public static const uint MAX_DRAWS = 4096;
 /** Slots per chunk: the simulation's groups each take one chunk of one emitter. */
 public static const uint CHUNK = 64;
 /** Floats of an effect's curve keys the update keeps in group-shared memory; longer blocks are read in place. */

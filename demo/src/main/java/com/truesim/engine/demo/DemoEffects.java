@@ -122,6 +122,22 @@ final class DemoEffects implements AutoCloseable {
             .render(Renderer.billboard(Renderer.Facing.POSITION).set("soft", 0.3f)))
         .build();
 
+    /**
+     * Lit smoke: grey puffs lit per pixel (a sphere's normal across each), so the sun and the lights near it light one
+     * side, the sun's cascades shadow it, and the other side stays in the sky's light.
+     */
+    static final EffectData LIT_SMOKE = EffectData.builder()
+        .emitter("smoke", e -> e.spawn(Spawn.rate(14)).init(Shape.sphere(0.4f),
+                Init.velocity(Bind.random(-0.15f, 0.15f), Bind.random(0.5f, 0.9f), Bind.random(-0.15f, 0.15f)),
+                Init.lifetime(Bind.random(4, 6)), Init.size(Bind.random(0.9f, 1.4f)),
+                Init.color(Bind.color(0.8f, 0.8f, 0.8f, 0.85f)))
+            .update(Forces.drag(0.3f), Over.size(FloatCurve.of(0, 0.6f, 1, 2.2f)),
+                Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0).linear(0.12f, 1, 1, 1, 1)
+                    .linear(1, 1, 1, 1, 0).build()))
+            .render(Renderer.billboard(Renderer.Facing.POSITION).lighting(Renderer.Lighting.PER_PIXEL)
+                .set("soft", 0.5f)))
+        .build();
+
     /** Sparks: velocity-facing and additive, cooling as they fall. */
     static final EffectData SPARKS = EffectData.builder().emitter("sparks", e -> e.spawn(Spawn.rate(400))
         .init(Shape.cone(0.35f, 0.05f), Init.speed(Bind.random(4, 8)), Init.lifetime(Bind.random(0.8f, 1.8f)),
@@ -275,6 +291,7 @@ final class DemoEffects implements AutoCloseable {
         effects.play(SWIRL, x - 1, DemoMeshes.height(x - 1, z - 4) + 0.1, z - 4);
         effects.play(HAIL, x + 2, DemoMeshes.height(x + 2, z + 3), z + 3);
         effects.play(FIREWORKS, x - 6, DemoMeshes.height(x - 6, z - 8), z - 8);
+        effects.play(LIT_SMOKE, x - 5, DemoMeshes.height(x - 5, z + 5), z + 5);
         sync.beamEnd(effects.play(BEAM, fountain).offset(0, 0.3, 0).id(), 0, orb);
     }
 

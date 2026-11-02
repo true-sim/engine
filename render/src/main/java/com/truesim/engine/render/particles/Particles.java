@@ -1789,6 +1789,11 @@ public final class Particles implements AutoCloseable {
         return listTime[index];
     }
 
+    /** The capacity of the emitter at {@code index} of the frame's list. */
+    int capacityOf(int index) {
+        return capacities[listInstance[index]];
+    }
+
     /** Whether the emitter at {@code index} of the frame's list is a CPU emitter. */
     boolean listCpu(int index) {
         return cpu[listInstance[index]];
@@ -1939,6 +1944,48 @@ public final class Particles implements AutoCloseable {
     /** Its renderer {@code r}'s kind ({@code RENDER_*}). */
     int rendererKind(int index, int r) {
         return blocks[listSlot[index]].data.emitters().get(listEmitter[index]).renderers().get(r).kind().ordinal();
+    }
+
+    /**
+     * Lit renderers draw at {@code quality} from now on ({@code effects.quality}): below high, per-pixel lighting is
+     * drawn per vertex; at low, six-way maps too. As authored at high and epic, the default.
+     */
+    public Particles quality(com.truesim.scene.effects.Quality quality) {
+        this.quality = Objects.requireNonNull(quality, "quality");
+        return this;
+    }
+
+    /** The quality lit renderers draw at. */
+    public com.truesim.scene.effects.Quality quality() {
+        return quality;
+    }
+
+    private com.truesim.scene.effects.Quality quality = com.truesim.scene.effects.Quality.HIGH;
+
+    /** Its renderer {@code r}'s lighting ({@code LIGHTING_*}) as drawn: billboards' as authored, lowered by quality. */
+    int rendererLighting(int index, int r) {
+        Renderer renderer = blocks[listSlot[index]].data.emitters().get(listEmitter[index]).renderers().get(r);
+        return lighting(renderer.kind(), renderer.lighting(), quality);
+    }
+
+    /** {@code lighting} of a renderer of {@code kind} drawn at {@code quality}: only billboards are lit. */
+    static int lighting(Renderer.Kind kind, Renderer.Lighting lighting, com.truesim.scene.effects.Quality quality) {
+        if (kind != Renderer.Kind.BILLBOARD) {
+            return ParticleConstants.LIGHTING_UNLIT;
+        }
+        boolean high = quality.ordinal() >= com.truesim.scene.effects.Quality.HIGH.ordinal();
+        boolean low = quality == com.truesim.scene.effects.Quality.LOW;
+        return switch (lighting) {
+            case UNLIT -> ParticleConstants.LIGHTING_UNLIT;
+            case PER_VERTEX -> ParticleConstants.LIGHTING_VERTEX;
+            case PER_PIXEL -> high ? ParticleConstants.LIGHTING_PIXEL : ParticleConstants.LIGHTING_VERTEX;
+            case SIX_WAY -> low ? ParticleConstants.LIGHTING_VERTEX : ParticleConstants.LIGHTING_SIX_WAY;
+        };
+    }
+
+    /** Its renderer {@code r}'s second texture's slot: a normal map, six-way maps' second; or {@code NO_TEXTURE}. */
+    int rendererExtra(int index, int r) {
+        return textureSlot(blocks[listSlot[index]].extras[listEmitter[index]][r]);
     }
 
     /** Its renderer {@code r}'s texture slot. */

@@ -94,6 +94,8 @@ final class ModulePrograms implements AutoCloseable {
         final int[][] renderers;
         /** Per emitter and renderer: its texture's asset, or null. */
         final AssetRef<?>[][] textures;
+        /** Per emitter and renderer: its second texture's asset (a normal map, six-way maps' second), or null. */
+        final AssetRef<?>[][] extras;
         /** Per emitter: the past positions its trails keep per particle, 0 for none. */
         final int[] trails;
         /** Per emitter and renderer: whether it draws billboards back to front. */
@@ -117,6 +119,7 @@ final class ModulePrograms implements AutoCloseable {
             this.over = over;
             this.renderers = renderers;
             this.textures = textures;
+            this.extras = new AssetRef<?>[textures.length][];
             this.trails = trails;
             this.sorted = sorted;
             this.sourced = sourced;
@@ -312,6 +315,17 @@ final class ModulePrograms implements AutoCloseable {
         for (int i = 0; i < keys.floats.size; i++) {
             c.setAtIndex(ValueLayout.JAVA_INT, curveStart + i, keys.floats.values[i]);
         }
+        Block block = new Block(data, wordStart, Math.max(1, program.size), curveStart, Math.max(1, keys.floats.size),
+            starts, over, renderers, textures, trails, sorted, sourced, meshRenderers);
+        for (int e = 0; e < emitters.size(); e++) {
+            List<Renderer> drawn = emitters.get(e).renderers();
+            block.extras[e] = new AssetRef<?>[drawn.size()];
+            for (int r = 0; r < drawn.size(); r++) {
+                Renderer d = drawn.get(r);
+                Object extra = d.settings().get(d.lighting() == Renderer.Lighting.SIX_WAY ? "texture.b" : "normal");
+                block.extras[e][r] = extra instanceof AssetRef<?> t ? t : null;
+            }
+        }
         for (int e = 0; e < starts.length; e++) {
             if (starts[e] >= 0) {
                 starts[e] += wordStart;
@@ -320,8 +334,7 @@ final class ModulePrograms implements AutoCloseable {
                 renderers[e][r] += wordStart;
             }
         }
-        return new Block(data, wordStart, Math.max(1, program.size), curveStart, Math.max(1, keys.floats.size), starts,
-            over, renderers, textures, trails, sorted, sourced, meshRenderers);
+        return block;
     }
 
     /** A range of {@code length} units of the words (or curves), the buffer grown if there is no room. */
