@@ -80,6 +80,23 @@ final class DemoEffects implements AutoCloseable {
             .render(Renderer.billboard(Renderer.Facing.POSITION).set("soft", 0.1f)))
         .build();
 
+    /**
+     * Fire on a skin: flames born all over the mesh of the node the effect plays on, a skinned one as posed (its
+     * surface, uniform by area), licking up and left behind as it moves.
+     */
+    static final EffectData SKIN_FIRE = EffectData.builder()
+        .emitter("flames", e -> e.capacity(1400).spawn(Spawn.rate(2400))
+            .init(Shape.mesh(Shape.SURFACE), Init.speed(Bind.random(0.05f, 0.2f)),
+                Init.velocity(Bind.random(-0.05f, 0.05f), Bind.random(0.3f, 0.6f), Bind.random(-0.05f, 0.05f)),
+                Init.lifetime(Bind.random(0.2f, 0.45f)), Init.size(Bind.random(0.04f, 0.08f)),
+                Init.color(Bind.color(1.4f, 0.55f, 0.14f, 1)))
+            .update(Forces.gravity(Bind.constant(-0.3f)), Forces.drag(1.5f),
+                Over.size(FloatCurve.of(0, 0.6f, 0.3f, 1, 1, 0.2f)),
+                Over.color(ColorGradient.builder().linear(0, 1, 1, 1, 0).linear(0.15f, 1, 1, 1, 1)
+                    .linear(0.6f, 0.9f, 0.4f, 0.15f, 1).linear(1, 0.4f, 0.08f, 0.02f, 0).build()))
+            .render(Renderer.billboard(Renderer.Facing.AXIS).additive().set("soft", 0.05f)))
+        .build();
+
     /** Sparks: velocity-facing and additive, cooling as they fall. */
     static final EffectData SPARKS = EffectData.builder().emitter("sparks", e -> e.spawn(Spawn.rate(400))
         .init(Shape.cone(0.35f, 0.05f), Init.speed(Bind.random(4, 8)), Init.lifetime(Bind.random(0.8f, 1.8f)),
@@ -252,6 +269,16 @@ final class DemoEffects implements AutoCloseable {
             bindings.onEvent(DemoCharacter.FEET[f], DUST, fox.feet()[f]).scale(INTENSITY).minimumWeight(0.2f);
         }
         bindings.curve(fox.animator(), DemoCharacter.FLICKER, torchFire, INTENSITY).map(0.9, 0.4);
+    }
+
+    /**
+     * Sets the fox on fire: flames over its skin as it moves, from the posed copy {@code renderer} draws (the world's,
+     * whose pool holds the fox's meshes).
+     */
+    void burn(DemoCharacter fox, com.truesim.engine.render.MeshletRenderer renderer) {
+        particles.meshes(renderer);
+        sync.meshes(fox.sync());
+        effects.play(SKIN_FIRE, fox.body());
     }
 
     /** The bindings with the fox, or null. */

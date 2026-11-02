@@ -18,6 +18,9 @@ import com.truesim.engine.render.layout.ParticleEmitterLayout;
 import com.truesim.engine.render.layout.ParticleLayout;
 import com.truesim.engine.render.layout.ParticlePush;
 import com.truesim.engine.render.layout.ParticleSpawnLayout;
+import com.truesim.engine.render.layout.ParticleSourceLayout;
+import com.truesim.engine.render.GeometryPool;
+import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.vulkan.FrameBuffer;
@@ -155,6 +158,15 @@ public final class Particles implements AutoCloseable {
     private long frameRecorded = -1;
     private RayTracing rayTracing;
     private MeshletRenderer rayRenderer;
+    // What mesh and bone shapes emit from (effects.md §2.7): the renderer whose pool's meshes they read, the meshes'
+    // alias tables, who names each emitter's mesh and joints, and the frame's sources
+    private MeshletRenderer meshRenderer;
+    private final MeshTables meshTables;
+    private Sources sources;
+    private FrameBuffer sourceTable;
+    private final Staging sourceStaged = new Staging(16L * ParticleSourceLayout.BYTES);
+    private int sourceCount;
+    private long setup; // changes with what the simulation reads: ray tracing, meshes
     // Events (E9): the frame's records, their sort keys (two buffers), the sort's counts and dispatch, each sorted
     // event's first child; and each effect's emitters' places, for their targets
     private final GpuBuffer events;
@@ -197,6 +209,11 @@ public final class Particles implements AutoCloseable {
     private final boolean[] fresh;
     private final boolean[] local;
     private final boolean[] cpu;
+    private final int[] sourceMesh; // the pool mesh its mesh shapes emit from, -1: none
+    private final MeshData[] sourceData;
+    private final double[][] sourceWorld; // that mesh's world transform, rows of 3 x 4; made when first set
+    private final int[] jointCounts;
+    private final double[][] jointWorld; // the joints its bone shapes run along, x, y, z each; made when first set
     private final ParticleWriter[] writers;
     private final CpuEmitters cpuEmitters;
     private CpuSimulation simulation;
@@ -274,6 +291,11 @@ public final class Particles implements AutoCloseable {
         fresh = new boolean[maxEmitters];
         local = new boolean[maxEmitters];
         cpu = new boolean[maxEmitters];
+        sourceMesh = new int[maxEmitters];
+        sourceData = new MeshData[maxEmitters];
+        sourceWorld = new double[maxEmitters][];
+        jointCounts = new int[maxEmitters];
+        jointWorld = new double[maxEmitters][];
         writers = new ParticleWriter[maxEmitters];
         freeInstances = new int[maxEmitters];
         for (int i = 0; i < maxEmitters; i++) {
@@ -301,7 +323,7 @@ public final class Particles implements AutoCloseable {
         ModulePrograms m = null;
         CpuEmitters c = null;
         GpuBuffer[] made = new GpuBuffer[12];
-        FrameBuffer[] tables = new FrameBuffer[10];
+        FrameBuffer[] tables = new FrameBuffer[11];
         try {
             p = new ParticlePool(device, budget);
             m = new ModulePrograms(device, slots);
@@ -322,6 +344,7 @@ public final class Particles implements AutoCloseable {
             made[10] = GpuBuffer.deviceLocal(device, 4L * 16 * (events / ParticleConstants.SORT_GROUP), GPU_USAGE);
             made[11] = GpuBuffer.deviceLocal(device, 4 * events, GPU_USAGE);
             tables[9] = FrameBuffer.create(device, 4L * maxEmitters, STORAGE, slots);
+            tables[10] = FrameBuffer.create(device, 16L * ParticleSourceLayout.BYTES, STORAGE, slots);
             tables[7] = FrameBuffer.create(device, ParticleFrameLayout.BYTES, STORAGE, slots);
             tables[8] = FrameBuffer.create(device, (long) ParticleColliderLayout.BYTES
                 * ParticleConstants.MAX_COLLIDERS, STORAGE, slots);
@@ -371,6 +394,8 @@ public final class Particles implements AutoCloseable {
         eventCounts = made[10];
         childPrefix = made[11];
         targetTable = tables[9];
+        sourceTable = tables[10];
+        meshTables = new MeshTables(device, slots);
         targetStaged = new Staging(4L * maxEmitters);
         frameTable = tables[7];
         colliderTable = tables[8];
@@ -504,6 +529,7 @@ public final class Particles implements AutoCloseable {
             updatedAt = frames;
         }
         retired.release();
+        meshTables.release();
         cool(false);
         programs.collect();
         following = effects;
@@ -545,6 +571,11 @@ public final class Particles implements AutoCloseable {
         }
         parameterStaged.copyTo(parameterBlocks, parameterBytes);
         ribbonStaged.copyTo(ribbonList, 8L * ribbonCount);
+        long sourceBytes = (long) ParticleSourceLayout.BYTES * sourceCount;
+        if (sourceTable.size() < sourceBytes) {
+            sourceTable = grown(sourceTable, sourceBytes);
+        }
+        sourceStaged.copyTo(sourceTable, sourceBytes);
         sortStaged.copyTo(sortList, 4L * sortedCount);
         sortChunkStaged.copyTo(sortChunks, 8L * sortChunkCount);
         cpuEmitters.finish();
@@ -574,6 +605,15 @@ public final class Particles implements AutoCloseable {
         r.putLong(ParticleFrameLayout.EVENT_ARGS, eventArgs.deviceAddress());
         r.putLong(ParticleFrameLayout.CHILD_PREFIX, childPrefix.deviceAddress());
         r.putLong(ParticleFrameLayout.TARGETS, targetTable.deviceAddress());
+        r.putLong(ParticleFrameLayout.SOURCES, sourceTable.deviceAddress());
+        GeometryPool meshes = meshRenderer == null ? null : meshRenderer.pool();
+        r.putLong(ParticleFrameLayout.MESHES, meshes == null ? 0 : meshes.meshTable().deviceAddress());
+        r.putLong(ParticleFrameLayout.POSITIONS, meshes == null ? 0 : meshes.positions().deviceAddress());
+        r.putLong(ParticleFrameLayout.ATTRIBUTES, meshes == null ? 0 : meshes.attributes().deviceAddress());
+        r.putLong(ParticleFrameLayout.MESHLETS, meshes == null ? 0 : meshes.meshlets().deviceAddress());
+        r.putLong(ParticleFrameLayout.MESHLET_VERTICES, meshes == null ? 0 : meshes.meshletVertices().deviceAddress());
+        r.putLong(ParticleFrameLayout.MESHLET_TRIANGLES, meshes == null ? 0
+            : meshes.meshletTriangles().deviceAddress());
         r.putInt(ParticleFrameLayout.COLLIDER_COUNT, colliderCount);
         r.putInt(ParticleFrameLayout.HEIGHT_RESOLUTION, heights == null ? 0 : heightResolution);
         r.putFloat(ParticleFrameLayout.HEIGHT_SIZE, heightSize);
@@ -726,6 +766,9 @@ public final class Particles implements AutoCloseable {
         fresh[instance] = true;
         beamEnded[instance] = false;
         writers[instance] = null;
+        sourceMesh[instance] = -1;
+        sourceData[instance] = null;
+        jointCounts[instance] = 0;
     }
 
     private static int sideUnits(int capacity, boolean over, int trail) {
@@ -874,6 +917,7 @@ public final class Particles implements AutoCloseable {
         sortedCount = 0;
         sortChunkCount = 0;
         targetCount = 0;
+        sourceCount = 0;
         sendsEvents = false;
         for (int slot = 0; slot < highest; slot++) {
             long effect = ids[slot];
@@ -996,6 +1040,14 @@ public final class Particles implements AutoCloseable {
                     putVector(t, at + ParticleEmitterLayout.DOWN, 0, -1, 0);
                     putVector(t, at + ParticleEmitterLayout.WIND, effects.wind(0), effects.wind(1), effects.wind(2));
                 }
+                int source = ParticleConstants.NO_SOURCE;
+                if (block.sourced[e] && !cpu[instance]) {
+                    if (sources != null) {
+                        sources.emit(effect, e); // names its mesh and joints for the frame
+                    }
+                    source = putSource(instance, x, y, z, qx, qy, qz, qw);
+                }
+                t.putInt(at + ParticleEmitterLayout.SOURCE, source);
                 fresh[instance] = false;
                 sendsEvents |= !blocks[slot].data.emitters().get(e).events().isEmpty();
                 int chunks = cpu[instance] ? 0 : ParticlePool.chunksOf(capacities[instance]);
@@ -1020,6 +1072,73 @@ public final class Particles implements AutoCloseable {
             previous[3 * slot + 1] = y;
             previous[3 * slot + 2] = z;
         }
+    }
+
+    /**
+     * Writes instance {@code instance}'s source for the frame: its mesh with its alias tables and its joints, in the
+     * frame of its emitter at ({@code x}, {@code y}, {@code z}) turned by ({@code qx}, ..., {@code qw}); returns its
+     * entry, or {@code NO_SOURCE} with neither.
+     */
+    private int putSource(int instance, double x, double y, double z, float qx, float qy, float qz, float qw) {
+        int mesh = sourceMesh[instance];
+        GeometryPool pool = meshRenderer == null ? null : meshRenderer.pool();
+        boolean meshed = mesh >= 0 && pool != null && pool.contains(mesh);
+        MeshTables.Table table = null;
+        if (meshed) {
+            int rest = pool.deformedFrom(mesh); // a posed copy draws from its source's tables
+            table = meshTables.of(rest >= 0 ? rest : mesh, sourceData[instance]);
+            meshed = table.triangles() > 0;
+        }
+        int joints = jointCounts[instance];
+        if (!meshed && joints == 0) {
+            return ParticleConstants.NO_SOURCE;
+        }
+        int index = sourceCount++;
+        long at = (long) ParticleSourceLayout.BYTES * index;
+        Staging r = sourceStaged;
+        r.room(at + ParticleSourceLayout.BYTES);
+        r.putInt(at + ParticleSourceLayout.MESH, meshed ? mesh : ParticleConstants.NO_MESH);
+        r.putInt(at + ParticleSourceLayout.JOINTS, joints);
+        if (meshed) {
+            // The mesh's world transform into the emitter's frame: its rotation's inverse times (world - emitter)
+            double[] w = sourceWorld[instance];
+            for (int column = 0; column < 4; column++) {
+                double cx = w[column];
+                double cy = w[4 + column];
+                double cz = w[8 + column];
+                if (column == 3) {
+                    cx -= x;
+                    cy -= y;
+                    cz -= z;
+                }
+                turnBack(cx, cy, cz, qx, qy, qz, qw);
+                for (int row = 0; row < 3; row++) {
+                    r.putFloat(at + ParticleSourceLayout.TO_EMITTER + 16L * row + 4L * column, (float) back[row]);
+                }
+            }
+            r.putLong(at + ParticleSourceLayout.TABLE, table.buffer().deviceAddress());
+            r.putInt(at + ParticleSourceLayout.TRIANGLES, table.triangles());
+            r.putInt(at + ParticleSourceLayout.VERTICES, table.vertices());
+        }
+        double[] chain = jointWorld[instance];
+        for (int j = 0; j < joints; j++) {
+            turnBack(chain[3 * j] - x, chain[3 * j + 1] - y, chain[3 * j + 2] - z, qx, qy, qz, qw);
+            r.putVector(at + ParticleSourceLayout.CHAIN + 16L * j, (float) back[0], (float) back[1],
+                (float) back[2]);
+        }
+        return index;
+    }
+
+    private final double[] back = new double[3];
+
+    /** ({@code x}, {@code y}, {@code z}) turned by the inverse of the rotation ({@code qx}, ..., {@code qw}). */
+    private void turnBack(double x, double y, double z, double qx, double qy, double qz, double qw) {
+        double cx = 2 * (-qy * z + qz * y);
+        double cy = 2 * (-qz * x + qx * z);
+        double cz = 2 * (-qx * y + qy * x);
+        back[0] = x + qw * cx - qy * cz + qz * cy;
+        back[1] = y + qw * cy - qz * cx + qx * cz;
+        back[2] = z + qw * cz - qx * cy + qy * cx;
     }
 
     /** Writes the scene's colliders (at most {@code MAX_COLLIDERS}) for the frame. */
@@ -1116,7 +1235,108 @@ public final class Particles implements AutoCloseable {
         this.rayTracing = traced ? rayTracing : null;
         this.rayRenderer = traced ? Objects.requireNonNull(renderer, "renderer") : null;
         programs.rays(traced);
+        setup++;
         return this;
+    }
+
+    /**
+     * Lets mesh shapes emit from the meshes of {@code renderer}'s geometry pool (null: none): the simulation reads its
+     * buffers, a skinned mesh's posed copy after the deformation pass. Set before effects play; what each emitter
+     * emits from, its {@link #sources} name.
+     */
+    public Particles meshes(MeshletRenderer renderer) {
+        meshRenderer = renderer;
+        meshTables.follow(renderer == null ? null : renderer.pool());
+        setup++;
+        return this;
+    }
+
+    /** The renderer whose meshes mesh shapes read, or null. */
+    MeshletRenderer meshRenderer() {
+        return meshRenderer;
+    }
+
+    /** Meshes with alias tables for mesh shapes. */
+    public int meshTableCount() {
+        return meshTables.size();
+    }
+
+    /** A number that changes with what the simulation reads ({@link #rays}, {@link #meshes}): its graph rebuilds. */
+    long setup() {
+        return setup;
+    }
+
+    /**
+     * What emitters with mesh or bone shapes ({@code Shape.MESH}, {@code Shape.BONES}) emit from: asked in every
+     * {@link #update}, for each such emitter of each playing effect, before its record is written. The engine-scene
+     * sync names the mesh of the effect's node and the joints given it.
+     */
+    @FunctionalInterface
+    public interface Sources {
+
+        /**
+         * Names what emitter {@code emitter} of playing effect {@code effect} emits from this frame, through
+         * {@link #emitFrom} and {@link #joints}; what it named before stays otherwise. Allocates nothing.
+         */
+        void emit(long effect, int emitter);
+    }
+
+    /** Asks {@code sources} what mesh and bone shapes emit from, from the next update on (null: nobody). */
+    public Particles sources(Sources sources) {
+        this.sources = sources;
+        return this;
+    }
+
+    /**
+     * Emits the mesh shapes of emitter {@code emitter} of playing effect {@code effect} from pool mesh {@code mesh}
+     * of the {@link #meshes} renderer, a skinned renderable's posed copy as drawn (-1: from nothing, its particles
+     * born dead), whose data (a copy's source's) is {@code data}, its alias tables built from it once. {@code world}
+     * places it: rows of the 3 x 4 matrix of its node's world transform, scale included, as of the frame. Kept until
+     * set again or the effect ends. Allocates nothing once set.
+     */
+    public void emitFrom(long effect, int emitter, int mesh, MeshData data, double[] world) {
+        int instance = sourced(effect, emitter);
+        if (mesh >= 0) {
+            Objects.requireNonNull(data, "data");
+            if (sourceWorld[instance] == null) {
+                sourceWorld[instance] = scratch(12);
+            }
+            System.arraycopy(world, 0, sourceWorld[instance], 0, 12);
+        }
+        sourceMesh[instance] = mesh;
+        sourceData[instance] = mesh >= 0 ? data : null;
+    }
+
+    /**
+     * Runs the bone shapes of emitter {@code emitter} of playing effect {@code effect} along {@code count} joints
+     * (0 to {@code MAX_JOINTS}) at world positions {@code xyz} (x, y, z each), as of the frame. Kept until set again or
+     * the effect ends. Allocates nothing once set.
+     */
+    public void joints(long effect, int emitter, double[] xyz, int count) {
+        int instance = sourced(effect, emitter);
+        if (count < 0 || count > ParticleConstants.MAX_JOINTS) {
+            throw new IllegalArgumentException("Not a joint count: " + count);
+        }
+        if (jointWorld[instance] == null) {
+            jointWorld[instance] = scratch(3 * ParticleConstants.MAX_JOINTS);
+        }
+        System.arraycopy(xyz, 0, jointWorld[instance], 0, 3 * count);
+        jointCounts[instance] = count;
+    }
+
+    /** The GPU instance of emitter {@code emitter} of playing effect {@code effect}, which must have one. */
+    private int sourced(long effect, int emitter) {
+        int instance = instance(effect, emitter);
+        if (instance < 0 || cpu[instance]) {
+            throw new IllegalArgumentException("Not a GPU emitter with room of a playing effect: " + emitter + " of "
+                + Long.toHexString(effect));
+        }
+        return instance;
+    }
+
+    @AllowAllocation("an emitter's source, set up once")
+    private static double[] scratch(int length) {
+        return new double[length];
     }
 
     /** The ray tracing collision rays go into, or null. */
@@ -1713,6 +1933,8 @@ public final class Particles implements AutoCloseable {
         eventCounts.close();
         childPrefix.close();
         targetTable.close();
+        sourceTable.close();
+        meshTables.close();
         programs.close();
         cpuEmitters.close();
         pool.close();

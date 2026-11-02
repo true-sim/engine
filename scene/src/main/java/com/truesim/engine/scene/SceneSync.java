@@ -336,6 +336,33 @@ public final class SceneSync implements AutoCloseable {
     }
 
     /**
+     * The pool mesh {@code node}'s renderable draws as: its deformed copy where it has one (posed as drawn), else its
+     * mesh; -1 while it is not on the GPU. What particles' mesh shapes emit from.
+     */
+    public int drawnMeshOf(long node) {
+        int item = NodeHandle.index(node);
+        if (item >= itemNode.length || itemNode[item] != node || itemMesh[item].mesh.id == NONE) {
+            return NONE;
+        }
+        return itemCopy[item] != NONE ? itemCopy[item] : itemMesh[item].mesh.id;
+    }
+
+    /** The data of {@code node}'s renderable's mesh (a copy's at rest), or null while it is not on the GPU. */
+    public MeshData meshDataOf(long node) {
+        int item = NodeHandle.index(node);
+        return item < itemNode.length && itemNode[item] == node && itemMesh[item].mesh.id != NONE
+            ? itemMesh[item].mesh.data : null;
+    }
+
+    /** {@code node}'s world transform as of the last {@code scene.update()}: rows of a 3 x 4 matrix, into {@code out}. */
+    public void worldOf(long node, double[] out) {
+        if (!scene.contains(node)) {
+            throw new IllegalArgumentException("Not a node of the scene: " + NodeHandle.toString(node));
+        }
+        world(node, out);
+    }
+
+    /**
      * Renderables whose meshes are on the GPU that do not draw yet: assets they wait for
      * ({@link SceneResources.Loading#WHOLE}) have not arrived. They draw as those come.
      */

@@ -69,6 +69,7 @@ final class DemoCharacter implements AutoCloseable {
     private final Animators animators = new Animators(scene);
     private final SceneSync sync;
     private final long holder;
+    private long body; // the node drawing its skinned mesh
     private final double x;
     private final double z;
     private final Animator animator;
@@ -108,6 +109,11 @@ final class DemoCharacter implements AutoCloseable {
         holder = scene.create();
         scene.setScale(holder, 0.012, 0.012, 0.012);
         long[] nodes = model.spawn(scene, renderables, holder);
+        for (long node : nodes) {
+            if (body == 0 && renderables.has(node) && renderables.skin(node) != null) {
+                body = node;
+            }
+        }
         animators.morphSink(renderables::setMorphWeights);
 
         Rig.Builder r = Rig.builder(model.skeleton());
@@ -153,6 +159,16 @@ final class DemoCharacter implements AutoCloseable {
 
     SceneGraph scene() {
         return scene;
+    }
+
+    /** Its sync, which draws it: what particles' mesh shapes emit from. */
+    SceneSync sync() {
+        return sync;
+    }
+
+    /** The node drawing its skinned mesh. */
+    long body() {
+        return body;
     }
 
     Animators animators() {

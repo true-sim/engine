@@ -98,6 +98,7 @@ public final class StereoBench {
                     : new DemoEffects(device, graph.frameSlots(), fox.scene(), fx, height(v[1], fx, fz), fz);
                 if (fox != null) {
                     effects.dust(fox); // the fox kicks up dust; its survey flickers the torch
+                    effects.burn(fox, world.renderer()); // and burns all over as it moves
                 }
                 owned.add(effects);
                 graph.add(effects.simulation());

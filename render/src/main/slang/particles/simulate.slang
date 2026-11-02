@@ -7,9 +7,12 @@
 // along the emitter's motion by birth time, moved on by their age; argsMain keeps each emitter's count for the next
 // frame and the statistics. A module program is one emitter's initializers and updaters as words (ModulePrograms);
 // their curve keys sit in a block per effect, which the update keeps in group-shared memory per chunk. The same
-// arithmetic as scene-effects' CpuSimulation, the reference the tests compare against.
+// arithmetic as scene-effects' CpuSimulation, the reference the tests compare against. Mesh shapes read the geometry
+// pool (a skinned mesh's posed copy, after the deformation pass) through the frame's emission sources and alias
+// tables; bone shapes the joints the CPU wrote there; masks sample a texture where the shapes put a particle.
 import particle;
 import bindless;
+import meshlets.common;
 #ifdef PARTICLE_RAYS
 import raytracing;
 #endif
@@ -145,6 +148,191 @@ uint skip(Emitting m, uint op)
     return op + (m.program[op] >> 8);
 }
 
+/** Byte `i` of the pool's meshlet triangles. */
+uint triangleByte(uint* triangles, uint i)
+{
+    return (triangles[i >> 2] >> ((i & 3) * 8)) & 0xff;
+}
+
+/** Pool vertex `v`'s normal, or `fallback` where the mesh has none. */
+float3 vertexNormal(MeshEntry mesh, uint* attributes, uint v, float3 fallback)
+{
+    return (mesh.attributeFormat & 1) != 0 ? decodeOctahedral(attributeWord(mesh, attributes, v, 0)) : fallback;
+}
+
+/** Pool vertex `v`'s first texture coordinates (the mesh has them). */
+float2 vertexUv(MeshEntry mesh, uint* attributes, uint v)
+{
+    uint word = attributeWord(mesh, attributes, v, 2);
+    return float2(decodeHalf(word & 0xffff), decodeHalf(word >> 16));
+}
+
+/**
+ * A point of source `at`'s mesh, as `mode` says (MESH_*), drawn from `salt` on, in the emitter's frame: on a triangle
+ * its alias table by area picks (uniform within it), on a vertex, or in the tetrahedron from the box's center to a
+ * triangle its table by volume picks; with the surface's normal (outwards from the center in the volume) and its
+ * texture coordinates where the mesh has them. False without a mesh.
+ */
+bool meshPoint(uint at, uint mode, uint seed, uint salt, out float3 position, out float3 normal, out float2 uv,
+    out bool textured)
+{
+    ParticleFrame* frame = push.frame;
+    ParticleSource* sources = frame.sources;
+    position = 0;
+    normal = float3(0, 1, 0);
+    uv = 0;
+    textured = false;
+    uint meshIndex = sources[at].mesh;
+    if (meshIndex == NO_MESH)
+    {
+        return false;
+    }
+    MeshEntry* meshes = (MeshEntry*) frame.meshes;
+    MeshEntry mesh = meshes[meshIndex];
+    uint2* positions = frame.positions;
+    uint* attributes = frame.attributes;
+    if (mode == MESH_VERTICES)
+    {
+        uint vertices = sources[at].vertices;
+        uint v = mesh.vertexBase + min(uint(random(seed, salt + 8) * float(vertices)), vertices - 1);
+        position = decodePosition(positions[v], mesh);
+        normal = vertexNormal(mesh, attributes, v, normal);
+        textured = (mesh.attributeFormat & 4) != 0;
+        uv = textured ? vertexUv(mesh, attributes, v) : 0;
+    }
+    else
+    {
+        uint n = sources[at].triangles;
+        uint* table = (uint*) (sources[at].table + (mode == MESH_VOLUME ? 12 * uint64_t(n) : 0));
+        uint i = min(uint(random(seed, salt + 8) * float(n)), n - 1);
+        uint chosen = random(seed, salt + 9) < asfloat(table[3 * i + 1]) ? i : table[3 * i + 2];
+        uint packed = table[3 * chosen];
+        uint* meshlets = frame.meshlets;
+        uint* meshletVertices = frame.meshletVertices;
+        uint* triangles = frame.meshletTriangles;
+        uint w = (mesh.meshletBase + (packed >> 8)) * 8;
+        uint first = mesh.meshletVertexBase + meshlets[w];
+        uint corner = mesh.indexBase + meshlets[w + 1] + 3 * (packed & 0xff);
+        uint3 v = uint3(meshletVertices[first + triangleByte(triangles, corner)],
+            meshletVertices[first + triangleByte(triangles, corner + 1)],
+            meshletVertices[first + triangleByte(triangles, corner + 2)]) + mesh.vertexBase;
+        float3 a = decodePosition(positions[v.x], mesh);
+        float3 b = decodePosition(positions[v.y], mesh);
+        float3 c = decodePosition(positions[v.z], mesh);
+        if (mode == MESH_VOLUME)
+        {
+            // Uniform in the tetrahedron (center, a, b, c): a point of the unit cube folded into it (Rocchini and
+            // Cignoni 2000)
+            float3 center = mesh.boxMin + 0.5 * mesh.boxExtent;
+            float s = random(seed, salt + 10);
+            float t = random(seed, salt + 11);
+            float u = random(seed, salt + 12);
+            if (s + t > 1)
+            {
+                s = 1 - s;
+                t = 1 - t;
+            }
+            if (t + u > 1)
+            {
+                float k = u;
+                u = 1 - s - t;
+                t = 1 - k;
+            }
+            else if (s + t + u > 1)
+            {
+                float k = u;
+                u = s + t + u - 1;
+                s = 1 - t - k;
+            }
+            position = (1 - s - t - u) * center + s * a + t * b + u * c;
+            float3 away = position - center;
+            normal = dot(away, away) > 1e-12 ? normalize(away) : normal;
+        }
+        else
+        {
+            float r = sqrt(random(seed, salt + 10));
+            float q = random(seed, salt + 11);
+            float3 bary = float3(1 - r, r * (1 - q), r * q);
+            position = bary.x * a + bary.y * b + bary.z * c;
+            float3 face = cross(b - a, c - a);
+            face = dot(face, face) > 1e-20 ? normalize(face) : normal;
+            if ((mesh.attributeFormat & 1) != 0)
+            {
+                normal = bary.x * vertexNormal(mesh, attributes, v.x, face)
+                    + bary.y * vertexNormal(mesh, attributes, v.y, face)
+                    + bary.z * vertexNormal(mesh, attributes, v.z, face);
+            }
+            else
+            {
+                normal = face;
+            }
+            textured = (mesh.attributeFormat & 4) != 0;
+            if (textured)
+            {
+                uv = bary.x * vertexUv(mesh, attributes, v.x) + bary.y * vertexUv(mesh, attributes, v.y)
+                    + bary.z * vertexUv(mesh, attributes, v.z);
+            }
+        }
+    }
+    // Into the emitter's frame; normals by the cofactors, so a scaled mesh's stay perpendicular
+    float4 r0 = sources[at].toEmitter[0];
+    float4 r1 = sources[at].toEmitter[1];
+    float4 r2 = sources[at].toEmitter[2];
+    position = float3(dot(r0.xyz, position) + r0.w, dot(r1.xyz, position) + r1.w, dot(r2.xyz, position) + r2.w);
+    float3x3 cofactor = float3x3(cross(r1.xyz, r2.xyz), cross(r2.xyz, r0.xyz), cross(r0.xyz, r1.xyz));
+    float3 turned = mul(transpose(cofactor), normal);
+    normal = dot(turned, turned) > 1e-20 ? normalize(turned) : float3(0, 1, 0);
+    return true;
+}
+
+/**
+ * A point within `radius` of the chain of source `at`'s joints, uniform by length along it (and by area across it),
+ * drawn from `salt` on, with the direction away from the chain. False without joints.
+ */
+bool bonePoint(uint at, float radius, uint seed, uint salt, out float3 position, out float3 direction)
+{
+    ParticleFrame* frame = push.frame;
+    ParticleSource* sources = frame.sources;
+    uint n = min(sources[at].joints, MAX_JOINTS);
+    position = 0;
+    direction = randomDirection(seed, salt + 10);
+    if (n == 0)
+    {
+        return false;
+    }
+    float total = 0;
+    for (uint i = 0; i + 1 < n; i++)
+    {
+        total += length(sources[at].chain[i + 1].xyz - sources[at].chain[i].xyz);
+    }
+    float along = random(seed, salt + 8) * total;
+    float3 a = sources[at].chain[0].xyz;
+    float3 b = a;
+    float t = 0;
+    for (uint i = 0; i + 1 < n; i++)
+    {
+        a = sources[at].chain[i].xyz;
+        b = sources[at].chain[i + 1].xyz;
+        float l = length(b - a);
+        t = l > 0 ? saturate(along / l) : 0.0;
+        if (along <= l)
+        {
+            break;
+        }
+        along -= l;
+    }
+    position = a + (b - a) * t;
+    float3 axis = b - a;
+    if (dot(axis, axis) > 1e-12)
+    {
+        axis = normalize(axis);
+        float3 across = direction - axis * dot(direction, axis);
+        direction = dot(across, across) > 1e-12 ? normalize(across) : direction;
+    }
+    position += direction * (radius * sqrt(random(seed, salt + 9)));
+    return true;
+}
+
 /** Runs the initializers on newborn `p` (CpuSimulation.init), its direction scratch kept across them. */
 void initialize<K : ICurveKeys>(Emitting m, K keys, inout Particle p, inout float4 color0, inout float size0)
 {
@@ -152,6 +340,9 @@ void initialize<K : ICurveKeys>(Emitting m, K keys, inout Particle p, inout floa
     uint count = header & 0xff;
     uint op = 1;
     float3 direction = 0;
+    float2 uv = 0;         // the mesh shape's texture coordinates, for masks
+    bool textured = false;
+    bool masked = false;   // a mask left it out: born dead
     for (uint i = 0; i < count; i++)
     {
         uint code = m.program[op] & 0xff;
@@ -207,12 +398,44 @@ void initialize<K : ICurveKeys>(Emitting m, K keys, inout Particle p, inout floa
             break;
         case OP_INHERIT:
             break; // read when an event spawns the particle (inheritFrom)
+        case OP_MESH:
+            p.position = 0;
+            direction = float3(0, 1, 0);
+            textured = false;
+            // Nothing to emit from (no mesh named, or not loaded yet): born dead, not in a heap at the emitter
+            masked = masked || m.emitter.source == NO_SOURCE || !meshPoint(m.emitter.source,
+                uint(value(m, keys, op, salt, 0, p) + 0.5), seed, salt, p.position, direction, uv, textured);
+            break;
+        case OP_BONES:
+            p.position = 0;
+            direction = randomDirection(seed, salt + 10);
+            textured = false;
+            masked = masked || m.emitter.source == NO_SOURCE || !bonePoint(m.emitter.source,
+                value(m, keys, op, salt, 0, p), seed, salt, p.position, direction);
+            break;
+        case OP_MASK: // channel, mask, size x, size z, threshold
+            uint maskSlot = m.program[op + 2 + BINDING_WORDS];
+            if (maskSlot != NO_TEXTURE)
+            {
+                float2 at = textured ? uv : float2(p.position.x / value(m, keys, op, salt, 2, p),
+                    p.position.z / value(m, keys, op, salt, 3, p)) + 0.5;
+                float4 texel = textures[NonUniformResourceIndex(maskSlot)].SampleLevel(samplers[LINEAR_CLAMP], at, 0);
+                uint channel = uint(value(m, keys, op, salt, 0, p) + 0.5);
+                float density = channel < 4 ? texel[channel] : dot(texel.rgb, float3(0.2126, 0.7152, 0.0722));
+                float threshold = value(m, keys, op, salt, 4, p);
+                masked = masked || (threshold > 0 ? density < threshold : !(random(seed, salt + 12) < density));
+            }
+            break;
         default: // OP_COLOR
             color0 = colorOf(m, keys, op, salt, p);
             p.color = color0;
             break;
         }
         op = skip(m, op);
+    }
+    if (masked)
+    {
+        p.lifetime = 0; // dead at birth
     }
 }
 

@@ -98,11 +98,14 @@ final class ModulePrograms implements AutoCloseable {
         final int[] trails;
         /** Per emitter and renderer: whether it draws billboards back to front. */
         final boolean[][] sorted;
+        /** Per emitter on the GPU: whether its shapes emit from a mesh or a chain of joints, which the engine names. */
+        final boolean[] sourced;
         int users;
         long releaseAt = -1;
 
         Block(EffectData data, int words, int wordLength, int curves, int curveLength, int[] programs,
-            boolean[] over, int[][] renderers, AssetRef<?>[][] textures, int[] trails, boolean[][] sorted) {
+            boolean[] over, int[][] renderers, AssetRef<?>[][] textures, int[] trails, boolean[][] sorted,
+            boolean[] sourced) {
             this.data = data;
             this.words = words;
             this.wordLength = wordLength;
@@ -114,6 +117,7 @@ final class ModulePrograms implements AutoCloseable {
             this.textures = textures;
             this.trails = trails;
             this.sorted = sorted;
+            this.sourced = sourced;
         }
     }
 
@@ -240,6 +244,7 @@ final class ModulePrograms implements AutoCloseable {
         int[] trails = new int[emitters.size()];
         AssetRef<?>[][] textures = new AssetRef<?>[emitters.size()][];
         boolean[][] sorted = new boolean[emitters.size()][];
+        boolean[] sourced = new boolean[emitters.size()];
         for (int e = 0; e < emitters.size(); e++) {
             EmitterData emitter = emitters.get(e);
             List<Renderer> drawn = emitter.renderers();
@@ -262,6 +267,9 @@ final class ModulePrograms implements AutoCloseable {
                 overLife |= module.type().equals(Over.SIZE) || module.type().equals(Over.COLOR);
             }
             over[e] = overLife;
+            for (Module module : emitter.init()) {
+                sourced[e] |= module.type().equals(Shape.MESH) || module.type().equals(Shape.BONES);
+            }
             int inits = encodeOps(data, emitter.init(), 0, program, keys, assetSlots);
             int updates = encodeOps(data, emitter.update(), CpuSimulation.UPDATE_SALTS, program, keys, assetSlots);
             int points = 0;
@@ -305,7 +313,7 @@ final class ModulePrograms implements AutoCloseable {
             }
         }
         return new Block(data, wordStart, Math.max(1, program.size), curveStart, Math.max(1, keys.floats.size), starts,
-            over, renderers, textures, trails, sorted);
+            over, renderers, textures, trails, sorted, sourced);
     }
 
     /** A range of {@code length} units of the words (or curves), the buffer grown if there is no room. */
@@ -464,6 +472,9 @@ final class ModulePrograms implements AutoCloseable {
             case Init.SIZE -> OP_SIZE;
             case Init.COLOR -> OP_COLOR;
             case Init.INHERIT -> ParticleConstants.OP_INHERIT;
+            case Shape.MESH -> ParticleConstants.OP_MESH;
+            case Shape.BONES -> ParticleConstants.OP_BONES;
+            case Shape.MASK -> ParticleConstants.OP_MASK;
             case Forces.GRAVITY -> OP_GRAVITY;
             case Forces.DRAG -> OP_DRAG;
             case Over.SIZE -> OP_OVER_SIZE;

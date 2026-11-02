@@ -164,6 +164,14 @@ without any visibility modifier make everything public, which is what the genera
 - Rule: in shader files that are entry points rather than modules (no `module` line), use no visibility modifiers; in
   modules, mark everything other files use `public`.
 
+**A `[HostLayout]` struct named through a pointer before it is declared broke the layout generator.** `ParticleFrame`
+held a `ParticleSource*` declared after it in particle.slang; `generateSlangRecords` failed with "class
+java.lang.String cannot be cast to class java.util.Map" (`GenerateSlangRecords.writeLayouts`): the reflection names a
+struct it described already instead of describing it again, and the probe's own field of that struct came second.
+- Proof: reproduced while adding mesh shapes (effects step 15); declaring `ParticleSource` before `ParticleFrame` fixed
+  the build.
+- Rule: declare a `[HostLayout]` struct before any struct holding a pointer to it.
+
 **Features and sharing must match the device.** Cube array image views failed validation until `imageCubeArray` was
 enabled, and on lavapipe (one queue family for graphics and compute) images failed when they listed that family twice
 for concurrent sharing.

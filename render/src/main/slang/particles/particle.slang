@@ -62,7 +62,7 @@ public struct ParticleEmitter
     public float3 inherited;       // velocity its world-space newborn inherit: a share of the emitter's over the frame
     public uint targets;           // its effect's emitters' places in the list, from here in the frame's target table
     public float3 wind;            // the world's wind in its particles' frame, m/s
-    public uint pad2;
+    public uint source;            // what its mesh and bone shapes emit from: its entry of the frame's sources, or NO_SOURCE
 };
 
 /**
@@ -79,6 +79,27 @@ public struct ParticleCollider
     public float4 rotation;        // its node's world rotation
     public float3 size;            // a sphere's radius, a box's half extents, a capsule's radius and half length
     public uint pad;
+};
+
+/**
+ * What an emitter's mesh and bone shapes emit from this frame (effects.md §2.7): a mesh of the geometry pool (a skinned
+ * one's posed copy, which the deformation pass writes before the simulation reads it) with its alias tables, and a
+ * chain of joints; written by the CPU each frame. 352 bytes.
+ */
+[HostLayout]
+public struct ParticleSource
+{
+    public float4 toEmitter[3];    // rows of the 3 x 4 matrix from the mesh's space into the emitter's frame
+    public uint64_t table;         // the mesh's alias tables over its finest level's triangles: by area, then by the
+                                   // volume of each one's tetrahedron to the box's center; 3 words an entry (the
+                                   // triangle as meshlet << 8 | triangle, the chance it keeps, its alias)
+    public uint mesh;              // the pool's mesh read; NO_MESH: none
+    public uint triangles;         // entries of each table
+    public uint vertices;          // the mesh's vertices
+    public uint joints;            // joints along the chain, at most MAX_JOINTS
+    public uint pad0;
+    public uint pad1;
+    public float4 chain[16];    // the joints, in the emitter's frame
 };
 
 /**
@@ -111,7 +132,15 @@ public struct ParticleFrame
     public uint pad2;
     public float3 raysOriginLow;
     public uint pad3;
+    public ParticleSource* sources; // the meshes and joints the frame's emitters emit from (mesh and bone shapes)
+    public uint64_t meshes;        // MeshEntry*: the geometry pool's mesh table, as the frame reads it; or 0
+    public uint2* positions;       // the pool's buffers: positions, attribute words, meshlet records, their vertices
+    public uint* attributes;
+    public uint* meshlets;
+    public uint* meshletVertices;
+    public uint* meshletTriangles; // and triangles, 3 bytes each
 };
+
 
 /**
  * An event a particle sent (E9, effects.md §2.7): what it spawns and a snapshot of its parent, which the children read
@@ -210,6 +239,15 @@ public static const uint SORT_DEPTH_BITS = 20;
 public static const uint SORT_GROUP = 256;
 /** A draw not sorted. */
 public static const uint NO_SORT = 0xffffffffu;
+/** Joints a bone shape runs along at most. */
+public static const uint MAX_JOINTS = 16;
+/** An emitter without an emission source, and a source without a mesh. */
+public static const uint NO_SOURCE = 0xffffffffu;
+public static const uint NO_MESH = 0xffffffffu;
+/** Mesh shape modes: scene-effects' Shape.SURFACE, VERTICES, VOLUME. */
+public static const uint MESH_SURFACE = 0;
+public static const uint MESH_VERTICES = 1;
+public static const uint MESH_VOLUME = 2;
 /** A side range that is not there. */
 public static const uint NO_SIDE = 0xffffffffu;
 
@@ -299,6 +337,9 @@ public static const uint OP_HEIGHT = 23;
 public static const uint OP_DEPTH = 24;
 public static const uint OP_RAYS = 25;
 public static const uint OP_INHERIT = 26;
+public static const uint OP_MESH = 27;
+public static const uint OP_BONES = 28;
+public static const uint OP_MASK = 29;
 /** Events: scene-effects' ParticleEvent.Kind, in order; an emitter's events follow its updaters, EVENT_WORDS each. */
 public static const uint EVENT_BIRTH = 0;
 public static const uint EVENT_DEATH = 1;
