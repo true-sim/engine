@@ -123,9 +123,10 @@ public final class EffectSync {
         return simulation;
     }
 
-    /** The quality effects spawn at ({@code effects.quality}). */
+    /** The quality effects spawn and lit particles draw at ({@code effects.quality}). */
     public void quality(Quality quality) {
         runtime.quality(quality);
+        particles.quality(quality);
     }
 
     /** Forgets the viewers; with none, every effect counts as near. */

@@ -44,6 +44,8 @@ tasks.register<JavaExec>("stereoBench") {
     providers.gradleProperty("frames").orNull?.let { systemProperty("truesim.demo.frames", it) }
     // -Peffect=x,y,z: the demo's particle effects at a point (g+h: h above the ground)
     providers.gradleProperty("effect").orNull?.let { systemProperty("truesim.demo.effect", it) }
+    // -Plights=1024: that many point lights, the circling six and the rest scattered near the middle
+    providers.gradleProperty("lights").orNull?.let { systemProperty("truesim.demo.lights", it) }
     // -Pfoxes=1000 -Pcrowd=<path to Fox.gltf> [-PfoxLod=true]: a crowd of animated foxes, what animating it costs
     providers.gradleProperty("foxes").orNull?.let { systemProperty("truesim.demo.foxes", it) }
     providers.gradleProperty("crowd").orNull?.let { systemProperty("truesim.demo.crowd", it) }

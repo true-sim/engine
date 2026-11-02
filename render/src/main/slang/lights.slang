@@ -363,8 +363,20 @@ int shadowFor(Light light, Shadow* shadows, float3 world, float depth, uint2 pix
 public float3 lightSurface<R : IShadowRays>(R rays, LightListHeader h, Light light, Surface s, float3 world,
     float3 toViewer, uint2 pixel, float depth)
 {
-    Shadow* shadows = h.shadows;
     float3 toLight;
+    float3 irradiance = lightIrradiance(rays, h, light, world, s.normal, pixel, depth, toLight);
+    return all(irradiance <= 0) ? 0 : reflected(s, toViewer, toLight, irradiance);
+}
+
+/**
+ * The irradiance light `light` brings to a point at `world` (`normal`: its surface's, for shadow offsets), at
+ * `pixel`, `depth` from the viewer, after its shadow; the direction to it into `toLight`. What every way of lighting a
+ * point uses, surfaces and particles alike.
+ */
+public float3 lightIrradiance<R : IShadowRays>(R rays, LightListHeader h, Light light, float3 world, float3 normal,
+    uint2 pixel, float depth, out float3 toLight)
+{
+    Shadow* shadows = h.shadows;
     float3 irradiance = light.color;
     float distance = 1.0e30;
     if (light.type == DIRECTIONAL)
@@ -394,10 +406,10 @@ public float3 lightSurface<R : IShadowRays>(R rays, LightListHeader h, Light lig
     if (shadow >= 0)
     {
         Shadow entry = shadows[shadow];
-        ShadowQuery q = { world + h.toEntry(entry), s.normal, toLight, distance, pixel, depth, length(world) };
+        ShadowQuery q = { world + h.toEntry(entry), normal, toLight, distance, pixel, depth, length(world) };
         irradiance *= shadowVisibility(rays, entry, q);
     }
-    return reflected(s, toViewer, toLight, irradiance);
+    return irradiance;
 }
 
 /** What every light of `list` adds to surface `s` at `world`, seen from `toViewer`, `depth` from the viewer. */

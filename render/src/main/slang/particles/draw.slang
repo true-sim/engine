@@ -100,7 +100,12 @@ struct ParticleVertex
     float2 uv : TEXCOORD0;         // across the quad (strips: u along, v across)
     float3 sphere : TEXCOORD1;     // the particle's view distance, its radius, and the fragment's own view distance
     nointerpolation uint4 frames : TEXCOORD2; // flipbook frames, their blend as 16-bit fixed point, and the kind
-    nointerpolation uint2 draw : TEXCOORD3;   // its draw's renderer word and texture slot
+    nointerpolation uint4 draw : TEXCOORD3;   // its draw's renderer word, texture slot, second texture, LIGHTING_*
+    float3 world : TEXCOORD4;      // relative to the camera: per-pixel lighting
+    nointerpolation float3 lit : TEXCOORD5;   // per-vertex lighting: the light at its center (else 1)
+    nointerpolation float3 right : TEXCOORD6; // billboards' frame: right, up, and towards the camera
+    nointerpolation float3 up : TEXCOORD7;
+    nointerpolation float3 forward : TEXCOORD8;
 };
 
 /** The record of draw `index` of the multi-draw recorded. */
@@ -126,7 +131,107 @@ ParticleVertex nothing()
     o.sphere = 0;
     o.frames = 0;
     o.draw = 0;
+    o.world = 0;
+    o.lit = 1;
+    o.right = 0;
+    o.up = 0;
+    o.forward = 0;
     return o;
+}
+
+// ---------------------------------------------------------------------------------------------- lighting (E14)
+
+/** The words of the commands buffer before each slot's light: the view's indirect draws. */
+static const uint LIT_WORDS = 4 * MAX_DRAWS;
+
+/** The weights of a light from `l` (in the billboard's frame: right, up, towards the camera) for six-way maps. */
+float sixWay(float3 l, float4 a, float4 b)
+{
+    float3 w = l * l; // the unit direction's squared components share it out
+    return (l.x >= 0 ? a.r : b.r) * w.x + (l.y >= 0 ? a.g : b.g) * w.y + (l.z >= 0 ? b.b : a.b) * w.z;
+}
+
+/**
+ * The light a particle reflects at `world` (relative to the camera; at `pixel`, `depth` from the viewer): every light
+ * of the view's list there after its shadow (the sun without a list), and the sky, as `mode` weighs them: 0 the same
+ * from every side (a point lit per vertex), 1 by `normal` wrapped around (lit per pixel), 2 by six-way maps `a` and
+ * `b` in the frame (`right`, `up`, `normal` towards the camera). Diffuse, over pi.
+ */
+float3 particleLight(LightListHeader* h, float3 world, float3 normal, float3 right, float3 up, uint mode, float4 a,
+    float4 b, uint2 pixel, float depth)
+{
+    float sky = mode == 2 ? (a.r + a.g + a.b + b.r + b.g + b.b) / 6 : 1;
+    float3 sum = SKY_IRRADIANCE * sky;
+    if (h == nullptr)
+    {
+        float3 l = float3(dot(SUN, right), dot(SUN, up), dot(SUN, normal));
+        sum += SUN_IRRADIANCE * (mode == 0 ? 1 : mode == 1 ? saturate(0.5 + 0.5 * dot(normal, SUN)) : sixWay(l, a, b));
+        return sum * 0.31830988;
+    }
+    LightListHeader header = loadHeader(h);
+    ClusterLightList list = ClusterLightList(header, pixel, depth);
+    for (uint i = 0; i < list.count(); i++)
+    {
+        float3 toLight;
+        float3 e = lightIrradiance(NoRays(), header, list.light(i), world, normal, pixel, depth, toLight);
+        float w = 1;
+        if (mode == 1)
+        {
+            w = saturate(0.5 + 0.5 * dot(normal, toLight));
+        }
+        else if (mode == 2)
+        {
+            w = sixWay(float3(dot(toLight, right), dot(toLight, up), dot(toLight, normal)), a, b);
+        }
+        sum += e * w;
+    }
+    return sum * 0.31830988; // over pi
+}
+
+/** The pixel and view depth of `p`, relative to the camera, in `view`: where its light clusters are looked up. */
+void pixelOf(View* view, float3 p, out uint2 pixel, out float depth)
+{
+    float4 clip = mul(view.viewProjection, float4(p, 1));
+    depth = clip.w;
+    float2 ndc = clip.xy / max(abs(clip.w), 1e-6);
+    uint2 size = view.outputSize;
+    pixel = uint2(clamp((ndc * 0.5 + 0.5) * float2(size), 0.0, float2(size) - 1));
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lightMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
+{
+    // Per-vertex lighting (E14): a row of groups per draw, a thread per particle of those lit per vertex: the light at
+    // its center, from every side, into its slot's four words after the view's indirect draws
+    ParticleDrawRecord* draws = push.draws;
+    ParticleDrawRecord d = draws[group.y];
+    if (d.lighting != LIGHTING_VERTEX)
+    {
+        return;
+    }
+    ParticleEmitter* emitters = push.emitters;
+    ParticleEmitter e = emitters[d.emitter];
+    uint* state = push.state;
+    uint k = id.x;
+    if (k >= state[e.instance * STATE_WORDS + STATE_ALIVE])
+    {
+        return;
+    }
+    Particle* particles = push.particles;
+    Particle p = particles[e.first + k];
+    View* view = push.view;
+    float3 center = relativeTo(e, p.position, view.position, view.positionLow);
+    uint2 pixel;
+    float depth;
+    pixelOf(view, center, pixel, depth);
+    float3 toCamera = normalize(push.facing - center);
+    float3 lit = particleLight((LightListHeader*) d.lights, center, toCamera, 0, 0, 0, 0, 0, pixel, depth);
+    uint* commands = push.commands;
+    uint at = LIT_WORDS + 4 * (e.first + k);
+    commands[at] = asuint(lit.x);
+    commands[at + 1] = asuint(lit.y);
+    commands[at + 2] = asuint(lit.z);
 }
 
 /** Corner `vertex % 6` of two triangles: (-1, -1), (1, -1), (-1, 1), (1, -1), (1, 1), (-1, 1). */
@@ -215,7 +320,18 @@ ParticleVertex billboardMain(uint vertex : SV_VertexID, uint instance : SV_Insta
     uint f1 = loop ? (f0 + 1) % uint(frames) : min(f0 + 1, uint(frames) - 1);
     float blend = (r.flags & DRAW_BLEND_FRAMES) != 0 ? t - floor(t) : 0;
     o.frames = uint4(f0, f1, uint(blend * 65535), RENDER_BILLBOARD);
-    o.draw = uint2(d.renderer, d.texture);
+    o.draw = uint4(d.renderer, d.texture, d.extra, d.lighting);
+    o.world = world;
+    o.right = right;
+    o.up = up;
+    o.forward = toCamera;
+    o.lit = 1;
+    if (d.lighting == LIGHTING_VERTEX)
+    {
+        uint* commands = push.commands;
+        uint at = LIT_WORDS + 4 * (e.first + index);
+        o.lit = float3(asfloat(commands[at]), asfloat(commands[at + 1]), asfloat(commands[at + 2]));
+    }
     return o;
 }
 
@@ -251,7 +367,12 @@ ParticleVertex segment(StripPoint before, StripPoint a, StripPoint b, StripPoint
     o.uv = float2(p.u, 0.5 - 0.5 * xy.y);
     o.sphere = float3(o.position.w, 0.5 * p.width, o.position.w);
     o.frames = uint4(0, 0, 0, kind);
-    o.draw = uint2(d.renderer, d.texture);
+    o.draw = uint4(d.renderer, d.texture, NO_TEXTURE, LIGHTING_UNLIT);
+    o.world = world;
+    o.lit = 1;
+    o.right = 0;
+    o.up = 0;
+    o.forward = 0;
     return o;
 }
 
@@ -431,6 +552,13 @@ float4 frame(ParticleRenderer r, uint texture, uint f, float2 uv)
         (cell + uv) / float2(columns, rows));
 }
 
+/** The view's light list, as fragment `v`'s draw names it. */
+LightListHeader* lightsOf(ParticleVertex v)
+{
+    ParticleDrawRecord* draws = push.draws;
+    return (LightListHeader*) draws[push.first].lights; // the same for every draw of the view
+}
+
 [shader("fragment")]
 float4 fragmentMain(ParticleVertex v) : SV_Target
 {
@@ -457,6 +585,35 @@ float4 fragmentMain(ParticleVertex v) : SV_Target
         }
     }
     float4 color = v.color * texel;
+    uint lighting = v.draw.w;
+    if (lighting == LIGHTING_VERTEX)
+    {
+        color.rgb *= v.lit;
+    }
+    else if (lighting == LIGHTING_PIXEL || lighting == LIGHTING_SIX_WAY)
+    {
+        uint2 pixel = uint2(v.position.xy);
+        float depth = v.position.w;
+        float3 n = v.forward;
+        if (lighting == LIGHTING_PIXEL)
+        {
+            // Its normal map's (tangent space: right, up, towards the camera), else a sphere's: a round puff
+            float2 d = 2 * v.uv - 1;
+            float3 m = v.draw.z != NO_TEXTURE ? frame(r, v.draw.z, v.frames.x, v.uv).xyz * 2 - 1
+                : float3(d.x, -d.y, sqrt(saturate(1 - dot(d, d))));
+            n = normalize(v.right * m.x + v.up * m.y + v.forward * m.z);
+            color.rgb *= particleLight(lightsOf(v), v.world, n, v.right, v.up, 1, 0, 0, pixel, depth);
+        }
+        else
+        {
+            // Six-way maps: the texture's right, top, back and alpha, the second's left, bottom, front and emission
+            float4 b = v.draw.z != NO_TEXTURE ? frame(r, v.draw.z, v.frames.x, v.uv) : float4(texel.rgb, 0);
+            float4 a = texel;
+            color = float4(v.color.rgb * (particleLight(lightsOf(v), v.world, n, v.right, v.up, 2, a, b, pixel, depth)
+                + b.a),
+                v.color.a * a.a);
+        }
+    }
     // The opaque scene's distance here: reverse depth with an infinite far plane, depth = near / distance.
     View* view = push.view;
     float near = mul(view.viewProjection, float4(0, 0, 0, 1)).z;

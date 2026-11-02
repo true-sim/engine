@@ -31,7 +31,9 @@ final class DemoScene implements AutoCloseable {
     static final double CHARACTER_X = 26;
     static final double CHARACTER_Z = 26;
     private static final int ROCKS = Integer.getInteger("truesim.demo.rocks", 800); // more for benchmarks
-    private static final int POINT_LIGHTS = 6;
+    private static final int CIRCLING_LIGHTS = 6;
+    private static final int POINT_LIGHTS = Math.max(CIRCLING_LIGHTS, Integer.getInteger("truesim.demo.lights",
+        CIRCLING_LIGHTS)); // more scattered about the middle, still
 
     private final GeometryPool pool;
     private final GpuScene scene;
@@ -163,8 +165,17 @@ final class DemoScene implements AutoCloseable {
                 (float) Maths.sin(angle / 2), 0, (float) Maths.cos(angle / 2), s, s, s);
         }
         lights.directional(0, -0.4f, -0.8f, -0.45f, 2.5f, 2.3f, 2.0f);
-        for (int l = 0; l < POINT_LIGHTS; l++) {
-            double a = seconds * 0.3 + l * 2 * Math.PI / POINT_LIGHTS;
+        for (int l = CIRCLING_LIGHTS; l < POINT_LIGHTS; l++) {
+            // Scattered: a hash of the light's number, within 30 m of the middle, low over the ground
+            double x = (((l * 2654435761L) >>> 8 & 0xffff) / 65535.0 - 0.5) * 60;
+            double z = (((l * 40503L * 2654435761L) >>> 8 & 0xffff) / 65535.0 - 0.5) * 60;
+            float r = 0.5f + 2.5f * ((l * 7) % 5) / 4f;
+            float g = 0.5f + 2.5f * ((l * 3) % 7) / 6f;
+            float b = 0.5f + 2.5f * ((l * 5) % 3) / 2f;
+            lights.point(l + 1, x, DemoMeshes.height(x, z) + 0.6, z, 3.5f, r, g, b);
+        }
+        for (int l = 0; l < CIRCLING_LIGHTS; l++) {
+            double a = seconds * 0.3 + l * 2 * Math.PI / CIRCLING_LIGHTS;
             double x = 25 * Maths.cos(a);
             double z = 25 * Maths.sin(a);
             float r = l % 3 == 0 ? 8 : 1;
