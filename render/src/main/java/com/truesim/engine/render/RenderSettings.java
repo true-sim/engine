@@ -15,6 +15,12 @@ public final class RenderSettings {
     public static final Setting<Boolean> OCCLUSION = Setting.bool("render.occlusionCulling", true,
         "two-phase occlusion culling, where a view was made with it");
 
+    /**
+     * How instances moved in fixed steps are drawn between steps (D91): blended on the GPU, on the CPU, or not at all.
+     */
+    public static final Setting<Interpolation> INTERPOLATION = Setting.choice("render.interpolation", Interpolation.GPU,
+        "how instances moved in fixed steps are drawn between steps");
+
     /** Every render setting: these, the light clusters', the shadows' and the display transform's. */
     public static final List<Setting<?>> ALL = all();
 
@@ -24,6 +30,7 @@ public final class RenderSettings {
     private static List<Setting<?>> all() {
         List<Setting<?>> all = new ArrayList<>();
         all.add(OCCLUSION);
+        all.add(INTERPOLATION);
         all.addAll(ClusteredLights.ALL);
         all.addAll(ShadowSettings.ALL);
         all.addAll(DisplayTransform.ALL);

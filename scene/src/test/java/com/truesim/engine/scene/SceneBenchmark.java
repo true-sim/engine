@@ -250,6 +250,7 @@ class SceneBenchmark {
                         List.of(renderables.materials(rocks[r]).getFirst() == GRANITE ? GRASS : GRANITE));
                 }
             });
+            fixedSteps(graph, slots, tasks, scene, renderables, sync, cameraView, camera, rocks, placed);
             if (device.primitiveIds()) {
                 port.replace(new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
                     VK_FORMAT_D32_SFLOAT));
@@ -265,6 +266,120 @@ class SceneBenchmark {
             sync.close();
             particles.close();
         }
+    }
+
+    /** Frames measured per fixed-step scenario: enough of both kinds, steps and none, at 144 frames to 60 steps. */
+    private static final int STEP_FRAMES = 240;
+
+    /**
+     * D122: the 30,000 rocks moved in fixed steps (60 a second, every rock every step, on an engine clock followed by the
+     * sync) while frames run at 144 a second of simulated time, drawn between steps on the GPU, on the CPU, or not at
+     * all. Prints per kind of frame (with a step, without) the median of the steps (moves, transforms, capture) and of
+     * the sync, the bytes uploaded per frame with a step, the GPU time of the blend pass, the memory per moving
+     * instance, and what the main thread allocated.
+     */
+    private static void fixedSteps(FrameGraph graph, FrameSlots slots, TaskScheduler tasks, SceneGraph scene,
+        Renderables renderables, SceneSync sync, RenderView cameraView, Camera camera, long[] rocks, double[] placed) {
+        if (!"30,000 rocks in fixed steps".contains(SCENARIO) && !SCENARIO.contains("fixed steps")) {
+            return;
+        }
+        com.truesim.engine.app.Application world = new com.truesim.engine.app.Application() {
+            @Override
+            public void configure(com.truesim.engine.app.AppConfig app) {
+                app.defaults(com.truesim.engine.app.Engine.FRAME_RATE, 10_000);
+            }
+
+            @Override
+            public void fixedUpdate(com.truesim.engine.app.Step step) {
+                double up = 0.01 * (step.tick() % 7);
+                for (int r = 0; r < ROCKS; r++) {
+                    scene.setTranslation(rocks[r], placed[3 * r], placed[3 * r + 1] + up, placed[3 * r + 2]);
+                }
+            }
+        };
+        graph.timings(true);
+        try (com.truesim.engine.app.Engine engine = com.truesim.engine.app.Engine.create(world)) {
+            com.truesim.engine.app.Clock clock = engine.addClock("rocks");
+            sync.follow(clock);
+            long[] now = {0};
+            int held = 0; // motion records while drawn on the GPU
+            for (com.truesim.engine.render.Interpolation mode : com.truesim.engine.render.Interpolation.values()) {
+                sync.interpolation(mode);
+                long[] steps = new long[STEP_FRAMES];
+                long[] syncs = new long[STEP_FRAMES];
+                long[] allocated = new long[STEP_FRAMES];
+                long[] uploaded = new long[STEP_FRAMES];
+                boolean[] stepped = new boolean[STEP_FRAMES];
+                double gpuBlend = 0;
+                int gpuFrames = 0;
+                for (int frame = -144; frame < STEP_FRAMES; frame++) { // a second to warm: the first interpolated
+                    // frames allocated about 63 KB once (twice, one per frame slot), then never again
+                    long bytes = THREADS.getCurrentThreadAllocatedBytes();
+                    int slot = graph.beginFrame();
+                    slots.begin(slot);
+                    tasks.drainCompleted();
+                    long t0 = System.nanoTime();
+                    now[0] += 1_000_000_000L / 144;
+                    engine.stepAt(now[0]); // FIXED: the rocks moved, the transforms, the moves captured
+                    long t1 = System.nanoTime();
+                    scene.update();
+                    renderables.update();
+                    sync.update();
+                    long t2 = System.nanoTime();
+                    long upload = (long) sync.gpu().pendingCount() * (GpuScene.INSTANCE_BYTES + 4)
+                        + (long) sync.gpu().motion().pendingCount()
+                        * (com.truesim.engine.render.InstanceMotion.RECORD_BYTES + 4);
+                    cameraView.set(camera, 1, MeshletRenderer.MODE_LIT);
+                    graph.submit(0, 0);
+                    slots.end();
+                    if (frame >= 0) {
+                        steps[frame] = t1 - t0;
+                        syncs[frame] = t2 - t1;
+                        stepped[frame] = clock.stepsLastFrame() > 0;
+                        uploaded[frame] = upload;
+                        allocated[frame] = THREADS.getCurrentThreadAllocatedBytes() - bytes;
+                        com.truesim.engine.graph.GpuTimings timings = graph.timings();
+                        for (int p = 0; timings != null && p < timings.count(); p++) {
+                            if (timings.pass(p).equals("interpolation")) {
+                                gpuBlend += timings.millis(p);
+                                gpuFrames++;
+                            }
+                        }
+                    }
+                }
+                held = Math.max(held, sync.gpu().motion().highWater());
+                System.out.printf(Locale.ROOT, "  30,000 rocks in fixed steps, %-4s frames with a step: steps %7.3f "
+                    + "sync %7.3f ms, %,d bytes uploaded; without: steps %7.3f sync %7.3f ms, %,d bytes; blend pass "
+                    + "%.4f ms GPU; %,d bytes allocated (median), %,d max%n", mode,
+                    median(steps, stepped, true) / 1e6, median(syncs, stepped, true) / 1e6,
+                    median(uploaded, stepped, true), median(steps, stepped, false) / 1e6,
+                    median(syncs, stepped, false) / 1e6, median(uploaded, stepped, false),
+                    gpuFrames == 0 ? 0 : gpuBlend / gpuFrames, median(allocated, stepped, null),
+                    Arrays.stream(allocated).max().orElse(0));
+            }
+            System.out.printf(Locale.ROOT, "  interpolation's memory per moving instance: %d bytes on the GPU (a motion "
+                + "record; %,d records in the GPU run), %d bytes on the CPU per drawn instance (two poses in doubles)%n",
+                com.truesim.engine.render.InstanceMotion.RECORD_BYTES, held, 2 * 10 * 8);
+            sync.interpolation(com.truesim.engine.render.Interpolation.OFF);
+        }
+        graph.timings(false);
+    }
+
+    /** The median of {@code values} over the frames whose {@code stepped} is {@code which} (null: all). */
+    private static long median(long[] values, boolean[] stepped, Boolean which) {
+        long[] kept = new long[values.length];
+        int n = 0;
+        for (int i = 0; i < values.length; i++) {
+            if (which == null || stepped[i] == which) {
+                kept[n++] = values[i];
+            }
+        }
+        if (n == 0) {
+            return 0;
+        }
+        long[] sorted = Arrays.copyOf(kept, n);
+        Arrays.sort(sorted);
+        return sorted[n / 2];
     }
 
     /** A rock resting on the terrain: half sunk, scaled 0.5 to 3, turned at random, ahead of the camera. */
