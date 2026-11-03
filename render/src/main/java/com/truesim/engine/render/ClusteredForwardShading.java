@@ -9,7 +9,8 @@ import java.util.Objects;
 
 /**
  * The scene shaded as it is drawn: provides {@link Keys#SCENE_COLOR} and {@link Keys#SCENE_DEPTH} from one
- * {@link SceneDraw} of its {@link SceneView}, the size of the view's port, with {@link SurfaceOutput#shaded shaded} output, each fragment lit by the
+ * {@link SceneDraw} of its {@link SceneView}, the size of the view's port, with {@link SurfaceOutput#shaded shaded} output
+ * (and the {@link SurfaceOutputs surface outputs} where a technique of the view asks for them), each fragment lit by the
  * lights the frame's {@link Keys#LIGHT_LIST} gives it (the sun without one). Simple, and each draw shades its own fragments, covered later or not. {@code graph.replace} swaps
  * it for another shading technique ({@link VisibilityBufferShading}).
  *
@@ -70,18 +71,24 @@ public final class ClusteredForwardShading implements Technique {
 
     @Override
     public List<Key<?>> provides() {
-        return List.of(Keys.SCENE_COLOR, Keys.SCENE_DEPTH);
+        return PROVIDES;
     }
+
+    /** The scene's color and depth, and its surface outputs ({@link SurfaceOutputs}: written only when asked for). */
+    static final List<Key<?>> PROVIDES = List.of(Keys.SCENE_COLOR, Keys.SCENE_DEPTH, Keys.SURFACE_NORMAL,
+        Keys.SURFACE_MATERIAL, Keys.SURFACE_REFLECTANCE);
 
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
         view.checkBuilding(g, this);
-        SceneDraw draw = new SceneDraw(geometry, view.view(), null, SurfaceOutput.shaded(colorFormat, clear),
+        boolean surfaces = SurfaceOutputs.wanted(g);
+        SceneDraw draw = new SceneDraw(geometry, view.view(), null, SurfaceOutput.shaded(colorFormat, clear, surfaces),
             depthFormat, view.width(), view.height(), (occlusion != null ? occlusion
             : g.setting(RenderSettings.OCCLUSION)) && view.view().options().occlusion());
         SceneDraw.Targets targets = g.request(draw);
         g.provide(Keys.SCENE_COLOR, targets.color());
         g.provide(Keys.SCENE_DEPTH, targets.depth());
+        SurfaceOutputs.provide(g, targets.surfaces(), view.width(), view.height());
     }
 }

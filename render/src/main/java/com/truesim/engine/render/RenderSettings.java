@@ -45,7 +45,10 @@ public final class RenderSettings {
     public static final Setting<Integer> STREAM_BUDGET = Setting.integer("render.streamBudget", 64, 0, 4096,
         "MiB a frame of streamed meshes and textures copied on the transfer queue (0: in the frame)");
 
-    /** Every render setting: these, the light clusters', the shadows' and the display transform's. */
+    /**
+     * Every render setting: these, transparency's and screen-space reflections', the light clusters', the shadows' and
+     * the display transform's.
+     */
     public static final List<Setting<?>> ALL = all();
 
     private RenderSettings() {
@@ -60,6 +63,7 @@ public final class RenderSettings {
         all.add(STREAM_BUDGET);
         all.add(Transparency.MODE);
         all.add(Transparency.SORTED_RUNS);
+        all.addAll(ScreenSpaceReflections.ALL);
         all.addAll(ClusteredLights.ALL);
         all.addAll(ShadowSettings.ALL);
         all.addAll(DisplayTransform.ALL);

@@ -85,6 +85,18 @@ public float3 brdfTable(IndirectLight* t, float nv, float roughness)
  */
 public float3 indirectLight(IndirectLight* t, Surface s, float3 toViewer)
 {
+    float3 reflectance;
+    return indirectLightWeighed(t, s, toViewer, reflectance);
+}
+
+/**
+ * indirectLight, also giving what the environment's reflection along the mirror direction (reflect(-toViewer,
+ * s.normal), at s.roughness: specularLight) is weighed by in the result, its `reflectance`: the lookup table's scale
+ * and bias, the occlusion, and what a sheen and a clear coat over it let through. Screen-space reflections replace
+ * that term by it (surfaces.slang). 0 where the reflection bends from the mirror direction (anisotropy).
+ */
+public float3 indirectLightWeighed(IndirectLight* t, Surface s, float3 toViewer, out float3 reflectance)
+{
     float3 n = s.normal;
     float nv = saturate(dot(n, toViewer));
     float3 reflectedNormal = n;
@@ -122,11 +134,14 @@ public float3 indirectLight(IndirectLight* t, Surface s, float3 toViewer)
         diffuse = lerp(diffuse, through, s.diffuseTransmission);
     }
     float3 color = (diffuse + specular) * s.occlusion;
+    reflectance = s.anisotropy > 0 ? float3(0) : fssEss * s.occlusion;
     if (any(s.sheenColor > 0))
     {
         float3 sheenLut = brdfTable(t, nv, s.sheenRoughness);
         float albedo = min(sheenLut.z, 1.0);
-        color = color * (1 - max(s.sheenColor.r, max(s.sheenColor.g, s.sheenColor.b)) * albedo)
+        float base = 1 - max(s.sheenColor.r, max(s.sheenColor.g, s.sheenColor.b)) * albedo;
+        reflectance *= base;
+        color = color * base
             + s.sheenColor * sheenLight(t, reflect(-toViewer, n), s.sheenRoughness) * albedo * s.occlusion;
     }
     if (s.clearcoat > 0)
@@ -137,6 +152,7 @@ public float3 indirectLight(IndirectLight* t, Surface s, float3 toViewer)
         float3 coat = specularLight(t, reflect(-toViewer, s.clearcoatNormal), s.clearcoatRoughness)
             * (0.04 * coatLut.x + coatLut.y) * s.occlusion;
         color = color * (1 - s.clearcoat * fresnel) + s.clearcoat * coat;
+        reflectance *= 1 - s.clearcoat * fresnel;
     }
     return color;
 }

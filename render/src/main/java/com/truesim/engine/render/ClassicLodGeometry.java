@@ -400,6 +400,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                     : NO_COLOR));
             }
         }
+        targets.attachSurfaces(pass, load);
         if (load) {
             pass.attachDepth(targets.depth(), Load.LOAD, Store.STORE);
         } else {
@@ -417,7 +418,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         IndirectInputs.Set indirect = targets.indirect();
         Pipeline[] pipeline = switch (kind) {
             case DEPTH -> geometry(materials, drawDepth, ShadingPipelines.DEPTH, selection);
-            case SHADED -> typed(materials, ShadingPipelines.COLOR, selection.categories());
+            case SHADED -> typed(materials, draw.output().surfaces() && wantSurfaces() ? ShadingPipelines.COLOR_SURFACES
+                : ShadingPipelines.COLOR, selection.categories());
             case IDS -> geometry(materials, drawIds, ShadingPipelines.IDS, selection);
         };
         pass.record(ctx -> {
@@ -427,6 +429,12 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             record(ctx, pipeline, selection, lights == null ? 0 : ctx.address(lights), list,
                 indirect == null ? 0 : ctx.address(indirect.table()));
         });
+    }
+
+    /** Has the renderer make the surface outputs' pipelines ahead from now on; true. */
+    private boolean wantSurfaces() {
+        renderer.wantSurfaces();
+        return true;
     }
 
     /**
@@ -496,7 +504,9 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             int rasters = materials.binDrawn(category);
             for (int list = 0; list < LISTS; list++) {
                 int bin = list % MeshletRenderer.BINS;
-                if ((rasters & 1 << bin) == 0 || target != ShadingPipelines.COLOR && bin != MeshletRenderer.BIN_BLENDED) {
+                boolean colorTarget = target == ShadingPipelines.COLOR || target == ShadingPipelines.COLOR_SURFACES;
+                if ((rasters & 1 << bin) == 0 || !colorTarget && bin != MeshletRenderer.BIN_BLENDED
+                    || target == ShadingPipelines.COLOR_SURFACES && bin == MeshletRenderer.BIN_BLENDED) {
                     continue;
                 }
                 parts[list * categories + category] = shading.get(forwardKey(type, features, list, target));
@@ -515,7 +525,9 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         int bin = list % MeshletRenderer.BINS;
         boolean masked = bin == MeshletRenderer.BIN_MASKED || bin == MeshletRenderer.BIN_BLENDED;
         return new ShadingPipelines.Key("shaders/classic/draw.spv", "classicVertexMain", false, type.forwardShader(),
-            type.name() + (weighted ? "BlendedMain" : masked ? "MaskedMain" : "FragmentMain"), features, type.geometry(),
+            type.name() + (weighted ? "BlendedMain" : target == ShadingPipelines.COLOR_SURFACES
+                ? (masked ? "MaskedSurfaceMain" : "SurfaceMain") : masked ? "MaskedMain" : "FragmentMain"), features,
+            type.geometry(),
             (bin == MeshletRenderer.BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED)
                 | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0),
             target, DRAW_PUSH);

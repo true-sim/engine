@@ -36,11 +36,20 @@ public record SceneBehind(Image color, ViewPort view) implements Request<Image> 
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Image build(GraphBuilder g) {
+        return chain(g, color, view, "scene behind " + color.name());
+    }
+
+    /**
+     * A copy of {@code color}'s render region in {@code view} (nullable: all of it) with a mip chain, each level
+     * averaging the one below, named {@code name}: as the scene behind is made, for others sampling the scene blurred
+     * by a footprint (screen-space reflections' cones).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    static Image chain(GraphBuilder g, Image color, ViewPort view, String name) {
         Pipeline pipeline = g.computeProgram("shaders/blocks/behind.spv", "behindMain", BehindPush.BYTES);
-        Image behind = g.create("scene behind " + color.name(), ImageDesc.of(FORMAT, color.width(), color.height())
-            .fullMips());
+        Image behind = g.create(name, ImageDesc.of(FORMAT, color.width(), color.height()).fullMips());
         for (int mip = 0; mip < behind.mips(); mip++) {
-            GraphBuilder.PassBuilder pass = g.pass("scene behind " + color.name() + ", level " + mip);
+            GraphBuilder.PassBuilder pass = g.pass(name + ", level " + mip);
             if (view != null) {
                 pass.region(view);
             }

@@ -1667,6 +1667,35 @@ class FrameGraphTest {
     }
 
     @Test
+    void aTechniqueSeesTheFramesAndItsViewsTechniques() {
+        // A technique deciding what to build by who else is there (a shading pass writing outputs a reader asks for):
+        // it sees the frame's techniques and its own view's, switched ones as themselves, built or not; not other views'.
+        Technique idle = new Fill(B, SIZE, 0, 0, 1, 1); // never built: nothing needs B
+        Technique switched = new Fill(Key.image("test.switched"), SIZE, 0, 1, 0, 1);
+        Technique elsewhere = new Fill(OUT, SIZE, 1, 0, 0, 1);
+        List<Technique> seen = new java.util.ArrayList<>();
+        Technique looking = new Technique() {
+            @Override
+            public List<Key<?>> provides() {
+                return List.of(OUT);
+            }
+
+            @Override
+            public void build(GraphBuilder g) {
+                seen.addAll(g.techniquesInView());
+                new Fill(OUT, SIZE, 1, 1, 1, 1).build(g);
+            }
+        };
+        com.truesim.engine.settings.Setting<Boolean> on = com.truesim.engine.settings.Setting.bool("test.seen", true,
+            "switches a technique");
+        graph.add(idle);
+        graph.addView("main").add(looking).add(switched.when(on)).output(OUT, output);
+        graph.addView("side").add(elsewhere);
+        frame();
+        assertThat(seen).containsExactlyInAnyOrder(idle, looking, switched);
+    }
+
+    @Test
     void aReaderTakesAKeyAsTheTechniquesBeforeItLeftIt() {
         // As a sky (stage 10) reads the opaque depth (B) while transparency drawn as opaque (stage 20) writes the
         // depth and the color (A) after it. Requiring the depth's last version needs the later technique first: a

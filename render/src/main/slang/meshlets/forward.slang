@@ -154,6 +154,64 @@ public float4 shadeTyped<M : IMaterial>(VertexOut s, uint2 pixel)
         push.lights, pixel, FEATURES, behind(s.instance), push.indirect);
 }
 
+/** A fragment's color and its surface outputs (surfaces.slang), for passes a technique asked them of. */
+public struct ShadedSurface
+{
+    public float4 color : SV_Target0;
+    public uint normal : SV_Target1;      // view space, packNormal's
+    public float4 material : SV_Target2;  // F0, perceptual roughness
+    public float4 reflectance : SV_Target3;
+};
+
+/** `color` with its `surface` as the targets take them, the normal in the view's space. */
+public ShadedSurface surfaceTargets(float4 color, SurfaceOut surface)
+{
+    ShadedSurface out;
+    out.color = color;
+    out.normal = packNormal(toView(viewAxes(push.view[0].viewProjection), surface.normal));
+    out.material = float4(saturate(surface.f0), saturate(surface.roughness));
+    out.reflectance = float4(saturate(surface.reflectance), 1);
+    return out;
+}
+
+/** shadeTyped, with the surface outputs. */
+public ShadedSurface shadeTypedSurface<M : IMaterial>(VertexOut s, uint2 pixel)
+{
+    float4 uvs = float4(s.uv, s.uv1);
+    discardHoles<M>(s, ddx(uvs), ddy(uvs));
+    SurfaceOut surface;
+    float4 color = shadeMaterialSurface<M, NoRays>(NoRays(), push.view[0], s, push.scene[0].materials, ddx(uvs),
+        ddy(uvs), push.lights, pixel, FEATURES, behind(s.instance), push.indirect, surface);
+    return surfaceTargets(color, surface);
+}
+
+/** typedFragment with the surface outputs. */
+public ShadedSurface typedFragmentSurface<M : IMaterial>(VertexOut in)
+{
+    return shadeTypedSurface<M>(in, uint2(in.position.xy));
+}
+
+/** typedMasked with the surface outputs. */
+public ShadedSurface typedMaskedSurface<M : IMaterial>(VertexOut in, bool front)
+{
+    discardMasked(push.scene[0].materials, in, front);
+    return shadeTypedSurface<M>(in, uint2(in.position.xy));
+}
+
+/** typedLean with the surface outputs. */
+public ShadedSurface typedLeanSurface<M : IMaterial>(LeanVertex in, uint primitive, float3 bary)
+{
+    return shadeTypedSurface<M>(lean(in, primitive, bary), uint2(in.position.xy));
+}
+
+/** typedLeanMasked with the surface outputs. */
+public ShadedSurface typedLeanMaskedSurface<M : IMaterial>(LeanVertex in, uint primitive, float3 bary, bool front)
+{
+    VertexOut s = lean(in, primitive, bary);
+    discardMasked(push.scene[0].materials, s, front);
+    return shadeTypedSurface<M>(s, uint2(in.position.xy));
+}
+
 /** Discards the fragment of `s` where type M's keep() makes a hole, if the type has the hook (GEOMETRY). */
 public void discardHoles<M : IMaterial>(VertexOut s, float4 dx, float4 dy)
 {
