@@ -11,8 +11,9 @@ import com.truesim.scene.audio.BusLayout;
 import org.junit.jupiter.api.Test;
 
 /**
- * The ambisonics bus (§6 step 18): the encoding is orthonormal, sources past the cap are heard from their direction,
- * the decode runs once a block per field however many voices it carries, crossing the cap does not click.
+ * The ambisonics bus (§6 step 18): the encoding is orthonormal, sources past the cap are heard from their direction
+ * (ITD, ILD broadband and per band), the decode runs once a block per field however many voices it carries, crossing
+ * the cap does not click.
  */
 class AmbisonicsTest {
 
@@ -91,14 +92,92 @@ class AmbisonicsTest {
             double fieldIld = ild(outs[1]);
             System.out.printf("%d°: ITD %.0f / %.0f samples, ILD %.1f / %.1f dB%n", degrees, directItd, fieldItd, directIld,
                 fieldIld);
-            // a third-order field narrows the widest ITDs (43 against 36 samples straight to the side)
-            assertThat(fieldItd).as("ITD at %s°", degrees).isCloseTo(directItd, within(8.0)); // 0.17 ms
-            assertThat(fieldIld).as("ILD at %s°", degrees).isCloseTo(directIld, within(6.0)); // narrower too
+            assertThat(fieldItd).as("ITD at %s°", degrees).isCloseTo(directItd, within(5.0)); // 0.1 ms
+            // broadband, so it also holds the decode's balance of lows and highs: before MagLS about half in dB
+            assertThat(fieldIld).as("ILD at %s°", degrees).isCloseTo(directIld, within(1.5));
             if (Math.abs(degrees) >= 30) {
                 assertThat(Math.signum(fieldIld)).isEqualTo(Math.signum(directIld));
                 assertThat(Math.signum(fieldItd)).isEqualTo(Math.signum(directItd));
             }
         }
+    }
+
+    /**
+     * Per octave band (500 Hz, 2 kHz, 6 kHz), white noise straight to the right and at 45°: the field's ILD within 1.5,
+     * 1.5 and 5 dB of the direct HRTF's, and the near ear's level within 3 dB. Fitting the complex responses at every
+     * frequency (with max-rE weights) had the near ear 11 dB too loud at 500 Hz and 7.5 dB too quiet at 6 kHz, the
+     * ILDs off by 4.4 dB at 2 kHz and 6.7 dB at 6 kHz straight to the side; with MagLS 1.3, 0.6 and 4.1 dB there.
+     */
+    @Test
+    void theFieldKeepsEachBandsLevelDifference() {
+        double[] tolerance = {1.5, 1.5, 5};
+        for (int degrees : new int[] {90, 45}) {
+            double[][] direct = bandLevels(whiteNoiseFrom(16, degrees));
+            double[][] field = bandLevels(whiteNoiseFrom(0, degrees));
+            for (int b = 0; b < BANDS.length; b++) {
+                double directIld = direct[0][b] - direct[1][b];
+                double fieldIld = field[0][b] - field[1][b];
+                System.out.printf("%d°, %.0f Hz: ILD %.1f / %.1f dB, near ear %+.1f dB%n", degrees, BANDS[b][2],
+                    directIld, fieldIld, field[1][b] - direct[1][b]);
+                assertThat(fieldIld).as("ILD at %s°, %s Hz", degrees, BANDS[b][2])
+                    .isCloseTo(directIld, within(tolerance[b]));
+                assertThat(field[1][b]).as("near (right) ear at %s°, %s Hz", degrees, BANDS[b][2])
+                    .isCloseTo(direct[1][b], within(3.0));
+            }
+        }
+    }
+
+    /** Octave bands: from, to, centre (Hz). */
+    private static final double[][] BANDS = {{354, 707, 500}, {1414, 2828, 2000}, {4243, 8485, 6000}};
+
+    /** A second of white noise at 2 m, {@code degrees} clockwise from ahead, with {@code cap} binaural voices. */
+    private static float[] whiteNoiseFrom(int cap, int degrees) {
+        float[] s = new float[RATE];
+        for (int i = 0; i < s.length; i++) {
+            s[i] = (float) (0.1 * (Hash.random(7, i) * 2 - 1));
+        }
+        double a = Math.toRadians(degrees);
+        try (AudioRenderer r = renderer(cap)) {
+            r.commands().play(0, Clips.mono(RATE, s), 0, 0, 1, 1, Bus.SFX, HrtfTest.SPATIAL_HRTF, 0, 1);
+            r.commands().spatial(0, (float) (2 * Math.sin(a)), 0, (float) (-2 * Math.cos(a)), 1, HrtfTest.FLAT,
+                false);
+            float[] out = new float[RATE];
+            r.render(out, 0, RATE / 4); // past the filters' start
+            r.render(out, 0, RATE / 2);
+            return out;
+        }
+    }
+
+    /** The level (dB) of each ear in each band: averaged spectra of half-overlapping Hann windows of 2,048 frames. */
+    private static double[][] bandLevels(float[] out) {
+        int n = 2048;
+        Fft fft = new Fft(n);
+        float[] frame = new float[n];
+        float[] re = new float[n / 2 + 1];
+        float[] im = new float[n / 2 + 1];
+        double[][] level = new double[2][BANDS.length];
+        for (int start = 0; start + n <= out.length / 2; start += n / 2) {
+            for (int ear = 0; ear < 2; ear++) {
+                for (int i = 0; i < n; i++) {
+                    frame[i] = (float) ((0.5 - 0.5 * Math.cos(2 * Math.PI * i / n)) * out[2 * (start + i) + ear]);
+                }
+                fft.forward(frame, re, im);
+                for (int k = 0; k <= n / 2; k++) {
+                    double f = (double) k * RATE / n;
+                    for (int b = 0; b < BANDS.length; b++) {
+                        if (f >= BANDS[b][0] && f < BANDS[b][1]) {
+                            level[ear][b] += re[k] * re[k] + im[k] * im[k];
+                        }
+                    }
+                }
+            }
+        }
+        for (int ear = 0; ear < 2; ear++) {
+            for (int b = 0; b < BANDS.length; b++) {
+                level[ear][b] = 10 * Math.log10(level[ear][b]);
+            }
+        }
+        return level;
     }
 
     /** The lag (samples) of the right ear behind the left: the largest cross-correlation of the two within 1 ms. */

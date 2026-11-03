@@ -388,7 +388,8 @@ class AmbisonicsIldProbe {
 
     /**
      * SH coefficients [ear][channel][2 * bin (+1 imaginary)]: weighted least squares over the measured directions,
-     * of the complex responses below {@code cutoff} and of the magnitudes above (phase from the bin below's decode).
+     * of the complex responses below {@code cutoff} and of the magnitudes above (phase from the bin below's decode,
+     * turned by a delay of the middle interaural delay, as {@link Ambisonics} does).
      */
     static double[][][] decode(Hrtf h, double[] w, double[][] re, double[][] im, int order, double cutoff,
             boolean maxRe, int m) {
@@ -439,6 +440,10 @@ class AmbisonicsIldProbe {
                             pr += y[i][a] * c[ear][a][2 * (k - 1)];
                             pi += y[i][a] * c[ear][a][2 * (k - 1) + 1];
                         }
+                        double turn = -2 * Math.PI * (HrtfSpatializer.BASE_DELAY + h.maxDelay() / 2 + 8) / m;
+                        double qr = pr * Math.cos(turn) - pi * Math.sin(turn);
+                        pi = pr * Math.sin(turn) + pi * Math.cos(turn);
+                        pr = qr;
                         double mag = Math.hypot(hr, hi);
                         double phase = Math.atan2(pi, pr);
                         tr[i] = mag * Math.cos(phase);

@@ -1,17 +1,21 @@
 package com.truesim.engine.audio;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.common.math.Maths;
 import java.util.Arrays;
 
 /**
  * The ambisonics bus (§2.9): HRTF voices past the cap are encoded into a third-order ambisonic field (16 real
  * spherical harmonics, orthonormal, of the direction in the listener's frame: positions are listener-relative, so
  * the field needs no rotation) and the field is decoded to both ears once a block, by convolving each harmonic with
- * an SH-domain filter pair derived from the same {@link Hrtf}: for harmonic n and ear e, the sum over the measured
- * directions d of w_d g_l Y_n(d) h_e,d, where w_d is the direction's share of the sphere (a third of its triangles'
- * solid angles), g_l the max-rE weight of the harmonic's order (fewer side lobes) and h_e,d the ear's filter delayed
- * by its interaural delay; scaled so the decoded field is as loud, averaged over the directions, as the direct HRTF.
- * The decode costs 16 forward FFTs, 32 partition products and 2 inverse FFTs a block, however many voices the field
+ * an SH-domain filter pair derived from the same {@link Hrtf}: per frequency, the 16 coefficients whose field best
+ * matches each ear's filter h_e,d (delayed by its interaural delay) over the measured directions d, weighted by each
+ * direction's share of the sphere (a third of its triangles' solid angles); below {@link #CUTOFF} the complex
+ * response, above it the magnitude only (MagLS), its phase free; scaled so the decoded field is as loud, averaged
+ * over the directions, as the direct HRTF. Fitting the complex response at all frequencies (with max-rE weights, as
+ * before) lost the highs at third order (the phase of h_e,d needs higher orders there) and, once scaled, raised the
+ * lows: about 11 dB too loud at 500 Hz and 7.5 dB too quiet at 6 kHz at the near ear, which halved the broadband ILD.
+ * The filters are as long as before (the same partitions), so the decode costs 16 forward FFTs, 32 partition products and 2 inverse FFTs a block, however many voices the field
  * carries; each voice costs 16 gains a sample.
  *
  * <p>One field per bus that has such voices (their bus volumes and effects stay), up to {@link #fields()}; a field
@@ -25,13 +29,19 @@ public final class Ambisonics {
     public static final int ORDER = 3;
     /** Harmonics: (order + 1)². */
     public static final int CHANNELS = (ORDER + 1) * (ORDER + 1);
-    /** Max-rE weights per order for order 3 (Zotter and Frank). */
-    static final float[] MAX_RE = {1, 0.861136f, 0.611985f, 0.304746f};
-    private static final int[] ORDERS = {0, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3};
+    /**
+     * Where the decode's fit turns from complex responses to magnitudes, Hz: near where a third-order field stops
+     * carrying the phase of the head (N c / (2 pi r) is 1.9 kHz for a radius of 8.75 cm); of 1.5, 2 and 3 kHz, 1.5 kept
+     * the ILDs and levels closest to the direct HRTF ({@code AmbisonicsIldProbe}).
+     */
+    static final double CUTOFF = 1_500;
+    /** Taps past the middle interaural delay around which the magnitude fit centres the highs. */
+    private static final int CENTRE = 8;
+    /** Taps faded out at the end of each SH-domain filter. */
+    private static final int FADE = 16;
 
     private final int block;
     private final int fields;
-    private final int length;
     private final int parts;
     private final int bins;
     private final Fft fft;
@@ -56,7 +66,7 @@ public final class Ambisonics {
     public Ambisonics(Hrtf hrtf, int block, int fields) {
         this.block = block;
         this.fields = fields;
-        length = hrtf.taps() + (int) Math.ceil(hrtf.maxDelay()) + 2 * HrtfSpatializer.BASE_DELAY + 1;
+        int length = hrtf.taps() + (int) Math.ceil(hrtf.maxDelay()) + 2 * HrtfSpatializer.BASE_DELAY + 1;
         parts = (length + block - 1) / block;
         bins = block + 1;
         fft = new Fft(2 * block);
@@ -77,9 +87,14 @@ public final class Ambisonics {
         filters(hrtf);
     }
 
-    /** The SH-domain filter pairs, transformed by partition. */
+    /**
+     * The SH-domain filter pairs, transformed by partition: designed per frequency bin as a weighted least-squares fit
+     * over the measured directions, of the complex responses below {@link #CUTOFF} and of their magnitudes above, with
+     * each direction's phase taken from the fit of the bin below (MagLS, Schoerkhuber, Zaunschirm and Hoeldrich 2018).
+     */
     private void filters(Hrtf hrtf) {
         int n = hrtf.count();
+        int span = parts * block;
         double[] share = new double[n];
         for (int t = 0; t < hrtf.triangles(); t++) {
             int a = hrtf.corner(t, 0);
@@ -90,42 +105,125 @@ public final class Ambisonics {
             share[b] += angle / 3;
             share[c] += angle / 3;
         }
-        float[][] sh = new float[2][CHANNELS * length];
-        float[] taps = new float[hrtf.taps()];
-        float[] delayed = new float[parts * block];
-        float[] kernel = new float[2 * HrtfSpatializer.BASE_DELAY + 2];
-        float[] y = new float[CHANNELS];
-        float[][] direct = new float[n * 2][];
+        // the fit: c = (Y^T W Y)^-1 Y^T W h, Y the harmonics of the directions, W their shares
+        float[] y = new float[n * CHANNELS];
+        double[][] gram = new double[CHANNELS][CHANNELS];
         for (int i = 0; i < n; i++) {
-            encode((float) hrtf.direction(i, 0), (float) hrtf.direction(i, 1), (float) hrtf.direction(i, 2), y, 0);
-            for (int ear = 0; ear < 2; ear++) {
+            encode((float) hrtf.direction(i, 0), (float) hrtf.direction(i, 1), (float) hrtf.direction(i, 2), y,
+                i * CHANNELS);
+            for (int a = 0; a < CHANNELS; a++) {
+                for (int b = 0; b < CHANNELS; b++) {
+                    gram[a][b] += share[i] * y[i * CHANNELS + a] * y[i * CHANNELS + b];
+                }
+            }
+        }
+        double[][] inverse = invert(gram);
+        float[] solve = new float[CHANNELS * n];
+        for (int a = 0; a < CHANNELS; a++) {
+            for (int i = 0; i < n; i++) {
+                double s = 0;
+                for (int b = 0; b < CHANNELS; b++) {
+                    s += inverse[a][b] * y[i * CHANNELS + b];
+                }
+                solve[a * n + i] = (float) (s * share[i]);
+            }
+        }
+        // each ear's filters (delayed by their interaural delays) as spectra, then the fit bin by bin
+        int size = Integer.highestOneBit(4 * span - 1) << 1;
+        int spectrum = size / 2 + 1;
+        int above = (int) Math.ceil(CUTOFF * size / hrtf.rate());
+        Fft design = new Fft(size);
+        // above the cutoff each bin takes the phase of the fit below, turned by the phase a delay of `centre` adds:
+        // the magnitude fit's highs then come around that delay, inside the filters, not around time 0 (wrapped)
+        double centre = HrtfSpatializer.BASE_DELAY + hrtf.maxDelay() / 2 + CENTRE;
+        double stepRe = Maths.cos(2 * Maths.PI * centre / size);
+        double stepIm = -Maths.sin(2 * Maths.PI * centre / size);
+        float[] taps = new float[hrtf.taps()];
+        float[] delayed = new float[span];
+        float[] kernel = new float[2 * HrtfSpatializer.BASE_DELAY + 2];
+        float[] padded = new float[size];
+        float[] re = new float[spectrum];
+        float[] im = new float[spectrum];
+        float[] hRe = new float[n * spectrum];
+        float[] hIm = new float[n * spectrum];
+        double[] cRe = new double[CHANNELS * spectrum];
+        double[] cIm = new double[CHANNELS * spectrum];
+        double[] tRe = new double[n];
+        double[] tIm = new double[n];
+        float[][] sh = new float[2][CHANNELS * span];
+        float[][] direct = new float[n * 2][];
+        for (int ear = 0; ear < 2; ear++) {
+            for (int i = 0; i < n; i++) {
                 for (int t = 0; t < taps.length; t++) {
                     taps[t] = hrtf.tap(i, ear, t);
                 }
                 HrtfSpatializer.shift(taps, hrtf.delay(i, ear) + HrtfSpatializer.BASE_DELAY, delayed, kernel);
-                direct[2 * i + ear] = Arrays.copyOf(delayed, length);
-                for (int ch = 0; ch < CHANNELS; ch++) {
-                    float g = (float) (share[i] * MAX_RE[ORDERS[ch]] * y[ch]);
-                    for (int t = 0; t < length; t++) {
-                        sh[ear][ch * length + t] += g * delayed[t];
+                direct[2 * i + ear] = delayed.clone();
+                System.arraycopy(delayed, 0, padded, 0, span);
+                design.forward(padded, re, im);
+                System.arraycopy(re, 0, hRe, i * spectrum, spectrum);
+                System.arraycopy(im, 0, hIm, i * spectrum, spectrum);
+            }
+            for (int k = 0; k < spectrum; k++) {
+                for (int i = 0; i < n; i++) {
+                    double hr = hRe[i * spectrum + k];
+                    double hi = hIm[i * spectrum + k];
+                    if (k < above) {
+                        tRe[i] = hr;
+                        tIm[i] = hi;
+                        continue;
                     }
+                    double pr = 0;
+                    double pi = 0;
+                    for (int a = 0; a < CHANNELS; a++) {
+                        pr += y[i * CHANNELS + a] * cRe[a * spectrum + k - 1];
+                        pi += y[i * CHANNELS + a] * cIm[a * spectrum + k - 1];
+                    }
+                    double advanced = pr * stepRe - pi * stepIm; // the phase a delay of `centre` adds a bin
+                    pi = pr * stepIm + pi * stepRe;
+                    pr = advanced;
+                    double magnitude = Math.sqrt(hr * hr + hi * hi);
+                    double fitted = Math.sqrt(pr * pr + pi * pi);
+                    tRe[i] = fitted > 0 ? magnitude * pr / fitted : magnitude;
+                    tIm[i] = fitted > 0 ? magnitude * pi / fitted : 0;
+                }
+                for (int a = 0; a < CHANNELS; a++) {
+                    double sr = 0;
+                    double si = 0;
+                    for (int i = 0; i < n; i++) {
+                        sr += solve[a * n + i] * tRe[i];
+                        si += solve[a * n + i] * tIm[i];
+                    }
+                    cRe[a * spectrum + k] = sr;
+                    cIm[a * spectrum + k] = k == 0 || k == spectrum - 1 ? 0 : si;
+                }
+            }
+            for (int a = 0; a < CHANNELS; a++) {
+                for (int k = 0; k < spectrum; k++) {
+                    re[k] = (float) cRe[a * spectrum + k];
+                    im[k] = (float) cIm[a * spectrum + k];
+                }
+                design.inverse(re, im, padded);
+                for (int t = 0; t < span; t++) { // a short fade at the end: the magnitude fit rings a little longer
+                    float fade = t < span - FADE ? 1 : (float) (span - t) / (FADE + 1);
+                    sh[ear][a * span + t] = padded[t] * fade;
                 }
             }
         }
         // as loud as the direct HRTF, averaged over the measured directions
         double decoded = 0;
         double wanted = 0;
-        float[] out = new float[length];
+        float[] out = new float[span];
         for (int i = 0; i < n; i++) {
-            encode((float) hrtf.direction(i, 0), (float) hrtf.direction(i, 1), (float) hrtf.direction(i, 2), y, 0);
             for (int ear = 0; ear < 2; ear++) {
                 Arrays.fill(out, 0);
                 for (int ch = 0; ch < CHANNELS; ch++) {
-                    for (int t = 0; t < length; t++) {
-                        out[t] += y[ch] * sh[ear][ch * length + t];
+                    float g = y[i * CHANNELS + ch];
+                    for (int t = 0; t < span; t++) {
+                        out[t] += g * sh[ear][ch * span + t];
                     }
                 }
-                for (int t = 0; t < length; t++) {
+                for (int t = 0; t < span; t++) {
                     decoded += out[t] * out[t];
                     wanted += direct[2 * i + ear][t] * direct[2 * i + ear][t];
                 }
@@ -137,8 +235,8 @@ public final class Ambisonics {
             for (int ch = 0; ch < CHANNELS; ch++) {
                 for (int p = 0; p < parts; p++) {
                     Arrays.fill(part, 0);
-                    for (int t = 0; t < block && p * block + t < length; t++) {
-                        part[t] = sh[ear][ch * length + p * block + t] * scale;
+                    for (int t = 0; t < block; t++) {
+                        part[t] = sh[ear][ch * span + p * block + t] * scale;
                     }
                     fft.forward(part, specRe, specIm);
                     int o = ((ear * CHANNELS + ch) * parts + p) * bins;
@@ -147,6 +245,44 @@ public final class Ambisonics {
                 }
             }
         }
+    }
+
+    /** The inverse of a small symmetric positive definite matrix (Gauss-Jordan with partial pivoting). */
+    private static double[][] invert(double[][] a) {
+        int n = a.length;
+        double[][] m = new double[n][2 * n];
+        for (int i = 0; i < n; i++) {
+            System.arraycopy(a[i], 0, m[i], 0, n);
+            m[i][n + i] = 1;
+        }
+        for (int col = 0; col < n; col++) {
+            int pivot = col;
+            for (int r = col + 1; r < n; r++) {
+                if (Math.abs(m[r][col]) > Math.abs(m[pivot][col])) {
+                    pivot = r;
+                }
+            }
+            double[] swap = m[col];
+            m[col] = m[pivot];
+            m[pivot] = swap;
+            double d = m[col][col];
+            for (int j = 0; j < 2 * n; j++) {
+                m[col][j] /= d;
+            }
+            for (int r = 0; r < n; r++) {
+                if (r != col) {
+                    double f = m[r][col];
+                    for (int j = 0; j < 2 * n; j++) {
+                        m[r][j] -= f * m[col][j];
+                    }
+                }
+            }
+        }
+        double[][] inverse = new double[n][n];
+        for (int i = 0; i < n; i++) {
+            System.arraycopy(m[i], n, inverse[i], 0, n);
+        }
+        return inverse;
     }
 
     /** The solid angle of the triangle of unit vectors a, b, c (Van Oosterom and Strackee). */
