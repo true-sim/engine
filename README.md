@@ -221,11 +221,15 @@ try (VulkanInstance instance = VulkanInstance.builder().applicationName("game").
   written straight through, for callers that wait for the GPU between frames.
 - **Records that change a few at a time:** a `RecordBuffer` is a device-local buffer of fixed-size records (any
   multiple of 16 bytes: instances, particles, game data per object). Changing one writes its bytes once into a list of
-  changes (`claim`, then the bytes in `changes()`; a record at most once per upload, from any thread once claimed); the
-  frame's first commands copy the list into the frame slot's upload buffer (`GpuBuffer.hostWritten`: write-combined,
-  or BAR memory where the GPU has it) and a compute pass scatters it. The CPU pays per record changed, frames in flight
-  keep no copies (the queue orders the scatter after the frames before), and shaders read device-local memory.
-  `GpuScene`'s instances are one.
+  changes (`claim`, then the bytes in `changes(entry)` at `offset(entry)`; a record at most once per upload, from any
+  thread once claimed); the frame's first commands copy the list into the frame slot's upload buffer
+  (`GpuBuffer.hostWritten`: write-combined, or BAR memory where the GPU has it) and a compute pass scatters it. The CPU
+  pays per record changed, frames in flight keep no copies (the queue orders the scatter after the frames before), and
+  shaders read device-local memory. `GpuScene`'s instances are one. `changeList(DIRECT, chunkBytes)` writes the
+  changes in place instead, into recycled chunks of GPU-visible host memory the scatter reads where they are: the
+  thread recording copies nothing (0.6 ms less at 100,000 changed instances), but the writers pay about as much more
+  and the scatter reads over the bus (0.2 ms more on an RX 9070 XT), so the copy stays the default
+  (`render.changeList`, `render.changeListChunk`; measured in docs/frame-graph-v2.md, phase 8).
 - **Work at the frame's start:** `FrameSlots.register(FrameStart)` records commands before every frame's passes (the
   frame graph calls `recordStart`); `FrameUploads` and `RecordBuffer` use it, and so may a game.
 

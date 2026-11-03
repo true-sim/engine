@@ -889,6 +889,35 @@ is released.
   131,000 triangles and a 2048 x 2048 texture with mips) take up to 1.78 ms of graphics-queue GPU time against a 0.77
   ms median, the uploads' copies and mips recorded in the frame; nothing over 11.1 ms. `StreamQueue` would move the
   copies (not the mips) to the transfer queue.
+- **The GPU change list measured (2026-11-03, `SceneBenchmark` "change list", RX 9070 XT and the Ryzen 9 9950X3D's
+  integrated GPU, 32 writer threads):** 100,000 rocks, 1,000 to 100,000 moving every frame (interpolation off) or
+  every 60 Hz fixed step at 144 frames a second (interpolation on the GPU, motion records), medians over 240 frames,
+  ranges over interleaved runs. Today's list (`COPY`) is written by the writers into plain memory and copied by the
+  thread recording into the slot's upload buffer (BAR memory). Written in place instead, into GPU-visible host-cached
+  memory that the scatter reads where it is: (A) one buffer of the capacity per frame in flight, (B) recycled 1 MiB
+  chunks (`DIRECT`). A and B took the same times (A: 13.7 MB pinned against B's 7.3 MB at 30,000 changes, and growing
+  with the capacity), so A was dropped. Copy against B, discrete GPU (ms; "upload" is the thread recording, "sync" the
+  writers' parallel fill as the frame's thread waits for it, "GPU" the scene upload pass):
+
+  | moving | interpolation | sync copy / B | upload copy / B | GPU copy / B |
+  |---|---|---|---|---|
+  | 1,000 | off | 0.018-0.019 / 0.023-0.026 | 0.004-0.005 / 0.002 | 0.002 / 0.004-0.005 |
+  | 30,000 | off | 0.252-0.279 / 0.374-0.400 | 0.158-0.167 / 0.006-0.007 | 0.006-0.007 / 0.051-0.055 |
+  | 100,000 | off | 0.711-0.727 / 1.082-1.112 | 0.594-0.616 / 0.019-0.028 | 0.024 / 0.223 |
+  | 30,000 | GPU | 0.538-0.571 / 0.624-0.677 | 0.084-0.090 / 0.006-0.007 | 0.004 / 0.028-0.030 |
+  | 100,000 | GPU | 1.765-1.883 / 2.022-2.185 | 0.334-0.356 / 0.035-0.059 | 0.011 / 0.075-0.119 |
+
+  B takes the copy off the thread recording (0.16 ms at 30,000, 0.6 ms at 100,000) but its writers pay most of it
+  back (they write memory not in cache, the next frame's chunks rotating through the frames in flight): sync plus
+  upload is 0.42 against 0.39 ms at 30,000 and 1.32 against 1.11 at 100,000 with interpolation off, 0.63 against 0.64
+  and 2.13 against 2.19 with it on the GPU. The scatter reads the changes over the bus: 0.05 to 0.2 ms more on the
+  graphics queue. Integrated GPU (one round each): sync plus upload equal within the noise (30,000 off: 0.49-0.50
+  against 0.48-0.52; 100,000 off 1.28-1.29 against 1.33; on the GPU 2.15-2.32 against 2.21-2.33), the scatter 10 to
+  20% slower (100,000 off: 0.223-0.227 against 0.265-0.272 ms), since it reads host memory either way. Memory at
+  100,000 moving: copy 6.9 MB of host memory (the list, of the capacity) and 13.7 MB of BAR upload buffers; B 14.7 MB
+  of pinned chunks and no list. Nothing allocates per frame either way. A trade-off, so both stay behind
+  `render.changeList` (`COPY` by default: less GPU time and writer time for the same frame-thread total;
+  `DIRECT` where the thread recording is the one to spare) and `render.changeListChunk` (KiB, 1024).
 - **Phase 7 status (2026-10-31):** landed by 0.74: imported buffers on async queues and buffers swapped without a
   rebuild (earlier), persistent images and buffers (`g.persistent`, `g.persistentBuffer`) and history buffers
   (`g.historyBuffer`). A persistent image is one layer, mip level and sample for now.

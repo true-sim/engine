@@ -844,6 +844,36 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void changesWrittenInPlaceDrawAsCopiedOnes() {
+        // The instances' changes (and their motion's) written in place, in GPU-visible chunks, draw as copied ones.
+        assertThat(scene.changeList()).as("copied by default").isEqualTo(com.truesim.engine.vulkan.RecordBuffer
+            .ChangeList.COPY);
+        assertThat(scene.changeListHostBytes()).as("a list of the capacity").isPositive();
+        Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_WHITE);
+        SceneView main = main(camera);
+        main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+            .output(Keys.SCENE_COLOR, output);
+        scene.removeFrom(0);
+        scene.set(0, quad, -0.5f, 0, -3, 0, 0, 0, 1, 0.5f, 0.5f, 0.5f);
+        frame();
+        int[] copied = image();
+        scene.changeList(com.truesim.engine.vulkan.RecordBuffer.ChangeList.DIRECT, 64);
+        assertThat(scene.changeList()).isEqualTo(com.truesim.engine.vulkan.RecordBuffer.ChangeList.DIRECT);
+        assertThat(scene.changeListHostBytes()).as("no list of the capacity").isZero();
+        scene.set(0, quad, 0.5f, 0, -3, 0, 0, 0, 1, 0.5f, 0.5f, 0.5f); // moved
+        frame();
+        scene.set(0, quad, -0.5f, 0, -3, 0, 0, 0, 1, 0.5f, 0.5f, 0.5f); // and back, written in place
+        frame();
+        assertThat(image()).as("the same image").isEqualTo(copied);
+        assertThat(scene.changeListPinnedBytes()).isPositive();
+        assertThat(scene.uploadNanos()).isPositive();
+        scene.changeList(com.truesim.engine.vulkan.RecordBuffer.ChangeList.COPY, 1024);
+        frame();
+        assertThat(image()).isEqualTo(copied);
+    }
+
+    @Test
     void classicMeshesAddedWhileFramesAreInFlightDrawWithoutWaiting() {
         // Every frame a mesh is added to a growing pool and drawn the classic way, the one from two frames before
         // removed, while frames are in flight: the indices (and the index buffer, as it grows) are copied first thing

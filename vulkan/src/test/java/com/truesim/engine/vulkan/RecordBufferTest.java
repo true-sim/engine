@@ -52,7 +52,7 @@ class RecordBufferTest {
     private static void fill(RecordBuffer records, int index, int value) {
         long at = records.offset(records.claim(index));
         for (int word = 0; word < records.recordBytes() / 4; word++) {
-            records.changes().set(ValueLayout.JAVA_INT_UNALIGNED, at + 4L * word, value + word);
+            records.changes(records.claim(index)).set(ValueLayout.JAVA_INT_UNALIGNED, at + 4L * word, value + word);
         }
     }
 
@@ -194,8 +194,8 @@ class RecordBufferTest {
              RecordBuffer records = new RecordBuffer(device, 16 * 1024, 4_100, FrameSlots.single())) {
             for (int i = 0; i < records.capacity(); i++) {
                 long at = records.offset(records.claim(i));
-                records.changes().set(ValueLayout.JAVA_INT_UNALIGNED, at, i);
-                records.changes().set(ValueLayout.JAVA_INT_UNALIGNED, at + 16 * 1024 - 4, -i);
+                records.changes(records.claim(i)).set(ValueLayout.JAVA_INT_UNALIGNED, at, i);
+                records.changes(records.claim(i)).set(ValueLayout.JAVA_INT_UNALIGNED, at + 16 * 1024 - 4, -i);
             }
             device.submitAndWait(device.graphics(), records::upload);
             int[] words = read(device, records);
@@ -205,6 +205,68 @@ class RecordBufferTest {
                 assertThat(words[(i + 1) * perRecord - 1]).isEqualTo(-i);
             }
             assertThat(words[(records.capacity() - 1) * perRecord]).isEqualTo(records.capacity() - 1);
+        }
+    }
+
+    @Test
+    void changesWrittenInPlaceInChunksScatterAsCopiedOnes() {
+        try (VulkanInstance instance = instance(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
+            FrameSlots slots = new FrameSlots(2);
+            try (RecordBuffer records = new RecordBuffer(device, 32, 64, slots)) {
+                assertThat(records.changeList()).isEqualTo(RecordBuffer.ChangeList.COPY);
+                assertThat(records.hostBytes()).as("a list of the capacity").isEqualTo(36L * 64);
+                // Chunks of 3 records (36 bytes each with its index): 10 changes take 4 chunks.
+                records.changeList(RecordBuffer.ChangeList.DIRECT, 3 * 36);
+                assertThat(records.changeList()).isEqualTo(RecordBuffer.ChangeList.DIRECT);
+                assertThat(records.hostBytes()).as("no list of the capacity").isZero();
+                for (int frame = 0; frame < 6; frame++) {
+                    for (int i = 0; i < 10; i++) {
+                        fill(records, (7 * i + frame) % 64, 1000 * frame + i);
+                    }
+                    fill(records, frame % 64, 5); // claimed again: the same entry, the last write wins
+                    slots.begin(frame % 2);
+                    device.submitAndWait(device.graphics(), slots::recordStart);
+                    slots.end();
+                    assertThat(records.pendingCount()).isZero();
+                    int[] words = read(device, records);
+                    for (int i = 1; i < 10; i++) {
+                        assertThat(words[8 * ((7 * i + frame) % 64)]).as("frame %d, change %d", frame, i)
+                            .isEqualTo(1000 * frame + i);
+                    }
+                    assertThat(words[8 * (frame % 64)]).isEqualTo(5);
+                    assertThat(words[8 * (frame % 64) + 7]).isEqualTo(12);
+                }
+                long pinned = records.pinnedBytes();
+                assertThat(pinned).as("chunks reused, not made each frame: 4 a frame, 3 frames' worth at most")
+                    .isPositive().isLessThanOrEqualTo(12L * (128 + 3 * 32));
+                // Switched back with changes waiting: they upload where they were written, then the list switches.
+                fill(records, 63, 63);
+                records.changeList(RecordBuffer.ChangeList.COPY, RecordBuffer.CHUNK_BYTES);
+                assertThat(records.changeList()).as("after the upload").isEqualTo(RecordBuffer.ChangeList.DIRECT);
+                slots.begin(0);
+                device.submitAndWait(device.graphics(), slots::recordStart);
+                slots.end();
+                assertThat(records.changeList()).isEqualTo(RecordBuffer.ChangeList.COPY);
+                assertThat(read(device, records)[8 * 63]).isEqualTo(63);
+                // Grown while in place: chunks of the new size, the records kept.
+                records.changeList(RecordBuffer.ChangeList.DIRECT, RecordBuffer.CHUNK_BYTES);
+                records.grow(128);
+                fill(records, 127, 127);
+                slots.begin(1);
+                device.submitAndWait(device.graphics(), slots::recordStart);
+                slots.end();
+                int[] words = read(device, records);
+                assertThat(words[8 * 127]).isEqualTo(127);
+                assertThat(words[8 * 63]).isEqualTo(63);
+                assertThat(records.uploadNanos()).isPositive();
+                device.waitIdle();
+            }
+            assertThatIllegalArgumentException().isThrownBy(() -> {
+                try (RecordBuffer small = new RecordBuffer(device, 32, 4, slots)) {
+                    small.changeList(RecordBuffer.ChangeList.DIRECT, 16);
+                }
+            });
+            assertThat(instance.validationErrors()).as("validation errors").isZero();
         }
     }
 }

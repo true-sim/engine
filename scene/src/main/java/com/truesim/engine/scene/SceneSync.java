@@ -179,6 +179,9 @@ public final class SceneSync implements AutoCloseable {
     private double blendFactor;                     // the frame's, for the CPU's writes
     private com.truesim.engine.settings.EngineSettings.Subscription settingWatch; // render.interpolation, or null
     private boolean settingChanged;                 // since the last update
+    private com.truesim.engine.settings.EngineSettings.Subscription listWatch;  // render.changeList, or null
+    private com.truesim.engine.settings.EngineSettings.Subscription chunkWatch; // render.changeListChunk, or null
+    private boolean listChanged;                    // either, since the last update
     private boolean byHand;                         // interpolation(mode) was called: the setting no longer applies
 
     private final Map<AssetRef<MeshData>, ViewMesh> meshes = new HashMap<>();
@@ -234,6 +237,10 @@ public final class SceneSync implements AutoCloseable {
             interpolation = followed.get(RenderSettings.INTERPOLATION);
             layout();
             settingWatch = followed.onChange(RenderSettings.INTERPOLATION, () -> settingChanged = true);
+            // render.changeList and its chunks as set, from the next update on
+            gpu.changeList(followed.get(RenderSettings.CHANGE_LIST), followed.get(RenderSettings.CHANGE_LIST_CHUNK));
+            listWatch = followed.onChange(RenderSettings.CHANGE_LIST, () -> listChanged = true);
+            chunkWatch = followed.onChange(RenderSettings.CHANGE_LIST_CHUNK, () -> listChanged = true);
         }
     }
 
@@ -264,6 +271,11 @@ public final class SceneSync implements AutoCloseable {
      */
     public void update() {
         checkOpen();
+        if (listChanged) {
+            listChanged = false;
+            gpu.changeList(resources.settings().get(RenderSettings.CHANGE_LIST),
+                resources.settings().get(RenderSettings.CHANGE_LIST_CHUNK));
+        }
         if (settingChanged) { // render.interpolation changed: the path switches at the frame boundary
             settingChanged = false;
             if (!byHand) {
@@ -1465,6 +1477,8 @@ public final class SceneSync implements AutoCloseable {
             destroyAll();
             if (settingWatch != null) {
                 settingWatch.close();
+                listWatch.close();
+                chunkWatch.close();
             }
             closed = true;
         }

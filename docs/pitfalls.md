@@ -252,6 +252,14 @@ could take tile words as group counts.
 
 ## Tests and measurements
 
+**A chunk size derived from the capacity at construction stayed after growth.** The change list prototype sized its
+chunks by `min(capacity, chunk bytes / record)`; instance motion's buffers start with 64 records and grow, so their
+chunks stayed at 64 records: 469 chunks (and dispatches) for 30,000 motion records, 0.1 ms of uploads that looked like
+a cost of writing in place.
+- Proof: the per-buffer upload log of the `SceneBenchmark` change list runs (32-byte records, 469 chunks); recomputed
+  on growth, 0.007 ms (true-sim/engine#101, the GPU change list).
+- Rule: sizes derived from a capacity are derived again when it grows.
+
 **After a device loss, look at the first failure only.** Once one test lost the device, the tests after it failed too,
 with zeros and empty images that pointed at unrelated code.
 - Proof: [#144](https://github.com/true-sim/engine/pull/144), where 13 renderer tests failed from one bad index.
