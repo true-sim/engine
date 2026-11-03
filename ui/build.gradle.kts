@@ -10,6 +10,8 @@ dependencies {
     api(project(":engine-render"))
     api(project(":engine-input"))
     api("com.truesim.ui:ui-core:0.1.0")
+    testImplementation("com.truesim.ui:ui-controls:0.1.0") // the demo HUD: styles, layout, text
+    testImplementation("com.truesim.ui:ui-text-native:0.1.0")
 }
 
 // The UI shader's constants (ui/primitive.slang) as Java, checked against ui-core's Primitive by a test.
