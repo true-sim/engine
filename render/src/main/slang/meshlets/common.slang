@@ -828,7 +828,8 @@ public float4 shadeMaterialSurface<M : IMaterial, R : IShadowRays>(R rays, View 
     // Light from all around: the view's indirect-light table (an environment, later GI), or the constant sky
     float3 reflectance;
     float3 diffuseWeight;
-    float3 color = (indirect != nullptr ? indirectLightWeights(indirect, s, toViewer, reflectance, diffuseWeight)
+    float3 color = (indirect != nullptr ? indirectLightWeights(indirect, s, toViewer, in.world, reflectance,
+        diffuseWeight)
         : ambientWeights(s, toViewer, SKY_IRRADIANCE, reflectance, diffuseWeight)) + emissive;
     if (lights == nullptr)
     {

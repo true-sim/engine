@@ -123,7 +123,7 @@ class ScreenSpaceReflectionsTest {
     }
 
     /** A 2 x 2 quad in the xy plane facing +z. */
-    private static MeshData quad() {
+    static MeshData quad() {
         float[] positions = {-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0};
         float[] normals = {0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1};
         return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL), 4).positions(positions)
@@ -131,7 +131,7 @@ class ScreenSpaceReflectionsTest {
     }
 
     /** A 2 x 2 x 2 cube centered at the origin, a face per side (outward normals, counterclockwise outside). */
-    private static MeshData box() {
+    static MeshData box() {
         float[] positions = new float[6 * 4 * 3];
         float[] normals = new float[6 * 4 * 3];
         int[] indices = new int[6 * 6];
@@ -226,6 +226,11 @@ class ScreenSpaceReflectionsTest {
         if (directory == null) {
             return;
         }
+        save(name, image, size, directory);
+    }
+
+    /** Writes {@code image} (rgb in the low bytes, red lowest) as {@code name}.png into {@code directory}. */
+    static void save(String name, int[] image, int size, String directory) {
         java.awt.image.BufferedImage png = new java.awt.image.BufferedImage(size, size,
             java.awt.image.BufferedImage.TYPE_INT_RGB);
         for (int i = 0; i < image.length; i++) {

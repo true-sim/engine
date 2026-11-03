@@ -39,6 +39,7 @@ struct ReflectPush
     float cutoff;            // perceptual roughness from which there are no screen-space reflections
     float edgeFade;          // of the region's size, along each edge
     float scale;             // the hit image's resolution, of the region's
+    uint occlusion;          // with OCCLUSION: storage slot of ambient occlusion's specular occlusion
 };
 
 [[vk::push_constant]]
@@ -51,6 +52,13 @@ const uint HIERARCHICAL = 0;
 /** 1: the view has an indirect-light table; 0: the constant sky (no pointer is read: pitfalls.md). */
 [vk::constant_id(1)]
 const uint INDIRECT = 0;
+
+/**
+ * 1: ambient occlusion dimmed the environment's reflection before (AmbientOcclusion's specular occlusion): the
+ * environment replaced is the dimmed one.
+ */
+[vk::constant_id(2)]
+const uint OCCLUSION = 0;
 
 static const float LARGE = 1.0e30;
 
@@ -502,7 +510,15 @@ void compositeMain(uint3 id : SV_DispatchThreadID)
     float trust = g.trust / g.weights;
     trust *= 1 - smoothstep(0.75 * push.cutoff, push.cutoff, px.roughness);
     float3 r = reflect(normalize(px.position), px.normal);
-    float3 environment = INDIRECT != 0 ? specularLight(push.indirect, r, px.roughness) : SKY_REFLECTED;
+    // The environment's reflection as shading and ambient occlusion left it: dimmed by the probe volume's sky
+    // visibility where one lights the view, and by the specular occlusion
+    float3 environment = INDIRECT != 0
+        ? specularLightAt(push.indirect, r, px.roughness, px.position, px.normal, normalize(-px.position))
+        : SKY_REFLECTED;
+    if (OCCLUSION != 0)
+    {
+        environment *= images[push.occlusion][id.xy].r;
+    }
     float3 color = images[push.color][id.xy].rgb;
     images[push.color][id.xy] = float4(color + px.reflectance * trust * (reflected - environment), 1);
 }

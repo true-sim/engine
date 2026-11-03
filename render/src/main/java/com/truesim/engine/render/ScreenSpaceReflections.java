@@ -162,6 +162,9 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
         Image material = g.require(Keys.SURFACE_MATERIAL);
         Image reflectance = g.require(Keys.SURFACE_REFLECTANCE);
         IndirectInputs.Set indirect = IndirectInputs.of(g);
+        // Ambient occlusion's specular occlusion, where it dimmed the environment's reflection
+        Image occlusion = g.setting(AmbientOcclusion.MODE) != AmbientOcclusion.Mode.OFF
+            ? g.optional(Keys.SPECULAR_OCCLUSION) : null;
         ViewPort region = g.view();
         boolean hierarchical = mode == Mode.HIZ;
         Image pyramid = hierarchical ? g.request(new DepthPyramid(depth, region, true)) : null;
@@ -169,7 +172,7 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
         float scale = g.setting(RESOLUTION_SCALE);
         Image hits = g.create("reflection hits", ImageDesc.of(HITS_FORMAT,
             Math.max(1, (int) Math.ceil(color.width() * scale)), Math.max(1, (int) Math.ceil(color.height() * scale))));
-        int[] constants = {hierarchical ? 1 : 0, indirect != null ? 1 : 0};
+        int[] constants = {hierarchical ? 1 : 0, indirect != null ? 1 : 0, occlusion != null ? 1 : 0};
         Pipeline trace = g.computeProgram("shaders/reflections/reflect.spv", "traceMain", ReflectPush.BYTES,
             constants);
         Pipeline composite = g.computeProgram("shaders/reflections/reflect.spv", "compositeMain", ReflectPush.BYTES,
@@ -200,12 +203,15 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
         if (indirect != null) {
             indirect.readBy(compositing, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
         }
+        if (occlusion != null) {
+            compositing.read(occlusion, Access.STORAGE_READ);
+        }
         if (region != null) {
             compositing.region(region);
         }
         compositing.record(ctx -> {
             push(compositePush, ctx, settings, color, depth, normal, material, reflectance, chain, null, hits,
-                scale, indirect);
+                scale, indirect).occlusion(occlusion == null ? 0 : ctx.storage(occlusion));
             int width = ctx.regionWidth(color);
             int height = ctx.regionHeight(color);
             ctx.dispatch(composite, compositePush, (width + 7) / 8, (height + 7) / 8, 1);
