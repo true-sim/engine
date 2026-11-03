@@ -23,6 +23,16 @@ public final class Keys {
      * takes the constant sky.
      */
     public static final Key<Buffer> INDIRECT_LIGHT = Key.buffer("truesim.indirectLight");
+    /**
+     * A view's UI, an image (frame-graph-v2 §4.8): premultiplied alpha, linear light, 1.0 meaning paper white, at the
+     * size the view shows at (its output size), transparent where there is no UI. {@link DisplayTransform} composites it
+     * over the tone-mapped scene, after the tone curve, so the UI is neither exposed nor tone mapped: SDR shows it as
+     * it is, HDR at {@link DisplayTransform#PAPER_WHITE paper white} times {@link DisplayTransform#UI_BRIGHTNESS}.
+     * Without a provider, nothing changes. A view presented without an output transform is copied as it is and shows
+     * no UI: present through a {@code DisplayTransform} (with {@link DisplayTransform.Curve#NONE} and an exposure of 1
+     * the scene is copied unchanged, clamped to white) to show one. Provided by engine-ui's renderer.
+     */
+    public static final Key<Image> UI = Key.image("truesim.ui");
 
     /**
      * The opaque surfaces' normals in view space ({@link SurfaceOutputs}), written by the view's shading where a

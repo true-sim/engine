@@ -1247,6 +1247,12 @@ that declare how they use each image. The graph does the rest:
   towards the peak. HDR windows tell their displays about the content (`VK_EXT_hdr_metadata`, where the GPU has it):
   the peak as its brightest and paper white as its frame average, followed as the settings change
   (`OutputTransform.metadata`, `target.metadata()`).
+- **UI composition:** a view's UI is an image under `Keys.UI` (premultiplied alpha, linear, 1.0 paper white, at the
+  view's output size; engine-ui's renderer provides it). `DisplayTransform` composites it after the tone curve, so
+  the UI is neither exposed nor tone mapped: SDR shows `toneMapped * (1 - a) + ui`, HDR adds the UI at paper white
+  times `ui.brightness` (`DisplayTransform.UI_BRIGHTNESS`), UI brighter than white clipped at the peak. A view without
+  a UI is encoded as before; a window presented without an output transform shows no UI (use a `DisplayTransform`
+  with the `NONE` curve to copy the scene unchanged and show the UI over it).
 
 ```java
 try (Presenter presenter = new Presenter(graph, instance)) {

@@ -4,6 +4,8 @@
 // 2020 primaries and encoded by the PQ curve. scRGB: the same curve, in Rec. 709 primaries, 1.0 being 80 nits.
 // The result is the size the view shows at; scene color rendered smaller (a render scale, dynamic resolution's region)
 // is scaled up, filtered, never reading past the region.
+// A view's UI (engine-render's Keys.UI: premultiplied, linear, 1.0 paper white) is composited after the tone curve:
+// SDR toneMapped * (1 - a) + ui; HDR curveNits * (1 - a) + ui * paperWhite * uiBrightness, clipped at the peak.
 import bindless;
 
 public struct EncodePush
@@ -19,11 +21,14 @@ public struct EncodePush
     float exposure;     // scene color is multiplied by this first
     float paperWhite;   // nits of SDR white (scene color 1.0) on an HDR display
     float peak;         // the HDR display's peak brightness, in nits
+    uint ui;            // sampled slot of the view's UI, or NO_UI
+    float uiBrightness; // the UI's white on an HDR display, relative to paper white
 };
 
 public static const uint ENCODE_SDR = 0;
 public static const uint ENCODE_HDR10 = 1;
 public static const uint ENCODE_SCRGB = 2;
+public static const uint NO_UI = 0xffffffff;
 public static const uint CURVE_NONE = 0;
 public static const uint CURVE_REINHARD = 1;
 public static const uint CURVE_ACES = 2;
@@ -92,16 +97,36 @@ void encodeMain(uint3 id : SV_DispatchThreadID)
         color = textures[push.source].SampleLevel(samplers[LINEAR_CLAMP], p / float2(sceneWidth, sceneHeight), 0).rgb;
     }
     color = max(color, 0) * push.exposure;
+    float4 ui = float4(0, 0, 0, 0);
+    if (push.ui != NO_UI)
+    {
+        uint uiWidth;
+        uint uiHeight;
+        textures[push.ui].GetDimensions(uiWidth, uiHeight);
+        if (uiWidth == push.width && uiHeight == push.height)
+        {
+            ui = textures[push.ui].Load(int3(id.xy, 0));
+        }
+        else
+        {
+            float2 uv = (float2(id.xy) + 0.5) / float2(push.width, push.height);
+            ui = textures[push.ui].SampleLevel(samplers[LINEAR_CLAMP], uv, 0);
+        }
+        ui = max(ui, 0);
+    }
+    float keep = 1 - saturate(ui.a); // how much of the scene shows through the UI
     float3 encoded;
     if (push.encoding == ENCODE_SDR)
     {
-        encoded = toneMap(color);
+        encoded = saturate(toneMap(color) * keep + ui.rgb);
     }
     else
     {
         // The curve relative to the display's peak: paper white stays near itself, brighter colors roll off to the peak.
+        // The UI after it: its white at paper white (times its brightness), never past the peak.
         float range = push.peak / push.paperWhite;
-        float3 nits = toneMap(color / range) * push.peak;
+        float3 nits = toneMap(color / range) * push.peak * keep + ui.rgb * (push.paperWhite * push.uiBrightness);
+        nits = min(nits, push.peak);
         encoded = push.encoding == ENCODE_HDR10 ? pq(rec2020(nits)) : nits / 80;
     }
     images[push.target][id.xy] = float4(encoded, 1);

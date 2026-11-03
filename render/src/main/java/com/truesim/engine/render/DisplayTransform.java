@@ -33,6 +33,11 @@ import java.util.Objects;
  *       the display's {@link #PEAK peak brightness}.</li>
  * </ul>
  *
+ * <p>A view's {@link Keys#UI UI} (premultiplied, linear, 1.0 meaning paper white), where a technique provides one, is
+ * composited after the tone curve, so it is neither exposed nor tone mapped: SDR shows
+ * {@code toneMapped * (1 - a) + ui}, HDR {@code curveNits * (1 - a) + ui * paperWhite * uiBrightness} (UI brighter
+ * than white, a glow, clipped at the peak), then encodes.
+ *
  * <pre>{@code
  * presenter.outputTransform(new DisplayTransform());
  * graph.settings().set(DisplayTransform.EXPOSURE, 1.5f).set(PresentSettings.HDR, true);
@@ -44,6 +49,8 @@ public final class DisplayTransform implements OutputTransform {
     private static final int ENCODE_SDR = 0;
     private static final int ENCODE_HDR10 = 1;
     private static final int ENCODE_SCRGB = 2;
+    /** The UI slot when the view has no UI (encode.slang's NO_UI). */
+    private static final int NO_UI = -1;
 
     /** How scene color brighter than white is brought into what the display shows. */
     public enum Curve {
@@ -67,8 +74,11 @@ public final class DisplayTransform implements OutputTransform {
     /** The HDR display's peak brightness, where the tone curve ends. */
     public static final Setting<Float> PEAK = Setting.decimal("display.peakBrightness", 1000, 80, 10000,
         "the HDR display's peak brightness, in nits");
+    /** How bright the UI's white shows on an HDR display, relative to {@link #PAPER_WHITE paper white}. */
+    public static final Setting<Float> UI_BRIGHTNESS = Setting.decimal("ui.brightness", 1, 0.25f, 4,
+        "how bright the UI's white shows on an HDR display, relative to paper white");
     /** Every display setting. */
-    public static final List<Setting<?>> ALL = List.of(CURVE, EXPOSURE, PAPER_WHITE, PEAK);
+    public static final List<Setting<?>> ALL = List.of(CURVE, EXPOSURE, PAPER_WHITE, PEAK, UI_BRIGHTNESS);
 
     @Override
     public Technique transform(Key<Image> source, Key<Image> target, DisplayEncoding encoding) {
@@ -105,6 +115,7 @@ public final class DisplayTransform implements OutputTransform {
         public void build(GraphBuilder g) {
             Pipeline pipeline = g.computeProgram("shaders/present/encode.spv", "encodeMain", EncodePush.BYTES);
             Image scene = g.require(source);
+            Image ui = g.optional(Keys.UI); // composited after the tone curve, where the view has one
             // At the size the view shows at, its scene color scaled up from what it rendered.
             ViewPort view = g.view();
             Image encoded = g.unscaled(g.create("encoded for " + encoding, ImageDesc.of(Format.R16G16B16A16_SFLOAT,
@@ -116,17 +127,21 @@ public final class DisplayTransform implements OutputTransform {
                     case SCRGB_LINEAR -> ENCODE_SCRGB;
                 });
             EngineSettings settings = g.settings();
-            g.pass("display transform, " + encoding).read(scene, Access.SAMPLED_COMPUTE)
-                .write(encoded, Access.STORAGE_WRITE)
-                .record(ctx -> encode(ctx, pipeline, push, settings, scene, encoded));
+            GraphBuilder.PassBuilder pass = g.pass("display transform, " + encoding).read(scene, Access.SAMPLED_COMPUTE)
+                .write(encoded, Access.STORAGE_WRITE);
+            if (ui != null) {
+                pass.read(ui, Access.SAMPLED_COMPUTE);
+            }
+            pass.record(ctx -> encode(ctx, pipeline, push, settings, scene, ui, encoded));
             g.provide(target, encoded);
         }
 
         private static void encode(PassContext ctx, Pipeline pipeline, EncodePush push, EngineSettings settings,
-            Image scene, Image encoded) {
+            Image scene, Image ui, Image encoded) {
             push.source(ctx.sampled(scene)).target(ctx.storage(encoded)).sourceWidth(ctx.regionWidth(scene))
                 .sourceHeight(ctx.regionHeight(scene)).curve(settings.get(CURVE).ordinal())
-                .exposure(settings.get(EXPOSURE)).paperWhite(settings.get(PAPER_WHITE)).peak(settings.get(PEAK));
+                .exposure(settings.get(EXPOSURE)).paperWhite(settings.get(PAPER_WHITE)).peak(settings.get(PEAK))
+                .ui(ui == null ? NO_UI : ctx.sampled(ui)).uiBrightness(settings.get(UI_BRIGHTNESS));
             ctx.dispatch(pipeline, push, (encoded.width() + 7) / 8, (encoded.height() + 7) / 8, 1);
         }
     }
