@@ -232,6 +232,15 @@ transform lives in a buffer, so only GPU-assisted validation saw it; ordinary va
 - Rule: build transforms never scale by 0; run ray tracing tests with GPU-assisted validation once after changing
   what builds read from buffers.
 
+**A technique that provides nothing is never built.** `SegmentTracing` first provided no key, was added with
+`FrameGraph.add` and had a readback pass with side effects: it traced nothing, frame after frame, with no error. The
+graph builds only techniques the outputs need, through keys required or modified; side effects keep passes of built
+techniques from culling, they do not build a technique.
+- Proof: `SegmentTracingTest` collected no batch in 16 frames ("traced 0") until the tracing modified the frame's
+  output key (true-sim/engine, ray-traced audio occlusion).
+- Rule: a technique whose work only leaves the frame (readbacks, side effects) modifies a key its frames always make
+  (`Keys.SCENE_COLOR` of the main view), as `RayTracedShadows` modifies the light list.
+
 **A layout computed twice, from two sizes.** The visibility buffer's per-bin tile lists were spaced by the whole image's
 tile count where Java dispatched them and by the render region's where `resolve.slang` classified into them. With
 dynamic resolution every bin past 0 read another bin's header: its pixels went unshaded, and its indirect dispatch

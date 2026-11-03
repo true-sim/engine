@@ -531,7 +531,19 @@ public final class AudioSync {
         return this;
     }
 
-    /** Rays a frame, at most. */
+    /**
+     * Occludes sounds whose occlusion is {@code RAYS} (§2.11) by rays through {@code world}, a frame's rays handed over
+     * as one batch (64 rays round-robin, or the world's capacity if less) and the results taken as they come back,
+     * frames later: up to 4 batches out at once. Null turns occlusion off. For a world over the
+     * GPU's ray tracing structures; on a device without them, give an {@code AudioWorld} instead (physics) or none.
+     */
+    @AllowAllocation("set up once")
+    public AudioSync occlusion(BatchedAudioWorld world) {
+        occluder = world == null ? null : new Occluder(world, occluder == null ? 64 : occluder.budget());
+        return this;
+    }
+
+    /** Rays a frame, at most (and at most a batched world's capacity). */
     public AudioSync occlusionBudget(int rays) {
         if (occluder != null) {
             occluder.budget(rays);
@@ -539,9 +551,14 @@ public final class AudioSync {
         return this;
     }
 
-    /** Occlusion rays traced so far. */
+    /** Occlusion rays traced so far (handed over, for a batched world). */
     public long occlusionRays() {
         return occluder == null ? 0 : occluder.traced();
+    }
+
+    /** Batches of a batched world given up, having stayed out too long (its frames stopped, say). */
+    public long occlusionBatchesGivenUp() {
+        return occluder == null ? 0 : occluder.givenUp();
     }
 
     /** The smoothed mid-band transmission of instance {@code id} of store {@code s} (its gain); 1 if not occluded. */
@@ -575,17 +592,20 @@ public final class AudioSync {
             Sounds store = stores[track.store];
             int d = nearest(track);
             double[] p = devices[track.store];
-            occluder.add(t, d < 0 ? 0 : p[7 * d], d < 0 ? 0 : p[7 * d + 1], d < 0 ? 0 : p[7 * d + 2],
-                store.position(track.id, 0), store.position(track.id, 1), store.position(track.id, 2), radius,
-                occlusionSeed++);
-            track.rays = 0;
-            track.sumMid = 0;
-            track.sumHigh = 0;
+            occluder.add(t, track.id, track.store, d < 0 ? 0 : p[7 * d], d < 0 ? 0 : p[7 * d + 1],
+                d < 0 ? 0 : p[7 * d + 2], store.position(track.id, 0), store.position(track.id, 1),
+                store.position(track.id, 2), radius, occlusionSeed++);
         }
         occlusionCursor = n == 0 ? 0 : (occlusionCursor + visited) % n;
         occluder.trace();
-        for (int i = 0; i < occluder.count(); i++) {
-            Track track = tracks[occluder.owner(i)];
+        // The results in: this frame's rays, or a batched world's from frames before, each counted for its sound if
+        // that still plays in the track it was cast for.
+        for (int i = 0; i < occluder.results(); i++) {
+            int t = occluder.owner(i);
+            Track track = t < tracks.length ? tracks[t] : null;
+            if (!occluding(track) || track.id != occluder.ownerId(i) || track.store != occluder.ownerStore(i)) {
+                continue;
+            }
             Transmission r = occluder.result(i);
             // the gain: between the lows' and the mids' (bass carries through walls); the cutoff from the highs
             track.sumMid += (float) Math.sqrt(r.low() * r.mid());
@@ -600,6 +620,8 @@ public final class AudioSync {
                 track.targetMid = track.sumMid / track.rays;
                 track.targetHigh = track.sumHigh / track.rays;
                 track.rays = 0;
+                track.sumMid = 0;
+                track.sumHigh = 0;
                 if (!track.occKnown) { // its first rays: taken at once, not faded from open
                     track.occKnown = true;
                     track.occMid = track.targetMid;

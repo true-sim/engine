@@ -113,6 +113,7 @@ public final class SceneResources implements AutoCloseable {
     private Diagnostics diagnostics = new Diagnostics() { };
     private final Map<AssetRef<MeshData>, Mesh> meshes = new HashMap<>();
     private final Map<MaterialKey, MaterialSet> sets = new HashMap<>();
+    private MaterialSet[] setById = new MaterialSet[16]; // the block each material id is of: materialOf
     private final Map<AssetRef<MaterialData>, MaterialEntry> materialEntries = new HashMap<>();
     private final Map<AssetRef<TextureData>, TextureEntry> textureEntries = new HashMap<>();
     private final List<MaterialSet> dirtySets = new ArrayList<>();
@@ -895,7 +896,25 @@ public final class SceneResources implements AutoCloseable {
         }
         set.first = materials.addAll(initial);
         sets.put(key, set);
+        if (set.first + key.slots() > setById.length) {
+            setById = java.util.Arrays.copyOf(setById, Math.max(2 * setById.length, set.first + key.slots()));
+        }
+        java.util.Arrays.fill(setById, set.first, set.first + key.slots(), set);
         return set;
+    }
+
+    /**
+     * The material asset material id {@code id} (of the materials' table, as instances name them: a block's first plus
+     * a submesh) draws, or null for none: an id not in use, or a submesh drawn with the default material. What a
+     * triangle traced on the GPU says it is made of ({@code SegmentTracing}), back as an asset. Allocates nothing.
+     */
+    public AssetRef<MaterialData> materialOf(int id) {
+        MaterialSet set = id >= 0 && id < setById.length ? setById[id] : null;
+        if (set == null) {
+            return null;
+        }
+        MaterialEntry entry = set.entries[id - set.first];
+        return entry == null ? null : entry.ref;
     }
 
     /** Lets go of {@code set}: at no holders its ids are freed and its materials let go. */
@@ -904,6 +923,7 @@ public final class SceneResources implements AutoCloseable {
             return;
         }
         sets.remove(set.key);
+        java.util.Arrays.fill(setById, set.first, set.first + set.entries.length, null);
         materials.remove(set.first);
         if (set.dirty) {
             dirtySets.remove(set);
