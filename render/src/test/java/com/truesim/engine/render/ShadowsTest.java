@@ -644,9 +644,12 @@ class ShadowsTest {
         double[] shadow = shadowOf(sun[0], sun[1], sun[2]);
         MeshData mapped = uvQuad();
         int mappedQuad = pool.add(mapped);
+        MeshData second = secondUvQuad();
+        int secondQuad = pool.add(second);
         rayTracing = new RayTracing(device, pool, 16);
         rayTracing.add(quad, quadMesh, quadMesh.levels().size() - 1);
         rayTracing.add(mappedQuad, mapped, mapped.levels().size() - 1);
+        rayTracing.add(secondQuad, second, second.levels().size() - 1);
         try (Lights lights = new Lights(device, 4, 4); Materials materials = new Materials(device, 4);
              Textures textures = new Textures(device)) {
             java.lang.foreign.MemorySegment half = java.lang.foreign.Arena.ofAuto().allocate(4L * 8 * 8, 4);
@@ -656,8 +659,16 @@ class ShadowsTest {
             int solid = materials.add(Material.DEFAULT.alphaMask(0.5f));
             int clear = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
                 .withBaseColor(new Color(0.8, 0.8, 0.8, 0))).alphaMask(0.5f));
+            int texture = textures.color(8, 8, half);
             int halved = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
-                .withBaseColorTexture(textures.color(8, 8, half))).alphaMask(0.5f));
+                .withBaseColorTexture(texture)).alphaMask(0.5f));
+            // The mask in the second UV set, and moved by half by a transform: the other half kept
+            int inSecond = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
+                .withBaseColorTexture(TextureSampler.secondUv(texture))).alphaMask(0.5f));
+            int moved = materials.add(new Material(MetallicRoughnessParameters.DEFAULTS
+                .withBaseColorTexture(TextureSampler.transform(texture, 1))).alphaMask(0.5f)
+                .feature(com.truesim.engine.render.materials.TextureTransformParameters.DEFAULTS
+                    .withTransform1(new com.truesim.common.math.Vec4(0.5, 0, 1, 1))));
             scene.setMaterials(materials);
             lights.directional(0, (float) sun[0], (float) sun[1], (float) sun[2], 3, 3, 3).setCount(1);
             SceneDraw depthOnly = new SceneDraw(geometry, geometry.createView(ViewOptions.of(256, 1 << 12)), camera,
@@ -678,9 +689,38 @@ class ShadowsTest {
                 .isGreaterThan((int) (lit * 0.9));
             assertThat(floor(color, this, shadow[0] + 0.5, shadow[1])).as("under the kept half: shadowed")
                 .isLessThan((int) (lit * shadowRatio));
+            scene.set(1, secondQuad, inSecond, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            frame(colorTarget, 4);
+            color = frame(colorTarget, 4);
+            assertThat(floor(color, this, shadow[0] - 0.5, shadow[1])).as("second UV set, masked half: lit")
+                .isGreaterThan((int) (lit * 0.9));
+            assertThat(floor(color, this, shadow[0] + 0.5, shadow[1])).as("second UV set, kept half: shadowed")
+                .isLessThan((int) (lit * shadowRatio));
+            scene.set(1, mappedQuad, moved, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            frame(colorTarget, 4);
+            color = frame(colorTarget, 4);
+            assertThat(floor(color, this, shadow[0] - 0.5, shadow[1])).as("moved by half: shadowed")
+                .isLessThan((int) (lit * shadowRatio));
+            assertThat(floor(color, this, shadow[0] + 0.5, shadow[1])).as("moved by half: lit")
+                .isGreaterThan((int) (lit * 0.9));
             scene.setMaterials(null);
         }
         scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
+    /**
+     * As uvQuad, its u along x in the second UV set; the first, (0.25, 0.5) throughout, in a masked texel of the test's
+     * texture.
+     */
+    private static MeshData secondUvQuad() {
+        float[] positions = {-1, 0, -1, 1, 0, -1, -1, 0, 1, 1, 0, 1};
+        float[] uv0 = {0.25f, 0.5f, 0.25f, 0.5f, 0.25f, 0.5f, 0.25f, 0.5f};
+        float[] uv1 = {0, 0, 1, 0, 0, 1, 1, 1};
+        return new com.truesim.scene.meshbuild.MeshBuilder(com.truesim.scene.assets.mesh.VertexFormat.of(
+            com.truesim.scene.assets.mesh.VertexAttribute.UV0, com.truesim.scene.assets.mesh.VertexAttribute.UV1), 4)
+            .positions(positions).attribute(com.truesim.scene.assets.mesh.VertexAttribute.UV0, uv0)
+            .attribute(com.truesim.scene.assets.mesh.VertexAttribute.UV1, uv1)
+            .submesh(new int[] {0, 2, 1, 1, 2, 3}).buildFlat();
     }
 
     /** The test quad (2 x 2, in the xz plane) with texture coordinates: u along x, from 0 at x = -1 to 1 at x = 1. */

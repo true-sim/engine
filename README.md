@@ -375,8 +375,8 @@ try (GeometryPool pool = new GeometryPool(device, slots);              // starts
   mask what the camera does; classic LOD draws through the same bins. A view's extra bins have room for a quarter of
   its opaque bin by default (`ViewOptions.withBins`); `RenderView.visibleMeshlets(bin)` counts each. Ray tracing
   follows them too: instances with a masked material enter the top level as non-opaque, and shadow rays alpha-test
-  their triangles (the triangle looked up in its meshlet, its texture coordinates interpolated) against the same
-  cutoff, at the finest texels.
+  their triangles (the triangle looked up in its meshlet, its texture coordinates of both sets interpolated, the
+  mask texture read in its set and moved by its transform) against the same cutoff, at the finest texels.
 - **Two paths, one set of shaders:** a compute pass culls each chunk and lists the visible meshlets. With mesh shaders
   (`VK_EXT_mesh_shader`, enabled where the GPU has it), a mesh workgroup per listed meshlet emits its vertices and
   triangles straight from the pool. Without, an expansion pass writes their triangles into one index buffer, and one
