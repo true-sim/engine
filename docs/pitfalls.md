@@ -283,6 +283,17 @@ a cost of writing in place.
   on growth, 0.007 ms (true-sim/engine#101, the GPU change list).
 - Rule: sizes derived from a capacity are derived again when it grows.
 
+**Timing `engine.stepAt` in a test times the engine's pacing.** With no plugin driving frames, every frame waits for
+the paced driver (`app.frameRate`, at most 10,000 a second): input's first benchmark read 450 us a frame, the same
+work timed through the plugin's own `beforeUpdate` 88 us.
+- Proof: `InputBenchmarkTest`, both ways in one run (true-sim/engine, input actions).
+- Rule: time a plugin's own frame hook, or subtract an empty frame measured the same way.
+
+**Benchmarks run as tests carry JaCoCo's probes.** The test task runs with the coverage agent: the same input
+benchmark read 63 to 92 us a frame with it and 41 to 57 us without (`JacocoTaskExtension` disabled for the run).
+- Proof: `InputBenchmarkTest`, three runs each way on the same machine (true-sim/engine, input actions).
+- Rule: numbers for the README or the design docs come from a run without the agent, and say so.
+
 **After a device loss, look at the first failure only.** Once one test lost the device, the tests after it failed too,
 with zeros and empty images that pointed at unrelated code.
 - Proof: [#144](https://github.com/true-sim/engine/pull/144), where 13 renderer tests failed from one bad index.
