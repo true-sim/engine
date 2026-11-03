@@ -47,10 +47,15 @@ public final class MeshletGeometry implements GeometryProvider {
             : region != null ? () -> view.detail(region.renderScale()) : null;
         MeshletCulling.Views culling = g.request(new MeshletCulling(renderer));
         RasterPipelines.Typed typed = null;
-        if (draw.output().kind() == SurfaceOutput.Kind.SHADED
-            && g.setting(RenderSettings.FORWARD_SHADING) == ForwardShading.PER_TYPE) {
-            typed = renderer.forwardPipelines(); // shaded by type, from lists split by shading bin as culled
-            view.splitByType(typed.categories());
+        SurfaceOutput.Kind kind = draw.output().kind();
+        if (kind == SurfaceOutput.Kind.SHADED
+            || kind == SurfaceOutput.Kind.IDS && renderer.scene().materials().hasBlended()) {
+            // Shaded by type, from lists split by shading bin as culled: the view's color, or the blended bin a
+            // visibility buffer's view draws shaded after its IDs.
+            RasterPipelines.Typed pipelines = renderer.forwardPipelines();
+            view.splitByType(pipelines.categories(), kind == SurfaceOutput.Kind.SHADED ? (1 << MeshletRenderer.BINS) - 1
+                : 1 << MeshletRenderer.BIN_BLENDED); // a visibility buffer's opaque bins: IDs, by shared pipelines
+            typed = kind == SurfaceOutput.Kind.SHADED ? pipelines : null;
         }
         culling.add(view, draw.occlusion(), before);
         SceneData.Buffers scene = g.request(new SceneData(renderer));
@@ -92,13 +97,12 @@ public final class MeshletGeometry implements GeometryProvider {
     }
 
     /**
-     * Forward shading by type's pipelines for a draw of {@code view}, if it is {@code shaded}, the graph's settings ask
-     * for it and culling splits the view's lists (its shaded draw did: {@link #drawFirst}); else null.
+     * Forward shading by type's pipelines for a draw of {@code view}, if it is {@code shaded} and culling splits the
+     * view's lists (its shaded draw did: {@link #drawFirst}); else null.
      */
     @AllowAllocation("building the graph, when it changes")
     private RasterPipelines.Typed typed(GraphBuilder g, RenderView view, boolean shaded) {
-        return shaded && view.splitCategories() > 0
-            && g.setting(RenderSettings.FORWARD_SHADING) == ForwardShading.PER_TYPE ? renderer.forwardPipelines() : null;
+        return shaded && view.splitCategories() > 0 ? renderer.forwardPipelines() : null;
     }
 
     /**
@@ -141,13 +145,8 @@ public final class MeshletGeometry implements GeometryProvider {
                 if (shadows != null) {
                     shadows.prepare(ctx);
                 }
-                if (typed != null) {
-                    renderer.drawTypedAttached(ctx.unsafe().commands(), view, late, address(ctx, lights),
-                        indirect == null ? 0 : ctx.address(indirect.table()), typed);
-                } else {
-                    renderer.drawAttached(ctx.unsafe().commands(), view, late, false, address(ctx, lights),
-                        indirect == null ? 0 : ctx.address(indirect.table()));
-                }
+                renderer.drawTypedAttached(ctx.unsafe().commands(), view, late, address(ctx, lights),
+                    indirect == null ? 0 : ctx.address(indirect.table()), typed);
             });
             case IDS -> pass.record(ctx -> renderer.drawIdsAttached(ctx.unsafe().commands(), view, late));
         }
@@ -185,18 +184,17 @@ public final class MeshletGeometry implements GeometryProvider {
         targets.readBehind(pass);
         BlendedTargets.Kind kind = targets.kind();
         com.truesim.engine.graph.Image behind = targets.behind();
-        RasterPipelines.Typed typed = typed(g, view, true); // by type where the view's shaded draw split its lists
+        RasterPipelines.Typed typed = typed(g, view, true); // by type: the view's opaque draw split its lists
+        if (typed == null) {
+            throw new IllegalStateException("View " + view.index() + " draws blended surfaces but its lists are not "
+                + "split by shading bin: its opaque draw is built first, shaded or as IDs with blended materials");
+        }
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            if (typed != null) {
-                renderer.drawBlendedTypedAttached(ctx.unsafe().commands(), view, kind, address(ctx, lights),
-                    SceneBehind.words(ctx, behind), targets.indirectAddress(ctx), typed);
-            } else {
-                renderer.drawBlendedAttached(ctx.unsafe().commands(), view, kind, address(ctx, lights),
-                    SceneBehind.words(ctx, behind), targets.indirectAddress(ctx));
-            }
+            renderer.drawBlendedTypedAttached(ctx.unsafe().commands(), view, kind, address(ctx, lights),
+                SceneBehind.words(ctx, behind), targets.indirectAddress(ctx), typed);
         });
     }
 

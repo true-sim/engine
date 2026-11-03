@@ -25,10 +25,10 @@ import java.util.function.Function;
  * int lake = materials.add(new Material(WaterParameters.DEFAULTS));
  * }</pre>
  *
- * <p>{@link VisibilityBufferShading} shades by type, and so does forward shading with
- * {@link RenderSettings#FORWARD_SHADING} {@code PER_TYPE} (the default): each shading bin (a type and its features) draws
- * with pipelines of its type's forward entry points. With {@code SINGLE}, one shader draws every type, the others than
- * metallic-roughness as its defaults.
+ * <p>Every pass shading color draws a type with its own entry points: the visibility buffer's shading, and forward
+ * shading on every geometry path (indexed, mesh shaders, classic LOD), where each shading bin (a type and its
+ * features) draws with pipelines of its type's forward entry points, its blended surfaces too. Depth, shadow and ID
+ * passes draw every type alike.
  *
  * @param name            what it is called: in material data, errors and the pipeline cache
  * @param parameters      its parameters' record
@@ -41,21 +41,14 @@ import java.util.function.Function;
  *                        then it is shaded without them where they are on
  * @param tracedEntry     that entry point; null with no shader
  * @param forwardShader   the shader of its forward fragment entry points from full vertices ({@code <name>FragmentMain},
- *                        {@code <name>MaskedMain}, {@code <name>BlendedMain}), or null for none: then forward shading
- *                        draws it with the single shader
+ *                        {@code <name>MaskedMain}, {@code <name>BlendedMain}): the indexed path, classic LOD and mesh
+ *                        shaders without barycentrics
  * @param forwardLeanShader the shader of its forward fragment entry points on the lean mesh path
- *                        ({@code <name>LeanMain}, {@code <name>LeanMaskedMain}, {@code <name>LeanBlendedMain}), or null
+ *                        ({@code <name>LeanMain}, {@code <name>LeanMaskedMain}, {@code <name>LeanBlendedMain})
  */
 public record MaterialType(String name, Class<? extends MaterialParameters> parameters,
     Function<MaterialValues, ? extends MaterialParameters> fromValues, int allowedFeatures, String shader,
     String entry, String tracedShader, String tracedEntry, String forwardShader, String forwardLeanShader) {
-
-    /** A type without forward entry points of its own: forward shading draws it with the single shader. */
-    public MaterialType(String name, Class<? extends MaterialParameters> parameters,
-        Function<MaterialValues, ? extends MaterialParameters> fromValues, int allowedFeatures, String shader,
-        String entry, String tracedShader, String tracedEntry) {
-        this(name, parameters, fromValues, allowedFeatures, shader, entry, tracedShader, tracedEntry, null, null);
-    }
 
     public MaterialType {
         Objects.requireNonNull(name, "name");
@@ -63,6 +56,8 @@ public record MaterialType(String name, Class<? extends MaterialParameters> para
         Objects.requireNonNull(fromValues, "fromValues");
         Objects.requireNonNull(shader, "shader");
         Objects.requireNonNull(entry, "entry");
+        Objects.requireNonNull(forwardShader, "forwardShader");
+        Objects.requireNonNull(forwardLeanShader, "forwardLeanShader");
         if ((tracedShader == null) != (tracedEntry == null)) {
             throw new IllegalArgumentException("A traced shader and its entry point, or neither: " + name);
         }

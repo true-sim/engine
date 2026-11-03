@@ -33,19 +33,19 @@ import org.lwjgl.vulkan.VkRenderingInfo;
 import org.lwjgl.vulkan.VkViewport;
 
 /**
- * A {@link MeshletRenderer}'s draws of the meshlets its culling listed: a pipeline per raster bin and role (shaded,
- * depth only, the visibility buffer's IDs), on the indexed path and on mesh shaders. Drawing allocates nothing.
+ * A {@link MeshletRenderer}'s draws of the meshlets its culling listed, on the indexed path and on mesh shaders: into
+ * color by material type (each shading bin with pipelines of its type's entry points, from the view's lists split by
+ * shading bin), and into depth or the visibility buffer's IDs with pipelines shared by every type, a raster bin each.
+ * Drawing allocates nothing.
  */
 @AllowAllocation("created rarely")
 final class RasterPipelines implements AutoCloseable {
 
-    /** Shaded, into color and depth. */
-    static final int SHADED = 0;
     /** Depth only: a shadow map, say. */
     static final int DEPTH = 1;
     /** The visibility buffer's IDs ({@link MeshletRenderer#ID_FORMAT}) and depth. */
     static final int IDS = 2;
-    /** Every shaded raster pipeline takes forward.slang's push block. */
+    /** Every raster pipeline takes forward.slang's push block. */
     private static final int DRAW_PUSH = ForwardPush.BYTES;
     private static final int BINS = MeshletRenderer.BINS;
     private static final int BIN_OPAQUE = MeshletRenderer.BIN_OPAQUE;
@@ -54,23 +54,15 @@ final class RasterPipelines implements AutoCloseable {
 
     private final VulkanDevice device;
     // Per role, then raster bin (BIN_*): on the indexed path, and on mesh shaders (null without); the IDs' role is null
-    // without primitive IDs.
+    // without primitive IDs. Index 0 (color) is unused: color is drawn by type.
     private final Pipeline[][] indexed = new Pipeline[3][];
     private final Pipeline[][] mesh = new Pipeline[3][];
-    // The blended bin into the transparency pass's targets: on the indexed path, and on mesh shaders (null without).
-    private Pipeline indexedBlended;
-    private Pipeline meshBlended;
-    private final int colorFormat;
-    private final int depthFormat;
     private final boolean slimMeshes;
-    // Forward shading by type: pipelines by what they are made of, made as graphs first need them, kept till closed.
-    private final java.util.Map<TypedKey, Pipeline> typed = new java.util.HashMap<>();
-    private long typedNanos; // spent making them
+    private final ShadingPipelines store;
 
-    RasterPipelines(VulkanDevice device, int colorFormat, int depthFormat) {
+    RasterPipelines(VulkanDevice device, ShadingPipelines store, int depthFormat) {
         this.device = device;
-        this.colorFormat = colorFormat;
-        this.depthFormat = depthFormat;
+        this.store = store;
         this.slimMeshes = device.meshShaders() && device.barycentrics() && device.primitiveIds();
         try (ShaderModule drawShader = ShaderModule.load(device, "shaders/meshlets/draw.spv")) {
             ShaderModule idsShader = device.primitiveIds() ? ShaderModule.load(device, "shaders/visibility/ids.spv")
@@ -78,29 +70,14 @@ final class RasterPipelines implements AutoCloseable {
             // A pipeline per raster bin and role: the opaque bin culls back faces and discards nothing; the
             // double-sided one culls nothing; the masked one culls nothing and discards (masked texels, one-sided
             // materials' back faces), depth only too, so shadow maps mask what the camera does.
-            indexed[SHADED] = bins(bin -> raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain")
-                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, masking(bin) ? "maskedMain" : "fragmentMain")
-                .color(colorFormat).depth(depthFormat).build());
             indexed[DEPTH] = bins(bin -> depthOnly(raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain"),
                 bin, drawShader).depth(depthFormat).build());
-            indexedBlended = blended(raster(BIN_BLENDED, drawShader, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain")
-                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "blendedMain"), depthFormat);
             indexed[IDS] = idsShader == null ? null : bins(bin -> raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT,
                 "vertexMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader, masking(bin) ? "maskedIdsMain"
                 : "idsMain").color(MeshletRenderer.ID_FORMAT).depth(depthFormat).build());
-            // Barycentrics and primitive IDs in fragment shaders: the mesh path's lean and slim interfaces (lean.slang, mesh.slang).
             if (device.meshShaders()) {
                 try (ShaderModule meshShader = ShaderModule.load(device, "shaders/meshlets/mesh.spv")) {
                     if (slimMeshes) {
-                        // What interpolates, and the rest from the triangle (lean.slang); depth alone from positions.
-                        try (ShaderModule leanShader = ShaderModule.load(device, "shaders/meshlets/lean.spv")) {
-                            meshBlended = blended(raster(BIN_BLENDED, leanShader, VK_SHADER_STAGE_MESH_BIT_EXT,
-                                "meshLeanMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, leanShader, "leanBlendedMain"),
-                                depthFormat);
-                            mesh[SHADED] = bins(bin -> raster(bin, leanShader, VK_SHADER_STAGE_MESH_BIT_EXT,
-                                "meshLeanMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, leanShader, masking(bin)
-                                ? "leanMaskedMain" : "leanMain").color(colorFormat).depth(depthFormat).build());
-                        }
                         // Opaque bins' depth from positions alone (no fragment shader); the masked bin's fragments
                         // need texture coordinates, from the full vertices: in depth-only pipelines on an RX 9070 XT
                         // the fragment shader did not see the primitive ID the mesh shader wrote (pitfalls.md).
@@ -108,12 +85,6 @@ final class RasterPipelines implements AutoCloseable {
                             VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain"), bin, drawShader) : raster(bin, meshShader,
                             VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain")).depth(depthFormat).build());
                     } else {
-                        meshBlended = blended(raster(BIN_BLENDED, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT,
-                            "meshIdsMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "blendedMain"), depthFormat);
-                        mesh[SHADED] = bins(bin -> raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain")
-                            .stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, masking(bin) ? "maskedMain"
-                                : "fragmentMain") // the same shading
-                            .color(colorFormat).depth(depthFormat).build());
                         mesh[DEPTH] = bins(bin -> depthOnly(raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT,
                             "meshIdsMain"), bin, drawShader).depth(depthFormat).build());
                     }
@@ -129,51 +100,9 @@ final class RasterPipelines implements AutoCloseable {
         }
     }
 
-    /**
-     * For ForwardShadingBenchmark only (a prototype of the generated single shader): the single shader's shaded
-     * pipelines remade with the fragment entries {@code single*Main} of {@code full} (from full vertices) and
-     * {@code lean} (the lean mesh path), {@code constants} their specialization constants.
-     */
-    @AllowAllocation("a benchmark's set-up")
-    void singleShaderForBenchmark(String full, String lean, int... constants) {
-        try (ShaderModule draw = ShaderModule.load(device, "shaders/meshlets/draw.spv");
-             ShaderModule fullShader = ShaderModule.load(device, full);
-             ShaderModule leanShader = ShaderModule.load(device, lean)) {
-            for (Pipeline pipeline : indexed[SHADED]) {
-                pipeline.close();
-            }
-            indexedBlended.close();
-            indexed[SHADED] = bins(bin -> raster(bin, draw, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain")
-                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, fullShader, masking(bin) ? "singleMaskedMain"
-                    : "singleFragmentMain").constants(constants).color(colorFormat).depth(depthFormat).build());
-            indexedBlended = blended(raster(BIN_BLENDED, draw, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain")
-                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, fullShader, "singleBlendedMain").constants(constants),
-                depthFormat);
-            if (mesh[SHADED] != null) {
-                for (Pipeline pipeline : mesh[SHADED]) {
-                    pipeline.close();
-                }
-                meshBlended.close();
-                try (ShaderModule geometry = ShaderModule.load(device, slimMeshes ? "shaders/meshlets/lean.spv"
-                    : "shaders/meshlets/mesh.spv")) {
-                    String entry = slimMeshes ? "meshLeanMain" : "meshIdsMain";
-                    ShaderModule fragment = slimMeshes ? leanShader : fullShader;
-                    String prefix = slimMeshes ? "singleLean" : "single";
-                    mesh[SHADED] = bins(bin -> raster(bin, geometry, VK_SHADER_STAGE_MESH_BIT_EXT, entry)
-                        .stage(VK_SHADER_STAGE_FRAGMENT_BIT, fragment, prefix + (masking(bin) ? "MaskedMain"
-                            : slimMeshes ? "Main" : "FragmentMain")).constants(constants).color(colorFormat)
-                        .depth(depthFormat).build());
-                    meshBlended = blended(raster(BIN_BLENDED, geometry, VK_SHADER_STAGE_MESH_BIT_EXT, entry)
-                        .stage(VK_SHADER_STAGE_FRAGMENT_BIT, fragment, prefix + "BlendedMain").constants(constants),
-                        depthFormat);
-                }
-            }
-        }
-    }
-
     /** Whether the device draws on mesh shaders. */
     boolean meshShaders() {
-        return mesh[SHADED] != null;
+        return mesh[DEPTH] != null;
     }
 
     /** Throws without primitive IDs in fragment shaders: no visibility buffer. */
@@ -184,36 +113,32 @@ final class RasterPipelines implements AutoCloseable {
     }
 
     /**
-     * Draws {@code v}'s raster bins in {@code role} into its own rendering scope: the late phase's lists over the
-     * attachments with {@code late}, else the early (or only) phase's into cleared ones.
+     * Draws {@code v}'s raster bins in {@code role} ({@link #DEPTH}, {@link #IDS}) into its own rendering scope: the
+     * late phase's lists over the attachments with {@code late}, else the early (or only) phase's into cleared ones.
      */
     void draw(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading, int role, boolean late,
-        long colorView, long depthView, int width, int height, float r, float g, float b, long clusters) {
+        long colorView, long depthView, int width, int height) {
         try (MemoryStack stack = stackPush()) {
-            beginRendering(commands, stack, colorView, depthView, width, height, r, g, b, late);
+            beginRendering(commands, stack, colorView, depthView, width, height, 0, 0, 0, late);
             setViewport(commands, stack, width, height);
         }
-        drawBins(commands, scene, v, meshShading, role, late, clusters, 0);
+        drawBins(commands, scene, v, meshShading, role, late);
         Commands.endRendering(commands);
     }
 
     /**
-     * Draws {@code v}'s blended bin, its lists both phases' (appended), into a transparency technique's attachments
-     * open on {@code commands}: weighted, into accumulated color and revealage; as opaque, with the shaded pipelines
-     * (the masked entry points: one-sided back faces discarded).
+     * Draws {@code v} shaded by type into its own rendering scope, cleared to ({@code r}, {@code g}, {@code b}) unless
+     * {@code late}: {@link #drawTyped} with {@code pipelines}.
      */
-    void drawBlended(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading,
-        BlendedTargets.Kind kind, long clusters, long behind, long indirect) {
-        boolean weighted = kind == BlendedTargets.Kind.WEIGHTED;
+    void drawShaded(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading, boolean late,
+        long colorView, long depthView, int width, int height, float r, float g, float b, long clusters,
+        Typed pipelines) {
         try (MemoryStack stack = stackPush()) {
-            if (meshShading) {
-                drawMeshes(commands, stack, scene, v, BIN_BLENDED, false, v.drawCount().deviceAddress(), clusters,
-                    weighted ? meshBlended : mesh[SHADED][BIN_BLENDED], behind, indirect);
-            } else {
-                drawIndexed(commands, stack, scene, v, BIN_BLENDED, clusters,
-                    weighted ? indexedBlended : indexed[SHADED][BIN_BLENDED], behind, indirect);
-            }
+            beginRendering(commands, stack, colorView, depthView, width, height, r, g, b, late);
+            setViewport(commands, stack, width, height);
         }
+        drawTyped(commands, scene, v, meshShading, late, clusters, 0, pipelines);
+        Commands.endRendering(commands);
     }
 
     /**
@@ -227,134 +152,122 @@ final class RasterPipelines implements AutoCloseable {
     }
 
     /** Draws {@code v}'s opaque raster bins in {@code role} into the rendering scope open on {@code commands}. */
-    void drawBins(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading, int role, boolean late,
-        long clusters, long indirect) {
+    void drawBins(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading, int role, boolean late) {
         long count = v.drawCount().deviceAddress();
         Pipeline[] pipelines = meshShading ? mesh[role] : indexed[role];
         try (MemoryStack stack = stackPush()) {
             for (int bin = 0; bin < BIN_BLENDED; bin++) {
                 if (meshShading) {
-                    drawMeshes(commands, stack, scene, v, bin, late, count, clusters, pipelines[bin], 0, indirect);
+                    drawMeshes(commands, stack, scene, v, bin, late, count, pipelines[bin]);
                 } else {
-                    drawIndexed(commands, stack, scene, v, bin, clusters, pipelines[bin], 0, indirect);
+                    drawIndexed(commands, stack, scene, v, bin, pipelines[bin]);
                 }
             }
         }
     }
 
-    /** What a pipeline drawing one shading bin is made of: its fragment entry point, features and raster bin. */
-    private record TypedKey(String fragmentShader, String fragmentEntry, int features, int bin, boolean meshShading,
-        boolean weighted) {
+    /**
+     * What a pipeline drawing raster bin {@code bin} of a shading bin of {@code type} with {@code features} into color
+     * (or with {@code weighted}, the blended bin into weighted transparency's targets) is made of: the type's forward
+     * entry point behind the geometry stage reading the split list, on mesh shaders or the indexed path.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    ShadingPipelines.Key forwardKey(MaterialType type, int features, int bin, boolean meshShading, boolean weighted) {
+        boolean lean = meshShading && slimMeshes;
+        String suffix = weighted ? "BlendedMain" : masking(bin) ? "MaskedMain" : lean ? "Main" : "FragmentMain";
+        return new ShadingPipelines.Key(!meshShading ? "shaders/meshlets/draw.spv" : lean
+            ? "shaders/meshlets/lean.spv" : "shaders/meshlets/mesh.spv",
+            !meshShading ? "vertexMain" : lean ? "meshLeanTypedMain" : "meshIdsTypedMain", meshShading,
+            lean ? type.forwardLeanShader() : type.forwardShader(), type.name() + (lean ? "Lean" : "") + suffix,
+            features, 0, bin == BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED,
+            weighted ? ShadingPipelines.WEIGHTED : ShadingPipelines.COLOR, DRAW_PUSH);
     }
 
     /**
-     * Forward shading by type ({@link ForwardShading#PER_TYPE}): for each shading bin of a table, as a graph built,
-     * its pipelines per raster bin its materials draw in (null for the others), each its type's forward entry point
-     * with only the bin's features, and the blended bin's weighted ones; on mesh shaders or the indexed path.
-     *
-     * @param shaded per shading bin, then raster bin: drawn into color (the blended bin's as opaque)
-     * @param weighted per shading bin: the blended bin into the transparency pass's weighted targets
-     * @param meshShading whether they draw on mesh shaders
+     * Forward shading by type, for a material table as a graph built: per shading bin and raster bin its materials draw
+     * in, a pipeline of its type's forward entry point with only the bin's features (and the blended bin's weighted
+     * one), per path; made for the path of the build, and for the other when a frame first draws on it.
      */
-    record Typed(Pipeline[][] shaded, Pipeline[] weighted, boolean meshShading) {
+    final class Typed {
+        private final MaterialType[] types;
+        private final int[] features;
+        private final int[] rasters;
+        // Per path (0: indexed, 1: mesh shaders): per shading bin * BINS + raster bin; null where none draws or not yet
+        private final Pipeline[][] shaded = new Pipeline[2][];
+        private final Pipeline[][] weighted = new Pipeline[2][];
+
+        @AllowAllocation("building the graph, when it changes")
+        private Typed(Materials materials, boolean meshShading) {
+            int bins = materials.binCount();
+            types = new MaterialType[bins];
+            features = new int[bins];
+            rasters = new int[bins];
+            for (int category = 0; category < bins; category++) {
+                types[category] = materials.binType(category);
+                features[category] = materials.binFeatures(category);
+                rasters[category] = materials.binRasters(category);
+            }
+            make(meshShading ? 1 : 0);
+        }
+
         /** How many shading bins it draws. */
         int categories() {
-            return shaded.length;
+            return types.length;
+        }
+
+        /** Makes (or takes from the store) the pipelines of path {@code path}. */
+        @AllowAllocation("building the graph, or a frame first drawing on the other path")
+        private void make(int path) {
+            Pipeline[] s = new Pipeline[types.length * BINS];
+            Pipeline[] w = new Pipeline[types.length];
+            for (int category = 0; category < types.length; category++) {
+                for (int bin = 0; bin < BINS; bin++) {
+                    if ((rasters[category] & 1 << bin) != 0) {
+                        s[category * BINS + bin] = store.get(forwardKey(types[category], features[category], bin,
+                            path == 1, false));
+                        if (bin == BIN_BLENDED) {
+                            w[category] = store.get(forwardKey(types[category], features[category], bin, path == 1,
+                                true));
+                        }
+                    }
+                }
+            }
+            weighted[path] = w;
+            shaded[path] = s;
+        }
+
+        /** Shading bin {@code category}'s pipeline for raster bin {@code bin} on the path; null where none draws. */
+        Pipeline shaded(boolean meshShading, int category, int bin) {
+            int path = meshShading ? 1 : 0;
+            if (shaded[path] == null) {
+                make(path);
+            }
+            return shaded[path][category * BINS + bin];
+        }
+
+        /** Shading bin {@code category}'s weighted blended pipeline on the path; null where it draws nothing blended. */
+        Pipeline weighted(boolean meshShading, int category) {
+            int path = meshShading ? 1 : 0;
+            if (weighted[path] == null) {
+                make(path);
+            }
+            return weighted[path][category];
         }
     }
 
     /** The typed pipelines of {@code materials}' shading bins, as they are now (made where they are not yet). */
     @AllowAllocation("building the graph, when it changes")
-    synchronized Typed typed(Materials materials, boolean meshShading) {
-        int bins = materials.binCount();
-        Pipeline[][] shaded = new Pipeline[bins][BINS];
-        Pipeline[] weighted = new Pipeline[bins];
-        java.util.Map<String, ShaderModule> modules = new java.util.HashMap<>();
-        try {
-            for (int category = 0; category < bins; category++) {
-                MaterialType type = materials.binType(category);
-                int features = materials.binFeatures(category);
-                int rasters = materials.binRasters(category);
-                for (int bin = 0; bin < BINS; bin++) {
-                    if ((rasters & 1 << bin) != 0) {
-                        shaded[category][bin] = typed(modules, type, features, bin, meshShading, false);
-                        if (bin == BIN_BLENDED) {
-                            weighted[category] = typed(modules, type, features, bin, meshShading, true);
-                        }
-                    }
-                }
-            }
-        } finally {
-            for (ShaderModule module : modules.values()) {
-                module.close();
-            }
-        }
-        return new Typed(shaded, weighted, meshShading);
-    }
-
-    /** How many typed pipelines there are: made so far, all graphs together. */
-    synchronized int typedCount() {
-        return typed.size();
-    }
-
-    /** Nanoseconds spent making typed pipelines so far. */
-    synchronized long typedNanos() {
-        return typedNanos;
-    }
-
-    /**
-     * A pipeline drawing raster bin {@code bin} of one shading bin of {@code type} with {@code features}: its forward
-     * entry point (a type without them, the single shader's), behind the stage reading the split list.
-     */
-    @AllowAllocation("building the graph, when it changes")
-    private Pipeline typed(java.util.Map<String, ShaderModule> modules, MaterialType type, int features, int bin,
-        boolean meshShading, boolean weighted) {
-        boolean lean = meshShading && slimMeshes;
-        String suffix = weighted ? "BlendedMain" : masking(bin) ? "MaskedMain" : "FragmentMain";
-        String shader = lean ? type.forwardLeanShader() : type.forwardShader();
-        String entry;
-        int constant = features;
-        if (shader == null) { // no entry points of its own: the single shader, with its branches
-            shader = lean ? "shaders/meshlets/lean.spv" : "shaders/meshlets/draw.spv";
-            entry = lean ? (weighted ? "leanBlendedMain" : masking(bin) ? "leanMaskedMain" : "leanMain")
-                : (weighted ? "blendedMain" : masking(bin) ? "maskedMain" : "fragmentMain");
-            constant = 0;
-        } else {
-            entry = type.name() + (lean ? "Lean" + suffix.replace("FragmentMain", "Main") : suffix);
-        }
-        TypedKey key = new TypedKey(shader, entry, constant, bin, meshShading, weighted);
-        Pipeline made = typed.get(key);
-        if (made != null) {
-            return made;
-        }
-        long start = System.nanoTime();
-        String geometry = !meshShading ? "shaders/meshlets/draw.spv" : lean ? "shaders/meshlets/lean.spv"
-            : "shaders/meshlets/mesh.spv";
-        String geometryEntry = !meshShading ? "vertexMain" : lean ? "meshLeanTypedMain" : "meshIdsTypedMain";
-        String fragment = shader;
-        Pipeline.Graphics graphics = raster(bin, modules.computeIfAbsent(geometry, s -> ShaderModule.load(device, s)),
-            meshShading ? VK_SHADER_STAGE_MESH_BIT_EXT : VK_SHADER_STAGE_VERTEX_BIT, geometryEntry)
-            .stage(VK_SHADER_STAGE_FRAGMENT_BIT, modules.computeIfAbsent(fragment,
-                s -> ShaderModule.load(device, s)), entry)
-            .constants(constant);
-        made = weighted ? blended(graphics, depthFormat) : graphics.color(colorFormat).depth(depthFormat).build();
-        typedNanos += System.nanoTime() - start;
-        typed.put(key, made);
-        return made;
+    Typed typed(Materials materials, boolean meshShading) {
+        return new Typed(materials, meshShading);
     }
 
     /**
      * Draws {@code v}'s opaque raster bins shaded by type ({@code pipelines}), from its split lists, into the rendering
-     * scope open on {@code commands}: an indirect draw per raster bin and shading bin with a pipeline. Pipelines made
-     * for the other path, or lists split for fewer shading bins, draw untyped.
+     * scope open on {@code commands}: an indirect draw per raster bin and shading bin with a pipeline.
      */
     void drawTyped(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading, boolean late,
         long clusters, long indirect, Typed pipelines) {
-        int room = v.splitCategories();
-        if (pipelines.meshShading() != meshShading || room < pipelines.categories()) {
-            drawBins(commands, scene, v, meshShading, SHADED, late, clusters, indirect);
-            return;
-        }
+        int room = checkSplit(v, pipelines);
         try (MemoryStack stack = stackPush()) {
             long push = typedPush(stack, scene, v, late, clusters, 0, indirect, room);
             if (!meshShading) {
@@ -362,20 +275,21 @@ final class RasterPipelines implements AutoCloseable {
             }
             for (int bin = 0; bin < BIN_BLENDED; bin++) {
                 for (int category = 0; category < pipelines.categories(); category++) {
-                    drawTyped(commands, v, meshShading, push, bin, category, room, pipelines.shaded()[category][bin]);
+                    drawTyped(commands, v, meshShading, push, bin, category, room,
+                        pipelines.shaded(meshShading, category, bin));
                 }
             }
         }
     }
 
-    /** Like {@link #drawBlended}, by type ({@code pipelines}), from {@code v}'s split lists. */
+    /**
+     * Draws {@code v}'s blended bin, its lists both phases' (appended), shaded by type ({@code pipelines}) from its
+     * split lists, into a transparency technique's attachments open on {@code commands}: weighted, into accumulated
+     * color and revealage; as opaque, with the masked entry points (one-sided back faces discarded).
+     */
     void drawBlendedTyped(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading,
         BlendedTargets.Kind kind, long clusters, long behind, long indirect, Typed pipelines) {
-        int room = v.splitCategories();
-        if (pipelines.meshShading() != meshShading || room < pipelines.categories()) {
-            drawBlended(commands, scene, v, meshShading, kind, clusters, behind, indirect);
-            return;
-        }
+        int room = checkSplit(v, pipelines);
         boolean weighted = kind == BlendedTargets.Kind.WEIGHTED;
         try (MemoryStack stack = stackPush()) {
             long push = typedPush(stack, scene, v, false, clusters, behind, indirect, room);
@@ -384,9 +298,20 @@ final class RasterPipelines implements AutoCloseable {
             }
             for (int category = 0; category < pipelines.categories(); category++) {
                 drawTyped(commands, v, meshShading, push, BIN_BLENDED, category, room,
-                    weighted ? pipelines.weighted()[category] : pipelines.shaded()[category][BIN_BLENDED]);
+                    weighted ? pipelines.weighted(meshShading, category)
+                        : pipelines.shaded(meshShading, category, BIN_BLENDED));
             }
         }
+    }
+
+    /** The room {@code v}'s split lists have, which must hold {@code pipelines}' shading bins. */
+    private static int checkSplit(RenderView v, Typed pipelines) {
+        int room = v.splitCategories();
+        if (room < pipelines.categories()) {
+            throw new IllegalStateException("View " + v.index() + "'s lists are split for " + room
+                + " shading bins, not " + pipelines.categories());
+        }
+        return room;
     }
 
     /** The push block of typed draws of {@code v}, on {@code stack}; each draw sets its raster and shading bin. */
@@ -427,31 +352,25 @@ final class RasterPipelines implements AutoCloseable {
     }
 
     private static void drawMeshes(VkCommandBuffer commands, MemoryStack stack, GpuScene scene, RenderView v, int bin,
-        boolean late, long count, long clusters, Pipeline pipeline, long behind, long indirect) {
-        long push = stack.nmalloc(8, DRAW_PUSH);
+        boolean late, long count, Pipeline pipeline) {
+        long push = stack.ncalloc(8, 1, DRAW_PUSH);
         memPutLong(push + ForwardPush.VIEW, v.address());
         memPutLong(push + ForwardPush.SCENE, scene.tableAddress());
         memPutLong(push + ForwardPush.VISIBLE, v.visible().deviceAddress());
         memPutLong(push + ForwardPush.VISIBLE_COUNT, count);
-        memPutLong(push + ForwardPush.LIGHTS, clusters);
         memPutInt(push + ForwardPush.BIN, bin);
         memPutInt(push + ForwardPush.LATE, late ? 1 : 0);
-        memPutLong(push + ForwardPush.BACKGROUND, behind); // its slot, then its region: SceneBehind.words
-        memPutLong(push + ForwardPush.INDIRECT, indirect);
         pipeline.bind(commands);
         pipeline.push(commands, push, DRAW_PUSH);
         Commands.drawMeshTasksIndirect(commands, v.expandCommand().handle(), 16L * bin, 1, 12);
     }
 
     private static void drawIndexed(VkCommandBuffer commands, MemoryStack stack, GpuScene scene, RenderView v, int bin,
-        long clusters, Pipeline pipeline, long behind, long indirect) {
+        Pipeline pipeline) {
         long push = stack.ncalloc(8, 1, DRAW_PUSH);
         memPutLong(push + ForwardPush.VIEW, v.address());
         memPutLong(push + ForwardPush.SCENE, scene.tableAddress());
         memPutLong(push + ForwardPush.VISIBLE, v.visible().deviceAddress());
-        memPutLong(push + ForwardPush.LIGHTS, clusters);
-        memPutLong(push + ForwardPush.BACKGROUND, behind);
-        memPutLong(push + ForwardPush.INDIRECT, indirect);
         pipeline.bind(commands);
         pipeline.push(commands, push, DRAW_PUSH);
         Commands.bindIndexBuffer(commands, v.frameIndices().handle(), 0, VK_INDEX_TYPE_UINT32);
@@ -533,14 +452,6 @@ final class RasterPipelines implements AutoCloseable {
 
     @Override
     public void close() {
-        for (Pipeline pipeline : typed.values()) {
-            pipeline.close();
-        }
-        typed.clear();
-        indexedBlended.close();
-        if (meshBlended != null) {
-            meshBlended.close();
-        }
         for (Pipeline[][] paths : new Pipeline[][][] {indexed, mesh}) {
             for (Pipeline[] pipelines : paths) {
                 if (pipelines != null) {

@@ -580,11 +580,6 @@ public static const float3 SUN_IRRADIANCE = float3(2.35619449);
 public static const float3 SKY_IRRADIANCE = float3(0.78539816 / 1.02);
 
 /**
- * The surface color at `pixel`, with texture coordinate gradients `dx`, `dy` (per pixel): the fragment stage of both
- * paths, and of anything shading the same surfaces. Lit by the lights `lights` gives it (the frame's light list) and
- * the sky or, without a light list (null), by the sun and the sky. Shadow rays are traced by `rays` (NoRays: none).
- */
-/**
  * Discards what a masked material does not draw at this fragment: its masked texels, and back faces unless it is
  * double-sided (the masked bin draws without culling). Every pass rasterizing the masked bin calls it, shadows too.
  */
@@ -595,22 +590,6 @@ public void discardMasked(Material m, VertexOut in, bool front)
     {
         discard;
     }
-}
-
-public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Material* materials, float4 dx,
-    float4 dy, LightListHeader* lights, uint2 pixel, Background behind, IndirectLight* indirect)
-{
-    Material m = materials[in.material];
-    if (materialType(m) != 0)
-    {
-        // The one shader (render.forwardShading SINGLE) draws other types as metallic-roughness's defaults; by type,
-        // each draws with entry points of its own (forward.slang). This branch lost the device on an integrated GPU
-        // (pitfalls.md, #151).
-        return shadeMaterial<DefaultSurface, R>(rays, view, in, materials, dx, dy, lights, pixel,
-            materialFeatures(m), behind, indirect);
-    }
-    return shadeMaterial<MetallicRoughnessMaterial, R>(rays, view, in, materials, dx, dy, lights, pixel,
-        materialFeatures(m), behind, indirect);
 }
 
 /**
@@ -687,21 +666,12 @@ public float3 transmitted(Surface s, View view, float3 world, float3 toViewer, u
     return color * s.albedo;
 }
 
-/** Metallic-roughness's defaults, whatever the material's parameters: for types a pass cannot shade yet. */
-struct DefaultSurface : IMaterial
-{
-    typealias Parameters = NoParameters;
-
-    static Surface surface(NoParameters p, MaterialRef m, SurfaceInput in)
-    {
-        MetallicRoughnessParameters defaults = {};
-        return evaluate(defaults, in);
-    }
-};
-
 /**
- * shadeSurface with the surface from material type M, showing the features of `features` (FEATURE_*; where it is a
- * constant, the code of the others is left out): the lighting is the same for every type.
+ * The surface color at `pixel`, with texture coordinate gradients `dx`, `dy` (per pixel), of material type M's surface
+ * showing the features of `features` (FEATURE_*; where it is a constant, the code of the others is left out): the
+ * fragment stage of every geometry path, and of anything shading the same surfaces. The lighting is the same for every
+ * type: by the lights `lights` gives it (the frame's light list) and the sky or, without a light list (null), by the
+ * sun and the sky. Shadow rays are traced by `rays` (NoRays: none).
  */
 public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
     float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features, Background behind,

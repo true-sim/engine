@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.assertj.core.api.Assertions.within;
 import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
@@ -1278,7 +1279,9 @@ class GraphTechniquesTest {
                 .isThrownBy(() -> materials.update(quadMaterial, MetallicRoughnessParameters.ROUGHNESS, 0.5f));
             assertThatIllegalArgumentException().isThrownBy(() -> materials.register(Glow.TYPE));
             assertThatIllegalArgumentException().isThrownBy(() -> new MaterialType("half", GlowParameters.class,
-                GlowParameters::fromValues, 0, "a.spv", "a", "b.spv", null));
+                GlowParameters::fromValues, 0, "a.spv", "a", "b.spv", null, "c.spv", "d.spv"));
+            assertThatNullPointerException().as("forward entry points").isThrownBy(() -> new MaterialType("none",
+                GlowParameters.class, GlowParameters::fromValues, 0, "a.spv", "a", null, null, null, null));
             // At half the resolution: the glow type's bin, past bin 0, is shaded from the list classification wrote
             // into, though the render region has fewer tiles than the images the lists are spaced for.
             graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.HEADROOM, 1.5f);
@@ -1295,69 +1298,140 @@ class GraphTechniquesTest {
     }
 
     @Test
-    void forwardShadingDrawsEachMaterialTypeWithItsOwnShader() {
-        // The lit floor, metallic-roughness, and a quad standing on it, of the type under test (#67).
+    void forwardShadingDrawsFeatureBinsWithTheirVariants() {
+        // The lit floor, metallic-roughness, and a quad standing on it with a clear coat: its bin's variant (FEATURES
+        // a constant) shows the coat, on both paths, as the visibility buffer's shading of the same bin does.
         scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
         scene.removeFrom(2);
         Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
         view.set(camera, 1, MeshletRenderer.MODE_LIT);
         try (Materials materials = new Materials(device, 8)) {
-            materials.register(Glow.TYPE);
-            int quadMaterial = materials.add(new Material(GlowParameters.DEFAULTS));
+            int quadMaterial = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.2f, 0.1f, 1)))
+                .feature(ClearcoatParameters.DEFAULTS));
             scene.setMaterials(materials);
             scene.set(1, quad, quadMaterial, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
             SceneView main = main(camera);
-            main.port().add(new ClusteredForwardShading(SceneGeometry.meshlets(renderer), main,
-                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f))
-                .output(Keys.SCENE_COLOR, output);
-            assertThat(graph.settings().get(RenderSettings.FORWARD_SHADING)).as("the default")
-                .isEqualTo(ForwardShading.PER_TYPE);
-            for (MeshletRenderer.Path path : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED,
-                MeshletRenderer.Path.AUTO}) {
-                renderer.setPath(path);
-                // Opaque, then masked (the masked raster bin's entry points), each drawn per type and with the one
-                // shader; three frames each, so both occlusion phases have drawn (pitfalls.md).
-                for (Material glow : new Material[] {new Material(GlowParameters.DEFAULTS),
-                    new Material(GlowParameters.DEFAULTS).alphaMask(0.5f)}) {
-                    materials.set(quadMaterial, glow);
-                    graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.PER_TYPE);
-                    int[] typed = frames(3);
-                    graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.SINGLE);
-                    int[] single = frames(3);
-                    assertThat(glowing(typed)).as("the quad glows by its own type, %s, %s", path,
-                        glow.masked() ? "masked" : "opaque").isGreaterThan(SIZE * SIZE / 40);
-                    assertThat(glowing(single)).as("the one shader draws it as metallic-roughness's defaults")
-                        .isZero();
-                    int floor = 0;
-                    for (int i = 0; i < typed.length; i++) {
-                        if (!glowing(typed[i])) {
-                            assertThat(difference(typed[i], single[i])).as("pixel %d, metallic-roughness alike, %s",
-                                i, path).isLessThanOrEqualTo(2);
-                            floor++;
-                        }
-                    }
-                    assertThat(floor).as("the floor's pixels").isGreaterThan(SIZE * SIZE / 4);
-                }
-                // A feature's bin (metallic-roughness with a clear coat): its variant shows the coat as the one
-                // shader's branch does.
-                materials.set(quadMaterial, new Material(MR.withBaseColor(new Color(0.8f, 0.2f, 0.1f, 1)))
-                    .feature(ClearcoatParameters.DEFAULTS));
-                graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.PER_TYPE);
-                int[] typed = frames(3);
-                graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.SINGLE);
-                int[] single = frames(3);
-                int coated = 0;
-                for (int i = 0; i < typed.length; i++) {
-                    assertThat(difference(typed[i], single[i])).as("pixel %d, coated, %s", i, path)
-                        .isLessThanOrEqualTo(2);
-                    coated += (typed[i] & 0xff) > 2 * ((typed[i] >> 16) & 0xff) ? 1 : 0;
-                }
-                assertThat(coated).as("the red coated quad's pixels").isGreaterThan(SIZE * SIZE / 40);
+            SceneGeometry meshlets = SceneGeometry.meshlets(renderer);
+            main.port().add(new ClusteredForwardShading(meshlets, main, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f)).output(Keys.SCENE_COLOR, output);
+            int[][] forward = new int[2][];
+            MeshletRenderer.Path[] paths = {MeshletRenderer.Path.INDEXED, MeshletRenderer.Path.AUTO};
+            for (int p = 0; p < 2; p++) {
+                renderer.setPath(paths[p]);
+                forward[p] = frames(3); // both occlusion phases have drawn (pitfalls.md)
             }
-            assertThat(renderer.forwardPipelineCount()).as("pipelines by type made").isPositive();
             renderer.setPath(MeshletRenderer.Path.AUTO);
-            graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.PER_TYPE);
+            int coated = 0;
+            for (int i = 0; i < forward[0].length; i++) {
+                assertThat(difference(forward[0][i], forward[1][i])).as("pixel %d, the paths alike", i)
+                    .isLessThanOrEqualTo(2);
+                coated += (forward[0][i] & 0xff) > 2 * ((forward[0][i] >> 16) & 0xff) ? 1 : 0;
+            }
+            assertThat(coated).as("the red coated quad's pixels").isGreaterThan(SIZE * SIZE / 40);
+            assertThat(renderer.forwardPipelineCount()).as("pipelines by type made").isPositive();
             scene.setMaterials(null);
+        }
+    }
+
+    /** A material type under test, how its material is made and how its pixels look. */
+    private record TypeCase(String name, MaterialType type,
+        java.util.function.Function<GpuBuffer, MaterialParameters> parameters,
+        java.util.function.IntPredicate looks) {
+    }
+
+    /**
+     * Glow (magenta, whatever the light), tinted (green from a buffer its parameters name) and car paint (black
+     * metallic-roughness with orange flakes, lit), each read back on every path that shades color: forward on the
+     * indexed path and on mesh shaders, the visibility buffer, and classic LOD under both, opaque and blended (the
+     * blended bin into weighted transparency's targets, and drawn as opaque). Before every color pass drew by type, the
+     * visibility buffer's blended bin and classic LOD drew these types as metallic-roughness's defaults: grey.
+     */
+    @Test
+    void everyColorPathShadesEachMaterialTypeAsItself() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        TypeCase[] cases = {
+            new TypeCase("glow", Glow.TYPE, tint -> GlowParameters.DEFAULTS, GraphTechniquesTest::glowing),
+            new TypeCase("tinted", Tinted.TYPE, tint -> TintedParameters.DEFAULTS.withTint(tint),
+                pixel -> green(pixel) >= 250 && red(pixel) <= 5 && blue(pixel) <= 5),
+            new TypeCase("car paint", CarPaint.TYPE, tint -> CarPaintParameters.DEFAULTS.withBase(MR.withBaseColor(
+                new Color(0, 0, 0, 1)).withRoughness(1)).withFlakeColor(new Color(1, 0.5f, 0, 1)).withFlakes(1),
+                pixel -> red(pixel) > 40 && green(pixel) > red(pixel) / 4 && green(pixel) < red(pixel) * 3 / 4
+                    && blue(pixel) < red(pixel) / 8),
+        };
+        try (Materials materials = new Materials(device, 8);
+             GpuBuffer green = GpuBuffer.hostVisible(device, 16, usage);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            green.memory().copyFrom(java.lang.foreign.MemorySegment.ofArray(new float[] {0, 1, 0, 1}));
+            for (TypeCase c : cases) {
+                materials.register(c.type());
+            }
+            int quadMaterial = materials.add(new Material(MR));
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, quadMaterial, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            SceneGeometry meshlets = SceneGeometry.meshlets(renderer);
+            SceneGeometry classics = new SceneGeometry(classic.add(quadMesh, mesh));
+            main.port().output(Keys.SCENE_COLOR, output);
+            org.assertj.core.api.SoftAssertions softly = new org.assertj.core.api.SoftAssertions(); // every path told
+            for (TypeCase c : cases) {
+                for (boolean blended : new boolean[] {false, true}) {
+                    Material material = new Material(c.parameters().apply(green));
+                    materials.set(quadMaterial, blended ? material.alphaBlend() : material);
+                    for (String path : new String[] {"forward", "visibility buffer", "classic LOD forward",
+                        "classic LOD visibility buffer"}) {
+                        boolean ids = path.endsWith("visibility buffer");
+                        if (ids && !device.primitiveIds()) {
+                            continue;
+                        }
+                        SceneGeometry geometry = path.startsWith("classic") ? classics : meshlets;
+                        Technique shading = ids ? new VisibilityBufferShading(geometry, main,
+                            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0)
+                            : new ClusteredForwardShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                                VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0);
+                        replaceShading(main, shading);
+                        List<Technique> transparencies = blended ? List.of(new WeightedBlendedTransparency(geometry,
+                            main), new OpaqueTransparency(geometry, main)) : java.util.Collections.singletonList(null);
+                        for (Technique transparency : transparencies) {
+                            if (transparency != null) {
+                                main.port().remove(Transparency.ID).add(transparency);
+                            }
+                            MeshletRenderer.Path[] meshletPaths = path.startsWith("classic")
+                                ? new MeshletRenderer.Path[] {MeshletRenderer.Path.AUTO}
+                                : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED, MeshletRenderer.Path.AUTO};
+                            for (MeshletRenderer.Path meshletPath : meshletPaths) {
+                                renderer.setPath(meshletPath);
+                                int[] pixels = frames(3);
+                                int count = 0;
+                                for (int pixel : pixels) {
+                                    count += c.looks().test(pixel) ? 1 : 0;
+                                }
+                                softly.assertThat(count).as("%s, %s, %s%s, %s", c.name(), path, blended ? "blended, "
+                                    : "opaque", transparency == null ? "" : transparency.getClass().getSimpleName(),
+                                    meshletPath).isGreaterThan(SIZE * SIZE / 20);
+                            }
+                            renderer.setPath(MeshletRenderer.Path.AUTO);
+                        }
+                        main.port().remove(Transparency.ID);
+                    }
+                }
+            }
+            scene.setMaterials(null);
+            softly.assertAll();
+        }
+    }
+
+    /** Puts {@code shading} in place of {@code main}'s shading technique (or adds it, as the first). */
+    private static void replaceShading(SceneView main, Technique shading) {
+        try {
+            main.port().replace(shading);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            main.port().add(shading);
         }
     }
 

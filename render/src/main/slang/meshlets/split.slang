@@ -14,10 +14,11 @@ struct SplitPush
     VisibleMeshlet* visible;
     uint* visibleCount;
     uint* typed;              // the view's split lists: the header (forward.slang's SPLIT_*), then the slot list
-    uint categories;          // shading bins the header has room for: materials of a later bin draw as bin 0
+    uint categories;          // shading bins the header has room for: materials of a later bin are not drawn
     uint late;                // 1: the late phase's lists
     uint indexed;             // 1: the indexed path, whose meshlets get index ranges by shading bin
     uint stride;              // threads per raster bin: the dispatch's x times 64
+    uint bins;                // the raster bins split, a bit each: the others' lists stay as culled
 };
 
 [[vk::push_constant]]
@@ -84,6 +85,10 @@ void splitCountMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
 {
     View view = push.view[0];
     uint bin = group.y;
+    if ((push.bins >> bin & 1) == 0)
+    {
+        return; // uniform: the whole group's bin
+    }
     uint count = listed(view, bin);
     uint first = binFirstSlot(view, bin);
     uint entry0 = splitEntry(bin, 0, push.categories);
@@ -102,9 +107,11 @@ void splitCountMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
                 Instance instance = push.scene[0].instances[v.instance];
                 category = push.scene[0].materials[instance.materialBase
                     + meshletSubmesh(push.scene[0].meshlets, v.meshlet)].bin;
-                category = category < push.categories ? category : 0; // a bin made since the graph built
-                indices = meshletIndices(v.meshlet);
-                push.visible[first + k].pad = category; // for the scatter
+                // A bin made since the graph built has no pipeline yet: left out until the next build makes it
+                // (which the new bin asks for), rather than drawn as another type.
+                active = category < push.categories;
+                indices = active ? meshletIndices(v.meshlet) : 0;
+                push.visible[first + k].pad = active ? category : 0xffffffffu; // for the scatter
             }
         }
         waveAdd(entry0, SPLIT_COUNT, active, category, indices, push.indexed != 0); // and SPLIT_INDICES
@@ -118,6 +125,10 @@ void splitLayoutMain(uint3 group : SV_GroupID)
 {
     View view = push.view[0];
     uint bin = group.y;
+    if ((push.bins >> bin & 1) == 0)
+    {
+        return;
+    }
     uint slots = 0;
     uint indices = 0;
     uint firstIndex = push.indexed != 0 ? binFirstIndex(view, bin) : 0;
@@ -148,6 +159,10 @@ void splitScatterMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
 {
     View view = push.view[0];
     uint bin = group.y;
+    if ((push.bins >> bin & 1) == 0)
+    {
+        return; // uniform: the whole group's bin
+    }
     uint count = listed(view, bin);
     uint first = binFirstSlot(view, bin);
     uint entry0 = splitEntry(bin, 0, push.categories);
@@ -162,8 +177,8 @@ void splitScatterMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
         if (active)
         {
             v = push.visible[first + k];
-            active = v.instance != 0xffffffffu;
-            category = v.pad;
+            active = v.instance != 0xffffffffu && v.pad != 0xffffffffu;
+            category = active ? v.pad : 0;
             indices = active ? meshletIndices(v.meshlet) : 0;
         }
         // SPLIT_CURSOR and SPLIT_INDEX_CURSOR: the meshlet's place in its shading bin's part, and its indices'
