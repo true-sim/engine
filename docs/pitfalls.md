@@ -252,6 +252,17 @@ structure update rules); the validation layers reported nothing; the RX 9070 XT 
 - Rule: an instance left out of a top level names an empty bottom level with mask 0, never reference 0; anything else
   that changes which instances are active rebuilds the top level instead of refitting it.
 
+**A cluster hierarchy's finest level is not all of the mesh.** Bottom levels were built from one detail level's
+meshlet range (the last, "finest"). In a cluster hierarchy the levels are the DAG's depths: parts that simplify no
+further keep their meshlets in coarser levels, so Sponza's finest level held 80 of its 103 submeshes; its floor and
+some arches were missing from every ray (the reference showed the sky through the floor, ray-traced shadows lacked
+casters), while rasterizing, which selects by error, drew them.
+- Proof: per level, the submeshes its meshlets name (Sponza: 103 in all, 80 in the last level); the meshlets whose own
+  error is 0 name all 103. `ReferencePathTracerTest.rayTracedLevelsHoldEveryPartOfAClusterHierarchy` (a bumpy grid
+  beside a two-triangle quad) sees the sky through the quad without the fix (true-sim/engine, GI S0).
+- Rule: a bottom level is built from the level's cut (own error at most the level's, parent's above it), as drawing
+  selects, and rays find a triangle's meshlet through that list, not a range.
+
 **A build transform of a flat mesh was not invertible.** Bottom levels scale quantized positions by the mesh's box;
 a flat quad's box has no height, so the scale was 0 on one axis (VUID-VkTransformMatrixKHR-matrix-03799). The
 transform lives in a buffer, so only GPU-assisted validation saw it; ordinary validation stayed quiet.

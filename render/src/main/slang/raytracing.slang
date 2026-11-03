@@ -31,15 +31,19 @@ public struct RayScene
     public uint64_t bottom;            // BottomLevel*: per pool mesh
 };
 
-/** A mesh's bottom level: its address, and the detail level it was built from. */
+/**
+ * A mesh's bottom level: its address, and the meshlets it was built from (a detail level's cut, which in a cluster
+ * hierarchy need not be one range of them), its triangles theirs in that order.
+ */
 [HostLayout]
 public struct BottomLevel
 {
     public uint64_t address;           // 0: none
-    public uint firstMeshlet;          // the level's first meshlet, of the mesh's
-    public uint meshletCount;
+    public uint firstMeshlet;          // unused
+    public uint meshletCount;          // how many meshlets it was built from
     public uint submeshes;             // how many submeshes its meshlets name: the instance's materials to look at
-    public uint firstIndex;            // the mesh's triangle byte of its triangle 0
+    public uint firstIndex;            // unused
+    public uint64_t list;              // uint2 per meshlet: the mesh's meshlet, its first triangle in the level
 };
 
 /** Byte `i` of the pool's meshlet triangles. */
@@ -49,17 +53,18 @@ uint triangleByte(RayScene* scene, uint i)
 }
 
 /**
- * The first word of the meshlet record holding the triangle whose first index is `t` (the mesh's triangle byte), of
- * `level`'s meshlets: their triangles follow one another.
+ * Where triangle `primitive` of `level` lies in its mesh: its first index (the mesh's triangle byte) returned, the
+ * first word of its meshlet's record into `w`; found in the level's list of meshlets by its first triangle.
  */
-uint meshletWord(RayScene* scene, MeshEntry mesh, BottomLevel level, uint t)
+uint levelTriangle(RayScene* scene, MeshEntry mesh, BottomLevel level, uint primitive, out uint w)
 {
-    uint low = level.firstMeshlet;
-    uint high = level.firstMeshlet + level.meshletCount - 1;
+    uint2* list = (uint2*)level.list;
+    uint low = 0;
+    uint high = level.meshletCount - 1;
     while (low < high)
     {
         uint middle = (low + high + 1) / 2;
-        if (scene.meshlets[(mesh.meshletBase + middle) * 8 + 1] <= t)
+        if (list[middle].y <= primitive)
         {
             low = middle;
         }
@@ -68,7 +73,9 @@ uint meshletWord(RayScene* scene, MeshEntry mesh, BottomLevel level, uint t)
             high = middle - 1;
         }
     }
-    return (mesh.meshletBase + low) * 8;
+    uint2 entry = list[low];
+    w = (mesh.meshletBase + entry.x) * 8;
+    return scene.meshlets[w + 1] + (primitive - entry.y) * 3;
 }
 
 /** The material id (of the scene's table) of triangle `primitive` of instance `id`'s bottom level: its submesh's. */
@@ -78,7 +85,8 @@ public uint triangleMaterial(RayScene* scene, uint id, uint primitive)
     uint meshIndex = instance.mesh & INSTANCE_MESH;
     MeshEntry mesh = scene.meshes[meshIndex];
     BottomLevel level = ((BottomLevel*)scene.bottom)[meshIndex];
-    uint w = meshletWord(scene, mesh, level, level.firstIndex + primitive * 3);
+    uint w;
+    levelTriangle(scene, mesh, level, primitive, w);
     return instance.materialBase + (scene.meshlets[w + 2] >> 16);
 }
 
@@ -92,8 +100,8 @@ public bool clipped(RayScene* scene, uint id, uint primitive, float2 bary)
     uint meshIndex = instance.mesh & INSTANCE_MESH;
     MeshEntry mesh = scene.meshes[meshIndex];
     BottomLevel level = ((BottomLevel*)scene.bottom)[meshIndex];
-    uint t = level.firstIndex + primitive * 3;
-    uint w = meshletWord(scene, mesh, level, t);
+    uint w;
+    uint t = levelTriangle(scene, mesh, level, primitive, w);
     uint id = instance.materialBase + (scene.meshlets[w + 2] >> 16);
     Material m = ((Material*)scene.materials)[id];
     if (!materialMasked(m))
@@ -227,8 +235,8 @@ public TriangleVertices triangleVertices(RayScene* scene, uint id, uint primitiv
     uint meshIndex = instance.mesh & INSTANCE_MESH;
     MeshEntry mesh = scene.meshes[meshIndex];
     BottomLevel level = ((BottomLevel*)scene.bottom)[meshIndex];
-    uint t = level.firstIndex + primitive * 3;
-    uint w = meshletWord(scene, mesh, level, t);
+    uint w;
+    uint t = levelTriangle(scene, mesh, level, primitive, w);
     uint first = mesh.indexBase + t;
     uint vertexBase = mesh.meshletVertexBase + scene.meshlets[w];
     TriangleVertices v;

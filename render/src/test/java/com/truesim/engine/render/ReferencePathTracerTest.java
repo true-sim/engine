@@ -489,6 +489,99 @@ class ReferencePathTracerTest {
         camera.set(0, -0.5, -1, 0, 1, 0, Math.PI / 2, size, size, 0.01);
     }
 
+    /**
+     * A cluster hierarchy of two submeshes: a bumpy 32 x 32 grid (simplifies) beside a flat 2 x 2 quad of two triangles
+     * at x 3 to 5 (simplifies no further, so its meshlets stay in a coarser level than the finest).
+     */
+    static MeshData gridAndQuad() {
+        int n = 32;
+        int count = (n + 1) * (n + 1);
+        float[] positions = new float[3 * (count + 4)];
+        for (int z = 0; z <= n; z++) {
+            for (int x = 0; x <= n; x++) {
+                int v = z * (n + 1) + x;
+                positions[3 * v] = (x - n / 2f) / 8;
+                positions[3 * v + 1] = (float) (0.1 * Math.sin(x / 2.0) * Math.cos(z / 3.0));
+                positions[3 * v + 2] = (z - n / 2f) / 8;
+            }
+        }
+        int[] grid = new int[n * n * 6];
+        int at = 0;
+        for (int z = 0; z < n; z++) {
+            for (int x = 0; x < n; x++) {
+                int a = z * (n + 1) + x;
+                for (int k : new int[] {a, a + n + 1, a + 1, a + 1, a + n + 1, a + n + 2}) {
+                    grid[at++] = k;
+                }
+            }
+        }
+        float[][] corners = {{3, -1}, {3, 1}, {5, -1}, {5, 1}};
+        for (int c = 0; c < 4; c++) {
+            positions[3 * (count + c)] = corners[c][0];
+            positions[3 * (count + c) + 2] = corners[c][1];
+        }
+        return new com.truesim.scene.meshbuild.MeshBuilder(VertexFormat.POSITIONS_ONLY, count + 4).positions(positions)
+            .submesh(grid).submesh(new int[] {count, count + 1, count + 2, count + 2, count + 1, count + 3})
+            .buildHierarchy();
+    }
+
+    @Test
+    void shadingNormalsFacingAwayFromTheViewerReflectWithoutFireflies() {
+        // A floor whose vertex normals lean 85 degrees towards -x (as a normal map may bend them), seen from +x: its
+        // shading normal faces away from the viewer; samples about it must not divide by densities near nothing.
+        float[] positions = {-1, 0, -1, -1, 0, 1, 1, 0, -1, 1, 0, 1};
+        double lean = Math.toRadians(85);
+        float nx = (float) -Math.sin(lean);
+        float ny = (float) Math.cos(lean);
+        float[] normals = {nx, ny, 0, nx, ny, 0, nx, ny, 0, nx, ny, 0};
+        MeshData leaning = new com.truesim.scene.meshbuild.MeshBuilder(VertexFormat.of(
+            com.truesim.scene.assets.mesh.VertexAttribute.NORMAL), 4).positions(positions)
+            .attribute(com.truesim.scene.assets.mesh.VertexAttribute.NORMAL, normals)
+            .submesh(new int[] {0, 1, 2, 2, 1, 3})
+            .buildFlat();
+        int mesh = pool.add(leaning);
+        rayTracing.add(mesh, leaning, leaning.levels().size() - 1);
+        int shiny = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.8f, 0.8f, 1)).withRoughness(0.05f)));
+        scene.set(0, mesh, shiny, -2, -1, -3, 0, 0, 0, 1, 2, 1, 2);
+        camera.set(-1, -0.4, -1, 0, 1, 0, Math.PI / 3, size, size, 0.01); // looking towards -x: from +x's side
+        traced(0, null);
+        graph.settings().set(ReferencePathTracer.BOUNCES, 3);
+        float[] image = frames(32);
+        double max = 0;
+        for (int p = 0; p < size * size; p++) {
+            max = Math.max(max, luminance(image, p));
+        }
+        // Lit (the old bend left the normal facing away: the floor reflected nothing), and no sample's weight exploding
+        // (in Sponza, normals barely facing the viewer made values of 1e13)
+        assertThat(max).as("the brightest pixel: the floor, lit, brighter than the sky").isGreaterThan(0.3);
+        assertThat(max).as("the brightest pixel: the sky and the sun at most").isLessThan(5);
+    }
+
+    @Test
+    void rayTracedLevelsHoldEveryPartOfAClusterHierarchy() {
+        // Traced from its finest detail: the quad, whose meshlets are not in the finest level's range, is hit too
+        MeshData mesh = gridAndQuad();
+        int last = mesh.levels().size() - 1;
+        boolean quadInFinest = false;
+        for (int m = mesh.levels().get(last).firstMeshlet(); m < mesh.levels().get(last).firstMeshlet()
+            + mesh.levels().get(last).meshletCount(); m++) {
+            quadInFinest |= mesh.meshletSubmesh(m) == 1;
+        }
+        assertThat(quadInFinest).as("the quad is not in the finest level's range: the case under test").isFalse();
+        int combined = pool.add(mesh);
+        rayTracing.add(combined, mesh, last);
+        int grey = materials.add(new Material(MR.withBaseColor(new Color(0.5f, 0.5f, 0.5f, 1))).feature(LAMBERT));
+        materials.add(new Material(MR.withBaseColor(new Color(0.5f, 0.5f, 0.5f, 1))).feature(LAMBERT)); // the quad's
+        scene.set(0, combined, grey, -4, -1, -3, 0, 0, 0, 1, 1, 1, 1); // the quad from x = -1 to 1, in front
+        camera.set(0, -1, -3, 0, 1, 0, Math.PI / 6, size, size, 0.01); // at the quad's middle
+        traced(0, null);
+        float[] image = frames(16);
+        int p = (size / 2) * size + size / 2; // on the quad
+        double sky = SKY_IRRADIANCE / Math.PI;
+        assertThat((double) image[4 * p]).as("the quad, lit by the sky (not the sky behind it)")
+            .isCloseTo(0.5 * sky, within(0.5 * sky * 0.1));
+    }
+
     @Test
     void oneShaderSwitchingOverTheTypesShadesHitsAsTheirBinsDo() {
         everyType();

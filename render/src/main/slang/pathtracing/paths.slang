@@ -620,10 +620,13 @@ public void shadeHit<M : IMaterial>(uint index, uint features)
     float3 emissive;
     Surface s = typedSurface<M>(ref, input, features, emissive);
     float3 side = front ? ng : -ng; // the geometric normal on the viewer's side
-    if (dot(s.normal, v) <= 0)
+    // A shading normal (a normal map's) nearly in the plane of the view or facing away from it: moved towards the viewer
+    // until it faces it by at least 0.01, so the lobes sampled about it see the viewer (a normal facing away has no
+    // directions to reflect into; one barely facing makes samples whose density rounds to nothing)
+    float facing = dot(s.normal, v);
+    if (facing < 0.01)
     {
-        // A shading normal facing away from the viewer: bent back just above the surface, as for its geometry.
-        s.normal = normalize(s.normal + side * (1.0e-3 - dot(s.normal, v)));
+        s.normal = normalize(s.normal + v * (0.01 - facing));
     }
     // Blended surfaces cover by their alpha: the rest of the paths go through.
     if (materialBlended(m) && random01(rng) >= s.alpha)
