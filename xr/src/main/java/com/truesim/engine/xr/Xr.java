@@ -11,6 +11,7 @@ import com.truesim.engine.app.Stage;
 import com.truesim.engine.app.Startup;
 import com.truesim.engine.app.StartupFailure;
 import com.truesim.engine.graph.Rendering;
+import com.truesim.engine.input.Input;
 import java.util.List;
 
 /**
@@ -18,6 +19,7 @@ import java.util.List;
  * extensions and the GPU the headset needs, starts its session once the frame graph exists, and drives frames: each
  * frame begins with the headset's wait, input and poses ({@link Headset#beginFrame}), so the game's update reads them,
  * and ends with the graph rendered and the eyes submitted. The runtime asking the app to quit becomes a quit request.
+ * With {@link Input} installed, the headset's controllers are a kind of device of its ({@link XrControls}).
  *
  * <pre>{@code
  * app.use(new Rendering(), Xr.ifAvailable());               // no headset: the desktop only
@@ -79,7 +81,11 @@ public final class Xr implements Plugin {
                     .requestDeviceExtensions(headset.vulkanDeviceExtensions()).chooseGpu(headset::gpu);
             }
             case GRAPH -> headset.start(rendering.graph());
-            case RUN -> startup.driveFrames(new HeadsetFrames());
+            case RUN -> {
+                startup.driveFrames(new HeadsetFrames());
+                // The headset's input as a device for the engine's actions, sampled with the others (D64)
+                startup.find(Input.KEY).ifPresent(input -> input.addSource(new XrSource(headset)));
+            }
             default -> {
                 // nothing of its own in the other stages
             }

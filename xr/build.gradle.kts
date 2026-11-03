@@ -10,6 +10,7 @@ val lwjglNatives: List<String> by rootProject.extra
 
 dependencies {
     api(project(":engine-render"))
+    api(project(":engine-input")) // the headset's controllers as a kind of device
     implementation("org.lwjgl:lwjgl-openxr")
     for (natives in lwjglNatives.filter { !it.contains("macos") }) { // OpenXR has no macOS loader
         runtimeOnly("org.lwjgl:lwjgl-openxr::$natives")
