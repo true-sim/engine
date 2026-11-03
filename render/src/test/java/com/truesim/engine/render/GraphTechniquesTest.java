@@ -3391,6 +3391,43 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void lightThroughADiffuselyTransmittingSurfaceLosesWhatItsFresnelReflects() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Lights lights = new Lights(device, 1, 1); Materials materials = new Materials(device, 4)) {
+            // A black leaf letting all its diffuse light through, red, seen at 75 degrees; a light straight behind it,
+            // whose mirror image on the viewer's side is 150 degrees from the viewer: v.h = cos 75, Fresnel 0.255.
+            int leaf = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1))
+                .feature(DiffuseTransmissionParameters.DEFAULTS.withDiffuseTransmissionFactor(1)
+                    .withDiffuseTransmissionColorFactor(new Color(1, 0, 0, 1))));
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, leaf, 0, 0, -2, 0, (float) Math.sin(Math.toRadians(37.5)), 0,
+                (float) Math.cos(Math.toRadians(37.5)), 1, 1, 1);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .add(new ClusteredLights(lights, main)).output(Keys.SCENE_COLOR, output);
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            lights.directional(0, 0, 0, 1, 0, 0, 0).setCount(1);
+            frame();
+            frame();
+            int dark = red(image()[center]);
+            lights.directional(0, 0, 0, 1, 6, 6, 6);
+            frame();
+            frame();
+            int lit = red(image()[center]);
+            // 6 / pi * cos 75 * (1 - 0.255): 0.368 (0.494 without the Fresnel)
+            double cos = Math.cos(Math.toRadians(75));
+            double f = 0.04 + 0.96 * Math.pow(1 - cos, 5);
+            assertThat(lit - dark).as("through, less the Fresnel").isCloseTo((int) Math.round(255 * 6 / Math.PI * cos
+                * (1 - f)), within(6));
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
     void classicLodDrawnAfterMeshletsWritesDepth() {
         // A meshlet quad behind, a classic one in front: the classic one wins, drawn over the meshlets' depth.
         MeshData far = twoUvQuad();

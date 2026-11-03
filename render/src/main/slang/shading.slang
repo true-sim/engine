@@ -131,9 +131,13 @@ public float3 reflected(Surface s, float3 toViewer, float3 toLight, float3 irrad
     else if (s.diffuseTransmission > 0)
     {
         // Lit from behind: what the surface lets through diffusely, as a Lambertian surface facing the other way, in
-        // its transmission color (KHR_materials_diffuse_transmission: in place of the base color, not times it).
-        color = s.diffuseTransmission * s.diffuseTransmissionColor * (1 - s.metallic) * (1 - s.transmission) / PI
-            * irradiance * -nl;
+        // its transmission color (KHR_materials_diffuse_transmission: in place of the base color, not times it), less
+        // what its specular layer reflects (the spec's fresnel_mix over the whole base), at the half vector of the
+        // viewer and the light mirrored to the viewer's side, as the glTF sample viewer.
+        float3 mirrored = toLight - 2 * nl * s.normal;
+        float3 fresnel = surfaceFresnel(s, saturate(dot(toViewer, normalize(toViewer + mirrored))));
+        color = (1 - fresnel) * s.diffuseTransmission * s.diffuseTransmissionColor * (1 - s.metallic)
+            * (1 - s.transmission) / PI * irradiance * -nl;
     }
     if (any(s.sheenColor > 0))
     {
