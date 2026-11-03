@@ -281,6 +281,24 @@ cyan where the Khronos reference shows none).
 - Rule: an approximation of an integral is fitted to the integral over its whole domain and says how far it is off;
   a path without the lookup table uses the same lobe the table was made from.
 
+**Neighbors compared by depth rejected their own surface on a slanted floor.** Screen-space reflections traced at
+half resolution took the 2 x 2 hit texels around a pixel where the pixels they were traced from lay within 5 % of its
+depth. On a floor seen at a grazing angle, depth changes by more than that every two rows: every other row found no
+hit, and the mirror image came out striped.
+- Proof: `ScreenSpaceReflectionsTest.reflectionsFollowTheRenderRegion` ("traced at half resolution": red 0 at the
+  mirror image) with the depth test; passes with the distance from the pixel's plane (true-sim/engine, screen-space
+  reflections).
+- Rule: decide whether a neighbor lies on the same surface by its distance from the pixel's plane, not by depth.
+
+**Blurring the hit by the cone's footprint did not blur an object's outline.** Rough reflections sampled the scene's
+mip chain at the level of the GGX cone's footprint where the mirror ray met it. A thin stripe against the sky came out
+dimmer but no wider: rays of the pixels beside it missed (the sky) and took the environment, so the outline stayed
+where the mirror's was.
+- Proof: `ScreenSpaceReflectionsTest.roughFloorsBlurTheirReflections`: the stripe 4 pixels wide on the mirror and on
+  the rough floor alike, wider (as the test wants) once the composite averages the hits and misses of the pixels within
+  the cone's radius (true-sim/engine, screen-space reflections).
+- Rule: a filter of a lobe over one ray per pixel gathers neighbors' rays too, misses included.
+
 ## Tests and measurements
 
 **A GPU time per frame that left out the frame start.** `GpuTimings` timed passes only; textures' copies and mip

@@ -208,6 +208,11 @@ final class DemoScene implements AutoCloseable {
         return woodMaterial;
     }
 
+    /** The scene's material table. */
+    Materials materials() {
+        return materials;
+    }
+
     /** The instances drawn. */
     GpuScene gpuScene() {
         return scene;

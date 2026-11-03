@@ -939,6 +939,111 @@ front first, so the draws gain about as much as the sort costs, and lose where t
 the sort is not offered for opaque draws.
 
 
+### Surface outputs and screen-space reflections
+
+**Surface outputs** (`SurfaceOutputs`): the opaque shading pass can also write, per pixel, what later passes need of
+its surface, as images under `Keys.SURFACE_NORMAL`, `SURFACE_MATERIAL` and `SURFACE_REFLECTANCE`: the shading normal in
+view space (x right, y down, z forward; octahedral, two 16-bit signed values in an `R32_UINT`), specular F0 and
+perceptual roughness (`R8G8B8A8_UNORM`), and the reflectance: what the environment's reflection along the mirror
+direction was weighed by in the pixel's color (the split sum's scale and bias, the occlusion, what a sheen or clear coat
+lets through; 0 where shading bent the reflection by anisotropy, or nothing covers the pixel). Forward shading on both
+meshlet paths and classic LOD writes them as three more color attachments (generated `*SurfaceMain` entry points per
+type, pipelines `ShadingPipelines.COLOR_SURFACES`, made ahead once a graph asked for them), the visibility buffer's
+shading as storage images (its variants with `SURFACES` set). Only when a technique of the view asks
+(`SurfaceOutputs.Consumer.wantsSurfaces`, read while the graph builds through `GraphBuilder.techniquesInView`): without
+one, no image, attachment, pipeline or shader write exists (the keys get images nothing writes, which take no memory
+and fail a build that reads them). Post materials (decals, fog by normal, outlines) will take them the same way: a
+technique implementing the consumer interface and requiring the keys. Blended and transmissive surfaces write none.
+
+**Screen-space reflections** (`ScreenSpaceReflections`, one per view under `ScreenSpaceReflections.ID`, at
+`Anchor.OPAQUE` after the background, before transparency), chosen by `render.ssr`:
+
+- `OFF`: the environment's reflections alone; the surface outputs are not written for it.
+- `LINEAR`: each pixel's mirror ray marched through the depth in screen space in equal steps (at least a pixel), where
+  a straight line stays straight; the crossing refined by bisection; a surface counts only within `thickness` behind
+  its depth, so rays pass behind thicker ones and find what is behind them.
+- `HIZ` (the default: a third of `LINEAR`'s time, below): the hierarchical march of AMD's FidelityFX SSSR over a
+  nearest-depth pyramid (`DepthPyramid` with `nearest`: the occlusion culling's pyramid keeps the farthest depth,
+  which would let rays pass through surfaces): cells the ray
+  passes wholly in front of are skipped a level coarser, so long rays take few steps; the first surface the ray goes
+  behind ends it, a hit only within the thickness.
+- Ray-traced reflections (#379) will be another value of the same setting, filling the same hit image.
+
+Both write a hit image (where, how far, how trusted) at `render.ssr.resolutionScale` of the view, and one composite
+pass at full resolution replaces the environment's reflection that shading added along the same mirror direction:
+color + reflectance x trust x (scene at the hit - environment along the ray), the environment from the view's
+indirect-light table (or the constant sky). Shading already weighed the environment by the reflectance, so energy
+stays as it was: a wall as bright as the environment reflected instead of it leaves the image unchanged (tested). Rough
+surfaces take the scene at the hit from a mip chain of the scene's color (`SceneBehind`'s), at the level whose texels
+are as wide as the GGX lobe's cone where it meets the scene (the lobe's angle as a Phong lobe's, Uludag); since one
+ray per pixel finds only the lobe's middle (an object against the sky would keep a sharp outline), a spatial filter
+averages the hits and misses of the pixels within the cone's radius on the reflected image (12 taps, this frame only).
+Where trust falls (the image's edges over `edgeFade`, the last fifth of `maxDistance`, a ray leaving the image or
+finding nothing, a surface's back, roughness from three quarters of `roughnessCutoff`) the environment's reflection
+takes over smoothly. No history, no temporal accumulation: no added latency, no ghosting. Each view (each eye, each
+window) has its own, within its render region under dynamic resolution. Blended and transmissive surfaces get none and
+are not seen in reflections (drawn after it).
+
+Settings: `render.ssr` (`OFF`, `LINEAR`, `HIZ`, default `HIZ`; rebuilds), `render.ssr.maxSteps` (64),
+`render.ssr.thickness` (0.25 m), `render.ssr.maxDistance` (100 m), `render.ssr.roughnessCutoff` (0.6),
+`render.ssr.edgeFade` (0.1 of the image), read as frames record, and `render.ssr.resolutionScale` (1; rebuilds).
+
+What it costs (`ReflectionsBenchmark`, RX 9070 XT, 2026-11-03): 30,000 rocks of glossy metal (roughness 0.35) on a
+glossy terrain (0.2), so nearly every pixel traces a ray, under a uniform environment, half-float color, 64 steps;
+configurations in turns, 4 rounds after 2 uncounted ones, ranges of the rounds' medians, JaCoCo off. Frame: timestamps
+around batches of 8 frames. Shading passes: the forward draws (both phases) or the visibility buffer's shading pass,
+where the surface outputs are written. Reflection passes: the trace, the composite, the scene's mip chain and (HIZ)
+the nearest-depth pyramid. "surface outputs only": a technique asking for them and reading nothing.
+
+| Size | Shading | Reflections | Frame (GPU) | Shading passes | Reflection passes |
+|---|---|---|---|---|---|
+| 1080p | forward, mesh shaders | off | 1.341-1.353 ms | 1.181-1.184 ms | - |
+| 1080p | forward, mesh shaders | surface outputs only | 1.342-1.353 ms | 1.213-1.223 ms | - |
+| 1080p | forward, mesh shaders | LINEAR | 2.652-2.689 ms | 1.224-1.248 ms | 1.229-1.249 ms |
+| 1080p | forward, mesh shaders | HIZ | 1.821-1.831 ms | 1.226-1.237 ms | 0.426-0.453 ms |
+| 1080p | forward, mesh shaders | LINEAR, half | 1.969-1.979 ms | 1.220-1.231 ms | 0.578-0.600 ms |
+| 1080p | forward, mesh shaders | HIZ, half | 1.683-1.704 ms | 1.215-1.235 ms | 0.290-0.313 ms |
+| 1080p | forward, indexed | off | 0.968-0.974 ms | 0.705-0.706 ms | - |
+| 1080p | forward, indexed | surface outputs only | 1.008-1.069 ms | 0.760-0.809 ms | - |
+| 1080p | forward, indexed | LINEAR | 2.357-2.358 ms | 0.743-0.753 ms | 1.243-1.256 ms |
+| 1080p | forward, indexed | HIZ | 1.453-1.477 ms | 0.747-0.754 ms | 0.421-0.423 ms |
+| 1080p | forward, indexed | LINEAR, half | 1.623-1.639 ms | 0.751-0.758 ms | 0.576-0.595 ms |
+| 1080p | forward, indexed | HIZ, half | 1.328-1.335 ms | 0.756-0.770 ms | 0.294-0.303 ms |
+| 1080p | visibility buffer | off | 0.975-1.027 ms | 0.161-0.180 ms | - |
+| 1080p | visibility buffer | surface outputs only | 0.983-1.065 ms | 0.171-0.182 ms | - |
+| 1080p | visibility buffer | LINEAR | 2.259-2.267 ms | 0.168-0.170 ms | 1.216-1.232 ms |
+| 1080p | visibility buffer | HIZ | 1.418-1.440 ms | 0.172-0.175 ms | 0.413-0.418 ms |
+| 1080p | visibility buffer | LINEAR, half | 1.589-1.594 ms | 0.172-0.173 ms | 0.579-0.592 ms |
+| 1080p | visibility buffer | HIZ, half | 1.292-1.305 ms | 0.172-0.175 ms | 0.298-0.317 ms |
+| 4K | forward, mesh shaders | off | 3.071-3.077 ms | 2.889-2.910 ms | - |
+| 4K | forward, mesh shaders | surface outputs only | 3.345-3.366 ms | 2.996-3.006 ms | - |
+| 4K | forward, mesh shaders | LINEAR | 10.965-11.028 ms | 3.015-3.062 ms | 7.516-7.554 ms |
+| 4K | forward, mesh shaders | HIZ | 4.935-4.943 ms | 3.084-3.104 ms | 1.562-1.571 ms |
+| 4K | forward, mesh shaders | LINEAR, half | 6.822-6.830 ms | 2.980-2.992 ms | 3.598-3.619 ms |
+| 4K | forward, mesh shaders | HIZ, half | 4.398-4.414 ms | 3.058-3.104 ms | 1.056-1.059 ms |
+| 4K | forward, indexed | off | 2.385-2.392 ms | 1.799-1.812 ms | - |
+| 4K | forward, indexed | surface outputs only | 2.681-2.695 ms | 2.012-2.027 ms | - |
+| 4K | forward, indexed | LINEAR | 10.403-10.422 ms | 1.985-1.998 ms | 7.544-7.574 ms |
+| 4K | forward, indexed | HIZ | 4.287-4.292 ms | 2.031-2.077 ms | 1.628-1.634 ms |
+| 4K | forward, indexed | LINEAR, half | 6.141-6.148 ms | 1.984-2.003 ms | 3.611-3.625 ms |
+| 4K | forward, indexed | HIZ, half | 3.755-3.763 ms | 2.029-2.065 ms | 1.092-1.107 ms |
+| 4K | visibility buffer | off | 2.509-2.519 ms | 0.616-0.618 ms | - |
+| 4K | visibility buffer | surface outputs only | 2.602-2.616 ms | 0.656-0.661 ms | - |
+| 4K | visibility buffer | LINEAR | 10.384-10.393 ms | 0.661-0.663 ms | 7.462-7.494 ms |
+| 4K | visibility buffer | HIZ | 4.295-4.299 ms | 0.664-0.668 ms | 1.550-1.560 ms |
+| 4K | visibility buffer | LINEAR, half | 6.086-6.091 ms | 0.660-0.663 ms | 3.557-3.576 ms |
+| 4K | visibility buffer | HIZ, half | 3.741-3.768 ms | 0.661-0.663 ms | 1.057-1.060 ms |
+
+- **Surface outputs** cost nothing when no technique asks (no attachment or write exists; "off" is the build without
+  them). Asked for, at 1080p: forward on mesh shaders 0.00 ms of frame, indexed 0.04-0.10 ms, the visibility buffer
+  0.01-0.04 ms; at 4K 0.27-0.29, 0.29-0.30 and 0.09-0.10 ms (three more targets, 12 bytes a pixel).
+- **HIZ against LINEAR**, at the same 64 steps: 0.41-0.45 ms against 1.22-1.26 ms of reflection passes at 1080p,
+  1.55-1.63 against 7.46-7.57 ms at 4K (LINEAR samples the depth at every step and bisects each crossing).
+  Hence `HIZ` by default; `LINEAR` stays for scenes where rays must pass behind thick surfaces to find what is
+  behind them. Half-resolution tracing (`resolutionScale` 0.5) takes HIZ to 0.29-0.32 ms at 1080p and 1.06-1.11 ms at
+  4K.
+
+
 ## Ray tracing
 
 Where the GPU has it (`VK_KHR_acceleration_structure` and `VK_KHR_ray_query`), `VulkanDevice.rayTracing()` is true and
