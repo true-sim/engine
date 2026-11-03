@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.assertj.core.api.Assertions.within;
 import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
@@ -56,6 +57,8 @@ import com.truesim.engine.render.materials.IorParameters;
 import com.truesim.common.math.Vec4;
 import com.truesim.engine.render.materials.TextureTransformParameters;
 import com.truesim.engine.render.materials.UnlitParameters;
+import com.truesim.engine.render.materials.Dissolve;
+import com.truesim.engine.render.materials.DissolveParameters;
 import com.truesim.engine.render.materials.Glow;
 import com.truesim.engine.render.materials.GlowParameters;
 import com.truesim.engine.render.materials.Tinted;
@@ -1278,7 +1281,9 @@ class GraphTechniquesTest {
                 .isThrownBy(() -> materials.update(quadMaterial, MetallicRoughnessParameters.ROUGHNESS, 0.5f));
             assertThatIllegalArgumentException().isThrownBy(() -> materials.register(Glow.TYPE));
             assertThatIllegalArgumentException().isThrownBy(() -> new MaterialType("half", GlowParameters.class,
-                GlowParameters::fromValues, 0, "a.spv", "a", "b.spv", null));
+                GlowParameters::fromValues, 0, "a.spv", "a", "b.spv", null, "c.spv", "d.spv", "e.spv"));
+            assertThatNullPointerException().as("forward entry points").isThrownBy(() -> new MaterialType("none",
+                GlowParameters.class, GlowParameters::fromValues, 0, "a.spv", "a", null, null, null, null, null));
             // At half the resolution: the glow type's bin, past bin 0, is shaded from the list classification wrote
             // into, though the render region has fewer tiles than the images the lists are spaced for.
             graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.HEADROOM, 1.5f);
@@ -1295,70 +1300,477 @@ class GraphTechniquesTest {
     }
 
     @Test
-    void forwardShadingDrawsEachMaterialTypeWithItsOwnShader() {
-        // The lit floor, metallic-roughness, and a quad standing on it, of the type under test (#67).
+    void forwardShadingDrawsFeatureBinsWithTheirVariants() {
+        // The lit floor, metallic-roughness, and a quad standing on it with a clear coat: its bin's variant (FEATURES
+        // a constant) shows the coat, on both paths, as the visibility buffer's shading of the same bin does.
         scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
         scene.removeFrom(2);
         Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
         view.set(camera, 1, MeshletRenderer.MODE_LIT);
         try (Materials materials = new Materials(device, 8)) {
+            int quadMaterial = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.2f, 0.1f, 1)))
+                .feature(ClearcoatParameters.DEFAULTS));
+            scene.setMaterials(materials);
+            scene.set(1, quad, quadMaterial, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+            SceneView main = main(camera);
+            SceneGeometry meshlets = SceneGeometry.meshlets(renderer);
+            main.port().add(new ClusteredForwardShading(meshlets, main, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f)).output(Keys.SCENE_COLOR, output);
+            int[][] forward = new int[2][];
+            MeshletRenderer.Path[] paths = {MeshletRenderer.Path.INDEXED, MeshletRenderer.Path.AUTO};
+            for (int p = 0; p < 2; p++) {
+                renderer.setPath(paths[p]);
+                forward[p] = frames(3); // both occlusion phases have drawn (pitfalls.md)
+            }
+            renderer.setPath(MeshletRenderer.Path.AUTO);
+            int coated = 0;
+            for (int i = 0; i < forward[0].length; i++) {
+                assertThat(difference(forward[0][i], forward[1][i])).as("pixel %d, the paths alike", i)
+                    .isLessThanOrEqualTo(2);
+                coated += (forward[0][i] & 0xff) > 2 * ((forward[0][i] >> 16) & 0xff) ? 1 : 0;
+            }
+            assertThat(coated).as("the red coated quad's pixels").isGreaterThan(SIZE * SIZE / 40);
+            assertThat(renderer.forwardPipelineCount()).as("pipelines by type made").isPositive();
+            scene.setMaterials(null);
+        }
+    }
+
+    /** A material type under test, how its material is made and how its pixels look. */
+    private record TypeCase(String name, MaterialType type,
+        java.util.function.Function<GpuBuffer, MaterialParameters> parameters,
+        java.util.function.IntPredicate looks) {
+    }
+
+    /**
+     * Glow (magenta, whatever the light), tinted (green from a buffer its parameters name) and car paint (black
+     * metallic-roughness with orange flakes, lit), each read back on every path that shades color: forward on the
+     * indexed path and on mesh shaders, the visibility buffer, and classic LOD under both, opaque and blended (the
+     * blended bin into weighted transparency's targets, and drawn as opaque). Before every color pass drew by type, the
+     * visibility buffer's blended bin and classic LOD drew these types as metallic-roughness's defaults: grey.
+     */
+    @Test
+    void everyColorPathShadesEachMaterialTypeAsItself() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        TypeCase[] cases = {
+            new TypeCase("glow", Glow.TYPE, tint -> GlowParameters.DEFAULTS, GraphTechniquesTest::glowing),
+            new TypeCase("tinted", Tinted.TYPE, tint -> TintedParameters.DEFAULTS.withTint(tint),
+                pixel -> green(pixel) >= 250 && red(pixel) <= 5 && blue(pixel) <= 5),
+            new TypeCase("car paint", CarPaint.TYPE, tint -> CarPaintParameters.DEFAULTS.withBase(MR.withBaseColor(
+                new Color(0, 0, 0, 1)).withRoughness(1)).withFlakeColor(new Color(1, 0.5f, 0, 1)).withFlakes(1),
+                pixel -> red(pixel) > 40 && green(pixel) > red(pixel) / 4 && green(pixel) < red(pixel) * 3 / 4
+                    && blue(pixel) < red(pixel) / 8),
+        };
+        try (Materials materials = new Materials(device, 8);
+             GpuBuffer green = GpuBuffer.hostVisible(device, 16, usage);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            green.memory().copyFrom(java.lang.foreign.MemorySegment.ofArray(new float[] {0, 1, 0, 1}));
+            for (TypeCase c : cases) {
+                materials.register(c.type());
+            }
+            int quadMaterial = materials.add(new Material(MR));
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, quadMaterial, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            SceneGeometry meshlets = SceneGeometry.meshlets(renderer);
+            SceneGeometry classics = new SceneGeometry(classic.add(quadMesh, mesh));
+            main.port().output(Keys.SCENE_COLOR, output);
+            org.assertj.core.api.SoftAssertions softly = new org.assertj.core.api.SoftAssertions(); // every path told
+            for (TypeCase c : cases) {
+                for (boolean blended : new boolean[] {false, true}) {
+                    Material material = new Material(c.parameters().apply(green));
+                    materials.set(quadMaterial, blended ? material.alphaBlend() : material);
+                    for (String path : new String[] {"forward", "visibility buffer", "classic LOD forward",
+                        "classic LOD visibility buffer"}) {
+                        boolean ids = path.endsWith("visibility buffer");
+                        if (ids && !device.primitiveIds()) {
+                            continue;
+                        }
+                        SceneGeometry geometry = path.startsWith("classic") ? classics : meshlets;
+                        Technique shading = ids ? new VisibilityBufferShading(geometry, main,
+                            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0)
+                            : new ClusteredForwardShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                                VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0);
+                        replaceShading(main, shading);
+                        List<Technique> transparencies = blended ? List.of(new WeightedBlendedTransparency(geometry,
+                            main), new OpaqueTransparency(geometry, main)) : java.util.Collections.singletonList(null);
+                        for (Technique transparency : transparencies) {
+                            if (transparency != null) {
+                                main.port().remove(Transparency.ID).add(transparency);
+                            }
+                            MeshletRenderer.Path[] meshletPaths = path.startsWith("classic")
+                                ? new MeshletRenderer.Path[] {MeshletRenderer.Path.AUTO}
+                                : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED, MeshletRenderer.Path.AUTO};
+                            for (MeshletRenderer.Path meshletPath : meshletPaths) {
+                                renderer.setPath(meshletPath);
+                                int[] pixels = frames(3);
+                                int count = 0;
+                                for (int pixel : pixels) {
+                                    count += c.looks().test(pixel) ? 1 : 0;
+                                }
+                                softly.assertThat(count).as("%s, %s, %s%s, %s", c.name(), path, blended ? "blended, "
+                                    : "opaque", transparency == null ? "" : transparency.getClass().getSimpleName(),
+                                    meshletPath).isGreaterThan(SIZE * SIZE / 20);
+                            }
+                            renderer.setPath(MeshletRenderer.Path.AUTO);
+                        }
+                        main.port().remove(Transparency.ID);
+                    }
+                }
+            }
+            scene.setMaterials(null);
+            softly.assertAll();
+        }
+    }
+
+    /** Puts {@code shading} in place of {@code main}'s shading technique (or adds it, as the first). */
+    private static void replaceShading(SceneView main, Technique shading) {
+        try {
+            main.port().replace(shading);
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            main.port().add(shading);
+        }
+    }
+
+    /**
+     * A material type with a geometry hook (dissolve: its keep() cuts a checkerboard out of its surfaces) has the same
+     * holes in color (forward, and the visibility buffer's), in a depth pass and in a shadow map (a depth draw through
+     * a camera of its own), on the meshlet paths and classic LOD; types without the hook keep the shared depth and ID
+     * pipelines, and no list is split for depth or IDs while no type has one.
+     */
+    @Test
+    void geometryHooksCutTheSameHolesInEveryPass() {
+        assertThat(Dissolve.TYPE.geometry()).as("from its parameters' attribute").isEqualTo(Material.GEOMETRY_KEEP);
+        assertThat(Glow.TYPE.geometry()).isZero();
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 8);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
             materials.register(Glow.TYPE);
             int quadMaterial = materials.add(new Material(GlowParameters.DEFAULTS));
             scene.setMaterials(materials);
-            scene.set(1, quad, quadMaterial, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+            scene.set(0, quadMesh, quadMaterial, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            RenderView depthView = renderer.createView(ViewOptions.of(256, 1 << 12));
+            depthView.set(camera, 1, MeshletRenderer.MODE_LIT);
+            RenderView shadowView = renderer.createView(ViewOptions.of(256, 1 << 12));
+            SceneView main = main(camera);
+            SceneGeometry meshlets = SceneGeometry.meshlets(renderer);
+            SceneGeometry classics = new SceneGeometry(classic.add(quadMesh, mesh));
+            main.port().output(Keys.SCENE_COLOR, output);
+            // No type with a hook: depth draws keep their lists as culled and the shared pipelines; none is made.
+            replaceShading(main, new ClusteredForwardShading(meshlets, main, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            int whole = count(frames(3), GraphTechniquesTest::glowing);
+            assertThat(whole).as("the glowing quad").isGreaterThan(SIZE * SIZE / 10);
+            depthImage(main, new SceneDraw(meshlets, depthView, null, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT,
+                SIZE, SIZE, false));
+            assertThat(depthView.splitCategories()).as("not split for depth").isZero();
+            assertThat(renderer.shading().count(ShadingPipelines.DEPTH)).as("depth pipelines of types").isZero();
+            // The dissolving type: holes in its cells.
+            materials.register(Dissolve.TYPE);
+            materials.set(quadMaterial, new Material(DissolveParameters.DEFAULTS));
+            java.util.function.IntPredicate yellow = pixel -> red(pixel) >= 250 && green(pixel) >= 250
+                && blue(pixel) <= 5;
+            org.assertj.core.api.SoftAssertions softly = new org.assertj.core.api.SoftAssertions();
+            for (SceneGeometry geometry : new SceneGeometry[] {meshlets, classics}) {
+                boolean isClassic = geometry == classics;
+                MeshletRenderer.Path[] paths = isClassic ? new MeshletRenderer.Path[] {MeshletRenderer.Path.AUTO}
+                    : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED, MeshletRenderer.Path.AUTO};
+                for (MeshletRenderer.Path path : paths) {
+                    renderer.setPath(path);
+                    String what = (isClassic ? "classic LOD" : "meshlets") + ", " + path;
+                    replaceShading(main, new ClusteredForwardShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                    boolean[] color = mask(frames(3), yellow);
+                    int kept = count(color);
+                    softly.assertThat(kept).as("%s: a checkerboard, half the quad", what)
+                        .isBetween(whole * 3 / 10, whole * 7 / 10);
+                    boolean[] depth = mask(depthImage(main, new SceneDraw(geometry, depthView, null,
+                        SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, SIZE, SIZE, false)), pixel -> red(pixel) > 0);
+                    boolean[] shadow = mask(depthImage(main, new SceneDraw(geometry, shadowView, camera,
+                        SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, SIZE, SIZE, false)), pixel -> red(pixel) > 0);
+                    // The lean mesh path interpolates color's texture coordinates from barycentrics, depth's in the
+                    // rasterizer: at a cell's edge a pixel may fall either way. Elsewhere the same vertices: exact.
+                    int edge = path == MeshletRenderer.Path.AUTO && !isClassic && renderer.raster().leanColor()
+                        ? SIZE * 2 : 0;
+                    softly.assertThat(differing(color, depth)).as("%s: color against depth", what)
+                        .isLessThanOrEqualTo(edge);
+                    softly.assertThat(differing(color, shadow)).as("%s: color against the shadow map", what)
+                        .isLessThanOrEqualTo(edge);
+                    if (device.primitiveIds()) {
+                        replaceShading(main, new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                        boolean[] ids = mask(frames(3), yellow);
+                        softly.assertThat(differing(ids, depth)).as("%s: the visibility buffer against depth", what)
+                            .isZero(); // both from full vertices
+                    }
+                }
+            }
+            renderer.setPath(MeshletRenderer.Path.AUTO);
+            // Pipelines by pass: depth and IDs made per raster bin for the dissolving type and for the shared
+            // category of the split lists, nothing for glow or metallic-roughness.
+            int depthPipelines = renderer.shading().count(ShadingPipelines.DEPTH);
+            int idPipelines = renderer.shading().count(ShadingPipelines.IDS);
+            System.out.printf("Pipelines of types: color %d, weighted %d, depth %d, IDs %d%n",
+                renderer.shading().count(ShadingPipelines.COLOR), renderer.shading().count(ShadingPipelines.WEIGHTED),
+                depthPipelines, idPipelines);
+            softly.assertThat(depthPipelines).as("depth: shared and dissolve's, 3 raster bins, both meshlet paths and"
+                + " classic's 6 lists").isEqualTo(renderer.raster().meshShaders() ? 3 * 2 * 2 + 6 : 3 * 2 + 6);
+            softly.assertAll();
+            scene.setMaterials(null);
+        }
+    }
+
+    /**
+     * The depth of {@code draw} as red, read back after 3 frames, output in place of {@code main}'s scene color (its
+     * port off meanwhile).
+     */
+    private int[] depthImage(SceneView main, SceneDraw draw) {
+        Key<Image> key = Key.image("test.holes");
+        DepthCopy copy = new DepthCopy(key, draw);
+        main.port().removeOutput(Keys.SCENE_COLOR, output).enabled(false);
+        graph.add(copy).output(key, output);
+        int[] pixels = frames(3);
+        graph.removeOutput(key).remove(copy);
+        main.port().enabled(true).output(Keys.SCENE_COLOR, output);
+        return pixels;
+    }
+
+    private static boolean[] mask(int[] pixels, java.util.function.IntPredicate test) {
+        boolean[] mask = new boolean[pixels.length];
+        for (int i = 0; i < pixels.length; i++) {
+            mask[i] = test.test(pixels[i]);
+        }
+        return mask;
+    }
+
+    private static int count(boolean[] mask) {
+        int count = 0;
+        for (boolean set : mask) {
+            count += set ? 1 : 0;
+        }
+        return count;
+    }
+
+    private static int count(int[] pixels, java.util.function.IntPredicate test) {
+        return count(mask(pixels, test));
+    }
+
+    private static int differing(boolean[] a, boolean[] b) {
+        int count = 0;
+        for (int i = 0; i < a.length; i++) {
+            count += a[i] != b[i] ? 1 : 0;
+        }
+        return count;
+    }
+
+    /**
+     * A material's pipelines are made when it is written, on the pipelines' own thread: the graph does not rebuild for
+     * a material no instance takes, and the frame first drawing it (an instance taking it) finds them made. Asked for
+     * before they are ready, a pipeline is made then, as it always was.
+     */
+    @Test
+    void pipelinesAreMadeAheadOfTheFirstDraw() {
+        scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+        scene.removeFrom(1);
+        Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        try (Materials materials = new Materials(device, 8)) {
+            materials.register(Glow.TYPE);
+            scene.setMaterials(materials);
             SceneView main = main(camera);
             main.port().add(new ClusteredForwardShading(SceneGeometry.meshlets(renderer), main,
                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f))
                 .output(Keys.SCENE_COLOR, output);
-            assertThat(graph.settings().get(RenderSettings.FORWARD_SHADING)).as("the default")
-                .isEqualTo(ForwardShading.PER_TYPE);
-            for (MeshletRenderer.Path path : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED,
-                MeshletRenderer.Path.AUTO}) {
-                renderer.setPath(path);
-                // Opaque, then masked (the masked raster bin's entry points), each drawn per type and with the one
-                // shader; three frames each, so both occlusion phases have drawn (pitfalls.md).
-                for (Material glow : new Material[] {new Material(GlowParameters.DEFAULTS),
-                    new Material(GlowParameters.DEFAULTS).alphaMask(0.5f)}) {
-                    materials.set(quadMaterial, glow);
-                    graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.PER_TYPE);
-                    int[] typed = frames(3);
-                    graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.SINGLE);
-                    int[] single = frames(3);
-                    assertThat(glowing(typed)).as("the quad glows by its own type, %s, %s", path,
-                        glow.masked() ? "masked" : "opaque").isGreaterThan(SIZE * SIZE / 40);
-                    assertThat(glowing(single)).as("the one shader draws it as metallic-roughness's defaults")
-                        .isZero();
-                    int floor = 0;
-                    for (int i = 0; i < typed.length; i++) {
-                        if (!glowing(typed[i])) {
-                            assertThat(difference(typed[i], single[i])).as("pixel %d, metallic-roughness alike, %s",
-                                i, path).isLessThanOrEqualTo(2);
-                            floor++;
-                        }
-                    }
-                    assertThat(floor).as("the floor's pixels").isGreaterThan(SIZE * SIZE / 4);
-                }
-                // A feature's bin (metallic-roughness with a clear coat): its variant shows the coat as the one
-                // shader's branch does.
-                materials.set(quadMaterial, new Material(MR.withBaseColor(new Color(0.8f, 0.2f, 0.1f, 1)))
-                    .feature(ClearcoatParameters.DEFAULTS));
-                graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.PER_TYPE);
-                int[] typed = frames(3);
-                graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.SINGLE);
-                int[] single = frames(3);
-                int coated = 0;
-                for (int i = 0; i < typed.length; i++) {
-                    assertThat(difference(typed[i], single[i])).as("pixel %d, coated, %s", i, path)
-                        .isLessThanOrEqualTo(2);
-                    coated += (typed[i] & 0xff) > 2 * ((typed[i] >> 16) & 0xff) ? 1 : 0;
-                }
-                assertThat(coated).as("the red coated quad's pixels").isGreaterThan(SIZE * SIZE / 40);
-            }
-            assertThat(renderer.forwardPipelineCount()).as("pipelines by type made").isPositive();
-            renderer.setPath(MeshletRenderer.Path.AUTO);
-            graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.PER_TYPE);
+            frames(3);
+            int builds = graph.builds();
+            int glow = materials.add(new Material(GlowParameters.DEFAULTS));
+            boolean meshShading = renderer.path() == MeshletRenderer.Path.MESH_SHADERS;
+            ShadingPipelines.Key key = renderer.raster().forwardKey(Glow.TYPE, 0, MeshletRenderer.BIN_OPAQUE,
+                meshShading, false);
+            renderer.shading().awaitPrepared();
+            assertThat(renderer.shading().ready(key)).as("made ahead, on its own thread").isNotNull();
+            frames(2);
+            assertThat(graph.builds()).as("no instance takes it: nothing rebuilt").isEqualTo(builds);
+            assertThat(materials.binDrawn(materials.binCount() - 1)).isZero();
+            int made = renderer.shading().count();
+            long waited = renderer.shading().waitedNanos();
+            scene.set(1, quad, glow, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+            int[] pixels = frames(3);
+            assertThat(graph.builds()).as("rebuilt for the bin drawn").isEqualTo(builds + 1);
+            assertThat(glowing(pixels)).as("the glowing quad").isGreaterThan(SIZE * SIZE / 40);
+            assertThat(renderer.shading().count()).as("nothing made while drawing it first").isEqualTo(made);
+            assertThat(renderer.shading().waitedNanos()).as("nor waited for").isEqualTo(waited);
+            // Taken the frame it is added (a type of its own): the pipeline is made or waited for then, and drawn.
+            materials.register(Dissolve.TYPE);
+            int dissolve = materials.add(new Material(DissolveParameters.DEFAULTS.withColor(new Color(1, 0, 1, 1))
+                .withCell(1)));
+            scene.set(1, quad, dissolve, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+            assertThat(glowing(frames(1))).as("drawn from the first frame").isGreaterThan(0);
             scene.setMaterials(null);
         }
+    }
+
+    /** A material of the feature matrix: its features in order; the last one is the one proven to change the image. */
+    private record FeatureCase(String name, Material base, MaterialFeature... features) {
+        Material material(int features) {
+            Material m = base;
+            for (int i = 0; i < features; i++) {
+                m = m.feature(this.features[i]);
+            }
+            return m;
+        }
+    }
+
+    /** Pixels of {@code a} and {@code b} differing by more than {@code by} in a channel; and the mean difference. */
+    private static double[] compare(int[] a, int[] b, int by) {
+        int over = 0;
+        long sum = 0;
+        for (int i = 0; i < a.length; i++) {
+            int d = difference(a[i], b[i]);
+            over += d > by ? 1 : 0;
+            sum += d;
+        }
+        return new double[] {over, (double) sum / a.length};
+    }
+
+    /**
+     * Metallic-roughness with each engine feature (and combinations), and a custom type with one, drawn on every color
+     * path (forward on the indexed path and mesh shaders, the visibility buffer, classic LOD forward and visibility
+     * buffer), opaque and blended (weighted and drawn as opaque): each path reads back as forward on the indexed path
+     * within a tolerance, and that differs from the material without its last feature, so the feature drew. One
+     * frame each, 64 x 64; a red glowing wall behind for what transmission lets through.
+     */
+    @Test
+    void everyPathShadesEveryFeatureAlike() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        MetallicRoughnessParameters paint = MR.withBaseColor(new Color(0.8f, 0.3f, 0.2f, 0.6f)).withRoughness(0.35f)
+            .withMetallic(0);
+        MetallicRoughnessParameters glass = MR.withBaseColor(new Color(1, 1, 1, 0.6f)).withRoughness(0.05f)
+            .withMetallic(0);
+        MetallicRoughnessParameters metal = MR.withBaseColor(new Color(0.5f, 0.5f, 0.5f, 0.6f)).withRoughness(0.35f)
+            .withMetallic(1);
+        TransmissionParameters through = TransmissionParameters.DEFAULTS.withTransmissionFactor(1);
+        VolumeParameters volume = VolumeParameters.DEFAULTS.withThicknessFactor(0.5f).withAttenuationDistance(1)
+            .withAttenuationColor(new Color(0.3f, 1, 1, 1));
+        ClearcoatParameters coat = ClearcoatParameters.DEFAULTS;
+        SheenParameters sheen = SheenParameters.DEFAULTS.withSheenColorFactor(new Color(1, 1, 1, 1))
+            .withSheenRoughnessFactor(0.5f);
+        FeatureCase[] cases = {
+            new FeatureCase("clearcoat", new Material(paint), coat),
+            new FeatureCase("unlit", new Material(paint), UnlitParameters.DEFAULTS),
+            new FeatureCase("specular", new Material(paint), SpecularParameters.DEFAULTS
+                .withSpecularColorFactor(new Color(0, 1, 0, 1))),
+            new FeatureCase("ior", new Material(paint), IorParameters.DEFAULTS.withIor(3)),
+            new FeatureCase("sheen", new Material(paint), sheen),
+            new FeatureCase("transmission", new Material(glass), through),
+            new FeatureCase("volume", new Material(glass), through, volume),
+            new FeatureCase("anisotropy", new Material(paint), AnisotropyParameters.DEFAULTS
+                .withAnisotropyStrength(1)),
+            new FeatureCase("iridescence", new Material(metal), IridescenceParameters.DEFAULTS
+                .withIridescenceFactor(1).withIridescenceThicknessMaximum(300)),
+            new FeatureCase("diffuse transmission", new Material(paint), DiffuseTransmissionParameters.DEFAULTS
+                .withDiffuseTransmissionFactor(1).withDiffuseTransmissionColorFactor(new Color(0, 0, 1, 1))),
+            new FeatureCase("clearcoat + sheen", new Material(paint).feature(coat), sheen),
+            new FeatureCase("transmission + volume + dispersion", new Material(glass), through, volume,
+                DispersionParameters.DEFAULTS.withDispersion(10)),
+            new FeatureCase("car paint + clearcoat", new Material(CarPaintParameters.DEFAULTS.withBase(paint)
+                .withFlakeColor(new Color(1, 1, 0, 1)).withFlakes(0.5f)), coat),
+        };
+        String[] modes = {"opaque", "blended, weighted", "blended, as opaque"};
+        String[] paths = {"forward, indexed", "forward, mesh shaders", "visibility buffer", "classic LOD forward",
+            "classic LOD visibility buffer"};
+        int[][][][] images = new int[cases.length][modes.length][paths.length][];
+        int[][] without = new int[cases.length][];
+        try (Materials materials = new Materials(device, 8);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            materials.register(CarPaint.TYPE);
+            int wall = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1)
+                .withEmissive(new Color(1, 0, 0, 1))));
+            int quadMaterial = materials.add(cases[0].material(0));
+            scene.setMaterials(materials);
+            // The wall smaller than the quad seen in front of it, so its edges show through (refraction, dispersion);
+            // the quad turned to halfway between the camera and the sun, its highlight in the middle (coats, IOR,
+            // specular, anisotropy).
+            scene.set(0, quadMesh, wall, 0, 0, -3, 0, 0, 0, 1, 0.5f, 0.5f, 0.5f);
+            scene.set(1, quadMesh, quadMaterial, 0, 0, -2, -0.2750f, 0.1375f, 0, 0.9516f, 1, 1, 1);
+            scene.removeFrom(2);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            SceneGeometry meshlets = SceneGeometry.meshlets(renderer);
+            SceneGeometry classics = new SceneGeometry(classic.add(quadMesh, mesh));
+            main.port().output(Keys.SCENE_COLOR, output);
+            for (int path = 0; path < paths.length; path++) {
+                boolean ids = paths[path].endsWith("visibility buffer");
+                if (ids && !device.primitiveIds()) {
+                    continue;
+                }
+                SceneGeometry geometry = paths[path].startsWith("classic") ? classics : meshlets;
+                renderer.setPath(path == 0 ? MeshletRenderer.Path.INDEXED : MeshletRenderer.Path.AUTO);
+                replaceShading(main, ids ? new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0) : new ClusteredForwardShading(geometry, main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                for (int mode = 0; mode < modes.length; mode++) {
+                    main.port().remove(Transparency.ID).add(mode == 2 ? new OpaqueTransparency(geometry, main)
+                        : new WeightedBlendedTransparency(geometry, main));
+                    for (int c = 0; c < cases.length; c++) {
+                        Material material = cases[c].material(cases[c].features().length);
+                        materials.set(quadMaterial, mode == 0 ? material : material.alphaBlend());
+                        images[c][mode][path] = frames(1);
+                        if (path == 0 && mode == 0) {
+                            materials.set(quadMaterial, cases[c].material(cases[c].features().length - 1));
+                            without[c] = frames(1);
+                        }
+                    }
+                }
+                main.port().remove(Transparency.ID);
+            }
+            renderer.setPath(MeshletRenderer.Path.AUTO);
+            scene.setMaterials(null);
+        }
+        // Each path against forward on the indexed path: at most 1% of the pixels more than 6 apart in a channel (a
+        // quad's edge, a highlight interpolated a little otherwise), a mean difference of at most 1. Each feature
+        // against the material without it: 1% of the pixels more than 6 apart (dispersion
+        // changes the fringes of the wall seen through the glass alone, 57 pixels; the others 185-999 of the quad's 999).
+        org.assertj.core.api.SoftAssertions softly = new org.assertj.core.api.SoftAssertions();
+        double worstShare = 0;
+        double worstMean = 0;
+        for (int c = 0; c < cases.length; c++) {
+            double[] changed = compare(images[c][0][0], without[c], 6);
+            System.out.printf(java.util.Locale.ROOT, "  %s: %.0f pixels changed by its last feature%n", cases[c].name(),
+                changed[0]);
+            softly.assertThat(changed[0]).as("%s: changes the image", cases[c].name())
+                .isGreaterThan(SIZE * SIZE / 100.0);
+            for (int mode = 0; mode < modes.length; mode++) {
+                for (int path = 1; path < paths.length; path++) {
+                    if (images[c][mode][path] == null) {
+                        continue;
+                    }
+                    double[] d = compare(images[c][mode][0], images[c][mode][path], 6);
+                    worstShare = Math.max(worstShare, d[0] / (SIZE * SIZE));
+                    worstMean = Math.max(worstMean, d[1]);
+                    softly.assertThat(d[0]).as("%s, %s, %s: pixels off", cases[c].name(), modes[mode], paths[path])
+                        .isLessThanOrEqualTo(SIZE * SIZE / 100.0);
+                    softly.assertThat(d[1]).as("%s, %s, %s: mean difference", cases[c].name(), modes[mode],
+                        paths[path]).isLessThanOrEqualTo(1.0);
+                }
+            }
+        }
+        System.out.printf(java.util.Locale.ROOT, "Feature matrix: worst share of pixels more than 6 off %.4f, worst mean"
+            + " difference %.3f%n", worstShare, worstMean);
+        softly.assertAll();
     }
 
     /** Records {@code count} frames and returns the last one's pixels. */

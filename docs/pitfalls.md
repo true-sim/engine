@@ -39,6 +39,14 @@ scene benchmark burned (embers alive), most of the "sync" column.
 - Rule: tables rewritten every frame are written into plain memory and handed to the frame buffer with one `put`;
   per-field writes are for a few fields that change.
 
+**A flag every thread writes ping-pongs between their caches.** Posing skinned copies on the sync's job system (A5),
+every matrix value that changed set one `written` field of the `Deformation` (and `changed[copy]` for its copy): the
+sync of 1,000 skinned characters (24 joints) took 3.2 ms a frame on 32 threads against 0.5 ms posed one after another,
+and the CPU path's blend 2.0 ms against 0.15. Reading the flag first and writing it only when not yet set brought them
+to 0.33 and 0.07 ms.
+- Proof: `SkinnedCrowdBenchmark` (engine-scene), run before and after the change in the same session (A5 branch).
+- Rule: in code run on many threads, a shared flag or counter is read before it is written, or kept per thread.
+
 ## Frame graph
 
 **A write is visible to nothing until a barrier.** The compiler once marked a write's own stage and access visible, so
@@ -279,6 +287,14 @@ a cost of writing in place.
 with zeros and empty images that pointed at unrelated code.
 - Proof: [#144](https://github.com/true-sim/engine/pull/144), where 13 renderer tests failed from one bad index.
 - Rule: find the first test reporting `VK_ERROR_DEVICE_LOST`, fix that, then rerun.
+
+**One uncounted round did not warm the GPU up for a short benchmark.** `ForwardShadingBenchmark`'s depth draws (about
+0.6 ms a frame) took 1.11-1.19 ms in the first counted round and 0.79-0.85 ms in the second on the RX 9070 XT (mesh
+shaders), then settled at 0.60-0.68 ms: the ranges of five rounds after one warm-up round spread 0.60-1.19 ms.
+- Proof: the per-round lines of `depthByGeometryHooks` with one and with two warm-up rounds (true-sim/engine, geometry
+  hooks); with four, the rounds of each configuration fell within 0.08 ms of each other.
+- Rule: a benchmark warms until its rounds agree (look at the per-round lines, not the ranges); short frames need more
+  warm-up than long ones.
 
 **Benchmark numbers in the README go stale.** The per-path table stayed from the first mesh shader benchmark while
 materials and lighting doubled the mesh path's time.

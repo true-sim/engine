@@ -20,7 +20,7 @@ public final class RenderSettings {
      * How instances moved in fixed steps are drawn between steps (D91): blended on the GPU, on the CPU, or not at all.
      */
     public static final Setting<Interpolation> INTERPOLATION = Setting.choice("render.interpolation", Interpolation.GPU,
-        "how instances moved in fixed steps are drawn between steps");
+        "how instances and skinned joints moved in fixed steps are drawn between steps");
 
     /**
      * Where the instances' changes are written before the GPU scatters them: into plain memory copied when the frame
@@ -45,14 +45,6 @@ public final class RenderSettings {
     public static final Setting<Integer> STREAM_BUDGET = Setting.integer("render.streamBudget", 64, 0, 4096,
         "MiB a frame of streamed meshes and textures copied on the transfer queue (0: in the frame)");
 
-    /**
-     * How forward shading draws material types: per type (each type and feature combination with pipelines of its own,
-     * from lists split after culling; types other than metallic-roughness shade as themselves), or with one shader
-     * branching on the type, which draws those as metallic-roughness's defaults (README, "Forward shading by type").
-     */
-    public static final Setting<ForwardShading> FORWARD_SHADING = Setting.choice("render.forwardShading",
-        ForwardShading.PER_TYPE, "how forward shading draws material types: per type, or one shader for all");
-
     /** Every render setting: these, the light clusters', the shadows' and the display transform's. */
     public static final List<Setting<?>> ALL = all();
 
@@ -66,7 +58,6 @@ public final class RenderSettings {
         all.add(CHANGE_LIST);
         all.add(CHANGE_LIST_CHUNK);
         all.add(STREAM_BUDGET);
-        all.add(FORWARD_SHADING);
         all.addAll(ClusteredLights.ALL);
         all.addAll(ShadowSettings.ALL);
         all.addAll(DisplayTransform.ALL);

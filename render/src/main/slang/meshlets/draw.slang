@@ -1,7 +1,7 @@
 // The indexed path's draw: all visible meshlets' triangles in one indexed draw. Each index is a visible meshlet's slot
 // and its local vertex (slot << 8 | local); the vertex shader finds the instance, the meshlet and the pool vertex from
-// it. The fragment shader serves the mesh shader path too.
-// The push block (forward.slang's ForwardPush), behind() and the type's generated fragment stages are forward.slang's.
+// it. Shaded fragments are the material types' generated stages (forward.slang's typed*), on the mesh shader path too.
+// The push block (forward.slang's ForwardPush) is forward.slang's.
 import meshlets.forward;
 
 [shader("vertex")]
@@ -19,38 +19,6 @@ VertexOut vertexMain(uint index : SV_VulkanVertexID)
     out.instance = v.instance;
     out.firstTriangle = v.firstIndex / 3;
     return out;
-}
-
-[shader("fragment")]
-float4 fragmentMain(VertexOut in) : SV_Target
-{
-    float4 uvs = float4(in.uv, in.uv1);
-    return shadeSurface(NoRays(), push.view[0], in, push.scene[0].materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind(in.instance), push.indirect);
-}
-
-/**
- * The blended bin's, into the transparency pass's targets: one-sided materials' back faces discarded, and masked
- * texels (a masked material that is transmissive draws here).
- */
-[shader("fragment")]
-BlendedOut blendedMain(VertexOut in, bool front : SV_IsFrontFace)
-{
-    discardMasked(push.scene[0].materials[in.material], in, front); // masked transmissive materials draw here too
-    float4 uvs = float4(in.uv, in.uv1);
-    return weighBlended(shadeSurface(NoRays(), push.view[0], in, push.scene[0].materials, ddx(uvs), ddy(uvs),
-        push.lights,
-        uint2(in.position.xy), behind(in.instance), push.indirect), length(in.world));
-}
-
-/** The masked bin's: drawn without culling, so one-sided materials' back faces go here with the masked texels. */
-[shader("fragment")]
-float4 maskedMain(VertexOut in, bool front : SV_IsFrontFace) : SV_Target
-{
-    discardMasked(push.scene[0].materials[in.material], in, front);
-    float4 uvs = float4(in.uv, in.uv1);
-    return shadeSurface(NoRays(), push.view[0], in, push.scene[0].materials, ddx(uvs), ddy(uvs), push.lights,
-        uint2(in.position.xy), behind(in.instance), push.indirect);
 }
 
 /** The masked bin's depth only (shadow maps, depth prepasses): the same texels masked as the color pass's. */

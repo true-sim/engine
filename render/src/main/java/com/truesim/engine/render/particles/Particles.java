@@ -1666,6 +1666,7 @@ public final class Particles implements AutoCloseable {
      */
     public Particles meshes(MeshletRenderer renderer) {
         meshRenderer = renderer;
+        referenceMeshMaterials();
         meshTables.follow(renderer == null ? null : renderer.pool());
         setup++;
         return this;
@@ -1717,6 +1718,18 @@ public final class Particles implements AutoCloseable {
     @AllowAllocation("a mesh registered")
     public void mesh(AssetRef<?> mesh, int poolMesh, int materialBase) {
         meshAssets.put(Objects.requireNonNull(mesh, "mesh"), new long[] {poolMesh, materialBase});
+        referenceMeshMaterials();
+    }
+
+    /** Has the mesh renderer's scene draw the materials of the meshes particles take (their instances are the GPU's). */
+    private void referenceMeshMaterials() {
+        if (meshRenderer == null) {
+            return;
+        }
+        for (long[] mesh : meshAssets.values()) {
+            meshRenderer.scene().reference((int) mesh[1], Math.max(1, meshRenderer.pool().materialSlots(
+                (int) mesh[0])));
+        }
     }
 
     /** Forgets {@code mesh}'s pool mesh. */

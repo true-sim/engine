@@ -524,14 +524,14 @@ try (Textures textures = new Textures(device); Materials materials = new Materia
 - **The table** is a 32-byte slot per material (header: type, double-sided, masked, features, cutoff; the mask's alpha
   and texture; where its blocks lie), then the blocks: the type's parameters and a section per feature shown, each
   material paying only for what it has. Passes that only rasterize (depth, shadows, IDs) read the slot alone, whatever
-  the type. Material 0 is metallic-roughness's defaults, so meshes draw before anything is set up. Instances name a
+  the type, but types with geometry hooks ("Geometry hooks" below). Material 0 is metallic-roughness's defaults, so meshes draw before anything is set up. Instances name a
   first material and each submesh of the mesh takes the next.
 - **Features are the engine's**, applied on any type allowing them: a clear coat (glTF's `KHR_materials_clearcoat`)
   is laid over the type's surface where the material has a `ClearcoatParameters` section. The visibility buffer sorts
   the screen's 8x8 tiles into a list per type and feature combination they show and shades each with one indirect
   dispatch of its own variant (a specialization constant), holding only its features' code: a plain material never
   pays for a coat. Forward shading does the same by draws: each type and feature combination draws with pipelines of
-  its own ("Forward shading by type" below).
+  its own ("Every color pass by material type" below).
 - **Textures** live in the bindless set and are sampled by slot, trilinear and anisotropic (`Bindless.MATERIAL`, up to
   16x where the GPU allows).
 - **One shading model** (`shading.slang`): Lambert diffuse and a GGX specular lobe with height-correlated Smith
@@ -654,55 +654,149 @@ Both light each pixel with the light list's lights for it (and the sky), or with
 | the same, 4,096 point lights | 5.56 ms | 1.71 ms |
 | 3,000 rocks, 1,024 point lights (`Screenshots.renderLights`) | 1.86 ms | 0.74 ms |
 
-**Forward shading by type** (#67, `render.forwardShading`, `PER_TYPE` by default). A `[MaterialType]` gets forward
-fragment entry points generated too (`material-types/entryForward*.slang.template`: per raster bin, from full vertices
-and on the lean mesh path), and each shading bin (a type and the features its materials show, numbered as the visibility
-buffer numbers them) draws with pipelines of its type's entry points, its features a specialization constant, made
-for the raster bins its materials draw in. After culling, a view drawn shaded has its lists split by shading bin
-(`meshlets/split.slang`: count, lay out, scatter, three small dispatches per cull): each (raster bin, shading bin)
-draws with one indirect draw from its part, and on the indexed path the expansion writes each part's indices in a range
-of its own. No shader branches on the type, and every type shades as itself; `SINGLE` keeps the one shader branching
-on it, which draws other types as metallic-roughness's defaults. A bin first drawn rebuilds the graph with its
-pipelines before it draws. Depth, shadow and ID passes keep their shared entry points: no type has a geometry half yet
-(clip, and displacement with #68), and they read the slot alone. The blended bin draws by type where the view's shaded
-draw split its lists (the visibility buffer's blended bin keeps the one shader), and classic LOD's draws keep it too.
+**Every color pass by material type** (#67 and its follow-up). A `[MaterialType]` gets forward fragment entry points
+generated too (`material-types/entryForward*.slang.template`: per raster bin, from full vertices and on the lean mesh
+path), and each shading bin (a type and the features its materials show, numbered as the visibility buffer numbers
+them) draws with pipelines of its type's entry points, its features a specialization constant, made for the raster
+bins its materials draw in. No shader branches on the type, and every type shades as itself, on every path that shades
+color:
 
-Measured with `ForwardShadingBenchmark` (`TRUESIM_BENCHMARK=true`) on an RX 9070 XT at 1920 x 1080, 2026-11-03: 30,000
-rocks on the terrain (87,193 meshlets drawn), the rocks' materials spread over 1, 4 or 12 shading bins (metallic-
-roughness; with glow, tinted and car paint; and with 8 feature combinations of metallic-roughness), occlusion culling
-on. Configurations took turns in 5 rounds after an uncounted warm-up round; ranges of the rounds' medians. GPU frame
-time from timestamps around batches of 8 frames; culling (both phases, the split and the indexed expansion included) and
-the forward draws (both phases) from the graph's pass timings; CPU time of recording a frame:
+- **Forward, meshlets** (indexed and mesh shaders): after culling, a view drawn shaded has its lists split by shading
+  bin (`meshlets/split.slang`: count, lay out, scatter, three small dispatches per cull): each (raster bin, shading
+  bin) draws with one indirect draw from its part, and on the indexed path the expansion writes each part's indices in
+  a range of its own. The blended bin draws the same way, into weighted transparency's targets or as opaque.
+- **The visibility buffer**: opaque pixels are shaded per type by its compute passes; its blended bin, drawn after the
+  IDs, splits the view's blended list alone (the opaque bins keep their lists for the shared ID pipelines) and draws by
+  type like forward.
+- **Classic LOD**: the selection cuts each draw list in a part per shading bin, room for `maxDraws` draws each (where
+  the list is drawn shaded: every list of a shaded view, the blended ones of a visibility buffer's view), and each
+  part draws with one `vkCmdDrawIndexedIndirectCount` of its type's pipeline, behind the classic vertex stage.
+- **Outside a frame graph** (`MeshletRenderer.record`, `drawView`): views culled there are split too, and shaded draws
+  go by type.
+
+A shading bin an instance first draws rebuilds the graph with its pipelines before it draws (made ahead: below); a
+material of a bin made after the graph built is left out of that frame (never drawn as another type). Depth, shadow
+and ID passes keep shared entry points: they read the slot alone (alpha masking from its cutoff and mask texture),
+whatever the type, but for types with geometry hooks.
+
+**Geometry hooks** (the first of #68's): a type may decide where its surfaces are, in every pass. Its parameters'
+attribute names the hooks it has beside the features it allows (`[MaterialParameters(GEOMETRY_KEEP)]`; the build
+hands the mask on, and `MaterialType.geometry()` reads it), and the type overrides the hook's function, which
+`IMaterial` gives every type by default:
+
+```slang
+[MaterialParameters(GEOMETRY_KEEP)]
+public struct DissolveParameters { [Color] public float3 color = float3(1, 1, 0); public float cell = 0.25; };
+
+[MaterialType("dissolve")]
+public struct Dissolve : IMaterial
+{
+    public typealias Parameters = DissolveParameters;
+    public static Surface surface(DissolveParameters p, MaterialRef m, SurfaceInput in) { ... }
+    public override static bool keep(DissolveParameters p, MaterialRef m, SurfaceInput in) // false: a hole
+    {
+        int2 cell = int2(floor(in.uv / p.cell));
+        return ((cell.x + cell.y) & 1) == 0;
+    }
+};
+```
+
+- **The same holes everywhere.** The hooks a type has are a specialization constant (`GEOMETRY`) of all its pipelines,
+  so a hook runs in every pass or in none: its color entry points discard where `keep()` says (forward, both mesh
+  paths, classic LOD, blended), and a type with hooks gets generated depth and ID entry points
+  (`material-types/entryGeometry.slang.template`: depth, masked depth, IDs and classic LOD's IDs, from full vertices)
+  that discard alike, so its shadow maps, depth passes and visibility buffer show the holes its color does. A `keep()`
+  without the attribute's bit runs nowhere.
+- **Only those types pay.** Depth, shadow and ID passes keep one shared pipeline per raster bin for every type without
+  hooks. Where instances take materials of types with hooks (`Materials.drawsGeometry`; such types numbered as they
+  are registered, the number in the slot beside the shading bin), a depth or ID view's opaque lists are split after
+  culling by that number (0: no hooks), and each part draws with its pipeline: the shared one, or the type's. Classic
+  LOD cuts its depth and ID lists the same way. Until then nothing is split and the passes draw as before.
+- **What it costs** (`ForwardShadingBenchmark.depthByGeometryHooks`, RX 9070 XT, 2026-11-03): a depth draw of the
+  30,000 rocks through a camera of its own (a shadow map's), 5 rounds after 4 uncounted ones, ranges of the rounds'
+  medians; culling includes the split, the depth pass is the draws:
+
+  | Path | Types with hooks | Frame (GPU) | Culling | Depth pass |
+  |---|---|---|---|---|
+  | mesh shaders | none | 0.591-0.663 ms | 0.123-0.128 ms | 0.450-0.490 ms |
+  | mesh shaders | dissolve registered, no rock takes it | 0.590-0.618 ms | 0.122-0.124 ms | 0.446-0.457 ms |
+  | mesh shaders | 1 rock in 12 dissolving | 0.642-0.654 ms | 0.118-0.119 ms | 0.491-0.500 ms |
+  | indexed | none | 0.626-0.634 ms | 0.207-0.216 ms | 0.418-0.443 ms |
+  | indexed | dissolve registered, no rock takes it | 0.619-0.683 ms | 0.207-0.215 ms | 0.418-0.440 ms |
+  | indexed | 1 rock in 12 dissolving | 0.659-0.691 ms | 0.223-0.225 ms | 0.429-0.434 ms |
+
+  With no type with hooks drawn, depth takes the path it took before them: nothing split, the shared pipelines. With
+  dissolving rocks the frame takes 0.03-0.06 ms more: their own pipeline, and on the indexed path the split.
+- **Pipelines by pass** (`geometryHooksCutTheSameHolesInEveryPass`, a dissolving quad drawn on both meshlet paths and
+  classic LOD): 12 color pipelines of types, 18 depth (shared and dissolve's per opaque raster bin: 6 per meshlet path,
+  6 for classic LOD's lists), 18 ID; with no type with hooks, depth and IDs make none beside the renderer's shared ones.
+- **Displacement joins the same way** (#68, not built): another bit (`GEOMETRY_DISPLACE`), a `displace()` with the
+  default doing nothing, run by the vertex stages of a type's pipelines (its geometry entry points take vertex stages
+  then), its bounds grown for culling.
+
+**Pipelines made ahead.** A renderer keeps the pipelines of material types in one store (`ShadingPipelines`, through
+the device's pipeline cache), and has those a material will draw with made on a thread of its own when the material
+is written: as a table is set (every bin it has), and as a material first draws in a shading bin and raster bin
+(`Materials` tells its listeners): its forward ones for the path frames take, classic LOD's, and a type's depth and ID
+ones where it has geometry hooks. Graphs build only for bins instances draw: a material counts once an instance takes
+it (`GpuScene` writing an instance, or mesh particles naming their meshes' materials, `Materials.reference`), so adding
+one rebuilds nothing, and the frame where an instance first takes it rebuilds the graph with pipelines already made.
+Wanted before it is made, a pipeline is made then, or, being made already, waited for, which takes no longer: making
+ahead never delays a material's first appearance.
+
+Measured with `ForwardShadingBenchmark` on the RX 9070 XT, 2026-11-03: the 4-bin table drawn, a material of a bin no
+table drew before added (its pipeline cold: a specialization constant never used), then rock 1 takes it in front of the
+camera; CPU time of recording frames, three runs each:
+
+| A material of a new bin | Before (every color pass by type, 866cdaf) | Made ahead |
+|---|---|---|
+| added, frames on for 1 s, then taken | the frame after the add 155-201 ms (compiling); the first draw 0.09-0.15 ms | the frame after the add 0.05-0.07 ms; the first draw 1.3-2.4 ms (the rebuild); the pipeline made off the frames' thread in 170-195 ms |
+| added and taken in the same frame | the first draw 166-199 ms | the first draw 183-191 ms, 167-190 ms of it waiting for the pipeline being made |
+
+The other frames of the second they ran took up to 10-20 ms in both, also in runs that compiled nothing: this
+benchmark's frames as the JIT compiles them (pitfalls.md, "an optimizing compile stops the thread").
+
+One shader for every type is gone (`render.forwardShading` with it). It drew types other than metallic-roughness as
+metallic-roughness's defaults (a glow material did not glow, car paint had no flakes, tinted ignored its buffer). A
+correct one was built to decide: the shader as the build would generate it, its surface a switch over the material's
+type calling each registered type's own `surface()`, features read from the material (prototype in commit 8432bf5,
+`test/singleForward.slang`). Measured against by type with `ForwardShadingBenchmark` (`TRUESIM_BENCHMARK=true`) on an
+RX 9070 XT at 1920 x 1080, 2026-11-03: 30,000 rocks on the terrain (87,193 meshlets drawn), the rocks' materials spread
+over 1, 4 or 12 shading bins (metallic-roughness; with glow, tinted and car paint; and with 8 feature combinations of
+metallic-roughness), occlusion culling on. Configurations took turns in 5 rounds after an uncounted warm-up round;
+ranges of the rounds' medians. GPU frame time from timestamps around batches of 8 frames; culling (both phases, the
+split and the indexed expansion included) and the forward draws (both phases) from the graph's pass timings; CPU time
+of recording a frame:
 
 | Path | Bins | Shading | Frame (GPU) | Culling | Forward draws | Record (CPU) | Draws |
 |---|---|---|---|---|---|---|---|
-| mesh shaders | 1 | by type | 1.129-1.691 ms | 0.122-0.158 ms | 0.964-1.267 ms | 0.023-0.029 ms | 2 |
-| mesh shaders | 1 | single | 1.147-1.417 ms | 0.123-0.141 ms | 0.949-1.075 ms | 0.021-0.027 ms | 6 |
-| mesh shaders | 4 | by type | 0.943-0.994 ms | 0.128-0.130 ms | 0.783-0.797 ms | 0.025-0.033 ms | 8 |
-| mesh shaders | 4 | single | 1.118-1.138 ms | 0.106-0.125 ms | 0.925-1.003 ms | 0.024-0.027 ms | 6 |
-| mesh shaders | 12 | by type | 1.053-1.105 ms | 0.137-0.140 ms | 0.876-0.886 ms | 0.031-0.041 ms | 24 |
-| mesh shaders | 12 | single | 1.160-1.184 ms | 0.106-0.124 ms | 0.964-0.989 ms | 0.021-0.027 ms | 6 |
-| indexed | 1 | by type | 0.779-0.783 ms | 0.213-0.215 ms | 0.544-0.551 ms | 0.025-0.032 ms | 2 |
-| indexed | 1 | single | 0.819-0.829 ms | 0.189-0.207 ms | 0.559-0.566 ms | 0.029-0.030 ms | 6 |
-| indexed | 4 | by type | 0.755-0.777 ms | 0.223-0.229 ms | 0.499-0.504 ms | 0.034-0.035 ms | 8 |
-| indexed | 4 | single | 0.803-0.844 ms | 0.188-0.210 ms | 0.546-0.570 ms | 0.023-0.030 ms | 6 |
-| indexed | 12 | by type | 0.845-0.857 ms | 0.262-0.266 ms | 0.538-0.541 ms | 0.033-0.042 ms | 24 |
-| indexed | 12 | single | 0.855-0.863 ms | 0.188-0.208 ms | 0.587-0.599 ms | 0.023-0.030 ms | 6 |
+| mesh shaders | 1 | by type | 1.131-1.569 ms | 0.122-0.150 ms | 0.964-1.187 ms | 0.024 ms | 2 |
+| mesh shaders | 1 | one, generated | 1.175-1.341 ms | 0.124-0.127 ms | 0.975-1.022 ms | 0.022-0.023 ms | 6 |
+| mesh shaders | 4 | by type | 0.945-0.956 ms | 0.127-0.129 ms | 0.781-0.790 ms | 0.026-0.027 ms | 8 |
+| mesh shaders | 4 | one, generated | 1.139-1.161 ms | 0.123-0.125 ms | 0.945-1.022 ms | 0.022-0.023 ms | 6 |
+| mesh shaders | 12 | by type | 1.053-1.077 ms | 0.137-0.140 ms | 0.873-0.885 ms | 0.032-0.033 ms | 24 |
+| mesh shaders | 12 | one, generated | 1.184-1.217 ms | 0.105-0.139 ms | 0.983-1.112 ms | 0.022-0.023 ms | 6 |
+| indexed | 1 | by type | 0.774-0.814 ms | 0.213-0.220 ms | 0.544-0.552 ms | 0.026-0.027 ms | 2 |
+| indexed | 1 | one, generated | 0.816-0.820 ms | 0.205-0.207 ms | 0.555-0.570 ms | 0.024-0.026 ms | 6 |
+| indexed | 4 | by type | 0.748-0.761 ms | 0.224-0.227 ms | 0.496-0.499 ms | 0.029 ms | 8 |
+| indexed | 4 | one, generated | 0.798-0.809 ms | 0.190-0.208 ms | 0.553-0.556 ms | 0.025 ms | 6 |
+| indexed | 12 | by type | 0.840-0.845 ms | 0.264-0.266 ms | 0.533-0.539 ms | 0.035 ms | 24 |
+| indexed | 12 | one, generated | 0.849-0.857 ms | 0.207 ms | 0.590-0.597 ms | 0.025 ms | 6 |
 
-The mesh path's 1-bin "by type" range comes from one slow round (the others 1.129-1.143 ms). The split costs 0.01-0.03
-ms of culling on mesh shaders and 0.02-0.07 ms on the indexed path; the draws, specialized to their features and free
-of the type branch, gain more, except with one bin on mesh shaders, where the two are even. Recording costs a few
-microseconds more per frame (a draw per shading bin). Pipelines (cold: compiled with a specialization constant never
-used, so the driver's disk cache had none): the single shader's opaque pipeline took 450-500 ms to compile on either
-path, a pipeline by type 70-150 ms (glow 70-95, metallic-roughness 100-125, metallic-roughness with a coat and sheen
-120-155). By type, a table makes one pipeline per shading bin and raster bin drawn: 1, 4 and 12 for the tables above
-(the renderer makes the single shader's 5 shaded pipelines per path, a raster bin each and the weighted blended
-one, when it is made). A bin first drawn while frames run costs the frame that draws it the rebuild and its
-pipelines: 170 ms cold, 1-3 ms with the driver's cache warm; with the single shader the rebuild alone (0.3-3 ms).
-Warm, a table's pipelines by type took 1-4 ms in all.
+The mesh path's 1-bin "by type" range comes from one slow round (the others 1.131-1.150 ms). Registers of the fragment
+stages (`VK_AMD_shader_info`): the generated shader 132-134 VGPRs and 70-74 SGPRs, so 11 waves per SIMD; by type
+61-94 VGPRs (glow 61, metallic-roughness 82, with a coat and sheen 94), 16 waves. Cold compiles (a specialization
+constant never used, so the driver's disk cache had none): the generated shader 320-350 ms, a pipeline by type 80-155
+ms (glow 80-115, metallic-roughness 110-145, with a coat and sheen 135-155); the old branching shader took 500-540
+ms. By type the draws are faster with any number of bins and the frame never slower; the generated shader's only
+gains were a few microseconds of recording and no pipeline to compile for a new bin, which making pipelines ahead
+takes away (above). It was not kept.
+
+Pipelines by type: one per shading bin and raster bin drawn, 1, 4 and 12 for the tables above; warm, a table's took
+1-4 ms in all.
 
 On the integrated GPU (#151, 2026-11-03), by type does not show a fix: `SceneSyncTest` lost the device in 15 of 36
-tests with the single shader; by type, the 10 tests that ran failed (7 device losses, 3 failed submits) before the GPU
+tests with the old single shader; by type, the 10 tests that ran failed (7 device losses, 3 failed submits) before the GPU
 dropped out of the device list. Both times the first loss came in a test drawing metallic-roughness materials only
 (faults at 0x2000000000 and at 0x0). One run each; no run of the code before this change on the same driver state.
 
@@ -1086,6 +1180,16 @@ renderers above, following the scene's change logs and asset cache:
   uploaded per frame with a step, 0.001 ms and nothing without, the blend pass 0.006 ms on the GPU; `GPU_PRECISE` 0.57
   ms and 2.04 MB, 0.009 ms; `CPU` 0.44 ms and 2.04 MB with a step, 0.24 ms and 2.04 MB without (application-api.md
   D122).
+- **Skinned joints between fixed steps** (animation.md A5): an animator on fixed steps (`animator.fixedSteps(true)`)
+  runs in the `Animation` plugin's `FIXED`, once per step of its world's clock, deterministic whatever the frame rate.
+  The sync following that clock poses the skinned copies whose joints a step moved, on its job system, and draws them
+  between their last two steps' poses, the skinning matrices blended linearly (each vertex that part of the way
+  between the two poses), as `render.interpolation` says: on the GPU the skinning blends both steps' matrices kept in
+  the deformation's buffer, on the CPU the sync writes the blend each frame, `OFF` draws steps. `sync.teleport(body)`
+  in a step snaps the joints; joints moved outside the steps are drawn as posed. 1,000 characters of 24 joints at 60
+  steps and 144 frames a second (`SkinnedCrowdBenchmark`): animated every frame, 2.4 ms of main thread every frame; on
+  fixed steps blended on the GPU, 2.6–3.3 ms in frames with a step and 0.01–0.03 ms in the others (half the time per
+  second), 1.7 times the joint matrices uploaded, the same 0.49 ms of GPU deformation (application-api.md D91).
 
 ```java
 FrameSlots slots = new FrameSlots(2);                 // shared by every graph drawing these resources

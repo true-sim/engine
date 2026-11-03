@@ -60,8 +60,7 @@ import org.lwjgl.vulkan.VkPhysicalDeviceProperties;
 import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
 
 /**
- * Forward shading by material type ({@link ForwardShading#PER_TYPE}: pipelines per shading bin, lists split after
- * culling) against the one shader branching on the type ({@link ForwardShading#SINGLE}), #67: 30,000 rocks on the
+ * Forward shading by material type (pipelines per shading bin, lists split after culling, #67): 30,000 rocks on the
  * terrain at 1920 x 1080, their materials spread over 1, 4 or 12 shading bins (types and feature combinations), on both
  * geometry paths. Configurations take turns, round after round, so they see the same clocks (a first round, warming
  * the clocks up, is not counted); each round's medians are printed and the range over the rounds summed up. Run with {@code TRUESIM_BENCHMARK=true ./gradlew
@@ -147,7 +146,7 @@ class ForwardShadingBenchmark {
     }
 
     @Test
-    void perTypeAgainstSingle() {
+    void perType() {
         try (VulkanInstance instance = VulkanInstance.builder().applicationName("benchmark").surfaces(false).build();
              VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
              GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 100_000, 4));
@@ -183,42 +182,36 @@ class ForwardShadingBenchmark {
                 MeshletRenderer.Path[] paths = device.meshShaders()
                     ? new MeshletRenderer.Path[] {MeshletRenderer.Path.MESH_SHADERS, MeshletRenderer.Path.INDEXED}
                     : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED};
-                ForwardShading[] settings = ForwardShading.values();
                 System.out.printf(Locale.ROOT, "Forward shading by type on %s, %d x %d, 30,000 rocks (%,d triangles"
                     + " each) on the terrain, the sun:%n", device.gpu().name(), WIDTH, HEIGHT, 20 * (1L << 12));
-                Sample[][][][] samples = new Sample[paths.length][BINS.length][settings.length][ROUNDS];
+                Sample[][][] samples = new Sample[paths.length][BINS.length][ROUNDS];
                 for (int round = -1; round < ROUNDS; round++) { // round -1 warms the GPU's clocks up, uncounted
                     for (int p = 0; p < paths.length; p++) {
                         renderer.setPath(paths[p]);
                         for (int b = 0; b < BINS.length; b++) {
                             gpu.setMaterials(tables.get(b));
-                            for (int s = 0; s < settings.length; s++) {
-                                Sample sample = measure(device, renderer, view, camera, target, queries, period,
-                                    settings[s], tables.get(b));
-                                if (round >= 0) {
-                                    samples[p][b][s][round] = sample;
-                                }
-                                System.out.printf(Locale.ROOT, "  round %d, %s, %2d bins, %-8s: frame %.3f ms GPU,"
-                                    + " culling %.3f ms, draws %.3f ms, record %.3f ms CPU, %d draws, %,d meshlets%n",
-                                    round, pathName(paths[p]), BINS[b], settings[s], sample.gpu, sample.culling,
-                                    sample.draws, sample.cpu, sample.drawCalls, view.visibleMeshlets());
+                            Sample sample = measure(device, renderer, view, camera, target, queries, period,
+                                tables.get(b));
+                            if (round >= 0) {
+                                samples[p][b][round] = sample;
                             }
+                            System.out.printf(Locale.ROOT, "  round %d, %s, %2d bins: frame %.3f ms GPU,"
+                                + " culling %.3f ms, draws %.3f ms, record %.3f ms CPU, %d draws, %,d meshlets%n",
+                                round, pathName(paths[p]), BINS[b], sample.gpu, sample.culling, sample.draws,
+                                sample.cpu, sample.drawCalls, view.visibleMeshlets());
                         }
                     }
                 }
                 System.out.println("Ranges over the rounds (of each round's median):");
                 for (int p = 0; p < paths.length; p++) {
                     for (int b = 0; b < BINS.length; b++) {
-                        for (int s = 0; s < settings.length; s++) {
-                            Sample[] all = samples[p][b][s];
-                            System.out.printf(Locale.ROOT, "  | %s | %d | %s | %s | %s | %s | %s | %d |%n",
-                                pathName(paths[p]), BINS[b], settings[s], range(all, Sample::gpu),
-                                range(all, Sample::culling), range(all, Sample::draws), range(all, Sample::cpu),
-                                all[0].drawCalls);
-                        }
+                        Sample[] all = samples[p][b];
+                        System.out.printf(Locale.ROOT, "  | %s | %d | %s | %s | %s | %s | %d |%n",
+                            pathName(paths[p]), BINS[b], range(all, Sample::gpu), range(all, Sample::culling),
+                            range(all, Sample::draws), range(all, Sample::cpu), all[0].drawCalls);
                     }
                 }
-                newType(device, renderer, view, camera, target);
+                firstDraw(device, renderer, view, camera, target, rock);
             } finally {
                 gpu.setMaterials(null);
                 for (Materials table : tables) {
@@ -274,9 +267,12 @@ class ForwardShadingBenchmark {
      */
     private static void cold(VulkanInstance instance) {
         long salt = System.nanoTime();
-        try (VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
+        boolean info = instance.bestGpu().supports(org.lwjgl.vulkan.AMDShaderInfo.VK_AMD_SHADER_INFO_EXTENSION_NAME);
+        try (VulkanDevice device = info ? VulkanDevice.create(instance.bestGpu(),
+            List.of(org.lwjgl.vulkan.AMDShaderInfo.VK_AMD_SHADER_INFO_EXTENSION_NAME))
+            : VulkanDevice.createHeadless(instance.bestGpu())) {
+            shaderInfo = info;
             String[][] variants = {
-                {"single shader", "", "leanMain", "fragmentMain", "0"},
                 {"metallic-roughness", "metallicRoughness", "metallicRoughnessLeanMain",
                     "metallicRoughnessFragmentMain", "0"},
                 {"metallic-roughness + coat + sheen", "metallicRoughness", "metallicRoughnessLeanMain",
@@ -287,13 +283,14 @@ class ForwardShadingBenchmark {
             for (int repeat = 0; repeat < 3; repeat++) {
                 for (String[] v : variants) {
                     double[] ms = new double[2];
+                    String[] registers = {"", ""};
                     for (int lean = 0; lean < 2; lean++) {
                         if (lean == 1 && !(device.meshShaders() && device.barycentrics() && device.primitiveIds())) {
                             ms[lean] = Double.NaN;
                             continue;
                         }
                         String geometry = lean == 1 ? "shaders/meshlets/lean.spv" : "shaders/meshlets/draw.spv";
-                        String fragment = v[1].isEmpty() ? geometry : "shaders/material-types/" + v[1]
+                        String fragment = "shaders/material-types/" + v[1]
                             + (lean == 1 ? "ForwardLean.spv" : "Forward.spv");
                         try (var g = com.truesim.engine.vulkan.ShaderModule.load(device, geometry);
                              var f = com.truesim.engine.vulkan.ShaderModule.load(device, fragment)) {
@@ -301,52 +298,304 @@ class ForwardShadingBenchmark {
                             try (var pipeline = com.truesim.engine.vulkan.Pipeline.graphics(device)
                                 .stage(lean == 1 ? org.lwjgl.vulkan.EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT
                                     : org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_VERTEX_BIT, g,
-                                    lean == 1 ? (v[1].isEmpty() ? "meshLeanMain" : "meshLeanTypedMain") : "vertexMain")
+                                    lean == 1 ? "meshLeanTypedMain" : "vertexMain")
                                 .stage(org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_FRAGMENT_BIT, f, lean == 1 ? v[2] : v[3])
                                 .pushConstants(com.truesim.engine.render.layout.ForwardPush.BYTES)
-                                .constants(Integer.parseInt(v[4]), (int) (salt++))
+                                .constants(Integer.parseInt(v[4]), 1, 2, 3, (int) (salt++)) // id 4: no shader's
                                 .color(VK_FORMAT_R8G8B8A8_UNORM).depth(VK_FORMAT_D32_SFLOAT).build()) {
                                 ms[lean] = (System.nanoTime() - t0) / 1e6;
+                                if (repeat == 0) {
+                                    registers[lean] = registers(device, pipeline.handle());
+                                }
                             }
                         }
                     }
-                    System.out.printf(Locale.ROOT, "  cold, %s: lean mesh path %.1f ms, indexed %.1f ms%n", v[0], ms[1],
-                        ms[0]);
+                    System.out.printf(Locale.ROOT, "  cold, %s: lean mesh path %.1f ms%s, indexed %.1f ms%s%n", v[0],
+                        ms[1], registers[1], ms[0], registers[0]);
                 }
             }
         }
     }
 
+    private static boolean shaderInfo;
+
     /**
-     * A shading bin first drawn while frames run: the frame that rebuilds the graph (and by type, makes the bin's
-     * pipelines), against the frames around it, CPU time of recording.
+     * The fragment stage's registers of {@code pipeline} (VK_AMD_shader_info): vector and scalar registers used, and
+     * the waves a SIMD holds by its vector registers (the physical ones over those used); empty without the extension.
      */
-    private static void newType(VulkanDevice device, MeshletRenderer renderer, RenderView view, Camera camera,
-        ExternalImage target) {
+    private static String registers(VulkanDevice device, long pipeline) {
+        if (!shaderInfo) {
+            return "";
+        }
+        try (MemoryStack stack = stackPush()) {
+            org.lwjgl.vulkan.VkShaderStatisticsInfoAMD info = org.lwjgl.vulkan.VkShaderStatisticsInfoAMD.create(
+                stack.ncalloc(org.lwjgl.vulkan.VkShaderStatisticsInfoAMD.ALIGNOF, 1, org.lwjgl.vulkan.VkShaderStatisticsInfoAMD.SIZEOF));
+            org.lwjgl.PointerBuffer size = stack.pointers(org.lwjgl.vulkan.VkShaderStatisticsInfoAMD.SIZEOF);
+            int result = org.lwjgl.vulkan.AMDShaderInfo.vkGetShaderInfoAMD(device.handle(), pipeline,
+                org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_FRAGMENT_BIT,
+                org.lwjgl.vulkan.AMDShaderInfo.VK_SHADER_INFO_TYPE_STATISTICS_AMD, size,
+                org.lwjgl.system.MemoryUtil.memByteBuffer(info.address(), org.lwjgl.vulkan.VkShaderStatisticsInfoAMD.SIZEOF));
+            if (result != 0) {
+                return " (no shader info: " + result + ")";
+            }
+            int vgprs = info.resourceUsage().numUsedVgprs();
+            return String.format(Locale.ROOT, " (%d VGPRs, %d SGPRs, %d waves/SIMD of %d physical VGPRs)", vgprs,
+                info.resourceUsage().numUsedSgprs(), Math.min(16, info.numPhysicalVgprs() / Math.max(1, vgprs)),
+                info.numPhysicalVgprs());
+        }
+    }
+
+    /** Milliseconds of frames between adding a material and an instance first taking it ({@link #firstDraw}). */
+    private static final int FIRST_DRAW_GAP = 1000;
+
+    /**
+     * A shading bin first drawn while frames run, its pipelines never compiled before (a specialization constant no
+     * shader reads, of a value never used, so the driver's disk cache has none): a material of it is added, frames go
+     * on for {@link #FIRST_DRAW_GAP} ms, then rock 1 takes it. CPU time of recording the slowest frame of the sequence
+     * (the one compiling, if any does), the frame after the add, the frame first drawing it, and frames before and
+     * after.
+     */
+    private static void firstDraw(VulkanDevice device, MeshletRenderer renderer, RenderView view, Camera camera,
+        ExternalImage target, int rock) {
         renderer.setPath(MeshletRenderer.Path.AUTO);
-        for (ForwardShading setting : ForwardShading.values()) {
-            for (int extra = 0; extra < 3; extra++) {
-                try (Materials materials = table(device, 4); FrameGraph graph = new FrameGraph(device, 2)) {
-                    renderer.scene().setMaterials(materials);
-                    SceneView main = new SceneView(graph.addView("main").size(WIDTH, HEIGHT), view, camera);
-                    main.port().add(MeshletBenchmark.forward(main)).output(Keys.SCENE_COLOR, target);
-                    graph.settings().set(RenderSettings.FORWARD_SHADING, setting);
-                    for (int i = 0; i < 20; i++) {
-                        device.submitAndWait(device.graphics(), graph::record);
+        // Bins no table drew yet: metallic-roughness with two features each time.
+        MaterialFeature[][] combinations = {
+            {ClearcoatParameters.DEFAULTS, SpecularParameters.DEFAULTS},
+            {ClearcoatParameters.DEFAULTS, IorParameters.DEFAULTS},
+            {ClearcoatParameters.DEFAULTS, IridescenceParameters.DEFAULTS},
+            {ClearcoatParameters.DEFAULTS, AnisotropyParameters.DEFAULTS},
+            {SpecularParameters.DEFAULTS, IorParameters.DEFAULTS},
+            {SheenParameters.DEFAULTS, SpecularParameters.DEFAULTS},
+        };
+        for (int run = 0; run < combinations.length; run++) {
+            int gapMillis = run < 3 ? FIRST_DRAW_GAP : 0; // then drawn the frame it is added
+            try (Materials materials = table(device, 4); FrameGraph graph = new FrameGraph(device, 2)) {
+                renderer.scene().setMaterials(materials);
+                SceneView main = new SceneView(graph.addView("main").size(WIDTH, HEIGHT), view, camera);
+                main.port().add(MeshletBenchmark.forward(main)).output(Keys.SCENE_COLOR, target);
+                for (int i = 0; i < 20; i++) {
+                    device.submitAndWait(device.graphics(), graph::record);
+                }
+                double before = recordMillis(device, graph);
+                long nanos = renderer.forwardPipelineNanos();
+                long waited = renderer.shading().waitedNanos();
+                int builds = graph.builds();
+                renderer.shading().coldForBenchmarks((int) System.nanoTime());
+                for (int filler = 0; filler < run; filler++) {
+                    materials.add(material(0)); // an id no instance took before: instances' ids stay taken
+                }
+                Material material = new Material(MR);
+                for (MaterialFeature feature : combinations[run]) {
+                    material = material.feature(feature);
+                }
+                int added = materials.add(material);
+                double addFrame = Double.NaN;
+                double slowest = 0;
+                if (gapMillis > 0) {
+                    addFrame = recordMillis(device, graph);
+                    slowest = addFrame;
+                    long until = System.nanoTime() + gapMillis * 1_000_000L;
+                    while (System.nanoTime() < until) {
+                        slowest = Math.max(slowest, recordMillis(device, graph));
                     }
-                    double before = recordMillis(device, graph);
-                    long nanos = renderer.forwardPipelineNanos();
-                    int builds = graph.builds();
-                    // A bin not drawn yet (a coat over metallic-roughness with another feature each time), on rock 1.
-                    materials.set(1, material(5 + extra).feature(ClearcoatParameters.DEFAULTS));
-                    double rebuilt = recordMillis(device, graph);
-                    double after = recordMillis(device, graph);
-                    System.out.printf(Locale.ROOT, "  a new bin, %s: the frame recording it %.2f ms CPU (rebuilt %d"
-                        + " times; %.1f ms making pipelines), before %.2f ms, after %.2f ms%n", setting, rebuilt,
-                        graph.builds() - builds, (renderer.forwardPipelineNanos() - nanos) / 1e6, before, after);
-                    renderer.scene().setMaterials(null);
+                }
+                double gap = slowest;
+                renderer.scene().set(1, rock, added, 0, -12 + MeshletBenchmark.terrainHeight(0, -10) + 1, -10, 0, 0, 0,
+                    1, 2, 2, 2); // in front of the camera
+                double drawFrame = recordMillis(device, graph);
+                slowest = Math.max(slowest, drawFrame);
+                double after = recordMillis(device, graph);
+                renderer.shading().coldForBenchmarks(0);
+                System.out.printf(Locale.ROOT, "  a new bin, drawn %d ms after it is added: slowest frame %.2f ms CPU"
+                    + " (until the first draw %.2f), the add's %.2f ms, the first draw's %.2f ms (rebuilt %d times; %.1f"
+                    + " ms making pipelines, %.1f ms waited for), before %.2f ms, after %.2f ms%n", gapMillis, slowest,
+                    gap, addFrame, drawFrame,
+                    graph.builds() - builds, (renderer.forwardPipelineNanos() - nanos) / 1e6,
+                    (renderer.shading().waitedNanos() - waited) / 1e6, before, after);
+                renderer.scene().setMaterials(null);
+            }
+        }
+    }
+
+    /**
+     * Depth by type with geometry hooks (#68's first hook, keep()): a depth draw of the 30,000 rocks through a camera
+     * of its own (a shadow map's), with no type having a hook (the lists as culled, the shared pipelines: nothing split),
+     * with the dissolving type registered but no rock taking it (the opaque lists split, every rock in the shared
+     * category), and with one rock in 12 dissolving. Culling's and the depth pass's GPU time (the graph's timings) and
+     * the frame's (timestamps around batches of frames); 5 rounds taking turns, ranges of the rounds' medians.
+     */
+    @Test
+    void depthByGeometryHooks() {
+        String[] configurations = {"no type with hooks", "dissolve registered, unused", "1 rock in 12 dissolving"};
+        try (VulkanInstance instance = VulkanInstance.builder().applicationName("benchmark").surfaces(false).build();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 100_000, 4));
+             GpuScene gpu = new GpuScene(device, pool, 40_000);
+             MeshletRenderer renderer = new MeshletRenderer(device, gpu, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT);
+             GpuImage copied = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+             MemoryStack stack = stackPush()) {
+            int rock = pool.add(MeshletBenchmark.rock(6));
+            int ground = pool.add(MeshletBenchmark.terrain(1024));
+            rocksOnTerrain(gpu, rock, ground, 30_000, 600, -12);
+            Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
+            RenderView depthView = renderer.createView(ViewOptions.of(1 << 20, 80_000_000));
+            ExternalImage target = new ExternalImage("depth as color", WIDTH, HEIGHT,
+                com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(copied.handle(), 0);
+            VkPhysicalDeviceProperties properties = VkPhysicalDeviceProperties.malloc(stack);
+            vkGetPhysicalDeviceProperties(device.gpu().handle(), properties);
+            double period = properties.limits().timestampPeriod();
+            LongBuffer handle = stack.mallocLong(1);
+            vkCreateQueryPool(device.handle(), VkQueryPoolCreateInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO).queryType(VK_QUERY_TYPE_TIMESTAMP).queryCount(2),
+                null, handle);
+            long queries = handle.get(0);
+            Materials[] tables = new Materials[configurations.length];
+            try {
+                for (int c = 0; c < configurations.length; c++) {
+                    tables[c] = table(device, 4);
+                    if (c > 0) {
+                        tables[c].register(com.truesim.engine.render.materials.Dissolve.TYPE);
+                    }
+                    if (c == 2) { // material 12 (rocks 12, 24, ...) dissolves
+                        tables[c].set(MATERIALS, new Material(
+                            com.truesim.engine.render.materials.DissolveParameters.DEFAULTS));
+                    }
+                }
+                MeshletRenderer.Path[] paths = device.meshShaders()
+                    ? new MeshletRenderer.Path[] {MeshletRenderer.Path.MESH_SHADERS, MeshletRenderer.Path.INDEXED}
+                    : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED};
+                Sample[][][] samples = new Sample[paths.length][configurations.length][ROUNDS];
+                for (int round = -4; round < ROUNDS; round++) { // four rounds warm the clocks up (pitfalls.md), uncounted
+                    for (int p = 0; p < paths.length; p++) {
+                        renderer.setPath(paths[p]);
+                        for (int c = 0; c < configurations.length; c++) {
+                            gpu.setMaterials(tables[c]);
+                            Sample sample = measureDepth(device, renderer, depthView, camera, target, queries,
+                                period);
+                            if (round >= 0) {
+                                samples[p][c][round] = sample;
+                            }
+                            System.out.printf(Locale.ROOT, "  round %d, %s, %s: frame %.3f ms GPU, culling %.3f ms,"
+                                + " depth %.3f ms, record %.3f ms CPU, split for %d%n", round, pathName(paths[p]),
+                                configurations[c], sample.gpu, sample.culling, sample.draws, sample.cpu,
+                                depthView.splitCategories());
+                        }
+                    }
+                }
+                System.out.println("Depth by geometry hooks, ranges over the rounds (of each round's median):");
+                for (int p = 0; p < paths.length; p++) {
+                    for (int c = 0; c < configurations.length; c++) {
+                        Sample[] all = samples[p][c];
+                        System.out.printf(Locale.ROOT, "  | %s | %s | %s | %s | %s | %s |%n", pathName(paths[p]),
+                            configurations[c], range(all, Sample::gpu), range(all, Sample::culling),
+                            range(all, Sample::draws), range(all, Sample::cpu));
+                    }
+                }
+                System.out.printf(Locale.ROOT, "  pipelines of types: depth %d%n",
+                    renderer.shading().count(ShadingPipelines.DEPTH));
+            } finally {
+                gpu.setMaterials(null);
+                for (Materials table : tables) {
+                    if (table != null) {
+                        table.close();
+                    }
+                }
+                vkDestroyQueryPool(device.handle(), queries, null);
+            }
+        }
+    }
+
+    /** A depth draw of {@code view} through {@code camera}, its depth copied into {@code target} to be built. */
+    private record DepthDraw(SceneDraw draw) implements com.truesim.engine.graph.Technique {
+        static final com.truesim.engine.graph.Key<com.truesim.engine.graph.Image> KEY =
+            com.truesim.engine.graph.Key.image("benchmark.depth");
+
+        @Override
+        public List<com.truesim.engine.graph.Key<?>> provides() {
+            return List.of(KEY);
+        }
+
+        @Override
+        public void build(com.truesim.engine.graph.GraphBuilder g) {
+            com.truesim.engine.graph.Image depth = g.request(draw).depth();
+            com.truesim.engine.graph.Image image = g.create("depth as color",
+                com.truesim.engine.graph.ImageDesc.of(com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, WIDTH,
+                    HEIGHT));
+            com.truesim.engine.vulkan.Pipeline pipeline = g.computeProgram("shaders/test/depthcopy.spv", "copyMain",
+                8);
+            g.pass("copy depth").read(depth, com.truesim.engine.graph.Access.SAMPLED_COMPUTE)
+                .write(image, com.truesim.engine.graph.Access.STORAGE_WRITE).record(ctx -> {
+                    try (MemoryStack stack = stackPush()) {
+                        long push = stack.nmalloc(4, 8);
+                        org.lwjgl.system.MemoryUtil.memPutInt(push, ctx.sampled(depth));
+                        org.lwjgl.system.MemoryUtil.memPutInt(push + 4, ctx.storage(image));
+                        pipeline.bind(ctx.unsafe().commands());
+                        pipeline.push(ctx.unsafe().commands(), push, 8);
+                        org.lwjgl.vulkan.VK10.vkCmdDispatch(ctx.unsafe().commands(), WIDTH / 8, HEIGHT / 8, 1);
+                    }
+                });
+            g.provide(KEY, image);
+        }
+    }
+
+    /** As {@link #measure}, of a depth draw: culling and the depth pass from the graph's timings. */
+    private static Sample measureDepth(VulkanDevice device, MeshletRenderer renderer, RenderView view, Camera camera,
+        ExternalImage target, long queries, double period) {
+        try (FrameGraph graph = new FrameGraph(device, 2)) {
+            graph.add(new DepthDraw(new SceneDraw(SceneGeometry.meshlets(renderer), view, camera,
+                SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, WIDTH, HEIGHT, false))).output(DepthDraw.KEY, target);
+            for (int i = 0; i < 10; i++) {
+                device.submitAndWait(device.graphics(), graph::record);
+            }
+            double[] gpu = new double[BATCHES];
+            double[] cpu = new double[BATCHES * BATCH];
+            for (int batch = 0; batch < BATCHES; batch++) {
+                int first = batch * BATCH;
+                device.submitAndWait(device.graphics(), commands -> {
+                    vkCmdResetQueryPool(commands, queries, 0, 2);
+                    vkCmdWriteTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 0);
+                    for (int i = 0; i < BATCH; i++) {
+                        long t0 = System.nanoTime();
+                        graph.record(commands);
+                        cpu[first + i] = (System.nanoTime() - t0) / 1e6;
+                        fullBarrier(commands);
+                    }
+                    vkCmdWriteTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 1);
+                });
+                try (MemoryStack stack = stackPush()) {
+                    LongBuffer stamps = stack.mallocLong(2);
+                    vkGetQueryPoolResults(device.handle(), queries, 0, 2, stamps, 8,
+                        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+                    gpu[batch] = (stamps.get(1) - stamps.get(0)) * period / 1e6 / BATCH;
                 }
             }
+            graph.timings(true);
+            double[] culling = new double[TIMED];
+            double[] draws = new double[TIMED];
+            for (int i = -4; i < TIMED; i++) {
+                device.submitAndWait(device.graphics(), graph::record);
+                GpuTimings timings = graph.timings();
+                if (i < 0 || timings == null) {
+                    continue;
+                }
+                for (int t = 0; t < timings.count(); t++) {
+                    String pass = timings.pass(t);
+                    double ms = timings.millis(t);
+                    if (Double.isNaN(ms)) {
+                        continue;
+                    }
+                    if (pass.equals("meshlet culling")) {
+                        culling[i] += ms;
+                    } else if (pass.startsWith("meshlet depth")) {
+                        draws[i] += ms;
+                    }
+                }
+            }
+            graph.timings(false);
+            return new Sample(median(gpu), median(culling), median(draws), median(cpu), 0);
         }
     }
 
@@ -367,15 +616,14 @@ class ForwardShadingBenchmark {
      * timings, frame by frame) and CPU time of recording a frame; medians.
      */
     private static Sample measure(VulkanDevice device, MeshletRenderer renderer, RenderView view, Camera camera,
-        ExternalImage target, long queries, double period, ForwardShading setting, Materials materials) {
+        ExternalImage target, long queries, double period, Materials materials) {
         try (FrameGraph graph = new FrameGraph(device, 2)) {
             SceneView main = new SceneView(graph.addView("main").size(WIDTH, HEIGHT), view, camera);
             main.port().add(MeshletBenchmark.forward(main)).output(Keys.SCENE_COLOR, target);
-            graph.settings().set(RenderSettings.FORWARD_SHADING, setting);
             for (int i = 0; i < 10; i++) {
                 device.submitAndWait(device.graphics(), graph::record);
             }
-            if (setting == ForwardShading.PER_TYPE && view.splitCategories() < materials.binCount()) {
+            if (view.splitCategories() < materials.binCount()) {
                 throw new IllegalStateException("not split by type: " + view.splitCategories());
             }
             double[] gpu = new double[BATCHES];
@@ -423,18 +671,12 @@ class ForwardShadingBenchmark {
                 }
             }
             graph.timings(false);
-            return new Sample(median(gpu), median(culling), median(draws), median(cpu), drawCalls(setting, materials));
+            return new Sample(median(gpu), median(culling), median(draws), median(cpu), drawCalls(materials));
         }
     }
 
-    /**
-     * Draws the forward passes record per frame, both phases: the single shader one per opaque raster bin, by type one
-     * per shading bin and opaque raster bin its materials draw in.
-     */
-    private static int drawCalls(ForwardShading setting, Materials materials) {
-        if (setting == ForwardShading.SINGLE) {
-            return 2 * MeshletRenderer.BIN_BLENDED;
-        }
+    /** Draws the forward passes record per frame, both phases: one per shading bin and opaque raster bin it draws in. */
+    private static int drawCalls(Materials materials) {
         int calls = 0;
         for (int bin = 0; bin < materials.binCount(); bin++) {
             calls += Integer.bitCount(materials.binRasters(bin) & ((1 << MeshletRenderer.BIN_BLENDED) - 1));

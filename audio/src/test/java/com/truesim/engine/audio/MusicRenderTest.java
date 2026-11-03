@@ -159,6 +159,13 @@ class MusicRenderTest {
             .duck(-12).build();
         music.play(score, A);
         play(BAR, false);
+        // A game asks for a stinger long after its score primed it; here the bar went by in a second at most, so
+        // wait for the clip and take it from the cache (ready means handed over, which drainCompleted does)
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        while (cache.loadingCount() > 0 && System.nanoTime() < deadline) {
+            Thread.sleep(1);
+        }
+        tasks.drainCompleted();
         music.stinger(Stinger.of("hit"));
         float[] out = play(RATE, true);
         // ducked: the bed at -12 dB (0.125) plus the stinger's 0.1, centred

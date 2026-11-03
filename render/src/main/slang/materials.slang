@@ -79,7 +79,8 @@ public struct Material
     public uint features;          // the FEATURE_* bits it shows
     public uint featureTable;      // from its block's start: a uint per feature it shows, in bit order, each the
                                    // offset of the feature's section from the block's start
-    public uint bin;               // its shading bin: its type and features, as the table numbers them
+    public uint bin;               // its shading bin (its type and features, as the table numbers them) bits 0-15; its
+                                   // type's number among the table's types with geometry hooks bits 16-31 (0: none)
 };
 
 /** Features: parts of the lighting a material may show, each a bit of its features and a section of its block. */
@@ -116,6 +117,18 @@ public static const uint FEATURE_DIFFUSE_TRANSMISSION = 2048;
 public static const uint FEATURE_BITS = 12;
 
 /**
+ * Geometry hooks a material type may have, named in its parameters' attribute beside the features it allows
+ * (`[MaterialParameters(FEATURE_CLEARCOAT | GEOMETRY_KEEP)]`): parts of the type that decide where its surfaces are,
+ * so they run in every pass drawing them (color, depth, shadows, the visibility buffer's IDs). A type with one gets
+ * depth, shadow and ID pipelines of its own; the others share one. GEOMETRY_KEEP: its keep() says which points of its
+ * surfaces exist (a cutout, a dissolve), holes alike in every pass. Displacement (#68) is to join as another bit, its
+ * displace() run by the vertex stages.
+ */
+public static const uint GEOMETRY_KEEP = 1u << 16;
+/** Where geometry hooks start in the attribute's mask: the bits below are features. */
+public static const uint GEOMETRY_SHIFT = 16;
+
+/**
  * A texture reference, as materials' texture fields hold them: slot bits 0-15, sampler 16-20, bit 21 the second UV set,
  * bits 22-25 the transform (1-8, of the material's FEATURE_TEXTURE_TRANSFORM; 0: none). -1: no texture.
  */
@@ -146,6 +159,18 @@ public struct TextureTransformParameters
 public uint materialType(Material m)
 {
     return m.header & 0xff;
+}
+
+/** The shading bin of `m`: its type and features, as its table numbers them. */
+public uint materialShadingBin(Material m)
+{
+    return m.bin & 0xffff;
+}
+
+/** The number of `m`'s type among its table's types with geometry hooks (GEOMETRY_*), from 1; 0: its type has none. */
+public uint materialGeometry(Material m)
+{
+    return m.bin >> 16;
 }
 
 /** The features `m` shows. */
@@ -310,6 +335,16 @@ public interface IMaterial
     associatedtype Parameters;
 
     static Surface surface(Parameters p, MaterialRef m, SurfaceInput in);
+
+    /**
+     * A geometry hook (GEOMETRY_KEEP): whether this point of the surface exists; false makes a hole. Runs, where the
+     * type's parameters' attribute names GEOMETRY_KEEP, in every pass drawing the surface; elsewhere never. Every
+     * point exists unless a type says otherwise (`override`).
+     */
+    static bool keep(Parameters p, MaterialRef m, SurfaceInput in)
+    {
+        return true;
+    }
 };
 
 /** The parameters of a type that has none. */

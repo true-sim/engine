@@ -98,8 +98,19 @@ public final class Materials implements AutoCloseable {
     private int[] binFeatures = new int[16];
     private int[] binRasters = new int[16]; // per bin, a bit per raster bin its materials drew in; never cleared
     private long rastersVersion;
+    // Which materials instances take (reference), and per shading bin the raster bins those draw in: pipelines are
+    // needed for those alone. Sticky, guarded by `usage`; drawnVersion changes as a bin first draws in a raster bin.
+    private final Object usage = new Object();
+    private long[] referenced = new long[1];
+    private int[] slotBin = new int[16];   // per id written, its shading bin, and its raster bin's bit
+    private int[] slotRaster = new int[16];
+    private int[] binDrawn = new int[16];
+    private volatile long drawnVersion;
+    private final List<DrawListener> listeners = new java.util.concurrent.CopyOnWriteArrayList<>();
     private int bins;
     private final Map<Long, Integer> binOf = new HashMap<>();
+    // The types with geometry hooks (MaterialType.geometry), in registration order: each one's number is its index + 1.
+    private final List<MaterialType> geometryTypes = new java.util.concurrent.CopyOnWriteArrayList<>();
     private int blended; // how many materials are drawn blended: the transparency pass runs while there are
     private int transmissive; // how many are transmissive: transparency copies the scene behind while there are
     /** The type of each parameters' record, where one type takes it. */
@@ -176,6 +187,12 @@ public final class Materials implements AutoCloseable {
             throw new IllegalStateException("A table names at most " + MAX_TYPES + " material types");
         }
         types.add(type);
+        if (type.geometry() != 0) {
+            if (geometryTypes.size() == 0xffff) {
+                throw new IllegalStateException("A table names at most 65,535 types with geometry hooks");
+            }
+            geometryTypes.add(type);
+        }
         if (byRecord.putIfAbsent(type.parameters(), type) != null) {
             ambiguous.add(type.parameters());
         }
@@ -290,6 +307,24 @@ public final class Materials implements AutoCloseable {
         if (masks[1] >= 0 && block + masks[1] >= at && block + masks[1] < at + bytes) {
             table.putInt(slot + MaterialLayout.MASK_TEXTURE, table.getInt(block + masks[1]));
         }
+    }
+
+    /**
+     * How many of the registered types have geometry hooks ({@link MaterialType#geometry}): depth, shadow and ID passes
+     * draw each with pipelines of its own, the other types with shared ones. Allocates nothing.
+     */
+    public int geometryTypeCount() {
+        return geometryTypes.size();
+    }
+
+    /** Type {@code number} (from 1) of those with geometry hooks, in registration order. */
+    public MaterialType geometryType(int number) {
+        return geometryTypes.get(number - 1);
+    }
+
+    /** {@code type}'s number among the types with geometry hooks, from 1; 0 if it has none. */
+    private int geometryNumber(MaterialType type) {
+        return type.geometry() == 0 ? 0 : geometryTypes.indexOf(type) + 1;
     }
 
     /** How many material types are registered. Allocates nothing. */
@@ -824,6 +859,94 @@ public final class Materials implements AutoCloseable {
         return rastersVersion + bins;
     }
 
+    /**
+     * The raster bins materials of shading bin {@code bin} that instances take draw in, a bit each
+     * ({@code 1 << MeshletRenderer.BIN_*}), since an instance first took one ({@link #reference}): the pipelines
+     * drawing by type are made for those. Never cleared. Thread-safe.
+     */
+    public int binDrawn(int bin) {
+        synchronized (usage) {
+            java.util.Objects.checkIndex(bin, bins);
+            return bin < binDrawn.length ? binDrawn[bin] : 0;
+        }
+    }
+
+    /**
+     * Whether instances take a material of a type with geometry hooks ({@link MaterialType#geometry}): depth, shadow
+     * and ID passes then split their lists by such types; until then they draw every type alike, nothing split.
+     */
+    public boolean drawsGeometry() {
+        for (MaterialType type : geometryTypes) {
+            int id = types.indexOf(type);
+            for (int bin = 0; bin < bins; bin++) {
+                if (binTypes[bin] == id && binDrawn(bin) != 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Changes as a shading bin first draws in a raster bin for an instance taking its material ({@link #binDrawn}):
+     * drawing by type rebuilds the graph with the pipelines it then needs, made ahead from when the material was
+     * written ({@link DrawListener}). Allocates nothing.
+     */
+    public long drawnVersion() {
+        return drawnVersion;
+    }
+
+    /**
+     * Instances take materials {@code first} to {@code first + count - 1} (a mesh's submeshes): their shading bins draw
+     * from now on, and those set under these ids later too. Called by {@link GpuScene} as instances are written (and
+     * for instances the GPU writes, by what writes them). Thread-safe; allocates nothing unless the ids are new.
+     */
+    public void reference(int first, int count) {
+        synchronized (usage) {
+            for (int id = first; id < first + count; id++) {
+                if (id >>> 6 >= referenced.length) {
+                    referenced = Arrays.copyOf(referenced, Math.max(2 * referenced.length, (id >>> 6) + 1));
+                }
+                if ((referenced[id >>> 6] & 1L << id) == 0) {
+                    referenced[id >>> 6] |= 1L << id;
+                    if (id < slotRaster.length && slotRaster[id] != 0) {
+                        drawn(slotBin[id], slotRaster[id]);
+                    }
+                }
+            }
+        }
+    }
+
+    /** Bin {@code bin} draws in raster bin {@code raster} (a bit) for an instance: guarded by {@code usage}. */
+    private void drawn(int bin, int raster) {
+        if (bin >= binDrawn.length) {
+            binDrawn = Arrays.copyOf(binDrawn, Math.max(2 * binDrawn.length, bin + 1));
+        }
+        if ((binDrawn[bin] & raster) == 0) {
+            binDrawn[bin] |= raster;
+            drawnVersion++;
+        }
+    }
+
+    /**
+     * Told, on the thread writing the material, when a material of shading bin {@code bin} is first written to draw
+     * in raster bin bits {@code rasters} of it: a renderer makes the pipelines it will draw with ahead, on a thread of
+     * its own, so the frame first drawing it finds them made.
+     */
+    @FunctionalInterface
+    interface DrawListener {
+        void willDraw(Materials materials, int bin, int rasters);
+    }
+
+    /** Tells {@code listener} of shading bins about to draw in raster bins, until {@link #stopListening}. */
+    void listen(DrawListener listener) {
+        listeners.add(listener);
+    }
+
+    void stopListening(DrawListener listener) {
+        listeners.remove(listener);
+    }
+
     /** The raster bin of {@code material}, as meshlets/common.slang's rasterBin. */
     private static int rasterBin(Material material) {
         return material.drawnBlended() ? MeshletRenderer.BIN_BLENDED : material.masked() ? MeshletRenderer.BIN_MASKED
@@ -891,6 +1014,20 @@ public final class Materials implements AutoCloseable {
         if ((binRasters[bin] & raster) == 0) {
             binRasters[bin] |= raster;
             rastersVersion++;
+            for (DrawListener listener : listeners) {
+                listener.willDraw(this, bin, raster);
+            }
+        }
+        synchronized (usage) {
+            if (id >= slotRaster.length) {
+                slotBin = Arrays.copyOf(slotBin, Math.max(2 * slotBin.length, id + 1));
+                slotRaster = Arrays.copyOf(slotRaster, Math.max(2 * slotRaster.length, id + 1));
+            }
+            slotBin[id] = bin;
+            slotRaster[id] = raster;
+            if (id >>> 6 < referenced.length && (referenced[id >>> 6] & 1L << id) != 0) {
+                drawn(bin, raster); // taken by an instance already: drawn from the next frame
+            }
         }
         long bytes = align(material.parameters().bytes());
         for (MaterialFeature feature : material.features()) {
@@ -935,7 +1072,8 @@ public final class Materials implements AutoCloseable {
         table.putInt(slot + MaterialLayout.GEOMETRY, 0);
         table.putInt(slot + MaterialLayout.FEATURES, material.featureMask());
         table.putInt(slot + MaterialLayout.FEATURE_TABLE, (int) featureTable);
-        table.putInt(slot + MaterialLayout.BIN, bin);
+        // Its shading bin, and its type's number among those with geometry hooks (materials.slang's Material.bin).
+        table.putInt(slot + MaterialLayout.BIN, bin | geometryNumber(types.get(typeId)) << 16);
         count(materials[id], -1);
         count(material, 1);
         materials[id] = material;

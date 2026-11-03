@@ -135,6 +135,7 @@ public final class GeometryPool implements AutoCloseable {
     private int[] meshletVertexLength;
     private int[] meshletStart;
     private int[] meshletLength;
+    private int[] materialSlots; // per mesh, its submeshes: the materials an instance of it takes
     private long[] triangleStart;
     private long[] triangleLength;
     private boolean[] live;
@@ -226,6 +227,7 @@ public final class GeometryPool implements AutoCloseable {
         meshletVertexLength = new int[meshes];
         meshletStart = new int[meshes];
         meshletLength = new int[meshes];
+        materialSlots = new int[meshes];
         triangleStart = new long[meshes];
         triangleLength = new long[meshes];
         live = new boolean[meshes];
@@ -463,6 +465,7 @@ public final class GeometryPool implements AutoCloseable {
         meshletVertexLength[id] = meshletVertexTotal;
         meshletStart[id] = (int) meshletBase;
         meshletLength[id] = mesh.meshletCount();
+        materialSlots[id] = mesh.materialSlots();
         triangleStart[id] = indexBase;
         triangleLength[id] = indexRange;
         live[id] = true;
@@ -532,6 +535,7 @@ public final class GeometryPool implements AutoCloseable {
         triangleLength[id] = triangleLength[source];
         live[id] = true;
         deformedFrom[id] = source;
+        materialSlots[id] = materialSlots[source];
         copies[source]++;
         fits[id] = fits[source];
         unfit += fits[id] ? 0 : 1;
@@ -754,6 +758,7 @@ public final class GeometryPool implements AutoCloseable {
         meshletVertexLength = Arrays.copyOf(meshletVertexLength, more);
         meshletStart = Arrays.copyOf(meshletStart, more);
         meshletLength = Arrays.copyOf(meshletLength, more);
+        materialSlots = Arrays.copyOf(materialSlots, more);
         triangleStart = Arrays.copyOf(triangleStart, more);
         triangleLength = Arrays.copyOf(triangleLength, more);
         live = Arrays.copyOf(live, more);
@@ -912,6 +917,15 @@ public final class GeometryPool implements AutoCloseable {
     /** Mesh {@code mesh}'s first meshlet in {@link #meshlets()}. */
     public int meshletBase(int mesh) {
         return entryWord(mesh, 28);
+    }
+
+    /**
+     * How many submeshes mesh {@code mesh} has: an instance of it takes that many materials, from its first on (0 for a
+     * mesh not in the pool). Allocates nothing.
+     */
+    public int materialSlots(int mesh) {
+        int[] slots = materialSlots;
+        return mesh >= 0 && mesh < slots.length ? slots[mesh] : 0;
     }
 
     /** How many meshlets mesh {@code mesh} has. */

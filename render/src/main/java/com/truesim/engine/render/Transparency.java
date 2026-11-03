@@ -46,10 +46,12 @@ public interface Transparency extends Technique {
 
     /**
      * Whether {@code materials} has blended ones and transmissive ones, as a build version: the passes come and go
-     * with them.
+     * with them; and its shading bins with the raster bins they draw in, since the blended bin draws by type: a bin
+     * first drawn blended rebuilds the graph with its pipelines.
      */
     static long buildVersion(Materials materials) {
-        return materials == null ? 0 : (materials.hasBlended() ? 1 : 0) | (materials.hasTransmissive() ? 2 : 0);
+        return materials == null ? 0 : ((materials.hasBlended() ? 1 : 0) | (materials.hasTransmissive() ? 2 : 0))
+            + 4 * materials.drawnVersion();
     }
 
     /**

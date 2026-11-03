@@ -77,7 +77,13 @@ public final class GpuScene implements AutoCloseable {
     private final Materials defaultMaterials;
     private final com.truesim.engine.vulkan.FrameBuffer table; // common.slang's SceneTable, a copy per frame slot
     private final InstanceMotion motion; // instances drawn between two fixed steps
-    private Materials materials;
+    private volatile Materials materials;
+    // The material ids instances took (a bit each, sticky), for the table's draws by type: set under the lock, read
+    // without it first (a bit missed is set again under it).
+    private volatile long[] referenced = new long[1];
+    private final Object referencing = new Object();
+    private final List<java.util.function.Consumer<Materials>> tableListeners =
+        new java.util.concurrent.CopyOnWriteArrayList<>();
     private int count;
     private long version; // changes with every claim and removal
     private int highWater;
@@ -295,7 +301,58 @@ public final class GpuScene implements AutoCloseable {
      * material {@code material + s}. Read when the frame's commands run, as instances are.
      */
     public void setMaterials(Materials table) {
-        this.materials = table == null ? defaultMaterials : table;
+        Materials set = table == null ? defaultMaterials : table;
+        synchronized (referencing) {
+            long[] bits = referenced;
+            for (int word = 0; word < bits.length; word++) {
+                for (long w = bits[word]; w != 0; w &= w - 1) {
+                    set.reference(word * 64 + Long.numberOfTrailingZeros(w), 1);
+                }
+            }
+            this.materials = set;
+        }
+        for (java.util.function.Consumer<Materials> listener : tableListeners) {
+            listener.accept(set);
+        }
+    }
+
+    /** Tells {@code listener} the table each time one is set ({@link #setMaterials}): renderers prepare its pipelines. */
+    void onMaterials(java.util.function.Consumer<Materials> listener) {
+        tableListeners.add(listener);
+    }
+
+    void stopOnMaterials(java.util.function.Consumer<Materials> listener) {
+        tableListeners.remove(listener);
+    }
+
+    /**
+     * Instances take materials {@code first} to {@code first + count - 1}: their tables' shading bins draw from now on
+     * ({@link Materials#reference}). Instances written here do so themselves; what writes instances on the GPU (mesh
+     * particles) names its materials here. Allocates nothing once ids are known.
+     */
+    public void reference(int first, int count) {
+        long[] bits = referenced;
+        for (int id = first; id < first + count; id++) {
+            if (id >>> 6 >= bits.length || (bits[id >>> 6] & 1L << id) == 0) {
+                referenceSlow(first, count);
+                return;
+            }
+        }
+    }
+
+    @AllowAllocation("an instance first taking a material")
+    private void referenceSlow(int first, int count) {
+        synchronized (referencing) {
+            long[] bits = referenced;
+            if ((first + count - 1) >>> 6 >= bits.length) {
+                bits = java.util.Arrays.copyOf(bits, Math.max(2 * bits.length, ((first + count - 1) >>> 6) + 1));
+            }
+            for (int id = first; id < first + count; id++) {
+                bits[id >>> 6] |= 1L << id;
+            }
+            referenced = bits;
+            materials.reference(first, count);
+        }
     }
 
     /** Whether instances take their materials from a table set ({@link #setMaterials}), not the default one only. */
@@ -405,6 +462,7 @@ public final class GpuScene implements AutoCloseable {
         m.set(FLOAT, o + InstanceLayout.SCALE + 4, sy);
         m.set(FLOAT, o + InstanceLayout.SCALE + 8, sz);
         m.set(INT, o + InstanceLayout.MATERIAL_BASE, material);
+        reference(material, Math.max(1, pool.materialSlots(mesh))); // its submeshes' materials draw
         m.set(FLOAT, o + InstanceLayout.POSITION_LOW, (float) (x - hx));
         m.set(FLOAT, o + InstanceLayout.POSITION_LOW + 4, (float) (y - hy));
         m.set(FLOAT, o + InstanceLayout.POSITION_LOW + 8, (float) (z - hz));

@@ -352,6 +352,8 @@ final class CullPasses implements AutoCloseable {
                     memPutInt(push + SplitPush.LATE, early == null ? 1 : 0);
                     memPutInt(push + SplitPush.INDEXED, meshShading ? 0 : 1);
                     memPutInt(push + SplitPush.STRIDE, groups * 64);
+                    memPutInt(push + SplitPush.BINS, v.splitBins());
+                    memPutInt(push + SplitPush.GEOMETRY_BINS, v.splitGeometryBins());
                     stages[stage].push(commands, push, SplitPush.BYTES);
                     Commands.dispatch(commands, groups, BINS, 1);
                 }
@@ -363,9 +365,9 @@ final class CullPasses implements AutoCloseable {
     private void expand(VkCommandBuffer commands, RenderView[] views, boolean[] early, int count) {
         for (int i = 0; i < count; i++) {
             RenderView v = views[i];
-            boolean split = v.splitCategories() > 0;
-            (split ? expandTyped : expand).bind(commands);
             for (int bin = 0; bin < BINS; bin++) {
+                boolean split = v.splitCategories() > 0 && (v.splitBins() & 1 << bin) != 0;
+                (split ? expandTyped : expand).bind(commands); // a bin split by shading bin: in the split's order
                 try (MemoryStack stack = stackPush()) {
                     long push = stack.nmalloc(8, ExpandPush.BYTES);
                     memPutLong(push + ExpandPush.VIEW, v.address());

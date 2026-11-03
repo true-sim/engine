@@ -80,8 +80,20 @@ public final class MeshletRenderer implements AutoCloseable {
     private final RenderViews views; // the open views, their constants array and culled rows
     private final CullPasses culling; // the instance, cull and expansion passes, and the chunks they share
     private final RasterPipelines raster; // the draws of what culling listed
+    private final ShadingPipelines shading; // the material types' pipelines, made as they are first wanted or ahead
+    // Shaded draws outside a frame graph (record, drawView): the pipelines by type for the table as last drawn.
+    private RasterPipelines.Typed immediate;
+    private Materials immediateTable;
+    private long immediateVersion;
+    // ... and their depth and IDs where types have geometry hooks (by the same split, per shading bin); null: none.
+    private final RasterPipelines.Geometry[] immediateGeometry = new RasterPipelines.Geometry[3];
     private final Retiring retiring; // the old tables, rows and view lists, until no frame reads them
     private final Runnable followScene = this::followScene;
+    // Pipelines made ahead: the scene's table followed, each shading bin's pipelines made as its materials are written.
+    private final java.util.function.Consumer<Materials> followTable = this::followTable;
+    private final Materials.DrawListener prepare = this::prepare;
+    private Materials listened;
+    private final List<ClassicLodGeometry> classics = new java.util.concurrent.CopyOnWriteArrayList<>();
     // Read only: a frame graph may record passes on several threads at once, so recording changes no field.
     private static final boolean[] NOT_EARLY = {false};
     private static final boolean[] EARLY = {true};
@@ -118,10 +130,96 @@ public final class MeshletRenderer implements AutoCloseable {
                 + "with the same frames in flight");
         }
         this.retiring = new Retiring(slots);
-        raster = new RasterPipelines(device, colorFormat, depthFormat);
+        shading = new ShadingPipelines(device, colorFormat, depthFormat);
+        raster = new RasterPipelines(device, shading, depthFormat);
         views = new RenderViews(device, slots, retiring);
         culling = new CullPasses(device, scene, slots, views, retiring, chunks);
         scene.onGrow(followScene);
+        scene.onMaterials(followTable);
+        followTable(scene.materials());
+    }
+
+    /**
+     * Follows {@code table}, the scene's now: has the pipelines its shading bins draw with made ahead, those it has now
+     * and those its materials ask for when written ({@link #prepare}).
+     */
+    @AllowAllocation("a table set")
+    private synchronized void followTable(Materials table) {
+        if (closed) {
+            return;
+        }
+        if (listened != null) {
+            listened.stopListening(prepare);
+        }
+        listened = table;
+        table.listen(prepare);
+        for (int bin = 0; bin < table.binCount(); bin++) {
+            prepare(table, bin, table.binRasters(bin));
+        }
+    }
+
+    /**
+     * Has the pipelines shading bin {@code bin} of {@code materials} draws with in raster bins {@code rasters} (a bit
+     * each) made ahead, on the pipelines' own thread, for the path frames take now: its forward ones (and the blended
+     * bin's weighted ones), classic LOD's where geometry draws classic, and its type's depth and ID ones where it has
+     * geometry hooks. Called as a material is written: the frame first drawing it finds them made, or waits for them
+     * no longer than making them then would take.
+     */
+    @AllowAllocation("a material written")
+    private void prepare(Materials materials, int bin, int rasters) {
+        if (closed) {
+            return;
+        }
+        MaterialType type = materials.binType(bin);
+        int features = materials.binFeatures(bin);
+        boolean meshShading = path() == Path.MESH_SHADERS;
+        for (int raster = 0; raster < BINS; raster++) {
+            if ((rasters & 1 << raster) == 0) {
+                continue;
+            }
+            shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, false));
+            if (raster == BIN_BLENDED) {
+                shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, true));
+            }
+            for (ClassicLodGeometry classic : classics) {
+                for (int list = raster; list < 2 * BINS; list += BINS) {
+                    shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, false));
+                    if (raster == BIN_BLENDED) {
+                        shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, true));
+                    }
+                }
+            }
+            if (type.geometry() != 0 && raster < BIN_BLENDED) {
+                for (int role : new int[] {RasterPipelines.DEPTH, RasterPipelines.IDS}) {
+                    if (role == RasterPipelines.IDS && !this.raster.ids()) {
+                        continue;
+                    }
+                    shading.prepare(this.raster.geometryKey(type, raster, role, meshShading));
+                    for (int shared = 0; shared < BIN_BLENDED; shared++) { // the other types' category
+                        shading.prepare(this.raster.geometryKey(null, shared, role, meshShading));
+                    }
+                    for (ClassicLodGeometry classic : classics) {
+                        for (int list = raster; list < 2 * BINS; list += BINS) {
+                            shading.prepare(ClassicLodGeometry.geometryKey(type, list, role == RasterPipelines.DEPTH
+                                ? ShadingPipelines.DEPTH : ShadingPipelines.IDS));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** Classic LOD drawing this renderer's instances: its pipelines are made ahead too. */
+    void addClassic(ClassicLodGeometry classic) {
+        classics.add(classic);
+        Materials table = scene.materials();
+        for (int bin = 0; bin < table.binCount(); bin++) {
+            prepare(table, bin, table.binRasters(bin));
+        }
+    }
+
+    void removeClassic(ClassicLodGeometry classic) {
+        classics.remove(classic);
     }
 
     /**
@@ -238,6 +336,83 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /**
+     * The pipelines by type of shaded draws outside a frame graph, for the scene's table as it is now: made again when
+     * it changed (another table, a shading bin new or drawn in another raster bin).
+     */
+    @AllowAllocation("when the table's shading bins change")
+    private RasterPipelines.Typed immediate() {
+        Materials materials = scene.materials();
+        if (immediate == null || materials != immediateTable || materials.drawnVersion() != immediateVersion) {
+            immediateTable = materials;
+            immediateVersion = materials.drawnVersion();
+            immediate = raster.typed(materials, path() == Path.MESH_SHADERS);
+            immediateGeometry[RasterPipelines.DEPTH] = null;
+            immediateGeometry[RasterPipelines.IDS] = null;
+        }
+        return immediate;
+    }
+
+    /**
+     * Depth or IDs ({@code role}) outside a frame graph where the table has types with geometry hooks: by the views'
+     * split per shading bin, each bin of such a type with its pipelines, the others with shared ones; else null.
+     */
+    @AllowAllocation("when the table's shading bins change")
+    private RasterPipelines.Geometry immediateGeometry(int role) {
+        Materials materials = scene.materials();
+        RasterPipelines.Typed typed = immediate();
+        if (!materials.drawsGeometry()) {
+            return null;
+        }
+        if (immediateGeometry[role] == null) {
+            MaterialType[] types = new MaterialType[typed.categories()];
+            for (int bin = 0; bin < types.length; bin++) {
+                MaterialType type = materials.binType(bin);
+                types[bin] = type.geometry() != 0 ? type : null;
+            }
+            immediateGeometry[role] = raster.geometry(types, role, path() == Path.MESH_SHADERS);
+        }
+        return immediateGeometry[role];
+    }
+
+    /**
+     * Depth or IDs ({@code role}) for a graph drawing views whose lists culling splits by type with geometry hooks:
+     * category 0 every type without (shared pipelines), category n the table's type n with them; null when the table
+     * has none (then the lists stay as culled and draw with the shared pipelines). While a graph builds.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    RasterPipelines.Geometry geometryPipelines(int role) {
+        Materials materials = scene.materials();
+        int count = materials.geometryTypeCount();
+        if (count == 0 || !materials.drawsGeometry()) {
+            return null;
+        }
+        MaterialType[] types = new MaterialType[count + 1];
+        for (int number = 1; number <= count; number++) {
+            types[number] = materials.geometryType(number);
+        }
+        return raster.geometry(types, role, path() == Path.MESH_SHADERS);
+    }
+
+    /**
+     * Like {@link #drawAttached} into depth, or {@link #drawIdsAttached}, by type with geometry hooks
+     * ({@code pipelines}' role), from the view's lists as culling split them. Allocates nothing.
+     */
+    void drawGeometryAttached(VkCommandBuffer commands, RenderView view, boolean late,
+        RasterPipelines.Geometry pipelines) {
+        raster.drawGeometry(commands, scene, own(view), path() == Path.MESH_SHADERS, late, pipelines);
+    }
+
+    /** Draws {@code v}'s depth or IDs ({@code role}) attached: by geometry type where the table has some. */
+    private void drawRole(VkCommandBuffer commands, RenderView v, int role, boolean late) {
+        RasterPipelines.Geometry geometry = immediateGeometry(role);
+        if (geometry != null) {
+            raster.drawGeometry(commands, scene, v, path() == Path.MESH_SHADERS, late, geometry);
+        } else {
+            raster.drawBins(commands, scene, v, path() == Path.MESH_SHADERS, role, late);
+        }
+    }
+
+    /**
      * Draws {@code view}'s depth only (no color, no shading) into {@code depthView}, cleared to 0: e.g. a shadow map
      * from a light's orthographic view. Allocates nothing.
      */
@@ -273,8 +448,12 @@ public final class MeshletRenderer implements AutoCloseable {
     public void recordLate(VkCommandBuffer commands, RenderView view, long colorView, long depthView, int width,
         int height, int pyramid, int mips, long clusters) {
         cullLate(commands, view, pyramid, width, height, mips);
-        draw(commands, view, true, colorView == 0 ? RasterPipelines.DEPTH : RasterPipelines.SHADED, colorView,
-            depthView, width, height, 0, 0, 0, clusters);
+        if (colorView == 0) {
+            draw(commands, view, true, RasterPipelines.DEPTH, colorView, depthView, width, height);
+        } else {
+            raster.drawShaded(commands, scene, view, path() == Path.MESH_SHADERS, true, colorView, depthView, width,
+                height, 0, 0, 0, clusters, immediate());
+        }
     }
 
     /**
@@ -283,6 +462,7 @@ public final class MeshletRenderer implements AutoCloseable {
      * slot {@code pyramid}, {@code mips} levels, of the {@code width} by {@code height} depth). Allocates nothing.
      */
     public void cullLate(VkCommandBuffer commands, RenderView view, int pyramid, int width, int height, int mips) {
+        own(view).splitByType(immediate().categories()); // for a shaded draw by type
         cullLate(commands, view, pyramid, width, height, mips, false);
     }
 
@@ -317,6 +497,10 @@ public final class MeshletRenderer implements AutoCloseable {
      * others draw everything in view. Chunks are shared by the views. Allocates nothing.
      */
     public void cullViews(VkCommandBuffer commands, RenderView[] views, boolean[] early, int count) {
+        int categories = immediate().categories();
+        for (int i = 0; i < Math.min(count, views.length); i++) {
+            own(views[i]).splitByType(categories); // their lists split by shading bin, for shaded draws by type
+        }
         cullViews(commands, views, early, count, false);
     }
 
@@ -370,8 +554,12 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void drawView(VkCommandBuffer commands, RenderView view, long colorView, long depthView, int width,
         int height, float r, float g, float b, long clusters) {
-        draw(commands, own(view), false, colorView == 0 ? RasterPipelines.DEPTH : RasterPipelines.SHADED, colorView,
-            depthView, width, height, r, g, b, clusters);
+        if (colorView == 0) {
+            draw(commands, own(view), false, RasterPipelines.DEPTH, colorView, depthView, width, height);
+        } else {
+            raster.drawShaded(commands, scene, own(view), path() == Path.MESH_SHADERS, false, colorView, depthView,
+                width, height, r, g, b, clusters, immediate());
+        }
     }
 
     /**
@@ -382,7 +570,7 @@ public final class MeshletRenderer implements AutoCloseable {
     public void drawIds(VkCommandBuffer commands, RenderView view, long idView, long depthView, int width,
         int height) {
         raster.checkIds();
-        draw(commands, own(view), false, RasterPipelines.IDS, idView, depthView, width, height, 0, 0, 0, 0);
+        draw(commands, own(view), false, RasterPipelines.IDS, idView, depthView, width, height);
     }
 
     /** The late phase ({@link #recordLate}) into a visibility buffer ({@link #drawIds}). */
@@ -390,14 +578,18 @@ public final class MeshletRenderer implements AutoCloseable {
         int height, int pyramid, int mips) {
         raster.checkIds();
         cullLate(commands, view, pyramid, width, height, mips);
-        draw(commands, view, true, RasterPipelines.IDS, idView, depthView, width, height, 0, 0, 0, 0);
+        draw(commands, view, true, RasterPipelines.IDS, idView, depthView, width, height);
     }
 
     /** Draws {@code v} in {@code role} into its own rendering scope: the late phase's lists with {@code late}. */
     private void draw(VkCommandBuffer commands, RenderView v, boolean late, int role, long colorView, long depthView,
-        int width, int height, float r, float g, float b, long clusters) {
-        raster.draw(commands, scene, v, path() == Path.MESH_SHADERS, role, late, colorView, depthView, width, height,
-            r, g, b, clusters);
+        int width, int height) {
+        try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+            RasterPipelines.beginRendering(commands, stack, colorView, depthView, width, height, 0, 0, 0, late);
+            RasterPipelines.setViewport(commands, stack, width, height);
+        }
+        drawRole(commands, v, role, late);
+        com.truesim.engine.vulkan.Commands.endRendering(commands);
     }
 
     /**
@@ -417,14 +609,18 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void drawAttached(VkCommandBuffer commands, RenderView view, boolean late, boolean depthOnly,
         long clusters, long indirect) {
-        raster.drawBins(commands, scene, own(view), path() == Path.MESH_SHADERS,
-            depthOnly ? RasterPipelines.DEPTH : RasterPipelines.SHADED, late, clusters, indirect);
+        if (depthOnly) {
+            drawRole(commands, own(view), RasterPipelines.DEPTH, late);
+        } else {
+            raster.drawTyped(commands, scene, own(view), path() == Path.MESH_SHADERS, late, clusters, indirect,
+                immediate());
+        }
     }
 
     /** Like {@link #drawAttached}, into a visibility buffer ({@link #drawIds}) and its depth. */
     public void drawIdsAttached(VkCommandBuffer commands, RenderView view, boolean late) {
         raster.checkIds();
-        raster.drawBins(commands, scene, own(view), path() == Path.MESH_SHADERS, RasterPipelines.IDS, late, 0, 0);
+        drawRole(commands, own(view), RasterPipelines.IDS, late);
     }
 
     /**
@@ -435,7 +631,8 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public void drawBlendedAttached(VkCommandBuffer commands, RenderView view, BlendedTargets.Kind kind,
         long clusters, long behind, long indirect) {
-        raster.drawBlended(commands, scene, own(view), path() == Path.MESH_SHADERS, kind, clusters, behind, indirect);
+        raster.drawBlendedTyped(commands, scene, own(view), path() == Path.MESH_SHADERS, kind, clusters, behind,
+            indirect, immediate());
     }
 
     /**
@@ -447,16 +644,26 @@ public final class MeshletRenderer implements AutoCloseable {
     }
 
     /**
-     * How many pipelines forward shading by type ({@link ForwardShading#PER_TYPE}) made so far: a shading bin's for each
+     * How many pipelines of material types were made so far: a shading bin's for each
      * raster bin its materials draw in, on the path drawn.
      */
     public int forwardPipelineCount() {
-        return raster.typedCount();
+        return shading.count();
     }
 
     /** Nanoseconds spent making forward shading's pipelines by type so far ({@link #forwardPipelineCount}). */
     public long forwardPipelineNanos() {
-        return raster.typedNanos();
+        return shading.nanos();
+    }
+
+    /** Its draws of what culling listed. */
+    RasterPipelines raster() {
+        return raster;
+    }
+
+    /** The material types' pipelines, shared by the geometry paths drawing this renderer's instances. */
+    ShadingPipelines shading() {
+        return shading;
     }
 
     /**
@@ -497,7 +704,14 @@ public final class MeshletRenderer implements AutoCloseable {
         if (!closed) {
             closed = true;
             scene.stopFollowing(followScene);
+            scene.stopOnMaterials(followTable);
+            synchronized (this) {
+                if (listened != null) {
+                    listened.stopListening(prepare);
+                }
+            }
             raster.close();
+            shading.close();
             retiring.close(); // the GPU is done: what is retired from now on goes at once
             views.close();
             culling.close();
