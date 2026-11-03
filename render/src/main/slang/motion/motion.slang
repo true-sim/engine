@@ -5,7 +5,8 @@
 // D91, and instances written anew alike), a skinned copy's vertices as they were posed then, seen through the frame
 // before's view-projection (RenderView: relative to this frame's camera). Pixels showing nothing move with the camera's
 // turn alone (directions at infinity). The motion is in pixels of the render region, from here to there (the frame
-// before's position less this one), the projections' jitter taken out of both.
+// before's position, in its render region's pixels, less this one), the projections' jitter taken out of both: a
+// history rendered the frame before is read at the pixel plus the motion, whatever the regions' sizes.
 import meshlets.common;
 
 /** A skinned copy's vertices as the frame before drew them: per pool mesh, 32 bytes (Deformation's previous table). */
@@ -29,6 +30,7 @@ struct MotionPush
     uint motion;                 // storage slot of the motion (two floats)
     uint size;                   // the region: width, height in the high 16 bits
     uint meshCount;              // pool meshes the deformed table covers
+    uint previousSize;           // the frame before's region (dynamic resolution): where its pixels lay
 };
 
 [[vk::push_constant]]
@@ -136,6 +138,8 @@ void motionMain(uint3 id : SV_DispatchThreadID)
         float3 point = bary.x * then[0] + bary.y * then[1] + bary.z * then[2];
         before = mul(view.previousViewProjection, float4(point, 1));
     }
-    float2 there = before.w > 1.0e-6 ? toPixel(before, size, view.previousJitter) : here;
+    float2 previousSize = float2(push.previousSize & 0xffff, push.previousSize >> 16);
+    float2 there = before.w > 1.0e-6 ? toPixel(before, previousSize, view.previousJitter)
+        : here * previousSize / size;
     images[push.motion][id.xy] = float4(there - here, 0, 0);
 }

@@ -38,11 +38,11 @@ import java.util.Objects;
  *   ({@link Deformation#keepPrevious}).
  * </ul>
  *
- * <p>The motion is in pixels of the render region, from the pixel to where its surface was: a history is read at
- * {@code pixel + motion} (two 16-bit floats, {@link #FORMAT}); jitter does not move it. Pixels showing nothing move with
+ * <p>The motion is in pixels, from the pixel to where its surface was in the frame before's render region: a history
+ * rendered then is read at {@code pixel + motion} (two 16-bit floats, {@link #FORMAT}), whatever dynamic resolution
+ * made of the two regions' sizes; jitter does not move it. Pixels showing nothing move with
  * the camera's turn (the sky at infinity); an instance new this frame, or drawing another mesh than the frame before,
- * has none of its own; the first frame has none. With dynamic resolution, regions of two sizes: the frame before's
- * pixels are this frame's scaled (the region of the frame before is not kept yet).
+ * has none of its own; the first frame has none.
  *
  * <p>Costs a pass per view (one thread per pixel, rebuilding its triangle twice), a copy of the instance table per
  * frame (64 bytes an instance, shared by every view), and for forward views an ID draw. Allocates nothing per frame.
@@ -115,17 +115,20 @@ public final class MotionVectors implements Technique {
         Pipeline motion = g.computeProgram("shaders/motion/motion.spv", "motionMain", MotionPush.BYTES);
         Image image = g.create("motion", ImageDesc.of(FORMAT, width, height));
         MotionPush push = new MotionPush();
+        int[] previousRegion = {-1}; // the frame before's region (width, height in the high 16 bits); -1: none yet
         scene.read(g.pass("motion vectors"), BufferAccess.STORAGE_READ).read(ids.color(), Access.STORAGE_READ)
             .read(before.previous(), BufferAccess.STORAGE_READ).write(image, Access.STORAGE_WRITE)
             .record(ctx -> {
                 Buffer previous = ctx.historyValid(before) ? before.previous() : scene.instances();
+                int region = ctx.regionWidth(image) | ctx.regionHeight(image) << 16;
+                int previousSize = previousRegion[0] < 0 ? region : previousRegion[0];
+                previousRegion[0] = region;
                 ctx.dispatch(motion, push.view(this.ids.address()).scene(renderer.scene().tableAddress())
                     .previous(ctx.address(previous)).deformed(deformation.previousTableAddress())
                     .previousPositions(deformation.previousPositionsAddress())
                     .classicIndices(classic == null ? 0 : classic.indicesAddress())
                     .ids(ctx.storage(ids.color())).motion(ctx.storage(image))
-                    .size(ctx.regionWidth(image) | ctx.regionHeight(image) << 16)
-                    .meshCount(deformation.previousTableMeshes()),
+                    .size(region).previousSize(previousSize).meshCount(deformation.previousTableMeshes()),
                     (ctx.regionWidth(image) + 7) / 8, (ctx.regionHeight(image) + 7) / 8, 1);
             });
         g.provide(Keys.MOTION, image);

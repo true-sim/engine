@@ -17,6 +17,7 @@ import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
+import com.truesim.engine.graph.ResolutionSettings;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -215,6 +216,42 @@ class MotionVectorsTest {
             pose(1);
             assertThat(ReferencePathTracerTest.framesAllocating(device, graph, 400)).as("frames allocating")
                 .isLessThan(8);
+            device.waitIdle();
+        }
+    }
+
+    @Test
+    void motionReachesTheFrameBeforesRenderRegion() {
+        assumeThat(device.primitiveIds()).as("primitive IDs in fragment shaders").isTrue();
+        try (GpuImage image = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) {
+            color = image;
+            SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+            scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 10, 10, 10); // the floor; nothing moves
+            scene.removeFrom(1);
+            camera.set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = new SceneView(graph.addView("main").size(SIZE, SIZE), view, camera);
+            main.port().add(new VisibilityBufferShading(geometry, main, VK_FORMAT_R16G16B16A16_SFLOAT,
+                VK_FORMAT_D32_SFLOAT)).add(new MotionVectors(geometry, view, main, VK_FORMAT_D32_SFLOAT))
+                .output(Keys.MOTION, new ExternalImage("motion", SIZE, SIZE, Format.R16G16_SFLOAT,
+                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view()));
+            graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.HEADROOM, 1.0f);
+            frame();
+            float[] motion = frame();
+            expect(motion, 40, 50, 0, 0, "the full region, still");
+            // Rendered at half the size: the floor still, its pixels where the frame before's region had them, twice
+            // as far from the corner: a history of the frame before is read at the pixel plus the motion.
+            main.port().renderScale(0.5f);
+            motion = frame();
+            // The output shows the region at the view's size, its texels doubled: region pixel (16, 30) at (32, 60)
+            expect(motion, 32, 60, 16.5, 30.5, "half the region after the full one");
+            motion = frame();
+            expect(motion, 32, 60, 0, 0, "half the region again");
+            main.port().renderScale(1);
+            motion = frame();
+            expect(motion, 40, 50, -20.25, -25.25, "the full region after half");
             device.waitIdle();
         }
     }
