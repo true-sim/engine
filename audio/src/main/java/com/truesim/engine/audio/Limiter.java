@@ -26,9 +26,15 @@ final class Limiter {
 
     @AllowAllocation("made with its renderer")
     Limiter(int rate, int channels) {
+        this(rate, channels, -1);
+    }
+
+    /** A limiter to a ceiling of {@code ceilingDb} dBFS. */
+    @AllowAllocation("made with its renderer")
+    Limiter(int rate, int channels, double ceilingDb) {
         this.channels = channels;
         latency = Math.max(1, (int) Math.round(rate * 0.0015));
-        ceiling = (float) Maths.pow(10, -1 / 20.0);
+        ceiling = (float) Maths.pow(10, ceilingDb / 20.0);
         attack = 1f / latency;
         release = (float) (1 / (0.05 * rate));
         delay = new float[latency * channels];

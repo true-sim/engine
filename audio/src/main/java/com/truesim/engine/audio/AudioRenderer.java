@@ -46,6 +46,8 @@ public final class AudioRenderer implements AutoCloseable {
     static final int SPATIAL = 10;
     static final int BUDGET = 11;
     static final int STREAM = 12;
+    static final int BUS_FILTER = 13;
+    static final int ACCESS = 14;
 
     /** Receives events. */
     @FunctionalInterface
@@ -59,6 +61,7 @@ public final class AudioRenderer implements AutoCloseable {
     private final Ring events;
     private final Voices voices;
     private final Limiter limiter;
+    private final Accessibility access;
     private final RenderClock clock;
     private final Commands producer;
     private final float[] block;
@@ -77,9 +80,10 @@ public final class AudioRenderer implements AutoCloseable {
         events = new Ring(1 << 13);
         this.voices = new Voices(voices, format.channels(), format.rate());
         limiter = new Limiter(format.rate(), format.channels());
+        access = new Accessibility(format.rate(), format.channels());
         clock = new RenderClock(format.rate(), limiter.latency());
         block = new float[format.block() * format.channels()];
-        graph = new BusGraph(BusLayout.DEFAULT, format.channels(), format.block());
+        graph = new BusGraph(BusLayout.DEFAULT, format.rate(), format.channels(), format.block());
         producer = new Commands();
     }
 
@@ -101,6 +105,27 @@ public final class AudioRenderer implements AutoCloseable {
     /** The commands' producer side: used by one thread. */
     public Commands commands() {
         return producer;
+    }
+
+    /** {@code bus}'s peak over the last meter period (about 1/30 s), linear; 0 for a bus the layout lacks. */
+    public float meterPeak(Bus bus) {
+        BusGraph g = graph;
+        int i = g.layout().indexOf(bus);
+        return i < 0 ? 0 : g.meterPeak(i);
+    }
+
+    /** {@code bus}'s RMS over the last meter period, linear. */
+    public float meterRms(Bus bus) {
+        BusGraph g = graph;
+        int i = g.layout().indexOf(bus);
+        return i < 0 ? 0 : g.meterRms(i);
+    }
+
+    /** The gain {@code bus}'s ducks apply now (1 when not ducked). */
+    public float duckGain(Bus bus) {
+        BusGraph g = graph;
+        int i = g.layout().indexOf(bus);
+        return i < 0 ? 1 : g.duckGain(i);
     }
 
     /** Times a streamed voice ran dry. */
@@ -189,6 +214,7 @@ public final class AudioRenderer implements AutoCloseable {
         voices.render(graph, frame, format.block(), events);
         graph.process();
         System.arraycopy(graph.mix(), 0, block, 0, block.length);
+        access.process(block, format.block());
         limiter.process(block, format.block());
         frame += format.block();
         clock.publish(frame, System.nanoTime(), 0);
@@ -224,6 +250,8 @@ public final class AudioRenderer implements AutoCloseable {
                     pendingRing = null;
                 }
                 case STREAM -> pendingRing = (StreamRing) r.refs[c];
+                case BUS_FILTER -> graph.filters(slot, (float) values[v], (float) values[v + 1]);
+                case ACCESS -> access.set(values[v] != 0, (float) values[v + 1], (int) values[v + 2]);
                 case GAIN -> voices.gain(slot, (float) values[v], (int) values[v + 1]);
                 case PITCH -> voices.pitch(slot, (float) values[v]);
                 case PAN -> voices.pan(slot, (float) values[v]);
@@ -340,7 +368,7 @@ public final class AudioRenderer implements AutoCloseable {
         /** Swaps the bus layout at the next block: its graph is built here, on the producer's thread. */
         @AllowAllocation("a new layout")
         public boolean layout(BusLayout layout) {
-            BusGraph next = new BusGraph(layout, format.channels(), format.block());
+            BusGraph next = new BusGraph(layout, format.rate(), format.channels(), format.block());
             int c = claim(LAYOUT, 0, 0);
             if (c < 0) {
                 return false;
@@ -378,6 +406,19 @@ public final class AudioRenderer implements AutoCloseable {
             return true;
         }
 
+        /** Sets {@code bus}'s snapshot filters: a low-pass and a high-pass cutoff in Hz, each off at 0. */
+        public boolean busFilters(Bus bus, float lowPass, float highPass) {
+            return send(BUS_FILTER, sent.index(bus), 0, lowPass, highPass, 0);
+        }
+
+        /**
+         * Sets the master's accessibility stage (§2.17): {@code mono} downmix, {@code balance} from -1 (left) to 1, and
+         * the dynamic range preset (0 full, 1 home, 2 night).
+         */
+        public boolean accessibility(boolean mono, float balance, int dynamicRange) {
+            return send(ACCESS, 0, 0, mono ? 1 : 0, balance, dynamicRange);
+        }
+
         /** Sets the real voices at most (AU7: 64 by default). */
         public boolean budget(int voices) {
             return send(BUDGET, voices, 0, 0, 0);
@@ -389,12 +430,17 @@ public final class AudioRenderer implements AutoCloseable {
         }
 
         private boolean send(int opcode, int slot, long frame, double a, double b) {
+            return send(opcode, slot, frame, a, b, 0);
+        }
+
+        private boolean send(int opcode, int slot, long frame, double a, double b, double c3) {
             int c = claim(opcode, slot, frame);
             if (c < 0) {
                 return false;
             }
             commands.values[c * Ring.VALUES] = a;
             commands.values[c * Ring.VALUES + 1] = b;
+            commands.values[c * Ring.VALUES + 2] = c3;
             commands.publish();
             return true;
         }

@@ -67,6 +67,17 @@ public final class Audio implements Plugin {
     public static final Setting<Float> SFX_VOLUME = Setting.decimal("audio.volume.sfx", 1, 0, 1, "effects volume");
     public static final Setting<Float> VOICE_VOLUME = Setting.decimal("audio.volume.voice", 1, 0, 1, "dialogue volume");
     public static final Setting<Float> UI_VOLUME = Setting.decimal("audio.volume.ui", 1, 0, 1, "interface volume");
+    /** Dynamic range presets (§2.17): the master compressed for quieter rooms. */
+    public enum DynamicRange {
+        FULL,
+        HOME,
+        NIGHT
+    }
+
+    public static final Setting<Boolean> MONO = Setting.bool("audio.mono", false, "both ears hear everything");
+    public static final Setting<Float> BALANCE = Setting.decimal("audio.balance", 0, -1, 1, "left to right");
+    public static final Setting<DynamicRange> DYNAMIC_RANGE =
+        Setting.choice("audio.dynamicRange", DynamicRange.FULL, "how loud the quiet and loud parts are");
     public static final Setting<String> DEVICE =
         Setting.text("audio.device", "", "the playback device by name; empty for the system's default");
     public static final Setting<Background> BACKGROUND =
@@ -81,6 +92,7 @@ public final class Audio implements Plugin {
         Setting.text("audio.driver", "", "SDL's audio driver by name (dummy, disk); empty for SDL's choice");
 
     private Engine engine;
+    private Mixer mixer;
     private EngineSettings settings;
     private AudioRenderer renderer;
     private AudioOutput output;
@@ -107,13 +119,18 @@ public final class Audio implements Plugin {
             engine = startup.engine();
             settings = startup.settings();
             startup.registry().add(GROUP, MASTER_VOLUME, MUSIC_VOLUME, SFX_VOLUME, VOICE_VOLUME, UI_VOLUME, DEVICE,
-                BACKGROUND);
+                BACKGROUND, MONO, BALANCE, DYNAMIC_RANGE);
             startup.registry().addHidden(BLOCK, LOW_MARK, VOICES, DRIVER);
         } else if (stage == Stage.INSTANCE) {
             Desktop desktop = startup.find(Desktop.KEY).orElse(null);
             output = open(desktop);
             renderer = new AudioRenderer(format(), settings.get(VOICES));
+            mixer = new Mixer(renderer.commands());
             output.start(renderer);
+            for (Setting<?> access : List.of(MONO, BALANCE, DYNAMIC_RANGE)) {
+                settings.onChange(access, this::accessibility);
+            }
+            accessibility();
             for (Setting<Float> volume : List.of(MASTER_VOLUME, MUSIC_VOLUME, SFX_VOLUME, VOICE_VOLUME, UI_VOLUME)) {
                 settings.onChange(volume, this::volumes);
             }
@@ -218,12 +235,23 @@ public final class Audio implements Plugin {
     }
 
     private void volumes() {
-        AudioRenderer.Commands c = renderer.commands();
-        c.busGain(Bus.MASTER, settings.get(MASTER_VOLUME) * background);
-        c.busGain(Bus.MUSIC, settings.get(MUSIC_VOLUME));
-        c.busGain(Bus.SFX, settings.get(SFX_VOLUME));
-        c.busGain(Bus.VOICE, settings.get(VOICE_VOLUME));
-        c.busGain(Bus.UI, settings.get(UI_VOLUME));
+        mixer.playerVolume(Bus.MASTER, settings.get(MASTER_VOLUME) * background);
+        mixer.playerVolume(Bus.MUSIC, settings.get(MUSIC_VOLUME));
+        mixer.playerVolume(Bus.SFX, settings.get(SFX_VOLUME));
+        mixer.playerVolume(Bus.VOICE, settings.get(VOICE_VOLUME));
+        mixer.playerVolume(Bus.UI, settings.get(UI_VOLUME));
+        mixer.update(0);
+    }
+
+    private void accessibility() {
+        renderer.commands().accessibility(settings.get(MONO), settings.get(BALANCE),
+            settings.get(DYNAMIC_RANGE).ordinal());
+    }
+
+    /** The mixer: the layout, snapshots, player volumes. */
+    public Mixer mixer() {
+        renderer();
+        return mixer;
     }
 
     @Override
@@ -242,7 +270,7 @@ public final class Audio implements Plugin {
         };
         if (wanted != background) {
             background = wanted;
-            renderer.commands().busGain(Bus.MASTER, settings.get(MASTER_VOLUME) * background);
+            mixer.playerVolume(Bus.MASTER, settings.get(MASTER_VOLUME) * background);
         }
     }
 
@@ -259,6 +287,7 @@ public final class Audio implements Plugin {
             ui.advance(ticks);
         }
         sync.update();
+        mixer.update(frame.delta());
     }
 
     @Override

@@ -445,7 +445,8 @@ public final class AudioSync {
             | track.sound.priority().ordinal() << Voices.PRIORITY_SHIFT
             | track.sound.virtualization().ordinal() << Voices.VIRTUAL_SHIFT;
         Bus bus = store.isUi() ? Bus.UI : track.sound.bus();
-        if (!commands.play(slot, clip, at, 0, gain(track, v), pitch(track, v), bus, flags, 0, track.id)) {
+        // the clip's gain to its target loudness (measured at import) rides on the voice's
+        if (!commands.play(slot, clip, at, 0, gain(track, v) * clip.gain(), pitch(track, v), bus, flags, 0, track.id)) {
             return; // the ring is full: tried again next frame
         }
         if (store.holding(track.id)) {
