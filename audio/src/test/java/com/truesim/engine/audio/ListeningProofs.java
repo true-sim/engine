@@ -495,6 +495,127 @@ class ListeningProofs {
         }
     }
 
+    /** A footstep on surface {@code key / 3} (grass, stone, gravel), variant {@code key % 3}. */
+    static AudioClip footstep(int key) {
+        int surface = key / 3;
+        int variant = key % 3;
+        int frames = RATE / 4;
+        float[] s = new float[frames];
+        double low = 0;
+        double band = 0;
+        float peak = 0;
+        for (int i = 0; i < frames; i++) {
+            double t = (double) i / RATE;
+            double noise = Hash.random(31 * key + 7, i) * 2 - 1;
+            double v;
+            if (surface == 0) { // grass: a padded heel thump, then a rustle of blades under the sole
+                low += 0.12 * (noise - low);
+                v = 0.7 * Math.sin(2 * Math.PI * (60 + 6 * variant) * t) * Math.exp(-t * 30)
+                    + 0.45 * (noise - low) * Math.exp(-Math.abs(t - 0.04) * 30) * Math.min(1, t * 150);
+            } else if (surface == 1) { // stone: heel and toe knocks, a little grit scraping
+                double toe = t - 0.045 - 0.008 * variant;
+                band += 0.3 * (noise - band);
+                v = 0.6 * Math.sin(2 * Math.PI * (700 + 90 * variant) * t) * Math.exp(-t * 110)
+                    + 0.5 * Math.sin(2 * Math.PI * 95 * t) * Math.exp(-t * 45)
+                    + (toe > 0 ? 0.35 * Math.sin(2 * Math.PI * (1_100 + 70 * variant) * toe) * Math.exp(-toe * 140)
+                        : 0) + 0.15 * (noise - band) * Math.exp(-t * 25);
+            } else { // gravel: a crunch of small stones shifting over 120 ms, a dull thump under it
+                double click = Hash.random(91 * key, i / 40) < 0.18 ? noise : 0;
+                v = 0.9 * click * Math.exp(-t * 18) * Math.min(1, t * 80)
+                    + 0.35 * Math.sin(2 * Math.PI * 80 * t) * Math.exp(-t * 35);
+            }
+            s[i] = (float) v;
+            peak = Math.max(peak, Math.abs(s[i]));
+        }
+        for (int i = 0; i < frames; i++) {
+            s[i] *= 0.8f / peak;
+        }
+        return AudioClip.builder(RATE, 1).floats(s).build();
+    }
+
+    enum Ground {
+        GRASS, STONE, GRAVEL
+    }
+
+    @Test
+    void footstepsWalkingThenRunningOverGrassStoneAndGravel() throws IOException, InterruptedException {
+        try (World w = new World()) {
+            w.renderer.commands().layout(com.truesim.scene.audio.BusLayout.builder()
+                .bus(com.truesim.scene.audio.Bus.SFX, b -> b.send(AudioSync.REVERB, -16))
+                .aux(AudioSync.REVERB, b -> b.effect(com.truesim.scene.audio.AudioEffect.named("reverb")
+                    .set("preset", 0).set("decay", 0.9))).build());
+            var surface = com.truesim.scene.audio.SwitchGroup.of("surface", Ground.class, Ground.GRASS);
+            var steps = com.truesim.scene.audio.Switch.on(surface);
+            for (Ground g : Ground.values()) {
+                com.truesim.scene.audio.SoundNode[] variants = new com.truesim.scene.audio.SoundNode[3];
+                for (int v = 0; v < 3; v++) {
+                    variants[v] = Play.clip(AssetRef.generated(AudioAssets.CLIP, (k, seed) -> footstep(k),
+                        3 * g.ordinal() + v, 0));
+                }
+                steps = steps.when(g, com.truesim.scene.audio.Random.of(variants).noRepeat(1));
+            }
+            Sound step = Sound.builder().root(steps).attenuation(Attenuation.near(1, 40)).volume(Range.db(6, 9))
+                .pitch(Range.semitones(-1, 1)).build();
+            // a walker: hip and two feet; a walk of 1.1 s and a run of 0.66 s, a step each half
+            double[] rest = new double[30];
+            for (int j = 0; j < 3; j++) {
+                rest[10 * j + 6] = 1;
+                rest[10 * j + 7] = 1;
+                rest[10 * j + 8] = 1;
+                rest[10 * j + 9] = 1;
+            }
+            var legs = new com.truesim.scene.animation.Skeleton(new String[] {"hip", "footL", "footR"},
+                new int[] {-1, 0, 0}, rest);
+            var r = com.truesim.scene.animation.Rig.builder(legs);
+            var footL = r.joint("footL");
+            var footR = r.joint("footR");
+            var left = com.truesim.scene.animation.AnimationEvent.of("left");
+            var right = com.truesim.scene.animation.AnimationEvent.of("right");
+            var walk = r.clip(cycle("walk", 1.1f)).event(0.1, left).event(0.65, right);
+            var run = r.clip(cycle("run", 0.66f)).event(0.05, left).event(0.38, right);
+            var base = r.layer();
+            var rig = r.build();
+            long hip = w.scene.create();
+            long fl = w.scene.create(hip);
+            long fr = w.scene.create(hip);
+            w.scene.setTranslation(fl, 0, 0, -0.15);
+            w.scene.setTranslation(fr, 0, 0, 0.15);
+            var animators = new com.truesim.scene.animation.Animators(w.scene);
+            var walker = animators.add(rig, new long[] {hip, fl, fr});
+            walker.layer(base).play(walk);
+            AudioBindings bindings = new AudioBindings(w.sounds, animators);
+            AudioBindings.MaterialAt ground = (x, z) -> x < 8 ? 0 : x < 16 ? 1 : 2;
+            bindings.onEvent(left, step, footL).surface(surface, ground);
+            bindings.onEvent(right, step, footR).surface(surface, ground);
+            for (int k = 0; k < 9; k++) { // every clip loaded before the walk
+                w.sounds.set(w.sounds.fire(step, 0, 0, -1000), surface, Ground.values()[k / 3]);
+            }
+            w.load();
+            w.scene.setTranslation(w.head, 10, 1.6, 2.5);
+            double x = -4;
+            animators.update(0);
+            for (int f = 0; f < 60 * 17; f++) {
+                double t = f / 60.0;
+                if (f == 60 * 11) {
+                    walker.layer(base).play(run, 0.3);
+                }
+                x += (t < 11 ? 1.4 : 4.2) / 60;
+                w.scene.setTranslation(hip, x, 0, 0);
+                w.scene.update();
+                animators.update(1 / 60.0);
+                w.frame();
+            }
+            w.write("au_step14_footsteps_grass_stone_gravel.wav");
+        }
+    }
+
+    private static com.truesim.scene.animation.AnimationClip cycle(String name, float seconds) {
+        return new com.truesim.scene.animation.AnimationClip(name, java.util.List.of(
+            new com.truesim.scene.animation.Track("hip", 0, com.truesim.scene.animation.Track.Property.TRANSLATION,
+                com.truesim.scene.animation.Track.Interpolation.LINEAR, new float[] {0, seconds},
+                new float[] {0, 0, 0, 0, 0, 0}, 0)));
+    }
+
     @Test
     void carPassingWithDopplerAndPanning() throws IOException, InterruptedException {
         try (World w = new World()) {

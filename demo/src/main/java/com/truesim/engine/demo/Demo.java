@@ -115,6 +115,7 @@ public final class Demo implements Application, PlatformListener {
     private SceneView mainView;
     private final Camera camera = new Camera();
     private KnockingRocks knocks;
+    private FoxFootsteps footsteps;
     private final List<SceneView> shaded = new ArrayList<>(); // every view drawing the scene: shading swaps in all
     private final List<CascadedShadowMaps> cascades = new ArrayList<>(); // fitted to their cameras every frame
     private boolean visibility;
@@ -193,6 +194,8 @@ public final class Demo implements Application, PlatformListener {
         }
         knocks = engine.find(Audio.KEY).map(audio -> new KnockingRocks(audio, world, engine.tasks(), eye, yaw))
             .orElse(null);
+        footsteps = world.character() == null ? null : engine.find(Audio.KEY)
+            .map(audio -> new FoxFootsteps(audio, world.character(), engine.tasks())).orElse(null);
         System.out.println(HELP);
         this.started = System.nanoTime();
         titled = this.started;
@@ -209,6 +212,9 @@ public final class Demo implements Application, PlatformListener {
         world.update((now - started) / 1e9);
         if (knocks != null) {
             knocks.update(dt, eye, yaw);
+        }
+        if (footsteps != null) {
+            footsteps.update(eye, yaw);
         }
         for (CascadedShadowMaps sun : cascades) {
             sun.update();
@@ -235,6 +241,10 @@ public final class Demo implements Application, PlatformListener {
             engine.find(Audio.KEY).ifPresent(audio -> System.out.println("Audio: " + knocks.knocks() + " knocks on "
                 + audio.output().getClass().getSimpleName() + ", " + audio.output().underruns() + " underruns"));
             knocks.close();
+        }
+        if (footsteps != null) {
+            System.out.println("Audio: " + footsteps.played() + " footsteps");
+            footsteps.close();
         }
         if (world != null) {
             world.close();
