@@ -106,9 +106,12 @@ class StreamingTest {
         tasks.close();
     }
 
-    /** Renders {@code frames} in blocks of 256 at about real time over the streaming thread's pace, frames synced. */
+    /**
+     * Renders {@code frames} in blocks of 256 at a device's pace (5.33 ms a block), frames synced: the decoders and
+     * loads keep the pace they would in a game, on any machine (docs/pitfalls.md, offline audio tests).
+     */
     private float[] play(int frames) throws InterruptedException {
-        return play(frames, 200_000);
+        return play(frames, (int) (256 * 1_000_000_000L / RATE));
     }
 
     /** As {@link #play(int)}, sleeping {@code nanos} after each block. */
@@ -145,8 +148,7 @@ class StreamingTest {
         AssetRef<AudioClip> intro = ref(() -> sine(37), "intro");
         AssetRef<AudioClip> loop = ref(() -> streamed(sine(11)), "loop");
         sounds.play(Sound.builder().root(Segments.intro(intro).loop(loop)).spatial(Spatial.TWO_D).build());
-        // near real time, as a device asks: 26 times faster, a busy 4-core CI runner starved the decoder 3 times
-        float[] out = play(3 * RATE, 3_000_000);
+        float[] out = play(3 * RATE);
         // a 400 Hz sine at 0.5, centre-panned, moves at most 0.5 * 0.707 * 2 pi * 400 / 48,000 a sample: 0.0185
         assertThat(maxStep(out, RATE / 4, 3 * RATE)).isLessThan(0.019f);
         assertThat(Clips.peak(out, 2, 0, RATE, 3 * RATE)).isCloseTo(0.5f * CENTRE, within(0.002f));
