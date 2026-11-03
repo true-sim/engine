@@ -10,7 +10,8 @@ dependencies {
     api(project(":engine-render"))
     api(project(":engine-input"))
     api("com.truesim.ui:ui-core:0.1.0")
-    testImplementation("com.truesim.ui:ui-controls:0.1.0") // the demo HUD: styles, layout, text
+    api("com.truesim.ui:ui-controls:0.1.0") // the Ui the plugin runs
+    testImplementation(testFixtures("com.truesim.ui:ui-controls:0.1.0")) // the galleries the screenshots show
     testImplementation("com.truesim.ui:ui-text-native:0.1.0")
     testImplementation("com.truesim.ui:ui-fonts-cjk:0.1.0") // bundled fonts: the same text on every machine
     testImplementation("com.truesim.ui:ui-fonts-emoji:0.1.0") // colour emoji in the text field test

@@ -95,7 +95,10 @@ import static org.lwjgl.sdl.SDLInit.SDL_INIT_SENSOR;
 import static org.lwjgl.sdl.SDLInit.SDL_INIT_VIDEO;
 import static org.lwjgl.sdl.SDLInit.SDL_Init;
 import static org.lwjgl.sdl.SDLInit.SDL_WasInit;
+import static org.lwjgl.sdl.SDLMouse.SDL_CreateSystemCursor;
 import static org.lwjgl.sdl.SDLMouse.SDL_CursorVisible;
+import static org.lwjgl.sdl.SDLMouse.SDL_DestroyCursor;
+import static org.lwjgl.sdl.SDLMouse.SDL_SetCursor;
 import static org.lwjgl.sdl.SDLMouse.SDL_HideCursor;
 import static org.lwjgl.sdl.SDLMouse.SDL_ShowCursor;
 import static org.lwjgl.sdl.SDLVideo.SDL_DisableScreenSaver;
@@ -213,6 +216,7 @@ public final class Platform implements AutoCloseable {
     private final List<Joystick> joysticks = new ArrayList<>();
     private final List<Haptic> openHaptics = new ArrayList<>();
     private final List<Sensor> openSensors = new ArrayList<>();
+    private final long[] cursors = new long[SystemCursor.values().length]; // made by setCursor, 0 until then
     private boolean closed;
 
     @AllowAllocation("starting up")
@@ -450,6 +454,27 @@ public final class Platform implements AutoCloseable {
         } else {
             SDL_HideCursor();
         }
+    }
+
+    /**
+     * Shows {@code cursor} over every window (created once per kind, kept until the platform closes); {@code HIDDEN}
+     * hides it, any other shows it again.
+     */
+    public void setCursor(SystemCursor cursor) {
+        checkThread();
+        if (cursor == SystemCursor.HIDDEN) {
+            SDL_HideCursor();
+            return;
+        }
+        long handle = cursors[cursor.ordinal()];
+        if (handle == 0) {
+            handle = SDL_CreateSystemCursor(cursor.sdl);
+            cursors[cursor.ordinal()] = handle;
+        }
+        if (handle != 0) {
+            SDL_SetCursor(handle);
+        }
+        SDL_ShowCursor();
     }
 
     public boolean isCursorVisible() {
@@ -1054,6 +1079,12 @@ public final class Platform implements AutoCloseable {
             return;
         }
         checkThread();
+        for (int i = 0; i < cursors.length; i++) {
+            if (cursors[i] != 0) {
+                SDL_DestroyCursor(cursors[i]);
+                cursors[i] = 0;
+            }
+        }
         for (Window window : List.copyOf(windows)) {
             window.close();
         }

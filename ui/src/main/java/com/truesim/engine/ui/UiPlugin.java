@@ -1,0 +1,273 @@
+package com.truesim.engine.ui;
+
+import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.app.Frame;
+import com.truesim.engine.app.Plugin;
+import com.truesim.engine.app.PluginKey;
+import com.truesim.engine.app.Stage;
+import com.truesim.engine.app.Startup;
+import com.truesim.engine.graph.FrameGraph;
+import com.truesim.engine.graph.Presenter;
+import com.truesim.engine.graph.Rendering;
+import com.truesim.engine.graph.ViewPort;
+import com.truesim.engine.input.Input;
+import com.truesim.engine.platform.Desktop;
+import com.truesim.engine.platform.Platform;
+import com.truesim.engine.platform.SystemCursor;
+import com.truesim.engine.platform.Window;
+import com.truesim.engine.settings.Setting;
+import com.truesim.engine.settings.SettingGroup;
+import com.truesim.engine.settings.SettingRegistry;
+import com.truesim.ui.controls.Ui;
+import com.truesim.ui.core.Tunable;
+import com.truesim.ui.core.input.Cursor;
+import com.truesim.ui.core.input.UiInput;
+import java.util.List;
+import java.util.Objects;
+import java.util.function.Function;
+
+/**
+ * The UI as an engine plugin: one {@link Ui} on a view, its input, settings and rendering wired into the frame.
+ * Installed with {@code app.use(new UiPlugin(textures -> new Ui(theme, textSystem(textures))))} next to
+ * {@link Rendering} and {@link Input} (and the {@link Desktop} when there is a window); game code reaches the UI by
+ * {@code engine.get(UiPlugin.KEY).ui()}.
+ *
+ * <ul>
+ * <li><b>Settings</b> (design: tunables are settings): every tunable of the UI ({@link Ui#tunables()}) becomes a
+ * setting through {@link UiTunables}, and {@link UiCommands#ALL} joins them, in the settings group {@code ui}
+ * ({@code settings.ui}); changed settings reach the tunables at each frame's start.</li>
+ * <li><b>Input</b>: the {@code ui} action group ({@link UiActions#UI}) is added to input; each frame starts with the
+ * frame's {@link UiCommands}, the {@link MousePointer} and the typed text and IME composition of {@link UiTextInput}
+ * written into one {@link UiInput}. The window's clipboard ({@link SdlClipboard}) is the UI's.</li>
+ * <li><b>The frame</b>: at each frame's start ({@link #beforeUpdate}), after input sampled the devices, the UI
+ * processes that input and updates ({@code ui.update(width, height, input, nanos)}, the view's size in pixels, the
+ * frame's real time), and its layers are submitted to its {@link GpuUiRenderer}, a technique of the view providing
+ * {@code Keys.UI}. What the UI's listeners change is shown in the same frame; the game's own changes to the UI in its
+ * update show from the next frame on.</li>
+ * <li><b>The window</b>: the display's content scale ({@code Window.displayScale()}) is the layout's content scale, so
+ * the UI keeps its size in points on a high-density display; the mouse cursor follows the UI's ({@code cursor} in
+ * styles) while the pointer is over the UI.</li>
+ * </ul>
+ *
+ * <p>Per frame it allocates nothing: the input, the layers and the cursor change are kept.
+ */
+public final class UiPlugin implements Plugin {
+
+    /** Its key. */
+    public static final PluginKey<UiPlugin> KEY = PluginKey.of("ui", UiPlugin.class);
+
+    private static final Cursor[] CURSORS = Cursor.values();
+    private static final SystemCursor[] SYSTEM = new SystemCursor[CURSORS.length];
+
+    static {
+        for (Cursor c : CURSORS) {
+            SYSTEM[c.ordinal()] = systemCursor(c);
+        }
+    }
+
+    private final Function<com.truesim.ui.core.draw.UiTextures, Ui> factory;
+    private String viewName;
+    private Ui ui;
+    private final UiInput input = new UiInput(64);
+    private UiTunables tunables;
+    private UiCommands commands;
+    private MousePointer mouse;
+    private UiTextInput text;
+    private GpuUiRenderer renderer;
+    private ViewPort view;
+    private Window window;
+    private Platform platform;
+    private Desktop desktop;
+    private SystemCursor shownCursor;
+    private float shownScale = -1;
+
+    /**
+     * The UI made by {@code factory} at startup, given the textures it should use (null: its own, or its text
+     * system's atlas): {@code textures -> new Ui(Tss.defaultTheme(), text)}.
+     */
+    public UiPlugin(Function<com.truesim.ui.core.draw.UiTextures, Ui> factory) {
+        this.factory = Objects.requireNonNull(factory, "factory");
+    }
+
+    /** Draws on the view named {@code name} (default: the view the first window presents, else the first view). */
+    public UiPlugin view(String name) {
+        viewName = name;
+        return this;
+    }
+
+    @Override
+    public PluginKey<UiPlugin> key() {
+        return KEY;
+    }
+
+    @Override
+    public List<PluginKey<?>> requires() {
+        return List.of(Rendering.KEY, Input.KEY);
+    }
+
+    @Override
+    public List<PluginKey<?>> after() {
+        return List.of(Desktop.KEY);
+    }
+
+    @Override
+    @AllowAllocation("starting up")
+    public void start(Stage stage, Startup startup) {
+        switch (stage) {
+            case BEFORE_INSTANCE -> {
+                ui = Objects.requireNonNull(factory.apply(null), "the factory made no UI");
+                Input in = startup.get(Input.KEY);
+                in.add(UiActions.UI);
+                SettingRegistry registry = startup.registry();
+                SettingGroup group = SettingGroup.root("ui", "settings.ui", 45);
+                registry.add(group, UiCommands.ALL.toArray(new Setting<?>[0]));
+                tunables = new UiTunables(startup.settings()).add(registry, group,
+                    ui.tunables().toArray(new Tunable[0]));
+                commands = new UiCommands(in, startup.settings());
+                desktop = startup.find(Desktop.KEY).orElse(null);
+            }
+            case RUN -> wire(startup);
+            default -> {
+                // nothing in the other stages: views exist from GRAPH on, windows by RUN
+            }
+        }
+    }
+
+    @AllowAllocation("starting up")
+    private void wire(Startup startup) {
+        Rendering rendering = startup.get(Rendering.KEY);
+        FrameGraph graph = rendering.graph();
+        Presenter.Target target = null;
+        if (!rendering.headless()) {
+            for (Presenter.Target t : rendering.presenter().targets()) {
+                if (viewName == null || t.view().name().equals(viewName)) {
+                    target = t;
+                    break;
+                }
+            }
+        }
+        if (target != null) {
+            view = target.view();
+            window = target.window();
+        } else {
+            for (ViewPort v : graph.views()) {
+                if (viewName == null || v.name().equals(viewName)) {
+                    view = v;
+                    break;
+                }
+            }
+        }
+        if (view == null) {
+            throw new IllegalStateException(viewName == null ? "The UI needs a view: add one to the frame graph"
+                : "No view is named " + viewName);
+        }
+        renderer = new GpuUiRenderer(graph);
+        view.add(renderer);
+        Input in = startup.get(Input.KEY);
+        if (window != null && desktop != null) {
+            platform = desktop.platform();
+            mouse = new MousePointer(window, in);
+            desktop.listen(mouse);
+            text = new UiTextInput(commands, window);
+            ui.interaction().textInputHost(text);
+            ui.interaction().clipboard(new SdlClipboard(platform));
+        }
+    }
+
+    /** The UI; from the first startup stage on. */
+    public Ui ui() {
+        if (ui == null) {
+            throw new IllegalStateException("The UI is made when the engine starts");
+        }
+        return ui;
+    }
+
+    /** The view it draws on; from {@link Stage#RUN}. */
+    public ViewPort view() {
+        return view;
+    }
+
+    /** Its renderer, a technique of {@link #view()}. */
+    public GpuUiRenderer renderer() {
+        return renderer;
+    }
+
+    /** The UI's input of the frame (pointers, commands, text). */
+    public UiInput input() {
+        return input;
+    }
+
+    /** The commands from the {@code ui} actions. */
+    public UiCommands commands() {
+        return commands;
+    }
+
+    @Override
+    public void beforeUpdate(Frame frame) {
+        if (view == null) {
+            return;
+        }
+        tunables.update();
+        float scale = window != null ? window.displayScale() : 1;
+        if (scale > 0 && scale != shownScale) {
+            shownScale = scale;
+            ui.layout().contentScale(scale);
+            if (text != null) {
+                text.scale((float) window.width() / Math.max(1, window.pixelWidth()));
+            }
+        }
+        input.beginFrame();
+        commands.poll(input);
+        if (mouse != null) {
+            mouse.poll(input);
+        }
+        if (text != null) {
+            text.poll(input);
+        }
+        int width = view.width();
+        int height = view.height();
+        ui.update(width, height, input, (long) (frame.realTime() * 1e9));
+        renderer.submit(ui.layers(), ui.layerCount(), ui.textures(), width, height);
+        if (platform != null && mouse != null) {
+            SystemCursor wanted = SYSTEM[ui.interaction().cursor(MousePointer.ID).ordinal()];
+            if (wanted != shownCursor) {
+                shownCursor = wanted;
+                platform.setCursor(wanted);
+            }
+        }
+    }
+
+    @Override
+    public void stop() {
+        if (desktop != null && mouse != null) {
+            desktop.unlisten(mouse);
+        }
+        if (commands != null) {
+            commands.close();
+            commands = null;
+        }
+        if (renderer != null) {
+            renderer.close();
+            renderer = null;
+        }
+    }
+
+    /** The system cursor showing the UI's {@code cursor}. */
+    static SystemCursor systemCursor(Cursor cursor) {
+        return switch (cursor) {
+            case AUTO, DEFAULT -> SystemCursor.DEFAULT;
+            case POINTER -> SystemCursor.POINTER;
+            case TEXT -> SystemCursor.TEXT;
+            case MOVE, GRABBING -> SystemCursor.MOVE;
+            case GRAB -> SystemCursor.POINTER;
+            case NOT_ALLOWED -> SystemCursor.NOT_ALLOWED;
+            case RESIZE_EW -> SystemCursor.RESIZE_EW;
+            case RESIZE_NS -> SystemCursor.RESIZE_NS;
+            case RESIZE_NESW -> SystemCursor.RESIZE_NESW;
+            case RESIZE_NWSE -> SystemCursor.RESIZE_NWSE;
+            case CROSSHAIR -> SystemCursor.CROSSHAIR;
+            case WAIT -> SystemCursor.WAIT;
+            case NONE -> SystemCursor.HIDDEN;
+        };
+    }
+}
