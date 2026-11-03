@@ -299,6 +299,22 @@ where the mirror's was.
   the cone's radius (true-sim/engine, screen-space reflections).
 - Rule: a filter of a lobe over one ray per pixel gathers neighbors' rays too, misses included.
 
+**Screen-space reflections tested a visible pixel as if it were the surface the ray met.** Rays near an outline or
+under a bulge go behind the visible surface and meet hidden parts of the same object. Three choices made from the
+visible pixel alone flipped neighbors between hit and miss: rejecting the hit when the pixel's normal faced away from
+the ray (at outlines it is perpendicular to the view, so its sign is noise), taking the pixel under the hierarchical
+march's end point (at a cell border it lies on either side by the march's nudge, so half the contact took the floor's
+pixel), and a thickness measured along the view (at grazing angles the depth behind a pixel jumps from one pixel to
+the next). The demo's screenshots showed a dotted line of sky along each rock's contact with a mirror and hairs along
+the reflections' outlines; filling from neighbors then drew a line of sky of its own, from pixels of the rock standing
+on the floor, which are untraced but lie on the floor's plane.
+- Proof: `ScreenSpaceReflectionsTest.aBoxOnAMirrorReflectsItsContactAndOutlineCleanly`: with the old shader, a rock on
+  the mirror showed the environment at 8 contact pixels and 8 to 12 extra hit-miss changes along its outline on every
+  path and technique; 0 with the pixel the ray went behind, no normal test, thickness along the surface's normal and a
+  3 x 3 reconstruction over texels traced from the same surface (true-sim/engine, screen-space reflections).
+- Rule: a test of a screen-space hit uses what the ray did (the pixel it went behind, how deep), not the visible
+  pixel's properties; a filter over neighbors leaves out texels not traced at all, not only those of other planes.
+
 ## Tests and measurements
 
 **A GPU time per frame that left out the frame start.** `GpuTimings` timed passes only; textures' copies and mip

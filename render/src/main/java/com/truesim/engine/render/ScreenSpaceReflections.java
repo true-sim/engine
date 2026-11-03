@@ -29,7 +29,7 @@ import java.util.Objects;
  * term was weighed by), so energy stays as shading had it. Rough surfaces take the scene blurred by the footprint of
  * their GGX lobe's cone where it meets it (a level of a mip chain of the scene's color); above
  * {@link #ROUGHNESS_CUTOFF}, the environment alone. Where the ray leaves the image, passes the maximum distance, finds
- * nothing or a surface thicker than {@link #THICKNESS} in front of it, the environment's reflection stays, fading in
+ * nothing or only surfaces it passes behind ({@link #THICKNESS}), the environment's reflection stays, fading in
  * smoothly at the image's edges ({@link #EDGE_FADE}), the distance's end and the cutoff. No history: each frame's
  * reflections are its own (no latency, no ghosting).
  *
@@ -67,7 +67,7 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
     }
 
     /**
-     * How reflections are found; the graph rebuilds when it changes. {@link Mode#HIZ} by default: about a third of
+     * How reflections are found; the graph rebuilds when it changes. {@link Mode#HIZ} by default: under half of
      * {@link Mode#LINEAR}'s time at the same maximum of steps (README, the reflections benchmark).
      */
     public static final Setting<Mode> MODE = Setting.choice("render.ssr", Mode.HIZ,
@@ -75,9 +75,13 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
     /** Steps a ray takes at most (LINEAR: equal steps; HIZ: cells visited). Read as frames record. */
     public static final Setting<Integer> MAX_STEPS = Setting.integer("render.ssr.maxSteps", 64, 4, 1024,
         "steps a screen-space reflection ray takes at most");
-    /** How deep a surface counts as, behind its depth, in view depth units (meters). Read as frames record. */
+    /**
+     * How thick surfaces are taken to be, in meters along their normal (seen at a grazing angle, a ray behind one by up
+     * to four times this along the view still meets it): a ray within it of the surface it went behind meets that
+     * surface, fading out to twice it, past which the ray passes behind. Read as frames record.
+     */
     public static final Setting<Float> THICKNESS = Setting.decimal("render.ssr.thickness", 0.25f, 0.001f, 1000,
-        "how thick surfaces are taken to be behind their depth, in meters");
+        "how thick surfaces are taken to be along their normal, in meters");
     /** How far rays go, in meters; reflections fade over their last fifth. Read as frames record. */
     public static final Setting<Float> MAX_DISTANCE = Setting.decimal("render.ssr.maxDistance", 100, 0.01f, 1_000_000,
         "how far screen-space reflection rays go, in meters");

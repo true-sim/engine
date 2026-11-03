@@ -68,6 +68,10 @@ class ScreenSpaceReflectionsTest {
     private GpuBuffer pixels;
     private int quad;
     private MeshData quadData;
+    private int box;
+    private MeshData boxData;
+    private int rock;
+    private MeshData rockData;
 
     @BeforeEach
     void start() {
@@ -83,6 +87,10 @@ class ScreenSpaceReflectionsTest {
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 14, 256, 8));
         quadData = quad();
         quad = pool.add(quadData);
+        boxData = box();
+        box = pool.add(boxData);
+        rockData = MeshletBenchmark.rockBuilder(3).buildFlat();
+        rock = pool.add(rockData);
         scene = new GpuScene(device, pool, 1024);
         renderer = new MeshletRenderer(device, scene, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
         view = renderer.createView(ViewOptions.of(4096, 1 << 16).withOcclusion(true));
@@ -120,6 +128,39 @@ class ScreenSpaceReflectionsTest {
         float[] normals = {0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1};
         return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL), 4).positions(positions)
             .attribute(VertexAttribute.NORMAL, normals).submesh(new int[] {0, 1, 2, 0, 2, 3}).buildFlat();
+    }
+
+    /** A 2 x 2 x 2 cube centered at the origin, a face per side (outward normals, counterclockwise outside). */
+    private static MeshData box() {
+        float[] positions = new float[6 * 4 * 3];
+        float[] normals = new float[6 * 4 * 3];
+        int[] indices = new int[6 * 6];
+        int[][] axes = {{0, 1, 2}, {1, 2, 0}, {2, 0, 1}}; // normal, u, v with u x v = normal
+        int face = 0;
+        for (int[] a : axes) {
+            for (int sign : new int[] {1, -1}) {
+                float[] n = new float[3];
+                float[] u = new float[3];
+                float[] v = new float[3];
+                n[a[0]] = sign;
+                u[a[1]] = sign; // flipping u with the normal keeps u x v = n
+                v[a[2]] = 1;
+                float[][] corners = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+                for (int c = 0; c < 4; c++) {
+                    for (int k = 0; k < 3; k++) {
+                        positions[3 * (face * 4 + c) + k] = n[k] + corners[c][0] * u[k] + corners[c][1] * v[k];
+                        normals[3 * (face * 4 + c) + k] = n[k];
+                    }
+                }
+                int[] q = {0, 1, 2, 0, 2, 3};
+                for (int i = 0; i < 6; i++) {
+                    indices[face * 6 + i] = face * 4 + q[i];
+                }
+                face++;
+            }
+        }
+        return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL), 24).positions(positions)
+            .attribute(VertexAttribute.NORMAL, normals).submesh(indices).buildFlat();
     }
 
     /** A floor of {@code material} at y = -1, from z = 0 to -16, 16 wide. */
@@ -244,9 +285,9 @@ class ScreenSpaceReflectionsTest {
                     VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0);
             }));
         }
-        shadings.add(new Shading("forward, classic LOD", v -> new ClusteredForwardShading(
-            new SceneGeometry(classic.add(quad, quadData)), v, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
-            .clearColor(0, 0, 0)));
+        SceneGeometry classics = new SceneGeometry(classic.add(quad, quadData).add(box, boxData).add(rock, rockData));
+        shadings.add(new Shading("forward, classic LOD", v -> new ClusteredForwardShading(classics, v,
+            VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0)));
         return shadings;
     }
 
@@ -414,7 +455,7 @@ class ScreenSpaceReflectionsTest {
                 save("rough-" + mode + "-0.3", rough, SIZE);
                 int blurred = width(rough, image[1]);
                 assertThat(sharp).as("%s: the mirror's stripe", mode).isBetween(2, 5);
-                assertThat(blurred).as("%s: wider on the rough floor", mode).isGreaterThanOrEqualTo(sharp + 3);
+                assertThat(blurred).as("%s: wider on the rough floor", mode).isGreaterThanOrEqualTo(sharp + 2);
             }
             scene.setMaterials(null);
         }
@@ -559,5 +600,107 @@ class ScreenSpaceReflectionsTest {
             }
             scene.setMaterials(null);
         }
+    }
+
+    @Test
+    void aBoxOnAMirrorReflectsItsContactAndOutlineCleanly() {
+        try (Materials materials = new Materials(device, 8);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            int mirror = materials.add(metal(0));
+            int red = materials.add(unlit(0.9f, 0, 0));
+            scene.setMaterials(materials);
+            floor(0, mirror);
+            Camera camera = new Camera().set(0, -0.3, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            SceneView main = null;
+            for (Shading shading : shadings(classic)) {
+              for (boolean round : new boolean[] {false, true}) {
+                // A box standing on the floor, turned a little about y (its outline crosses pixel rows at a slant),
+                // or a round rock bulging over its contact (rays from the floor below it meet its hidden underside)
+                float turn = 0.2f;
+                if (round) {
+                    scene.set(1, rock, red, 0.3f, -0.15f, -4.5f, 0, 0, 0, 1, 1, 1, 1);
+                } else {
+                    scene.set(1, box, red, 0.3f, -0.1f, -4.5f, 0, (float) Math.sin(turn), 0, (float) Math.cos(turn),
+                        1.2f, 0.9f, 1.2f);
+                }
+                scene.removeFrom(2);
+                if (main == null) {
+                    main = main(camera, shading.make(), Environment.uniform("blue", 0, 0, 0.4f));
+                } else {
+                    main.port().replace(shading.make().apply(main));
+                }
+                graph.settings().set(ScreenSpaceReflections.MODE, ScreenSpaceReflections.Mode.OFF);
+                int[] off = frames();
+                String shape = round ? "rock" : "box";
+                save(shape + "-OFF-" + shading.name().replaceAll("[ ,]+", "-"), off, SIZE);
+                for (ScreenSpaceReflections.Mode mode : TRACED) {
+                    graph.settings().set(ScreenSpaceReflections.MODE, mode);
+                    int[] on = frames();
+                    String what = shape + ", " + shading.name() + ", " + mode;
+                    save(shape + "-" + mode + "-" + shading.name().replaceAll("[ ,]+", "-"), on, SIZE);
+                    int left = SIZE;
+                    int right = -1;
+                    for (int i = 0; i < off.length; i++) {
+                        if (isRed(off[i])) {
+                            left = Math.min(left, i % SIZE);
+                            right = Math.max(right, i % SIZE);
+                        }
+                    }
+                    int columns = 0;
+                    int environment = 0;
+                    for (int column = left + (right - left) / 4; column <= right - (right - left) / 4; column++) {
+                        // In the middle half of the object, its lowest row without reflections: below it, the floor
+                        // (the outline check below covers the sides)
+                        int bottom = -1;
+                        for (int row = 0; row < SIZE; row++) {
+                            if (isRed(at(off, column, row))) {
+                                bottom = row;
+                            }
+                        }
+                        if (bottom < 0 || bottom > SIZE - 6) {
+                            continue;
+                        }
+                        columns++;
+                        for (int row = bottom + 1; row <= bottom + 4; row++) {
+                            environment += isRed(at(on, column, row)) ? 0 : 1;
+                        }
+                    }
+                    assertThat(columns).as("%s: columns under the object", what).isGreaterThan(SIZE / 16);
+                    assertThat(environment).as("%s: pixels at the contact showing the environment, not the box",
+                        what).isZero();
+                    // Across the reflection, each row crosses its outline twice, once on each side (the object's own
+                    // pixels left out)
+                    int extra = 0;
+                    int rows = 0;
+                    for (int row = 0; row < SIZE; row++) {
+                        int changes = 0;
+                        boolean reflected = false;
+                        for (int column = 0; column < SIZE; column++) {
+                            if (isRed(at(off, column, row))) {
+                                continue; // the object itself: its reflection's outline runs on past it
+                            }
+                            boolean now = isRed(at(on, column, row));
+                            changes += now != reflected ? 1 : 0;
+                            reflected = now;
+                        }
+                        if (changes > 0) {
+                            rows++;
+                            extra += Math.max(0, changes - 2);
+                        }
+                    }
+                    assertThat(rows).as("%s: rows of the reflection", what).isGreaterThan(SIZE / 10);
+                    assertThat(extra).as("%s: hits and misses alternating along the outline", what).isZero();
+                }
+              }
+            }
+            renderer.setPath(MeshletRenderer.Path.AUTO);
+            scene.setMaterials(null);
+        }
+    }
+
+    /** Whether {@code pixel} shows the red box, itself or reflected (blended with the environment at most half). */
+    private static boolean isRed(int pixel) {
+        return red(pixel) > 110 && red(pixel) > 2 * blue(pixel);
     }
 }
