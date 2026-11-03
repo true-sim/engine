@@ -71,6 +71,30 @@ class AudioPluginTest {
     }
 
     @Test
+    void headphonesTurnTheHrtfOnAndOtherOutputsOff() throws InterruptedException {
+        Audio audio = new Audio();
+        try (Engine engine = engine(audio, "dummy")) {
+            assertThat(engine.registry().find("audio.hrtf.set")).isNotNull();
+            assertThat(audio.spatializer()).isNull();
+            engine.settings().set(Audio.HRTF_SET, "no/such/file.hrtf"); // falls back to the built-in set
+            engine.settings().set(Audio.OUTPUT, Audio.Output.HEADPHONES);
+            for (int i = 0; i < 400 && audio.spatializer() == null; i++) {
+                engine.step();
+                Thread.sleep(5);
+            }
+            assertThat(audio.spatializer()).isInstanceOf(HrtfSpatializer.class);
+            assertThat(((HrtfSpatializer) audio.spatializer()).hrtf().credit()).contains("SADIE II");
+            engine.settings().set(Audio.MONO, true); // mono downmix: no HRTF
+            engine.step();
+            assertThat(audio.spatializer()).isNull();
+            engine.settings().set(Audio.MONO, false);
+            engine.settings().set(Audio.OUTPUT, Audio.Output.STEREO_SPEAKERS);
+            engine.step();
+            assertThat(audio.spatializer()).isNull();
+        }
+    }
+
+    @Test
     void withoutADeviceItPlaysSilently() {
         Audio audio = new Audio();
         try (Engine engine = engine(audio, "no-such-driver")) {

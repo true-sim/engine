@@ -674,6 +674,59 @@ class ListeningProofs {
         }
     }
 
+    /** A fly's buzz: a bright pulse train near 190 Hz, its pitch and level fluttering, with breathy noise. */
+    static AudioClip buzz() {
+        int frames = RATE * 4;
+        float[] s = new float[frames];
+        double phase = 0;
+        double low = 0;
+        for (int i = 0; i < frames; i++) {
+            double t = (double) i / RATE;
+            // whole cycles of the flutter in the clip's 4 s, so the pulses come round to their start
+            double hz = 190 + 12 * Math.sin(2 * Math.PI * 1.5 * t) + 5 * Math.sin(2 * Math.PI * 7.25 * t);
+            phase += hz / RATE;
+            double saw = 2 * (phase - Math.floor(phase)) - 1;
+            double noise = Hash.random(91, i) * 2 - 1;
+            low += 0.3 * (noise - low);
+            double level = 0.7 + 0.3 * Math.sin(2 * Math.PI * 0.75 * t);
+            s[i] = (float) (level * (0.35 * saw * saw * saw + 0.12 * saw + 0.18 * (noise - low)));
+        }
+        return AudioClip.builder(RATE, 1).floats(s).build(); // 760 whole pulses: a seamless loop
+    }
+
+    @Test
+    void aFlyCirclingTheHeadThroughTheHrtfThenPanned() throws IOException, InterruptedException {
+        try (World w = new World()) {
+            w.renderer.commands().spatializer(new HrtfSpatializer(Hrtf.builtIn(RATE), 256, 20), 16);
+            AssetRef<AudioClip> clip = AssetRef.generated(AudioAssets.CLIP, (v, seed) -> buzz(), 0, 0);
+            Attenuation near = Attenuation.builder().distance(0.5f, 30).build();
+            Sound hrtf = Sound.builder().root(Play.clip(clip)).attenuation(near)
+                .spatial(com.truesim.scene.audio.Spatial.HRTF).loop().build();
+            Sound panned = Sound.builder().root(Play.clip(clip)).attenuation(near).loop().build();
+            long fly = w.scene.create();
+            // 12 s each: two turns around the head at 1.2 m, a third rising over it, then one passing close by
+            for (Sound sound : new Sound[] {hrtf, panned}) {
+                w.scene.setTranslation(fly, 0, 1.6, -1.2);
+                w.scene.update();
+                SoundInstance buzzing = w.sounds.play(sound, fly);
+                w.load();
+                for (int f = 0; f < 60 * 12; f++) {
+                    double t = f / 60.0;
+                    double angle = 2 * Math.PI * t / 4; // clockwise seen from above: ahead, right, behind, left
+                    double radius = t < 10 ? 1.2 : 1.2 - 0.9 * Math.sin(Math.PI * (t - 10) / 2);
+                    double height = t < 8 ? 0 : t < 10 ? 1.0 * Math.sin(Math.PI * (t - 8) / 2) : 0;
+                    w.scene.setTranslation(fly, radius * Math.sin(angle), 1.6 + height, -radius * Math.cos(angle));
+                    w.frame();
+                }
+                buzzing.stop(0.2f);
+                for (int f = 0; f < 30; f++) {
+                    w.frame();
+                }
+            }
+            w.write("au_step17_fly_circling_hrtf_then_panned.wav");
+        }
+    }
+
     @Test
     void carPassingWithDopplerAndPanning() throws IOException, InterruptedException {
         try (World w = new World()) {

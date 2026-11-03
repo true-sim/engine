@@ -38,3 +38,29 @@ tasks.test {
         extensions.configure<JacocoTaskExtension> { isEnabled = false } // measure the code, not its coverage probes
     }
 }
+
+// The SOFA converter (§2.9, decision 2): HDF5 is read at build time only, through jHDF in this source set, never at
+// runtime. ./gradlew :engine-audio:convertHrtf -Ptruesim.audio.sofa=<file.sofa> -Ptruesim.audio.hrtf=<out.hrtf>
+// [-Ptruesim.audio.directions=2000] [-Ptruesim.audio.taps=128] [-Ptruesim.audio.credit=<text>]
+val tools: SourceSet by sourceSets.creating {
+    compileClasspath += sourceSets.main.get().output + sourceSets.main.get().compileClasspath
+    runtimeClasspath += sourceSets.main.get().output + sourceSets.main.get().runtimeClasspath
+}
+
+dependencies {
+    "toolsImplementation"("io.jhdf:jhdf:0.13.0")
+}
+
+tasks.register<JavaExec>("convertHrtf") {
+    group = "audio"
+    description = "Converts a SOFA file (SimpleFreeFieldHRIR) to an .hrtf set."
+    classpath = tools.runtimeClasspath
+    mainClass = "com.truesim.engine.audio.SofaConverter"
+    args(
+        providers.gradleProperty("truesim.audio.sofa").orNull ?: "",
+        providers.gradleProperty("truesim.audio.hrtf").orNull ?: "build/converted.hrtf",
+        providers.gradleProperty("truesim.audio.directions").orNull ?: "0",
+        providers.gradleProperty("truesim.audio.taps").orNull ?: "128",
+        providers.gradleProperty("truesim.audio.credit").orNull ?: "converted from SOFA",
+    )
+}

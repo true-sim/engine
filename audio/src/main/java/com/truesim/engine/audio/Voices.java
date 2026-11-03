@@ -35,6 +35,8 @@ final class Voices {
     static final int LOOP = 1;
     /** Placed in 3D: the clip is mixed to mono and panned by direction. */
     static final int SPATIAL = 1 << 1;
+    /** Placed in 3D through the HRTF while a spatializer is set and the voice is among the most audible (§2.9). */
+    static final int HRTF = 1 << 2;
     /** The priority's ordinal (0 lowest to 4 highest), in 3 bits from here. */
     static final int PRIORITY_SHIFT = 4;
     /** The virtualization's ordinal (keep time, kill, kill if finite), in 2 bits from here. */
@@ -128,6 +130,17 @@ final class Voices {
     private int highest;
     private long ended;
 
+    // Binaural voices (step 17, §2.9): the spatializer's channels, which voice has each, the fade between pan and HRTF.
+    private Spatializer spatializer;
+    private int binauralCap;
+    private final int[] binauralChannel;
+    private final float[] binauralMix;
+    private final float[] binauralTarget;
+    private int[] channelSlot = new int[0];
+    private int[] drainBus = new int[0];
+    private int[] drainLeft = new int[0];
+    private final float[] binaural;
+
     // Rendering listeners (step 13, §2.10): their mixes, the voices each hears and how loud, re-emitting voices.
     static final int LISTENERS = 4;
     private static final int MIX_RING = 4_096;
@@ -163,6 +176,11 @@ final class Voices {
         heardTo = new float[LISTENERS][2 * capacity];
         heardMax = new float[capacity];
         voiceBuffers = new float[capacity][block];
+        binauralChannel = new int[capacity];
+        binauralMix = new float[capacity];
+        binauralTarget = new float[capacity];
+        binaural = new float[block];
+        Arrays.fill(binauralChannel, -1);
         inputs = new int[capacity];
         inputPrevious = new int[capacity];
         inputSwitched = new long[capacity];
@@ -379,6 +397,9 @@ final class Voices {
         attenuations[slot] = attenuation;
         boolean first = !placed[slot];
         placed[slot] = true;
+        if (first && (flags[slot] & HRTF) != 0 && spatializer != null && binauralCount() < binauralCap) {
+            bind(slot, 1); // a voice starting binaural: no fade from the pan
+        }
         place(slot);
         if (first) { // the first place: taken at once, not ramped from the middle
             int o = slot * channels;
@@ -407,6 +428,136 @@ final class Voices {
         float occluded = occCutoffs[slot];
         float cutoff = air <= 0 ? occluded : occluded <= 0 ? air : Math.min(air, occluded);
         lowCoef[slot] = cutoff <= 0 ? 1 : (float) (1 - Maths.exp(-2 * Math.PI * Math.min(cutoff, 0.45 * rate) / rate));
+        if (binauralChannel[slot] >= 0) {
+            spatializer.place(binauralChannel[slot], x, y, z);
+        }
+    }
+
+    // ---------------------------------------------------------------- binaural voices
+
+    /**
+     * Renders up to {@code cap} placed {@code HRTF} voices through {@code next} (null: none, every voice pans), the
+     * most audible at each choice; a voice joining or leaving cross-fades between its pan and the HRTF over a block. A
+     * spatializer replaced or removed drops its voices back to panning at once.
+     */
+    @AllowAllocation("a spatializer of another size: a setting changed")
+    void spatializer(Spatializer next, int cap) {
+        for (int slot = 0; slot < capacity; slot++) {
+            binauralChannel[slot] = -1;
+            binauralMix[slot] = 0;
+            binauralTarget[slot] = 0;
+        }
+        spatializer = next;
+        binauralCap = next == null ? 0 : Math.min(cap, next.capacity());
+        int channels = next == null ? 0 : next.capacity();
+        if (channelSlot.length != channels) {
+            channelSlot = new int[channels];
+            drainBus = new int[channels];
+            drainLeft = new int[channels];
+        }
+        Arrays.fill(channelSlot, -1);
+        Arrays.fill(drainBus, -1);
+    }
+
+    /** Voices rendering binaurally now (fading in or out too). */
+    int binauralVoices() {
+        int n = 0;
+        for (int slot = 0; slot < highest; slot++) {
+            n += binauralChannel[slot] >= 0 ? 1 : 0;
+        }
+        return n;
+    }
+
+    /** Whether {@code slot} renders through the HRTF now. */
+    boolean binaural(int slot) {
+        return binauralChannel[slot] >= 0;
+    }
+
+    /** Voices meant to be binaural (not fading out). */
+    private int binauralCount() {
+        int n = 0;
+        for (int slot = 0; slot < highest; slot++) {
+            n += binauralChannel[slot] >= 0 && binauralTarget[slot] > 0 ? 1 : 0;
+        }
+        return n;
+    }
+
+    /** Gives {@code slot} a free channel, its mix starting at {@code mix}; false when none is free. */
+    private boolean bind(int slot, float mix) {
+        for (int c = 0; c < channelSlot.length; c++) {
+            if (channelSlot[c] < 0 && drainBus[c] < 0) {
+                channelSlot[c] = slot;
+                binauralChannel[slot] = c;
+                binauralMix[slot] = mix;
+                binauralTarget[slot] = 1;
+                spatializer.reset(c);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Takes {@code slot}'s channel back; it renders its tail (no new input) into the voice's bus first. */
+    private void unbind(int slot) {
+        int c = binauralChannel[slot];
+        if (c >= 0) {
+            channelSlot[c] = -1;
+            drainBus[c] = busIndex[slot];
+            drainLeft[c] = spatializer.tailBlocks();
+            binauralChannel[slot] = -1;
+            binauralMix[slot] = 0;
+            binauralTarget[slot] = 0;
+        }
+    }
+
+    /** The channels let go of render what their filters still hold, for the spatializer's tail. */
+    private void drain(BusGraph graph, int frames) {
+        for (int c = 0; c < drainBus.length; c++) {
+            if (drainBus[c] >= 0) {
+                Arrays.fill(binaural, 0, frames, 0);
+                spatializer.process(c, binaural, graph.buffer(drainBus[c]), frames);
+                if (--drainLeft[c] <= 0) {
+                    drainBus[c] = -1;
+                }
+            }
+        }
+    }
+
+    /** A layout swap renumbers the buses: tails still to drain are dropped. */
+    void layoutChanged() {
+        Arrays.fill(drainBus, -1);
+    }
+
+    /** Binaural candidates now: real placed HRTF voices; the most audible {@code cap} get (or keep) a channel. */
+    private void chooseBinaural() {
+        if (spatializer == null) {
+            return;
+        }
+        int n = 0;
+        for (int slot = 0; slot < highest; slot++) {
+            if (binauralCandidate(slot)) {
+                scratch[n++] = audibility[slot];
+            }
+        }
+        float least = n <= binauralCap ? 0 : kth(scratch, n, n - binauralCap);
+        for (int slot = 0; slot < highest; slot++) {
+            boolean want = binauralCandidate(slot) && audibility[slot] >= least;
+            if (binauralChannel[slot] >= 0) {
+                binauralTarget[slot] = want ? 1 : 0;
+            }
+        }
+        for (int slot = 0; slot < highest; slot++) { // after the leaving ones made room
+            if (binauralCandidate(slot) && audibility[slot] >= least && binauralChannel[slot] < 0
+                    && binauralCount() < binauralCap && bind(slot, 0)) {
+                place(slot);
+            }
+        }
+    }
+
+    private boolean binauralCandidate(int slot) {
+        return states[slot] != FREE && (flags[slot] & (HRTF | SPATIAL)) == (HRTF | SPATIAL) && placed[slot]
+            && audibility[slot] > 0 && (reality[slot] == REAL || reality[slot] == TO_REAL) && inputs[slot] < 0
+            && inputPrevious[slot] < 0;
     }
 
     /**
@@ -490,6 +641,7 @@ final class Voices {
     }
 
     private void end(int slot) {
+        unbind(slot);
         states[slot] = FREE;
         attenuations[slot] = null;
         if (rings[slot] != null) {
@@ -606,6 +758,10 @@ final class Voices {
     void render(BusGraph graph, long blockStart, int frames, Ring events) {
         if (blocks++ % 4 == 0) {
             choose(graph, blockStart, events);
+        }
+        if (spatializer != null) {
+            spatializer.begin();
+            drain(graph, frames);
         }
         mixing = beginMixes(blockStart, frames);
         int top = 0;
@@ -931,6 +1087,7 @@ final class Voices {
                 }
             }
         }
+        chooseBinaural();
     }
 
     /** The value {@code k} places from the bottom of the first {@code n} values of {@code values}: a quickselect. */
@@ -975,6 +1132,7 @@ final class Voices {
         int o = slot * channels;
         System.arraycopy(panTo, o, panFrom, o, channels);
         attFrom[slot] = attTo[slot];
+        unbind(slot); // out of earshot: its channel is for others
         if (ending[slot]) {
             return false; // stopping, and out of earshot: over at once
         }
@@ -1036,6 +1194,12 @@ final class Voices {
         float sendStep = (auxTo[slot] - send) / frames;
         float dry = dryGains[slot];
         float dryStep = 1 / (0.005f * rate);
+        int channel = spatial ? binauralChannel[slot] : -1;
+        float mix = channel >= 0 ? binauralMix[slot] : 0;
+        float mixStep = channel >= 0 ? (binauralTarget[slot] - mix) / frames : 0;
+        if (channel >= 0) {
+            Arrays.fill(binaural, 0, frames, 0);
+        }
         if (patches[slot] != null) { // what this block reads, with the resampler's taps
             patches[slot].fill((long) (position + Math.max(rateFrom, rateTargets[slot]) * (frames - from)) + 4);
         }
@@ -1113,8 +1277,14 @@ final class Voices {
                 }
                 s *= g;
                 energy += s * s;
+                float panned = s;
+                if (channel >= 0) { // through the HRTF, cross-faded with the pan while joining or leaving
+                    mix = Math.max(0, Math.min(1, mix + mixStep));
+                    binaural[f] = s * mix;
+                    panned = s * (1 - mix);
+                }
                 for (int c = 0; c < channels; c++) {
-                    out[f * channels + c] += s * (panFrom[o + c] + (panTo[o + c] - panFrom[o + c]) * t);
+                    out[f * channels + c] += panned * (panFrom[o + c] + (panTo[o + c] - panFrom[o + c]) * t);
                 }
                 if (aux != null) { // the reverb send: post-fader, unpanned
                     send += sendStep;
@@ -1129,6 +1299,13 @@ final class Voices {
             } else if (!loop && position >= end) {
                 alive = false;
                 break;
+            }
+        }
+        if (channel >= 0) {
+            spatializer.process(channel, binaural, out, frames);
+            binauralMix[slot] = mix;
+            if (binauralTarget[slot] == 0 && mix <= 0) {
+                unbind(slot);
             }
         }
         positions[slot] = position;

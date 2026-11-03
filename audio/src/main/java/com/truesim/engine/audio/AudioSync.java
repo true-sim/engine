@@ -1067,6 +1067,7 @@ public final class AudioSync {
         }
         Sounds store = stores[track.store];
         int flags = (store.voiceLoops(track.id, v) ? Voices.LOOP : 0) | (placed(track) ? Voices.SPATIAL : 0)
+            | (placed(track) && track.sound.spatial() == Spatial.HRTF ? Voices.HRTF : 0)
             | track.sound.priority().ordinal() << Voices.PRIORITY_SHIFT
             | track.sound.virtualization().ordinal() << Voices.VIRTUAL_SHIFT;
         Bus bus = store.isUi() ? Bus.UI : track.sound.bus();

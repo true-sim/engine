@@ -1190,8 +1190,16 @@ audio.ui().play(CLICK);
 - **Outputs**: `SdlOutput` (the device's own format, a Java platform thread with MMCSS "Pro Audio" and a
   high-resolution timer on Windows, the queue kept at least a device buffer and a block deep, underruns counted and
   guarded), `NullOutput`, `OfflineOutput`.
-- **Settings** (group "audio"): player volumes (saved with the app's settings), device, background rule; block size,
-  queue, voices and driver hidden.
+- **HRTF** (§2.9): with `audio.output` set to `HEADPHONES`, sounds marked `Spatial.HRTF` render binaurally, the 16
+  most audible (`audio.hrtf.voices`) through `HrtfSpatializer` (partitioned FFT convolution of minimum-phase filters
+  interpolated between measured directions, cross-faded as sources move, a near field), the others panned. Sets are
+  `.hrtf` files converted from SOFA at build time (`./gradlew :engine-audio:convertHrtf -Ptruesim.audio.sofa=...`);
+  `audio.hrtf.set` names one, else the built-in set plays: **SADIE II's KU100 (University of York, Apache License
+  2.0; Armstrong et al., Applied Sciences 8(11) 2029, 2018, doi:10.3390/app8112029)**, converted, with its licence
+  and notice in `audio/src/main/resources/com/truesim/engine/audio/hrtf/`. Games crediting their audio middleware
+  credit it there too (`Hrtf.credit()`).
+- **Settings** (group "audio"): player volumes (saved with the app's settings), device, background rule, output and
+  HRTF set; block size, queue, voices, driver and HRTF voices hidden.
 - **The collector**: run games with `-XX:+UseZGC`; under other collectors the queue starts 4 blocks deep.
 - **Tests without a device** use SDL's `dummy` driver and the `disk` driver for an end-to-end check;
   `TRUESIM_AUDIO=true ./gradlew :engine-audio:test --tests '*AudioDeviceProbe*'` measures the real device.

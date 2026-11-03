@@ -59,6 +59,7 @@ public final class AudioRenderer implements AutoCloseable {
     static final int INPUT = 22;
     static final int INPUT_NEXT = 23;
     static final int OCCLUDE = 24;
+    static final int SPATIALIZER = 25;
 
     /** Receives events. */
     @FunctionalInterface
@@ -309,13 +310,25 @@ public final class AudioRenderer implements AutoCloseable {
                 case SPATIAL -> voices.spatial(slot, (float) values[v], (float) values[v + 1], (float) values[v + 2],
                     (float) values[v + 3], (Attenuation) r.refs[c], values[v + 4] != 0);
                 case BUDGET -> voices.budget(slot);
+                case SPATIALIZER -> voices.spatializer((Spatializer) r.refs[c], (int) values[v]);
                 default -> throw new IllegalStateException("Unknown audio command " + r.opcodes[c]);
             }
             r.release();
         }
     }
 
+    /** Voices rendering through the HRTF now (fading in or out too): for tests and meters, on the audio thread. */
+    public int binauralVoices() {
+        return voices.binauralVoices();
+    }
+
+    /** Whether voice {@code slot} renders through the HRTF now: for tests, on the audio thread. */
+    boolean binaural(int slot) {
+        return voices.binaural(slot);
+    }
+
     private void layout(BusGraph next) {
+        voices.layoutChanged();
         for (int slot = 0; slot < voices.highest(); slot++) {
             if (!voices.free(slot)) {
                 voices.busIndex[slot] = next.index(voices.buses[slot]);
@@ -557,6 +570,21 @@ public final class AudioRenderer implements AutoCloseable {
         /** Sets the decay (seconds) and damping of {@code aux}'s reverb: a zone's blended in. */
         public boolean reverb(Bus aux, float decay, float damping) {
             return send(REVERB, sent.index(aux), 0, decay, damping);
+        }
+
+        /**
+         * Renders up to {@code voices} placed HRTF voices (the most audible) through {@code spatializer}, made for this
+         * renderer's block and rate (§2.9); null turns binaural rendering off: every voice pans.
+         */
+        public boolean spatializer(Spatializer spatializer, int voices) {
+            int c = claim(SPATIALIZER, 0, 0);
+            if (c < 0) {
+                return false;
+            }
+            commands.values[c * Ring.VALUES] = voices;
+            commands.refs[c] = spatializer;
+            commands.publish();
+            return true;
         }
 
         /** Sets the real voices at most (AU7: 64 by default). */

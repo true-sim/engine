@@ -92,6 +92,23 @@ public final class Audio implements Plugin {
     public static final Setting<String> DRIVER =
         Setting.text("audio.driver", "", "SDL's audio driver by name (dummy, disk); empty for SDL's choice");
 
+    /** What the sound plays on (§2.17): SDL cannot tell headphones from speakers, so the player says. */
+    public enum Output {
+        /** Stereo, or the device's own layout: panned. */
+        AUTO,
+        /** Binaural: sounds marked HRTF go through the HRTF (§2.9). */
+        HEADPHONES,
+        STEREO_SPEAKERS,
+        SURROUND
+    }
+
+    public static final Setting<Output> OUTPUT =
+        Setting.choice("audio.output", Output.AUTO, "headphones play sounds around the head (HRTF)");
+    public static final Setting<String> HRTF_SET =
+        Setting.text("audio.hrtf.set", "", "the HRTF set, an .hrtf file; empty for the built-in one");
+    public static final Setting<Integer> HRTF_VOICES =
+        Setting.integer("audio.hrtf.voices", 16, 0, 64, "voices rendered through the HRTF at most");
+
     private Engine engine;
     private Mixer mixer;
     private EngineSettings settings;
@@ -120,8 +137,8 @@ public final class Audio implements Plugin {
             engine = startup.engine();
             settings = startup.settings();
             startup.registry().add(GROUP, MASTER_VOLUME, MUSIC_VOLUME, SFX_VOLUME, VOICE_VOLUME, UI_VOLUME, DEVICE,
-                BACKGROUND, MONO, BALANCE, DYNAMIC_RANGE);
-            startup.registry().addHidden(BLOCK, LOW_MARK, VOICES, DRIVER);
+                BACKGROUND, MONO, BALANCE, DYNAMIC_RANGE, OUTPUT, HRTF_SET); // no tiers declared by default
+            startup.registry().addHidden(BLOCK, LOW_MARK, VOICES, DRIVER, HRTF_VOICES);
         } else if (stage == Stage.INSTANCE) {
             Desktop desktop = startup.find(Desktop.KEY).orElse(null);
             output = open(desktop);
@@ -132,6 +149,10 @@ public final class Audio implements Plugin {
                 settings.onChange(access, this::accessibility);
             }
             accessibility();
+            for (Setting<?> binaural : List.of(OUTPUT, HRTF_SET, HRTF_VOICES, MONO)) {
+                settings.onChange(binaural, this::binaural);
+            }
+            binaural();
             for (Setting<Float> volume : List.of(MASTER_VOLUME, MUSIC_VOLUME, SFX_VOLUME, VOICE_VOLUME, UI_VOLUME)) {
                 settings.onChange(volume, this::volumes);
             }
@@ -249,6 +270,58 @@ public final class Audio implements Plugin {
             settings.get(DYNAMIC_RANGE).ordinal());
     }
 
+    // Binaural rendering (§2.9): the set prepared off the game thread, handed to the renderer from it.
+    private volatile Spatializer preparedSpatializer;
+    private volatile boolean binauralChanged;
+    private Spatializer spatializer;
+    private int binauralWanted;
+
+    /**
+     * Turns binaural rendering on with headphones (stereo, mono off) and off otherwise: the set (the built-in one, or
+     * {@link #HRTF_SET}'s file) is prepared for the output's rate on a background thread and handed to the renderer at
+     * the next frame.
+     */
+    @AllowAllocation("a setting changed")
+    private void binaural() {
+        boolean on = settings.get(OUTPUT) == Output.HEADPHONES && renderer.format().channels() == 2
+            && !settings.get(MONO) && settings.get(HRTF_VOICES) > 0;
+        int wanted = ++binauralWanted;
+        if (!on) {
+            preparedSpatializer = null;
+            binauralChanged = true;
+            return;
+        }
+        String file = settings.get(HRTF_SET);
+        int voices = settings.get(HRTF_VOICES);
+        AudioFormat format = renderer.format();
+        Thread.ofPlatform().daemon().name("audio-hrtf").start(() -> {
+            Hrtf hrtf = prepare(file, format.rate());
+            HrtfSpatializer next = new HrtfSpatializer(hrtf, format.block(), voices + 4);
+            if (wanted == binauralWanted) {
+                preparedSpatializer = next;
+                binauralChanged = true;
+            }
+        });
+    }
+
+    /** The set in {@code file} (empty: the built-in one) prepared for {@code rate}; the built-in one if it fails. */
+    @AllowAllocation("preparing a set")
+    static Hrtf prepare(String file, int rate) {
+        if (!file.isEmpty()) {
+            try (java.io.InputStream in = java.nio.file.Files.newInputStream(java.nio.file.Path.of(file))) {
+                return Hrtf.prepare(com.truesim.scene.audio.HrtfSet.read(in), rate);
+            } catch (java.io.IOException | RuntimeException e) {
+                LOG.warn("Audio: the HRTF set {} does not load ({}); the built-in one plays", file, e.getMessage());
+            }
+        }
+        return Hrtf.builtIn(rate);
+    }
+
+    /** The spatializer the renderer was last given (null: none); set a frame after the settings ask for it. */
+    public Spatializer spatializer() {
+        return spatializer;
+    }
+
     private Music music;
 
     /** The music player (§2.12): music over the renderer's clock, its clips through the asset cache; made once. */
@@ -284,6 +357,11 @@ public final class Audio implements Plugin {
         }
         if (sync != null) {
             sync.events();
+        }
+        if (binauralChanged) {
+            binauralChanged = false;
+            spatializer = preparedSpatializer;
+            renderer.commands().spatializer(spatializer, settings.get(HRTF_VOICES));
         }
         boolean away = !engine.focused() || !engine.visible();
         float wanted = !away ? 1 : switch (settings.get(BACKGROUND)) {
