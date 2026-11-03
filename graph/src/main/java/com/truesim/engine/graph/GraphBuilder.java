@@ -205,8 +205,16 @@ public final class GraphBuilder {
 
             @Override
             public List<Object> modifies(Technique technique) {
+                // Readers stand among a key's modifiers too: where their order puts them, building nothing after it
                 List<Object> keys = new ArrayList<>();
                 for (Key<?> key : technique.modifies()) {
+                    keys.add(resolve(viewOf.get(technique), key));
+                }
+                for (Key<?> key : technique.reads()) {
+                    if (technique.modifies().contains(key)) {
+                        throw new IllegalStateException(GraphBuilder.name(technique) + " both modifies and reads "
+                            + key);
+                    }
                     keys.add(resolve(viewOf.get(technique), key));
                 }
                 return keys;
@@ -506,6 +514,22 @@ public final class GraphBuilder {
             buffers.get(((Buffer) result).id).owner = scope();
         }
         return key.kind().cast(result);
+    }
+
+    /**
+     * For a technique that {@link Technique#reads() reads} {@code key}: the result as the techniques ordered before it
+     * left it, to read only (its passes may not write it): e.g. the opaque scene's depth for a background drawn before
+     * transparency, which may write the depth after it.
+     *
+     * @throws IllegalStateException unless the building technique lists {@code key} among the keys it reads
+     */
+    public <T> T read(Key<T> key) {
+        Object scope = scope();
+        if (!(scope instanceof Technique technique) || !technique.reads().contains(key)) {
+            throw new IllegalStateException(name(scope) + " cannot read " + key + " in its order: only a technique "
+                + "listing it among the keys it reads can");
+        }
+        return key.kind().cast(resolution.take(resolve(view(), key))); // its owner stays the one who may write it
     }
 
     /**

@@ -75,6 +75,15 @@ public final class SkyBackground implements Technique {
         return List.of(Keys.SCENE_COLOR);
     }
 
+    /**
+     * The scene's depth as the opaque scene left it: read at its place in the order, so a transparency technique writing
+     * the depth after it ({@link OpaqueTransparency}) does not need it built first.
+     */
+    @Override
+    public List<Key<?>> reads() {
+        return List.of(Keys.SCENE_DEPTH);
+    }
+
     @Override
     public Order order() {
         return Order.at(Anchor.OPAQUE);
@@ -85,7 +94,7 @@ public final class SkyBackground implements Technique {
     public void build(GraphBuilder g) {
         view.checkBuilding(g, this);
         Image color = g.modify(Keys.SCENE_COLOR);
-        Image depth = g.require(Keys.SCENE_DEPTH);
+        Image depth = g.read(Keys.SCENE_DEPTH);
         EnvironmentMaps.Maps maps = g.request(new EnvironmentMaps(environment, quality));
         Pipeline sky = g.computeProgram("shaders/environment/sky.spv", "skyMain", SkyPush.BYTES);
         SkyPush push = new SkyPush();

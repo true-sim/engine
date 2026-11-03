@@ -55,9 +55,9 @@ public final class ParticleCollisionDepth implements Technique {
         return List.of();
     }
 
-    /** The scene's depth, which it only reads: a modifier is built where the depth is used, and ordered after it. */
+    /** The scene's depth, which it only reads, as the opaque scene left it. */
     @Override
-    public List<Key<?>> modifies() {
+    public List<Key<?>> reads() {
         return List.of(Keys.SCENE_DEPTH);
     }
 
@@ -70,7 +70,7 @@ public final class ParticleCollisionDepth implements Technique {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
-        Image depth = g.modify(Keys.SCENE_DEPTH);
+        Image depth = g.read(Keys.SCENE_DEPTH);
         Buffer target = g.importBuffer(particles.depthImport());
         Pipeline capture = g.computeProgram("shaders/particles/depth.spv", "captureMain", ParticleDepthPush.BYTES);
         RenderView renderView = view.view();
@@ -91,6 +91,5 @@ public final class ParticleCollisionDepth implements Technique {
                     .regionHeight(regionHeight), (width + 7) / 8, (height + 7) / 8, 1);
                 p.depthCaptured();
             });
-        g.provide(Keys.SCENE_DEPTH, depth);
     }
 }
