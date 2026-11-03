@@ -184,8 +184,9 @@ final class FrameExecution implements AutoCloseable {
         int graphicsChunks = batches.graphicsChunks();
         int computeChunks = batches.computeChunks();
         for (int i = 0; i < used.length; i++) {
-            // The calling thread (worker 0) records the frame start too, when recording on several threads.
-            int needed = i % 2 == GRAPHICS ? graphicsChunks + (i == GRAPHICS ? 1 : 0) : computeChunks;
+            // The calling thread (worker 0) records the frame start too, when recording on several threads, and the
+            // prologue of a graph just built.
+            int needed = i % 2 == GRAPHICS ? graphicsChunks + (i == GRAPHICS ? 2 : 0) : computeChunks;
             if (buffers[slot][i].length < needed) {
                 grow(i, needed);
             }
@@ -225,10 +226,15 @@ final class FrameExecution implements AutoCloseable {
 
     /**
      * Submits {@code batches} in order, each to its queue: their chunks' command buffers {@code chunkCommands}, and
-     * {@code frameStart} (null: none) ahead of the first graphics chunk. Allocates nothing.
+     * {@code frameStart} (null: none) ahead of the first graphics chunk. A {@code prologue} (null: none) goes to the
+     * graphics queue first, on its own, after all both queues did before; every batch of the frame runs after it.
+     * Allocates nothing.
      */
     void submit(CompiledGraph.Batches batches, VkCommandBuffer frameStart, VkCommandBuffer[] chunkCommands,
-        long[] acquired, int acquiredCount, long[] renderFinished, int finishedCount) {
+        long[] acquired, int acquiredCount, long[] renderFinished, int finishedCount, VkCommandBuffer prologue) {
+        if (prologue != null) {
+            submitPrologue(prologue);
+        }
         int[] batchQueue = batches.queue();
         int[] batchFirstChunk = batches.firstChunk();
         int[] batchWait = batches.waitFor();
@@ -239,7 +245,7 @@ final class FrameExecution implements AutoCloseable {
         boolean acquireWaited = acquiredCount == 0;
         // Both queues once the compute queue ever ran: a build without async passes still follows one with them,
         // whose compute work of the frames in flight may use what this frame does (pooled images, histories).
-        boolean bothQueues = computeValue > 0;
+        boolean bothQueues = computeValue > 0 || prologue != null;
         boolean firstGraphics = true;
         boolean firstCompute = true;
         for (int b = 0; b < batchQueue.length; b++) {
@@ -311,6 +317,27 @@ final class FrameExecution implements AutoCloseable {
         slotGraphicsValue[slot] = graphicsValue;
         slotComputeValue[slot] = computeValue;
         begun = false;
+    }
+
+    /** Submits {@code prologue} to the graphics queue, after all both queues submitted, signalling the next value. */
+    private void submitPrologue(VkCommandBuffer prologue) {
+        try (MemoryStack stack = stackPush()) {
+            long info = stack.ncalloc(VkCommandBufferSubmitInfo.ALIGNOF, 1, VkCommandBufferSubmitInfo.SIZEOF);
+            commandBufferInfo(info, prologue);
+            long wait = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 1, VkSemaphoreSubmitInfo.SIZEOF);
+            semaphore(wait, computeTimeline, computeValue);
+            long signal = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 1, VkSemaphoreSubmitInfo.SIZEOF);
+            semaphore(signal, graphicsTimeline, ++graphicsValue);
+            long submit = stack.ncalloc(VkSubmitInfo2.ALIGNOF, 1, VkSubmitInfo2.SIZEOF);
+            memPutInt(submit + VkSubmitInfo2.STYPE, VK_STRUCTURE_TYPE_SUBMIT_INFO_2);
+            memPutInt(submit + VkSubmitInfo2.WAITSEMAPHOREINFOCOUNT, computeValue > 0 ? 1 : 0);
+            memPutAddress(submit + VkSubmitInfo2.PWAITSEMAPHOREINFOS, wait);
+            memPutInt(submit + VkSubmitInfo2.COMMANDBUFFERINFOCOUNT, 1);
+            memPutAddress(submit + VkSubmitInfo2.PCOMMANDBUFFERINFOS, info);
+            memPutInt(submit + VkSubmitInfo2.SIGNALSEMAPHOREINFOCOUNT, 1);
+            memPutAddress(submit + VkSubmitInfo2.PSIGNALSEMAPHOREINFOS, signal);
+            graphicsQueue.submit(1, submit, 0);
+        }
     }
 
     /**

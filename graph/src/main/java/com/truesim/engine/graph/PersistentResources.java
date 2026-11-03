@@ -81,6 +81,12 @@ final class PersistentResources {
         replaced.clear();
     }
 
+    /** The persistent images and buffers not cleared yet ({@link Persistent#initialize}): those just made. */
+    @AllowAllocation("building the graph, when it changes")
+    Persistent[] uninitialized() {
+        return persistents.values().stream().filter(p -> !p.initialized()).toArray(Persistent[]::new);
+    }
+
     /** How many persistent images and buffers there are. */
     int count() {
         return persistents.size();

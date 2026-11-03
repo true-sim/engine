@@ -111,6 +111,8 @@ public final class FrameGraph implements AutoCloseable {
         new int[] {0}, new int[] {0});
     // The seam: transitions joining the histories to a graph just built, recorded at the start of its first frame.
     private Physical[] seamImages = NO_PHYSICALS;
+    private Persistent[] seamPersistents = NO_PERSISTENTS; // made by the build: cleared in the seam
+    private static final Persistent[] NO_PERSISTENTS = new Persistent[0];
     private int[] seamFrom = new int[0];
     private int[] seamTo = new int[0];
     private final Queue graphicsQueue;
@@ -557,6 +559,13 @@ public final class FrameGraph implements AutoCloseable {
             recordSlot = execution.slot();
             slotFrame[recordSlot] = frame;
             execution.ensureCommandBuffers(batches);
+            VkCommandBuffer prologue = null;
+            if (seamImages.length + seamPersistents.length > 0 && batches.computeBatches() > 0) {
+                // A graph just built with async passes: the seam goes ahead of the frame, which every batch waits for.
+                prologue = execution.commandBuffer(0, GRAPHICS);
+                recordSeam(prologue);
+                Vulkan.check(Commands.endCommandBuffer(prologue), "Could not finish recording");
+            }
             if (jobs != null && batches.chunkBatch().length > 1) {
                 frameStart = execution.commandBuffer(0, GRAPHICS);
                 bindless.bind(frameStart, true);
@@ -569,7 +578,7 @@ public final class FrameGraph implements AutoCloseable {
                 recordChunks(0, batches.chunkBatch().length, 0);
             }
             execution.submit(batches, frameStart, chunkCommands, acquired, acquiredCount, renderFinished,
-                finishedCount);
+                finishedCount, prologue);
             submitted = true;
         } finally {
             // A build or a pass that threw leaves the graph usable: the frame is dropped, the next one begins (a graph
@@ -1049,6 +1058,7 @@ public final class FrameGraph implements AutoCloseable {
         startTooling(g);
         startHistories(pairs, keptPair, compiled);
         persistents.start(g, builds + 1L, retiring);
+        seamPersistents = persistents.uninitialized();
         dirty = false;
         currentBuild = g; // the build images and buffers resolved in passes must be of
         built = g.techniques().toArray(new Technique[0]);
@@ -1167,8 +1177,8 @@ public final class FrameGraph implements AutoCloseable {
      * Joins the histories to the graph just built, without waiting for the GPU: the seam. A pair the graph kept keeps
      * its contents, its last frame image moving from the layout the graph before left it in to the one this graph
      * starts with; a new pair starts with undefined contents (its first frame has no last frame). The transitions run
-     * at the start of the next frame's graphics commands (a frame starting on the compute queue has them submitted
-     * ahead). Each pair notes the layouts this graph leaves it in, for the next seam.
+     * at the start of the next frame's graphics commands (with async passes, in a prologue on the graphics queue that
+     * the frame's batches on both queues wait for). Each pair notes the layouts this graph leaves it in, for the next seam.
      */
     @AllowAllocation("building the graph, when it changes")
     private void startHistories(HistoryPair[] pairs, boolean[] kept, CompiledGraph compiled) {
@@ -1206,13 +1216,17 @@ public final class FrameGraph implements AutoCloseable {
         seamImages = Arrays.copyOf(images, count);
         seamFrom = Arrays.copyOf(from, count);
         seamTo = Arrays.copyOf(to, count);
-        if (count > 0 && batches.queue().length > 0 && batches.queue()[0] != GRAPHICS) {
-            device.submitAndWait(graphicsQueue, this::recordSeam); // the frame starts on the compute queue
-        }
     }
 
-    /** Records the seam's transitions, if the graph was just built, once. */
+    /**
+     * Records the seam, if the graph was just built, once: the persistent resources it made cleared, the histories'
+     * transitions.
+     */
     private void recordSeam(VkCommandBuffer commands) {
+        for (Persistent made : seamPersistents) {
+            made.initialize(commands);
+        }
+        seamPersistents = NO_PERSISTENTS;
         for (int i = 0; i < seamImages.length; i++) {
             com.truesim.engine.vulkan.Images.transition(commands, seamImages[i].image.handle(),
                 seamImages[i].format.aspect(), seamFrom[i], seamTo[i], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
