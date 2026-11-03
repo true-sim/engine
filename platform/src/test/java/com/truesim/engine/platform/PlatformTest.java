@@ -84,6 +84,31 @@ class PlatformTest {
     }
 
     @Test
+    void windowsOpenWhereAskedAndTheMouseHasAPlaceOnTheDesktop() {
+        Window placed = platform.createWindow(WindowOptions.of("placed", 160, 120).withVulkan(false), 140, 90);
+        Window hidden = platform.createWindow(WindowOptions.of("hidden", 160, 120).withHidden(true)
+            .withVulkan(false), 300, 200);
+        placed.sync();
+        assertThat(placed.isVisible()).isTrue();
+        assertThat(hidden.isVisible()).isFalse();
+        String driver = platform.videoDriver();
+        if (!"wayland".equals(driver) && !"offscreen".equals(driver)) { // neither places windows where asked
+            assertThat(placed.x()).isEqualTo(140);
+            assertThat(placed.y()).isEqualTo(90);
+        }
+        float[] at = {Float.NaN, Float.NaN};
+        boolean known = platform.globalMouse(at);
+        assertThat(known).isEqualTo(!"wayland".equals(platform.videoDriver()));
+        if (known) {
+            assertThat(at[0]).isFinite();
+            assertThat(at[1]).isFinite();
+        }
+        assertThat(platform.globalMouse(at)).isEqualTo(known); // asked once what the system tells
+        placed.close();
+        hidden.close();
+    }
+
+    @Test
     void textInputHasKindsAndAnImeAreaAndTheClipboardHoldsText() {
         Window window = platform.createWindow(WindowOptions.of("text", 200, 100).withHidden(true).withVulkan(false));
         for (int kind : new int[] {Window.TEXT_INPUT_PASSWORD, Window.TEXT_INPUT_NUMBER, Window.TEXT_INPUT_MULTILINE,
