@@ -546,10 +546,11 @@ public HitSurface hitSurface(PathState path, View view)
 }
 
 /**
- * Shades path `index` (whose hit is of material type M, features FEATURES): emission, the lights by next-event
- * estimation, then the next direction sampled from the surface's lobes, or the path ends.
+ * Shades path `index` (whose hit is of material type M, features `features`: FEATURES where a pass is a variant):
+ * emission, the lights by next-event estimation, then the next direction sampled from the surface's lobes, or the
+ * path ends.
  */
-public void shadeHit<M : IMaterial>(uint index)
+public void shadeHit<M : IMaterial>(uint index, uint features)
 {
     PathState path = push.paths[index];
     View view = push.view[0];
@@ -600,14 +601,24 @@ public void shadeHit<M : IMaterial>(uint index)
     input.dx1 = hit.dx.zw;
     input.dy1 = hit.dy.zw;
     input.color = in.color;
-    input.features = FEATURES;
+    input.features = features;
     input.transforms = nullptr;
-    if ((FEATURES & FEATURE_TEXTURE_TRANSFORM) != 0)
+    if ((features & FEATURE_TEXTURE_TRANSFORM) != 0)
     {
         input.transforms = materialFeatureAt<TextureTransformParameters>(ref, FEATURE_TEXTURE_TRANSFORM);
     }
+    // A type's geometry hook (GEOMETRY_KEEP) makes holes at hits as in every pass drawing it: the path goes through
+    if (materialGeometry(m) != 0 && !M.keep(materialParameters<M.Parameters>(ref), ref, input))
+    {
+        if (bounce + 1 < maxBounces)
+        {
+            path.rng = rng;
+            continuePath(path, offsetRay(p, front ? -ng : ng), path.direction, throughput, flags + 1);
+        }
+        return;
+    }
     float3 emissive;
-    Surface s = typedSurface<M>(ref, input, FEATURES, emissive);
+    Surface s = typedSurface<M>(ref, input, features, emissive);
     float3 side = front ? ng : -ng; // the geometric normal on the viewer's side
     if (dot(s.normal, v) <= 0)
     {
@@ -625,7 +636,7 @@ public void shadeHit<M : IMaterial>(uint index)
         return;
     }
     float unlit = 0;
-    if ((FEATURES & FEATURE_UNLIT) != 0)
+    if ((features & FEATURE_UNLIT) != 0)
     {
         unlit = materialFeature<UnlitParameters>(ref, FEATURE_UNLIT).amount;
     }
@@ -788,5 +799,5 @@ public void shadeHits<M : IMaterial>(uint3 group, uint3 thread)
     {
         return;
     }
-    shadeHit<M>(push.bins[push.list + binOffset(push.bin) + index]);
+    shadeHit<M>(push.bins[push.list + binOffset(push.bin) + index], FEATURES);
 }

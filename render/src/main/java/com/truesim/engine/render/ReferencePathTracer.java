@@ -95,6 +95,8 @@ public final class ReferencePathTracer implements Technique {
     private final SceneView view;
     private final int colorFormat;
     private Lights worldLights; // or null: the light list's
+    private String singleShader; // or null: hits shaded by bin, a dispatch per bin
+    private String singleEntry;
     private final float[] lastMatrix = new float[16];
     private final double[] lastPosition = new double[3];
     private long lastVersion = Long.MIN_VALUE;
@@ -128,6 +130,19 @@ public final class ReferencePathTracer implements Technique {
         return this;
     }
 
+    /**
+     * Shades every hit with {@code entry} of {@code shader} in one dispatch, in place of a dispatch per shading bin of
+     * the types' own hit entry points (and the bins' layout and scatter): for measuring a generated shader switching
+     * over the types (design D5; null: by bin, the default). The shader takes paths.slang's push block and shades the
+     * paths with a hit ({@code shadeHit}). Rebuilds the graph.
+     */
+    @AllowAllocation("set up rarely")
+    public ReferencePathTracer singleHitShader(String shader, String entry) {
+        this.singleShader = shader;
+        this.singleEntry = entry;
+        return this;
+    }
+
     /** Starts the samples anew from the next frame (lights moved, say). */
     public synchronized ReferencePathTracer restart() {
         restart = true;
@@ -150,7 +165,8 @@ public final class ReferencePathTracer implements Technique {
         Materials materials = renderer.scene().materials();
         return ((long) System.identityHashCode(materials) << 32 | materials.binCount())
             + 31 * (materials.graphBuffersVersion() + 31L * materials.drawnVersion())
-            + (worldLights == null ? 0 : 7L * System.identityHashCode(worldLights));
+            + (worldLights == null ? 0 : 7L * System.identityHashCode(worldLights))
+            + (singleShader == null ? 0 : 11L * singleShader.hashCode());
     }
 
     @Override
@@ -184,6 +200,8 @@ public final class ReferencePathTracer implements Technique {
                     materials.binFeatures(bin));
             }
         }
+        Pipeline single = singleShader == null ? null
+            : g.computeProgram(singleShader, singleEntry, PathPush.BYTES); // every hit in one dispatch: no bins
         String shader = "shaders/pathtracing/trace.spv";
         Pipeline generate = g.computeProgram(shader, "generateMain", PathPush.BYTES);
         Pipeline trace = g.computeProgram(shader, "traceMain", PathPush.BYTES);
@@ -246,19 +264,23 @@ public final class ReferencePathTracer implements Technique {
                         null, indirect, table, tablesBytes, bounce, bins, 0, settings), ROW, groupRows(ctx, color), 1);
                 }
             });
-            g.pass("reference bins " + b).write(binTables, BufferAccess.STORAGE_WRITE).record(ctx -> {
-                if (tracing(ctx, color, settings)) {
-                    ctx.dispatch(layout, push(layoutPush, ctx, color, null, null, null, binTables, null, null,
-                        null, table, tablesBytes, bounce, bins, 0, settings), 1);
-                }
-            });
-            g.pass("reference scatter " + b).read(current, BufferAccess.STORAGE_READ)
-                .read(counts, BufferAccess.STORAGE_READ).write(binTables, BufferAccess.STORAGE_WRITE).record(ctx -> {
+            if (single == null) { // hits sorted by shading bin: laid out, scattered
+                g.pass("reference bins " + b).write(binTables, BufferAccess.STORAGE_WRITE).record(ctx -> {
                     if (tracing(ctx, color, settings)) {
-                        ctx.dispatch(scatter, push(scatterPush, ctx, color, null, current, null, binTables, counts,
-                            null, null, table, tablesBytes, bounce, bins, 0, settings), ROW, groupRows(ctx, color), 1);
+                        ctx.dispatch(layout, push(layoutPush, ctx, color, null, null, null, binTables, null, null,
+                            null, table, tablesBytes, bounce, bins, 0, settings), 1);
                     }
                 });
+                g.pass("reference scatter " + b).read(current, BufferAccess.STORAGE_READ)
+                    .read(counts, BufferAccess.STORAGE_READ).write(binTables, BufferAccess.STORAGE_WRITE)
+                    .record(ctx -> {
+                        if (tracing(ctx, color, settings)) {
+                            ctx.dispatch(scatter, push(scatterPush, ctx, color, null, current, null, binTables,
+                                counts, null, null, table, tablesBytes, bounce, bins, 0, settings), ROW,
+                                groupRows(ctx, color), 1);
+                        }
+                    });
+            }
             GraphBuilder.PassBuilder shadePass = scene.read(g.pass("reference shade " + b), BufferAccess.STORAGE_READ)
                 .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ)
                 .read(current, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
@@ -275,6 +297,12 @@ public final class ReferencePathTracer implements Technique {
             }
             shadePass.record(ctx -> {
                 if (!tracing(ctx, color, settings)) {
+                    return;
+                }
+                if (single != null) { // every hit by one shader
+                    ctx.dispatch(single, push(shadePush, ctx, color, accumulation, current, next, binTables, counts,
+                        lights, indirect, table, tablesBytes, bounce, bins, 0, settings)
+                        .world(world == null ? 0 : ctx.address(world.grid())), ROW, groupRows(ctx, color), 1);
                     return;
                 }
                 for (int bin = 0; bin < shade.length; bin++) {

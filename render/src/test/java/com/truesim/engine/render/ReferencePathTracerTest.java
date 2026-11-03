@@ -28,10 +28,14 @@ import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.render.materials.CarPaint;
 import com.truesim.engine.render.materials.CarPaintParameters;
+import com.truesim.engine.render.materials.Dissolve;
+import com.truesim.engine.render.materials.DissolveParameters;
 import com.truesim.engine.render.materials.Glow;
 import com.truesim.engine.render.materials.GlowParameters;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.render.materials.SpecularParameters;
+import com.truesim.engine.render.materials.Tinted;
+import com.truesim.engine.render.materials.TintedParameters;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
@@ -460,6 +464,47 @@ class ReferencePathTracerTest {
         graph.settings().set(ReferencePathTracer.LIGHTS, lighting).set(WorldLights.MODE, mode)
             .set(WorldLights.CELL, 0.5f).set(WorldLights.SLOTS, mode == WorldLights.Mode.LISTS ? 64 : 16);
         return frames(frames);
+    }
+
+    /** The types test/singleHit.slang switches over, registered in its order; a material of each on quads. */
+    private void everyType() {
+        materials.register(Glow.TYPE);
+        materials.register(Tinted.TYPE);
+        materials.register(CarPaint.TYPE);
+        materials.register(Dissolve.TYPE);
+        int white = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.8f, 0.8f, 1))).feature(LAMBERT));
+        int coated = materials.add(new Material(MR.withBaseColor(new Color(0.2f, 0.4f, 0.9f, 1)).withRoughness(0.3f))
+            .feature(com.truesim.engine.render.materials.ClearcoatParameters.DEFAULTS));
+        int glow = materials.add(new Material(GlowParameters.DEFAULTS.withStrength(2)));
+        int tinted = materials.add(new Material(TintedParameters.DEFAULTS));
+        int paint = materials.add(new Material(CarPaint.TYPE, CarPaintParameters.DEFAULTS.withFlakes(1)
+            .withFlakeColor(new Color(1, 1, 0, 1))));
+        int dissolve = materials.add(new Material(DissolveParameters.DEFAULTS));
+        wall(0, white, 0, -1, -2, UP, 3);
+        wall(1, glow, -0.7f, 0, -2, DOWN, 0.4f);
+        wall(2, paint, 0.9f, -0.4f, -2.5f, PLUS_Z, 0.4f);
+        wall(3, dissolve, -0.2f, -0.5f, -2.2f, PLUS_Z, 0.3f);
+        wall(4, coated, 0.3f, -0.8f, -1.8f, UP, 0.3f);
+        wall(5, tinted, 0.6f, 0.4f, -2.6f, PLUS_Z, 0.2f);
+        camera.set(0, -0.5, -1, 0, 1, 0, Math.PI / 2, size, size, 0.01);
+    }
+
+    @Test
+    void oneShaderSwitchingOverTheTypesShadesHitsAsTheirBinsDo() {
+        everyType();
+        traced(0, null);
+        float[] binned = frames(16);
+        graph.close();
+        graph = new FrameGraph(device, 2);
+        traced(0, null).singleHitShader("shaders/test/singleHit.spv", "singleHitMain");
+        float[] switched = frames(16);
+        assertThat(graph.passes()).doesNotContain("reference bins 0", "reference scatter 0");
+        double worst = 0;
+        for (int i = 0; i < binned.length; i++) {
+            worst = Math.max(worst, Math.abs(binned[i] - switched[i]) / Math.max(Math.abs(binned[i]), 1.0e-2));
+        }
+        // The same paths and the same shading: the same image, but for the features known at run time or not
+        assertThat(worst).as("the most a value differs").isLessThan(1.0e-3);
     }
 
     /**

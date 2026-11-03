@@ -1242,7 +1242,21 @@ view.port().add(new ReferencePathTracer(geometry, rayTracing, view, Format.R32G3
   scattered by shading bin (as `meshlets/split.slang` does), and each bin is shaded by one indirect dispatch of its
   type's generated hit entry point (`material-types/entryHit.slang.template`, `MaterialType.hitShader`): the type's
   `surface()` with the engine's features (`typedSurface`, which `shadeMaterial` uses too), texture filtering by ray
-  cones. No shader branches on the type.
+  cones. No shader branches on the type. Measured against one shader switching over the types (as the build would
+  generate it, features read at run time: `test/singleHit.slang`, through `singleHitShader`; the same image,
+  `oneShaderSwitchingOverTheTypesShadesHitsAsTheirBinsDo`) with `HitShadingBenchmark` (RX 9070 XT, 2026-11-03,
+  3,000 rocks over 7 shading bins of 5 types, 2 bounces, binning and shading passes, 4 rounds after a warm-up):
+
+  | Rays | Way | Binning | Shading | Both |
+  |---|---|---|---|---|
+  | 256 x 256 (512 probes of 128) | binned, a dispatch per bin | 0.04 ms | 0.10 ms | 0.14-0.15 ms |
+  | 256 x 256 | one shader switching | - | 0.25 ms | 0.25 ms |
+  | 1920 x 1080 | binned, a dispatch per bin | 0.84-0.99 ms | 1.10-1.27 ms | 1.95-2.27 ms |
+  | 1920 x 1080 | one shader switching | - | 2.75-3.34 ms | 2.75-3.34 ms |
+
+  Binning costs its passes and still wins at both sizes: the switch's shading alone takes longer than binning and
+  shading by type. It is not offered. A type's geometry hook (`keep()`) makes holes at hits as in every pass (shadow
+  rays still stop at them: occlusion tests only alpha masks).
 - **Light transport:** the BRDF shading uses (`reflected()`), sampled by its lobes (Lambert by the cosine, GGX and the
   clear coat by their visible normals, diffuse transmission behind), every light of the list by a shadow ray
   (next-event estimation), emission and the environment where paths meet them, transmission refracted through thin
