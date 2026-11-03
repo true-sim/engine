@@ -1,0 +1,439 @@
+package com.truesim.engine.ui;
+
+import static com.truesim.testing.AllocationAssertions.assertAllocationFree;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.within;
+
+import com.truesim.engine.render.Keys;
+import com.truesim.engine.ui.layout.PrimitiveConstants;
+import com.truesim.ui.core.draw.DrawList;
+import com.truesim.ui.core.draw.Primitive;
+import com.truesim.ui.core.draw.Rgba;
+import com.truesim.ui.core.draw.UiTexture;
+import com.truesim.ui.core.draw.UiTextures;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import org.assertj.core.data.Offset;
+import org.junit.jupiter.api.Test;
+
+/** The UI renderer on the GPU: each kind of primitive, clipping, batching, uploads; read back from the UI image. */
+class UiRendererTest {
+
+    private static final int W = 256;
+    private static final int H = 128;
+    private static final long RED = Rgba.pack(1, 0, 0, 1);
+    private static final long GREEN = Rgba.pack(0, 1, 0, 1);
+    private static final long BLUE = Rgba.pack(0, 0, 1, 1);
+    private static final Offset<Float> CLOSE = within(0.01f);
+
+    /** A list of one range holding what {@code record} records. */
+    static DrawList list(int capacity, java.util.function.Consumer<DrawList> record) {
+        DrawList list = new DrawList();
+        int start = list.allocate(capacity);
+        list.begin(start, capacity);
+        record.accept(list);
+        assertThat(list.end()).as("fits").isTrue();
+        return list;
+    }
+
+    /**
+     * A synthetic MTSDF texture of a disc: every channel the true signed distance (0.5 on the edge, positive inside),
+     * {@code range} texels from 0 to 1, as msdfgen encodes it.
+     */
+    static UiTexture disc(UiTextures textures, int size, float radius, float range) {
+        UiTexture texture = textures.create("disc", size, size, UiTexture.Format.RGBA8_UNORM);
+        byte[] pixels = texture.pixels();
+        float centre = size / 2f;
+        for (int y = 0; y < size; y++) {
+            for (int x = 0; x < size; x++) {
+                float d = radius - (float) Math.hypot(x + 0.5f - centre, y + 0.5f - centre);
+                int v = Math.round(Math.min(1, Math.max(0, 0.5f + d / range)) * 255);
+                int o = (y * size + x) * 4;
+                pixels[o] = (byte) v;
+                pixels[o + 1] = (byte) v;
+                pixels[o + 2] = (byte) v;
+                pixels[o + 3] = (byte) v;
+            }
+        }
+        texture.markDirty(0, 0, size, size);
+        return texture;
+    }
+
+    @Test
+    void theShadersConstantsAreThePrimitiveLayout() throws IllegalAccessException {
+        int checked = 0;
+        for (Field constant : PrimitiveConstants.class.getFields()) {
+            if (!Modifier.isStatic(constant.getModifiers())) {
+                continue;
+            }
+            Object expected = constant.getName().equals("CLIP_FLOATS") ? DrawList.CLIP_FLOATS
+                : field(Primitive.class, constant.getName());
+            assertThat(constant.get(null)).as(constant.getName()).isEqualTo(expected);
+            checked++;
+        }
+        assertThat(checked).isGreaterThanOrEqualTo(30);
+        assertThat(PrimitiveConstants.WORDS * 4).isEqualTo(Primitive.BYTES);
+        // and every layout constant of Primitive is mirrored
+        for (Field constant : Primitive.class.getFields()) {
+            if (Modifier.isStatic(constant.getModifiers()) && constant.getType() == int.class
+                && !constant.getName().equals("BYTES")) {
+                assertThat(field(PrimitiveConstants.class, constant.getName())).as(constant.getName())
+                    .isEqualTo(constant.get(null));
+            }
+        }
+    }
+
+    private static Object field(Class<?> type, String name) {
+        try {
+            return type.getField(name).get(null);
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(type.getSimpleName() + " has no " + name, e);
+        }
+    }
+
+    @Test
+    void boxesFillBorderAndRoundTheirCorners() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            DrawList list = list(3, l -> {
+                l.box(10.5f, 10, 60, 60, RED, 0, 0, 0, 0, 0, 0);
+                l.box(80, 10, 180, 110, GREEN, 30, 0, 10, 0, 6, BLUE);
+                l.gradientBox(190, 10, 250, 40, RED, BLUE, 0, 0, 0, 0, 0, 0, 0);
+            });
+            rig.frame(ui, null, list);
+            assertThat(rig.at(30, 30)).as("inside: the fill, premultiplied").containsExactly(new float[] {1, 0, 0, 1},
+                CLOSE);
+            assertThat(rig.at(5, 30)).as("outside").containsExactly(new float[] {0, 0, 0, 0}, CLOSE);
+            // The edge at x = 10.5 runs through pixel 10's centre: half covered; the pixels beside it not, and fully.
+            assertThat(rig.at(10, 30, 3)).as("anti-aliased edge").isCloseTo(0.5f, within(0.05f));
+            assertThat(rig.at(9, 30, 3)).isZero();
+            assertThat(rig.at(11, 30, 3)).isEqualTo(1f, CLOSE);
+            assertThat(rig.at(130, 60)).as("green inside the border").containsExactly(new float[] {0, 1, 0, 1}, CLOSE);
+            assertThat(rig.at(83, 60)).as("the border").containsExactly(new float[] {0, 0, 1, 1}, CLOSE);
+            assertThat(rig.at(176, 60)).as("the border on the right").containsExactly(new float[] {0, 0, 1, 1},
+                CLOSE);
+            assertThat(rig.at(82, 12, 3)).as("cut off by the 30 px corner").isZero();
+            assertThat(rig.at(178, 12)).as("the sharp top right corner").containsExactly(new float[] {0, 0, 1, 1},
+                CLOSE);
+            assertThat(rig.at(178, 108, 3)).as("the 10 px bottom right corner").isZero();
+            // Gradient left to right in linear light, premultiplied.
+            assertThat(rig.at(190, 25, 0)).isGreaterThan(0.95f);
+            assertThat(rig.at(249, 25, 2)).isGreaterThan(0.95f);
+            assertThat(rig.at(219, 25)).as("half way").containsExactly(new float[] {0.5f, 0, 0.5f, 1},
+                within(0.03f));
+            rig.screenshot("boxes");
+        }
+    }
+
+    @Test
+    void shadowsBlurByTheirSigma() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            long black = Rgba.pack(0, 0, 0, 0.8f);
+            DrawList list = list(2, l -> {
+                l.shadow(40, 30, 120, 90, black, 8, 8, 8, 8, 6);
+                l.shadow(150, 30, 230, 90, black, 0, 0, 0, 0, 0);
+            });
+            rig.frame(ui, null, list);
+            assertThat(rig.at(80, 60, 3)).as("well inside: its alpha").isCloseTo(0.8f, within(0.02f));
+            assertThat(rig.at(40, 60, 3)).as("on the edge: half").isCloseTo(0.4f, within(0.05f));
+            assertThat(rig.at(30, 60, 3)).as("a sigma and a half out: faint").isBetween(0.01f, 0.1f);
+            assertThat(rig.at(21, 60, 3)).as("beyond three sigma: nothing").isLessThan(0.005f);
+            assertThat(rig.at(42, 32, 3)).as("the rounded corner is softer than the side")
+                .isLessThan(rig.at(42, 60, 3));
+            assertThat(rig.at(190, 60, 3)).as("no blur: a hard box").isCloseTo(0.8f, within(0.01f));
+            assertThat(rig.at(148, 60, 3)).isZero();
+            rig.screenshot("shadows");
+        }
+    }
+
+    @Test
+    void glyphsDecodeTheMtsdfAtTheirPixelRange() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            UiTextures textures = new UiTextures();
+            UiTexture disc = disc(textures, 64, 20, 8);
+            // Drawn at twice the atlas size: the disc's radius is 40 px, the range 16 px on screen; the first centred on
+            // pixel (64, 64)'s centre.
+            DrawList list = list(3, l -> {
+                l.glyph(0.5f, 0.5f, 128.5f, 128.5f, 0, 0, 1, 1, disc.id(), 16, Rgba.WHITE, 0, 0, 0);
+                l.glyph(128, 0, 256, 128, 0, 0, 1, 1, disc.id(), 16, GREEN, 4, RED, 0);
+            });
+            rig.frame(ui, textures, list);
+            assertThat(rig.at(64, 64)).containsExactly(new float[] {1, 1, 1, 1}, CLOSE);
+            assertThat(rig.at(64 + 37, 64, 3)).as("3 px inside the edge").isGreaterThan(0.97f);
+            assertThat(rig.at(64 + 43, 64, 3)).as("3 px outside").isLessThan(0.03f);
+            assertThat(rig.at(64 + 40, 64, 3)).as("on the edge").isCloseTo(0.5f, within(0.15f));
+            // The outlined one: green inside, a 4 px red ring outside the edge.
+            assertThat(rig.at(192, 64)).containsExactly(new float[] {0, 1, 0, 1}, CLOSE);
+            assertThat(rig.at(192 + 42, 64)).as("the outline").containsExactly(new float[] {1, 0, 0, 1},
+                within(0.05f));
+            assertThat(rig.at(192 + 47, 64, 3)).as("past the outline").isLessThan(0.03f);
+            assertThat(ui.slot(disc.id())).isNotNegative();
+            rig.screenshot("glyphs");
+        }
+    }
+
+    @Test
+    void boldGlyphsGrowByTheirWeight() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            UiTextures textures = new UiTextures();
+            UiTexture disc = disc(textures, 64, 20, 8);
+            DrawList list = list(1, l -> l.glyph(0, 0, 128, 128, 0, 0, 1, 1, disc.id(), 16, Rgba.WHITE, 0, 0, 3));
+            rig.frame(ui, textures, list);
+            assertThat(rig.at(64 + 42, 64, 3)).as("2 px outside the edge, inside the bold one").isGreaterThan(0.97f);
+            assertThat(rig.at(64 + 46, 64, 3)).isLessThan(0.03f);
+        }
+    }
+
+    @Test
+    void outlinesAndWeightsStayWithinWhatTheAtlasEncodes() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            UiTextures textures = new UiTextures();
+            UiTexture disc = disc(textures, 64, 20, 8);
+            // At the atlas's size the range is 8 px: distances reach 4 px from the edge; a 10 px outline and a
+            // weight of 10 would otherwise fill the whole quad from the clamped encoding.
+            DrawList list = list(2, l -> {
+                l.glyph(0, 0, 64, 64, 0, 0, 1, 1, disc.id(), 8, Rgba.WHITE, 10, RED, 0);
+                l.glyph(64, 0, 128, 64, 0, 0, 1, 1, disc.id(), 8, Rgba.WHITE, 0, 0, 10);
+            });
+            rig.frame(ui, textures, list);
+            assertThat(rig.at(2, 2, 3)).as("the outlined quad's corner").isZero();
+            assertThat(rig.at(66, 2, 3)).as("the bold quad's corner").isZero();
+            assertThat(rig.at(32 + 22, 32)).as("the outline, as wide as encoded").containsExactly(
+                new float[] {1, 0, 0, 1}, within(0.05f));
+        }
+    }
+
+    @Test
+    void imagesAreSampledAsLinearAndNineSlicesKeepTheirCorners() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            UiTextures textures = new UiTextures();
+            UiTexture gray = textures.create("gray", 2, 2, UiTexture.Format.RGBA8_SRGB);
+            java.util.Arrays.fill(gray.pixels(), (byte) 188); // sRGB 188: linear 0.5, opaque
+            for (int i = 3; i < 16; i += 4) {
+                gray.pixels()[i] = (byte) 255;
+            }
+            gray.markDirty(0, 0, 2, 2);
+            // A 12 x 12 skin: a 3-texel red frame around a green middle.
+            UiTexture skin = textures.create("skin", 12, 12, UiTexture.Format.RGBA8_UNORM);
+            byte[] p = skin.pixels();
+            for (int y = 0; y < 12; y++) {
+                for (int x = 0; x < 12; x++) {
+                    boolean frame = x < 3 || y < 3 || x >= 9 || y >= 9;
+                    int o = (y * 12 + x) * 4;
+                    p[o] = (byte) (frame ? 255 : 0);
+                    p[o + 1] = (byte) (frame ? 0 : 255);
+                    p[o + 3] = (byte) 255;
+                }
+            }
+            skin.markDirty(0, 0, 12, 12);
+            DrawList list = list(3, l -> {
+                l.image(10, 10, 50, 50, 0, 0, 1, 1, gray.id(), Rgba.pack(1, 1, 1, 0.5f));
+                l.nineSlice(60, 10, 250, 120, 0, 0, 1, 1, skin.id(), Rgba.WHITE, 12, 12, 12, 12, 3, 3, 3, 3);
+                l.image(10, 60, 50, 100, 0, 0, 0, 0, 0, BLUE);
+            });
+            rig.frame(ui, textures, list);
+            assertThat(rig.at(30, 30)).as("sRGB 188 is linear 0.5; tinted to half alpha, premultiplied")
+                .containsExactly(new float[] {0.25f, 0.25f, 0.25f, 0.5f}, within(0.01f));
+            assertThat(rig.at(30, 80)).as("no texture: the tint").containsExactly(new float[] {0, 0, 1, 1}, CLOSE);
+            assertThat(rig.at(65, 65)).as("the left side, 12 px wide").containsExactly(new float[] {1, 0, 0, 1},
+                CLOSE);
+            assertThat(rig.at(155, 15)).as("the top").containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            assertThat(rig.at(245, 115)).as("the corner").containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            assertThat(rig.at(155, 65)).as("the middle, stretched").containsExactly(new float[] {0, 1, 0, 1}, CLOSE);
+            assertThat(rig.at(200, 65)).containsExactly(new float[] {0, 1, 0, 1}, CLOSE);
+            rig.screenshot("images");
+        }
+    }
+
+    @Test
+    void linesAreAntiAliasedSegments() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            DrawList list = list(3, l -> {
+                l.line(20, 20, 220, 20, 4, RED);
+                l.line(20, 40, 120, 120, 2, GREEN);
+                l.line(150, 60.5f, 240, 60.5f, 0.5f, Rgba.WHITE);
+            });
+            rig.frame(ui, null, list);
+            assertThat(rig.at(120, 19)).containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            assertThat(rig.at(120, 21)).containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            assertThat(rig.at(120, 24, 3)).isZero();
+            assertThat(rig.at(15, 20, 3)).as("butt ends").isZero();
+            assertThat(rig.at(70, 80, 1)).as("on the diagonal").isGreaterThan(0.9f);
+            assertThat(rig.at(80, 70, 3)).as("beside it").isZero();
+            assertThat(rig.at(200, 60, 3)).as("a hair line: a pixel, fainter").isCloseTo(0.5f, within(0.05f));
+            rig.screenshot("lines");
+        }
+    }
+
+    @Test
+    void primitivesAreClippedByRoundedRectangles() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            DrawList list = new DrawList();
+            int sharp = list.addClip(20, 20, 100, 100, 0);
+            int round = list.addClip(140, 20, 220, 100, 20);
+            int start = list.allocate(4);
+            list.begin(start, 4);
+            list.clip(sharp);
+            list.box(0, 0, 120, 120, RED, 0, 0, 0, 0, 0, 0);
+            list.clip(round);
+            list.box(130, 0, 250, 120, GREEN, 0, 0, 0, 0, 0, 0);
+            list.line(130, 60, 250, 60, 4, BLUE);
+            list.clip(DrawList.NO_CLIP);
+            list.box(0, 110, 10, 120, BLUE, 0, 0, 0, 0, 0, 0);
+            assertThat(list.end()).isTrue();
+            rig.frame(ui, null, list);
+            assertThat(rig.at(10, 60, 3)).as("left of the clip").isZero();
+            assertThat(rig.at(60, 60)).containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            assertThat(rig.at(105, 60, 3)).as("right of it").isZero();
+            assertThat(rig.at(142, 22, 3)).as("outside the clip's rounded corner").isZero();
+            assertThat(rig.at(180, 22)).containsExactly(new float[] {0, 1, 0, 1}, CLOSE);
+            assertThat(rig.at(180, 60)).as("the line over it").containsExactly(new float[] {0, 0, 1, 1}, CLOSE);
+            assertThat(rig.at(135, 60, 3)).as("the line clipped too").isZero();
+            assertThat(rig.at(5, 115)).as("unclipped").containsExactly(new float[] {0, 0, 1, 1}, CLOSE);
+            // Moving a clip moves what it lets through, and uploads the clip table only.
+            list.setClip(sharp, 20, 20, 50, 100, 0);
+            rig.frame(ui, null, list);
+            assertThat(ui.uploadedBytes()).isEqualTo(3L * DrawList.CLIP_FLOATS * 4);
+            assertThat(rig.at(60, 60, 3)).isZero();
+            assertThat(rig.at(40, 60, 0)).isEqualTo(1f, CLOSE);
+            rig.screenshot("clipping");
+        }
+    }
+
+    @Test
+    void anUnchangedFrameUploadsNothingAndChangesUploadTheirRange() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            UiTextures textures = new UiTextures();
+            UiTexture disc = disc(textures, 32, 10, 4);
+            DrawList list = new DrawList();
+            int first = list.allocate(2);
+            int second = list.allocate(2);
+            list.begin(first, 2);
+            list.box(10, 10, 50, 50, RED, 0, 0, 0, 0, 0, 0);
+            list.end();
+            list.begin(second, 2);
+            list.glyph(60, 10, 92, 42, 0, 0, 1, 1, disc.id(), 4, Rgba.WHITE, 0, 0, 0);
+            list.end();
+            rig.frame(ui, textures, list);
+            assertThat(ui.uploadedBytes()).as("all of it once: 4 primitives, a clip, the texture")
+                .isEqualTo(4L * Primitive.BYTES + DrawList.CLIP_FLOATS * 4 + 32 * 32 * 4);
+            rig.frame(ui, textures, list);
+            assertThat(ui.uploadedBytes()).as("nothing changed").isZero();
+            // The UI records the same again: still nothing.
+            list.begin(first, 2);
+            list.box(10, 10, 50, 50, RED, 0, 0, 0, 0, 0, 0);
+            list.end();
+            rig.frame(ui, textures, list);
+            assertThat(ui.uploadedBytes()).isZero();
+            // One box changes colour: its 64 bytes.
+            list.begin(first, 2);
+            list.box(10, 10, 50, 50, BLUE, 0, 0, 0, 0, 0, 0);
+            list.end();
+            rig.frame(ui, textures, list);
+            assertThat(ui.uploadedBytes()).isEqualTo(Primitive.BYTES);
+            assertThat(rig.at(30, 30)).containsExactly(new float[] {0, 0, 1, 1}, CLOSE);
+            // A texture region written: that region only.
+            disc.markDirty(4, 4, 8, 2);
+            rig.frame(ui, textures, list);
+            assertThat(ui.uploadedBytes()).isEqualTo(8 * 2 * 4);
+            assertThat(ui.totalUploadedBytes()).isEqualTo(4L * Primitive.BYTES + DrawList.CLIP_FLOATS * 4
+                + 32 * 32 * 4 + Primitive.BYTES + 8 * 2 * 4);
+            // A primitive removed (an empty slot): drawn as nothing.
+            list.begin(second, 2);
+            list.end();
+            rig.frame(ui, textures, list);
+            assertThat(rig.at(76, 26, 3)).isZero();
+            assertThat(rig.at(30, 30, 3)).isEqualTo(1f, CLOSE);
+        }
+    }
+
+    @Test
+    void submittingAnUnchangedOrSlightlyChangedFrameAllocatesNothing() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            UiTextures textures = new UiTextures();
+            disc(textures, 32, 10, 4);
+            DrawList[] layers = {list(200, l -> {
+                for (int i = 0; i < 100; i++) {
+                    l.box(i, i, i + 10, i + 10, RED, 2, 2, 2, 2, 1, BLUE);
+                    l.glyph(i, i, i + 8, i + 8, 0, 0, 1, 1, 1, 4, Rgba.WHITE, 0, 0, 0);
+                }
+            }), new DrawList()};
+            rig.frame(ui, textures, layers);
+            ui.batching(GpuUiRenderer.Batching.PER_KIND);
+            float[] x = {0};
+            assertAllocationFree(() -> {
+                ui.submit(layers, 2, textures, W, H);
+                // one box moves: the dirty range and the runs found again
+                layers[0].begin(0, 200);
+                for (int i = 0; i < 100; i++) {
+                    layers[0].box(i + x[0], i, i + 10, i + 10, RED, 2, 2, 2, 2, 1, BLUE);
+                    layers[0].glyph(i, i, i + 8, i + 8, 0, 0, 1, 1, 1, 4, Rgba.WHITE, 0, 0, 0);
+                }
+                layers[0].end();
+                x[0] = x[0] == 0 ? 1 : 0;
+                ui.submit(layers, 2, textures, W, H);
+            });
+        }
+    }
+
+    @Test
+    void everyBatchingDrawsTheSameImage() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            UiTextures textures = new UiTextures();
+            UiTexture disc = disc(textures, 32, 10, 4);
+            // Mixed short runs, then a run of 300 glyphs (a block of text), then a box over them.
+            DrawList list = list(400, l -> {
+                for (int i = 0; i < 8; i++) {
+                    float x = 10 + i * 30;
+                    l.shadow(x + 2, 22, x + 24, 52, Rgba.pack(0, 0, 0, 0.5f), 4, 4, 4, 4, 3);
+                    l.box(x, 20, x + 22, 50, Rgba.pack(0.2f, 0.3f, 0.8f, 1), 4, 4, 4, 4, 1, Rgba.WHITE);
+                    l.glyph(x + 3, 25, x + 19, 41, 0, 0, 1, 1, disc.id(), 2, Rgba.WHITE, 0, 0, 0);
+                    l.line(x, 60 + i * 5, x + 25, 70 + i * 5, 1.5f, GREEN);
+                }
+                for (int i = 0; i < 300; i++) {
+                    l.glyph(4 + (i % 50) * 5, 80 + (i / 50) * 7, 10 + (i % 50) * 5, 86 + (i / 50) * 7, 0, 0, 1, 1,
+                        disc.id(), 0.75f, Rgba.pack(1, 1, 0, 1), 0, 0, 0);
+                }
+                l.box(100, 90, 140, 110, Rgba.pack(1, 0, 1, 0.5f), 5, 5, 5, 5, 0, 0);
+            });
+            assertThat(ui.batching()).as("the default").isEqualTo(GpuUiRenderer.Batching.ADAPTIVE);
+            ui.batching(GpuUiRenderer.Batching.UBER);
+            rig.frame(ui, textures, list);
+            float[] uber = rig.rgba.clone();
+            assertThat(ui.draws()).isEqualTo(1);
+            ui.batching(GpuUiRenderer.Batching.PER_KIND);
+            rig.frame(ui, textures, list);
+            assertThat(ui.draws()).as("a run per primitive, the text one run, the last box").isEqualTo(32 + 1 + 1);
+            assertThat(rig.rgba).containsExactly(uber, within(1e-3f));
+            ui.batching(GpuUiRenderer.Batching.ADAPTIVE);
+            rig.frame(ui, textures, list);
+            assertThat(ui.draws()).as("the short runs together, the text alone, the box").isEqualTo(3);
+            assertThat(ui.uploadedBytes()).as("planning again uploads nothing").isZero();
+            assertThat(rig.rgba).containsExactly(uber, within(1e-3f));
+            rig.screenshot("batchings");
+        }
+    }
+
+    @Test
+    void aUiOfAnotherSizeIsScaledToTheView() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            DrawList list = list(1, l -> l.box(10, 10, 20, 20, RED, 0, 0, 0, 0, 0, 0));
+            ui.submit(new DrawList[] {list}, 1, null, W / 2, H / 2); // the UI in half the pixels: drawn twice as large
+            rig.frame();
+            assertThat(rig.at(30, 30)).containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            assertThat(rig.at(42, 30, 3)).isZero();
+            assertThat(rig.at(18, 30, 3)).isZero();
+        }
+    }
+}
