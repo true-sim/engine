@@ -138,6 +138,7 @@ public final class AudioSync {
         stores[n] = sounds;
         marks[n] = -1;
         tracked[n] = new LongIntMap(64);
+        sounds.dialogue().heardByEngine(); // its lines are heard when this says
         return this;
     }
 
@@ -425,6 +426,7 @@ public final class AudioSync {
         if (music != null) {
             music();
         }
+        long heardFrame = clock.heardFrame();
         for (int t = 0; t < tracks.length; t++) {
             Track track = tracks[t];
             if (track != null && track.sound != null && !track.gone) {
@@ -433,7 +435,66 @@ public final class AudioSync {
                     place(t);
                     hear(t);
                 }
+                if (track.sound != null && track.sound.bus() == Bus.VOICE) {
+                    line(track, heardFrame);
+                }
             }
+        }
+        for (Sounds store : stores) {
+            store.dialogue().update(); // its events at the heard times just told
+        }
+    }
+
+    /** Tells a dialogue line where it is heard ({@code heardFrame} against its start) and how loud it is. */
+    private void line(Track track, long heardFrame) {
+        Sounds store = stores[track.store];
+        if (!store.dialogue().saying(track.id)) {
+            return;
+        }
+        if (track.state[0] != PLAYING) {
+            store.dialogue().heard(track.id, -1); // loading: not heard yet
+            return;
+        }
+        store.dialogue().heard(track.id, (double) (heardFrame - track.starts[0]) / rate);
+        store.dialogue().envelope(track.id, renderer.level(track.slots[0]));
+    }
+
+    /**
+     * Fills {@code out} with the loudest captioned sounds device listener {@code listener} hears (§2.17, visualized
+     * sound for a HUD ring): their caption, direction from the listener in its frame (x right, y up, -z ahead) and
+     * loudness (the attenuation at the distance times the voice's gain). Returns how many. Allocates nothing.
+     */
+    public int indicators(long listener, Indicators out) {
+        out.clear();
+        for (int s = 0; s < stores.length && s < deviceIds.length; s++) {
+            for (int n = 0; n < deviceCounts[s]; n++) {
+                if (deviceIds[s][n] == listener) {
+                    indicators(s, n, out);
+                    return out.count();
+                }
+            }
+        }
+        return 0;
+    }
+
+    private void indicators(int s, int n, Indicators out) {
+        for (Track track : tracks) {
+            if (track == null || track.sound == null || track.gone || track.store != s
+                || track.sound.caption() == null || !playing(track) || !placed(track)) {
+                continue;
+            }
+            relativeTo(track, devices[s], 7 * n);
+            double x = relative[0];
+            double y = relative[1];
+            double z = relative[2];
+            double distance = Math.sqrt(x * x + y * y + z * z);
+            int v = 0;
+            while (track.state[v] != PLAYING) {
+                v++;
+            }
+            float loudness = track.sound.attenuation().gain((float) distance) * gain(track, v);
+            double d = Math.max(distance, 1e-9);
+            out.offer(track.sound.caption(), track.id, (float) (x / d), (float) (y / d), (float) (z / d), loudness);
         }
     }
 

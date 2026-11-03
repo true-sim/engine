@@ -115,6 +115,7 @@ final class Voices {
     private final float[] auxTo;
     private final boolean[] starving;
     private final float[] lastPlayed;
+    private final float[] levels;
     private final long[] resumes;
     private final float[] dryGains;
     private int starvations;
@@ -223,6 +224,7 @@ final class Voices {
         auxTo = new float[capacity];
         starving = new boolean[capacity];
         lastPlayed = new float[2 * capacity];
+        levels = new float[capacity];
         resumes = new long[capacity];
         dryGains = new float[capacity];
         dopplerAlpha = (float) (1 - Maths.exp(-(double) AudioFormat.DEFAULT_BLOCK / rate / 0.05));
@@ -297,6 +299,7 @@ final class Voices {
         auxTo[slot] = 0;
         starving[slot] = false;
         dryGains[slot] = 1;
+        levels[slot] = 0;
         if (patch != null || input >= 0) { // a patch or a listener's mix: mono at the mix rate, endless
             segments[slot] = null;
             pcm16[slot] = false;
@@ -689,6 +692,11 @@ final class Voices {
         heardMax[slot] = 0;
     }
 
+    /** Voice {@code slot}'s level: its output's RMS over the last block, falling over about 100 ms. */
+    float level(int slot) {
+        return levels[slot];
+    }
+
     /** Blocks rendering listener {@code l} has rendered (it renders only while something consumes it). */
     long listenerBlocks(int l) {
         return mixBlocks[l];
@@ -980,6 +988,7 @@ final class Voices {
             rateStep = 0;
         }
         float[] heard = mixing && !input && heardMax[slot] > 0 ? voiceBuffers[slot] : null;
+        double energy = 0;
         if (heard != null) {
             Arrays.fill(heard, 0, frames, 0);
         }
@@ -1061,6 +1070,7 @@ final class Voices {
                     lastPlayed[2 * slot] = l / Math.max(g, 1e-30f);
                     lastPlayed[2 * slot + 1] = r / Math.max(g, 1e-30f);
                 }
+                energy += 0.5f * (l * l + r * r);
                 out[f * channels] += l * (panFrom[o] + (panTo[o] - panFrom[o]) * t);
                 out[f * channels + 1] += r * (panFrom[o + 1] + (panTo[o + 1] - panFrom[o + 1]) * t);
             } else {
@@ -1081,6 +1091,7 @@ final class Voices {
                     heard[f] = s * gain * env * realGain * dry;
                 }
                 s *= g;
+                energy += s * s;
                 for (int c = 0; c < channels; c++) {
                     out[f * channels + c] += s * (panFrom[o + c] + (panTo[o + c] - panFrom[o + c]) * t);
                 }
@@ -1105,6 +1116,9 @@ final class Voices {
         envelopes[slot] = env;
         lowPass[slot] = low;
         dryGains[slot] = dry;
+        // its level (a dialogue line's envelope, for a jaw): the block's RMS, falling over about 100 ms
+        float rms = (float) Math.sqrt(energy / frames);
+        levels[slot] = Math.max(rms, levels[slot] * (1 - Math.min(1, frames / (0.1f * rate))));
         auxFrom[slot] = auxTo[slot];
         if (ring != null) {
             ring.readTo((long) position - 2);

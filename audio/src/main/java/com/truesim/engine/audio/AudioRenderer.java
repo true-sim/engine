@@ -246,6 +246,14 @@ public final class AudioRenderer implements AutoCloseable {
         render(scratch, 0, format.block());
     }
 
+    /**
+     * Voice {@code slot}'s level (its output's RMS, falling over about 100 ms): a line's envelope for a jaw. Read from
+     * any thread: a float written by the audio thread, a block late at worst.
+     */
+    public float level(int slot) {
+        return voices.level(slot);
+    }
+
     /** Blocks rendering listener {@code l} has rendered: it renders only while something consumes its mix. */
     public long listenerBlocks(int l) {
         return voices.listenerBlocks(l);

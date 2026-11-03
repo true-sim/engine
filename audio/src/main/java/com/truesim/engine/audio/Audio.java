@@ -266,6 +266,11 @@ public final class Audio implements Plugin {
         return sync().patches();
     }
 
+    /** Fills {@code out} with the loudest captioned sounds {@code listener} hears; see {@link AudioSync#indicators}. */
+    public int indicators(long listener, Indicators out) {
+        return sync().indicators(listener, out);
+    }
+
     /** The mixer: the layout, snapshots, player volumes. */
     public Mixer mixer() {
         renderer();
