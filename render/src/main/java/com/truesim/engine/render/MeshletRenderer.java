@@ -475,6 +475,11 @@ public final class MeshletRenderer implements AutoCloseable {
             indirect, pipelines);
     }
 
+    /** For ForwardShadingBenchmark: see {@link RasterPipelines#singleShaderForBenchmark}. */
+    void singleShaderForBenchmark(String full, String lean, int... constants) {
+        raster.singleShaderForBenchmark(full, lean, constants);
+    }
+
     /** The scene it draws. */
     public GpuScene scene() {
         return scene;

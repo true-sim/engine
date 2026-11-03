@@ -58,7 +58,7 @@ final class RasterPipelines implements AutoCloseable {
     private final Pipeline[][] indexed = new Pipeline[3][];
     private final Pipeline[][] mesh = new Pipeline[3][];
     // The blended bin into the transparency pass's targets: on the indexed path, and on mesh shaders (null without).
-    private final Pipeline indexedBlended;
+    private Pipeline indexedBlended;
     private Pipeline meshBlended;
     private final int colorFormat;
     private final int depthFormat;
@@ -125,6 +125,48 @@ final class RasterPipelines implements AutoCloseable {
             }
             if (idsShader != null) {
                 idsShader.close();
+            }
+        }
+    }
+
+    /**
+     * For ForwardShadingBenchmark only (a prototype of the generated single shader): the single shader's shaded
+     * pipelines remade with the fragment entries {@code single*Main} of {@code full} (from full vertices) and
+     * {@code lean} (the lean mesh path), {@code constants} their specialization constants.
+     */
+    @AllowAllocation("a benchmark's set-up")
+    void singleShaderForBenchmark(String full, String lean, int... constants) {
+        try (ShaderModule draw = ShaderModule.load(device, "shaders/meshlets/draw.spv");
+             ShaderModule fullShader = ShaderModule.load(device, full);
+             ShaderModule leanShader = ShaderModule.load(device, lean)) {
+            for (Pipeline pipeline : indexed[SHADED]) {
+                pipeline.close();
+            }
+            indexedBlended.close();
+            indexed[SHADED] = bins(bin -> raster(bin, draw, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain")
+                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, fullShader, masking(bin) ? "singleMaskedMain"
+                    : "singleFragmentMain").constants(constants).color(colorFormat).depth(depthFormat).build());
+            indexedBlended = blended(raster(BIN_BLENDED, draw, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain")
+                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, fullShader, "singleBlendedMain").constants(constants),
+                depthFormat);
+            if (mesh[SHADED] != null) {
+                for (Pipeline pipeline : mesh[SHADED]) {
+                    pipeline.close();
+                }
+                meshBlended.close();
+                try (ShaderModule geometry = ShaderModule.load(device, slimMeshes ? "shaders/meshlets/lean.spv"
+                    : "shaders/meshlets/mesh.spv")) {
+                    String entry = slimMeshes ? "meshLeanMain" : "meshIdsMain";
+                    ShaderModule fragment = slimMeshes ? leanShader : fullShader;
+                    String prefix = slimMeshes ? "singleLean" : "single";
+                    mesh[SHADED] = bins(bin -> raster(bin, geometry, VK_SHADER_STAGE_MESH_BIT_EXT, entry)
+                        .stage(VK_SHADER_STAGE_FRAGMENT_BIT, fragment, prefix + (masking(bin) ? "MaskedMain"
+                            : slimMeshes ? "Main" : "FragmentMain")).constants(constants).color(colorFormat)
+                        .depth(depthFormat).build());
+                    meshBlended = blended(raster(BIN_BLENDED, geometry, VK_SHADER_STAGE_MESH_BIT_EXT, entry)
+                        .stage(VK_SHADER_STAGE_FRAGMENT_BIT, fragment, prefix + "BlendedMain").constants(constants),
+                        depthFormat);
+                }
             }
         }
     }

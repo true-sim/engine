@@ -113,6 +113,10 @@ class ForwardShadingBenchmark {
                 throw new IllegalStateException("material " + j + " got id " + id);
             }
         }
+        if (materials.types().indexOf(Glow.TYPE) != 1 || materials.types().indexOf(Tinted.TYPE) != 2
+            || materials.types().indexOf(CarPaint.TYPE) != 3) {
+            throw new IllegalStateException("types numbered otherwise than the single shader's constants");
+        }
         if (materials.binCount() != bins) {
             throw new IllegalStateException(bins + " bins wanted, the table numbers " + materials.binCount());
         }
@@ -142,6 +146,18 @@ class ForwardShadingBenchmark {
         scene.removeFrom(count + 1);
     }
 
+    /** The generated single shader's prototype (test/singleForward.slang): from full vertices, and lean. */
+    private static final String SINGLE_FULL = "shaders/test/singleForward.spv";
+    private static final String SINGLE_LEAN = "shaders/test/singleForward.spv";
+
+    /**
+     * The prototype's specialization constants: FEATURES (unused), then the numbers {@link #table} gives glow, tinted
+     * and car paint (registered first, in that order: 1, 2, 3).
+     */
+    private static int[] singleConstants() {
+        return new int[] {0, 1, 2, 3};
+    }
+
     /** One configuration's numbers of one round. */
     private record Sample(double gpu, double culling, double draws, double cpu, int drawCalls) {
     }
@@ -157,6 +173,7 @@ class ForwardShadingBenchmark {
              GpuImage shaded = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
                  VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
              MemoryStack stack = stackPush()) {
+            renderer.singleShaderForBenchmark(SINGLE_FULL, SINGLE_LEAN, singleConstants());
             MeshData rockMesh = MeshletBenchmark.rock(6);
             int rock = pool.add(rockMesh);
             int ground = pool.add(MeshletBenchmark.terrain(1024));
@@ -274,9 +291,14 @@ class ForwardShadingBenchmark {
      */
     private static void cold(VulkanInstance instance) {
         long salt = System.nanoTime();
-        try (VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
+        boolean info = instance.bestGpu().supports(org.lwjgl.vulkan.AMDShaderInfo.VK_AMD_SHADER_INFO_EXTENSION_NAME);
+        try (VulkanDevice device = info ? VulkanDevice.create(instance.bestGpu(),
+            List.of(org.lwjgl.vulkan.AMDShaderInfo.VK_AMD_SHADER_INFO_EXTENSION_NAME))
+            : VulkanDevice.createHeadless(instance.bestGpu())) {
+            shaderInfo = info;
             String[][] variants = {
-                {"single shader", "", "leanMain", "fragmentMain", "0"},
+                {"single shader (old, wrong)", "", "leanMain", "fragmentMain", "0"},
+                {"generated single shader", "single", "singleLeanMain", "singleFragmentMain", "0"},
                 {"metallic-roughness", "metallicRoughness", "metallicRoughnessLeanMain",
                     "metallicRoughnessFragmentMain", "0"},
                 {"metallic-roughness + coat + sheen", "metallicRoughness", "metallicRoughnessLeanMain",
@@ -287,33 +309,66 @@ class ForwardShadingBenchmark {
             for (int repeat = 0; repeat < 3; repeat++) {
                 for (String[] v : variants) {
                     double[] ms = new double[2];
+                    String[] registers = {"", ""};
                     for (int lean = 0; lean < 2; lean++) {
                         if (lean == 1 && !(device.meshShaders() && device.barycentrics() && device.primitiveIds())) {
                             ms[lean] = Double.NaN;
                             continue;
                         }
                         String geometry = lean == 1 ? "shaders/meshlets/lean.spv" : "shaders/meshlets/draw.spv";
-                        String fragment = v[1].isEmpty() ? geometry : "shaders/material-types/" + v[1]
-                            + (lean == 1 ? "ForwardLean.spv" : "Forward.spv");
+                        String fragment = v[1].isEmpty() ? geometry : v[1].equals("single") ? SINGLE_FULL
+                            : "shaders/material-types/" + v[1] + (lean == 1 ? "ForwardLean.spv" : "Forward.spv");
                         try (var g = com.truesim.engine.vulkan.ShaderModule.load(device, geometry);
                              var f = com.truesim.engine.vulkan.ShaderModule.load(device, fragment)) {
                             long t0 = System.nanoTime();
                             try (var pipeline = com.truesim.engine.vulkan.Pipeline.graphics(device)
                                 .stage(lean == 1 ? org.lwjgl.vulkan.EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT
                                     : org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_VERTEX_BIT, g,
-                                    lean == 1 ? (v[1].isEmpty() ? "meshLeanMain" : "meshLeanTypedMain") : "vertexMain")
+                                    lean == 1 ? (v[1].isEmpty() || v[1].equals("single") ? "meshLeanMain"
+                                        : "meshLeanTypedMain") : "vertexMain")
                                 .stage(org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_FRAGMENT_BIT, f, lean == 1 ? v[2] : v[3])
                                 .pushConstants(com.truesim.engine.render.layout.ForwardPush.BYTES)
-                                .constants(Integer.parseInt(v[4]), (int) (salt++))
+                                .constants(Integer.parseInt(v[4]), 1, 2, 3, (int) (salt++)) // id 4: no shader's
                                 .color(VK_FORMAT_R8G8B8A8_UNORM).depth(VK_FORMAT_D32_SFLOAT).build()) {
                                 ms[lean] = (System.nanoTime() - t0) / 1e6;
+                                if (repeat == 0) {
+                                    registers[lean] = registers(device, pipeline.handle());
+                                }
                             }
                         }
                     }
-                    System.out.printf(Locale.ROOT, "  cold, %s: lean mesh path %.1f ms, indexed %.1f ms%n", v[0], ms[1],
-                        ms[0]);
+                    System.out.printf(Locale.ROOT, "  cold, %s: lean mesh path %.1f ms%s, indexed %.1f ms%s%n", v[0],
+                        ms[1], registers[1], ms[0], registers[0]);
                 }
             }
+        }
+    }
+
+    private static boolean shaderInfo;
+
+    /**
+     * The fragment stage's registers of {@code pipeline} (VK_AMD_shader_info): vector and scalar registers used, and
+     * the waves a SIMD holds by its vector registers (the physical ones over those used); empty without the extension.
+     */
+    private static String registers(VulkanDevice device, long pipeline) {
+        if (!shaderInfo) {
+            return "";
+        }
+        try (MemoryStack stack = stackPush()) {
+            org.lwjgl.vulkan.VkShaderStatisticsInfoAMD info = org.lwjgl.vulkan.VkShaderStatisticsInfoAMD.create(
+                stack.ncalloc(org.lwjgl.vulkan.VkShaderStatisticsInfoAMD.ALIGNOF, 1, org.lwjgl.vulkan.VkShaderStatisticsInfoAMD.SIZEOF));
+            org.lwjgl.PointerBuffer size = stack.pointers(org.lwjgl.vulkan.VkShaderStatisticsInfoAMD.SIZEOF);
+            int result = org.lwjgl.vulkan.AMDShaderInfo.vkGetShaderInfoAMD(device.handle(), pipeline,
+                org.lwjgl.vulkan.VK10.VK_SHADER_STAGE_FRAGMENT_BIT,
+                org.lwjgl.vulkan.AMDShaderInfo.VK_SHADER_INFO_TYPE_STATISTICS_AMD, size,
+                org.lwjgl.system.MemoryUtil.memByteBuffer(info.address(), org.lwjgl.vulkan.VkShaderStatisticsInfoAMD.SIZEOF));
+            if (result != 0) {
+                return " (no shader info: " + result + ")";
+            }
+            int vgprs = info.resourceUsage().numUsedVgprs();
+            return String.format(Locale.ROOT, " (%d VGPRs, %d SGPRs, %d waves/SIMD of %d physical VGPRs)", vgprs,
+                info.resourceUsage().numUsedSgprs(), Math.min(16, info.numPhysicalVgprs() / Math.max(1, vgprs)),
+                info.numPhysicalVgprs());
         }
     }
 
