@@ -142,6 +142,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.lwjgl.PointerBuffer;
+import org.lwjgl.sdl.SDLClipboard;
+import org.lwjgl.sdl.SDLStdinc;
 import org.lwjgl.sdl.SDL_AudioDeviceEvent;
 import org.lwjgl.sdl.SDL_CommonEvent;
 import org.lwjgl.sdl.SDL_DisplayMode;
@@ -175,6 +177,7 @@ import org.lwjgl.sdl.SDL_TextInputEvent;
 import org.lwjgl.sdl.SDL_TouchFingerEvent;
 import org.lwjgl.sdl.SDL_WindowEvent;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.system.MemoryUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -455,6 +458,34 @@ public final class Platform implements AutoCloseable {
     }
 
     /** Keeps the screen saver and display sleep off while the platform runs (SDL's default), or lets them be. */
+    /**
+     * The system clipboard's text, or an empty string (none, or not text). SDL's copy is freed here: the string is
+     * the caller's.
+     */
+    @AllowAllocation("the clipboard is read when the user pastes")
+    public String clipboardText() {
+        long text = SDLClipboard.nSDL_GetClipboardText();
+        if (text == 0) {
+            return "";
+        }
+        try {
+            return MemoryUtil.memUTF8(text);
+        } finally {
+            SDLStdinc.nSDL_free(text);
+        }
+    }
+
+    /** Puts {@code text} on the system clipboard; false if SDL refused it. */
+    @AllowAllocation("the clipboard is written when the user copies")
+    public boolean clipboardText(String text) {
+        return SDLClipboard.SDL_SetClipboardText(text);
+    }
+
+    /** Whether the system clipboard holds text. */
+    public boolean hasClipboardText() {
+        return SDLClipboard.SDL_HasClipboardText();
+    }
+
     public void setKeepScreenOn(boolean on) {
         checkThread();
         if (on) {

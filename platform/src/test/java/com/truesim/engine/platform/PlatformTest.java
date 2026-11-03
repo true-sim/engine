@@ -83,6 +83,27 @@ class PlatformTest {
         event.free();
     }
 
+    @Test
+    void textInputHasKindsAndAnImeAreaAndTheClipboardHoldsText() {
+        Window window = platform.createWindow(WindowOptions.of("text", 200, 100).withHidden(true).withVulkan(false));
+        for (int kind : new int[] {Window.TEXT_INPUT_PASSWORD, Window.TEXT_INPUT_NUMBER, Window.TEXT_INPUT_MULTILINE,
+            Window.TEXT_INPUT_TEXT}) {
+            window.startTextInput(kind); // a running input restarts with the new kind
+            assertThat(window.textInputActive()).isTrue();
+        }
+        window.textInputArea(10, 20, 100, 18, 30);
+        window.stopTextInput();
+        assertThat(window.textInputActive()).isFalse();
+        // the offscreen driver may have no clipboard: whatever it holds reads back as a string, never null
+        boolean written = platform.clipboardText("true-sim \u2764");
+        String read = platform.clipboardText();
+        assertThat(read).isNotNull();
+        if (written && platform.hasClipboardText()) {
+            assertThat(read).isEqualTo("true-sim \u2764");
+        }
+        window.close();
+    }
+
     /** Records every event as a line of text. */
     private static final class Recorder implements PlatformListener {
         final List<String> events = new ArrayList<>();

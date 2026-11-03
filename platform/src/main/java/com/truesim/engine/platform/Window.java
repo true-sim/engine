@@ -48,7 +48,19 @@ import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_MAXIMIZED;
 import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_MINIMIZED;
 import static org.lwjgl.sdl.SDLVideo.SDL_WINDOW_NOT_FOCUSABLE;
 import static org.lwjgl.sdl.SDLVulkan.nSDL_Vulkan_CreateSurface;
+import static org.lwjgl.sdl.SDLKeyboard.SDL_PROP_TEXTINPUT_MULTILINE_BOOLEAN;
+import static org.lwjgl.sdl.SDLKeyboard.SDL_PROP_TEXTINPUT_TYPE_NUMBER;
+import static org.lwjgl.sdl.SDLKeyboard.SDL_SetTextInputArea;
 import static org.lwjgl.sdl.SDLKeyboard.SDL_StartTextInput;
+import static org.lwjgl.sdl.SDLKeyboard.SDL_StartTextInputWithProperties;
+import static org.lwjgl.sdl.SDLKeyboard.SDL_TEXTINPUT_TYPE_NUMBER;
+import static org.lwjgl.sdl.SDLKeyboard.SDL_TEXTINPUT_TYPE_TEXT;
+import static org.lwjgl.sdl.SDLKeyboard.SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_HIDDEN;
+import static org.lwjgl.sdl.SDLKeyboard.SDL_TextInputActive;
+import static org.lwjgl.sdl.SDLProperties.SDL_CreateProperties;
+import static org.lwjgl.sdl.SDLProperties.SDL_DestroyProperties;
+import static org.lwjgl.sdl.SDLProperties.SDL_SetBooleanProperty;
+import static org.lwjgl.sdl.SDLProperties.SDL_SetNumberProperty;
 import static org.lwjgl.sdl.SDLKeyboard.SDL_StopTextInput;
 import static org.lwjgl.sdl.SDLVideo.SDL_CreateWindow;
 import static org.lwjgl.sdl.SDLVideo.SDL_DestroyWindow;
@@ -84,6 +96,7 @@ import java.nio.IntBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import org.lwjgl.sdl.SDL_DisplayMode;
+import org.lwjgl.sdl.SDL_Rect;
 import org.lwjgl.system.MemoryStack;
 
 /**
@@ -317,6 +330,59 @@ public final class Window implements AutoCloseable {
     public void stopTextInput() {
         check();
         SDL_StopTextInput(handle);
+    }
+
+    /** Text input of a kind: {@link #TEXT_INPUT_TEXT} and the others. */
+    public static final int TEXT_INPUT_TEXT = 0;
+    /** A password: hidden, without IME composition, prediction or learning where the platform has them. */
+    public static final int TEXT_INPUT_PASSWORD = 1;
+    /** A number: a numeric on-screen keyboard where there is one. */
+    public static final int TEXT_INPUT_NUMBER = 2;
+    /** Multi-line text: Enter makes a line break on an on-screen keyboard. */
+    public static final int TEXT_INPUT_MULTILINE = 3;
+
+    /**
+     * Starts text input of {@code kind} ({@link #TEXT_INPUT_TEXT}, {@link #TEXT_INPUT_PASSWORD},
+     * {@link #TEXT_INPUT_NUMBER}, {@link #TEXT_INPUT_MULTILINE}): SDL's input type and multi-line properties, which
+     * on-screen keyboards and IMEs follow (a password gets no composition). Restarting with another kind applies it.
+     */
+    public void startTextInput(int kind) {
+        check();
+        int props = SDL_CreateProperties();
+        try {
+            int type = switch (kind) {
+                case TEXT_INPUT_PASSWORD -> SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_HIDDEN;
+                case TEXT_INPUT_NUMBER -> SDL_TEXTINPUT_TYPE_NUMBER;
+                default -> SDL_TEXTINPUT_TYPE_TEXT;
+            };
+            SDL_SetNumberProperty(props, SDL_PROP_TEXTINPUT_TYPE_NUMBER, type);
+            SDL_SetBooleanProperty(props, SDL_PROP_TEXTINPUT_MULTILINE_BOOLEAN, kind == TEXT_INPUT_MULTILINE);
+            if (SDL_TextInputActive(handle)) {
+                SDL_StopTextInput(handle); // a new kind takes effect on a new start
+            }
+            SDL_StartTextInputWithProperties(handle, props);
+        } finally {
+            SDL_DestroyProperties(props);
+        }
+    }
+
+    /** Whether text input runs for this window. */
+    public boolean textInputActive() {
+        check();
+        return SDL_TextInputActive(handle);
+    }
+
+    /**
+     * Where the IME's candidate window goes: the text field's area {@code x, y, width, height} in window coordinates,
+     * the caret {@code cursor} pixels right of its left edge (SDL places the candidates by it).
+     */
+    public void textInputArea(int x, int y, int width, int height, int cursor) {
+        check();
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            SDL_Rect.Buffer rect = SDL_Rect.malloc(1, stack);
+            rect.get(0).set(x, y, width, height);
+            SDL_SetTextInputArea(handle, rect, cursor);
+        }
     }
 
     /**
