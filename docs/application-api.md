@@ -479,7 +479,7 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   `iridescence.slang`, `dispersion.slang`, `diffuseTransmission.slang`; glTF's field names, the importer's
   `diffuse_transmission` taken too), as the glTF sample viewer: an anisotropic GGX lobe along the tangent frame turned
   by the rotation (any frame without tangents); a thin film's reflectance (Belcour and Barla) evaluated once per point
-  and mixed into the Fresnel; each color channel refracted by its own IOR through a volume; and light through thin
+  and mixed into the Fresnel, of the reflections and of what a transmissive surface lets through; each color channel refracted by its own IOR through a volume; and light through thin
   surfaces in the transmission color, from lights behind and the sky. Checked against the Khronos models; the specular
   ones (anisotropy, iridescence) wait for environment lighting to compare fully.
 - **D138** (built) Environment lighting, as a high-effort review recommended, decided with the user (HDR images first,

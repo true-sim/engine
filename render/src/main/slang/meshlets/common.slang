@@ -808,8 +808,14 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
         float through = s.transmission * (1 - s.metallic);
         if (behind.present())
         {
+            // What the dielectric reflects rather than lets in, a thin film's reflectance mixed in as in its
+            // reflections (KHR_materials_iridescence over transmission: what the film reflects is not transmitted)
             float nv = saturate(dot(s.normal, toViewer));
-            float3 fresnel = s.f0 + (s.f90 - s.f0) * pow(1 - nv, 5); // what the surface reflects rather than lets in
+            float3 fresnel = s.f0 + (s.f90 - s.f0) * pow(1 - nv, 5);
+            if (s.iridescence > 0)
+            {
+                fresnel = lerp(fresnel, s.iridescenceFresnel, s.iridescence);
+            }
             color += through * (1 - fresnel) * transmitted(s, view, in.world, toViewer, pixel, behind);
         }
         else

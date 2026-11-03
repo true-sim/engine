@@ -3168,6 +3168,49 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void aThinFilmTintsWhatATransmissiveSurfaceLetsThrough() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 8)) {
+            // A white wall behind clear glass; the film's colors are what it reflects, so what passes is the rest.
+            int wall = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1)
+                .withEmissive(new Color(0.8, 0.8, 0.8, 1))));
+            MetallicRoughnessParameters white = MR.withBaseColor(new Color(1, 1, 1, 1)).withRoughness(0.05f);
+            TransmissionParameters clear = TransmissionParameters.DEFAULTS.withTransmissionFactor(1);
+            int glass = materials.add(new Material(white).feature(clear));
+            int filmed = materials.add(new Material(white).feature(clear).feature(IridescenceParameters.DEFAULTS
+                .withIridescenceFactor(1).withIridescenceIor(2).withIridescenceThicknessMaximum(400)));
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, wall, 0, 0, -3, 0, 0, 0, 1, 2, 2, 2);
+            scene.removeFrom(2);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .add(new WeightedBlendedTransparency(SceneGeometry.meshlets(renderer), main))
+                .output(Keys.SCENE_COLOR, output);
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            scene.set(1, quadMesh, glass, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            frame();
+            int plain = image()[center];
+            scene.set(1, quadMesh, filmed, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            frame();
+            int tinted = image()[center];
+            assertThat(spread(plain)).as("clear glass: the wall's grey").isLessThan(4);
+            assertThat(spread(tinted)).as("filmed glass: what the film does not reflect, colored").isGreaterThan(15);
+            scene.setMaterials(null);
+        }
+    }
+
+    /** The largest difference between {@code pixel}'s red, green and blue. */
+    private static int spread(int pixel) {
+        int r = pixel & 0xff;
+        int g = (pixel >> 8) & 0xff;
+        int b = (pixel >> 16) & 0xff;
+        return Math.max(r, Math.max(g, b)) - Math.min(r, Math.min(g, b));
+    }
+
+    @Test
     void transmissiveMaterialsShowTheSceneBehindThroughThem() {
         MeshData mesh = twoUvQuad();
         int quadMesh = pool.add(mesh);
