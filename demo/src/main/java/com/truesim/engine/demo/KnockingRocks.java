@@ -57,6 +57,11 @@ final class KnockingRocks implements AutoCloseable {
     private final SceneGraph scene = new SceneGraph(new ChangeClock());
     private final long listener;
     private final Sounds sounds;
+
+    /** The rocks' and the car's sounds: for the audio overlay's listener graph. */
+    Sounds sounds() {
+        return sounds;
+    }
     private final AssetCache cache;
     private final TaskScheduler tasks;
     private final Sound knock;

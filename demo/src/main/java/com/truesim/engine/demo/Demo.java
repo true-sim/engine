@@ -12,6 +12,7 @@ import com.truesim.engine.app.SettingsFile;
 import com.truesim.engine.app.StartupFailure;
 import com.truesim.engine.app.TrueSim;
 import com.truesim.engine.audio.Audio;
+import com.truesim.engine.audio.AudioOverlay;
 import com.truesim.engine.graph.DynamicResolution;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.GpuTimings;
@@ -128,6 +129,8 @@ public final class Demo implements Application, PlatformListener {
     private final Camera mapCamera = new Camera();
     // VR.
     private Headset headset;
+    private AudioOverlay overlay;
+    private long overlayed;
     private final ViewPort[] eyes = new ViewPort[2];
     private boolean spectating;
     private final boolean[] triggers = new boolean[2];
@@ -199,6 +202,10 @@ public final class Demo implements Application, PlatformListener {
         }
         footsteps = world.character() == null ? null : engine.find(Audio.KEY)
             .map(audio -> new FoxFootsteps(audio, world.character(), engine.tasks())).orElse(null);
+        if (List.of(args).contains("--audio-overlay")) { // the audio debug overlay, printed every 5 s
+            overlay = engine.find(Audio.KEY).map(audio -> new AudioOverlay(audio.renderer(), audio.output())
+                .listeners(knocks == null ? null : knocks.sounds())).orElse(null);
+        }
         System.out.println(HELP);
         this.started = System.nanoTime();
         titled = this.started;
@@ -227,6 +234,11 @@ public final class Demo implements Application, PlatformListener {
         }
         if (headset != null) {
             xrInput(dt); // the headset's input and poses are this frame's: read when the frame began
+        }
+        if (overlay != null && now - overlayed > 5_000_000_000L) {
+            overlay.update();
+            System.out.print(overlay.text());
+            overlayed = now;
         }
         titledFrames++;
         if (now - titled > 500_000_000L) {

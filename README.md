@@ -1200,9 +1200,45 @@ audio.ui().play(CLICK);
   credit it there too (`Hrtf.credit()`).
 - **Settings** (group "audio"): player volumes (saved with the app's settings), device, background rule, output and
   HRTF set; block size, queue, voices, driver and HRTF voices hidden.
+- **Many sounds**: `Scatter` roots spawn one-shots around the listener (8 at once at most); `sounds.field(sound,
+  SoundField.points(...) | line(...) | area(...))` plays one loop from many places: real voices at the nearest few
+  and a 2D bed at the rest's summed attenuation.
+- **VR**: `audio.head(sounds, xrInput::head)` listens from the headset (and turns the HRTF on with `audio.output` at
+  `AUTO`); `audio.headsetDevice(headset.audioOutputDevice())` plays on the headset's device where the runtime names
+  it; the headset's idle and focus reach the background rule. HRTF voices past the 16 binaural ones go into a
+  third-order ambisonic field per bus, decoded to both ears once a block.
+- **Debug overlay**: `AudioOverlay` writes text lines (voices real, virtual, binaural; underruns; each bus's meter;
+  rendering listeners and the listener graph) for a HUD or a log; the demo prints it with `--args="--audio-overlay"`.
 - **The collector**: run games with `-XX:+UseZGC`; under other collectors the queue starts 4 blocks deep.
 - **Tests without a device** use SDL's `dummy` driver and the `disk` driver for an end-to-end check;
   `TRUESIM_AUDIO=true ./gradlew :engine-audio:test --tests '*AudioDeviceProbe*'` measures the real device.
+
+### Audio benchmark
+
+`TRUESIM_AUDIO=true ./gradlew :engine-audio:test --tests '*AudioBenchmark*'` plays each scene through the sync and
+the renderer as a game does (60 Hz frames, the listener walking and turning; 48 kHz stereo, 256-frame blocks, so 5.33
+ms a block), 10 s of warm-up, then 30 s timed per block (the audio thread's work) and per frame (`AudioSync.update`, on
+the game thread), with the bytes the render allocates. The heavy scene is the design's (§2.23 of scene's
+`docs/audio.md`): 1,000 placed loops with 64 real voices (16 binaural, the other HRTF ones in the ambisonic field),
+two cameras heard from televisions (16 voices each), a V8 patch, 12 streamed loops (4 music stems, 8 ambiences), a
+reverb aux, an equalizer and a compressor on the effects bus, the limiter. Target: under 1.5 ms a block.
+
+Measured 2026-11-03 on a Ryzen 9 9950X3D (Windows 11, JDK 27, the test JVM's default collector, G1):
+
+| Scene | Block median | p99 | p99.9 | max | Sync median | Sync p99 | Real voices | Bytes a block |
+|---|---|---|---|---|---|---|---|---|
+| 64 voices of 1,000 placed loops | 0.219 ms | 0.439 ms | 0.603 ms | 17.0 ms | 0.039 ms | 0.058 ms | 64 | 0 |
+| 16 HRTF voices | 0.279 ms | 0.444 ms | 0.648 ms | 24.1 ms | 0.001 ms | 0.004 ms | 16 | 0 |
+| 64 HRTF voices: 16 binaural, 48 in the field | 0.489 ms | 0.755 ms | 0.989 ms | 23.2 ms | 0.003 ms | 0.006 ms | 64 | 0 |
+| 2 rendering listeners, 16 voices each | 0.176 ms | 0.283 ms | 0.366 ms | 20.7 ms | 0.002 ms | 0.005 ms | 34 | 0 |
+| 12 streams (4 stems, 8 ambiences) | 0.065 ms | 0.120 ms | 0.129 ms | 0.18 ms | 0.000 ms | 0.001 ms | 12 | 0 |
+| V8 patch | 0.017 ms | 0.025 ms | 0.042 ms | 0.67 ms | 0.001 ms | 0.005 ms | 1 | 0 |
+| **Heavy scene** | **0.516 ms** | **1.010 ms** | **1.218 ms** | 19.9 ms | 0.087 ms | 0.172 ms | 64 | 0 |
+
+The heavy scene stays under 1.5 ms a block to the 99.9th percentile (9.7 % of the block at the median). The maxima
+of 17 to 24 ms are each run's slowest block; their cause was not looked for (the benchmark's threads allocate while
+the scenes are set up and run under G1; a device's queue covers several blocks). Streams decode memory clips here (the
+streaming thread's decoding is not in the block time).
 
 ## VR
 
