@@ -322,6 +322,20 @@ device had just taken a buffer the size of the queue, though it had all it neede
   device, or its first pulls play silence (the disk driver's file had the clip 2,816 frames late without, and 1,024,
   one buffer of silence the disk driver writes first, with).
 
+**In tests, an optimizing compile stops the thread that asked for it.** The allocation-free conventions run every
+test JVM with `-XX:-BackgroundCompilation`, so a method's C2 compile blocks its caller until it is done. In
+`AudioBenchmark` the slowest block of every scene with voices (17 to 27 ms, against 0.2 to 0.6 ms medians) was such a
+compile of a method run every block: `AudioRenderer.renderBlock` reached C2 after about 5,100 blocks (27 s of
+audio), past the 10 s warm-up; others were `Voices.render`, `AudioRenderer.drain` and `Voices.choose`. Not GC:
+`-Xlog:gc,safepoint` logged no pause or safepoint during those blocks.
+- Proof: each slow block's end matched a `b  4` (blocking, tier 4) line for one of those methods in
+  `-Xlog:jit+compilation=debug` (e.g. `renderBlock` queued at 4.644 s, the 17.8 ms block ending at 4.661 s); with
+  `-XX:+BackgroundCompilation` the same benchmark's maxima were 0.2 to 1.6 ms, and with a 30 s warm-up 0.1 to 3.8 ms
+  (true-sim/engine, audio block spikes).
+- Rule: a timing test under these conventions warms past the C2 thresholds of what it times (a method called once per
+  iteration compiles after about 5,000 calls), or its maximum measures the compiler; `AudioBenchmark` warms 30 s and
+  fails on any timed block slower than a block.
+
 ## Java
 
 **A record's components are its accessors.** A method named like a component must return the component's type:

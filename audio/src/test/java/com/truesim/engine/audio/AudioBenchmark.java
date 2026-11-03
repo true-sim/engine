@@ -1,5 +1,7 @@
 package com.truesim.engine.audio;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 import com.truesim.common.jobs.TaskScheduler;
 import com.truesim.common.math.random.Hash;
 import com.truesim.common.state.ChangeClock;
@@ -40,14 +42,24 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  * ambisonic field), two cameras heard from televisions (16 voices each), a V8 patch, 12 streamed loops (4 music
  * stems, 8 ambiences), a reverb aux, an equalizer and a compressor on the effects bus, the limiter. Target: under
  * 1.5 ms a block.
+ *
+ * <p>The warm-up is 30 s because the test JVM compiles synchronously ({@code -XX:-BackgroundCompilation}, from the
+ * allocation-free conventions): a method's optimizing (C2) compile stops the thread that called it until done. Methods
+ * called once a block, such as {@code AudioRenderer.renderBlock}, reach C2 after about 5,000 calls, 27 s of audio; with
+ * 10 s of warm-up that compile fell in the timed window and was each run's slowest block (17 to 27 ms). An app compiles
+ * in the background and never stalls on it. The timed blocks must each stay under a block's time (5.33 ms): a slower one
+ * is a compile still happening after warm-up, or a real stall, and fails the run.
  */
 @EnabledIfEnvironmentVariable(named = "TRUESIM_AUDIO", matches = "true")
 class AudioBenchmark {
 
     static final int RATE = 48_000;
-    static final int FRAMES = 60 * 30; // 30 s of game frames timed, after 10 s of warm-up
+    static final int FRAMES = 60 * 30; // 30 s of game frames timed
+    static final int WARM_UP = 60 * 30; // 30 s, about 5,600 blocks: past the C2 thresholds of per-block methods
+    static final long BLOCK_NANOS = 1_000_000_000L * 256 / RATE;
 
     private final List<String> rows = new ArrayList<>();
+    private final List<String> stalls = new ArrayList<>();
 
     @Test
     void scenes() throws InterruptedException {
@@ -64,6 +76,7 @@ class AudioBenchmark {
         for (String row : rows) {
             System.out.println(row);
         }
+        assertThat(stalls).as("timed blocks slower than a block (%d ns)", BLOCK_NANOS).isEmpty();
     }
 
     /** A loop of whole periods of a few harmonics of {@code hz}, about a second. */
@@ -145,7 +158,7 @@ class AudioBenchmark {
                 car = sounds.play(Sound.builder().root(PatchRenderTest.V8).attenuation(Attenuation.near(3, 200))
                     .priority(com.truesim.scene.audio.Priority.HIGH).loop().build(), 0, 0.5, -8);
             }
-            // load, then 10 s of warm-up and 30 s timed
+            // load, then 30 s of warm-up and 30 s timed
             sync.update();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
             while (cache.loadingCount() > 0 && System.nanoTime() < deadline) {
@@ -166,8 +179,8 @@ class AudioBenchmark {
             var threads = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
             long bytes = 0;
             int real = 0;
-            for (int f = -600; f < FRAMES; f++) {
-                double t = (f + 600) / 60.0;
+            for (int f = -WARM_UP; f < FRAMES; f++) {
+                double t = (f + WARM_UP) / 60.0;
                 scene.setTranslation(head, 20 * Math.sin(t / 7), 1.7, 20 * Math.cos(t / 9));
                 double half = t / 3;
                 scene.setRotation(head, 0, Math.sin(half), 0, Math.cos(half));
@@ -193,6 +206,9 @@ class AudioBenchmark {
                     long b1 = System.nanoTime();
                     long a1 = threads.getCurrentThreadAllocatedBytes();
                     if (f >= 0) {
+                        if (b1 - b0 > BLOCK_NANOS) {
+                            stalls.add(String.format(Locale.ROOT, "%s: frame %d, %.3f ms", name, f, (b1 - b0) / 1e6));
+                        }
                         blocks[blockCount++] = b1 - b0;
                         bytes += a1 - a0;
                     }
