@@ -252,11 +252,9 @@ class TracedOcclusionTest {
                 tracing.frontsOnly(false);
                 assertThat(await(graph, meshes, meshes.submit(rays, RAYS), traced)).isEqualTo(RAYS);
                 double[] sides = compare(physics(boxes, true), rays, traced, "triangle meshes, every crossing");
-                // One ray of 4,096 differs here, by physics' fault: stepping out of a curtain box in doubling steps
-                // (up to 5 m), it lands inside the brick box behind it and never counts it (traced alone, it does).
                 assertThat(convex[1]).as("rays crossing boxes").isGreaterThan(RAYS / 4.0);
-                assertThat(convex[0]).as("rays agreeing, bodies").isGreaterThanOrEqualTo(RAYS * 0.999);
-                assertThat(sides[0]).as("rays agreeing, meshes").isGreaterThanOrEqualTo(RAYS * 0.999);
+                assertThat(convex[0]).as("rays agreeing, bodies").isEqualTo(RAYS);
+                assertThat(sides[0]).as("rays agreeing, meshes").isEqualTo(RAYS);
                 time(graph, bodies, rays, traced, 64);
                 time(graph, bodies, rays, traced, RAYS);
                 device.waitIdle();
