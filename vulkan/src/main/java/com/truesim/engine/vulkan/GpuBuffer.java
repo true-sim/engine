@@ -138,7 +138,9 @@ public final class GpuBuffer implements AutoCloseable, DeviceBuffer {
 
     /**
      * A device-local buffer holding {@code data}, copied through a staging buffer on the graphics queue, so the
-     * graphics and compute work that uses it needs no queue ownership transfer: for data uploaded once, such as meshes. {@code usage} gets {@code TRANSFER_DST} added.
+     * graphics and compute work that uses it needs no queue ownership transfer: for data uploaded once, such as meshes.
+     * {@code usage} gets {@code TRANSFER_DST} added. Waits for the GPU, and so for every frame queued ahead: for setup
+     * only; while frames run, make the buffer and fill it through {@link FrameUploads}.
      */
     public static GpuBuffer upload(VulkanDevice device, MemorySegment data, int usage) {
         long bytes = data.byteSize();
@@ -159,7 +161,8 @@ public final class GpuBuffer implements AutoCloseable, DeviceBuffer {
 
     /**
      * Writes {@code data} at {@code offset}: straight into a host-visible buffer, or through a staging buffer on the
-     * graphics queue into a device-local one, waiting until it is there. For setup work such as adding meshes.
+     * graphics queue into a device-local one, waiting until it is there, and so for every frame queued ahead. For setup
+     * work; while frames run, write device-local buffers through {@link FrameUploads}.
      */
     public void write(long offset, MemorySegment data) {
         long bytes = data.byteSize();
