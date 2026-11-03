@@ -16,7 +16,9 @@ data. (The scene repo's `scene.world.Feature` is a world content variant and kee
 Plugins: `Desktop` (engine-platform), `Rendering` (engine-graph: instance, device, graph, presenter as the default
 frame driver), `Xr` (engine-xr: `Xr.ifAvailable()` / `Xr.required()`, drives frames with `Headset.beginFrame` and
 `submit`); the demo runs on them. `Assets` (engine-scene: cache, path assets, GPU resources); glTF import is
-scene's `scene-gltf` module, models are `RenderAssets.MODEL` (D17), sub-assets path fragments (`#mesh/0`). Not yet: `fixedUpdate` (with the clocks, D88–D92), BaseGame, the native error box.
+scene's `scene-gltf` module, models are `RenderAssets.MODEL` (D17), sub-assets path fragments (`#mesh/0`). The phases,
+clocks and fixed steps (§6: `Phase`, `Clock`, `Step`, `Timer`, `fixedUpdate`/`lateUpdate`) and the `Animation` plugin
+(engine-scene) since 2026-11-03. Not yet: BaseGame, the native error box.
 
 ```java
 public final class RockGarden extends BaseGame {
@@ -203,17 +205,37 @@ input through `Headset.input()`, one fixed OpenXR action set synced inside `Head
 
 ## 6. Game logic and time
 
+**Built since (2026-11-03):** `engine-app`: `Phase` (`FIXED`, `UPDATE`, `ANIMATE`, `LATE`; `engine.phase()`),
+`Engine.stepAt(nanos)` running a frame in D124's order; `Clock` per world (D88, D89: `engine.addClock(name)`, 60/s
+unless `rate(n)`, stepped in the order made), owed each frame's capped delta as nanoseconds times its rate (whole
+ticks, no drift), `blend()`, `renderTime()`, `frameDelta()`; one budget of steps per frame for all worlds
+(`Engine.FIXED_STEP_BUDGET`, 8), ticks past it dropped and reported (D92: `Frame.droppedTicks()`,
+`Clock.droppedTicks()`, `Frame.capped()`); `Frame.realDelta()`/`realTime()` beside the app clock; `Step`, with
+`Application.fixedUpdate(Step)` and `lateUpdate(Frame)` and `Plugin.fixedUpdate`, `animate`, `lateUpdate`;
+`Clock.afterStep` hooks (D123's transforms: `afterStep(scene::update)`, or `SceneSync.follow`); `Timer`s counting steps
+(D97: `after`, `every`, `afterSeconds`, `everySeconds`). engine-scene: the `Animation` plugin (animation.md: a world's
+`Animators` in `ANIMATE`, parallel sampling, ordered writes and events, world transforms updated before `LATE`; a world
+on a clock animates by its drawn time, A5), and D91 (below): `SceneSync.follow(clock)`, `interpolation(...)`,
+`teleport`, `interpolated(node, false)`; engine-render: `InstanceMotion`, `Interpolation`, `RenderSettings.INTERPOLATION`.
+Not yet: pausing a world (D128), behaviours and game systems, BaseGame's `fixedUpdate` hook. Two gaps that need scene:
+D123's "change logging once per frame" (`SceneGraph` has no update that propagates without logging; each step's
+`scene.update()` logs, which is also how the sync finds what a step moved: the log grows rather than drop changes, so a
+catch-up frame loses none) and A13's serial ground probes (scene's `Animators` runs pose modifiers, foot placement's
+ground included, in its parallel part, and documents `Ground` as thread-safe).
+
 - **D88** Clocks: real time, app clock, one clock per world.
 - **D89** (decided) Fixed steps per world, each world's clock with its own rate, 60/s by default; the shared budget
   (D92) caps the total. Worlds step out of phase, so reading another world gives its latest state.
 - **D90** (revised 2026-11-03: `ANIMATE` added, animation.md) Phases: `FIXED`, `UPDATE`, `ANIMATE`, `LATE`, then scene
   update and rendering. `ANIMATE` runs the worlds' animators between the game's update (which sets what plays) and
   `LATE` (which reads and overrides joints).
-- **D91** (revised) Interpolation between fixed steps runs on the GPU: when a step runs, `SceneSync` uploads the
-  previous and current world transforms of instances moved in `FIXED`; each frame passes one blend factor. Frames
-  without a step cost no CPU, and the same data gives motion vectors. A teleport or spawn sets previous = current.
-  The scene graph keeps simulated values only. **Measured first** (D122). On by default for nodes moved in `FIXED`;
-  a node can opt out.
+- **D91** (revised; built 2026-11-03 after D122's measurement) Interpolation between fixed steps runs on the GPU: when a
+  step runs, `SceneSync` uploads the previous and current world transforms of instances moved in `FIXED`; each frame
+  passes one blend factor. Frames without a step cost no CPU, and the same data gives motion vectors. A teleport or
+  spawn sets previous = current. The scene graph keeps simulated values only. **Measured first** (D122). On by default
+  for nodes moved in `FIXED`; a node can opt out. Built as: `InstanceMotion` records (112 B: both poses) scattered
+  with the instances, a blend pass after the scene upload writing the instance table; `render.interpolation` GPU (the
+  default), CPU or OFF; motion vectors not yet read from it.
 - **D92** (revised) Frame delta capped (0.25 s); one budget of fixed steps per frame shared by all worlds, in a fixed
   world order; when it is hit, the remaining accumulated time is discarded. Accumulation is in whole ticks, not
   floating-point seconds. Caps are reported.
@@ -229,7 +251,28 @@ input through `Headset.input()`, one fixed OpenXR action set synced inside `Head
 - **D122** (new) Before building D91: measure the GPU cost (memory per moving instance, about 80–160 B; upload per
   step; shader cost) against the CPU alternative on the scene benchmark with 30,000 moving rocks, bytes allocated
   included.
-- **D123** (new) World transforms are propagated after every fixed step (transforms only; change logging once per
+  **Measured (2026-11-03,** RX 9070 XT, Ryzen 9 9950X3D, `SceneBenchmark` "30,000 rocks in fixed steps": every rock
+  moved every step, 60 steps and 144 frames a second of simulated time, medians of 240 frames after a second of
+  warm-up**):**
+
+  | | sync, frame with a step | sync, frame without | uploaded, with a step | without | GPU per frame |
+  |---|---|---|---|---|---|
+  | GPU (motion records, blend pass) | 0.50 ms | 0.002 ms | 3.48 MB (116 B each) | 0 | blend pass 0.013 ms |
+  | CPU (blended pose written each frame) | 0.63 ms | 0.44 ms | 2.04 MB (68 B each) | 2.04 MB | none (empty pass 0.003) |
+  | Off (drawn as stepped) | 0.31 ms | 0.001 ms | 2.04 MB | 0 | none |
+
+  The steps themselves (moving 30,000 nodes, transforms, capturing the moves) took 0.95 ms with interpolation and
+  0.75 ms without: capturing costs about 0.2 ms per step. Memory: 112 B of GPU memory per moving instance (one motion
+  record, both poses), none for the CPU path; both keep 160 B per drawn instance on the CPU (two poses in doubles). 0
+  bytes allocated per frame on every path once warm (the first interpolated frames allocated about 63 KB once per
+  frame slot, never again). Per second at 144 frames and 60 steps the GPU path spends about 30 ms of sync and uploads
+  209 MB, the CPU path about 75 ms and 294 MB; at one frame per step the GPU path is still the cheaper (0.50 against
+  0.63 ms) and uploads 1.7 times the bytes. **Verdict: the GPU path holds**: it is not worse than the CPU path in CPU
+  time anywhere measured and costs 0.013 ms of GPU and 112 B of GPU memory per moving instance; D91 is built with it
+  as the default. The CPU path stays as the `render.interpolation` choice for frames recorded without a frame graph
+  (they run no blend pass), `OFF` for drawing steps as they are.
+- **D123** (new; built 2026-11-03, logging per step until scene has an update without logging: §6 "Built since")
+  World transforms are propagated after every fixed step (transforms only; change logging once per
   frame), so step 2 never reads stale parent transforms and a catch-up frame does not overflow the change log.
 - **D124** (revised 2026-11-03: `ANIMATE`) Frame start order: drain finished loads (time-budgeted) → sample input →
   `FIXED` → `UPDATE` → `ANIMATE` → `LATE` → scene update and GPU sync → render.
