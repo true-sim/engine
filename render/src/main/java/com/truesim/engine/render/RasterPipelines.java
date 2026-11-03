@@ -105,6 +105,11 @@ final class RasterPipelines implements AutoCloseable {
         return mesh[DEPTH] != null;
     }
 
+    /** Whether the device draws the visibility buffer's IDs (primitive IDs in fragment shaders). */
+    boolean ids() {
+        return indexed[IDS] != null;
+    }
+
     /** Whether shaded draws on mesh shaders take the lean path (fragments from barycentrics and the triangle). */
     boolean leanColor() {
         return slimMeshes;
@@ -196,7 +201,7 @@ final class RasterPipelines implements AutoCloseable {
             for (int category = 0; category < bins; category++) {
                 types[category] = materials.binType(category);
                 features[category] = materials.binFeatures(category);
-                rasters[category] = materials.binRasters(category);
+                rasters[category] = materials.binDrawn(category);
             }
             make(meshShading ? 1 : 0);
         }

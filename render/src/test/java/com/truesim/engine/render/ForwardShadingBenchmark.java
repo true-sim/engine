@@ -358,7 +358,17 @@ class ForwardShadingBenchmark {
     private static void firstDraw(VulkanDevice device, MeshletRenderer renderer, RenderView view, Camera camera,
         ExternalImage target, int rock) {
         renderer.setPath(MeshletRenderer.Path.AUTO);
-        for (int extra = 0; extra < 3; extra++) {
+        // Bins no table drew yet: metallic-roughness with two features each time.
+        MaterialFeature[][] combinations = {
+            {ClearcoatParameters.DEFAULTS, SpecularParameters.DEFAULTS},
+            {ClearcoatParameters.DEFAULTS, IorParameters.DEFAULTS},
+            {ClearcoatParameters.DEFAULTS, IridescenceParameters.DEFAULTS},
+            {ClearcoatParameters.DEFAULTS, AnisotropyParameters.DEFAULTS},
+            {SpecularParameters.DEFAULTS, IorParameters.DEFAULTS},
+            {SheenParameters.DEFAULTS, SpecularParameters.DEFAULTS},
+        };
+        for (int run = 0; run < combinations.length; run++) {
+            int gapMillis = run < 3 ? FIRST_DRAW_GAP : 0; // then drawn the frame it is added
             try (Materials materials = table(device, 4); FrameGraph graph = new FrameGraph(device, 2)) {
                 renderer.scene().setMaterials(materials);
                 SceneView main = new SceneView(graph.addView("main").size(WIDTH, HEIGHT), view, camera);
@@ -371,13 +381,23 @@ class ForwardShadingBenchmark {
                 long waited = renderer.shading().waitedNanos();
                 int builds = graph.builds();
                 renderer.shading().coldForBenchmarks((int) System.nanoTime());
-                // A bin no table drew yet: a coat over metallic-roughness with specular, IOR or iridescence.
-                int added = materials.add(material(7 + extra).feature(ClearcoatParameters.DEFAULTS));
-                double addFrame = recordMillis(device, graph);
-                double slowest = addFrame;
-                long until = System.nanoTime() + FIRST_DRAW_GAP * 1_000_000L;
-                while (System.nanoTime() < until) {
-                    slowest = Math.max(slowest, recordMillis(device, graph));
+                for (int filler = 0; filler < run; filler++) {
+                    materials.add(material(0)); // an id no instance took before: instances' ids stay taken
+                }
+                Material material = new Material(MR);
+                for (MaterialFeature feature : combinations[run]) {
+                    material = material.feature(feature);
+                }
+                int added = materials.add(material);
+                double addFrame = Double.NaN;
+                double slowest = 0;
+                if (gapMillis > 0) {
+                    addFrame = recordMillis(device, graph);
+                    slowest = addFrame;
+                    long until = System.nanoTime() + gapMillis * 1_000_000L;
+                    while (System.nanoTime() < until) {
+                        slowest = Math.max(slowest, recordMillis(device, graph));
+                    }
                 }
                 double gap = slowest;
                 renderer.scene().set(1, rock, added, 0, -12 + MeshletBenchmark.terrainHeight(0, -10) + 1, -10, 0, 0, 0,
@@ -386,9 +406,10 @@ class ForwardShadingBenchmark {
                 slowest = Math.max(slowest, drawFrame);
                 double after = recordMillis(device, graph);
                 renderer.shading().coldForBenchmarks(0);
-                System.out.printf(Locale.ROOT, "  a new bin: slowest frame %.2f ms CPU (until the first draw %.2f), the"
-                    + " add's %.2f ms, the first draw's %.2f ms (rebuilt %d times; %.1f ms making pipelines, %.1f ms"
-                    + " waited for), before %.2f ms, after %.2f ms%n", slowest, gap, addFrame, drawFrame,
+                System.out.printf(Locale.ROOT, "  a new bin, drawn %d ms after it is added: slowest frame %.2f ms CPU"
+                    + " (until the first draw %.2f), the add's %.2f ms, the first draw's %.2f ms (rebuilt %d times; %.1f"
+                    + " ms making pipelines, %.1f ms waited for), before %.2f ms, after %.2f ms%n", gapMillis, slowest,
+                    gap, addFrame, drawFrame,
                     graph.builds() - builds, (renderer.forwardPipelineNanos() - nanos) / 1e6,
                     (renderer.shading().waitedNanos() - waited) / 1e6, before, after);
                 renderer.scene().setMaterials(null);
@@ -447,7 +468,7 @@ class ForwardShadingBenchmark {
                     ? new MeshletRenderer.Path[] {MeshletRenderer.Path.MESH_SHADERS, MeshletRenderer.Path.INDEXED}
                     : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED};
                 Sample[][][] samples = new Sample[paths.length][configurations.length][ROUNDS];
-                for (int round = -1; round < ROUNDS; round++) {
+                for (int round = -4; round < ROUNDS; round++) { // four rounds warm the clocks up (pitfalls.md), uncounted
                     for (int p = 0; p < paths.length; p++) {
                         renderer.setPath(paths[p]);
                         for (int c = 0; c < configurations.length; c++) {

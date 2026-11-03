@@ -89,6 +89,11 @@ public final class MeshletRenderer implements AutoCloseable {
     private final RasterPipelines.Geometry[] immediateGeometry = new RasterPipelines.Geometry[3];
     private final Retiring retiring; // the old tables, rows and view lists, until no frame reads them
     private final Runnable followScene = this::followScene;
+    // Pipelines made ahead: the scene's table followed, each shading bin's pipelines made as its materials are written.
+    private final java.util.function.Consumer<Materials> followTable = this::followTable;
+    private final Materials.DrawListener prepare = this::prepare;
+    private Materials listened;
+    private final List<ClassicLodGeometry> classics = new java.util.concurrent.CopyOnWriteArrayList<>();
     // Read only: a frame graph may record passes on several threads at once, so recording changes no field.
     private static final boolean[] NOT_EARLY = {false};
     private static final boolean[] EARLY = {true};
@@ -130,6 +135,91 @@ public final class MeshletRenderer implements AutoCloseable {
         views = new RenderViews(device, slots, retiring);
         culling = new CullPasses(device, scene, slots, views, retiring, chunks);
         scene.onGrow(followScene);
+        scene.onMaterials(followTable);
+        followTable(scene.materials());
+    }
+
+    /**
+     * Follows {@code table}, the scene's now: has the pipelines its shading bins draw with made ahead, those it has now
+     * and those its materials ask for when written ({@link #prepare}).
+     */
+    @AllowAllocation("a table set")
+    private synchronized void followTable(Materials table) {
+        if (closed) {
+            return;
+        }
+        if (listened != null) {
+            listened.stopListening(prepare);
+        }
+        listened = table;
+        table.listen(prepare);
+        for (int bin = 0; bin < table.binCount(); bin++) {
+            prepare(table, bin, table.binRasters(bin));
+        }
+    }
+
+    /**
+     * Has the pipelines shading bin {@code bin} of {@code materials} draws with in raster bins {@code rasters} (a bit
+     * each) made ahead, on the pipelines' own thread, for the path frames take now: its forward ones (and the blended
+     * bin's weighted ones), classic LOD's where geometry draws classic, and its type's depth and ID ones where it has
+     * geometry hooks. Called as a material is written: the frame first drawing it finds them made, or waits for them
+     * no longer than making them then would take.
+     */
+    @AllowAllocation("a material written")
+    private void prepare(Materials materials, int bin, int rasters) {
+        if (closed) {
+            return;
+        }
+        MaterialType type = materials.binType(bin);
+        int features = materials.binFeatures(bin);
+        boolean meshShading = path() == Path.MESH_SHADERS;
+        for (int raster = 0; raster < BINS; raster++) {
+            if ((rasters & 1 << raster) == 0) {
+                continue;
+            }
+            shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, false));
+            if (raster == BIN_BLENDED) {
+                shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, true));
+            }
+            for (ClassicLodGeometry classic : classics) {
+                for (int list = raster; list < 2 * BINS; list += BINS) {
+                    shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, false));
+                    if (raster == BIN_BLENDED) {
+                        shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, true));
+                    }
+                }
+            }
+            if (type.geometry() != 0 && raster < BIN_BLENDED) {
+                for (int role : new int[] {RasterPipelines.DEPTH, RasterPipelines.IDS}) {
+                    if (role == RasterPipelines.IDS && !this.raster.ids()) {
+                        continue;
+                    }
+                    shading.prepare(this.raster.geometryKey(type, raster, role, meshShading));
+                    for (int shared = 0; shared < BIN_BLENDED; shared++) { // the other types' category
+                        shading.prepare(this.raster.geometryKey(null, shared, role, meshShading));
+                    }
+                    for (ClassicLodGeometry classic : classics) {
+                        for (int list = raster; list < 2 * BINS; list += BINS) {
+                            shading.prepare(ClassicLodGeometry.geometryKey(type, list, role == RasterPipelines.DEPTH
+                                ? ShadingPipelines.DEPTH : ShadingPipelines.IDS));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** Classic LOD drawing this renderer's instances: its pipelines are made ahead too. */
+    void addClassic(ClassicLodGeometry classic) {
+        classics.add(classic);
+        Materials table = scene.materials();
+        for (int bin = 0; bin < table.binCount(); bin++) {
+            prepare(table, bin, table.binRasters(bin));
+        }
+    }
+
+    void removeClassic(ClassicLodGeometry classic) {
+        classics.remove(classic);
     }
 
     /**
@@ -252,9 +342,9 @@ public final class MeshletRenderer implements AutoCloseable {
     @AllowAllocation("when the table's shading bins change")
     private RasterPipelines.Typed immediate() {
         Materials materials = scene.materials();
-        if (immediate == null || materials != immediateTable || materials.rastersVersion() != immediateVersion) {
+        if (immediate == null || materials != immediateTable || materials.drawnVersion() != immediateVersion) {
             immediateTable = materials;
-            immediateVersion = materials.rastersVersion();
+            immediateVersion = materials.drawnVersion();
             immediate = raster.typed(materials, path() == Path.MESH_SHADERS);
             immediateGeometry[RasterPipelines.DEPTH] = null;
             immediateGeometry[RasterPipelines.IDS] = null;
@@ -270,7 +360,7 @@ public final class MeshletRenderer implements AutoCloseable {
     private RasterPipelines.Geometry immediateGeometry(int role) {
         Materials materials = scene.materials();
         RasterPipelines.Typed typed = immediate();
-        if (materials.geometryTypeCount() == 0) {
+        if (!materials.drawsGeometry()) {
             return null;
         }
         if (immediateGeometry[role] == null) {
@@ -293,7 +383,7 @@ public final class MeshletRenderer implements AutoCloseable {
     RasterPipelines.Geometry geometryPipelines(int role) {
         Materials materials = scene.materials();
         int count = materials.geometryTypeCount();
-        if (count == 0) {
+        if (count == 0 || !materials.drawsGeometry()) {
             return null;
         }
         MaterialType[] types = new MaterialType[count + 1];
@@ -614,6 +704,12 @@ public final class MeshletRenderer implements AutoCloseable {
         if (!closed) {
             closed = true;
             scene.stopFollowing(followScene);
+            scene.stopOnMaterials(followTable);
+            synchronized (this) {
+                if (listened != null) {
+                    listened.stopListening(prepare);
+                }
+            }
             raster.close();
             shading.close();
             retiring.close(); // the GPU is done: what is retired from now on goes at once

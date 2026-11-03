@@ -163,6 +163,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                 }
             }
         }
+        renderer.addClassic(this); // its pipelines made ahead as materials come
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         // Laid out as the pool's meshlet triangles: mesh triangle t's indices at the mesh's index base + 3t.
         indices = GpuBuffer.deviceLocal(device, 12L * pool.capacity().triangles(),
@@ -378,7 +379,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             case DEPTH -> 0;
         };
         // Depth and IDs cut their opaque lists by type with geometry hooks, where the table has such types.
-        int geometryTypes = kind == SurfaceOutput.Kind.SHADED ? 0 : materials.geometryTypeCount();
+        int geometryTypes = kind == SurfaceOutput.Kind.SHADED || !materials.drawsGeometry() ? 0
+            : materials.geometryTypeCount();
         int byGeometry = geometryTypes == 0 ? 0 : OPAQUE_LISTS;
         Selection selection = new Selection(this, view, camera, targets.region(),
             Math.max(byType == 0 ? 1 : materials.binCount(), geometryTypes + 1), byType, byGeometry);
@@ -487,7 +489,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         for (int category = 0; category < Math.min(categories, materials.binCount()); category++) {
             MaterialType type = materials.binType(category);
             int features = materials.binFeatures(category);
-            int rasters = materials.binRasters(category);
+            int rasters = materials.binDrawn(category);
             for (int list = 0; list < LISTS; list++) {
                 int bin = list % MeshletRenderer.BINS;
                 if ((rasters & 1 << bin) == 0 || weighted && bin != MeshletRenderer.BIN_BLENDED) {
@@ -727,6 +729,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                 }
             }
             pool.stopFollowing(forget);
+            renderer.removeClassic(this);
             uploads.close();
             indices.close();
             meshes.close();

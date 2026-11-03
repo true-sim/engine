@@ -51,7 +51,7 @@ public interface Transparency extends Technique {
      */
     static long buildVersion(Materials materials) {
         return materials == null ? 0 : ((materials.hasBlended() ? 1 : 0) | (materials.hasTransmissive() ? 2 : 0))
-            + 4 * materials.rastersVersion();
+            + 4 * materials.drawnVersion();
     }
 
     /**

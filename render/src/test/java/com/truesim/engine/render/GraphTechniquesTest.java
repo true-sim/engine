@@ -1573,6 +1573,53 @@ class GraphTechniquesTest {
         return count;
     }
 
+    /**
+     * A material's pipelines are made when it is written, on the pipelines' own thread: the graph does not rebuild for
+     * a material no instance takes, and the frame first drawing it (an instance taking it) finds them made. Asked for
+     * before they are ready, a pipeline is made then, as it always was.
+     */
+    @Test
+    void pipelinesAreMadeAheadOfTheFirstDraw() {
+        scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+        scene.removeFrom(1);
+        Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        try (Materials materials = new Materials(device, 8)) {
+            materials.register(Glow.TYPE);
+            scene.setMaterials(materials);
+            SceneView main = main(camera);
+            main.port().add(new ClusteredForwardShading(SceneGeometry.meshlets(renderer), main,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f))
+                .output(Keys.SCENE_COLOR, output);
+            frames(3);
+            int builds = graph.builds();
+            int glow = materials.add(new Material(GlowParameters.DEFAULTS));
+            boolean meshShading = renderer.path() == MeshletRenderer.Path.MESH_SHADERS;
+            ShadingPipelines.Key key = renderer.raster().forwardKey(Glow.TYPE, 0, MeshletRenderer.BIN_OPAQUE,
+                meshShading, false);
+            renderer.shading().awaitPrepared();
+            assertThat(renderer.shading().ready(key)).as("made ahead, on its own thread").isNotNull();
+            frames(2);
+            assertThat(graph.builds()).as("no instance takes it: nothing rebuilt").isEqualTo(builds);
+            assertThat(materials.binDrawn(materials.binCount() - 1)).isZero();
+            int made = renderer.shading().count();
+            long waited = renderer.shading().waitedNanos();
+            scene.set(1, quad, glow, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+            int[] pixels = frames(3);
+            assertThat(graph.builds()).as("rebuilt for the bin drawn").isEqualTo(builds + 1);
+            assertThat(glowing(pixels)).as("the glowing quad").isGreaterThan(SIZE * SIZE / 40);
+            assertThat(renderer.shading().count()).as("nothing made while drawing it first").isEqualTo(made);
+            assertThat(renderer.shading().waitedNanos()).as("nor waited for").isEqualTo(waited);
+            // Taken the frame it is added (a type of its own): the pipeline is made or waited for then, and drawn.
+            materials.register(Dissolve.TYPE);
+            int dissolve = materials.add(new Material(DissolveParameters.DEFAULTS.withColor(new Color(1, 0, 1, 1))
+                .withCell(1)));
+            scene.set(1, quad, dissolve, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+            assertThat(glowing(frames(1))).as("drawn from the first frame").isGreaterThan(0);
+            scene.setMaterials(null);
+        }
+    }
+
     /** Records {@code count} frames and returns the last one's pixels. */
     private int[] frames(int count) {
         for (int i = 0; i < count; i++) {
