@@ -14,6 +14,7 @@ import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.assets.mesh.MeshData;
+import java.util.Objects;
 import java.util.SplittableRandom;
 
 /**
@@ -210,6 +211,12 @@ final class DemoScene implements AutoCloseable {
     /** Its ray tracing, or null without. */
     RayTracing rayTracing() {
         return rayTracing;
+    }
+
+    /** Puts extra rock {@code k} (0 to 7: the knocking rocks) at ({@code x}, {@code y}, {@code z}), unrotated. */
+    void extraRock(int k, double x, double y, double z, float scale) {
+        scene.set(ROCKS + 1 + Objects.checkIndex(k, 8), rock, rockMaterial, (float) x, (float) y, (float) z, 0, 0, 0, 1,
+            scale, scale, scale);
     }
 
     /** The world at {@code seconds}: rocks spun, lights moved. Before the frame records. */

@@ -1,0 +1,18 @@
+sadie-ii-ku100.hrtf: the engine's default HRTF set
+
+Source: the SADIE II database, University of York, subject D1 (Neumann KU100 dummy head), file
+D1_48K_24bit_256tap_FIR_SOFA.sofa from D1_HRIR_SOFA.zip (Zenodo; SHA-256 of the zip
+366321fa78f211bacc0ec6bea96701625b196a5db54ec16748b0eab0b9705f75).
+https://www.york.ac.uk/sadie-project/database.html
+
+Credit: C. Armstrong, L. Thresh, D. Murphy, G. Kearney, "A Perceptual Evaluation of Individual and
+Non-Individual HRTFs: A Case Study of the SADIE II Database", Applied Sciences 8(11), 2029 (2018),
+doi:10.3390/app8112029.
+
+Licence: Apache License, Version 2.0 (LICENSE-SADIE-II.txt in this folder).
+
+Changes made (Apache 2.0, section 4b): converted by true-sim's SofaConverter
+(./gradlew :engine-audio:convertHrtf -Ptruesim.audio.directions=2000): each response replaced by a
+minimum-phase filter of 128 taps with the same magnitude (real cepstrum) and an interaural delay
+(cross-correlation below 1.5 kHz); 2,000 of the 8,802 directions kept, spread evenly; filters scaled
+so an ear's mean energy is 1/2; written in true-sim's .hrtf format.

@@ -11,6 +11,8 @@ import com.truesim.engine.app.Frame;
 import com.truesim.engine.app.SettingsFile;
 import com.truesim.engine.app.StartupFailure;
 import com.truesim.engine.app.TrueSim;
+import com.truesim.engine.audio.Audio;
+import com.truesim.engine.audio.AudioOverlay;
 import com.truesim.engine.graph.DynamicResolution;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.GpuTimings;
@@ -113,6 +115,8 @@ public final class Demo implements Application, PlatformListener {
     private ViewPort main;
     private SceneView mainView;
     private final Camera camera = new Camera();
+    private KnockingRocks knocks;
+    private FoxFootsteps footsteps;
     private final List<SceneView> shaded = new ArrayList<>(); // every view drawing the scene: shading swaps in all
     private final List<CascadedShadowMaps> cascades = new ArrayList<>(); // fitted to their cameras every frame
     private boolean visibility;
@@ -125,6 +129,8 @@ public final class Demo implements Application, PlatformListener {
     private final Camera mapCamera = new Camera();
     // VR.
     private Headset headset;
+    private AudioOverlay overlay;
+    private long overlayed;
     private final ViewPort[] eyes = new ViewPort[2];
     private boolean spectating;
     private final boolean[] triggers = new boolean[2];
@@ -151,7 +157,7 @@ public final class Demo implements Application, PlatformListener {
     @Override
     public void configure(AppConfig app) {
         app.id("truesim-demo").name("true-sim demo").saveSettings(settingsFile)
-            .use(new Desktop(), new Rendering().validation(validation));
+            .use(new Desktop(), new Rendering().validation(validation), new Audio());
         if (vr) {
             app.use(Xr.ifAvailable());
         }
@@ -189,6 +195,17 @@ public final class Demo implements Application, PlatformListener {
             System.out.println("Headset: " + headset);
             startHeadset();
         }
+        knocks = engine.find(Audio.KEY).map(audio -> new KnockingRocks(audio, world, engine.tasks(), eye, yaw,
+            headset == null ? null : (p, o) -> headset.running() && headset.input().head(p, o))).orElse(null);
+        if (headset != null) { // Meta's runtime names the headset's audio device; SteamVR makes it the default
+            engine.find(Audio.KEY).ifPresent(audio -> audio.headsetDevice(headset.audioOutputDevice()));
+        }
+        footsteps = world.character() == null ? null : engine.find(Audio.KEY)
+            .map(audio -> new FoxFootsteps(audio, world.character(), engine.tasks())).orElse(null);
+        if (List.of(args).contains("--audio-overlay")) { // the audio debug overlay, printed every 5 s
+            overlay = engine.find(Audio.KEY).map(audio -> new AudioOverlay(audio.renderer(), audio.output())
+                .listeners(knocks == null ? null : knocks.sounds())).orElse(null);
+        }
         System.out.println(HELP);
         this.started = System.nanoTime();
         titled = this.started;
@@ -203,6 +220,12 @@ public final class Demo implements Application, PlatformListener {
         double dt = Math.min(0.1, frame.delta());
         move(dt);
         world.update((now - started) / 1e9);
+        if (knocks != null) {
+            knocks.update(dt, eye, yaw);
+        }
+        if (footsteps != null) {
+            footsteps.update(eye, yaw);
+        }
         for (CascadedShadowMaps sun : cascades) {
             sun.update();
         }
@@ -211,6 +234,11 @@ public final class Demo implements Application, PlatformListener {
         }
         if (headset != null) {
             xrInput(dt); // the headset's input and poses are this frame's: read when the frame began
+        }
+        if (overlay != null && now - overlayed > 5_000_000_000L) {
+            overlay.update();
+            System.out.print(overlay.text());
+            overlayed = now;
         }
         titledFrames++;
         if (now - titled > 500_000_000L) {
@@ -224,6 +252,15 @@ public final class Demo implements Application, PlatformListener {
     public void stop() {
         Rendering rendering = engine.get(Rendering.KEY);
         rendering.device().waitIdle();
+        if (knocks != null) {
+            engine.find(Audio.KEY).ifPresent(audio -> System.out.println("Audio: " + knocks.knocks() + " knocks on "
+                + audio.output().getClass().getSimpleName() + ", " + audio.output().underruns() + " underruns"));
+            knocks.close();
+        }
+        if (footsteps != null) {
+            System.out.println("Audio: " + footsteps.played() + " footsteps");
+            footsteps.close();
+        }
         if (world != null) {
             world.close();
         }

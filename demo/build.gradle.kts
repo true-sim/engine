@@ -7,8 +7,9 @@ description = "The engine's demo: a scene to try settings, HDR, dynamic resoluti
 dependencies {
     implementation(project(":engine-xr"))
     implementation(project(":engine-scene"))
-    implementation("com.truesim.scene:scene-meshbuild:0.57.0")
-    implementation("com.truesim.scene:scene-gltf:0.57.0")
+    implementation(project(":engine-audio"))
+    implementation("com.truesim.scene:scene-meshbuild:0.58.0")
+    implementation("com.truesim.scene:scene-gltf:0.58.0")
 }
 
 application {
@@ -18,7 +19,7 @@ application {
 
 tasks.named<JavaExec>("run") {
     workingDir = rootProject.projectDir
-    jvmArgs("--enable-native-access=ALL-UNNAMED")
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-XX:+UseZGC") // generational ZGC: pauses the audio queue covers
     // -Pcharacter=<glTF-Sample-Assets>/Models/Fox/glTF/Fox.gltf: an animated fox among the rocks
     providers.gradleProperty("character").orNull?.let { systemProperty("truesim.demo.character", it) }
 }

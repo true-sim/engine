@@ -78,7 +78,16 @@ import static org.lwjgl.sdl.SDLHaptic.SDL_GetHaptics;
 import static org.lwjgl.sdl.SDLHaptic.SDL_IsMouseHaptic;
 import static org.lwjgl.sdl.SDLHaptic.SDL_OpenHaptic;
 import static org.lwjgl.sdl.SDLHaptic.SDL_OpenHapticFromMouse;
+import static org.lwjgl.sdl.SDLAudio.SDL_GetCurrentAudioDriver;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_AUDIO_DEVICE_ADDED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_AUDIO_DEVICE_FORMAT_CHANGED;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_AUDIO_DEVICE_REMOVED;
+import static org.lwjgl.sdl.SDLHints.SDL_HINT_AUDIO_DEVICE_STREAM_ROLE;
+import static org.lwjgl.sdl.SDLHints.SDL_HINT_AUDIO_DRIVER;
+import static org.lwjgl.sdl.SDLHints.SDL_SetHint;
+import static org.lwjgl.sdl.SDLInit.SDL_INIT_AUDIO;
 import static org.lwjgl.sdl.SDLInit.SDL_INIT_EVENTS;
+import static org.lwjgl.sdl.SDLInit.SDL_InitSubSystem;
 import static org.lwjgl.sdl.SDLInit.SDL_INIT_GAMEPAD;
 import static org.lwjgl.sdl.SDLInit.SDL_INIT_HAPTIC;
 import static org.lwjgl.sdl.SDLInit.SDL_INIT_JOYSTICK;
@@ -129,6 +138,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.lwjgl.PointerBuffer;
+import org.lwjgl.sdl.SDL_AudioDeviceEvent;
 import org.lwjgl.sdl.SDL_CommonEvent;
 import org.lwjgl.sdl.SDL_DisplayMode;
 import org.lwjgl.sdl.SDL_DropEvent;
@@ -208,6 +218,33 @@ public final class Platform implements AutoCloseable {
             open(device.kind(), device.id());
         }
         LOG.info("Platform started on video driver {}", SDL_GetCurrentVideoDriver());
+    }
+
+    /**
+     * Starts SDL's audio subsystem, on the platform's thread (audio.md §4): with {@code driver} (a name such as
+     * {@code dummy} or {@code disk}; {@code null} for SDL's choice or the {@code SDL_AUDIO_DRIVER} environment variable)
+     * and the stream role "Game". After this, the audio thread calls only SDL's audio stream and device functions,
+     * which SDL documents as safe from any thread. Starting twice does nothing.
+     */
+    @AllowAllocation("starting up")
+    public void startAudio(String driver) {
+        checkThread();
+        if (SDL_WasInit(SDL_INIT_AUDIO) != 0) {
+            return;
+        }
+        if (driver != null) {
+            SDL_SetHint(SDL_HINT_AUDIO_DRIVER, driver);
+        }
+        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_ROLE, "Game");
+        if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+            throw new PlatformException("SDL audio could not start: " + SDL_GetError());
+        }
+        LOG.info("Audio started on driver {}", SDL_GetCurrentAudioDriver());
+    }
+
+    /** The audio driver running, or {@code null} before {@link #startAudio}. Safe from any thread. */
+    public static String runningAudioDriver() {
+        return SDL_WasInit(SDL_INIT_AUDIO) == 0 ? null : SDL_GetCurrentAudioDriver();
     }
 
     /** Starts the platform on this thread. Only one platform runs at a time. */
@@ -835,6 +872,11 @@ public final class Platform implements AutoCloseable {
             case SDL_EVENT_MOUSE_REMOVED -> removed(InputDevice.Kind.MOUSE, e, listener);
             case SDL_EVENT_GAMEPAD_REMOVED -> removed(InputDevice.Kind.GAMEPAD, e, listener);
             case SDL_EVENT_JOYSTICK_REMOVED -> removedJoystick(e, listener);
+            case SDL_EVENT_AUDIO_DEVICE_ADDED -> listener.audioDeviceAdded(SDL_AudioDeviceEvent.nwhich(e),
+                !SDL_AudioDeviceEvent.nrecording(e));
+            case SDL_EVENT_AUDIO_DEVICE_REMOVED -> listener.audioDeviceRemoved(SDL_AudioDeviceEvent.nwhich(e));
+            case SDL_EVENT_AUDIO_DEVICE_FORMAT_CHANGED ->
+                listener.audioDeviceFormatChanged(SDL_AudioDeviceEvent.nwhich(e));
             default -> listener.other(SDL_CommonEvent.ntype(e), e);
         }
     }

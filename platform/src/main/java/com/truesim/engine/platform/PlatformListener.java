@@ -67,6 +67,18 @@ public interface PlatformListener {
     default void textEditing(int window, String text, int start, int length) {
     }
 
+    /** An audio device appeared: {@code playback}, or a recording device. */
+    default void audioDeviceAdded(int device, boolean playback) {
+    }
+
+    /** An audio device went away (unplugged); a stream opened on it by id now plays into nothing. */
+    default void audioDeviceRemoved(int device) {
+    }
+
+    /** An audio device's format (rate, channels) changed. */
+    default void audioDeviceFormatChanged(int device) {
+    }
+
     /** Any other event, as SDL gives it ({@code SDL_Event} at {@code event}, of {@code type}): read it there. */
     default void other(int type, long event) {
     }

@@ -15,6 +15,7 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 | `engine-graph`    | `com.truesim.engine.graph`    | Frame graph: techniques plugged together by the results they provide and need |
 | `engine-render`   | `com.truesim.engine.render`   | GPU-driven meshlet rendering of scene's meshes: geometry pool, GPU culling and LOD; blur |
 | `engine-scene`    | `com.truesim.engine.scene`    | Draws scenes: scene's renderables and assets onto renderers, one view per scene and camera |
+| `engine-audio`    | `com.truesim.engine.audio`    | Sound: the mixer on an allocation-free audio thread, SDL3 output, offline rendering |
 | `engine-xr`       | `com.truesim.engine.xr`       | VR headsets through OpenXR: their eyes as frame graph views, a desktop mirror |
 
 ## Application
@@ -1164,6 +1165,86 @@ effects.replace(TORCH, editedTorch);                       // hot reload: instan
 - Interpolation between fixed steps (application-api D91) is not built: effects take nodes' world transforms as they
   are. 100 torches on rocks in the scene benchmark allocate 0 bytes per frame (median).
 
+## Audio
+
+`engine-audio` plays scene-audio's stores (design: scene's `docs/audio.md`): a mixer in Java on an allocation-free,
+lock-free audio thread, and SDL3's audio stream in push mode as the output (AU1, AU2).
+
+```java
+app.use(new Desktop(), new Audio());                  // optional: no device means silence and a log line
+Audio audio = engine.get(Audio.KEY).assets(cache);
+Sounds sounds = audio.sounds(scene);                  // advanced and synced by the plugin each frame
+sounds.listeners().device(cameraNode);
+sounds.fire(KNOCK, x, y, z);
+audio.ui().play(CLICK);
+```
+
+- **`AudioRenderer`**: commands in through a single-producer ring, blocks out, events (voices ended) back; offline with
+  `AudioRenderer.offline(AudioFormat.stereo(48_000))` and `render(frames)`, bit-identical for the same commands.
+  Voices resample with a cubic Hermite, ramp every gain, pan (VBAP on speaker layouts), attenuate, low-pass and
+  Doppler placed sounds, and keep the most audible 64 real (every 4 blocks; the others keep time). Buses from a
+  `BusLayout`, a look-ahead limiter on the master. `Fft` for the steps that need spectra.
+- **`AudioSync`** (game thread): the stores' change logs into commands at the clock's schedule point, clips acquired
+  and started when loaded (dropped past their max start delay), positions relative to each sound's nearest device
+  listener in doubles.
+- **Outputs**: `SdlOutput` (the device's own format, a Java platform thread with MMCSS "Pro Audio" and a
+  high-resolution timer on Windows, the queue kept at least a device buffer and a block deep, underruns counted and
+  guarded), `NullOutput`, `OfflineOutput`.
+- **HRTF** (§2.9): with `audio.output` set to `HEADPHONES`, sounds marked `Spatial.HRTF` render binaurally, the 16
+  most audible (`audio.hrtf.voices`) through `HrtfSpatializer` (partitioned FFT convolution of minimum-phase filters
+  interpolated between measured directions, cross-faded as sources move, a near field), the others panned. Sets are
+  `.hrtf` files converted from SOFA at build time (`./gradlew :engine-audio:convertHrtf -Ptruesim.audio.sofa=...`);
+  `audio.hrtf.set` names one, else the built-in set plays: **SADIE II's KU100 (University of York, Apache License
+  2.0; Armstrong et al., Applied Sciences 8(11) 2029, 2018, doi:10.3390/app8112029)**, converted, with its licence
+  and notice in `audio/src/main/resources/com/truesim/engine/audio/hrtf/`. Games crediting their audio middleware
+  credit it there too (`Hrtf.credit()`).
+- **Settings** (group "audio"): player volumes (saved with the app's settings), device, background rule, output and
+  HRTF set; block size, queue, voices, driver and HRTF voices hidden.
+- **Many sounds**: `Scatter` roots spawn one-shots around the listener (8 at once at most); `sounds.field(sound,
+  SoundField.points(...) | line(...) | area(...))` plays one loop from many places: real voices at the nearest few
+  and a 2D bed at the rest's summed attenuation.
+- **VR**: `audio.head(sounds, xrInput::head)` listens from the headset (and turns the HRTF on with `audio.output` at
+  `AUTO`); `audio.headsetDevice(headset.audioOutputDevice())` plays on the headset's device where the runtime names
+  it; the headset's idle and focus reach the background rule. HRTF voices past the 16 binaural ones go into a
+  third-order ambisonic field per bus, decoded to both ears once a block.
+- **Debug overlay**: `AudioOverlay` writes text lines (voices real, virtual, binaural; underruns; each bus's meter;
+  rendering listeners and the listener graph) for a HUD or a log; the demo prints it with `--args="--audio-overlay"`.
+- **The collector**: run games with `-XX:+UseZGC`; under other collectors the queue starts 4 blocks deep.
+- **Tests without a device** use SDL's `dummy` driver and the `disk` driver for an end-to-end check;
+  `TRUESIM_AUDIO=true ./gradlew :engine-audio:test --tests '*AudioDeviceProbe*'` measures the real device.
+
+### Audio benchmark
+
+`TRUESIM_AUDIO=true ./gradlew :engine-audio:test --tests '*AudioBenchmark*'` plays each scene through the sync and
+the renderer as a game does (60 Hz frames, the listener walking and turning; 48 kHz stereo, 256-frame blocks, so 5.33
+ms a block), 30 s of warm-up, then 30 s timed per block (the audio thread's work) and per frame (`AudioSync.update`, on
+the game thread), with the bytes the render allocates. The heavy scene is the design's (§2.23 of scene's
+`docs/audio.md`): 1,000 placed loops with 64 real voices (16 binaural, the other HRTF ones in the ambisonic field),
+two cameras heard from televisions (16 voices each), a V8 patch, 12 streamed loops (4 music stems, 8 ambiences), a
+reverb aux, an equalizer and a compressor on the effects bus, the limiter. Target: under 1.5 ms a block. A timed
+block slower than a block's 5.33 ms fails the run.
+
+Measured 2026-11-03 on a Ryzen 9 9950X3D (Windows 11, JDK 27, the test JVM's default collector, G1):
+
+| Scene | Block median | p99 | p99.9 | max | Sync median | Sync p99 | Real voices | Bytes a block |
+|---|---|---|---|---|---|---|---|---|
+| 64 voices of 1,000 placed loops | 0.223 ms | 0.466 ms | 0.534 ms | 0.63 ms | 0.039 ms | 0.072 ms | 64 | 0 |
+| 16 HRTF voices | 0.280 ms | 0.397 ms | 0.471 ms | 0.52 ms | 0.001 ms | 0.002 ms | 16 | 0 |
+| 64 HRTF voices: 16 binaural, 48 in the field | 0.492 ms | 0.755 ms | 0.888 ms | 1.05 ms | 0.003 ms | 0.006 ms | 64 | 0 |
+| 2 rendering listeners, 16 voices each | 0.175 ms | 0.272 ms | 0.361 ms | 0.56 ms | 0.002 ms | 0.005 ms | 34 | 0 |
+| 12 streams (4 stems, 8 ambiences) | 0.065 ms | 0.120 ms | 0.163 ms | 0.22 ms | 0.000 ms | 0.001 ms | 12 | 0 |
+| V8 patch | 0.016 ms | 0.027 ms | 0.044 ms | 0.08 ms | 0.000 ms | 0.002 ms | 1 | 0 |
+| **Heavy scene** | **0.580 ms** | **1.128 ms** | **1.338 ms** | 3.8 ms | 0.088 ms | 0.176 ms | 66 | 0 |
+
+The heavy scene stays under 1.5 ms a block to the 99.9th percentile (10.9 % of the block at the median). Its slowest
+block was 3.8 ms in this run and 1.7 and 1.8 ms in two more; the 3.8 ms block's cause was not looked for. The timed
+30 s are now a later stretch of the listener's walk than before (66 real voices at most against 64), so the medians
+are not comparable with the earlier 10 s warm-up runs. With 10 s of warm-up the slowest blocks were 17 to 27 ms: each was
+the optimizing compile of a method called once a block (`AudioRenderer.renderBlock` after about 5,100 blocks,
+`Voices.render`, `AudioRenderer.drain`, `Voices.choose`), which stops the calling thread because the test JVM compiles
+synchronously (see `docs/pitfalls.md`); an app compiles in the background. Streams decode memory clips here (the
+streaming thread's decoding is not in the block time).
+
 ## VR
 
 `engine-xr` drives a headset through its OpenXR runtime (SteamVR, Meta's, Monado), behind the engine's own API: no
@@ -1216,6 +1297,8 @@ shadows and colored lights circling the middle, to try what the engine does live
 title shows the frame rate, GPU time, render size and display encoding. Settings persist in
 `~/.truesim/demo.properties`.
 
+- With a sound device, six rocks drop ahead of the camera and knock where they land (the `Audio` plugin; without a
+  device it plays silently).
 - `-Pcharacter=<glTF-Sample-Assets>/Models/Fox/glTF/Fox.gltf` puts the Khronos fox in a clearing at (26, 26), through
   the whole animation path: surveying, cross-fading into a walk that speeds up into a run (a blend space) and back, its
   head looking at a circling light, its tail after a wagging point (FABRIK with limits), its four feet on the terrain

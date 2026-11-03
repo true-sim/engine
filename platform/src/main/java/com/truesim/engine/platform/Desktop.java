@@ -222,6 +222,27 @@ public final class Desktop implements Plugin {
         }
 
         @Override
+        public void audioDeviceAdded(int device, boolean playback) {
+            for (PlatformListener listener : listeners) {
+                listener.audioDeviceAdded(device, playback);
+            }
+        }
+
+        @Override
+        public void audioDeviceRemoved(int device) {
+            for (PlatformListener listener : listeners) {
+                listener.audioDeviceRemoved(device);
+            }
+        }
+
+        @Override
+        public void audioDeviceFormatChanged(int device) {
+            for (PlatformListener listener : listeners) {
+                listener.audioDeviceFormatChanged(device);
+            }
+        }
+
+        @Override
         public void windowFocusChanged(int window, boolean focused) {
             if (focused) {
                 focusedWindow = window;
