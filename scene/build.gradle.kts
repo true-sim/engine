@@ -32,6 +32,17 @@ tasks.test {
     providers.gradleProperty("gltfTransparency").orNull?.let { systemProperty("truesim.gltf.transparency", it) }
 }
 
+// Global illumination's test scenes (gi.GiReferences, TRUESIM_SCREENSHOTS=true): -PgiOut=<directory> for the images,
+// -PgiScenes=a,b, -PgiSamples=n; -PgiSponza=<Sponza.gltf> adds Sponza (a local asset under its own licence: never
+// committed, only read where it is).
+tasks.test {
+    providers.gradleProperty("giOut").orNull?.let { systemProperty("truesim.gi.out", it) }
+    providers.gradleProperty("giScenes").orNull?.let { systemProperty("truesim.gi.scenes", it) }
+    providers.gradleProperty("giSamples").orNull?.let { systemProperty("truesim.gi.samples", it) }
+    providers.gradleProperty("giSponza").orNull?.let { systemProperty("truesim.gi.sponza", it) }
+    providers.gradleProperty("giBounces").orNull?.let { systemProperty("truesim.gi.bounces", it) }
+}
+
 // The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.
 tasks.test {
     if (providers.environmentVariable("TRUESIM_BENCHMARK").orNull == "true") {

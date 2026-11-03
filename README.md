@@ -1337,6 +1337,25 @@ rises where hits find a cell built in one frame and not in another (exact there,
 lights. Lists cost as many shadow rays as a cell has lights and add no noise; reservoirs cost one ray a hit whatever
 the count. Neither wins outright, so both stay; lists are the default.
 
+**GI test scenes** (engine-scene's tests, `gi.GiScenes`): scenes built in code, exact and repeatable, by name, for
+every GI stage's tests and benchmarks: `sun-room` (a closed room lit by the sun and sky through one window: mostly
+bounced light), `leak-5cm`, `leak-25cm`, `leak-50cm` (a closed dark room beside a sunlit one, the wall between that
+thick: the reference is black, any light there is a leak), `bleeding` (strongly colored walls and floor under a
+ceiling light), `screens` (a dark room lit only by emissive panels), the dynamic `toggle` (a point light on, then off),
+`door` (shut, then open to the sun) and `mover` (a red block beside a white wall, moved 2 m), and `cornell`. Boxes of
+plain materials (a cube with its faces' normals), the sun's shadows ray traced. `gi.GiHarness` renders a scene in a
+state path traced or in real time, `gi.GiError` compares an image with a reference (the mean relative luminance
+error, its median, 95th and 99th percentiles per pixel, the bias, and the mean absolute difference for black
+references), and `GiScenesTest` checks in CI that every scene traces and the dark rooms are black.
+`TRUESIM_SCREENSHOTS=true ./gradlew :engine-scene:test --tests '*GiReferences' -PgiOut=<directory>` writes each
+scene's reference (640 x 400, 4,096 samples: 4 to 9 s each on an RX 9070 XT) and real-time image as PNGs at the
+reference's exposure, and the reference as raw floats for later stages to compare against, with a table of the
+real-time image's error (no GI yet: the environment's light reaches closed rooms, 452 % too bright in `sun-room`,
+0.30 of luminance in the leak rooms' black; rooms lit by bounces alone come out black). Sponza, the large interior, is
+added by `-PgiSponza=<Khronos glTF Sample Assets>/Models/Sponza/glTF/Sponza.gltf` (`gi.GiSponza`: three views, the
+sun through the courtyard, 960 x 540, 2,048 samples: 7 to 9 s each): its files are under their own licence, read from
+where they are, never committed.
+
 **Ray queries in CI:** CI's pinned Mesa 26.0.8 lavapipe exposes `VK_KHR_acceleration_structure` and
 `VK_KHR_ray_query`: `VulkanDevice.rayTracing()` is true there, and the ray-traced tests (`SegmentTracingTest`,
 `ShadowsTest`'s) run in CI rather than being skipped. Ray-traced tests still assume `device.rayTracing()`, and the
