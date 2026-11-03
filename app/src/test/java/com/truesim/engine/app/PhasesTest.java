@@ -140,6 +140,8 @@ class PhasesTest {
             assertThat(paused.frameDelta()).isZero();
             assertThat(fired[0]).isZero();
             assertThat(other.tick()).isEqualTo(6);
+            assertThat(engine.clockCount()).isEqualTo(2);
+            assertThat(engine.clock(1)).isSameAs(other);
             paused.resume();
             engine.stepAt(100 * MS + 16_666_667L); // owed only the time since resuming: one tick
             assertThat(paused.tick()).isEqualTo(1);

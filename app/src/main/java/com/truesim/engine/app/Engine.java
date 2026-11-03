@@ -363,6 +363,16 @@ public final class Engine implements AutoCloseable {
         return clock;
     }
 
+    /** How many world clocks there are. */
+    public int clockCount() {
+        return clocks.length;
+    }
+
+    /** World clock {@code index}, in the order they step. */
+    public Clock clock(int index) {
+        return clocks[index];
+    }
+
     /** Stops stepping {@code clock}: its world is gone. False if it was not one of these. */
     @AllowAllocation("a world is removed")
     public boolean removeClock(Clock clock) {
