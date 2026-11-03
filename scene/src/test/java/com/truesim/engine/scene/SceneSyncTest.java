@@ -150,6 +150,8 @@ class SceneSyncTest {
     private final List<AutoCloseable> closing = new ArrayList<>();
     private final List<RenderView> cameraViews = new ArrayList<>(); // set to the camera every frame
     private RayTracing tracing; // graphs made while set build its top level every frame
+    private int segmentCapacity; // graphs made while set and tracing trace segments too, in segments
+    private com.truesim.engine.render.SegmentTracing segments;
 
     @BeforeEach
     void start() {
@@ -346,6 +348,11 @@ class SceneSyncTest {
         port.add(shading).add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
         if (tracing != null) {
             port.add(new Traced(tracing, renderer));
+            if (segmentCapacity > 0) { // and segments traced through it, in the main view
+                segments = closing(new com.truesim.engine.render.SegmentTracing(device, tracing, renderer,
+                    segmentCapacity));
+                port.add(segments);
+            }
         }
         return graph;
     }
@@ -614,6 +621,51 @@ class SceneSyncTest {
         frame(List.of(graph), List.of(sync), camera);
         assertThat(tracing.bottomLevelAdded(small)).isFalse();
         assertThat(tracing.bottomLevelAdded(again)).isFalse();
+        device.waitIdle();
+    }
+
+    @Test
+    void tracedSegmentsNameTheMaterialAssetsTheyCross() throws InterruptedException {
+        assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
+        tracing = closing(new RayTracing(device, pool, INSTANCES));
+        resources.rayTracing(tracing);
+        segmentCapacity = 4;
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        Renderables renderables = new Renderables(scene);
+        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        FrameGraph graph = graph(sync, false, new GpuBuffer[] {readback(), readback()});
+        long red = facing(scene, 1, 0, -3);
+        renderables.set(red, SQUARE, List.of(RED));
+        long green = facing(scene, -1, 0, -3);
+        renderables.set(green, SQUARE, List.of(GREEN));
+        settle(List.of(graph), List.of(sync));
+        for (int frame = 0; frame < 12 && tracing.pendingBottomLevels() > 0; frame++) {
+            frame(List.of(graph), List.of(sync), camera);
+        }
+        assertThat(resources.materialOf(sync.firstMaterialOf(red))).isEqualTo(RED);
+        assertThat(resources.materialOf(sync.firstMaterialOf(green))).isEqualTo(GREEN);
+        assertThat(resources.materialOf(-1)).isNull();
+        assertThat(resources.materialOf(1 << 20)).isNull();
+        // The crossings name the scene's material ids: through the middle of each square (its diagonal, two triangles
+        // met as one crossing), and above both.
+        long ticket = segments.submit(new double[] {1, 0, 0, 1, 0, -6, -1, 0, 0, -1, 0, -6, 0.5, 5, 0, 0.5, 5, -6}, 3);
+        int[] words = new int[com.truesim.engine.render.SegmentTracing.WORDS * 3];
+        int count = segments.collect(ticket, words);
+        for (int frame = 0; frame < 16 && count < 0; frame++) {
+            frame(List.of(graph), List.of(sync), camera);
+            count = segments.collect(ticket, words);
+        }
+        assertThat(count).isEqualTo(3);
+        assertThat(words[0]).as("through red, one crossing").isEqualTo(1);
+        assertThat(resources.materialOf(words[2])).as("through red").isEqualTo(RED);
+        assertThat(words[com.truesim.engine.render.SegmentTracing.WORDS]).as("through green, one crossing").isEqualTo(1);
+        assertThat(resources.materialOf(words[com.truesim.engine.render.SegmentTracing.WORDS + 2])).as("through green").isEqualTo(GREEN);
+        assertThat(words[2 * com.truesim.engine.render.SegmentTracing.WORDS]).as("past both").isZero();
+        int redMaterial = sync.firstMaterialOf(red);
+        renderables.remove(red);
+        frame(List.of(graph), List.of(sync), camera);
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(resources.materialOf(redMaterial)).as("its block let go").isNull();
         device.waitIdle();
     }
 

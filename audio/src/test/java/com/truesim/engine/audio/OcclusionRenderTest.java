@@ -238,4 +238,116 @@ class OcclusionRenderTest {
         assertThat(sync.occlusionRays()).isZero();
         assertThat(sync.occlusion(12345)).isEqualTo(1);
     }
+
+    /**
+     * {@code world} in batches, as a GPU pass would trace them: each batch traced when submitted and given back on the
+     * {@code delay + 1}th collect of it; every {@code refuse}th submit refused, and batch {@code lose} never given back.
+     */
+    static final class Batches implements BatchedAudioWorld {
+        final AudioWorld world;
+        final int capacity;
+        final int delay;
+        final int refuse;
+        final long lose;
+        final com.truesim.scene.audio.Transmission[] traced;
+        final int[] counts = new int[8];
+        final long[] tickets = new long[8];
+        final int[] asked = new int[8];
+        long issued;
+        int submits;
+        int largest;
+
+        Batches(AudioWorld world, int capacity, int delay, int refuse, long lose) {
+            this.world = world;
+            this.capacity = capacity;
+            this.delay = delay;
+            this.refuse = refuse;
+            this.lose = lose;
+            traced = new com.truesim.scene.audio.Transmission[8 * capacity];
+            for (int i = 0; i < traced.length; i++) {
+                traced[i] = new com.truesim.scene.audio.Transmission();
+            }
+        }
+
+        @Override
+        public int capacity() {
+            return capacity;
+        }
+
+        @Override
+        public long submit(double[] rays, int count) {
+            if (count < 1 || count > capacity) {
+                throw new AssertionError("a batch of " + count);
+            }
+            if (refuse > 0 && ++submits % refuse == 0) {
+                return 0;
+            }
+            largest = Math.max(largest, count);
+            long ticket = ++issued;
+            int slot = (int) (ticket % 8);
+            for (int i = 0; i < count; i++) {
+                int o = 6 * i;
+                world.trace(rays[o], rays[o + 1], rays[o + 2], rays[o + 3], rays[o + 4], rays[o + 5],
+                    traced[slot * capacity + i].open());
+            }
+            tickets[slot] = ticket;
+            counts[slot] = count;
+            asked[slot] = 0;
+            return ticket;
+        }
+
+        @Override
+        public int collect(long ticket, com.truesim.scene.audio.Transmission[] out, int offset) {
+            int slot = (int) (ticket % 8);
+            if (tickets[slot] != ticket || ticket == lose || asked[slot]++ < delay) {
+                return -1;
+            }
+            for (int i = 0; i < counts[slot]; i++) {
+                com.truesim.scene.audio.Transmission t = traced[slot * capacity + i];
+                out[offset + i].open().cross(t.low(), t.mid(), t.high());
+            }
+            return counts[slot];
+        }
+    }
+
+    @Test
+    void aBatchedWorldOccludesAsTheWorldDoesFramesLater() throws InterruptedException {
+        sync.occlusion(WALL, null);
+        double walled = level(dc(), Occlusion.RAYS);
+        Batches batches = new Batches(WALL, 64, 2, 0, -1);
+        sync.occlusion(batches);
+        double batched = level(dc(), Occlusion.RAYS);
+        assertThat(batched).as("the same wall, its results frames later").isCloseTo(walled, within(walled * 0.01));
+        assertThat(sync.occlusionRays()).isPositive();
+        assertThat(sync.occlusionBatchesGivenUp()).isZero();
+    }
+
+    @Test
+    void batchesRefusedOrLostAreGivenUpAndTheBudgetIsTheWorldsCapacity() throws InterruptedException {
+        Batches batches = new Batches(WALL, 16, 1, 3, 2); // every third refused; the second lost
+        sync.occlusion(batches).occlusionBudget(100);
+        long[] ids = new long[40];
+        for (int i = 0; i < ids.length; i++) {
+            ids[i] = sounds.fire(sound(dc(), Occlusion.RAYS, 0), 10, 0, i - 20);
+        }
+        frames(BLOCK);
+        settle();
+        frames(60 * BLOCK);
+        assertThat(batches.largest).as("batches as large as the world takes").isEqualTo(16);
+        assertThat(sync.occlusionBatchesGivenUp()).as("the lost batch").isEqualTo(1);
+        for (long id : ids) {
+            assertThat(sync.occlusion(id)).as("every sound walled in the end").isCloseTo((float) Math.sqrt(0.125),
+                within(1e-3f));
+        }
+        float[] out = new float[2 * BLOCK];
+        assertAllocationFree(() -> {
+            scene.update();
+            sync.events();
+            sounds.advance(5_333L);
+            sync.update();
+            renderer.render(out, 0, BLOCK);
+        }, 6_000, 200, 10);
+        sync.occlusion((BatchedAudioWorld) null);
+        assertThat(sync.occlusionBatchesGivenUp()).isZero();
+    }
 }

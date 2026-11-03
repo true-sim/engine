@@ -49,17 +49,11 @@ uint triangleByte(RayScene* scene, uint i)
 }
 
 /**
- * Whether triangle `primitive` of instance `id`'s bottom level, at barycentrics `bary` (of its second and third
- * vertices), is masked out by its material: the same test rasterizing a masked material makes, at the finest texels.
+ * The first word of the meshlet record holding the triangle whose first index is `t` (the mesh's triangle byte), of
+ * `level`'s meshlets: their triangles follow one another.
  */
-public bool clipped(RayScene* scene, uint id, uint primitive, float2 bary)
+uint meshletWord(RayScene* scene, MeshEntry mesh, BottomLevel level, uint t)
 {
-    Instance instance = ((Instance*)scene.instances)[id];
-    uint meshIndex = instance.mesh & INSTANCE_MESH;
-    MeshEntry mesh = scene.meshes[meshIndex];
-    BottomLevel level = ((BottomLevel*)scene.bottom)[meshIndex];
-    // The meshlet holding the triangle: the level's meshlets' triangles follow one another.
-    uint t = level.firstIndex + primitive * 3;
     uint low = level.firstMeshlet;
     uint high = level.firstMeshlet + level.meshletCount - 1;
     while (low < high)
@@ -74,7 +68,32 @@ public bool clipped(RayScene* scene, uint id, uint primitive, float2 bary)
             high = middle - 1;
         }
     }
-    uint w = (mesh.meshletBase + low) * 8;
+    return (mesh.meshletBase + low) * 8;
+}
+
+/** The material id (of the scene's table) of triangle `primitive` of instance `id`'s bottom level: its submesh's. */
+public uint triangleMaterial(RayScene* scene, uint id, uint primitive)
+{
+    Instance instance = ((Instance*)scene.instances)[id];
+    uint meshIndex = instance.mesh & INSTANCE_MESH;
+    MeshEntry mesh = scene.meshes[meshIndex];
+    BottomLevel level = ((BottomLevel*)scene.bottom)[meshIndex];
+    uint w = meshletWord(scene, mesh, level, level.firstIndex + primitive * 3);
+    return instance.materialBase + (scene.meshlets[w + 2] >> 16);
+}
+
+/**
+ * Whether triangle `primitive` of instance `id`'s bottom level, at barycentrics `bary` (of its second and third
+ * vertices), is masked out by its material: the same test rasterizing a masked material makes, at the finest texels.
+ */
+public bool clipped(RayScene* scene, uint id, uint primitive, float2 bary)
+{
+    Instance instance = ((Instance*)scene.instances)[id];
+    uint meshIndex = instance.mesh & INSTANCE_MESH;
+    MeshEntry mesh = scene.meshes[meshIndex];
+    BottomLevel level = ((BottomLevel*)scene.bottom)[meshIndex];
+    uint t = level.firstIndex + primitive * 3;
+    uint w = meshletWord(scene, mesh, level, t);
     Material m = ((Material*)scene.materials)[instance.materialBase + (scene.meshlets[w + 2] >> 16)];
     if (!materialMasked(m))
     {

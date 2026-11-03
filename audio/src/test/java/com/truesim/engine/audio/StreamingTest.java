@@ -145,7 +145,8 @@ class StreamingTest {
         AssetRef<AudioClip> intro = ref(() -> sine(37), "intro");
         AssetRef<AudioClip> loop = ref(() -> streamed(sine(11)), "loop");
         sounds.play(Sound.builder().root(Segments.intro(intro).loop(loop)).spatial(Spatial.TWO_D).build());
-        float[] out = play(3 * RATE);
+        // near real time, as a device asks: 26 times faster, a busy 4-core CI runner starved the decoder 3 times
+        float[] out = play(3 * RATE, 3_000_000);
         // a 400 Hz sine at 0.5, centre-panned, moves at most 0.5 * 0.707 * 2 pi * 400 / 48,000 a sample: 0.0185
         assertThat(maxStep(out, RATE / 4, 3 * RATE)).isLessThan(0.019f);
         assertThat(Clips.peak(out, 2, 0, RATE, 3 * RATE)).isCloseTo(0.5f * CENTRE, within(0.002f));

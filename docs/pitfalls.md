@@ -232,6 +232,15 @@ transform lives in a buffer, so only GPU-assisted validation saw it; ordinary va
 - Rule: build transforms never scale by 0; run ray tracing tests with GPU-assisted validation once after changing
   what builds read from buffers.
 
+**A technique that provides nothing is never built.** `SegmentTracing` first provided no key, was added with
+`FrameGraph.add` and had a readback pass with side effects: it traced nothing, frame after frame, with no error. The
+graph builds only techniques the outputs need, through keys required or modified; side effects keep passes of built
+techniques from culling, they do not build a technique.
+- Proof: `SegmentTracingTest` collected no batch in 16 frames ("traced 0") until the tracing modified the frame's
+  output key (true-sim/engine, ray-traced audio occlusion).
+- Rule: a technique whose work only leaves the frame (readbacks, side effects) modifies a key its frames always make
+  (`Keys.SCENE_COLOR` of the main view), as `RayTracedShadows` modifies the light list.
+
 **A layout computed twice, from two sizes.** The visibility buffer's per-bin tile lists were spaced by the whole image's
 tile count where Java dispatched them and by the render region's where `resolve.slang` classified into them. With
 dynamic resolution every bin past 0 read another bin's header: its pixels went unshaded, and its indirect dispatch
@@ -335,6 +344,18 @@ audio), past the 10 s warm-up; others were `Voices.render`, `AudioRenderer.drain
 - Rule: a timing test under these conventions warms past the C2 thresholds of what it times (a method called once per
   iteration compiles after about 5,000 calls), or its maximum measures the compiler; `AudioBenchmark` warms 30 s and
   fails on any timed block slower than a block.
+
+**A broadband ILD can be halved by the spectrum, not by the directions.** The ambisonic field's ILD of pink noise
+was about half the direct HRTF's in dB (7.2 against 11.3 at 90°), yet per octave band it was close (500 Hz: 5.5
+against 5.2 dB). The decode fitted the HRTFs' complex responses (with their interaural delays) at every frequency;
+a third-order field cannot carry that phase above about 2 kHz, so the fit lost the highs, and scaling it to the
+direct HRTF's loudness raised the lows: the near ear was 11 dB too loud at 500 Hz and 7.5 dB too quiet at 6 kHz, and
+a broadband ILD is dominated by the band with the most energy. Raising the order with the same fit did not cure it
+(fifth order: +9.8 and -6.3 dB); fitting magnitudes above 1.5 kHz (MagLS) did (pink noise at 90°: 11.1 against 11.4).
+- Proof: `AmbisonicsTest.theFieldKeepsEachBandsLevelDifference` and the 1.5 dB broadband check in
+  `sourcesPastTheCapAreHeardFromTheirDirection` fail with the old decode and pass with MagLS; numbers from
+  `AmbisonicsIldProbe` (true-sim/engine, ambisonics ILD).
+- Rule: judge a spatial decode per band and per ear level, not by one broadband ratio.
 
 ## Java
 
