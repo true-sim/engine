@@ -54,6 +54,9 @@ public final class GiScenes {
         final int box;
         int next;          // the next instance id
         int lightCount;
+        // Materials by their values: a scene built again (another state) names the same ones, so only what the state
+        // changes differs from the frame before
+        private final java.util.Map<String, Integer> mattes = new java.util.HashMap<>();
         public Environment environment = Environment.uniform("none", 0, 0, 0);
         public boolean sun; // light 0 is a directional light with ray-traced shadows (entry 0)
 
@@ -83,8 +86,9 @@ public final class GiScenes {
 
         /** A matte material of color (r, g, b), roughness 0.8, giving off (er, eg, eb). */
         public int matte(float r, float g, float b, float er, float eg, float eb) {
-            return materials.add(new Material(MetallicRoughnessParameters.DEFAULTS.withBaseColor(new Color(r, g, b,
-                1)).withRoughness(0.8f).withEmissive(new Color(er, eg, eb, 1))));
+            return mattes.computeIfAbsent(r + " " + g + " " + b + " " + er + " " + eg + " " + eb,
+                k -> materials.add(new Material(MetallicRoughnessParameters.DEFAULTS.withBaseColor(new Color(r, g, b,
+                    1)).withRoughness(0.8f).withEmissive(new Color(er, eg, eb, 1)))));
         }
 
         public int matte(float r, float g, float b) {

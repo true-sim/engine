@@ -42,6 +42,16 @@ public static const uint PATH_INSIDE = 1u << 8;
 public static const uint NO_BIN = 0xffffffffu;
 static const float PI = 3.14159265;
 
+/**
+ * In the limits: the paths are a probe volume's rays (engine-render's ProbeVolume, probes/update.slang), not a
+ * camera's: a ray's light is written to its texel of the ray image (the accumulation's slot) with its distance, a
+ * hit is shaded once (emission, its lights, and the volume's own indirect light of the frame before for the further
+ * bounces, as the push's indirect-light table holds it) and no path continues but through surfaces that let it pass.
+ */
+public static const uint PATH_PROBES = 1u << 16;
+/** A probe ray's distance where it met nothing. */
+public static const float PROBE_MISSED = 10000;
+
 /** Groups per row of the 2D dispatches over paths: (min(groups, this), rows). */
 public static const uint PATH_ROW = 1024;
 
@@ -794,6 +804,106 @@ public void shadeHit<M : IMaterial>(uint index, uint features)
     continuePath(path, offsetRay(p, dot(l, side) >= 0 ? side : -side), l, throughput * weight, flags + 1);
 }
 
+/** Writes a probe ray's light and distance (negative: a back face) into its texel of the ray image. */
+public void recordProbeRay(uint pixel, float3 radiance, float distance)
+{
+    uint2 p = uint2(pixel & 0xffff, pixel >> 16);
+    images[push.accumulation][p] = float4(radiance, distance);
+}
+
+/**
+ * Shades probe ray `index` (PATH_PROBES), whose hit is of material type M: the light the hit sends back along the ray,
+ * its distance; a back face of a one-sided material is recorded as one (no light, the distance shortened to a fifth and
+ * negative, DDGI's mark of a probe inside geometry); holes and what blended surfaces let pass go on.
+ */
+public void shadeProbeHit<M : IMaterial>(uint index, uint features)
+{
+    PathState path = push.paths[index];
+    View view = push.view[0];
+    HitSurface hit = hitSurface(path, view);
+    VertexOut in = hit.vertex;
+    float3 ng = hit.geometric;
+    float3 v = -path.direction;
+    uint flags = path.flags;
+    uint bounce = flags & 0xff;
+    uint maxBounces = push.limits & 0xff;
+    uint rng = path.rng;
+    float3 p = in.world;
+    float travelled = asfloat(path.pad) + path.t;
+    MaterialRef ref = { push.scene[0].materials, in.material };
+    Material m = ref.slot();
+    bool front = dot(ng, v) > 0;
+    path.cone = coneWidth(path, view);
+    if (!front && !materialDoubleSided(m))
+    {
+        recordProbeRay(path.pixel, 0, -0.2 * travelled);
+        return;
+    }
+    float3 normal = in.normal;
+    float4 tangent = in.tangent;
+    if (!front)
+    {
+        normal = -normal;
+        tangent.w = -tangent.w;
+    }
+    SurfaceInput input;
+    input.world = p;
+    input.toViewer = v;
+    input.normal = normal;
+    input.tangent = tangent;
+    input.uv = in.uv;
+    input.dx = hit.dx.xy;
+    input.dy = hit.dy.xy;
+    input.uv1 = in.uv1;
+    input.dx1 = hit.dx.zw;
+    input.dy1 = hit.dy.zw;
+    input.color = in.color;
+    input.features = features;
+    input.transforms = nullptr;
+    if ((features & FEATURE_TEXTURE_TRANSFORM) != 0)
+    {
+        input.transforms = materialFeatureAt<TextureTransformParameters>(ref, FEATURE_TEXTURE_TRANSFORM);
+    }
+    bool through = materialGeometry(m) != 0 && !M.keep(materialParameters<M.Parameters>(ref), ref, input);
+    float3 emissive;
+    Surface s = typedSurface<M>(ref, input, features, emissive);
+    through = through || (materialBlended(m) && random01(rng) >= s.alpha);
+    if (through)
+    {
+        // A hole, or what a blended surface lets pass: the ray goes on, its distance kept
+        if (bounce + 1 < maxBounces)
+        {
+            path.rng = rng;
+            path.pad = asuint(travelled);
+            continuePath(path, offsetRay(p, front ? -ng : ng), path.direction, path.throughput, flags + 1);
+        }
+        else
+        {
+            recordProbeRay(path.pixel, environment(path.direction), PROBE_MISSED);
+        }
+        return;
+    }
+    float facing = dot(s.normal, v);
+    if (facing < 0.01)
+    {
+        s.normal = normalize(s.normal + v * (0.01 - facing));
+    }
+    float unlit = 0;
+    if ((features & FEATURE_UNLIT) != 0)
+    {
+        unlit = materialFeature<UnlitParameters>(ref, FEATURE_UNLIT).amount;
+    }
+    float3 side = front ? ng : -ng;
+    // Its emission, its lights (shadow rays), and the light from all around it: the volume's of the frame before
+    // (further bounces), the environment's reflections as far as the volume's probes see the sky
+    float3 reflectance;
+    float3 diffuseWeight;
+    float3 around = indirectLightWeights(push.indirect, s, v, p, reflectance, diffuseWeight);
+    float3 radiance = emissive * (1 - unlit) + s.albedo * unlit
+        + (1 - unlit) * (directLight(s, p, side, v, view, rng) + around);
+    recordProbeRay(path.pixel, radiance, travelled);
+}
+
 /** Shades this pass's bin's paths with material type M: one thread per path, the groups as the bin's dispatch. */
 public void shadeHits<M : IMaterial>(uint3 group, uint3 thread)
 {
@@ -802,5 +912,11 @@ public void shadeHits<M : IMaterial>(uint3 group, uint3 thread)
     {
         return;
     }
-    shadeHit<M>(push.bins[push.list + binOffset(push.bin) + index], FEATURES);
+    uint path = push.bins[push.list + binOffset(push.bin) + index];
+    if ((push.limits & PATH_PROBES) != 0)
+    {
+        shadeProbeHit<M>(path, FEATURES);
+        return;
+    }
+    shadeHit<M>(path, FEATURES);
 }

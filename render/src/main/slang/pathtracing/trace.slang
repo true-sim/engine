@@ -54,6 +54,12 @@ void traceMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     RayHit hit = nearest(rays, path.origin + push.offset, path.direction, 0, 1.0e30);
     if (!hit.hit)
     {
+        if ((push.limits & PATH_PROBES) != 0)
+        {
+            recordProbeRay(path.pixel, environment(path.direction), PROBE_MISSED);
+            push.paths[index].bin = NO_BIN;
+            return;
+        }
         accumulate(path.pixel, path.throughput * environment(path.direction));
         push.paths[index].bin = NO_BIN;
         return;

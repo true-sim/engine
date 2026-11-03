@@ -443,6 +443,11 @@ public final class Deformation {
         return copyCount;
     }
 
+    /** The pool mesh id of the {@code i}th copy it poses ({@link #size}). */
+    int copyAt(int i) {
+        return copies[i];
+    }
+
     /**
      * Joint {@code joint}'s matrix for copy {@code copy}: rows of a 3x4 matrix taking the mesh's rest positions to its
      * posed ones (the joint's world transform relative to the instance's, times its inverse bind matrix).
