@@ -25,5 +25,5 @@ VertexOut vertexMain(uint index : SV_VulkanVertexID)
 [shader("fragment")]
 void maskedDepthMain(VertexOut in, bool front : SV_IsFrontFace)
 {
-    discardMasked(push.scene[0].materials[in.material], in, front);
+    discardMasked(push.scene[0].materials, in, front);
 }

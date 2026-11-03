@@ -151,9 +151,9 @@ value, rule or lock changed or `invalidateAvailability()` was called (a device o
 `g.settings()` when they record. Windows follow theirs (`platform.createWindow(options, settings.scoped("window.main"))`),
 and so does the `Presenter` (the graph's present settings, or a window's own). The core's tuning values are settings
 too, read from the graph's settings unless a technique is given its own: light clusters (`ClusteredLights.ALL`:
-tiles, slices, range, lights per cluster), occlusion culling (`RenderSettings.OCCLUSION`), cascades and ray offsets
-(`ShadowSettings.ALL`), and the display transform (`DisplayTransform.ALL`); `RenderSettings.ALL` lists them all for an
-options screen.
+tiles, slices, range, lights per cluster, and the irradiance where lights without a range end, `Lights.NO_RANGE`),
+occlusion culling (`RenderSettings.OCCLUSION`), cascades and ray offsets (`ShadowSettings.ALL`), and the display
+transform (`DisplayTransform.ALL`); `RenderSettings.ALL` lists them all for an options screen.
 
 ```java
 EngineSettings settings = new EngineSettings().load(saved);
@@ -428,13 +428,14 @@ try (GeometryPool pool = new GeometryPool(device, slots);              // starts
   `doubleSided(true)`; opaque and one-sided by default). The cull pass puts each meshlet in its view's list of its
   material's bin, and each bin draws with a pipeline of its own: ordinary opaque meshlets keep the fastest (back faces
   culled, no discard, early depth), double-sided ones draw without culling (their normal-cone test skipped, back faces
-  lit as the front), masked ones without culling and with a fragment variant discarding masked texels and one-sided
+  lit as the front), masked ones without culling and with a fragment variant discarding masked texels (the mask
+  texture sampled in its UV set, moved by its texture transform, as the color passes sample it) and one-sided
   back faces. Every pass rasterizing them uses the same variants, so shadow maps, depth and the visibility buffer
   mask what the camera does; classic LOD draws through the same bins. A view's extra bins have room for a quarter of
   its opaque bin by default (`ViewOptions.withBins`); `RenderView.visibleMeshlets(bin)` counts each. Ray tracing
   follows them too: instances with a masked material enter the top level as non-opaque, and shadow rays alpha-test
-  their triangles (the triangle looked up in its meshlet, its texture coordinates interpolated) against the same
-  cutoff, at the finest texels.
+  their triangles (the triangle looked up in its meshlet, its texture coordinates of both sets interpolated, the
+  mask texture read in its set and moved by its transform) against the same cutoff, at the finest texels.
 - **Two paths, one set of shaders:** a compute pass culls each chunk and lists the visible meshlets. With mesh shaders
   (`VK_EXT_mesh_shader`, enabled where the GPU has it), a mesh workgroup per listed meshlet emits its vertices and
   triangles straight from the pool. Without, an expansion pass writes their triangles into one index buffer, and one
@@ -529,7 +530,8 @@ classic renderer would add a 32-bit index buffer per mesh and per discrete LOD; 
 
 A material is its **type** (how its parameters become a surface), the type's **parameters**, the **features** it
 shows, and how it rasterizes. Type 0 is metallic-roughness as in glTF: a base color, metalness, roughness, a
-tangent-space normal map, occlusion and emission, each a factor times an optional texture.
+tangent-space normal map, occlusion and emission, each a factor times an optional texture (occlusion in the ORM
+texture's red, or in an occlusion texture of its own with its own UV set and transform).
 
 ```java
 try (Textures textures = new Textures(device); Materials materials = new Materials(device, 1024)) {

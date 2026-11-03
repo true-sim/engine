@@ -583,10 +583,11 @@ public static const float3 SKY_IRRADIANCE = float3(0.78539816 / 1.02);
  * Discards what a masked material does not draw at this fragment: its masked texels, and back faces unless it is
  * double-sided (the masked bin draws without culling). Every pass rasterizing the masked bin calls it, shadows too.
  */
-public void discardMasked(Material m, VertexOut in, bool front)
+public void discardMasked(Material* materials, VertexOut in, bool front)
 {
     float4 uvs = float4(in.uv, in.uv1);
-    if ((!front && !materialDoubleSided(m)) || alphaClipped(m, uvs, ddx(uvs), ddy(uvs), in.color))
+    if ((!front && !materialDoubleSided(materials[in.material]))
+        || alphaClipped(materials, in.material, uvs, ddx(uvs), ddy(uvs), in.color))
     {
         discard;
     }
@@ -792,7 +793,7 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
         emissive *= 1 - s.clearcoat * coatFresnel(dot(s.clearcoatNormal, toViewer)); // seen through the coat
     }
     // Light from all around: the view's indirect-light table (an environment, later GI), or the constant sky
-    float3 color = (indirect != nullptr ? indirectLight(indirect, s, toViewer) : ambient(s, SKY_IRRADIANCE)) + emissive;
+    float3 color = (indirect != nullptr ? indirectLight(indirect, s, toViewer) : ambient(s, toViewer, SKY_IRRADIANCE)) + emissive;
     if (lights == nullptr)
     {
         color += reflected(s, toViewer, SUN, SUN_IRRADIANCE);
@@ -807,8 +808,14 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
         float through = s.transmission * (1 - s.metallic);
         if (behind.present())
         {
+            // What the dielectric reflects rather than lets in, a thin film's reflectance mixed in as in its
+            // reflections (KHR_materials_iridescence over transmission: what the film reflects is not transmitted)
             float nv = saturate(dot(s.normal, toViewer));
-            float3 fresnel = s.f0 + (s.f90 - s.f0) * pow(1 - nv, 5); // what the surface reflects rather than lets in
+            float3 fresnel = s.f0 + (s.f90 - s.f0) * pow(1 - nv, 5);
+            if (s.iridescence > 0)
+            {
+                fresnel = lerp(fresnel, s.iridescenceFresnel, s.iridescence);
+            }
             color += through * (1 - fresnel) * transmitted(s, view, in.world, toViewer, pixel, behind);
         }
         else

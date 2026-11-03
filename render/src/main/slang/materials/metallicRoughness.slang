@@ -1,5 +1,5 @@
 // Metallic-roughness, as glTF: a base color, metalness, roughness, a tangent-space normal map, occlusion and
-// emission, each a factor times an optional texture. Type 0, every material's unless it names another. Other types
+// emission, each a factor times an optional texture (occlusion in the ORM texture's red, or a texture of its own). Type 0, every material's unless it names another. Other types
 // may nest its parameters and call evaluate(), or its pieces, to build on it.
 module metallicRoughness;
 
@@ -14,7 +14,8 @@ public struct MetallicRoughnessParameters
     [Range(0, 1)] public float roughness = 0.7;                            // perceptual; times the ORM's green
     [Range(0, 1)] public float metallic = 0;                               // times the ORM's blue
     [Texture(LINEAR)] public int ormTexture = -1;                          // occlusion, roughness, metalness in rgb
-    [Range(0, 1)] public float occlusion = 1;                              // how strongly the ORM's red darkens
+    [Range(0, 1)] public float occlusion = 1;                              // how strongly occlusion darkens
+    [Texture(LINEAR)] public int occlusionTexture = -1;                    // occlusion in red, in place of the ORM's
     [Texture(LINEAR)] public int normalTexture = -1;                       // tangent space, xyz in rgb
     public float normalScale = 1;                                          // how strongly it bends the normal
     [Color] public float3 emissive = float3(0, 0, 0);                      // linear
@@ -32,7 +33,10 @@ public float4 baseColor(MetallicRoughnessParameters p, SurfaceInput in)
     return base;
 }
 
-/** Occlusion (1: none), perceptual roughness and metalness: factors times the ORM texture's. */
+/**
+ * Occlusion (1: none), perceptual roughness and metalness: factors times the ORM texture's; occlusion from the
+ * occlusion texture's red where there is one (its own UV set and transform), else the ORM's, by its strength.
+ */
 public float3 orm(MetallicRoughnessParameters p, SurfaceInput in)
 {
     float3 result = float3(1, p.roughness, p.metallic);
@@ -40,6 +44,10 @@ public float3 orm(MetallicRoughnessParameters p, SurfaceInput in)
     {
         float3 texel = sampleTexture(p.ormTexture, in).rgb;
         result = float3(lerp(1.0, texel.r, p.occlusion), result.y * texel.g, result.z * texel.b);
+    }
+    if (p.occlusionTexture >= 0)
+    {
+        result.x = lerp(1.0, sampleTexture(p.occlusionTexture, in).r, p.occlusion);
     }
     return result;
 }

@@ -1165,6 +1165,48 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void aLightWithoutARangeFallsWithTheSquareOfTheDistanceUntilItsCutoff() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Lights lights = new Lights(device, 1, 1, graph.frameSlots());
+             Materials materials = new Materials(device, 4)) {
+            // A dark quad facing the camera, a light on its axis at distance d: what it reflects is 0.05 / pi times
+            // the irradiance, 16 / d^2 without a range. With a cutoff of 1, the light reaches 4.
+            int grey = materials.add(new Material(MR.withBaseColor(new Color(0.05, 0.05, 0.05, 1)).withRoughness(1)));
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, grey, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(1);
+            graph.settings().set(ClusteredLights.CUTOFF, 1f);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .add(new ClusteredLights(lights, main)).output(Keys.SCENE_COLOR, output);
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            double[] distances = {0.8, 1.2, 4.5};
+            int[] seen = new int[distances.length];
+            lights.point(0, 0, 0, -1.2, Lights.NO_RANGE, 0, 0, 0).setCount(1);
+            frame();
+            frame();
+            int dark = red(image()[center]);
+            for (int i = 0; i < distances.length; i++) {
+                lights.point(0, 0, 0, -2 + distances[i], Lights.NO_RANGE, 16, 16, 16);
+                frame();
+                frame();
+                seen[i] = red(image()[center]) - dark;
+            }
+            // The quad as lit at distance d, its BRDF the same for all (the light on its axis): 1 / d^2, faded only
+            // near the cutoff (2.5 % at a third of it)
+            double atNear = seen[0] * 0.8 * 0.8;
+            assertThat(atNear).as("lit, by the inverse square").isGreaterThan(30);
+            assertThat(seen[1] * 1.2 * 1.2).as("1.2: the inverse square").isCloseTo(atNear, within(0.06 * atNear));
+            assertThat(seen[2]).as("past the cutoff: dark").isZero();
+            graph.settings().set(ClusteredLights.CUTOFF, ClusteredLights.CUTOFF.defaultValue());
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
     void bothShadingsDrawTheSameImage() {
         assumeThat(device.primitiveIds()).as("primitive IDs in fragment shaders").isTrue();
         // The lit floor, and a quad standing on it hiding part of it.
@@ -2729,6 +2771,112 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void anOcclusionTextureOfItsOwnDarkensTheAmbientLightWithItsOwnTransform() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        // Two texels, nearest: occluded (black) on the left half of UV space, open (white) on the right.
+        java.lang.foreign.MemorySegment texels = java.lang.foreign.Arena.ofAuto().allocate(8, 4);
+        texels.setAtIndex(ValueLayout.JAVA_INT, 0, 0xff000000);
+        texels.setAtIndex(ValueLayout.JAVA_INT, 1, 0xffffffff);
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8)) {
+            int texture = TextureSampler.NEAREST.of(textures.color(2, 1, texels));
+            MetallicRoughnessParameters white = MR.withBaseColor(new Color(0.8, 0.8, 0.8, 1)).withRoughness(1);
+            int plain = materials.add(new Material(white));
+            int occluded = materials.add(new Material(white.withOcclusionTexture(texture)));
+            // Moved by half, as glTF's KHR_texture_transform on the occlusion texture alone: open on the left.
+            int moved = materials.add(new Material(white.withOcclusionTexture(TextureSampler.transform(texture, 1)))
+                .feature(TextureTransformParameters.DEFAULTS.withTransform1(new Vec4(0.5, 0, 1, 1))));
+            int weak = materials.add(new Material(white.withOcclusionTexture(texture).withOcclusion(0)));
+            scene.setMaterials(materials);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            List<Technique> shadings = new java.util.ArrayList<>();
+            if (device.primitiveIds()) {
+                shadings.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            }
+            int left = (SIZE / 2) * SIZE + SIZE * 3 / 8; // the quad's UV 0.25 across
+            int right = (SIZE / 2) * SIZE + SIZE * 5 / 8; // and 0.75
+            for (int pass = 0; pass <= shadings.size(); pass++) {
+                if (pass > 0) {
+                    main.port().replace(shadings.get(pass - 1));
+                }
+                scene.set(0, quadMesh, plain, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                int lit = image()[left] & 0xff;
+                assertThat(image()[right] & 0xff).as("pass %d: unoccluded, even", pass).isCloseTo(lit, within(2));
+                scene.set(0, quadMesh, occluded, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                assertThat(image()[left] & 0xff).as("pass %d: the sky occluded on the left", pass)
+                    .isLessThan(lit - 20);
+                assertThat(image()[right] & 0xff).as("pass %d: open on the right", pass).isCloseTo(lit, within(2));
+                scene.set(0, quadMesh, moved, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                assertThat(image()[left] & 0xff).as("pass %d: moved, open on the left", pass).isCloseTo(lit,
+                    within(2));
+                assertThat(image()[right] & 0xff).as("pass %d: moved, occluded on the right", pass)
+                    .isLessThan(lit - 20);
+                scene.set(0, quadMesh, weak, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                assertThat(image()[left] & 0xff).as("pass %d: strength 0, none", pass).isCloseTo(lit, within(2));
+            }
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
+    void alphaMasksFollowTheirTexturesTransform() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        // Two texels, nearest: transparent on the left half of UV space, opaque on the right.
+        java.lang.foreign.MemorySegment texels = java.lang.foreign.Arena.ofAuto().allocate(8, 4);
+        texels.setAtIndex(ValueLayout.JAVA_INT, 0, 0x00ffffff);
+        texels.setAtIndex(ValueLayout.JAVA_INT, 1, 0xffffffff);
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8)) {
+            int texture = TextureSampler.NEAREST.of(textures.color(2, 1, texels));
+            MetallicRoughnessParameters glowing = MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1)
+                .withEmissive(new Color(1, 1, 1, 1));
+            int plain = materials.add(new Material(glowing.withBaseColorTexture(texture)).alphaMask(0.5f));
+            // Moved by half: the opaque texels on the left, as the color the mask comes with.
+            int moved = materials.add(new Material(glowing.withBaseColorTexture(TextureSampler.transform(texture, 1)))
+                .feature(TextureTransformParameters.DEFAULTS.withTransform1(new Vec4(0.5, 0, 1, 1)))
+                .alphaMask(0.5f));
+            scene.setMaterials(materials);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            List<Technique> shadings = new java.util.ArrayList<>();
+            if (device.primitiveIds()) {
+                shadings.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            }
+            int left = (SIZE / 2) * SIZE + SIZE * 3 / 8; // the quad's UV 0.25 across
+            int right = (SIZE / 2) * SIZE + SIZE * 5 / 8; // and 0.75
+            for (int pass = 0; pass <= shadings.size(); pass++) {
+                if (pass > 0) {
+                    main.port().replace(shadings.get(pass - 1));
+                }
+                scene.set(0, quadMesh, plain, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                assertThat(image()[left] & 0xff).as("pass %d: masked out on the left", pass).isZero();
+                assertThat(image()[right] & 0xff).as("pass %d: drawn on the right", pass).isGreaterThan(200);
+                scene.set(0, quadMesh, moved, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                assertThat(image()[left] & 0xff).as("pass %d: moved, drawn on the left", pass).isGreaterThan(200);
+                assertThat(image()[right] & 0xff).as("pass %d: moved, masked out on the right", pass).isZero();
+            }
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
     void unlitMaterialsShowTheirBaseColorAsItIs() {
         MeshData mesh = twoUvQuad();
         int quadMesh = pool.add(mesh);
@@ -3062,6 +3210,49 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void aThinFilmTintsWhatATransmissiveSurfaceLetsThrough() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 8)) {
+            // A white wall behind clear glass; the film's colors are what it reflects, so what passes is the rest.
+            int wall = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1)
+                .withEmissive(new Color(0.8, 0.8, 0.8, 1))));
+            MetallicRoughnessParameters white = MR.withBaseColor(new Color(1, 1, 1, 1)).withRoughness(0.05f);
+            TransmissionParameters clear = TransmissionParameters.DEFAULTS.withTransmissionFactor(1);
+            int glass = materials.add(new Material(white).feature(clear));
+            int filmed = materials.add(new Material(white).feature(clear).feature(IridescenceParameters.DEFAULTS
+                .withIridescenceFactor(1).withIridescenceIor(2).withIridescenceThicknessMaximum(400)));
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, wall, 0, 0, -3, 0, 0, 0, 1, 2, 2, 2);
+            scene.removeFrom(2);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .add(new WeightedBlendedTransparency(SceneGeometry.meshlets(renderer), main))
+                .output(Keys.SCENE_COLOR, output);
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            scene.set(1, quadMesh, glass, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            frame();
+            int plain = image()[center];
+            scene.set(1, quadMesh, filmed, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            frame();
+            int tinted = image()[center];
+            assertThat(spread(plain)).as("clear glass: the wall's grey").isLessThan(4);
+            assertThat(spread(tinted)).as("filmed glass: what the film does not reflect, colored").isGreaterThan(15);
+            scene.setMaterials(null);
+        }
+    }
+
+    /** The largest difference between {@code pixel}'s red, green and blue. */
+    private static int spread(int pixel) {
+        int r = pixel & 0xff;
+        int g = (pixel >> 8) & 0xff;
+        int b = (pixel >> 16) & 0xff;
+        return Math.max(r, Math.max(g, b)) - Math.min(r, Math.min(g, b));
+    }
+
+    @Test
     void transmissiveMaterialsShowTheSceneBehindThroughThem() {
         MeshData mesh = twoUvQuad();
         int quadMesh = pool.add(mesh);
@@ -3237,6 +3428,43 @@ class GraphTechniquesTest {
             frame();
             int center = image()[(SIZE / 2) * SIZE + SIZE / 2];
             assertThat(blue(center)).as("bright blue, not NaN black").isGreaterThan(240);
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
+    void lightThroughADiffuselyTransmittingSurfaceLosesWhatItsFresnelReflects() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Lights lights = new Lights(device, 1, 1); Materials materials = new Materials(device, 4)) {
+            // A black leaf letting all its diffuse light through, red, seen at 75 degrees; a light straight behind it,
+            // whose mirror image on the viewer's side is 150 degrees from the viewer: v.h = cos 75, Fresnel 0.255.
+            int leaf = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1))
+                .feature(DiffuseTransmissionParameters.DEFAULTS.withDiffuseTransmissionFactor(1)
+                    .withDiffuseTransmissionColorFactor(new Color(1, 0, 0, 1))));
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, leaf, 0, 0, -2, 0, (float) Math.sin(Math.toRadians(37.5)), 0,
+                (float) Math.cos(Math.toRadians(37.5)), 1, 1, 1);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .add(new ClusteredLights(lights, main)).output(Keys.SCENE_COLOR, output);
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            lights.directional(0, 0, 0, 1, 0, 0, 0).setCount(1);
+            frame();
+            frame();
+            int dark = red(image()[center]);
+            lights.directional(0, 0, 0, 1, 6, 6, 6);
+            frame();
+            frame();
+            int lit = red(image()[center]);
+            // 6 / pi * cos 75 * (1 - 0.255): 0.368 (0.494 without the Fresnel)
+            double cos = Math.cos(Math.toRadians(75));
+            double f = 0.04 + 0.96 * Math.pow(1 - cos, 5);
+            assertThat(lit - dark).as("through, less the Fresnel").isCloseTo((int) Math.round(255 * 6 / Math.PI * cos
+                * (1 - f)), within(6));
             scene.setMaterials(null);
         }
     }
@@ -3444,6 +3672,57 @@ class GraphTechniquesTest {
                     .isGreaterThan(((shown[4] >> 16) & 0xff) + 4);
                 assertThat((shown[5] >> 8) & 0xff).as("pass %d: green sheen: green", pass)
                     .isGreaterThan(((shown[0] >> 8) & 0xff) + 4);
+            }
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
+    void aSheensAlbedoFollowsItsRoughnessUnderTheSunAndSky() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 16)) {
+            MetallicRoughnessParameters red = MR.withBaseColor(new Color(0.6, 0.1, 0.1, 1)).withRoughness(0.6f);
+            SheenParameters cyan = SheenParameters.DEFAULTS.withSheenColorFactor(new Color(0, 1, 1, 1));
+            int plain = materials.add(new Material(red));
+            // KHR_materials_sheen: roughness 0 is a sheen with no albedo, reflecting nothing and dimming nothing.
+            int smooth = materials.add(new Material(red).feature(cyan.withSheenRoughnessFactor(0)));
+            int slight = materials.add(new Material(red).feature(cyan.withSheenRoughnessFactor(0.05f)));
+            int rough = materials.add(new Material(red).feature(cyan.withSheenRoughnessFactor(1)));
+            scene.setMaterials(materials);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            List<Technique> shadings = new java.util.ArrayList<>();
+            if (device.primitiveIds()) {
+                shadings.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            }
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            for (int pass = 0; pass <= shadings.size(); pass++) {
+                if (pass > 0) {
+                    main.port().replace(shadings.get(pass - 1));
+                }
+                int[] list = {plain, smooth, slight, rough};
+                int[] shown = new int[list.length];
+                for (int i = 0; i < list.length; i++) {
+                    scene.set(0, quadMesh, list[i], 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                    frame();
+                    shown[i] = image()[center];
+                }
+                for (int shift = 0; shift < 24; shift += 8) {
+                    assertThat((shown[1] >> shift) & 0xff).as("pass %d: roughness 0, as without", pass)
+                        .isCloseTo((shown[0] >> shift) & 0xff, within(1));
+                    assertThat((shown[2] >> shift) & 0xff).as("pass %d: nearly smooth, seen head-on: as without",
+                        pass).isCloseTo((shown[0] >> shift) & 0xff, within(1));
+                }
+                assertThat((shown[3] >> 8) & 0xff).as("pass %d: rough, its cyan shows", pass)
+                    .isGreaterThan(((shown[0] >> 8) & 0xff) + 4);
+                assertThat(shown[3] & 0xff).as("pass %d: rough, the red base dimmed", pass)
+                    .isLessThan(shown[0] & 0xff);
             }
             scene.setMaterials(null);
         }

@@ -27,5 +27,5 @@ public void applySheen(inout Surface s, SheenParameters p, SurfaceInput in)
         roughness *= sampleTexture(p.sheenRoughnessTexture, in).a;
     }
     s.sheenColor = color;
-    s.sheenRoughness = clamp(roughness, 0.07, 1.0);
+    s.sheenRoughness = saturate(roughness);
 }

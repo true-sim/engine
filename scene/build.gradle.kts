@@ -8,9 +8,9 @@ description = "Engine scene bridge for true-sim: draws scene's renderables, foll
 
 dependencies {
     api(project(":engine-render"))
-    api("com.truesim.scene:scene-render:0.61.0")
-    testImplementation("com.truesim.scene:scene-meshbuild:0.61.0")
-    testImplementation("com.truesim.scene:scene-gltf:0.61.0")
+    api("com.truesim.scene:scene-render:0.62.0")
+    testImplementation("com.truesim.scene:scene-meshbuild:0.62.0")
+    testImplementation("com.truesim.scene:scene-gltf:0.62.0")
 }
 
 // The test shaders' material records (a game's own type, as in a project of its own), as Java.
@@ -26,6 +26,7 @@ tasks.test {
     providers.gradleProperty("gltfModels").orNull?.let { systemProperty("truesim.gltf.models", it) }
     providers.gradleProperty("gltfZoom").orNull?.let { systemProperty("truesim.gltf.zoom", it) }
     providers.gradleProperty("gltfEnvironment").orNull?.let { systemProperty("truesim.gltf.environment", it) }
+    providers.gradleProperty("gltfBackground").orNull?.let { systemProperty("truesim.gltf.background", it) }
     providers.gradleProperty("gltfAnimation").orNull?.let { systemProperty("truesim.gltf.animation", it) }
     providers.gradleProperty("gltfClip").orNull?.let { systemProperty("truesim.gltf.clip", it) }
 }

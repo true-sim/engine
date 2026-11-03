@@ -258,6 +258,17 @@ could take tile words as group counts.
 - Rule: a buffer layout shared by Java and a shader is computed once and handed over (a push field), never derived on
   both sides; test it with a region smaller than the image and with more than one bin.
 
+**A constant stood in for an integral that depends on the angle and the roughness.** Without an environment, the
+sheen's directional albedo (what it reflects of the sky, and takes from the base) was a fixed 0.157, its average at a
+mid roughness, and the sheen's roughness was clamped to 0.07: a sheen of roughness 0, which KHR_materials_sheen makes
+reflect nothing, dimmed its base by 16 % and added 16 % of its color under the sun and sky (SheenTestGrid's top row
+cyan where the Khronos reference shows none).
+- Proof: `GraphTechniquesTest.aSheensAlbedoFollowsItsRoughnessUnderTheSunAndSky` fails with the constant (the base's
+  red 63 against 75 without a sheen) and passes with `sheenAlbedo`, a fit to the lobe's integral (true-sim/engine,
+  PBR fixes from the Khronos samples).
+- Rule: an approximation of an integral is fitted to the integral over its whole domain and says how far it is off;
+  a path without the lookup table uses the same lobe the table was made from.
+
 ## Tests and measurements
 
 **A GPU time per frame that left out the frame start.** `GpuTimings` timed passes only; textures' copies and mip
@@ -365,6 +376,26 @@ software renderer it had not, so the growth came a frame later and the test fail
   once the test waited for the frames after.
 - Rule: what reads the GPU's results at a frame's end (counters, readbacks) sees them a frame or more late; a test
   asserts after enough frames and `waitIdle`, not at the frame that wrote them.
+
+**The sample renders' light clusters binned for a camera that was never set.** `SampleModelsRender` made its
+`SceneView` with a blank `Camera` and gave the framed one to `RenderView.set` only; `ClusteredLights` bins for the
+`SceneView`'s camera, so no KHR_lights_punctual light reached any surface (LightVisibility's spots and
+DiffuseTransmissionPlant's fireflies dark, read as a shading fault). Its lights also stayed at their rest nodes while
+the animation moved the fireflies.
+- Proof: LightVisibility rendered flat grey before, its two spots after one `Camera` was shared; the plant's leaves
+  glow red and green near the fireflies once lights follow the posed nodes (true-sim/engine, PBR fixes from the
+  Khronos samples).
+- Rule: a view's `SceneView` and its `RenderView.set` take the same `Camera` object; check a light test model before
+  judging lighting from a sample render.
+
+**A reflection in a reference-free spot was taken for a bug.** AttenuationTest's smooth glass showed bright patches
+(Sample Color 1.5 and 2.0, Thickness Texture 1.5) that the Khronos screenshot does not: mirror reflections, at 4 %
+Fresnel, of a band of Footprint Court of radiance about 10 behind the camera. The screenshot's camera is elsewhere.
+- Proof: the patches go with the environment's specular term alone (removing transmission, the sun or back faces
+  leaves them); the environment looked up along each pixel's mirrored ray predicts a bright band over the top 30 % of
+  the 2.0 quad and the 1.5 quad's top-right corner, where they are (`predict.py`, PBR fixes work).
+- Rule: before calling a difference from a reference a bug, check what the reference's camera and environment would
+  show; reflections depend on both.
 
 ## Audio
 

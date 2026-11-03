@@ -94,7 +94,8 @@ public bool clipped(RayScene* scene, uint id, uint primitive, float2 bary)
     BottomLevel level = ((BottomLevel*)scene.bottom)[meshIndex];
     uint t = level.firstIndex + primitive * 3;
     uint w = meshletWord(scene, mesh, level, t);
-    Material m = ((Material*)scene.materials)[instance.materialBase + (scene.meshlets[w + 2] >> 16)];
+    uint id = instance.materialBase + (scene.meshlets[w + 2] >> 16);
+    Material m = ((Material*)scene.materials)[id];
     if (!materialMasked(m))
     {
         return false;
@@ -103,6 +104,7 @@ public bool clipped(RayScene* scene, uint id, uint primitive, float2 bary)
     uint first = mesh.indexBase + t;
     uint vertexBase = mesh.meshletVertexBase + scene.meshlets[w];
     float2 uv = 0;
+    float2 uv1 = 0;
     float4 color = 1;
     if ((mesh.attributeFormat & 16) != 0)
     {
@@ -116,13 +118,18 @@ public bool clipped(RayScene* scene, uint id, uint primitive, float2 bary)
             uint word = attributeWord(mesh, scene.attributes, vertex, 2);
             uv += weights[k] * float2(decodeHalf(word & 0xffff), decodeHalf(word >> 16));
         }
+        if ((mesh.attributeFormat & 8) != 0) // UV1: 2 x float16, for a mask texture in the second set
+        {
+            uint word = attributeWord(mesh, scene.attributes, vertex, 3);
+            uv1 += weights[k] * float2(decodeHalf(word & 0xffff), decodeHalf(word >> 16));
+        }
         if ((mesh.attributeFormat & 16) != 0) // COLOR: 4 x unorm8
         {
             uint word = attributeWord(mesh, scene.attributes, vertex, 4);
             color += weights[k] * float4(word & 0xff, (word >> 8) & 0xff, (word >> 16) & 0xff, word >> 24) / 255.0;
         }
     }
-    return alphaClipped(m, float4(uv, uv), float4(0), float4(0), color);
+    return alphaClipped((Material*)scene.materials, id, float4(uv, uv1), float4(0), float4(0), color);
 }
 
 /**
