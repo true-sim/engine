@@ -1,6 +1,10 @@
 package com.truesim.engine.audio;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.common.jobs.JobSystem;
+import com.truesim.scene.audio.AudioWorld;
+import com.truesim.scene.audio.Occlusion;
+import com.truesim.scene.audio.Transmission;
 import com.truesim.engine.audio.dsp.PatchVoice;
 import com.truesim.engine.audio.dsp.Patches;
 import com.truesim.scene.assets.AssetCache;
@@ -93,6 +97,18 @@ public final class AudioSync {
         final double[] previous = new double[3];
         double previousDistance;
         float doppler = 1;
+        // occlusion (step 16): smoothed transmissions, this frame's sums from its rays, what was sent
+        float occMid = 1;
+        float occHigh = 1;
+        float targetMid = 1;
+        float targetHigh = 1;
+        float sumMid;
+        float sumHigh;
+        int rays;
+        float sentGain = 1;
+        float sentCutoff;
+        boolean sharesZone = true;
+        boolean occKnown;
 
         @AllowAllocation("a sound with more voices than any before")
         void grow(int n) {
@@ -423,6 +439,9 @@ public final class AudioSync {
             listenerZone(s);
         }
         renderingDone();
+        if (occluder != null) {
+            occlude();
+        }
         if (music != null) {
             music();
         }
@@ -443,6 +462,128 @@ public final class AudioSync {
         for (Sounds store : stores) {
             store.dialogue().update(); // its events at the heard times just told
         }
+    }
+
+    // Occlusion (step 16).
+    private Occluder occluder;
+    private int occlusionCursor;
+    private long occlusionPoint = -1;
+    private int occlusionSeed;
+
+    /**
+     * Occludes sounds whose occlusion is {@code RAYS} (§2.11) by rays through {@code world}, traced on {@code jobs}
+     * (null: on the calling thread), 64 rays a frame round-robin; null turns occlusion off.
+     */
+    @AllowAllocation("set up once")
+    public AudioSync occlusion(AudioWorld world, JobSystem jobs) {
+        occluder = world == null ? null : new Occluder(world, jobs, occluder == null ? 64 : occluder.budget());
+        return this;
+    }
+
+    /** Rays a frame, at most. */
+    public AudioSync occlusionBudget(int rays) {
+        if (occluder != null) {
+            occluder.budget(rays);
+        }
+        return this;
+    }
+
+    /** Occlusion rays traced so far. */
+    public long occlusionRays() {
+        return occluder == null ? 0 : occluder.traced();
+    }
+
+    /** The smoothed mid-band transmission of instance {@code id} of store {@code s} (its gain); 1 if not occluded. */
+    public float occlusion(long id) {
+        for (Track track : tracks) {
+            if (track != null && track.sound != null && track.id == id) {
+                return track.occMid;
+            }
+        }
+        return 1;
+    }
+
+    /** The frame's rays, round-robin over occluding sounds; traced, summed per sound, smoothed, sent. */
+    private void occlude() {
+        double seconds = occlusionPoint < 0 ? 0 : (double) (schedulePoint - occlusionPoint) / rate;
+        occlusionPoint = schedulePoint;
+        occluder.begin();
+        int n = tracks.length;
+        int visited = 0;
+        for (; visited < n; visited++) {
+            int t = (occlusionCursor + visited) % n;
+            Track track = tracks[t];
+            if (!occluding(track)) {
+                continue;
+            }
+            float radius = track.sound.attenuation().radius();
+            int need = radius > 0 ? 4 : 1;
+            if (!occluder.room(need)) {
+                break;
+            }
+            Sounds store = stores[track.store];
+            int d = nearest(track);
+            double[] p = devices[track.store];
+            occluder.add(t, d < 0 ? 0 : p[7 * d], d < 0 ? 0 : p[7 * d + 1], d < 0 ? 0 : p[7 * d + 2],
+                store.position(track.id, 0), store.position(track.id, 1), store.position(track.id, 2), radius,
+                occlusionSeed++);
+            track.rays = 0;
+            track.sumMid = 0;
+            track.sumHigh = 0;
+        }
+        occlusionCursor = n == 0 ? 0 : (occlusionCursor + visited) % n;
+        occluder.trace();
+        for (int i = 0; i < occluder.count(); i++) {
+            Track track = tracks[occluder.owner(i)];
+            Transmission r = occluder.result(i);
+            // the gain: between the lows' and the mids' (bass carries through walls); the cutoff from the highs
+            track.sumMid += (float) Math.sqrt(r.low() * r.mid());
+            track.sumHigh += r.high();
+            track.rays++;
+        }
+        for (Track track : tracks) {
+            if (!occluding(track)) {
+                continue;
+            }
+            if (track.rays > 0) {
+                track.targetMid = track.sumMid / track.rays;
+                track.targetHigh = track.sumHigh / track.rays;
+                track.rays = 0;
+                if (!track.occKnown) { // its first rays: taken at once, not faded from open
+                    track.occKnown = true;
+                    track.occMid = track.targetMid;
+                    track.occHigh = track.targetHigh;
+                }
+            }
+            track.occMid = Occluder.smooth(track.occMid, track.targetMid, seconds);
+            track.occHigh = Occluder.smooth(track.occHigh, track.targetHigh, seconds);
+            float cutoff = Occluder.cutoff(track.occMid, track.occHigh);
+            if (Math.abs(track.occMid - track.sentGain) > 0.002f || Math.abs(cutoff - track.sentCutoff) > 20) {
+                for (int v = 0; v < track.voices; v++) {
+                    if (track.state[v] == PLAYING) {
+                        commands.occlude(track.slots[v], track.occMid, cutoff);
+                    }
+                }
+                track.sentGain = track.occMid;
+                track.sentCutoff = cutoff;
+            }
+        }
+    }
+
+    private boolean occluding(Track track) {
+        return track != null && track.sound != null && !track.gone && track.sound.occlusion() == Occlusion.RAYS
+            && playing(track) && placed(track);
+    }
+
+    /** The strongest reverb zone at device listener {@code listener} of store {@code s}; 0 for none. */
+    private long listenerZoneOf(int s, long listener) {
+        for (int n = 0; n < deviceCounts[s]; n++) {
+            if (deviceIds[s][n] == listener) {
+                double[] d = devices[s];
+                return stores[s].reverbZones().strongest(d[7 * n], d[7 * n + 1], d[7 * n + 2]);
+            }
+        }
+        return 0;
     }
 
     /** Tells a dialogue line where it is heard ({@code heardFrame} against its start) and how loud it is. */
@@ -689,6 +830,14 @@ public final class AudioSync {
         track.placed = false;
         track.listener = 0;
         track.doppler = 1;
+        track.occMid = 1;
+        track.occHigh = 1;
+        track.targetMid = 1;
+        track.targetHigh = 1;
+        track.sentGain = 1;
+        track.sentCutoff = 0;
+        track.sharesZone = true;
+        track.occKnown = false;
         for (int v = 0; v < track.voices; v++) {
             track.slots[v] = -1;
             track.starts[v] = 0;
@@ -1267,6 +1416,9 @@ public final class AudioSync {
             long zone = zones.size() == 0 ? 0 : zones.strongest(ex, ey, ez);
             float inZone = zones.size() == 0 ? 1 : zone == 0 ? 0 : zones.weight(zone, ex, ey, ez);
             send = attenuation.reverbSend((float) distance) * inZone;
+            // occlusion lowers the reverb too; obstruction (listener and emitter in one zone) only the direct path
+            track.sharesZone = zone == 0 || zone == listenerZoneOf(track.store, track.listener);
+            send *= track.sharesZone ? 1 : track.occMid;
         }
         for (int v = 0; v < track.voices; v++) {
             if (track.state[v] == PLAYING) {

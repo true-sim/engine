@@ -100,6 +100,8 @@ final class Voices {
     private final float[] attTarget;
     private final float[] lowPass;
     private final float[] lowCoef;
+    private final float[] occGains;
+    private final float[] occCutoffs;
     private final float[] dopplerTargets;
     private final float[] dopplers;
     private final byte[] reality;
@@ -224,6 +226,8 @@ final class Voices {
         auxTo = new float[capacity];
         starving = new boolean[capacity];
         lastPlayed = new float[2 * capacity];
+        occGains = new float[capacity];
+        occCutoffs = new float[capacity];
         levels = new float[capacity];
         resumes = new long[capacity];
         dryGains = new float[capacity];
@@ -334,6 +338,8 @@ final class Voices {
         attTarget[slot] = 1;
         lowPass[slot] = 0;
         lowCoef[slot] = 1;
+        occGains[slot] = 1;
+        occCutoffs[slot] = 0;
         spatialLeft[slot] = 0;
         reality[slot] = REAL;
         realGains[slot] = 1;
@@ -394,11 +400,26 @@ final class Voices {
         float y = where[3 * slot + 1];
         float z = where[3 * slot + 2];
         float distance = (float) Math.sqrt(x * x + y * y + z * z);
-        attTarget[slot] = a.gain(distance);
+        attTarget[slot] = a.gain(distance) * occGains[slot];
         double azimuth = Maths.atan2(x, -z);
         panner.direction(azimuth, a.spread(distance), panTarget, slot * channels);
-        float cutoff = a.lowPass(distance);
+        float air = a.lowPass(distance);
+        float occluded = occCutoffs[slot];
+        float cutoff = air <= 0 ? occluded : occluded <= 0 ? air : Math.min(air, occluded);
         lowCoef[slot] = cutoff <= 0 ? 1 : (float) (1 - Maths.exp(-2 * Math.PI * Math.min(cutoff, 0.45 * rate) / rate));
+    }
+
+    /**
+     * Occludes {@code slot} (§2.11): its gain times {@code gain}, and a low-pass at {@code cutoff} Hz (0: none) on top of
+     * the air's; moved to over the next block.
+     */
+    void occlude(int slot, float gain, float cutoff) {
+        occGains[slot] = gain;
+        occCutoffs[slot] = cutoff;
+        if (placed[slot]) {
+            place(slot);
+            spatialLeft[slot] = Math.max(1, spatialLeft[slot]);
+        }
     }
 
     /** Moves a placed voice's gain and pan a block towards their targets, and its Doppler ratio. */

@@ -58,6 +58,7 @@ public final class AudioRenderer implements AutoCloseable {
     static final int ORDER = 21;
     static final int INPUT = 22;
     static final int INPUT_NEXT = 23;
+    static final int OCCLUDE = 24;
 
     /** Receives events. */
     @FunctionalInterface
@@ -283,6 +284,7 @@ public final class AudioRenderer implements AutoCloseable {
                     pendingInput = -1;
                 }
                 case INPUT_NEXT -> pendingInput = (int) values[v];
+                case OCCLUDE -> voices.occlude(slot, (float) values[v], (float) values[v + 1]);
                 case INPUT -> voices.input(slot, (int) values[v], Math.max(frame, r.frames[c] - latency));
                 case LISTENER -> voices.listener(slot, values[v] != 0, (int) values[v + 1], (float) values[v + 2],
                     r.refs[c] == null ? -1 : graph.index((Bus) r.refs[c]), (ListenerTap) r.refs2[c]);
@@ -439,6 +441,11 @@ public final class AudioRenderer implements AutoCloseable {
         /** Voice {@code slot} now re-emits listener {@code l}'s mix (-1 none), cross-fading 30 ms from {@code frame}. */
         public boolean input(int slot, int l, long frame) {
             return send(INPUT, slot, frame, l, 0);
+        }
+
+        /** Occludes voice {@code slot}: its gain times {@code gain}, a low-pass at {@code cutoff} Hz (0: none). */
+        public boolean occlude(int slot, float gain, float cutoff) {
+            return send(OCCLUDE, slot, 0, gain, cutoff);
         }
 
         /** The next {@link #play} re-emits listener {@code l}'s mix (its clip ignored, may be null). */

@@ -616,6 +616,64 @@ class ListeningProofs {
                 new float[] {0, 0, 0, 0, 0, 0}, 0)));
     }
 
+    /** Music from a room: drums, bass and bells of the step 11 score in one mono loop. */
+    static AudioClip partyLoop() {
+        AudioClip[] parts = {drums(), bass(), bells(), pads()};
+        int frames = (int) parts[0].frames();
+        float[] s = new float[frames];
+        for (AudioClip part : parts) {
+            for (int i = 0; i < frames; i++) {
+                s[i] += 0.5f * (part.sample(i, 0) + part.sample(i, 1));
+            }
+        }
+        return AudioClip.builder(RATE, 1).floats(s).loop(0, frames).build();
+    }
+
+    static int box(com.truesim.common.collision.CollisionWorld world, double x0, double x1, double z0, double z1,
+            int material) {
+        int c = world.addStatic(new com.truesim.common.collision.BoxShape(new com.truesim.common.math.Vec3(
+            (x1 - x0) / 2, 1.5, (z1 - z0) / 2)), com.truesim.common.math.Transform.ofTranslation(
+            new com.truesim.common.math.Vec3((x0 + x1) / 2, 1.5, (z0 + z1) / 2)));
+        world.setMaterial(c, material);
+        return c;
+    }
+
+    @Test
+    void walkingPastARoomWithMusic() throws IOException, InterruptedException {
+        try (World w = new World()) {
+            w.renderer.commands().layout(com.truesim.scene.audio.BusLayout.builder()
+                .bus(com.truesim.scene.audio.Bus.SFX, b -> b.send(AudioSync.REVERB, -12))
+                .aux(AudioSync.REVERB, b -> b.effect(com.truesim.scene.audio.AudioEffect.named("reverb")
+                    .set("preset", 0))).build());
+            // a room 8 by 8 m: concrete walls, a door gap and a glass window in the north wall (z = 0)
+            var physics = new com.truesim.common.collision.CollisionWorld();
+            box(physics, 0, 3, -0.1, 0.1, 1);
+            box(physics, 4.2, 6, -0.1, 0.1, 1);
+            box(physics, 6, 7.5, -0.1, 0.1, 2);
+            box(physics, 7.5, 8, -0.1, 0.1, 1);
+            box(physics, -0.1, 0.1, -8, 0, 1);
+            box(physics, 7.9, 8.1, -8, 0, 1);
+            box(physics, 0, 8, -8.1, -7.9, 1);
+            physics.update();
+            com.truesim.scene.audio.AudioMaterial[] table = {null, com.truesim.scene.audio.AudioMaterial.CONCRETE,
+                com.truesim.scene.audio.AudioMaterial.GLASS};
+            w.sync.occlusion(new com.truesim.scene.audio.CollisionAudioWorld(physics,
+                m -> m > 0 && m < table.length ? table[m] : null, -1), null);
+            AssetRef<AudioClip> loop = AssetRef.generated(AudioAssets.CLIP, (v, seed) -> partyLoop(), 0, 0);
+            Sound music = Sound.builder().root(Play.clip(loop)).occlusion(com.truesim.scene.audio.Occlusion.RAYS)
+                .attenuation(Attenuation.builder().distance(2, 60).reverbSend(0.6f, 1).build()).loop().build();
+            w.sounds.fire(music, 4, 1.5, -4);
+            w.load();
+            // walking along the outside of the north wall, 3 m from it: concrete, the door, concrete, the window
+            for (int f = 0; f < 60 * 24; f++) {
+                double x = -6 + 20.0 * f / (60 * 24);
+                w.scene.setTranslation(w.head, x, 1.6, 3);
+                w.frame();
+            }
+            w.write("au_step16_walking_past_a_room_with_music.wav");
+        }
+    }
+
     @Test
     void carPassingWithDopplerAndPanning() throws IOException, InterruptedException {
         try (World w = new World()) {
