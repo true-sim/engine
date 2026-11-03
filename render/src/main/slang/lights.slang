@@ -23,7 +23,8 @@ public static const uint DIRECTIONAL = 2;
 public struct Light
 {
     public float3 position;        // world position, high part; relative to the shading camera once handed out
-    public float range;            // where its light ends (smoothly); unused for directional lights
+    public float range;            // where its light ends (smoothly); infinite: where it falls below the list's cutoff;
+                                   // unused for directional lights
     public float3 color;           // linear, intensity included: irradiance at 1 unit (directional: at any distance)
     public uint type;
     public float3 direction;       // where it shines: spot and directional lights
@@ -99,14 +100,19 @@ public struct LightListHeader
     public Light* extra;           // the lights the GPU wrote this frame (particle lights), after the lights: copied
                                    // here by the binning; light lightCount + i is extra[i]
     public uint extraCount;        // how many (written by the binning)
-    public uint pad3;              // 128 bytes in all
+    public float cutoff;           // the irradiance where lights without a range end (ClusteredLights.CUTOFF); 128
+                                   // bytes in all
 
-    /** `light` as this list's shading sees it: its position relative to the camera. */
+    /**
+     * `light` as this list's shading sees it: its position relative to the camera, and a light without a range
+     * (infinite) ending where it falls below the cutoff (lightReach).
+     */
     public Light relativeTo(Light light)
     {
         Light r = light;
         r.position = lessCamera(light.position, light.positionLow, camera, cameraLow);
         r.positionLow = float3(0);
+        r.range = lightReach(light, cutoff);
         return r;
     }
 
@@ -160,8 +166,19 @@ public LightListHeader loadHeader(LightListHeader* h)
     r.pad2 = 0;
     r.extra = h[0].extra;
     r.extraCount = h[0].extraCount;
-    r.pad3 = 0;
+    r.cutoff = h[0].cutoff;
     return r;
+}
+
+/**
+ * Where light `light` ends: its range, or, for one without (infinite: glTF's KHR_lights_punctual without a range,
+ * falling with the square of the distance for ever), where its brightest channel's irradiance falls to `cutoff`.
+ * There the range's window (lightIrradiance) ends it smoothly: within half of it, the light is 12 % below the inverse
+ * square at most, within a third 2.5 %.
+ */
+public float lightReach(Light light, float cutoff)
+{
+    return isinf(light.range) ? sqrt(max(light.color.r, max(light.color.g, light.color.b)) / cutoff) : light.range;
 }
 
 /** Light list layouts. */

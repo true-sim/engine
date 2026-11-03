@@ -67,8 +67,15 @@ public final class ClusteredLights implements Technique {
     /** Lights a cluster holds at most. */
     public static final Setting<Integer> MAX_PER_CLUSTER = Setting.integer("lights.clusters.maxLights", 128, 1, 4096,
         "lights a cluster holds at most");
+    /**
+     * The irradiance (at 1 unit from a light of intensity 1: the units of light colors) where lights without a range
+     * end ({@link Lights#NO_RANGE}, glTF's lights without one): a light reaches as far as its brightest channel stays
+     * above it, faded out smoothly by its range's window.
+     */
+    public static final Setting<Float> CUTOFF = Setting.decimal("lights.cutoff", 0.005f, 1.0e-6f, 1000,
+        "the irradiance below which lights without a range end");
     /** Every light cluster setting. */
-    public static final List<Setting<?>> ALL = List.of(TILE_SIZE, SLICES, NEAR, FAR, MAX_PER_CLUSTER);
+    public static final List<Setting<?>> ALL = List.of(TILE_SIZE, SLICES, NEAR, FAR, MAX_PER_CLUSTER, CUTOFF);
 
     private final Lights lights;
     private final ViewPort port;
@@ -187,6 +194,7 @@ public final class ClusteredLights implements Technique {
                 g.setting(setting); // read for the build: a change rebuilds it
             }
         }
+        float cutoff = g.setting(CUTOFF); // given numbers or not: a light's reach is not the clusters
         int across = tilesAcross();
         int down = tilesDown();
         Pipeline pipeline = g.computeProgram("shaders/lights/cluster.spv", "clusterMain", ClusterPush.BYTES);
@@ -208,12 +216,12 @@ public final class ClusteredLights implements Technique {
             .write(list, BufferAccess.TRANSFER_DST)
             .write(list, BufferAccess.STORAGE_WRITE)
             .async()
-            .record(ctx -> cluster(ctx, pipeline, list, push, across, down, written, extra));
+            .record(ctx -> cluster(ctx, pipeline, list, push, across, down, written, extra, cutoff));
         g.provide(Keys.LIGHT_LIST, list);
     }
 
     private void cluster(PassContext ctx, Pipeline pipeline, Buffer list, ClusterPush push, int across, int down,
-        Buffer written, int extra) {
+        Buffer written, int extra, float cutoff) {
         int clusters = clusters(across, down);
         long header = ctx.address(list);
         long counts = header + HEADER_BYTES;
@@ -245,6 +253,7 @@ public final class ClusteredLights implements Technique {
             }
             memPutLong(data + 112, counts + 4L * clusters * (1 + maxPerCluster())); // the GPU's lights, copied
             memPutInt(data + 120, 0);
+            memPutFloat(data + 124, cutoff);
             Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(list), 0, HEADER_BYTES, data);
             Barriers.memory(ctx.unsafe().commands(), VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,

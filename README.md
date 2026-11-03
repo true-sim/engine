@@ -148,9 +148,9 @@ value, rule or lock changed or `invalidateAvailability()` was called (a device o
 `g.settings()` when they record. Windows follow theirs (`platform.createWindow(options, settings.scoped("window.main"))`),
 and so does the `Presenter` (the graph's present settings, or a window's own). The core's tuning values are settings
 too, read from the graph's settings unless a technique is given its own: light clusters (`ClusteredLights.ALL`:
-tiles, slices, range, lights per cluster), occlusion culling (`RenderSettings.OCCLUSION`), cascades and ray offsets
-(`ShadowSettings.ALL`), and the display transform (`DisplayTransform.ALL`); `RenderSettings.ALL` lists them all for an
-options screen.
+tiles, slices, range, lights per cluster, and the irradiance where lights without a range end, `Lights.NO_RANGE`),
+occlusion culling (`RenderSettings.OCCLUSION`), cascades and ray offsets (`ShadowSettings.ALL`), and the display
+transform (`DisplayTransform.ALL`); `RenderSettings.ALL` lists them all for an options screen.
 
 ```java
 EngineSettings settings = new EngineSettings().load(saved);

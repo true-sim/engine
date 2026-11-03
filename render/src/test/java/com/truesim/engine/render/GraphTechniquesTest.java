@@ -1165,6 +1165,48 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void aLightWithoutARangeFallsWithTheSquareOfTheDistanceUntilItsCutoff() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Lights lights = new Lights(device, 1, 1, graph.frameSlots());
+             Materials materials = new Materials(device, 4)) {
+            // A dark quad facing the camera, a light on its axis at distance d: what it reflects is 0.05 / pi times
+            // the irradiance, 16 / d^2 without a range. With a cutoff of 1, the light reaches 4.
+            int grey = materials.add(new Material(MR.withBaseColor(new Color(0.05, 0.05, 0.05, 1)).withRoughness(1)));
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, grey, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(1);
+            graph.settings().set(ClusteredLights.CUTOFF, 1f);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .add(new ClusteredLights(lights, main)).output(Keys.SCENE_COLOR, output);
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            double[] distances = {0.8, 1.2, 4.5};
+            int[] seen = new int[distances.length];
+            lights.point(0, 0, 0, -1.2, Lights.NO_RANGE, 0, 0, 0).setCount(1);
+            frame();
+            frame();
+            int dark = red(image()[center]);
+            for (int i = 0; i < distances.length; i++) {
+                lights.point(0, 0, 0, -2 + distances[i], Lights.NO_RANGE, 16, 16, 16);
+                frame();
+                frame();
+                seen[i] = red(image()[center]) - dark;
+            }
+            // The quad as lit at distance d, its BRDF the same for all (the light on its axis): 1 / d^2, faded only
+            // near the cutoff (2.5 % at a third of it)
+            double atNear = seen[0] * 0.8 * 0.8;
+            assertThat(atNear).as("lit, by the inverse square").isGreaterThan(30);
+            assertThat(seen[1] * 1.2 * 1.2).as("1.2: the inverse square").isCloseTo(atNear, within(0.06 * atNear));
+            assertThat(seen[2]).as("past the cutoff: dark").isZero();
+            graph.settings().set(ClusteredLights.CUTOFF, ClusteredLights.CUTOFF.defaultValue());
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
     void bothShadingsDrawTheSameImage() {
         assumeThat(device.primitiveIds()).as("primitive IDs in fragment shaders").isTrue();
         // The lit floor, and a quad standing on it hiding part of it.

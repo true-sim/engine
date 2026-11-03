@@ -141,8 +141,14 @@ public final class Lights implements AutoCloseable {
     }
 
     /**
+     * A light's range for one without (glTF's KHR_lights_punctual without a range): its light falls with the square of
+     * the distance until it is below the light list's cutoff ({@link ClusteredLights#CUTOFF}), where it ends smoothly.
+     */
+    public static final float NO_RANGE = Float.POSITIVE_INFINITY;
+
+    /**
      * Light {@code index} shines in all directions from world position ({@code x}, {@code y}, {@code z}), up to
-     * {@code range}:
+     * {@code range} ({@link #NO_RANGE}: as far as it is bright enough):
      * irradiance ({@code r}, {@code g}, {@code b}) at 1 unit, falling with the square of the distance. No shadows.
      */
     public Lights point(int index, double x, double y, double z, float range, float r, float g, float b) {

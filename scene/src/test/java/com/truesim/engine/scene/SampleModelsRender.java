@@ -198,7 +198,7 @@ class SampleModelsRender {
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
             GpuBuffer readback = GpuBuffer.hostVisible(device, SIZE * SIZE * 8L, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
             closing.add(readback);
-            Lights lights = lights(device, slots, model, world, bounds, lightValues, nodes, visibility);
+            Lights lights = lights(device, slots, model, world, lightValues, nodes, visibility);
             if (lights != null) {
                 closing.add(lights);
                 port.add(new ClusteredLights(lights, main));
@@ -251,7 +251,7 @@ class SampleModelsRender {
                 }
                 scene.update();
                 if (lights != null) { // at their nodes as posed
-                    lights(lights, model, sceneMatrices(scene, nodes), bounds, lightValues, nodes, visibility);
+                    lights(lights, model, sceneMatrices(scene, nodes), lightValues, nodes, visibility);
                 }
                 renderables.update();
                 sync.update();
@@ -319,7 +319,7 @@ class SampleModelsRender {
      * ({@code values}), dark on hidden nodes; null without any.
      */
     private static Lights lights(VulkanDevice device, FrameSlots slots, ModelData model, double[][] world,
-        double[] bounds, double[][] values, long[] placed, NodeVisibility visibility) {
+        double[][] values, long[] placed, NodeVisibility visibility) {
         int count = 0;
         for (ModelData.Node n : model.nodes()) {
             count += n.light() >= 0 ? 1 : 0;
@@ -328,17 +328,15 @@ class SampleModelsRender {
             return null;
         }
         Lights lights = new Lights(device, count, 1, slots); // a copy per frame: set every frame, as posed
-        lights(lights, model, world, bounds, values, placed, visibility);
+        lights(lights, model, world, values, placed, visibility);
         return lights;
     }
 
     /** Sets {@code lights} to the model's lights as {@link #lights(VulkanDevice, FrameSlots, ModelData, double[][],
-     * double[], double[][], long[], NodeVisibility)} makes them. */
-    private static void lights(Lights lights, ModelData model, double[][] world, double[] bounds, double[][] values,
+     * double[][], long[], NodeVisibility)} makes them. */
+    private static void lights(Lights lights, ModelData model, double[][] world, double[][] values,
         long[] placed, NodeVisibility visibility) {
         List<ModelData.Node> nodes = model.nodes();
-        double reach = 10 * Math.max(1, Math.max(bounds[3] - bounds[0], Math.max(bounds[4] - bounds[1],
-            bounds[5] - bounds[2])));
         int index = 0;
         for (int i = 0; i < nodes.size(); i++) {
             if (nodes.get(i).light() < 0) {
@@ -355,7 +353,7 @@ class SampleModelsRender {
             float r = (float) (v[0] * intensity);
             float g = (float) (v[1] * intensity);
             float b = (float) (v[2] * intensity);
-            float range = (float) (v[4] > 0 ? v[4] : reach);
+            float range = v[4] > 0 ? (float) v[4] : Lights.NO_RANGE; // glTF: none, the inverse square for ever
             switch (l.kind()) {
                 case DIRECTIONAL -> lights.directional(index, dx, dy, dz, r, g, b);
                 case POINT -> lights.point(index, m[12], m[13], m[14], range, r, g, b);
