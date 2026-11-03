@@ -844,6 +844,58 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void classicMeshesAddedWhileFramesAreInFlightDrawWithoutWaiting() {
+        // Every frame a mesh is added to a growing pool and drawn the classic way, the one from two frames before
+        // removed, while frames are in flight: the indices (and the index buffer, as it grows) are copied first thing
+        // in the frame, which is the first to draw the mesh; nothing waits for the GPU.
+        GpuBuffer[] readbacks = {GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+            GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)};
+        try (GeometryPool streamed = new GeometryPool(device, GeometryPool.Capacity.of(4, 1, 1), graph.frameSlots());
+             GpuScene moving = new GpuScene(device, streamed, 4, graph.frameSlots());
+             MeshletRenderer drawing = new MeshletRenderer(device, moving, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots());
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, drawing, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            SceneGeometry geometry = new SceneGeometry(classic);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            ViewPort port = graph.addView("main").size(SIZE, SIZE);
+            SceneView movingView = geometry.createView(port, camera, ViewOptions.of(256, 1 << 12));
+            port.add(new ClusteredForwardShading(geometry, movingView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                    .clearColor(0, 0, 0))
+                .add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+            MeshData fineQuad = MeshletRendererTest.grid(16, 2 / 16f, false, VertexFormat.POSITIONS_ONLY);
+            int[] meshes = new int[12];
+            int waits = 0;
+            for (int frame = 0; frame < meshes.length; frame++) {
+                if (frame == 2) {
+                    waits = device.waits(); // after the first frames, which build the graph
+                }
+                graph.beginFrame();
+                if (frame >= 2) {
+                    streamed.remove(meshes[frame - 2]);
+                }
+                // The new mesh's number may be one an instance of a frame in flight still draws, removed.
+                MeshData data = frame % 3 == 0 ? fineQuad : quadMesh;
+                meshes[frame] = streamed.add(data);
+                classic.add(meshes[frame], data);
+                moving.set(0, meshes[frame], frame % 2 == 0 ? -1 : 1, 0, -3, HALF, 0, 0, HALF, 0.5f, 0.5f, 0.5f);
+                movingView.set(1, MeshletRenderer.MODE_WHITE);
+                graph.submit(0, 0);
+            }
+            assertThat(device.waits()).as("waits for the GPU while streaming").isEqualTo(waits);
+            device.waitIdle();
+            assertThat(litColumn(readbacks[1])).as("the last frame's new mesh").isGreaterThan(SIZE / 2.0 + 4);
+            assertThat(litColumn(readbacks[0])).as("the frame before").isLessThan(SIZE / 2.0 - 4);
+            assertThat(streamed.capacity().triangles()).as("the pool grew").isGreaterThan(124);
+        } finally {
+            device.waitIdle();
+            for (GpuBuffer readback : readbacks) {
+                readback.close();
+            }
+        }
+    }
+
+    @Test
     void instancesChangeEveryFrameWithFramesInFlight() {
         // A quad moving left and right every frame, two frames in flight: each frame draws where it was set, as the
         // instance data has a copy per frame slot.

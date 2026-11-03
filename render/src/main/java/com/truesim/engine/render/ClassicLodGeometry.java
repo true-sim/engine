@@ -33,6 +33,8 @@ import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.SelectPush;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Commands;
+import com.truesim.engine.vulkan.FrameBuffer;
+import com.truesim.engine.vulkan.FrameUploads;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.Retiring;
@@ -98,8 +100,12 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     // them.
     private final VulkanDevice device;
     private final Retiring oldBuffers;
+    // The indices' uploads, recorded first thing in the next frame, so adding waits for no frame in flight.
+    private final FrameUploads uploads;
     private GpuBuffer indices;
-    private GpuBuffer meshes;
+    // A copy per frame slot: frames in flight keep drawing what they were recorded with, and a mesh added draws from
+    // the frame that uploads its indices on, never from an earlier one reading them before they are there.
+    private FrameBuffer meshes;
     private GpuBuffer levels;
     private GpuBuffer parts;
     private int levelCount;
@@ -125,6 +131,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         pool.onRemove(forget);
         this.device = device;
         this.oldBuffers = new Retiring(pool.frameSlots());
+        this.uploads = new FrameUploads(device, pool.frameSlots());
         this.maxDraws = maxDraws;
         // The lists' counts, each list's commands, then a record per draw slot of every list.
         this.recordsOffset = (4L * LISTS + (long) COMMAND_BYTES * maxDraws * LISTS + 15) & ~15L;
@@ -167,8 +174,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         // Laid out as the pool's meshlet triangles: mesh triangle t's indices at the mesh's index base + 3t.
         indices = GpuBuffer.deviceLocal(device, 12L * pool.capacity().triangles(),
             INDEX_USAGE);
-        meshes = GpuBuffer.hostVisible(device, 8L * pool.capacity().meshes(), storage);
-        meshes.memory().fill((byte) 0); // no levels: not drawn
+        meshes = FrameBuffer.create(device, 8L * pool.capacity().meshes(), storage, pool.frameSlots()); // zeros: none
         // A level and a part hold a meshlet at least.
         levels = GpuBuffer.hostVisible(device, 16L * pool.capacity().meshlets(), storage);
         parts = GpuBuffer.hostVisible(device, 16L * pool.capacity().meshlets(), storage);
@@ -176,7 +182,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
 
     /**
      * Draws the pool's mesh {@code mesh}, added to it from {@code data}, the classic way: uploads its indices and
-     * splits its levels into parts. Waits until the upload has finished.
+     * splits its levels into parts. Does not wait for the GPU: the indices are staged now and copied first thing in the
+     * next frame recorded, which is the first to draw the mesh this way (at once, waiting, without frames in flight).
      *
      * @throws IllegalArgumentException if {@code data} is not that mesh's, or its levels are not whole meshes (a
      *     cluster hierarchy's), or it has 2^24 triangles or 128 submeshes or more
@@ -202,8 +209,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                 + "cluster hierarchy");
         }
         coverPool();
-        MemorySegment entry = meshes.memory().asSlice(8L * mesh, 8);
-        if (entry.get(U32, 4) != 0) {
+        oldBuffers.release();
+        if (meshes.getInt(8L * mesh + 4) != 0) {
             throw new IllegalStateException("Mesh " + mesh + " is drawn the classic way already");
         }
         int neededParts = 0;
@@ -221,10 +228,10 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         if (indexEnd > indices.size()) {
             growIndices(Math.max(12L * pool.capacity().triangles(), indexEnd));
         }
-        try (Arena arena = Arena.ofConfined()) { // the indices only until copied
-            indices.write(4L * indexBase, data.expandIndices(arena));
+        try (Arena arena = Arena.ofConfined()) { // the indices only until staged
+            uploads.write(indices, 4L * indexBase, data.expandIndices(arena));
         }
-        entry.set(U32, 0, levelCount);
+        meshes.putInt(8L * mesh, levelCount);
         for (MeshLevel level : data.levels()) {
             long o = 16L * levelCount++;
             int count = partsOf(data, level, parts.memory(), partCount, indexBase, pool.meshletBase(mesh));
@@ -233,7 +240,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             levels.memory().set(F32, o + 8, (float) level.error());
             partCount += count;
         }
-        entry.set(U32, 4, data.levels().size());
+        meshes.putInt(8L * mesh + 4, data.levels().size());
         return this;
     }
 
@@ -245,14 +252,18 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
      */
     private synchronized void forget(int mesh) {
         if (8L * mesh < meshes.size()) {
-            meshes.memory().asSlice(8L * mesh, 8).fill((byte) 0);
+            meshes.putLong(8L * mesh, 0);
         }
     }
 
     /** Grows the per-mesh table to the pool's mesh numbers, for any instance's mesh to be looked up. */
     private synchronized void coverPool() {
         if (meshes.size() < 8L * pool.capacity().meshes()) {
-            meshes = grownTable(meshes, 8L * pool.capacity().meshes());
+            FrameBuffer grown = FrameBuffer.create(device, 8L * pool.capacity().meshes(), TABLE_USAGE,
+                pool.frameSlots());
+            grown.copyFrom(meshes);
+            oldBuffers.add(meshes); // frames in flight read their copies of it
+            meshes = grown;
         }
     }
 
@@ -265,11 +276,14 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         return grown;
     }
 
-    /** The index buffer at {@code bytes}, its indices copied over: waits, as adding does. */
+    /**
+     * The index buffer at {@code bytes}, its indices copied over in the next frame, ahead of the uploads queued after
+     * (into the new buffer); the old one goes once the frames up to that one are done.
+     */
     private void growIndices(long bytes) {
         GpuBuffer old = indices;
         GpuBuffer grown = GpuBuffer.deviceLocal(device, bytes, INDEX_USAGE);
-        device.submitAndWait(device.graphics(), commands -> {
+        uploads.recordCommands(commands -> {
             Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
             try (MemoryStack stack = stackPush()) {
@@ -280,9 +294,9 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             }
             Barriers.memory(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+            oldBuffers.add(old); // retired from the frame copying it, which reads it
         });
         indices = grown;
-        oldBuffers.add(old);
     }
 
     /** Whether the levels are whole meshes: one level, or discrete LODs (every meshlet with the same group sphere). */
@@ -576,6 +590,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                 }
             }
             pool.stopFollowing(forget);
+            uploads.close();
             indices.close();
             meshes.close();
             levels.close();
