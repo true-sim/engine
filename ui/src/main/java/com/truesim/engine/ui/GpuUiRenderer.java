@@ -89,6 +89,11 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  * ui.submit(layers, layerCount, textures, width, height);
  * }</pre>
  *
+ * <p><b>Several views of one UI.</b> A UI shown in several windows (docking's OS windows each show a region of it)
+ * uploads once: {@link #share()} makes a renderer for another view that draws this one's buffers and textures (one
+ * device, one upload, several presenter targets), at its own {@link #origin} (the UI pixel at its image's top left)
+ * and region size ({@link #submit}'s width and height, its layers ignored: this renderer's are drawn).
+ *
  * <p>One renderer per view (a technique belongs to one view). Use it on the thread that records frames. Submitting
  * allocates nothing once its buffers have grown, but for textures added or written (rare: an atlas page filled).
  */
@@ -125,7 +130,10 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     private final FrameUploads uploads;
     private final Retiring retiring;
     private final Pipeline uber;
-    private final Pipeline[] kinds = new Pipeline[Primitive.KINDS];
+    private final Pipeline[] kinds;
+    private final GpuUiRenderer source; // the renderer whose uploads this one draws, or null: its own
+    private float originX;
+    private float originY;
     private volatile Batching batching = Batching.ADAPTIVE;
 
     // Per layer: the list last submitted, its buffers, and what was drawn of it.
@@ -153,7 +161,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     private GpuImage[] images = new GpuImage[1];
     private int[] slotOf = new int[1];
     private FrameBuffer table;
-    private final Arena stagingArena = Arena.ofShared();
+    private final Arena stagingArena;
     private MemorySegment staging;
 
     private long uploaded;
@@ -172,6 +180,9 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         this.slots = Objects.requireNonNull(slots, "slots");
         this.uploads = new FrameUploads(device, slots);
         this.retiring = new Retiring(slots);
+        this.source = null;
+        this.kinds = new Pipeline[Primitive.KINDS];
+        this.stagingArena = Arena.ofShared();
         try (ShaderModule shaders = ShaderModule.load(device, "shaders/ui/draw.spv")) {
             uber = pipeline(shaders, "fragmentMain");
             for (int kind = 1; kind < Primitive.KINDS; kind++) {
@@ -180,6 +191,55 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         }
         table = FrameBuffer.create(device, 64L * 4, BUFFER_USAGE, slots);
         staging = stagingArena.allocate(64L * 64 * 4, 16);
+    }
+
+    /** A renderer drawing {@code source}'s uploads: {@link #share()}. */
+    @AllowAllocation("made once a window")
+    private GpuUiRenderer(GpuUiRenderer source) {
+        this.source = source;
+        this.device = source.device;
+        this.slots = source.slots;
+        this.uploads = source.uploads;
+        this.retiring = source.retiring;
+        this.uber = source.uber;
+        this.kinds = source.kinds;
+        this.stagingArena = source.stagingArena;
+        this.table = source.table;
+        this.staging = source.staging;
+    }
+
+    /**
+     * A renderer for another view that draws what this one uploads (its layers and textures, submitted to this one
+     * each frame first): for a UI shown in several windows. Close it before this one.
+     */
+    @AllowAllocation("made once a window")
+    public GpuUiRenderer share() {
+        if (closed) {
+            throw new IllegalStateException("The UI renderer is closed");
+        }
+        return new GpuUiRenderer(source != null ? source : this);
+    }
+
+    /** The renderer whose uploads it draws ({@link #share()}), or null if it uploads its own. */
+    public GpuUiRenderer source() {
+        return source;
+    }
+
+    /** Draws the UI region whose top left is UI pixel {@code x, y} (0, 0 by default); returns this. */
+    public GpuUiRenderer origin(float x, float y) {
+        originX = x;
+        originY = y;
+        return this;
+    }
+
+    /** The UI pixel at its image's top left. */
+    public float originX() {
+        return originX;
+    }
+
+    /** The UI pixel at its image's top left. */
+    public float originY() {
+        return originY;
     }
 
     private Pipeline pipeline(ShaderModule shaders, String fragment) {
@@ -213,6 +273,12 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         }
         if (layerCount < 0 || layerCount > layers.length) {
             throw new IllegalArgumentException("layers: " + layerCount);
+        }
+        if (source != null) { // its source uploads: only the region drawn is its own
+            this.width = uiWidth;
+            this.height = uiHeight;
+            uploaded = 0;
+            return;
         }
         retiring.release();
         if (layerCount > lists.length) {
@@ -529,15 +595,17 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         if (width <= 0 || height <= 0) {
             return;
         }
-        push.textures(table.deviceAddress()).scaleX((float) width / imageWidth).scaleY((float) height / imageHeight)
-            .toClipX(2f / width).toClipY(2f / height).clipFloats(DrawList.CLIP_FLOATS);
-        for (int i = 0; i < layerCount; i++) {
-            if (counts[i] == 0) {
+        GpuUiRenderer data = source != null ? source : this;
+        push.textures(data.table.deviceAddress()).scaleX((float) width / imageWidth)
+            .scaleY((float) height / imageHeight).toClipX(2f / width).toClipY(2f / height)
+            .clipFloats(DrawList.CLIP_FLOATS).originX(originX).originY(originY);
+        for (int i = 0; i < data.layerCount; i++) {
+            if (data.counts[i] == 0) {
                 continue;
             }
-            push.primitives(primitives[i].deviceAddress()).clips(clips[i].deviceAddress());
-            int[] planned = draws[i];
-            for (int d = 0; d < drawCounts[i]; d++) {
+            push.primitives(data.primitives[i].deviceAddress()).clips(data.clips[i].deviceAddress());
+            int[] planned = data.draws[i];
+            for (int d = 0; d < data.drawCounts[i]; d++) {
                 int pipeline = planned[d * 3 + 2];
                 ctx.draw(pipeline == 0 ? uber : kinds[pipeline], push.first(planned[d * 3]), 6 * planned[d * 3 + 1],
                     1);
@@ -559,15 +627,19 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
 
     /** The draws the next frame records: one per layer by the uber shader, more per kind or adaptively. */
     public int draws() {
+        GpuUiRenderer data = source != null ? source : this;
         int sum = 0;
-        for (int i = 0; i < layerCount; i++) {
-            sum += drawCounts[i];
+        for (int i = 0; i < data.layerCount; i++) {
+            sum += data.drawCounts[i];
         }
         return sum;
     }
 
     /** The bindless sampled slot of UI texture {@code id}, or -1 if it has none (yet). */
     public int slot(int id) {
+        if (source != null) {
+            return source.slot(id);
+        }
         return id > 0 && id < images.length && images[id] != null ? slotOf[id] : -1;
     }
 
@@ -579,6 +651,9 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             return;
         }
         closed = true;
+        if (source != null) {
+            return; // its source's buffers and pipelines
+        }
         forgetTextures();
         retiring.close();
         uploads.close();

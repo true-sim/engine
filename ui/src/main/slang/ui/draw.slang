@@ -25,6 +25,8 @@ struct UiPush
     float toClipX;      // 2 / the UI's width in pixels
     float toClipY;      // 2 / its height
     uint clipFloats;    // floats per clip record: ui-core's DrawList.CLIP_FLOATS
+    float originX;      // the UI pixel at the image's top left: 0, or a docking OS window's region
+    float originY;
 };
 
 [[vk::push_constant]]
@@ -175,7 +177,7 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
         }
         at = float2((corner & 1) != 0 ? hi.x : lo.x, (corner & 2) != 0 ? hi.y : lo.y);
     }
-    out.position = float4(at.x * push.toClipX - 1, at.y * push.toClipY - 1, 0, 1);
+    out.position = float4((at.x - push.originX) * push.toClipX - 1, (at.y - push.originY) * push.toClipY - 1, 0, 1);
     return out;
 }
 
@@ -407,7 +409,7 @@ float clipped(uint header, float2 px)
 /** The pixel's centre in UI pixels. */
 float2 uiPixel(float4 position)
 {
-    return position.xy * float2(push.scaleX, push.scaleY);
+    return position.xy * float2(push.scaleX, push.scaleY) + float2(push.originX, push.originY);
 }
 
 // ----------------------------------------------------------------------------------------------- fragments, uber path
