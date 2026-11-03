@@ -223,17 +223,24 @@ class StreamingTest {
         AssetRef<AudioClip> loop = ref(() -> AudioClip.builder(RATE, 1).floats(Clips.constant(RATE, 0.25f, 4_800)
             .segment().toArray(java.lang.foreign.ValueLayout.JAVA_FLOAT)).marker("hit", 1_200).build(), "marked");
         AssetRef<AudioClip> outro = ref(() -> Clips.constant(RATE, 0.5f, 2_400), "marked outro");
-        SoundInstance machine = sounds.play(Sound.builder().root(Segments.loop(loop).outro(outro)
-            .release(Release.AT_MARKER)).spatial(Spatial.TWO_D).build());
-        float[] begin = play(6_000);
-        int start = firstNonZero(begin);
-        machine.stop();
-        float[] rest = play(12_000);
-        int outroAt = 6_000;
-        while (outroAt - 6_000 < 12_000 && Math.abs(rest[2 * (outroAt - 6_000)] - 0.5f * CENTRE) > 1e-6) {
-            outroAt++;
+        // stopped before the pass's marker, then after it: the next pass's marker, never the pass end
+        for (int stopAt : new int[] {200, 2_400}) {
+            SoundInstance machine = sounds.play(Sound.builder().root(Segments.loop(loop).outro(outro)
+                .release(Release.AT_MARKER)).spatial(Spatial.TWO_D).build());
+            float[] begin = play(6_000);
+            int start = firstNonZero(begin);
+            int extra = Math.floorMod(start + stopAt - 6_000, 4_800); // to stopAt frames into a pass
+            play(extra);
+            machine.stop();
+            float[] rest = play(12_000);
+            int outroAt = 0;
+            while (outroAt < 12_000 && Math.abs(rest[2 * outroAt] - 0.5f * CENTRE) > 1e-6) {
+                outroAt++;
+            }
+            assertThat((6_000 + extra + outroAt - start - 1_200) % 4_800).as("stopped %d into a pass", stopAt)
+                .isZero();
+            play(4_096); // the outro ends
         }
-        assertThat((outroAt - start - 1_200) % 4_800).isZero();
         SoundInstance faded = sounds.play(Sound.builder().root(Segments.loop(loop).outro(outro)
             .release(Release.crossfade(0.1))).spatial(Spatial.TWO_D).build());
         play(4_096);

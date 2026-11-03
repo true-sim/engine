@@ -1278,6 +1278,11 @@ public final class AudioSync {
         long length = end - start;
         double now = Math.max(0, (schedulePoint - track.starts[v]) / outPerClip); // clip frames played (unwrapped)
         // pass k ends at clip frame end + k * length (unwrapped); a marker m at m + k * length
+        boolean markers = false; // past a pass's last marker, the next pass's first: pass ends only without any
+        for (int i = 0; marker && i < clip.markers().size(); i++) {
+            long m = clip.markers().get(i).frame();
+            markers |= m >= start && m < end;
+        }
         long best = Long.MAX_VALUE;
         for (int k = (int) Math.max(0, Math.floor((now - end) / length)); best == Long.MAX_VALUE; k++) {
             long passEnd = end + (long) k * length;
@@ -1290,7 +1295,7 @@ public final class AudioSync {
                     }
                 }
             }
-            if (best == Long.MAX_VALUE && passEnd >= now) {
+            if (best == Long.MAX_VALUE && !markers && passEnd >= now) {
                 best = passEnd;
             }
         }
