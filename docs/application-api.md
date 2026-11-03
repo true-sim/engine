@@ -527,6 +527,16 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   environment behind a view at `Anchor.OPAQUE`, chosen apart from the lighting (AR passthrough shows none, a product
   viewer a plain color). The graph's persistent images gained cube faces and mip chains with a slot per level, and the
   bindless set cube and 2D-array views. HDR panoramas come from scene's `RadianceImporter` as half-float `TextureData`.
+- **D139** (built) Surface outputs and screen-space reflections (README, "Surface outputs and screen-space
+  reflections"). The opaque shading pass writes the view-space normal, F0 and roughness, and the reflectance (what its
+  color weighs the environment's mirror reflection by) only while a technique of the view asks for them
+  (`SurfaceOutputs.Consumer`, found through `GraphBuilder.techniquesInView`); post materials will ask the same way.
+  Reflections are composited after the opaque scene rather than handed to shading through the indirect-light table: the
+  scene they reflect is this frame's opaque color, which exists only once shading is done, and taking last frame's
+  instead would add a frame of latency to reflections. Shading's reflectance makes the composite replace the
+  environment's term exactly (color + reflectance x trust x (hit - environment)), so energy is kept without splitting
+  `indirectLight` into passes. `render.ssr`: `OFF`, `LINEAR`, `HIZ` (the default after benchmarking; a nearest-depth pyramid, `DepthPyramid`
+  with `nearest`); ray-traced reflections (#379) join as another value, writing the same hit image.
 - **D137** (new) Checked against the Khronos glTF sample models: an optional sweep (`-PgltfSamples=...`) imports every
   model with all its parts.
 

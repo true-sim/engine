@@ -17,6 +17,7 @@ __exported import materials.diffuseTransmission;
 __exported import materials.unlit;
 __exported import lights;
 __exported import indirect;
+__exported import surfaces;
 
 /** One mesh in the geometry pool: where its data lies in the pool's buffers, and its quantization box. 96 bytes. */
 public struct MeshEntry
@@ -725,6 +726,24 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
     float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features, Background behind,
     IndirectLight* indirect)
 {
+    SurfaceOut surface;
+    return shadeMaterialSurface<M, R>(rays, view, in, materials, dx, dy, lights, pixel, features, behind, indirect,
+        surface);
+}
+
+/** The radiance the constant sky reflects from every direction (shading.slang's ambientWeighed). */
+public static const float3 SKY_REFLECTED = SKY_IRRADIANCE * 0.5 / 3.14159265;
+
+/**
+ * shadeMaterial, also giving the shaded `surface` (surfaces.slang): what the surface outputs hold, its reflectance
+ * the weight of the environment's reflection (the view's indirect-light table's specularLight, or SKY_REFLECTED
+ * without a table) in the color returned.
+ */
+public float4 shadeMaterialSurface<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in,
+    Material* materials, float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features,
+    Background behind, IndirectLight* indirect, out SurfaceOut surface)
+{
+    surface = noSurface();
     if (view.mode == 2)
     {
         return float4(1, 1, 1, 1);
@@ -793,7 +812,9 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
         emissive *= 1 - s.clearcoat * coatFresnel(dot(s.clearcoatNormal, toViewer)); // seen through the coat
     }
     // Light from all around: the view's indirect-light table (an environment, later GI), or the constant sky
-    float3 color = (indirect != nullptr ? indirectLight(indirect, s, toViewer) : ambient(s, toViewer, SKY_IRRADIANCE)) + emissive;
+    float3 reflectance;
+    float3 color = (indirect != nullptr ? indirectLightWeighed(indirect, s, toViewer, reflectance)
+        : ambientWeighed(s, toViewer, SKY_IRRADIANCE, reflectance)) + emissive;
     if (lights == nullptr)
     {
         color += reflected(s, toViewer, SUN, SUN_IRRADIANCE);
@@ -825,8 +846,14 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
     }
     if ((features & FEATURE_UNLIT) != 0)
     {
-        color = applyUnlit(color, s, materialFeature<UnlitParameters>(ref, FEATURE_UNLIT));
+        UnlitParameters unlit = materialFeature<UnlitParameters>(ref, FEATURE_UNLIT);
+        color = applyUnlit(color, s, unlit);
+        reflectance *= 1 - unlit.amount; // lerp(lit, albedo, amount): the lit part scaled
     }
+    surface.normal = s.normal;
+    surface.roughness = s.roughness;
+    surface.f0 = lerp(s.f0, s.albedo, s.metallic);
+    surface.reflectance = reflectance;
     return float4(color, s.alpha);
 }
 

@@ -51,16 +51,31 @@ public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, 
     }
 
     /**
-     * What the draw wrote: {@code depth}, {@code color} (shaded color or IDs; null for depth only), and the light list,
+     * What the draw wrote: {@code depth}, {@code color} (shaded color or IDs; null for depth only), the surface outputs
+     * where its output has them ({@code surfaces}, else null), and the light list,
      * shadow inputs and indirect light shading used ({@link Keys#LIGHT_LIST}, {@link ShadowInputs},
      * {@link IndirectInputs}; null without them, or without shading), within the render region of {@code region} (null:
      * all of them).
      */
     public record Targets(Image depth, Image color, Buffer lights, ShadowInputs.Set shadows,
-        IndirectInputs.Set indirect, ViewPort region) {
+        IndirectInputs.Set indirect, ViewPort region, SurfaceOutputs.Images surfaces) {
 
         public Targets(Image depth, Image color, Buffer lights, ShadowInputs.Set shadows) {
-            this(depth, color, lights, shadows, null, null);
+            this(depth, color, lights, shadows, null, null, null);
+        }
+
+        /** Declares the surface outputs as attachments of {@code pass}, cleared (no surface) or, with {@code load}, kept. */
+        public GraphBuilder.PassBuilder attachSurfaces(GraphBuilder.PassBuilder pass, boolean load) {
+            if (surfaces != null) {
+                for (Image image : surfaces.all()) {
+                    if (load) {
+                        pass.attach(image, com.truesim.engine.graph.Load.LOAD, com.truesim.engine.graph.Store.STORE);
+                    } else {
+                        pass.attach(image, com.truesim.engine.graph.Clear.color(0, 0, 0, 0));
+                    }
+                }
+            }
+            return pass;
         }
 
         /** Declares that {@code pass} reads the indirect light, where shading has some. */
@@ -92,7 +107,8 @@ public record SceneDraw(SceneGeometry geometry, RenderView view, Camera camera, 
         ViewPort region = port != null ? port : camera == null && built != null && built.width() == width
             && built.height() == height ? built : null;
         IndirectInputs.Set indirect = output.kind() == SurfaceOutput.Kind.SHADED ? IndirectInputs.of(g) : null;
-        Targets targets = new Targets(depth, color, lights, shadows, indirect, region);
+        SurfaceOutputs.Images surfaces = output.surfaces() ? SurfaceOutputs.create(g, name, width, height) : null;
+        Targets targets = new Targets(depth, color, lights, shadows, indirect, region, surfaces);
         boolean load = false;
         for (GeometryProvider provider : geometry.providers()) {
             provider.drawFirst(g, this, targets, load);

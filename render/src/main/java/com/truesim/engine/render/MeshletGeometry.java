@@ -52,7 +52,7 @@ public final class MeshletGeometry implements GeometryProvider {
             || kind == SurfaceOutput.Kind.IDS && renderer.scene().materials().hasBlended()) {
             // Shaded by type, from lists split by shading bin as culled: the view's color, or the blended bin a
             // visibility buffer's view draws shaded after its IDs.
-            RasterPipelines.Typed pipelines = renderer.forwardPipelines();
+            RasterPipelines.Typed pipelines = renderer.forwardPipelines(draw.output().surfaces(), true);
             view.splitByType(pipelines.categories(), kind == SurfaceOutput.Kind.SHADED ? (1 << MeshletRenderer.BINS) - 1
                 : 1 << MeshletRenderer.BIN_BLENDED, 0); // a visibility buffer's opaque bins draw IDs: below
             typed = kind == SurfaceOutput.Kind.SHADED ? pipelines : null;
@@ -107,7 +107,8 @@ public final class MeshletGeometry implements GeometryProvider {
         SurfaceOutput.Kind kind = draw.output().kind();
         RasterPipelines.Geometry geometry = kind == SurfaceOutput.Kind.SHADED ? null
             : renderer.geometryPipelines(kind == SurfaceOutput.Kind.DEPTH ? RasterPipelines.DEPTH : RasterPipelines.IDS);
-        record(draw, targets, pass, true, typed(g, view, kind == SurfaceOutput.Kind.SHADED), geometry);
+        record(draw, targets, pass, true, typed(g, view, kind == SurfaceOutput.Kind.SHADED, draw.output().surfaces(),
+            true), geometry);
     }
 
     @AllowAllocation("building the graph, when it changes")
@@ -124,8 +125,9 @@ public final class MeshletGeometry implements GeometryProvider {
      * view's lists (its shaded draw did: {@link #drawFirst}); else null.
      */
     @AllowAllocation("building the graph, when it changes")
-    private RasterPipelines.Typed typed(GraphBuilder g, RenderView view, boolean shaded) {
-        return shaded && view.splitCategories() > 0 ? renderer.forwardPipelines() : null;
+    private RasterPipelines.Typed typed(GraphBuilder g, RenderView view, boolean shaded, boolean surfaces,
+        boolean opaque) {
+        return shaded && view.splitCategories() > 0 ? renderer.forwardPipelines(surfaces, opaque) : null;
     }
 
     /**
@@ -147,6 +149,7 @@ public final class MeshletGeometry implements GeometryProvider {
                     : Clear.color(0, 0, 0, 0)); // IDs: 0 is nothing
             }
         }
+        targets.attachSurfaces(pass, late);
         if (late) {
             pass.attachDepth(depth, Load.LOAD, Store.STORE);
         } else {
@@ -198,7 +201,7 @@ public final class MeshletGeometry implements GeometryProvider {
         if (load) {
             throw new IllegalStateException("Meshlets are drawn first, before other geometry");
         }
-        RasterPipelines.Typed typed = typed(g, view, true); // by type: the view's opaque draw split its lists
+        RasterPipelines.Typed typed = typed(g, view, true, false, false); // by type: the opaque draw split the lists
         if (typed == null) {
             throw new IllegalStateException("View " + view.index() + " draws blended surfaces but its lists are not "
                 + "split by shading bin: its opaque draw is built first, shaded or as IDs with blended materials");

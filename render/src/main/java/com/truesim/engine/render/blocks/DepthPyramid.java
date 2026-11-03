@@ -25,19 +25,27 @@ import java.util.Objects;
  * Image hzb = g.request(new DepthPyramid(depth));   // read it as Access.SAMPLED_COMPUTE, levels by textures[].Load
  * }</pre>
  */
-public record DepthPyramid(Image depth, ViewPort view) implements Request<Image> {
+public record DepthPyramid(Image depth, ViewPort view, boolean nearest) implements Request<Image> {
 
     /**
      * The pyramid of {@code depth}, all of it; with a {@code view} (nullable), of its render region in {@code depth}
      * each frame (dynamic resolution): levels cover the region only, sized from it as from a depth image of its size.
+     * With {@code nearest}, each texel is the nearest depth it covers (the largest value) instead: what a ray tracing
+     * the depth hierarchically ({@code ScreenSpaceReflections}) may skip past, in front of all of it, where the
+     * farthest one would let it pass through surfaces.
      */
     public DepthPyramid {
         Objects.requireNonNull(depth, "depth");
     }
 
-    /** The pyramid of all of {@code depth}. */
+    /** The farthest-depth pyramid of {@code depth}'s region in {@code view} (nullable: all of it). */
+    public DepthPyramid(Image depth, ViewPort view) {
+        this(depth, view, false);
+    }
+
+    /** The farthest-depth pyramid of all of {@code depth}. */
     public DepthPyramid(Image depth) {
-        this(depth, null);
+        this(depth, null, false);
     }
 
     @Override
@@ -46,12 +54,13 @@ public record DepthPyramid(Image depth, ViewPort view) implements Request<Image>
         Pipeline pipeline = g.computeProgram("shaders/blocks/pyramid.spv", "pyramidMain", PyramidPush.BYTES);
         int width = (depth.width() + 1) / 2;
         int height = (depth.height() + 1) / 2;
-        Image pyramid = g.create("depth pyramid of " + depth.name(),
+        String name = (nearest ? "nearest depth pyramid of " : "depth pyramid of ") + depth.name();
+        Image pyramid = g.create(name,
             ImageDesc.of(Format.R32_SFLOAT, width, height).fullMips());
         // A pass per level, each reading the level below as the one before wrote it: the graph orders them. Sizes come
         // from the depth's render region each frame, as of an image of its size (levels halving, rounding down).
         for (int mip = 0; mip < pyramid.mips(); mip++) {
-            GraphBuilder.PassBuilder pass = g.pass("depth pyramid of " + depth.name() + ", level " + mip);
+            GraphBuilder.PassBuilder pass = g.pass(name + ", level " + mip);
             if (view != null) {
                 pass.region(view);
             }
@@ -62,7 +71,7 @@ public record DepthPyramid(Image depth, ViewPort view) implements Request<Image>
             } else {
                 pass.read(below, Access.STORAGE_READ);
             }
-            PyramidPush push = new PyramidPush().fromDepth(below == null ? 1 : 0);
+            PyramidPush push = new PyramidPush().fromDepth(below == null ? 1 : 0).nearest(nearest ? 1 : 0);
             int level = mip;
             pass.write(target, Access.STORAGE_WRITE).record(ctx -> {
                 int regionWidth = ctx.regionWidth(depth);
@@ -79,7 +88,7 @@ public record DepthPyramid(Image depth, ViewPort view) implements Request<Image>
     }
 
     /** Level {@code mip}'s size along a depth image side of {@code size}: half of it rounded up, then halving down. */
-    static int levelSize(int size, int mip) {
+    public static int levelSize(int size, int mip) {
         return Math.max(1, ((size + 1) / 2) >> mip);
     }
 

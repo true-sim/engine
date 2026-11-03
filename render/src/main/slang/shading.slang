@@ -352,6 +352,17 @@ float lobe(float3 n, float3 toViewer, float3 h, float nl, float roughness)
  */
 public float3 ambient(Surface s, float3 toViewer, float3 irradiance)
 {
+    float3 reflectance;
+    return ambientWeighed(s, toViewer, irradiance, reflectance);
+}
+
+/**
+ * ambient, also giving what its reflection of the sky (radiance irradiance / pi / 2 from every direction: SKY_REFLECTED
+ * for the constant sky) is weighed by in the result, its `reflectance`, as indirect.slang's indirectLightWeighed.
+ */
+public float3 ambientWeighed(Surface s, float3 toViewer, float3 irradiance, out float3 reflectance)
+{
+    reflectance = surfaceFresnel(s, 1.0) * s.occlusion;
     // The sky from behind too, through a surface transmitting diffusely: in its transmission color.
     float3 diffuse = (1 - s.diffuseTransmission) * s.albedo + s.diffuseTransmission * s.diffuseTransmissionColor;
     float3 base = (1 - s.metallic) * (1 - s.transmission) * diffuse / PI * irradiance * s.occlusion
@@ -360,12 +371,14 @@ public float3 ambient(Surface s, float3 toViewer, float3 irradiance)
     {
         // The sheen lit evenly from all around reflects its albedo of it, which it takes from the base.
         float nv = dot(s.normal, toViewer);
+        reflectance *= sheenScaling(s, nv);
         base = base * sheenScaling(s, nv) + s.sheenColor * sheenAlbedo(nv, s.sheenRoughness) * irradiance / PI
             * s.occlusion;
     }
     if (s.clearcoat > 0)
     {
         float coat = s.clearcoat * 0.04;
+        reflectance *= 1 - coat;
         base = base * (1 - coat) + coat * irradiance / PI * 0.5 * s.occlusion;
     }
     return base;

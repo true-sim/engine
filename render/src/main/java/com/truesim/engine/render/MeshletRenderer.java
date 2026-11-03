@@ -83,6 +83,7 @@ public final class MeshletRenderer implements AutoCloseable {
     private final ShadingPipelines shading; // the material types' pipelines, made as they are first wanted or ahead
     // Shaded draws outside a frame graph (record, drawView): the pipelines by type for the table as last drawn.
     private RasterPipelines.Typed immediate;
+    private volatile boolean surfacesWanted; // a graph drew with the surface outputs: prepare their pipelines too
     private Materials immediateTable;
     private long immediateVersion;
     // ... and their depth and IDs where types have geometry hooks (by the same split, per shading bin); null: none.
@@ -178,6 +179,10 @@ public final class MeshletRenderer implements AutoCloseable {
                 continue;
             }
             shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, ShadingPipelines.COLOR));
+            if (surfacesWanted && raster != BIN_BLENDED) {
+                shading.prepare(this.raster.forwardKey(type, features, raster, meshShading,
+                    ShadingPipelines.COLOR_SURFACES));
+            }
             if (raster == BIN_BLENDED) {
                 shading.prepare(this.raster.forwardKey(type, features, raster, meshShading,
                     ShadingPipelines.WEIGHTED));
@@ -186,6 +191,10 @@ public final class MeshletRenderer implements AutoCloseable {
             for (ClassicLodGeometry classic : classics) {
                 for (int list = raster; list < 2 * BINS; list += BINS) {
                     shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, ShadingPipelines.COLOR));
+                    if (surfacesWanted && raster != BIN_BLENDED) {
+                        shading.prepare(ClassicLodGeometry.forwardKey(type, features, list,
+                            ShadingPipelines.COLOR_SURFACES));
+                    }
                     if (raster == BIN_BLENDED) {
                         shading.prepare(ClassicLodGeometry.forwardKey(type, features, list,
                             ShadingPipelines.WEIGHTED));
@@ -644,7 +653,23 @@ public final class MeshletRenderer implements AutoCloseable {
      * path the next frame takes, made where they are not yet. While a graph builds.
      */
     RasterPipelines.Typed forwardPipelines() {
-        return raster.typed(scene.materials(), path() == Path.MESH_SHADERS);
+        return forwardPipelines(false, true);
+    }
+
+    /**
+     * Like {@link #forwardPipelines()}: with {@code surfaces}, the opaque bins' writing the surface outputs too (from
+     * then on also made ahead as materials are written); without {@code opaque}, the blended bin's only.
+     */
+    RasterPipelines.Typed forwardPipelines(boolean surfaces, boolean opaque) {
+        if (surfaces) {
+            surfacesWanted = true;
+        }
+        return raster.typed(scene.materials(), path() == Path.MESH_SHADERS, surfaces, opaque);
+    }
+
+    /** A graph draws with the surface outputs: from now on their pipelines are made ahead too. */
+    void wantSurfaces() {
+        surfacesWanted = true;
     }
 
     /**
@@ -653,6 +678,11 @@ public final class MeshletRenderer implements AutoCloseable {
      */
     public int forwardPipelineCount() {
         return shading.count();
+    }
+
+    /** How many pipelines of material types into {@code target} ({@link ShadingPipelines#COLOR} ...) were made. */
+    int pipelineCount(int target) {
+        return shading.count(target);
     }
 
     /** Nanoseconds spent making forward shading's pipelines by type so far ({@link #forwardPipelineCount}). */

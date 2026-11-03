@@ -266,6 +266,25 @@ public final class GraphBuilder {
         return scope == null ? null : requestViews.get(scope);
     }
 
+    /**
+     * The techniques the building one sees: the frame's, and those of the view being built ({@link #view()}); a
+     * {@link Switch} as the technique it switches. For a technique whose build depends on who else is there, e.g. a
+     * shading pass writing an output only when a technique reading it is in the view (engine-render's surface
+     * outputs), whether or not that one was built yet.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public List<Technique> techniquesInView() {
+        ViewPort view = view();
+        List<Technique> seen = new ArrayList<>();
+        for (Technique technique : techniques) {
+            ViewPort of = viewOf.get(technique);
+            if (of == null || of == view) {
+                seen.add(technique instanceof Switch switched ? switched.technique() : technique);
+            }
+        }
+        return seen;
+    }
+
     /** An output's image: {@code key}, the frame's or a view's ({@link #scoped}). */
     Image output(Object key) {
         return (Image) resolution.require(key);

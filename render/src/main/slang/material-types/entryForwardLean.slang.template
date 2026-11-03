@@ -22,3 +22,16 @@ BlendedOut {name}LeanBlendedMain(LeanVertex in, uint primitive : SV_PrimitiveID,
 {
     return typedLeanBlended<{struct}>(in, primitive, bary, front);
 }
+
+[shader("fragment")]
+ShadedSurface {name}LeanSurfaceMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bary : SV_Barycentrics)
+{
+    return typedLeanSurface<{struct}>(in, primitive, bary);
+}
+
+[shader("fragment")]
+ShadedSurface {name}LeanMaskedSurfaceMain(LeanVertex in, uint primitive : SV_PrimitiveID,
+    float3 bary : SV_Barycentrics, bool front : SV_IsFrontFace)
+{
+    return typedLeanMaskedSurface<{struct}>(in, primitive, bary, front);
+}

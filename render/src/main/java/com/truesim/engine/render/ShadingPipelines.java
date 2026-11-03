@@ -43,6 +43,8 @@ final class ShadingPipelines implements AutoCloseable {
      * tested, not written.
      */
     static final int OVER = 4;
+    /** Into the renderer's color format, the surface outputs ({@link SurfaceOutputs}) and depth. */
+    static final int COLOR_SURFACES = 5;
 
     /** Culls back faces (counter-clockwise front faces). */
     static final int CULL_BACK = 0;
@@ -164,6 +166,9 @@ final class ShadingPipelines implements AutoCloseable {
             }
             Pipeline pipeline = switch (key.target()) {
                 case COLOR -> graphics.color(colorFormat).depth(depthFormat).build();
+                case COLOR_SURFACES -> graphics.color(colorFormat).color(SurfaceOutputs.NORMAL_FORMAT.vk())
+                    .color(SurfaceOutputs.MATERIAL_FORMAT.vk()).color(SurfaceOutputs.REFLECTANCE_FORMAT.vk())
+                    .depth(depthFormat).build();
                 case DEPTH -> graphics.depth(depthFormat).build();
                 case IDS -> graphics.color(MeshletRenderer.ID_FORMAT).depth(depthFormat).build();
                 case WEIGHTED -> RasterPipelines.blended(graphics, depthFormat);

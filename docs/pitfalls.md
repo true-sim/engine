@@ -281,6 +281,40 @@ cyan where the Khronos reference shows none).
 - Rule: an approximation of an integral is fitted to the integral over its whole domain and says how far it is off;
   a path without the lookup table uses the same lobe the table was made from.
 
+**Neighbors compared by depth rejected their own surface on a slanted floor.** Screen-space reflections traced at
+half resolution took the 2 x 2 hit texels around a pixel where the pixels they were traced from lay within 5 % of its
+depth. On a floor seen at a grazing angle, depth changes by more than that every two rows: every other row found no
+hit, and the mirror image came out striped.
+- Proof: `ScreenSpaceReflectionsTest.reflectionsFollowTheRenderRegion` ("traced at half resolution": red 0 at the
+  mirror image) with the depth test; passes with the distance from the pixel's plane (true-sim/engine, screen-space
+  reflections).
+- Rule: decide whether a neighbor lies on the same surface by its distance from the pixel's plane, not by depth.
+
+**Blurring the hit by the cone's footprint did not blur an object's outline.** Rough reflections sampled the scene's
+mip chain at the level of the GGX cone's footprint where the mirror ray met it. A thin stripe against the sky came out
+dimmer but no wider: rays of the pixels beside it missed (the sky) and took the environment, so the outline stayed
+where the mirror's was.
+- Proof: `ScreenSpaceReflectionsTest.roughFloorsBlurTheirReflections`: the stripe 4 pixels wide on the mirror and on
+  the rough floor alike, wider (as the test wants) once the composite averages the hits and misses of the pixels within
+  the cone's radius (true-sim/engine, screen-space reflections).
+- Rule: a filter of a lobe over one ray per pixel gathers neighbors' rays too, misses included.
+
+**Screen-space reflections tested a visible pixel as if it were the surface the ray met.** Rays near an outline or
+under a bulge go behind the visible surface and meet hidden parts of the same object. Three choices made from the
+visible pixel alone flipped neighbors between hit and miss: rejecting the hit when the pixel's normal faced away from
+the ray (at outlines it is perpendicular to the view, so its sign is noise), taking the pixel under the hierarchical
+march's end point (at a cell border it lies on either side by the march's nudge, so half the contact took the floor's
+pixel), and a thickness measured along the view (at grazing angles the depth behind a pixel jumps from one pixel to
+the next). The demo's screenshots showed a dotted line of sky along each rock's contact with a mirror and hairs along
+the reflections' outlines; filling from neighbors then drew a line of sky of its own, from pixels of the rock standing
+on the floor, which are untraced but lie on the floor's plane.
+- Proof: `ScreenSpaceReflectionsTest.aBoxOnAMirrorReflectsItsContactAndOutlineCleanly`: with the old shader, a rock on
+  the mirror showed the environment at 8 contact pixels and 8 to 12 extra hit-miss changes along its outline on every
+  path and technique; 0 with the pixel the ray went behind, no normal test, thickness along the surface's normal and a
+  3 x 3 reconstruction over texels traced from the same surface (true-sim/engine, screen-space reflections).
+- Rule: a test of a screen-space hit uses what the ray did (the pixel it went behind, how deep), not the visible
+  pixel's properties; a filter over neighbors leaves out texels not traced at all, not only those of other planes.
+
 ## Tests and measurements
 
 **A GPU time per frame that left out the frame start.** `GpuTimings` timed passes only; textures' copies and mip

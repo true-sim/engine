@@ -29,11 +29,26 @@ public struct ShadePush
                                // uints from one bin's list to the next (full-image tiles: the region may be smaller)
     uint* classicIndices;      // the classic LOD path's indices, as the pool's triangles lie (null: no such path)
     uint* tiles;               // classification: the first bin's tile list; shading: this pass's bin's
+    uint normal;               // with SURFACES, storage slots of the surface outputs (surfaces.slang): the normal,
+    uint material;             // F0 and roughness,
+    uint reflectance;          // and the reflectance
 };
 
 /** The features a variant of a shading pass shows (FEATURE_*): set when its pipeline is made. */
 [vk::constant_id(0)]
 const uint FEATURES = 0;
+
+/** 1: the variant also writes the surface outputs, where a technique asked for them. */
+[vk::constant_id(1)]
+const uint SURFACES = 0;
+
+/** Writes `surface` into the surface outputs of pixel `p`, the normal in `view`'s space. */
+void writeSurface(View view, uint2 p, SurfaceOut surface, float covered)
+{
+    uintImages[push.normal][p] = uint2(packNormal(toView(viewAxes(view.viewProjection), surface.normal)), 0);
+    images[push.material][p] = float4(saturate(surface.f0), saturate(surface.roughness));
+    images[push.reflectance][p] = float4(saturate(surface.reflectance), covered);
+}
 
 /** Tiles per row before the next row of groups: an indirect dispatch's groups are (min(count, this), rows, 1). */
 static const uint TILE_ROW = 1024;
@@ -163,6 +178,10 @@ public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
     if (ids.x == 0)
     {
         images[push.color][id.xy] = float4(push.clear, 1);
+        if (SURFACES != 0)
+        {
+            writeSurface(push.view[0], id.xy, noSurface(), 0); // as forward's cleared targets
+        }
         return;
     }
     View view = push.view[0];
@@ -223,6 +242,11 @@ public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
         + baryX.z * float4(v[2].uv, v[2].uv1);
     float4 uvY = baryY.x * float4(v[0].uv, v[0].uv1) + baryY.y * float4(v[1].uv, v[1].uv1)
         + baryY.z * float4(v[2].uv, v[2].uv1);
-    images[push.color][id.xy] = shadeMaterial<M, R>(rays, view, s, push.scene[0].materials, uvX - uvs, uvY - uvs,
-        push.lights, id.xy, FEATURES, Background.none(), push.indirect); // transmissive surfaces: drawn with the blended
+    SurfaceOut surface;
+    images[push.color][id.xy] = shadeMaterialSurface<M, R>(rays, view, s, push.scene[0].materials, uvX - uvs,
+        uvY - uvs, push.lights, id.xy, FEATURES, Background.none(), push.indirect, surface); // transmissive: blended
+    if (SURFACES != 0)
+    {
+        writeSurface(view, id.xy, surface, 1);
+    }
 }

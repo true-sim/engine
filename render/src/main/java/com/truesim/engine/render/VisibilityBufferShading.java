@@ -34,6 +34,9 @@ import org.lwjgl.system.MemoryStack;
  * types (as they are when the graph builds) shades its tiles' pixels with its type's shader, by an indirect dispatch:
  * a variant compiled with only its features' code, for each combination of the features the type allows.
  *
+ * <p>Where a technique of the view asks for them ({@link SurfaceOutputs}), the shading passes' variants also write the
+ * surface outputs; otherwise nothing of them exists.
+ *
  * <p>The color format must allow storage images (not sRGB). Needs
  * {@link com.truesim.engine.vulkan.VulkanDevice#primitiveIds()}, and one provider whose triangles the shading pass can
  * rebuild: {@link MeshletGeometry} or {@link ClassicLodGeometry}.
@@ -90,7 +93,7 @@ public final class VisibilityBufferShading implements Technique {
 
     @Override
     public List<Key<?>> provides() {
-        return List.of(Keys.SCENE_COLOR, Keys.SCENE_DEPTH);
+        return ClusteredForwardShading.PROVIDES;
     }
 
     /**
@@ -122,6 +125,9 @@ public final class VisibilityBufferShading implements Technique {
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         IndirectInputs.Set indirect = IndirectInputs.of(g);
+        // The surface outputs, written by the shading passes' variants with SURFACES where a technique asks for them
+        SurfaceOutputs.Images surfaces = SurfaceOutputs.wanted(g) ? SurfaceOutputs.create(g, "scene", width, height)
+            : null;
         // With inline ray shadows, the variant tracing them, where the device can.
         boolean traced = shadows != null && shadows.traced() && g.capabilities().rayTracing();
         // A variant per bin: a type, and the features its materials show; made for the combinations in use only.
@@ -132,9 +138,9 @@ public final class VisibilityBufferShading implements Technique {
             int features = materials.binFeatures(bin);
             boolean rays = traced && type.tracedShader() != null;
             shade[bin] = compute(g, rays ? type.tracedShader() : type.shader(), rays ? type.tracedEntry() : type.entry(),
-                features);
+                features, surfaces != null ? 1 : 0);
         }
-        Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain", 0);
+        Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain", 0, 0);
         Image ids = targets.color();
         Image color = g.create("scene color", ImageDesc.of(Format.of(colorFormat), width, height));
         int tilesX = (width + TILE - 1) / TILE;
@@ -177,6 +183,11 @@ public final class VisibilityBufferShading implements Technique {
             .read(tiles, BufferAccess.INDIRECT)
             .read(tiles, BufferAccess.STORAGE_READ)
             .write(color, Access.STORAGE_WRITE);
+        if (surfaces != null) {
+            for (Image image : surfaces.all()) {
+                pass.write(image, Access.STORAGE_WRITE);
+            }
+        }
         if (lights != null) {
             pass.read(lights, BufferAccess.STORAGE_READ);
         }
@@ -195,13 +206,18 @@ public final class VisibilityBufferShading implements Technique {
                     continue;
                 }
                 long list = tableBytes + listBytes * listOf[bin];
-                ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, ids, color, lights, size(ctx, ids), shade.length,
-                    bin, ctx.address(tiles) + list).indirect(indirect == null ? 0 : ctx.address(indirect.table())),
-                    tiles, list);
+                push(shadePush, ctx, ids, color, lights, size(ctx, ids), shade.length, bin, ctx.address(tiles) + list)
+                    .indirect(indirect == null ? 0 : ctx.address(indirect.table()));
+                if (surfaces != null) {
+                    shadePush.normal(ctx.storage(surfaces.normal())).material(ctx.storage(surfaces.material()))
+                        .reflectance(ctx.storage(surfaces.reflectance()));
+                }
+                ctx.dispatchIndirect(shade[bin], shadePush, tiles, list);
             }
         });
         g.provide(Keys.SCENE_COLOR, color);
         g.provide(Keys.SCENE_DEPTH, targets.depth());
+        SurfaceOutputs.provide(g, surfaces, width, height);
     }
 
     /** The render region in {@code ids} this frame: width, and height in the high 16 bits (resolve.slang's size). */
@@ -210,9 +226,9 @@ public final class VisibilityBufferShading implements Technique {
     }
 
     @AllowAllocation("building the graph, when it changes")
-    /** {@code entry} of {@code shader}, with resolve.slang's FEATURES {@code features}. */
-    private static Pipeline compute(GraphBuilder g, String shader, String entry, int features) {
-        return g.computeProgram(shader, entry, PUSH_BYTES, features);
+    /** {@code entry} of {@code shader}, with resolve.slang's FEATURES {@code features} and SURFACES {@code surfaces}. */
+    private static Pipeline compute(GraphBuilder g, String shader, String entry, int features, int surfaces) {
+        return g.computeProgram(shader, entry, PUSH_BYTES, features, surfaces);
     }
 
     /**

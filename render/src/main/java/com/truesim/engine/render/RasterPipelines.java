@@ -172,7 +172,9 @@ final class RasterPipelines implements AutoCloseable {
     ShadingPipelines.Key forwardKey(MaterialType type, int features, int bin, boolean meshShading, int target) {
         boolean lean = meshShading && slimMeshes;
         boolean weighted = target == ShadingPipelines.WEIGHTED;
-        String suffix = weighted ? "BlendedMain" : masking(bin) ? "MaskedMain" : lean ? "Main" : "FragmentMain";
+        boolean surfaces = target == ShadingPipelines.COLOR_SURFACES;
+        String suffix = weighted ? "BlendedMain" : surfaces ? (masking(bin) ? "MaskedSurfaceMain" : "SurfaceMain")
+            : masking(bin) ? "MaskedMain" : lean ? "Main" : "FragmentMain";
         return new ShadingPipelines.Key(!meshShading ? "shaders/meshlets/draw.spv" : lean
             ? "shaders/meshlets/lean.spv" : "shaders/meshlets/mesh.spv",
             !meshShading ? "vertexMain" : lean ? "meshLeanTypedMain" : "meshIdsTypedMain", meshShading,
@@ -187,6 +189,8 @@ final class RasterPipelines implements AutoCloseable {
      * one), per path; made for the path of the build, and for the other when a frame first draws on it.
      */
     final class Typed {
+        private final boolean surfaces; // the opaque bins' pipelines write the surface outputs too
+        private final boolean opaque;   // false: the blended bin's pipelines only (a transparency pass's)
         private final MaterialType[] types;
         private final int[] features;
         private final int[] rasters;
@@ -196,7 +200,9 @@ final class RasterPipelines implements AutoCloseable {
         private final Pipeline[][] over = new Pipeline[2][];
 
         @AllowAllocation("building the graph, when it changes")
-        private Typed(Materials materials, boolean meshShading) {
+        private Typed(Materials materials, boolean meshShading, boolean surfaces, boolean opaque) {
+            this.surfaces = surfaces;
+            this.opaque = opaque;
             int bins = materials.binCount();
             types = new MaterialType[bins];
             features = new int[bins];
@@ -222,9 +228,10 @@ final class RasterPipelines implements AutoCloseable {
             Pipeline[] o = new Pipeline[types.length];
             for (int category = 0; category < types.length; category++) {
                 for (int bin = 0; bin < BINS; bin++) {
-                    if ((rasters[category] & 1 << bin) != 0) {
+                    if ((rasters[category] & 1 << bin) != 0 && (opaque || bin == BIN_BLENDED)) {
                         s[category * BINS + bin] = store.get(forwardKey(types[category], features[category], bin,
-                            path == 1, ShadingPipelines.COLOR));
+                            path == 1, surfaces && bin != BIN_BLENDED ? ShadingPipelines.COLOR_SURFACES
+                                : ShadingPipelines.COLOR));
                         if (bin == BIN_BLENDED) {
                             w[category] = store.get(forwardKey(types[category], features[category], bin, path == 1,
                                 ShadingPipelines.WEIGHTED));
@@ -391,7 +398,16 @@ final class RasterPipelines implements AutoCloseable {
     /** The typed pipelines of {@code materials}' shading bins, as they are now (made where they are not yet). */
     @AllowAllocation("building the graph, when it changes")
     Typed typed(Materials materials, boolean meshShading) {
-        return new Typed(materials, meshShading);
+        return new Typed(materials, meshShading, false, true);
+    }
+
+    /**
+     * Like {@link #typed(Materials, boolean)}: with {@code surfaces} the opaque bins' pipelines write the surface
+     * outputs too; without {@code opaque}, the blended bin's pipelines only (for a transparency pass).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    Typed typed(Materials materials, boolean meshShading, boolean surfaces, boolean opaque) {
+        return new Typed(materials, meshShading, surfaces, opaque);
     }
 
     /**
