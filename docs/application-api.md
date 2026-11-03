@@ -206,7 +206,9 @@ input through `Headset.input()`, one fixed OpenXR action set synced inside `Head
 - **D88** Clocks: real time, app clock, one clock per world.
 - **D89** (decided) Fixed steps per world, each world's clock with its own rate, 60/s by default; the shared budget
   (D92) caps the total. Worlds step out of phase, so reading another world gives its latest state.
-- **D90** Phases: `FIXED`, `UPDATE`, `LATE`, then scene update and rendering.
+- **D90** (revised 2026-11-03: `ANIMATE` added, animation.md) Phases: `FIXED`, `UPDATE`, `ANIMATE`, `LATE`, then scene
+  update and rendering. `ANIMATE` runs the worlds' animators between the game's update (which sets what plays) and
+  `LATE` (which reads and overrides joints).
 - **D91** (revised) Interpolation between fixed steps runs on the GPU: when a step runs, `SceneSync` uploads the
   previous and current world transforms of instances moved in `FIXED`; each frame passes one blend factor. Frames
   without a step cost no CPU, and the same data gives motion vectors. A teleport or spawn sets previous = current.
@@ -229,8 +231,8 @@ input through `Headset.input()`, one fixed OpenXR action set synced inside `Head
   included.
 - **D123** (new) World transforms are propagated after every fixed step (transforms only; change logging once per
   frame), so step 2 never reads stale parent transforms and a catch-up frame does not overflow the change log.
-- **D124** (new) Frame start order: drain finished loads (time-budgeted) → sample input → `FIXED` → `UPDATE` → `LATE`
-  → scene update and GPU sync → render.
+- **D124** (revised 2026-11-03: `ANIMATE`) Frame start order: drain finished loads (time-budgeted) → sample input →
+  `FIXED` → `UPDATE` → `ANIMATE` → `LATE` → scene update and GPU sync → render.
 
 ### Behaviours
 
