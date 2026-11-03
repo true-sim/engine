@@ -9,6 +9,7 @@ import com.truesim.scene.audio.Attenuation;
 import com.truesim.scene.audio.Bus;
 import com.truesim.scene.audio.Decibels;
 import com.truesim.scene.audio.Listeners;
+import com.truesim.scene.audio.Release;
 import com.truesim.scene.audio.Sound;
 import com.truesim.scene.audio.Sounds;
 import com.truesim.scene.audio.Spatial;
@@ -73,6 +74,7 @@ public final class AudioSync {
         long[] starts = new long[4];
         byte[] state = new byte[4];
         Object[] acquired = new Object[4];
+        StreamRing[] rings = new StreamRing[4];
         int acquiredCount;
         long added;
         boolean gone;
@@ -91,6 +93,7 @@ public final class AudioSync {
             starts = Arrays.copyOf(starts, size);
             state = Arrays.copyOf(state, size);
             acquired = Arrays.copyOf(acquired, size);
+            rings = Arrays.copyOf(rings, size);
         }
     }
 
@@ -274,6 +277,7 @@ public final class AudioSync {
         for (int v = 0; v < track.voices; v++) {
             track.slots[v] = -1;
             track.starts[v] = 0;
+            track.rings[v] = null;
             AssetRef<AudioClip> clip = store.voiceClip(id, v);
             track.state[v] = clip == null ? DONE : WAITING; // inputs, patches and scatters come with later steps
             if (clip != null && !acquired(track, clip)) {
@@ -317,6 +321,12 @@ public final class AudioSync {
         for (int i = 0; i < track.acquiredCount; i++) {
             cache.release((AssetRef<AudioClip>) track.acquired[i]);
             track.acquired[i] = null;
+        }
+        for (int v = 0; v < track.rings.length; v++) {
+            if (track.rings[v] != null) {
+                track.rings[v].close(); // a ring never played (dropped): the streaming thread lets it go
+                track.rings[v] = null;
+            }
         }
         tracked[track.store].remove(track.id);
         track.sound = null;
@@ -362,7 +372,12 @@ public final class AudioSync {
             } else {
                 at = schedulePoint + Math.round(store.voiceDelay(id, v) * rate);
             }
-            play(t, v, cache.get(ref), at);
+            AudioClip clip = cache.get(ref);
+            if (clip.streamed() && !stream(track, v, clip, store.voiceLoops(id, v))) {
+                waiting = true; // priming: its ring fills first
+                continue;
+            }
+            play(t, v, clip, at);
             anyStarted = true;
         }
         if (waiting && !anyStarted
@@ -388,11 +403,42 @@ public final class AudioSync {
         return false;
     }
 
+    /**
+     * Readies a streamed voice: its ring made and handed to the streaming thread on first sight; true once primed,
+     * after sending it for the next play.
+     */
+    private boolean stream(Track track, int v, AudioClip clip, boolean loop) {
+        if (track.rings[v] == null) {
+            track.rings[v] = newRing(clip, loop);
+            streams().add(track.rings[v]);
+        }
+        if (!track.rings[v].primed()) {
+            return false;
+        }
+        return commands.stream(track.rings[v]);
+    }
+
+    @AllowAllocation("a ring per streamed voice")
+    private static StreamRing newRing(AudioClip clip, boolean loop) {
+        return new StreamRing(clip, loop, 1.0);
+    }
+
+    private Streams streams;
+
+    /** The streaming thread streamed clips decode on; made on the first. */
+    @AllowAllocation("made once")
+    public Streams streams() {
+        if (streams == null) {
+            streams = new Streams();
+        }
+        return streams;
+    }
+
     private void play(int t, int v, AudioClip clip, long at) {
         Track track = tracks[t];
         int slot = firstFree();
         if (slot < 0) {
-            return; // every slot taken: it waits (logical voices beyond the renderer's are for step 7)
+            return; // every slot taken: it waits
         }
         Sounds store = stores[track.store];
         int flags = (store.voiceLoops(track.id, v) ? Voices.LOOP : 0) | (placed(track) ? Voices.SPATIAL : 0)
@@ -437,21 +483,69 @@ public final class AudioSync {
         for (int v = 0; v < track.voices; v++) {
             outro |= store.voiceOutro(track.id, v);
         }
+        // where the outro starts (§2.7): now, cross-fading the loop, or at the loop's next pass end or marker
+        long at = schedulePoint;
+        float loopFade = Math.max(fade, 0.03f);
+        for (int v = 0; v < track.voices && outro; v++) {
+            Release release = store.voiceRelease(track.id, v);
+            if (release != null && track.state[v] == PLAYING) {
+                if (release.kind() == Release.Kind.CROSSFADE) {
+                    loopFade = (float) release.seconds();
+                } else {
+                    at = boundary(track, v, release.kind() == Release.Kind.AT_MARKER);
+                    loopFade = 0;
+                }
+            }
+        }
         for (int v = 0; v < track.voices; v++) {
             if (store.voiceOutro(track.id, v)) {
                 AssetRef<AudioClip> ref = store.voiceClip(track.id, v);
                 if (cache.state(ref) == AssetState.LOADED) {
-                    play(t, v, cache.get(ref), schedulePoint);
+                    play(t, v, cache.get(ref), at);
                 } else {
                     track.state[v] = DONE;
                 }
             } else if (track.state[v] == PLAYING) {
-                commands.stop(track.slots[v], schedulePoint, outro ? Math.max(fade, 0.03) : fade);
+                boolean looping = store.voiceRelease(track.id, v) != null;
+                commands.stop(track.slots[v], looping ? at : schedulePoint, outro ? loopFade : fade);
             } else if (track.state[v] == WAITING) {
                 track.state[v] = DONE;
             }
         }
         finishIfDone(t);
+    }
+
+    /**
+     * The output frame at or after the schedule point where loop voice {@code v} next ends a pass of its loop region,
+     * or with {@code marker} passes the region's next marker (its pass end without one): from its start frame and its
+     * rate at the clip's frames, so the outro follows it seamlessly.
+     */
+    private long boundary(Track track, int v, boolean marker) {
+        Sounds store = stores[track.store];
+        AudioClip clip = cache.get(store.voiceClip(track.id, v));
+        double outPerClip = (double) rate / clip.rate() / pitch(track, v);
+        long start = clip.loopStart();
+        long end = clip.loopEnd();
+        long length = end - start;
+        double now = Math.max(0, (schedulePoint - track.starts[v]) / outPerClip); // clip frames played (unwrapped)
+        // pass k ends at clip frame end + k * length (unwrapped); a marker m at m + k * length
+        long best = Long.MAX_VALUE;
+        for (int k = (int) Math.max(0, Math.floor((now - end) / length)); best == Long.MAX_VALUE; k++) {
+            long passEnd = end + (long) k * length;
+            if (marker) {
+                for (int i = 0; i < clip.markers().size() && best == Long.MAX_VALUE; i++) {
+                    long m = clip.markers().get(i).frame();
+                    long at = m + (long) k * length;
+                    if (m >= start && m < end && at >= now) {
+                        best = at;
+                    }
+                }
+            }
+            if (best == Long.MAX_VALUE && passEnd >= now) {
+                best = passEnd;
+            }
+        }
+        return track.starts[v] + Math.round(best * outPerClip);
     }
 
     /** Voice {@code v}'s gain: drawn and by parameters, times the instance's volume (distance is the renderer's). */

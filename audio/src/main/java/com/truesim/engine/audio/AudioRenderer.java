@@ -45,6 +45,7 @@ public final class AudioRenderer implements AutoCloseable {
     static final int BUS_GAIN = 9;
     static final int SPATIAL = 10;
     static final int BUDGET = 11;
+    static final int STREAM = 12;
 
     /** Receives events. */
     @FunctionalInterface
@@ -61,6 +62,7 @@ public final class AudioRenderer implements AutoCloseable {
     private final RenderClock clock;
     private final Commands producer;
     private final float[] block;
+    private StreamRing pendingRing;
     private BusGraph graph;
     private long frame;
     /** Frames of {@link #block} not handed out yet: renders of any length are cut from whole blocks. */
@@ -99,6 +101,11 @@ public final class AudioRenderer implements AutoCloseable {
     /** The commands' producer side: used by one thread. */
     public Commands commands() {
         return producer;
+    }
+
+    /** Times a streamed voice ran dry. */
+    public int starvations() {
+        return voices.starvations();
     }
 
     /** Voices real at the last choice (every 4 blocks). */
@@ -213,8 +220,10 @@ public final class AudioRenderer implements AutoCloseable {
                     Bus bus = (Bus) r.refs[c];
                     voices.play(slot, (AudioClip) r.refs2[c], Math.max(frame, r.frames[c] - latency), values[v + 2],
                         (float) values[v], (float) values[v + 1], bus, graph.index(bus), (int) values[v + 3],
-                        (float) values[v + 4], r.tags[c]);
+                        (float) values[v + 4], r.tags[c], pendingRing);
+                    pendingRing = null;
                 }
+                case STREAM -> pendingRing = (StreamRing) r.refs[c];
                 case GAIN -> voices.gain(slot, (float) values[v], (int) values[v + 1]);
                 case PITCH -> voices.pitch(slot, (float) values[v]);
                 case PAN -> voices.pan(slot, (float) values[v]);
@@ -283,6 +292,17 @@ public final class AudioRenderer implements AutoCloseable {
             commands.tags[c] = tag;
             commands.refs[c] = bus;
             commands.refs2[c] = clip;
+            commands.publish();
+            return true;
+        }
+
+        /** The next {@link #play} reads {@code ring} instead of the clip's memory: a streamed voice. */
+        boolean stream(StreamRing ring) {
+            int c = claim(STREAM, 0, 0);
+            if (c < 0) {
+                return false;
+            }
+            commands.refs[c] = ring;
             commands.publish();
             return true;
         }

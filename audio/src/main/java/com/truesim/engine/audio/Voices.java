@@ -107,6 +107,11 @@ final class Voices {
     private final float[] scratch;
     private final float dopplerAlpha;
     private final int crossfadeBlocks;
+    private final StreamRing[] rings;
+    private final boolean[] starving;
+    private final long[] resumes;
+    private final float[] dryGains;
+    private int starvations;
     private int budget = DEFAULT_BUDGET;
     private int real;
     private int virtual;
@@ -167,6 +172,10 @@ final class Voices {
         realGains = new float[capacity];
         audibility = new float[capacity];
         scratch = new float[capacity];
+        rings = new StreamRing[capacity];
+        starving = new boolean[capacity];
+        resumes = new long[capacity];
+        dryGains = new float[capacity];
         dopplerAlpha = (float) (1 - Maths.exp(-(double) AudioFormat.DEFAULT_BLOCK / rate / 0.05));
         crossfadeBlocks = Math.max(1, (int) Math.ceil(0.05 * rate / AudioFormat.DEFAULT_BLOCK));
     }
@@ -189,6 +198,11 @@ final class Voices {
     /** Whether {@code slot} is real (or fading in or out). */
     boolean isReal(int slot) {
         return reality[slot] != VIRTUAL;
+    }
+
+    /** Times a streamed voice ran dry since made. */
+    int starvations() {
+        return starvations;
     }
 
     /** Where {@code slot} is in its clip, in clip frames. */
@@ -219,15 +233,22 @@ final class Voices {
      * offset fades in over 20 ms; one from the beginning plays its first sample as it is.
      */
     void play(int slot, AudioClip clip, long start, double offset, float gain, float pitch, Bus bus, int busIdx,
-            int flagBits, float pan, long tag) {
+            int flagBits, float pan, long tag, StreamRing ring) {
         states[slot] = WAITING;
         tags[slot] = tag;
         flags[slot] = flagBits;
         clips[slot] = clip;
         segments[slot] = clip.segment();
+        rings[slot] = ring;
+        starving[slot] = false;
+        dryGains[slot] = 1;
         pcm16[slot] = clip.encoding() == AudioClip.Encoding.PCM16;
         clipChannels[slot] = clip.channels();
-        clipFrames[slot] = clip.frames();
+        clipFrames[slot] = ring != null ? ring.end() : clip.frames();
+        if (ring != null) {
+            flagBits &= ~LOOP; // the ring stitches the loop: the voice reads straight on
+            flags[slot] = flagBits;
+        }
         loopStarts[slot] = clip.loopStart();
         loopEnds[slot] = clip.loopEnd();
         starts[slot] = start;
@@ -370,6 +391,10 @@ final class Voices {
     private void end(int slot) {
         states[slot] = FREE;
         attenuations[slot] = null;
+        if (rings[slot] != null) {
+            rings[slot].close();
+            rings[slot] = null;
+        }
         clips[slot] = null;
         segments[slot] = null;
         buses[slot] = null;
@@ -406,6 +431,11 @@ final class Voices {
 
     /** One tap of {@code slot}'s clip: frame {@code i} (wrapped into the loop, 0 past the end), {@code channel}. */
     private float tap(int slot, long i, int channel, boolean loop) {
+        StreamRing ring = rings[slot];
+        if (ring != null) {
+            long frame = Math.max(0, i);
+            return ring.holds(frame) ? ring.sample(frame, channel) : held(ring, channel);
+        }
         long frame = i;
         if (frame < 0) {
             frame = 0;
@@ -418,6 +448,12 @@ final class Voices {
         long index = frame * clipChannels[slot] + channel;
         return pcm16[slot] ? segments[slot].getAtIndex(SHORT, index) * 0x1p-15f
             : segments[slot].getAtIndex(FLOAT, index);
+    }
+
+    /** The last frame a dry ring holds (what a starved voice fades out on), or 0. */
+    private static float held(StreamRing ring, int channel) {
+        long last = ring.written() - 1;
+        return ring.holds(last) ? ring.sample(last, channel) : 0;
     }
 
     /** {@code slot}'s clip at fractional frame {@code position}, {@code channel}: Catmull-Rom cubic Hermite. */
@@ -475,7 +511,8 @@ final class Voices {
             if (states[slot] == FREE) {
                 continue;
             }
-            float a = Math.abs(gainTargets[slot]) * envelopeTargets[slot] * attTarget[slot]
+            // a fade still to come or under way counts as heard until it is done
+            float a = Math.abs(gainTargets[slot]) * Math.max(envelopes[slot], envelopeTargets[slot]) * attTarget[slot]
                 * graph.gain(busIndex[slot]);
             boolean wasReal = reality[slot] == REAL || reality[slot] == TO_REAL;
             boolean audible = a >= (wasReal ? SILENT : AUDIBLE);
@@ -604,7 +641,27 @@ final class Voices {
             : reality[slot] == TO_VIRTUAL ? -1 / (0.01f * rate) : 0;
         float low = lowPass[slot];
         float coef = lowCoef[slot];
+        StreamRing ring = rings[slot];
+        float dry = dryGains[slot];
+        float dryStep = 1 / (0.005f * rate);
         for (int f = from; f < frames; f++) {
+            if (ring != null) {
+                // playing: the next frames must be there; starved: 50 ms of them before it fades back in
+                long lead = starving[slot] ? rate / 20 : 2;
+                boolean there = ring.holds((long) position) && ring.holds((long) position + lead);
+                if (!there && !starving[slot]) { // dry: hold the last frame fading over 5 ms, keep time, ask
+                    starving[slot] = true;
+                    starvations++;
+                    resumes[slot] = (long) position + rate / 10;
+                    ring.resume(resumes[slot]);
+                } else if (!there && position > resumes[slot] + rate / 10) {
+                    resumes[slot] = (long) position + rate / 10; // passed where it asked before the ring got there
+                    ring.resume(resumes[slot]);
+                } else if (there && starving[slot]) {
+                    starving[slot] = false;
+                }
+                dry = starving[slot] ? Math.max(0, dry - dryStep) : Math.min(1, dry + dryStep);
+            }
             att += attStep;
             if (realStep != 0) {
                 realGain = Math.max(0, Math.min(1, realGain + realStep));
@@ -629,7 +686,7 @@ final class Voices {
                 continue; // paused: held where it is
             }
             float t = (float) (f + 1) / frames;
-            float g = gain * env * att * realGain;
+            float g = gain * env * att * realGain * dry;
             if (stereo) {
                 float l = read(slot, position, 0, loop) * g;
                 float r = read(slot, position, 1, loop) * g;
@@ -663,6 +720,10 @@ final class Voices {
         gains[slot] = gain;
         envelopes[slot] = env;
         lowPass[slot] = low;
+        dryGains[slot] = dry;
+        if (ring != null) {
+            ring.readTo((long) position - 2);
+        }
         attFrom[slot] = attTo[slot];
         realGains[slot] = realGain;
         if (reality[slot] == TO_REAL && realGain >= 1) {
