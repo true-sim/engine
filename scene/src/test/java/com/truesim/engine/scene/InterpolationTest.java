@@ -37,6 +37,7 @@ import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.Interpolation;
 import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.Materials;
+import com.truesim.engine.render.RenderSettings;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.SceneData;
 import com.truesim.engine.render.SceneGeometry;
@@ -44,6 +45,7 @@ import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.layout.InstanceLayout;
+import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -298,6 +300,52 @@ class InterpolationTest {
             }
             assertThat(world.sync.interpolatedCount()).isEqualTo(1);
             assertThat(world.gpu.motion().count()).isEqualTo(mode == Interpolation.GPU ? 1 : 0);
+        }
+    }
+
+    @Test
+    void theRenderSettingSwitchesThePathWithoutAppCode() throws InterruptedException {
+        EngineSettings settings = new EngineSettings();
+        resources.settings(settings); // as the assets plugin gives the engine's
+        World world = new World();
+        try (Engine engine = Engine.create(world)) {
+            world.settle(engine);
+            assertThat(world.sync.interpolation()).isEqualTo(Interpolation.GPU); // the default
+            world.frame(engine, 100);
+            world.frame(engine, 200);
+            world.frame(engine, 250);
+            assertThat(world.gpu.motion().count()).isEqualTo(1);
+            assertThat(world.drawnX()).isCloseTo(1.5, within(1e-3));
+            // The player picks the CPU: the sync switches at its next update, drawn where the step left it, the record
+            // gone; blended again on the CPU from the next step
+            settings.set(RenderSettings.INTERPOLATION, Interpolation.CPU);
+            world.frame(engine, 300);
+            world.frame(engine, 350);
+            assertThat(world.sync.interpolation()).isEqualTo(Interpolation.CPU);
+            assertThat(world.gpu.motion().count()).isZero();
+            assertThat(world.drawnX()).isCloseTo(3, within(1e-3));
+            world.frame(engine, 400);
+            world.frame(engine, 450);
+            assertThat(world.drawnX()).isCloseTo(3.5, within(1e-3));
+            // Off: drawn as each step leaves it
+            settings.set(RenderSettings.INTERPOLATION, Interpolation.OFF);
+            world.frame(engine, 500);
+            world.frame(engine, 550);
+            assertThat(world.drawnX()).isCloseTo(5, within(1e-3));
+            // Back to the GPU: from the step after the switch
+            settings.set(RenderSettings.INTERPOLATION, Interpolation.GPU);
+            world.frame(engine, 600);
+            world.frame(engine, 700);
+            world.frame(engine, 750);
+            assertThat(world.gpu.motion().count()).isEqualTo(1);
+            assertThat(world.drawnX()).isCloseTo(6.5, within(1e-3));
+            // Set by hand, the setting no longer applies to that sync
+            world.sync.interpolation(Interpolation.OFF);
+            settings.set(RenderSettings.INTERPOLATION, Interpolation.CPU);
+            world.frame(engine, 800);
+            assertThat(world.sync.interpolation()).isEqualTo(Interpolation.OFF);
+        } finally {
+            resources.settings(null);
         }
     }
 

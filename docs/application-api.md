@@ -235,7 +235,9 @@ ground included, in its parallel part, and documents `Ground` as thread-safe).
   spawn sets previous = current. The scene graph keeps simulated values only. **Measured first** (D122). On by default
   for nodes moved in `FIXED`; a node can opt out. Built as: `InstanceMotion` records (112 B: both poses) scattered
   with the instances, a blend pass after the scene upload writing the instance table; `render.interpolation` GPU (the
-  default), CPU or OFF; motion vectors not yet read from it.
+  default), CPU or OFF, followed without app code by every `SceneSync` on the assets plugin's resources
+  (`SceneResources.settings`), switched at its next update (set by hand on a sync, the setting no longer applies to
+  it); motion vectors not yet read from it.
 - **D92** (revised) Frame delta capped (0.25 s); one budget of fixed steps per frame shared by all worlds, in a fixed
   world order; when it is hit, the remaining accumulated time is discarded. Accumulation is in whole ticks, not
   floating-point seconds. Caps are reported.
@@ -271,6 +273,18 @@ ground included, in its parallel part, and documents `Ground` as thread-safe).
   time anywhere measured and costs 0.013 ms of GPU and 112 B of GPU memory per moving instance; D91 is built with it
   as the default. The CPU path stays as the `render.interpolation` choice for frames recorded without a frame graph
   (they run no blend pass), `OFF` for drawing steps as they are.
+
+  **Parallel writes (2026-11-03, later):** the motion records, and the CPU path's blended poses, are claimed in order
+  and written on the sync's job system (as instance writes are). Measured before and after in the same session,
+  alternating builds, on a machine under load from other work (so each pair is compared, not the absolute times):
+
+  | sync | GPU, frame with a step | CPU, frame with a step | CPU, frame without | Off, frame with a step |
+  |---|---|---|---|---|
+  | before, round 1 / 2 | 0.84 / 1.33 ms | 1.12 / 1.13 ms | 0.78 / 0.78 ms | 0.41 / 0.43 ms |
+  | after, round 1 / 2 | 0.37 / 0.75 ms | 0.37 / 0.70 ms | 0.17 / 0.34 ms | 0.28 / 0.51 ms |
+
+  The GPU path's step frames take about half the time they did; bytes, the blend pass (0.013 ms) and allocation (0)
+  are unchanged. The CPU path's frames without a step drop to a quarter to a half, but every one still writes 2.04 MB.
 - **D123** (new; built 2026-11-03, logging per step until scene has an update without logging: §6 "Built since")
   World transforms are propagated after every fixed step (transforms only; change logging once per
   frame), so step 2 never reads stale parent transforms and a catch-up frame does not overflow the change log.

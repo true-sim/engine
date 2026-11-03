@@ -9,6 +9,7 @@ import com.truesim.engine.app.Clock;
 import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.InstanceMotion;
 import com.truesim.engine.render.Interpolation;
+import com.truesim.engine.render.RenderSettings;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.core.NodeChange;
@@ -89,6 +90,8 @@ public final class SceneSync implements AutoCloseable {
     private final GpuScene gpu;
     private final JobSystem jobs; // or null: the instances are written on the calling thread
     private final JobSystem.RangeTask fill = this::fill;
+    private final JobSystem.RangeTask writeMotions = this::writeMotions;
+    private final JobSystem.RangeTask writeBlended = this::writeBlended;
     private final Renderables.Visitor onRenderableChange = (node, changes) -> reconcile(node);
     private final NodeChange.Visitor onSceneChange = this::sceneChanged;
     private long seen;
@@ -172,6 +175,10 @@ public final class SceneSync implements AutoCloseable {
     private long fixedThrough = Long.MIN_VALUE;     // the stamp of the last step's changes
     private int captured;                           // changes captured in steps since the last update
     private boolean steppedSince;                   // a step ran since the last update
+    private double blendFactor;                     // the frame's, for the CPU's writes
+    private com.truesim.engine.settings.EngineSettings.Subscription settingWatch; // render.interpolation, or null
+    private boolean settingChanged;                 // since the last update
+    private boolean byHand;                         // interpolation(mode) was called: the setting no longer applies
 
     private final Map<AssetRef<MeshData>, ViewMesh> meshes = new HashMap<>();
 
@@ -221,6 +228,11 @@ public final class SceneSync implements AutoCloseable {
         this.scene = renderables.scene();
         this.clock = scene.clock();
         gpu.setMaterials(resources.materials()); // the resources' table: instances name its ids
+        com.truesim.engine.settings.EngineSettings followed = resources.settings();
+        if (followed != null) { // render.interpolation as the player sets it, switched at the next update
+            interpolation = followed.get(RenderSettings.INTERPOLATION);
+            settingWatch = followed.onChange(RenderSettings.INTERPOLATION, () -> settingChanged = true);
+        }
     }
 
     private static int[] filled(int length) {
@@ -250,6 +262,12 @@ public final class SceneSync implements AutoCloseable {
      */
     public void update() {
         checkOpen();
+        if (settingChanged) { // render.interpolation changed: the path switches at the frame boundary
+            settingChanged = false;
+            if (!byHand) {
+                switchTo(resources.settings().get(RenderSettings.INTERPOLATION));
+            }
+        }
         long since = seen;
         seen = clock.now();
         if (!started || !renderables.changesSince(since, onRenderableChange)) {
@@ -1130,16 +1148,21 @@ public final class SceneSync implements AutoCloseable {
     }
 
     /**
-     * Draws instances moved in steps between steps as {@code mode} says ({@code RenderSettings.INTERPOLATION}): on the
-     * GPU, on the CPU, or not at all. Those moving now are drawn where they are and start again from their next step.
+     * Draws instances moved in steps between steps as {@code mode} says: on the GPU, on the CPU, or not at all. Those
+     * moving now are drawn where they are and start again from their next step. Set by hand, the resources' setting
+     * ({@code RenderSettings.INTERPOLATION}, which the sync otherwise follows) no longer applies to this sync.
      */
     public SceneSync interpolation(Interpolation mode) {
-        Objects.requireNonNull(mode, "mode");
+        byHand = true;
+        switchTo(Objects.requireNonNull(mode, "mode"));
+        return this;
+    }
+
+    private void switchTo(Interpolation mode) {
         if (mode != interpolation) {
             stopAll();
             interpolation = mode;
         }
-        return this;
     }
 
     public Interpolation interpolation() {
@@ -1243,6 +1266,7 @@ public final class SceneSync implements AutoCloseable {
         captured = 0;
         long tick = stepClock.tick();
         InstanceMotion motion = gpu.motion();
+        int count = 0; // records to write, in the fill lists (free until the fill)
         int i = 0;
         while (i < trackedCount) {
             int item = tracked[i];
@@ -1256,16 +1280,34 @@ public final class SceneSync implements AutoCloseable {
                     if (motionSlot[item] == NONE) {
                         motionSlot[item] = motion.add();
                     }
-                    int f = POSE * item;
-                    double[] a = fromPose;
-                    double[] b = drawnPose;
-                    motion.set(motionSlot[item], itemSlot[item], a[f], a[f + 1], a[f + 2], (float) a[f + 3],
-                        (float) a[f + 4], (float) a[f + 5], (float) a[f + 6], (float) a[f + 7], (float) a[f + 8],
-                        (float) a[f + 9], b[f], b[f + 1], b[f + 2], (float) b[f + 3], (float) b[f + 4], (float) b[f + 5],
-                        (float) b[f + 6], (float) b[f + 7], (float) b[f + 8], (float) b[f + 9]);
+                    fillItems[count++] = item;
                 }
                 i++;
             }
+        }
+        // Claimed in order on this thread, written on the job system's threads when many, as instances are
+        for (int r = 0; r < count; r++) {
+            fillEntries[r] = motion.claim(motionSlot[fillItems[r]]);
+        }
+        if (jobs != null && count >= PARALLEL) {
+            jobs.parallelFor(count, GRAIN, writeMotions);
+        } else {
+            writeMotions(0, count, 0);
+        }
+    }
+
+    /** Writes the motion records of {@code fillItems[from]} to {@code fillItems[to - 1]}, on any thread. */
+    private void writeMotions(int from, int to, int worker) {
+        InstanceMotion motion = gpu.motion();
+        double[] a = fromPose;
+        double[] b = drawnPose;
+        for (int r = from; r < to; r++) {
+            int item = fillItems[r];
+            int f = POSE * item;
+            motion.write(fillEntries[r], itemSlot[item], a[f], a[f + 1], a[f + 2], (float) a[f + 3], (float) a[f + 4],
+                (float) a[f + 5], (float) a[f + 6], (float) a[f + 7], (float) a[f + 8], (float) a[f + 9], b[f],
+                b[f + 1], b[f + 2], (float) b[f + 3], (float) b[f + 4], (float) b[f + 5], (float) b[f + 6],
+                (float) b[f + 7], (float) b[f + 8], (float) b[f + 9]);
         }
     }
 
@@ -1276,12 +1318,27 @@ public final class SceneSync implements AutoCloseable {
             gpu.motion().blend(a);
             return;
         }
-        double b = 1 - a;
+        blendFactor = a;
+        // Claimed in order on this thread, written on the job system's threads when many, as instances are
         for (int i = 0; i < trackedCount; i++) {
+            fillEntries[i] = gpu.claim(itemSlot[tracked[i]]);
+        }
+        if (jobs != null && trackedCount >= PARALLEL) {
+            jobs.parallelFor(trackedCount, GRAIN, writeBlended);
+        } else {
+            writeBlended(0, trackedCount, 0);
+        }
+    }
+
+    /** Writes the blended poses of {@code tracked[from]} to {@code tracked[to - 1]}, on any thread. */
+    private void writeBlended(int from, int to, int worker) {
+        double a = blendFactor;
+        double b = 1 - a;
+        double[] p = fromPose;
+        double[] q = drawnPose;
+        for (int i = from; i < to; i++) {
             int item = tracked[i];
             int f = POSE * item;
-            double[] p = fromPose;
-            double[] q = drawnPose;
             double qx = q[f + 3];
             double qy = q[f + 4];
             double qz = q[f + 5];
@@ -1293,7 +1350,7 @@ public final class SceneSync implements AutoCloseable {
             double rw = b * p[f + 6] + sign * qw;
             double length = Math.sqrt(rx * rx + ry * ry + rz * rz + rw * rw);
             long node = itemNode[item];
-            gpu.write(gpu.claim(itemSlot[item]), itemCopy[item] != NONE ? itemCopy[item] : itemMesh[item].mesh.id,
+            gpu.write(fillEntries[i], itemCopy[item] != NONE ? itemCopy[item] : itemMesh[item].mesh.id,
                 itemSet[item].first, scene.layers(node), renderables.castsShadows(node),
                 b * p[f] + a * q[f], b * p[f + 1] + a * q[f + 1], b * p[f + 2] + a * q[f + 2],
                 (float) (rx / length), (float) (ry / length), (float) (rz / length), (float) (rw / length),
@@ -1384,6 +1441,9 @@ public final class SceneSync implements AutoCloseable {
     public void close() {
         if (!closed) {
             destroyAll();
+            if (settingWatch != null) {
+                settingWatch.close();
+            }
             closed = true;
         }
     }

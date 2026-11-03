@@ -1004,8 +1004,9 @@ renderers above, following the scene's change logs and asset cache:
   `VisibilityBufferShading`, shadows, swapped with `port.replace`.
 - **Between fixed steps** (`sync.follow(clock)`): after each step of the world's clock the sync updates the scene's
   world transforms and captures the renderables the step moved; each frame draws them `clock.blend()` of the way from
-  their pose at the step before to the last step's (`sync.interpolation(Interpolation.GPU)`, the default of
-  `render.interpolation`). On the GPU, a step's moved instances each get one 112-byte motion record with both poses
+  their pose at the step before to the last step's, as `render.interpolation` says (GPU by default; syncs on resources
+  given settings, as the assets plugin's are, follow it as it changes; `sync.interpolation(mode)` sets one by hand).
+  On the GPU, a step's moved instances each get one 112-byte motion record with both poses
   (`GpuScene.motion()`, an `InstanceMotion`), and a compute pass after the scene upload blends them into the instance
   table before anything reads it: frames without a step cost the CPU nothing per instance. `CPU` writes every moving
   instance's blended pose each frame (for frames recorded without a frame graph, which run no blend pass); `OFF` draws

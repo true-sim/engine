@@ -99,11 +99,30 @@ public final class InstanceMotion implements AutoCloseable {
     public void set(int slot, int instance, double fx, double fy, double fz, float fqx, float fqy, float fqz, float fqw,
         float fsx, float fsy, float fsz, double tx, double ty, double tz, float tqx, float tqy, float tqz, float tqw,
         float tsx, float tsy, float tsz) {
+        write(claim(slot), instance, fx, fy, fz, fqx, fqy, fqz, fqw, fsx, fsy, fsz, tx, ty, tz, tqx, tqy, tqz, tqw, tsx,
+            tsy, tsz);
+    }
+
+    /**
+     * Record {@code slot}'s entry in this upload's changes, for {@link #write}: the first half of {@link #set}, so that
+     * many records can be claimed on one thread and written on several. Allocates nothing.
+     */
+    public int claim(int slot) {
         if (slot >= highWater || (used[slot >>> 6] & 1L << slot) == 0) {
             throw new IllegalArgumentException("No motion record " + slot);
         }
+        return records.claim(slot);
+    }
+
+    /**
+     * Writes entry {@code entry} ({@link #claim}) as {@link #set} does. Safe from any thread for distinct entries, while
+     * nothing claims, removes or uploads. Allocates nothing.
+     */
+    public void write(int entry, int instance, double fx, double fy, double fz, float fqx, float fqy, float fqz,
+        float fqw, float fsx, float fsy, float fsz, double tx, double ty, double tz, float tqx, float tqy, float tqz,
+        float tqw, float tsx, float tsy, float tsz) {
         MemorySegment m = records.changes();
-        long o = records.offset(records.claim(slot));
+        long o = records.offset(entry);
         m.set(FLOAT, o + MotionLayout.ROTATION_FROM, fqx);
         m.set(FLOAT, o + MotionLayout.ROTATION_FROM + 4, fqy);
         m.set(FLOAT, o + MotionLayout.ROTATION_FROM + 8, fqz);
