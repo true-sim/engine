@@ -115,14 +115,13 @@ public final class MotionVectors implements Technique {
         Pipeline motion = g.computeProgram("shaders/motion/motion.spv", "motionMain", MotionPush.BYTES);
         Image image = g.create("motion", ImageDesc.of(FORMAT, width, height));
         MotionPush push = new MotionPush();
-        int[] previousRegion = {-1}; // the frame before's region (width, height in the high 16 bits); -1: none yet
         scene.read(g.pass("motion vectors"), BufferAccess.STORAGE_READ).read(ids.color(), Access.STORAGE_READ)
             .read(before.previous(), BufferAccess.STORAGE_READ).write(image, Access.STORAGE_WRITE)
             .record(ctx -> {
                 Buffer previous = ctx.historyValid(before) ? before.previous() : scene.instances();
                 int region = ctx.regionWidth(image) | ctx.regionHeight(image) << 16;
-                int previousSize = previousRegion[0] < 0 ? region : previousRegion[0];
-                previousRegion[0] = region;
+                // The region the view rendered the frame before (its images are the view's size)
+                int previousSize = view.port().previousRegionWidth() | view.port().previousRegionHeight() << 16;
                 ctx.dispatch(motion, push.view(this.ids.address()).scene(renderer.scene().tableAddress())
                     .previous(ctx.address(previous)).deformed(deformation.previousTableAddress())
                     .previousPositions(deformation.previousPositionsAddress())
