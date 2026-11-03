@@ -1,0 +1,11 @@
+// The material type's shading at ray hits (pathtracing/paths.slang): the paths whose hits are of one of its shading
+// bins (FEATURES), sorted there by bin, each bin by one dispatch of its own, so every type shades as itself at hits too.
+import pathtracing.paths;
+import {module};
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void {name}HitMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
+{
+    shadeHits<{struct}>(group, thread);
+}

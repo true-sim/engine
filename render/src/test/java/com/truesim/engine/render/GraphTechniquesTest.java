@@ -1323,9 +1323,10 @@ class GraphTechniquesTest {
                 .isThrownBy(() -> materials.update(quadMaterial, MetallicRoughnessParameters.ROUGHNESS, 0.5f));
             assertThatIllegalArgumentException().isThrownBy(() -> materials.register(Glow.TYPE));
             assertThatIllegalArgumentException().isThrownBy(() -> new MaterialType("half", GlowParameters.class,
-                GlowParameters::fromValues, 0, "a.spv", "a", "b.spv", null, "c.spv", "d.spv", "e.spv"));
+                GlowParameters::fromValues, 0, "a.spv", "a", "b.spv", null, "c.spv", "d.spv", "e.spv", null, null));
             assertThatNullPointerException().as("forward entry points").isThrownBy(() -> new MaterialType("none",
-                GlowParameters.class, GlowParameters::fromValues, 0, "a.spv", "a", null, null, null, null, null));
+                GlowParameters.class, GlowParameters::fromValues, 0, "a.spv", "a", null, null, null, null, null, null,
+                null));
             // At half the resolution: the glow type's bin, past bin 0, is shaded from the list classification wrote
             // into, though the render region has fewer tiles than the images the lists are spaced for.
             graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.HEADROOM, 1.5f);

@@ -167,3 +167,76 @@ public struct QueryRays : IShadowRays
         return occluded((RayScene*)scene, origin, direction, 0, tMax) ? 0 : 1;
     }
 }
+
+/** The nearest triangle a ray meets: which, where along it, and where on it. */
+public struct RayHit
+{
+    public bool hit;
+    public uint instance;      // the scene's instance id (the top level's custom index)
+    public uint primitive;     // the triangle of its bottom level
+    public float2 bary;        // barycentrics of the triangle's second and third vertices
+    public float t;            // along the ray, in units of its direction
+};
+
+/**
+ * The nearest triangle on the ray from origin along direction, between tMin and tMax, in `scene`'s top level: opaque
+ * triangles as they come, those of masked materials where their alpha is not clipped (as occluded() stops at them).
+ */
+public RayHit nearest(RayScene* scene, float3 origin, float3 direction, float tMin, float tMax)
+{
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = tMin;
+    ray.TMax = tMax;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    query.TraceRayInline(scenes[scene.slot], RAY_FLAG_NONE, 0xff, ray);
+    while (query.Proceed())
+    {
+        if (query.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE
+            && !clipped(scene, query.CandidateInstanceID(), query.CandidatePrimitiveIndex(),
+                query.CandidateTriangleBarycentrics()))
+        {
+            query.CommitNonOpaqueTriangleHit();
+        }
+    }
+    RayHit h;
+    h.hit = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+    h.instance = h.hit ? query.CommittedInstanceID() : 0;
+    h.primitive = h.hit ? query.CommittedPrimitiveIndex() : 0;
+    h.bary = h.hit ? query.CommittedTriangleBarycentrics() : float2(0);
+    h.t = h.hit ? query.CommittedRayT() : tMax;
+    return h;
+}
+
+/**
+ * Where the vertices of triangle `primitive` of instance `id`'s bottom level lie in the pool: its meshlet record's
+ * first word, and its three pool vertices.
+ */
+public struct TriangleVertices
+{
+    public uint meshletWord;   // (the pool meshlet * 8): its record's first word
+    public uint3 vertices;     // pool vertices
+    public uint submesh;
+};
+
+/** The pool vertices of triangle `primitive` of instance `id`'s bottom level, as rasterizing would draw it. */
+public TriangleVertices triangleVertices(RayScene* scene, uint id, uint primitive)
+{
+    Instance instance = ((Instance*)scene.instances)[id];
+    uint meshIndex = instance.mesh & INSTANCE_MESH;
+    MeshEntry mesh = scene.meshes[meshIndex];
+    BottomLevel level = ((BottomLevel*)scene.bottom)[meshIndex];
+    uint t = level.firstIndex + primitive * 3;
+    uint w = meshletWord(scene, mesh, level, t);
+    uint first = mesh.indexBase + t;
+    uint vertexBase = mesh.meshletVertexBase + scene.meshlets[w];
+    TriangleVertices v;
+    v.meshletWord = w;
+    v.submesh = scene.meshlets[w + 2] >> 16;
+    for (uint k = 0; k < 3; k++)
+    {
+        v.vertices[k] = mesh.vertexBase + scene.meshletVertices[vertexBase + triangleByte(scene, first + k)];
+    }
+    return v;
+}
