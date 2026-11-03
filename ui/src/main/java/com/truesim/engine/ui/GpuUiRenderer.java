@@ -530,7 +530,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             return;
         }
         push.textures(table.deviceAddress()).scaleX((float) width / imageWidth).scaleY((float) height / imageHeight)
-            .toClipX(2f / width).toClipY(2f / height);
+            .toClipX(2f / width).toClipY(2f / height).clipFloats(DrawList.CLIP_FLOATS);
         for (int i = 0; i < layerCount; i++) {
             if (counts[i] == 0) {
                 continue;

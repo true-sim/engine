@@ -5,6 +5,10 @@
 // position by the primitive's kind (a signed distance for boxes, lines and glyphs), clipped by the clip's rounded
 // rectangle. EMPTY primitives (padding of an element's range) are degenerate: no pixels.
 //
+// A clip also carries an offset added to its primitives' coordinates (a scrolled region records its content once,
+// unscrolled, and scrolling moves the offset): the vertices move by it, and the kinds' coverage is worked out at the
+// pixel minus it (in the primitive's own coordinates), while the clip's rectangle is tested at the pixel itself.
+//
 // One draw per layer runs fragmentMain, which branches on the kind (the "uber" path); the per-kind path draws runs of
 // one kind with that kind's own fragment entry point (boxMain, glyphMain, ...), in list order.
 import bindless;
@@ -13,13 +17,14 @@ import ui.primitive;
 struct UiPush
 {
     uint* primitives;   // the layer's primitives, WORDS words each
-    float* clips;       // its clip rectangles, CLIP_FLOATS floats each; 0 clips nothing
+    float* clips;       // its clips, clipFloats floats each (rectangle, radius, offset); 0 clips nothing
     uint* textures;     // the sampled slot of each UI texture id
     uint first;         // the first primitive drawn: 0 for a whole layer, a run's first for per-kind draws
     float scaleX;       // UI pixels per pixel of the image
     float scaleY;
     float toClipX;      // 2 / the UI's width in pixels
     float toClipY;      // 2 / its height
+    uint clipFloats;    // floats per clip record: ui-core's DrawList.CLIP_FLOATS
 };
 
 [[vk::push_constant]]
@@ -94,8 +99,20 @@ float median(float r, float g, float b)
 /** The clip rectangle `clip`'s bounds: x0, y0, x1, y1. */
 float4 clipBounds(uint clip)
 {
-    float* c = push.clips + clip * CLIP_FLOATS;
+    float* c = push.clips + clip * push.clipFloats;
     return float4(c[0], c[1], c[2], c[3]);
+}
+
+/** The offset clip `clip` adds to its primitives' coordinates (0 for the clip that clips nothing). */
+float2 clipOffset(uint header)
+{
+    uint clip = header >> 16;
+    if (clip == 0)
+    {
+        return float2(0, 0);
+    }
+    float* c = push.clips + clip * push.clipFloats;
+    return float2(c[5], c[6]);
 }
 
 // ------------------------------------------------------------------------------------------------------------ vertices
@@ -110,8 +127,9 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
     uint kind = header & 0xff;
     VertexOut out;
     out.primitive = index;
-    float2 a = float2(word(p, X0), word(p, Y0));
-    float2 b = float2(word(p, X1), word(p, Y1));
+    float2 offset = clipOffset(header);
+    float2 a = float2(word(p, X0), word(p, Y0)) + offset;
+    float2 b = float2(word(p, X1), word(p, Y1)) + offset;
     float2 at;
     if (kind == EMPTY || kind >= KINDS)
     {
@@ -378,7 +396,7 @@ float clipped(uint header, float2 px)
     {
         return 1;
     }
-    float* c = push.clips + clip * CLIP_FLOATS;
+    float* c = push.clips + clip * push.clipFloats;
     float2 lo = float2(c[0], c[1]);
     float2 hi = float2(c[2], c[3]);
     float2 extent = (hi - lo) * 0.5;
@@ -400,26 +418,27 @@ float4 fragmentMain(VertexOut in) : SV_Target
     uint* p = push.primitives + in.primitive * WORDS;
     uint header = p[HEADER];
     float2 px = uiPixel(in.position);
+    float2 local = px - clipOffset(header); // the primitive's own coordinates
     float4 c;
     switch (header & 0xff)
     {
     case BOX:
-        c = box(p, header, px);
+        c = box(p, header, local);
         break;
     case SHADOW:
-        c = shadow(p, px);
+        c = shadow(p, local);
         break;
     case GLYPH:
-        c = glyph(p, px);
+        c = glyph(p, local);
         break;
     case IMAGE:
-        c = image(p, px);
+        c = image(p, local);
         break;
     case NINE_SLICE:
-        c = nineSlice(p, px);
+        c = nineSlice(p, local);
         break;
     case LINE:
-        c = segment(p, px);
+        c = segment(p, local);
         break;
     default:
         c = float4(0, 0, 0, 0);
@@ -436,7 +455,7 @@ float4 boxMain(VertexOut in) : SV_Target
     uint* p = push.primitives + in.primitive * WORDS;
     uint header = p[HEADER];
     float2 px = uiPixel(in.position);
-    return box(p, header, px) * clipped(header, px);
+    return box(p, header, px - clipOffset(header)) * clipped(header, px);
 }
 
 [shader("fragment")]
@@ -444,7 +463,7 @@ float4 shadowMain(VertexOut in) : SV_Target
 {
     uint* p = push.primitives + in.primitive * WORDS;
     float2 px = uiPixel(in.position);
-    return shadow(p, px) * clipped(p[HEADER], px);
+    return shadow(p, px - clipOffset(p[HEADER])) * clipped(p[HEADER], px);
 }
 
 [shader("fragment")]
@@ -452,7 +471,7 @@ float4 glyphMain(VertexOut in) : SV_Target
 {
     uint* p = push.primitives + in.primitive * WORDS;
     float2 px = uiPixel(in.position);
-    return glyph(p, px) * clipped(p[HEADER], px);
+    return glyph(p, px - clipOffset(p[HEADER])) * clipped(p[HEADER], px);
 }
 
 [shader("fragment")]
@@ -460,7 +479,7 @@ float4 imageMain(VertexOut in) : SV_Target
 {
     uint* p = push.primitives + in.primitive * WORDS;
     float2 px = uiPixel(in.position);
-    return image(p, px) * clipped(p[HEADER], px);
+    return image(p, px - clipOffset(p[HEADER])) * clipped(p[HEADER], px);
 }
 
 [shader("fragment")]
@@ -468,7 +487,7 @@ float4 nineSliceMain(VertexOut in) : SV_Target
 {
     uint* p = push.primitives + in.primitive * WORDS;
     float2 px = uiPixel(in.position);
-    return nineSlice(p, px) * clipped(p[HEADER], px);
+    return nineSlice(p, px - clipOffset(p[HEADER])) * clipped(p[HEADER], px);
 }
 
 [shader("fragment")]
@@ -476,5 +495,5 @@ float4 lineMain(VertexOut in) : SV_Target
 {
     uint* p = push.primitives + in.primitive * WORDS;
     float2 px = uiPixel(in.position);
-    return segment(p, px) * clipped(p[HEADER], px);
+    return segment(p, px - clipOffset(p[HEADER])) * clipped(p[HEADER], px);
 }
