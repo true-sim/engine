@@ -22,10 +22,12 @@ import com.truesim.engine.graph.Rendering;
 import com.truesim.engine.graph.ResolutionSettings;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.graph.ViewPort;
+import com.truesim.engine.input.Input;
+import com.truesim.engine.input.InputContext;
+import com.truesim.engine.input.MouseMode;
+import com.truesim.engine.input.Player;
 import com.truesim.engine.platform.Desktop;
-import com.truesim.engine.platform.Key;
 
-import com.truesim.engine.platform.MouseButton;
 import com.truesim.engine.platform.Platform;
 import com.truesim.engine.platform.PlatformListener;
 import com.truesim.engine.platform.Window;
@@ -50,8 +52,6 @@ import com.truesim.engine.vulkan.PresentMode;
 import com.truesim.engine.xr.Eye;
 import com.truesim.engine.xr.Hand;
 import com.truesim.engine.xr.Headset;
-import com.truesim.engine.xr.XrAxis;
-import com.truesim.engine.xr.XrButton;
 import com.truesim.engine.xr.XrInput;
 import com.truesim.engine.xr.XrListener;
 import com.truesim.engine.xr.Xr;
@@ -76,8 +76,9 @@ public final class Demo implements Application, PlatformListener {
     private static final ViewOptions CAMERA = ViewOptions.of(1 << 14, 1 << 22).withOcclusion(true);
     private static final ViewOptions CASCADES = ViewOptions.shadow(1 << 16, 1 << 22);
     private static final String HELP = """
-        Keys:
+        Keys (actions: rebind them in the settings file, input.demo.*):
           W A S D, Q E      move (Shift: faster); hold the right mouse button to look around
+                            a gamepad: sticks, shoulders to rise and sink, left stick pressed: faster
           1 / 2             forward shading / visibility buffer shading
           H                 HDR on or off (where the display offers it)
           T                 next tone curve; [ and ] exposure
@@ -89,7 +90,7 @@ public final class Demo implements Application, PlatformListener {
           O                 occlusion culling on or off
           N                 a second window, looking down on the scene
           P                 VR: the desktop window shows the left eye or its own camera
-          F5                save the settings now; Escape quits
+          F5 or Ctrl+S      save the settings now; Escape (or Back+Start) quits
         """;
 
     private final boolean vr;
@@ -97,10 +98,11 @@ public final class Demo implements Application, PlatformListener {
     private final double seconds; // quits by itself after this long (a smoke test); 0: runs until closed
     private final String[] args;
     private final Path settingsFile = Path.of(System.getProperty("user.home"), ".truesim", "demo.properties");
-    private final boolean[] held = new boolean[Key.values().length];
     private Engine engine;
     private EngineSettings settings;
-    private boolean looking;
+    private Input input;
+    private Player player;
+    private InputContext looking; // on while the right mouse button is held: the mouse captured
     private long started;
     private long titled;
     private int titledFrames;
@@ -134,7 +136,6 @@ public final class Demo implements Application, PlatformListener {
     private long overlayed;
     private final ViewPort[] eyes = new ViewPort[2];
     private boolean spectating;
-    private final boolean[] triggers = new boolean[2];
     private final double[] origin = new double[3]; // the tracking space's, in the world
 
     private Demo(String[] args, boolean vr, boolean validation, double seconds) {
@@ -158,7 +159,8 @@ public final class Demo implements Application, PlatformListener {
     @Override
     public void configure(AppConfig app) {
         app.id("truesim-demo").name("true-sim demo").saveSettings(settingsFile)
-            .use(new Desktop(), new Rendering().validation(validation), new Audio(), new Animation());
+            .use(new Desktop(), new Input().add(DemoActions.DEMO), new Rendering().validation(validation), new Audio(),
+                new Animation());
         if (vr) {
             app.use(Xr.ifAvailable());
         }
@@ -179,6 +181,9 @@ public final class Demo implements Application, PlatformListener {
         Desktop desktop = engine.get(Desktop.KEY);
         platform = desktop.platform();
         desktop.listen(this);
+        input = engine.get(Input.KEY);
+        player = input.player(0);
+        looking = input.context("looking", 10).mouse(MouseMode.CAPTURED);
         Rendering rendering = engine.get(Rendering.KEY);
         graph = rendering.graph().timings(true);
         presenter = rendering.presenter().outputTransform(new DisplayTransform());
@@ -219,6 +224,7 @@ public final class Demo implements Application, PlatformListener {
             engine.quit();
         }
         double dt = Math.min(0.1, frame.delta());
+        actions();
         move(dt);
         world.update((now - started) / 1e9);
         if (knocks != null) {
@@ -321,17 +327,19 @@ public final class Demo implements Application, PlatformListener {
             + "; P shows the left eye on the desktop");
     }
 
-    /** The free camera: moved by the keys held, looking where the mouse turned it; the map's above it. */
+    /** The free camera: moved by the actions, looking where the mouse or the stick turned it; the map's above it. */
     private void move(double dt) {
-        double speed = (held[Key.LEFT_SHIFT.ordinal()] || held[Key.RIGHT_SHIFT.ordinal()] ? 40 : 8) * dt;
+        yaw -= player.x(DemoActions.LOOK) + player.x(DemoActions.TURN) * dt;
+        pitch = Math.max(-1.5, Math.min(1.5, pitch - player.y(DemoActions.LOOK) + player.y(DemoActions.TURN) * dt));
+        double speed = (player.down(DemoActions.FAST) ? 40 : 8) * dt;
         double fx = Maths.cos(pitch) * Maths.sin(yaw);
         double fy = Maths.sin(pitch);
         double fz = Maths.cos(pitch) * Maths.cos(yaw);
         double rx = Maths.cos(yaw);
         double rz = -Maths.sin(yaw);
-        double forward = (held[Key.W.ordinal()] ? 1 : 0) - (held[Key.S.ordinal()] ? 1 : 0);
-        double right = (held[Key.D.ordinal()] ? 1 : 0) - (held[Key.A.ordinal()] ? 1 : 0);
-        double up = (held[Key.E.ordinal()] ? 1 : 0) - (held[Key.Q.ordinal()] ? 1 : 0);
+        double forward = player.y(DemoActions.MOVE);
+        double right = player.x(DemoActions.MOVE);
+        double up = player.value(DemoActions.RISE);
         eye[0] += speed * (forward * fx - right * rx);
         eye[1] += speed * (forward * fy + up);
         eye[2] += speed * (forward * fz - right * rz);
@@ -345,13 +353,13 @@ public final class Demo implements Application, PlatformListener {
         }
     }
 
-    /** Walks with the left thumbstick, buzzes a controller when its trigger goes down, prints profile changes. */
+    /** Walks with the walk action, buzzes a controller when its trigger goes down, prints profile changes. */
     private void xrInput(double dt) {
         if (!headset.running()) {
             return;
         }
-        XrInput input = headset.input();
-        input.poll(new XrListener() {
+        XrInput xr = headset.input();
+        xr.poll(new XrListener() {
             @Override
             public void profile(Hand hand, String profile) {
                 System.out.println("VR " + hand + ": " + (profile.isEmpty() ? "nothing" : profile));
@@ -359,7 +367,7 @@ public final class Demo implements Application, PlatformListener {
         });
         double[] head = new double[3];
         float[] orientation = new float[4];
-        if (input.head(head, orientation)) {
+        if (xr.head(head, orientation)) {
             // The head's yaw from its orientation: walking goes where the head looks.
             float x = orientation[0];
             float y = orientation[1];
@@ -368,19 +376,18 @@ public final class Demo implements Application, PlatformListener {
             double fx = -2 * (x * z + w * y);
             double fz = -(1 - 2 * (x * x + y * y));
             double length = Math.max(1e-6, Maths.hypot(fx, fz));
-            double ahead = input.axis(Hand.LEFT, XrAxis.THUMBSTICK_Y) * 3 * dt;
-            double side = input.axis(Hand.LEFT, XrAxis.THUMBSTICK_X) * 3 * dt;
+            double ahead = player.y(DemoActions.WALK) * 3 * dt;
+            double side = player.x(DemoActions.WALK) * 3 * dt;
             origin[0] += ahead * fx / length - side * fz / length;
             origin[2] += ahead * fz / length + side * fx / length;
             origin[1] = DemoMeshes.height(origin[0], origin[2]);
             headset.origin(origin[0], origin[1], origin[2]);
         }
-        for (Hand hand : Hand.values()) {
-            boolean down = input.pressed(hand, XrButton.TRIGGER);
-            if (down && !triggers[hand.ordinal()]) {
-                input.vibrate(hand, 0.6f, 0, 80_000_000L);
-            }
-            triggers[hand.ordinal()] = down;
+        if (player.pressed(DemoActions.LEFT_TRIGGER)) {
+            xr.vibrate(Hand.LEFT, 0.6f, 0, 80_000_000L);
+        }
+        if (player.pressed(DemoActions.RIGHT_TRIGGER)) {
+            xr.vibrate(Hand.RIGHT, 0.6f, 0, 80_000_000L);
         }
     }
 
@@ -407,52 +414,70 @@ public final class Demo implements Application, PlatformListener {
         }
     }
 
-    @Override
-    public void mouseButton(long timestamp, int id, int mouse, MouseButton button, boolean down, int clicks, float x,
-        float y) {
-        if (button == MouseButton.RIGHT && id == window.id()) {
-            looking = down;
-            window.setRelativeMouse(down);
+    /** What the actions pressed this frame do: the settings switched, the mouse captured while looking. */
+    private void actions() {
+        if (player.pressed(DemoActions.LOOKING)) {
+            input.push(looking);
         }
-    }
-
-    @Override
-    public void mouseMoved(long timestamp, int id, int mouse, float x, float y, float dx, float dy, int buttons) {
-        if (looking) {
-            yaw -= dx * 0.003;
-            pitch = Math.max(-1.5, Math.min(1.5, pitch - dy * 0.003));
+        if (player.released(DemoActions.LOOKING)) {
+            input.pop(looking);
         }
-    }
-
-    @Override
-    public void key(long timestamp, int id, int keyboard, Key key, int character, int modifiers, boolean down,
-        boolean repeat) {
-        held[key.ordinal()] = down;
-        if (!down || repeat && key != Key.MINUS && key != Key.EQUALS) {
-            return;
+        if (player.pressed(DemoActions.QUIT)) {
+            engine.quit();
         }
-        switch (key) {
-            case ESCAPE -> engine.quit();
-            case DIGIT_1 -> shadeWith(false);
-            case DIGIT_2 -> shadeWith(true);
-            case H -> say("HDR", toggle(PresentSettings.HDR));
-            case T -> say("tone curve", next(DisplayTransform.CURVE, DisplayTransform.Curve.values()));
-            case LEFT_BRACKET -> say("exposure", scaleBy(DisplayTransform.EXPOSURE, 1 / 1.25f));
-            case RIGHT_BRACKET -> say("exposure", scaleBy(DisplayTransform.EXPOSURE, 1.25f));
-            case V -> say("present mode", next(PresentSettings.PRESENT_MODE, PresentMode.values()));
-            case F, F11 -> say("window mode", next(settings.scoped("main"), WindowSettings.MODE, WindowMode.values()));
-            case R -> say("dynamic resolution", toggle(ResolutionSettings.DYNAMIC));
-            case MINUS -> renderScale(-0.05f);
-            case EQUALS -> renderScale(0.05f);
-            case G -> automatic();
-            case COMMA -> say("GPU target ms", add(ResolutionSettings.TARGET_MILLIS, -1));
-            case PERIOD -> say("GPU target ms", add(ResolutionSettings.TARGET_MILLIS, 1));
-            case O -> say("occlusion culling", toggle(RenderSettings.OCCLUSION));
-            case N -> toggleMap();
-            case P -> spectate();
-            case F5 -> save();
-            default -> {
-            }
+        if (player.pressed(DemoActions.FORWARD)) {
+            shadeWith(false);
+        }
+        if (player.pressed(DemoActions.VISIBILITY)) {
+            shadeWith(true);
+        }
+        if (player.pressed(DemoActions.HDR)) {
+            say("HDR", toggle(PresentSettings.HDR));
+        }
+        if (player.pressed(DemoActions.CURVE)) {
+            say("tone curve", next(DisplayTransform.CURVE, DisplayTransform.Curve.values()));
+        }
+        if (player.pressed(DemoActions.DARKER)) {
+            say("exposure", scaleBy(DisplayTransform.EXPOSURE, 1 / 1.25f));
+        }
+        if (player.pressed(DemoActions.BRIGHTER)) {
+            say("exposure", scaleBy(DisplayTransform.EXPOSURE, 1.25f));
+        }
+        if (player.pressed(DemoActions.PRESENT_MODE)) {
+            say("present mode", next(PresentSettings.PRESENT_MODE, PresentMode.values()));
+        }
+        if (player.pressed(DemoActions.WINDOW_MODE)) {
+            say("window mode", next(settings.scoped("main"), WindowSettings.MODE, WindowMode.values()));
+        }
+        if (player.pressed(DemoActions.DYNAMIC)) {
+            say("dynamic resolution", toggle(ResolutionSettings.DYNAMIC));
+        }
+        if (player.pressed(DemoActions.SMALLER)) {
+            renderScale(-0.05f);
+        }
+        if (player.pressed(DemoActions.LARGER)) {
+            renderScale(0.05f);
+        }
+        if (player.pressed(DemoActions.GPU_TIMED)) {
+            automatic();
+        }
+        if (player.pressed(DemoActions.TARGET_DOWN)) {
+            say("GPU target ms", add(ResolutionSettings.TARGET_MILLIS, -1));
+        }
+        if (player.pressed(DemoActions.TARGET_UP)) {
+            say("GPU target ms", add(ResolutionSettings.TARGET_MILLIS, 1));
+        }
+        if (player.pressed(DemoActions.OCCLUSION)) {
+            say("occlusion culling", toggle(RenderSettings.OCCLUSION));
+        }
+        if (player.pressed(DemoActions.MAP)) {
+            toggleMap();
+        }
+        if (player.pressed(DemoActions.SPECTATE)) {
+            spectate();
+        }
+        if (player.pressed(DemoActions.SAVE)) {
+            save();
         }
     }
 

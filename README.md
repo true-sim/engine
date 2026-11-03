@@ -11,6 +11,7 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 | `engine-settings` | `com.truesim.engine.settings` | Settings: declared once by the code using them, values set, saved and loaded; no SDL |
 | `engine-app`      | `com.truesim.engine.app`      | The application core: lifecycle, the engine-owned loop, plugins and their startup stages |
 | `engine-platform` | `com.truesim.engine.platform` | SDL3: displays, windows, runtime mode changes, all input devices |
+| `engine-input`    | `com.truesim.engine.input`    | Input actions: groups, bindings saved as settings, players, contexts, chords, filters |
 | `engine-vulkan`   | `com.truesim.engine.vulkan`   | Vulkan 1.3, 1.4 where available: instance, GPUs, devices, swapchains, frames |
 | `engine-graph`    | `com.truesim.engine.graph`    | Frame graph: techniques plugged together by the results they provide and need |
 | `engine-render`   | `com.truesim.engine.render`   | GPU-driven meshlet rendering of scene's meshes: geometry pool, GPU culling and LOD; blur |
@@ -66,8 +67,9 @@ public final class Hello implements Application {
 - **The engine's plugins:** `Desktop` (SDL: windows, input; the last window closing requests a quit), `Rendering`
   (Vulkan instance, device, frame graph on the engine's settings, presenter pacing frames; other plugins add instance
   and device extensions or pick the GPU in the stage before it acts) and `Xr` (a headset: connects first, picks the
-  GPU, starts its session with the graph and drives frames, so the game's update reads this frame's poses). The demo
-  is an `Application` on them, with `Animation` running the fox's and the crowd's animators.
+  GPU, starts its session with the graph and drives frames, so the game's update reads this frame's poses), `Input`
+  (actions, after the desktop; see Input). The demo is an `Application` on them, with `Animation` running the fox's
+  and the crowd's animators.
 - **`Assets`** (engine-scene): the asset cache on the engine's jobs, path-addressed assets on it (`paths()`: mounts
   and importers; `mount("game", folder)` before startup) and their GPU side (`resources()`). Nothing is imported by
   default: add importers, e.g. `new Gltf(assets.paths()).register()` from scene-gltf. `assets.budgetMegabytes` is a
@@ -78,7 +80,8 @@ One `Platform` per process, used from the thread that started it. Events go to a
 types and plain values, with nothing allocated. Nothing in the public API is SDL's: keys are `Key` (physical, USB HID
 based) with a layout character and `KeyModifiers` bits, and there are `MouseButton`, `GamepadButton`, `GamepadAxis`,
 `HatPosition`, `SensorType`, `TouchPhase`, `PenAxis` and so on. The mapping lives in one package-private class, so
-another backend replaces only the implementation. The input module builds on this.
+another backend replaces only the implementation. The input module builds on this (see Input); a gamepad's or
+joystick's `InputDevice` carries SDL's GUID, its serial and path, which tell it again when it is plugged back in.
 
 Everything SDL3 supports for input is passed through:
 
@@ -177,6 +180,62 @@ Window window = platform.createWindow(WindowOptions.of("true-sim", 1280, 720), s
 window.apply(window.settings().withMode(WindowMode.BORDERLESS_FULLSCREEN).withDisplay(platform.displayKey(id)));
 store("window", window.settings().toMap());
 ```
+
+## Input
+
+`engine-input` turns devices into actions (application-api.md §5). `app.use(new Input().add(GAME))` installs it; it
+starts after the desktop and listens to its events, and other plugins bring kinds of device (`Xr`: the headset's
+controllers). A frame starts with every device's values taken once and every player's actions worked out, before the
+fixed steps: an action is read in the frame it was sampled in, with nothing allocated.
+
+```java
+public static final ActionGroup GAME = ActionGroup.root("game");
+public static final ActionGroup VEHICLE = GAME.child("vehicle");          // a tree: on only if its parents are
+public static final BinaryAction JUMP = GAME.binary("jump", Binding.key(Key.SPACE), Binding.pad(GamepadButton.SOUTH));
+public static final Axis2Action MOVE = GAME.axis2("move", Binding.keys(Key.A, Key.D, Key.S, Key.W), Binding.stick(false));
+public static final BinaryAction SAVE = GAME.binary("save", Binding.chord(Controls.CONTROL, Controls.key(Key.S)));
+
+Player one = input.player(0);
+if (one.pressed(JUMP)) { ... }          // in update: since the last frame; in a fixed step: since that world's last step
+walk(one.x(MOVE), one.y(MOVE));
+input.push(input.context("menu", 100).groups(UI).mouse(MouseMode.RELEASED).blocking(true));
+Capture capture = input.capture(one, JUMP);   // the next input becomes a binding; input.rebind(one, JUMP, 0, ...)
+```
+
+- **Actions** are typed constants in groups: `BinaryAction` (down or not, no analog value), `Axis1Action`,
+  `Axis2Action`, `Axis3Action`, `PoseAction`. Groups form a tree, each with its own switch (`input.enable(group, on)`).
+  A module adds its group with its defaults in one call (`input.add(UI)`).
+- **Bindings are settings**, one text setting per action (`input.game.jump=key:SPACE; pad:SOUTH`), registered in the
+  options screen's input group and saved with the player's settings; the game's defaults go on the game layer
+  (`input.defaults`), a later player's own under `player<n>.`. A binding's text names generic controls (`key:W`,
+  `pad:SOUTH`, `mouse:X`, `joy:AXIS_2`, `xr:RIGHT_TRIGGER`), adapters (`axis(key:S,key:W)`, `2d(...)`, `3d(...)`,
+  `action(game.move)`), modifiers (`key:CONTROL+key:S`, left, right or either; any pad button), `toggle`, `tap`,
+  `hold(0.5)`, a filter chain by id with parameters (`deadzone`, `radial`, `scale`, `axes`, `curve`, `smooth`,
+  `clamp`, and the game's own) and, only when a player captured it, the device (`device(guid,serial,path)`). Text it
+  cannot read falls back to the defaults and is reported (`input.problems()`).
+- **Edges** are counted per player and action. A fixed step sees the presses and releases since its world's last
+  step: once however many steps a catch-up frame runs, and in the next step when the frame had none; a paused world
+  (`clock.pause()`) sees none from while it was paused.
+- **Chords:** a binary action's chord, held, takes its controls from less specific bindings (Ctrl+S held: S does not
+  walk back, Ctrl does not crouch); a modifier on an analog binding only gates it. A press fires at once; only a
+  binding marked tap or hold waits (`input.holdTime`, 0.25 s). Analog controls turn binary at `input.pressThreshold`
+  (0.6) and back at `input.releaseThreshold` (0.4). Several bindings combine by the largest value, or `SUM`/`FIRST`.
+- **Contexts** form a stack by priority: an action is read in the highest context covering its group, the controls
+  it binds are taken from those under it, a blocking context hides them, a context taking text leaves them no keys
+  and receives the text; the top context saying so captures or releases the mouse.
+- **Players:** one player reads every device; with more, each reads their own (`player.assign(device)`, the first
+  without a pad gets a new one, `joinOnPress`). An unplugged device is reported (`InputListener`) and, plugged back,
+  returns to its player, matched by GUID, then serial, then path. `player.rumble(...)`, `player.glyph(action)` (the
+  binding for the last device used), `player.lastDevice()`; devices stay readable directly (`input.keyboard()`).
+- **Filters** keep their state per player and binding; game filters on an action (`input.filter(action, filter)`, not
+  saved) run once per fixed step on the step's delta, or once per frame. Focus loss, a context switch and a disconnect
+  reset them.
+- **Capture** listens for a player's next input: a key released alone, a key held while another goes down (a chord),
+  an axis pushed (a stick's pair for a 2D action); a pad's device is recorded with it, Escape cancels.
+  `input.conflicts(player, action, binding)` lists other actions on the same controls.
+- **Cost:** 200 actions for 4 players, events every frame: about 40 to 60 us a frame on a Ryzen 9 9950X3D under load
+  from other work, without JaCoCo (`InputBenchmarkTest`, 2026-11-03), 0 bytes allocated; a fixed step readying its
+  edges, well under a microsecond.
 
 ## Vulkan
 
@@ -1496,7 +1555,9 @@ frame as the desktop windows, so an eye can also be shown on the desktop for peo
   pose; the eyes' gaze and the hands' 26 joints where the runtime offers them (`XR_EXT_eye_gaze_interaction`,
   `XR_EXT_hand_tracking`). `input.poll(listener)` reports button, touch and controller changes. The engine suggests
   where each input is on Meta Touch, Valve Index, HTC Vive, Windows Mixed Reality and simple controllers, and tracked
-  hands (`XR_EXT_hand_interaction`), so the same names work on each.
+  hands (`XR_EXT_hand_interaction`), so the same names work on each. With `Input` installed the headset is a device
+  of the engine's actions (`XrControls`: `xr:RIGHT_TRIGGER`, `xr:LEFT_THUMBSTICK_Y_AXIS`, `xr:RIGHT_AIM_POSE`,
+  `xr:HEAD_POSE`), sampled after `beginFrame` with the other devices, rebound and saved like them.
 - **Settings:** `XrSettings` (resolution scale, the eyes' near plane, seated or room-scale tracking space).
 - **Testing:** `HeadsetTest` needs a headset connected and starts the runtime: it runs with `TRUESIM_XR=true`.
 
@@ -1574,9 +1635,11 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
   start to start (99th percentile 3.94, worst 4.08); the main thread 2.14 ms (scene update 0.24, animation 0.21,
   effects sync 0.28, recording and submitting the graph 1.42), the GPU 2.61 ms from its first pass to its last; 401 of
   1080 frames waited for the GPU.
-- Keys: `1`/`2` forward or visibility buffer shading, `H` HDR, `T` tone curve, `[`/`]` exposure, `V` present mode,
-  `F`/`F11` window mode, `R` dynamic resolution, `-`/`=` render scale, `G` GPU-timed dynamic resolution (`,`/`.` its
-  target), `O` occlusion culling, `N` a second window, `F5` save.
+- Keys, all input actions (`DemoActions`, rebound in the settings file as `input.demo.*`): `1`/`2` forward or
+  visibility buffer shading, `H` HDR, `T` tone curve, `[`/`]` exposure, `V` present mode, `F`/`F11` window mode, `R`
+  dynamic resolution, `-`/`=` render scale, `G` GPU-timed dynamic resolution (`,`/`.` its target), `O` occlusion
+  culling, `N` a second window, `F5` or `Ctrl+S` save, `Escape` quit. A gamepad moves and looks with its sticks,
+  rises and sinks with its shoulders and switches HDR, the tone curve, exposure and the render scale.
 
 ## Building
 

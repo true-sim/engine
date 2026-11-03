@@ -845,6 +845,10 @@ class PlatformTest {
             "added JOYSTICK 4343");
         assertThat(recorder.added.getFirst()).isEqualTo(new InputDevice(4242, InputDevice.Kind.KEYBOARD, "", 0, 0));
         assertThat(Platform.device(InputDevice.Kind.GAMEPAD, 4444).name()).isEmpty();
+        InputDevice unknown = Platform.device(InputDevice.Kind.JOYSTICK, 4444); // SDL knows no such joystick
+        assertThat(unknown.guid()).isEmpty();
+        assertThat(unknown.serial()).isEmpty();
+        assertThat(unknown.path()).isEmpty();
         assertThat(Platform.axis((short) 0)).isZero();
     }
 

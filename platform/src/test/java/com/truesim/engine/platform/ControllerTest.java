@@ -198,6 +198,11 @@ class ControllerTest {
         assertThat(pad.firmwareVersion()).isNotNegative();
         assertThat(pad.serial()).isNotNull();
         assertThat(pad.path()).isNotNull();
+        assertThat(pad.guid()).hasSize(32).contains("3412", "7856"); // vendor and product, little-endian
+        InputDevice described = Platform.device(InputDevice.Kind.GAMEPAD, id);
+        assertThat(described.guid()).isEqualTo(pad.guid());
+        assertThat(described.serial()).isEqualTo(pad.serial());
+        assertThat(described.path()).isEqualTo(pad.path());
         assertThat(pad.type()).isNotNull();
         assertThat(pad.realType()).isNotNull();
         assertThat(pad.mapping()).isNotEmpty();

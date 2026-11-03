@@ -86,7 +86,7 @@ import org.slf4j.LoggerFactory;
  * <p>Positions are world positions: the tracking space's origin ({@link Headset#origin}) plus where the runtime says.
  * Use it on the thread rendering the headset. Reading allocates nothing.
  */
-public final class XrInput implements AutoCloseable {
+public final class XrInput implements AutoCloseable, XrState {
 
     private static final Logger LOG = LoggerFactory.getLogger(XrInput.class);
     private static final Hand[] HANDS = Hand.values();

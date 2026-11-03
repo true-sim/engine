@@ -18,7 +18,9 @@ frame driver), `Xr` (engine-xr: `Xr.ifAvailable()` / `Xr.required()`, drives fra
 `submit`); the demo runs on them. `Assets` (engine-scene: cache, path assets, GPU resources); glTF import is
 scene's `scene-gltf` module, models are `RenderAssets.MODEL` (D17), sub-assets path fragments (`#mesh/0`). The phases,
 clocks and fixed steps (§6: `Phase`, `Clock`, `Step`, `Timer`, `fixedUpdate`/`lateUpdate`) and the `Animation` plugin
-(engine-scene) since 2026-11-03. Not yet: BaseGame, the native error box.
+(engine-scene) since 2026-11-03. The `Input` plugin (engine-input, §5) since 2026-11-03, with `Plugin.after` (start
+after a plugin when it is installed: input after the desktop), `Plugin.beforeFixedUpdate` (input readies a step's
+edges), `Clock.pause()`/`resume()` and `engine.clockCount()`/`clock(i)`. Not yet: BaseGame, the native error box.
 
 ```java
 public final class RockGarden extends BaseGame {
@@ -165,42 +167,64 @@ and resources, no path), `AssetSource` (directory, gzip, `firstOf`), async on jo
 ## 5. Input
 
 **Exists:** platform events for keyboards, mice, gamepads, joysticks, haptics, touch, pens; `KeyModifiers` bits;
-several devices, each with an id valid while connected, vendor and product (no GUID exposed; serial often empty); XR
-input through `Headset.input()`, one fixed OpenXR action set synced inside `Headset.render`.
+several devices, each with an id valid while connected, vendor and product; XR input through `Headset.input()`, one
+fixed OpenXR action set synced in `Headset.beginFrame` (D119).
+**Built since (2026-11-03):** all of §5, in `engine-input` (`com.truesim.engine.input`): the `Input` plugin;
+`ActionGroup`, `Action` and its five types, `Combine`; `Binding` (text form, adapters, chords, `toggle`, `tap`, `hold`,
+filter chains, a captured device) with `Controls`, `Control`, `DeviceClass`, `ControlKind`; `FilterType` and the
+built-in `Filters`; `ActionFilter`; `Player`, `Device`, `DeviceIdentity`, `InputListener`, `InputSource`;
+`InputContext`, `MouseMode`, `TextListener`; `Capture`, `Conflict`; `InputSettings` (`input.holdTime`,
+`input.pressThreshold`, `input.releaseThreshold`). engine-platform: `InputDevice.guid()`, `serial()`, `path()`,
+`Controller.guid()`. engine-xr: `XrControls` (the headset as a kind of device) and its source, added by `Xr` when input
+is installed. The demo's keys, mouse look, gamepad and headset walking are actions (`DemoActions`). Measured
+(`InputBenchmarkTest`, Ryzen 9 9950X3D under load from other work, without JaCoCo): 200 actions for 4 players with
+events every frame, about 40 to 60 us a frame, 0 bytes allocated (the allocation check over whole engine frames, a
+world stepping); readying a fixed step's edges (two copies of 800 counts), well under a microsecond. Choices made
+while building, within the decisions: group switches and contexts are the input's, shared by its players (a player's
+own menu in split screen is a later addition); bindings are everyone's unless a later player rebinds (then
+`player<n>.input...`); only binary actions' chords take their controls (below, D69).
 
-- **D55** Input is a plugin; device kinds come with plugins (XR controllers with `Xr`).
-- **D56** (decided) Devices can be read directly; actions are what is rebound, saved and shown. Direct reading is
-  offered in `BaseGame` too (and so in `PrototypeGame`), for debug keys and quick hacks.
-- **D57** Actions are typed constants in groups. **D67** Groups form a tree; a group is active only if it and all its
-  parents are enabled. **D68** Each keeps its own switch.
-- **D58** Bindings are settings, saved like them.
-- **D59** Input is sampled once per frame, at its start (XR too, D119).
-- **D60** (revised) Edges are counted per world clock, per player and per action; a fixed-step reader sees the edges
-  since its last step. Pausing a world clears its counters, so resuming never fires a stale press.
-- **D61** Contexts form a stack with priority; they can capture or release the mouse; text fields take keys.
-- **D62** Glyphs follow the last device used.
-- **D63** Players and local multiplayer from the start; single player gets every device.
-- **D64** (revised) OpenXR actions are the device layer: generic controller inputs, attached once per session as
-  today. Engine actions and bindings run on top, so XR bindings can be rebound, saved and filtered like any other.
-- **D65** Nothing allocated per frame.
-- **D66** Rumble per player.
-- **D69** The most specific binding wins (chords suppress their parts). **D70** (decided) A press fires at once by
-  default. Only a binding marked tap-and-hold waits: the tap fires on release before the hold time (about 0.25 s), the
-  hold once it passes. **D71** Modifiers left, right or either; any pad button as a
+- **D55** (built) Input is a plugin; device kinds come with plugins (XR controllers with `Xr`).
+- **D56** (decided; built: `Device.value`, `input.keyboard()`; BaseGame not yet) Devices can be read directly; actions
+  are what is rebound, saved and shown. Direct reading is offered in `BaseGame` too (and so in `PrototypeGame`), for
+  debug keys and quick hacks.
+- **D57** (built) Actions are typed constants in groups. **D67** (built) Groups form a tree; a group is active only if
+  it and all its parents are enabled. **D68** (built) Each keeps its own switch.
+- **D58** (built) Bindings are settings, saved like them: one text setting per action, `input.<group>.<action>`.
+- **D59** (built) Input is sampled once per frame, at its start (XR too, D119): in `Input.beforeUpdate`, after the
+  frame driver's begin and the desktop's events, before `FIXED`.
+- **D60** (revised; built) Edges are counted per world clock, per player and per action; a fixed-step reader sees the
+  edges since its last step. Pausing a world clears its counters, so resuming never fires a stale press.
+- **D61** (built) Contexts form a stack with priority; they can capture or release the mouse; text fields take keys.
+- **D62** (built: `player.lastDevice()`, `player.glyph(action)`) Glyphs follow the last device used.
+- **D63** (built) Players and local multiplayer from the start; single player gets every device.
+- **D64** (revised; built: `XrControls`) OpenXR actions are the device layer: generic controller inputs, attached once
+  per session as today. Engine actions and bindings run on top, so XR bindings can be rebound, saved and filtered like
+  any other.
+- **D65** (built; checked over whole frames) Nothing allocated per frame.
+- **D66** (built) Rumble per player.
+- **D69** (built) The most specific binding wins (chords suppress their parts): a binary action's chord, held, takes
+  its controls from bindings with fewer modifiers that frame; a modifier on an analog binding (the right button held
+  to look with the mouse) only gates it, else it would release the button's own action. **D70** (decided; built) A
+  press fires at once by default. Only a binding marked tap-and-hold waits: the tap fires on release before the hold
+  time (about 0.25 s), the hold once it passes. **D71** (built) Modifiers left, right or either; any pad button as a
   modifier.
-- **D72** (refined) Game code binds only generic controls; a specific device is recorded only when the player captures
-  a binding. The platform layer exposes SDL's GUID; devices match by GUID, then serial, then path. Keyboards and mice
-  are not told apart.
-- **D73** Unplugging is reported; replugging returns the device to the same player (by D72's matching).
-- **D75** Action types by value: `BinaryAction`, `Axis1Action`, `Axis2Action`, `Axis3Action`, `PoseAction`.
-  **D76** Binary has no analog value. **D77** Analog to binary switches at a threshold with hysteresis (0.6/0.4).
-- **D79** Toggle or hold is the binding's choice. **D80** An action can be another's source; cycles rejected.
-- **D81** Adapters are saved with the binding.
-- **D82** A binding holds a chain of filters. **D83** Binding filters are saved by typed id with parameters and
-  adjustable. **D84** Action filters belong to the game, may read game state, are not saved. **D85** (refined) Filters
-  keep state per player and binding and allocate nothing; binding filters run per frame on real time (device feel);
-  action filters read by fixed-step systems run per step on the step's delta. **D86** Focus loss, context switch and
-  disconnects reset them. **D87** Several bindings combine by the largest value (per-action rule selectable).
+- **D72** (refined; built) Game code binds only generic controls; a specific device is recorded only when the player
+  captures a binding. The platform layer exposes SDL's GUID; devices match by GUID, then serial, then path. Keyboards
+  and mice are not told apart.
+- **D73** (built) Unplugging is reported; replugging returns the device to the same player (by D72's matching).
+- **D75** (built) Action types by value: `BinaryAction`, `Axis1Action`, `Axis2Action`, `Axis3Action`, `PoseAction`.
+  **D76** (built) Binary has no analog value. **D77** (built; the thresholds are settings) Analog to binary switches
+  at a threshold with hysteresis (0.6/0.4).
+- **D79** (built) Toggle or hold is the binding's choice. **D80** (built) An action can be another's source; cycles
+  rejected.
+- **D81** (built) Adapters are saved with the binding.
+- **D82** (built) A binding holds a chain of filters. **D83** (built) Binding filters are saved by typed id with
+  parameters and adjustable. **D84** (built) Action filters belong to the game, may read game state, are not saved.
+  **D85** (refined; built) Filters keep state per player and binding and allocate nothing; binding filters run per
+  frame on real time (device feel); action filters read by fixed-step systems run per step on the step's delta.
+  **D86** (built) Focus loss, context switch and disconnects reset them. **D87** (built) Several bindings combine by
+  the largest value (per-action rule selectable).
 - XR head and hand poses are read late in the frame and are never interpolated (D91).
 
 ## 6. Game logic and time
@@ -221,7 +245,8 @@ on a clock animates by its drawn time, A5), and D91 (below): `SceneSync.follow(c
 A5's opt-in (2026-11-03, scene's `Animator.fixedSteps(true)`, `Animators.step`): the `Animation` plugin steps a world's
 animators on fixed steps in `FIXED` (`Plugin.fixedUpdate`, after the game's, by the step's length), and their skinned
 joints are drawn between steps like other nodes moved in `FIXED` (D91, below: `Deformation.blended`, `blend`, `step`).
-Not yet: pausing a world (D128), behaviours and game systems, BaseGame's `fixedUpdate` hook. Two gaps that need scene:
+Pausing a world's steps (D128's `clock.pause()`, clearing its input edges) since 2026-11-03. Not yet: behaviours and
+game systems, BaseGame's `fixedUpdate` hook. Two gaps that need scene:
 D123's "change logging once per frame" (`SceneGraph` has no update that propagates without logging; each step's
 `scene.update()` logs, which is also how the sync finds what a step moved: the log grows rather than drop changes, so a
 catch-up frame loses none) and A13's serial ground probes (scene's `Animators` runs pose modifiers, foot placement's
@@ -418,7 +443,7 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   in reverse startup order and saves the player's settings (D7).
 - **D127** (new) Focus, visibility and suspend are app events: `onFocusChanged`, `onVisibilityChanged`, `onSuspend`,
   `onResume` (headset idle counts as hidden). Nothing pauses by itself; a hidden or minimised app throttles rendering.
-- **D128** (new) Pausing is per world: `world.clock().pause()` stops its `FIXED` steps and timers and clears its input
+- **D128** (new; built but `pauseOnFocusLoss`) Pausing is per world: `world.clock().pause()` stops its `FIXED` steps and timers and clears its input
   edges (D60); `UPDATE`, UI and other worlds keep running. `BaseGame.pauseOnFocusLoss(true)` opts in to pausing the
   game's worlds on focus loss and suspend.
 - **D129** (new) A camera is a component on a node (D46): it moves and animates with the scene graph. In XR the tracked
@@ -508,7 +533,7 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
 
 Three reviews (consistency and API design, performance and determinism, feasibility against the code). Code claims
 checked: `scene.world.Feature` exists (name clash); `AssetId` documented as never depending on paths; one loader per
-asset type; `InputDevice` without GUID; double positions without origin shifting; `xrSyncActions` inside
+asset type; `InputDevice` without GUID (since exposed); double positions without origin shifting; `xrSyncActions` inside
 `Headset.render`; `NodeGraph` orders by add order, culls side-effect-free nodes, 64 switches; nested `parallelFor`
 runs inline; `SceneSync` rewrites all instances above half changed; `SceneBatch` only stages new nodes. Rough build
 order from the feasibility review: settings module (M) → `engine-app` with stages (M) → Headset split and demo startup
