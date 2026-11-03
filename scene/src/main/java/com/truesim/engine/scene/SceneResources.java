@@ -105,6 +105,7 @@ public final class SceneResources implements AutoCloseable {
         WHOLE
     }
 
+    private com.truesim.engine.settings.EngineSettings settings; // followed by the syncs, or null
     private final AssetCache assets;
     private final GeometryPool pool;
     private final Materials materials;
@@ -563,6 +564,21 @@ public final class SceneResources implements AutoCloseable {
                 a.field = field;
             }
         }
+    }
+
+    /**
+     * The settings the scenes drawing these resources follow ({@code RenderSettings.INTERPOLATION}: how a
+     * {@link SceneSync} draws what moves in fixed steps, switched as it changes); the assets plugin gives the engine's.
+     * Set before the syncs are made; null (the default): none, each sync as set by hand.
+     */
+    public SceneResources settings(com.truesim.engine.settings.EngineSettings followed) {
+        this.settings = followed;
+        return this;
+    }
+
+    /** The settings scenes drawing these resources follow, or null. */
+    public com.truesim.engine.settings.EngineSettings settings() {
+        return settings;
     }
 
     /**

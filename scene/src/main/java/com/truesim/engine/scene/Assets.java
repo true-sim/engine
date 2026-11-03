@@ -9,6 +9,7 @@ import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.Rendering;
 import com.truesim.engine.render.GeometryPool;
 import com.truesim.engine.render.Materials;
+import com.truesim.engine.render.RenderSettings;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.settings.Setting;
 import com.truesim.scene.assets.AssetCache;
@@ -24,7 +25,8 @@ import java.util.Objects;
 /**
  * Assets as a plugin: the asset cache on the engine's jobs (loads finish at the start of a frame), assets addressed by
  * path on top of it ({@link #paths()}: mounts, importers), and their GPU side ({@link #resources()}: meshes, materials
- * and textures uploaded once however many scenes draw them). Nothing is mounted or imported by default: the game, or a
+ * and textures uploaded once however many scenes draw them; scene syncs on them follow the engine's
+ * {@code render.interpolation}). Nothing is mounted or imported by default: the game, or a
  * preset, adds mounts and importers.
  *
  * <pre>{@code
@@ -95,7 +97,7 @@ public final class Assets implements Plugin {
                 for (String[] mount : mounts) {
                     paths.mounts().add(mount[0], PathSource.folder(Path.of(mount[1])));
                 }
-                startup.registry().addHidden(BUDGET);
+                startup.registry().addHidden(BUDGET, RenderSettings.INTERPOLATION);
                 cache.setBudget((long) startup.settings().get(BUDGET) << 20);
                 startup.settings().onChange(BUDGET, () -> cache.setBudget((long) startup.settings().get(BUDGET) << 20));
             }
@@ -105,7 +107,8 @@ public final class Assets implements Plugin {
                 pool = new GeometryPool(rendering.device(), capacity, graph.frameSlots());
                 materials = new Materials(rendering.device(), materialCapacity, graph.frameSlots());
                 textures = new Textures(rendering.device(), graph.frameSlots());
-                resources = new SceneResources(cache, pool, materials, textures);
+                resources = new SceneResources(cache, pool, materials, textures)
+                    .settings(startup.settings()); // the scenes drawing them follow render.interpolation
             }
             default -> {
                 // nothing of its own in the other stages

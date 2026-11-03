@@ -80,7 +80,7 @@ class MusicRenderTest {
             sync.update();
             renderer.render(keep ? out : scratch, keep ? done : 0, Math.min(1_024, frames - done));
             if (cache.loadingCount() > 0) {
-                Thread.sleep(1);
+                Thread.sleep(1_024 * 1_000L / RATE); // at a device's pace while clips load, as they would load in a game
             }
         }
         return out;
@@ -142,7 +142,7 @@ class MusicRenderTest {
             }
             heard = Math.max(heard, sync.voices());
             if (cache.loadingCount() > 0) {
-                Thread.sleep(1);
+                Thread.sleep(1_024 * 1_000L / RATE); // at a device's pace while clips load, as they would load in a game
             }
         }
         assertThat(heard).as("the stems played").isPositive();

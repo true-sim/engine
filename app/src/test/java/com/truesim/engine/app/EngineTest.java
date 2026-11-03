@@ -168,7 +168,7 @@ class EngineTest {
             assertThat(engine.frame().number()).isZero();
             assertThat(engine.frame().delta()).isZero();
             engine.step();
-            assertThat(engine.frame().delta()).isBetween(0.0, Frame.MAX_DELTA);
+            assertThat(engine.frame().delta()).isBetween(0.0, engine.frame().maxDelta());
             assertThat(engine.frame().time()).isEqualTo(engine.frame().delta());
             log.clear();
         }

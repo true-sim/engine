@@ -318,6 +318,17 @@ software renderer it had not, so the growth came a frame later and the test fail
 
 ## Audio
 
+**Offline audio tests rendered far faster than real time while something loaded or decoded on another thread.**
+Three tests passed here and failed only on CI's busy 4-core runner: a loop released at its marker (where the stop fell
+depended on when the clip loaded), a streamed loop whose decoder starved 3 times at 26 times real time, and a stinger
+that missed its beat because a bar rendered in milliseconds while its clip loaded.
+- Proof: true-sim/engine#377's first CI run (`aLoopEndsAtItsNextMarkerOrCrossFades`, 3,600 frames off), CI run
+  41599859241 (`introLoopAndStreamedLoopSeamsAreContinuous`, 3 starvations), CI run 41621834713
+  (`aStingerPlaysOnTheBeatAndDucksTheMusic`, the bed un-ducked at the beat).
+- Rule: a test whose result depends on another thread (asset loads, stream decoders) renders at a device's pace while
+  that thread works, or waits for it before the part it measures; never assume it finishes within N blocks rendered
+  offline.
+
 **SDL's device thread takes a whole device buffer from the stream at once.** The audio queue was kept at the design's 2
 blocks (512 frames); SDL's dummy driver, and this machine's WASAPI device (which ignored
 `SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES`), pull 1,024 frames at a time, so the queue ran dry at every pull and the

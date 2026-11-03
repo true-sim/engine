@@ -5,7 +5,11 @@ import com.truesim.common.jobs.JobSystem;
 import com.truesim.common.math.Maths;
 import com.truesim.common.math.TransformArray;
 import com.truesim.common.state.ChangeClock;
+import com.truesim.engine.app.Clock;
 import com.truesim.engine.render.GpuScene;
+import com.truesim.engine.render.InstanceMotion;
+import com.truesim.engine.render.Interpolation;
+import com.truesim.engine.render.RenderSettings;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.core.NodeChange;
@@ -86,6 +90,8 @@ public final class SceneSync implements AutoCloseable {
     private final GpuScene gpu;
     private final JobSystem jobs; // or null: the instances are written on the calling thread
     private final JobSystem.RangeTask fill = this::fill;
+    private final JobSystem.RangeTask writeMotions = this::writeMotions;
+    private final JobSystem.RangeTask writeBlended = this::writeBlended;
     private final Renderables.Visitor onRenderableChange = (node, changes) -> reconcile(node);
     private final NodeChange.Visitor onSceneChange = this::sceneChanged;
     private long seen;
@@ -148,6 +154,33 @@ public final class SceneSync implements AutoCloseable {
 
     private boolean rewriteAll = true;
 
+    // Interpolation between fixed steps (D91), once a clock is followed: by node index, each drawn item's pose as last
+    // captured or written (position, rotation, scale: 10 doubles) and, while it moves in steps, its pose at the step
+    // before; the items moving (tracked), each with its motion record on the GPU; opted out and teleported nodes.
+    private static final int POSE = 10;
+    private Clock stepClock; // the world's, whose steps capture moves; null: none followed
+    private Interpolation interpolation = Interpolation.GPU;
+    private final NodeChange.Visitor onStepChange = this::stepChanged;
+    private final Runnable afterStep = this::stepped;
+    private double[] drawnPose = new double[64 * POSE];
+    private double[] fromPose = new double[64 * POSE];
+    private long[] movedTick = new long[64];
+    private int[] motionSlot = filled(64);
+    private boolean[] isTracked = new boolean[64];
+    private int[] trackedAt = new int[64];
+    private int[] tracked = new int[64];
+    private int trackedCount;
+    private boolean[] still = new boolean[64];      // opted out: drawn as stepped
+    private boolean[] teleported = new boolean[64]; // its next move starts from where it lands
+    private boolean[] restart = new boolean[64];    // teleported: the GPU's pose before is not where it starts
+    private long fixedThrough = Long.MIN_VALUE;     // the stamp of the last step's changes
+    private int captured;                           // changes captured in steps since the last update
+    private boolean steppedSince;                   // a step ran since the last update
+    private double blendFactor;                     // the frame's, for the CPU's writes
+    private com.truesim.engine.settings.EngineSettings.Subscription settingWatch; // render.interpolation, or null
+    private boolean settingChanged;                 // since the last update
+    private boolean byHand;                         // interpolation(mode) was called: the setting no longer applies
+
     private final Map<AssetRef<MeshData>, ViewMesh> meshes = new HashMap<>();
 
     /** A mesh this scene's renderables use: the shared upload, and the list of this scene's items using it. */
@@ -196,6 +229,12 @@ public final class SceneSync implements AutoCloseable {
         this.scene = renderables.scene();
         this.clock = scene.clock();
         gpu.setMaterials(resources.materials()); // the resources' table: instances name its ids
+        com.truesim.engine.settings.EngineSettings followed = resources.settings();
+        if (followed != null) { // render.interpolation as the player sets it, switched at the next update
+            interpolation = followed.get(RenderSettings.INTERPOLATION);
+            layout();
+            settingWatch = followed.onChange(RenderSettings.INTERPOLATION, () -> settingChanged = true);
+        }
     }
 
     private static int[] filled(int length) {
@@ -225,6 +264,12 @@ public final class SceneSync implements AutoCloseable {
      */
     public void update() {
         checkOpen();
+        if (settingChanged) { // render.interpolation changed: the path switches at the frame boundary
+            settingChanged = false;
+            if (!byHand) {
+                switchTo(resources.settings().get(RenderSettings.INTERPOLATION));
+            }
+        }
         long since = seen;
         seen = clock.now();
         if (!started || !renderables.changesSince(since, onRenderableChange)) {
@@ -236,7 +281,8 @@ public final class SceneSync implements AutoCloseable {
             // Following the scene's log finds the moved instances and the copies whose joints moved; when it lost
             // changes, everything is written and posed. More moved instances than half: rewriting every one costs
             // less than picking them.
-            int changed = scene.changeCountSince(since);
+            int logged = scene.changeCountSince(since);
+            int changed = logged < 0 ? -1 : logged - captured; // moves captured in steps are drawn by interpolation
             if (changed < 0 || changed > (watchCount + Math.max(instanceCount, itemCount)) / 2) {
                 // Lost changes, or most of what it watches moved: posing and writing all costs less than picking
                 rewriteAll = true;
@@ -258,10 +304,13 @@ public final class SceneSync implements AutoCloseable {
         resources.flush();
         finishSwaps();
         drawWaiting();
+        if (stepClock != null) {
+            followSteps();
+        }
         int count = 0;
         if (rewriteAll) {
             for (int item = 0; item < itemNode.length; item++) {
-                if (itemSlot[item] != NONE) {
+                if (itemSlot[item] != NONE && !steppedOnly(item)) {
                     fillItems[count++] = item;
                 }
             }
@@ -295,6 +344,9 @@ public final class SceneSync implements AutoCloseable {
             moved[movedItems[i]] = false;
         }
         movedCount = 0;
+        if (stepClock != null && trackedCount > 0) {
+            blend();
+        }
     }
 
     /** How many renderables are drawn now: those whose meshes are on the GPU. */
@@ -597,7 +649,7 @@ public final class SceneSync implements AutoCloseable {
         }
         if ((NodeChange.has(changes, NodeChange.TRANSFORM) || NodeChange.has(changes, NodeChange.LAYERS))
             && item < itemNode.length && itemNode[item] == node
-            && itemSlot[item] != NONE) {
+            && itemSlot[item] != NONE && !steppedOnly(item)) {
             markMoved(item);
         }
         if (NodeChange.has(changes, NodeChange.TRANSFORM) && item < watchHead.length) {
@@ -744,6 +796,17 @@ public final class SceneSync implements AutoCloseable {
         itemCopy = Arrays.copyOf(itemCopy, length);
         itemCopySkinned = Arrays.copyOf(itemCopySkinned, length);
         poseDue = Arrays.copyOf(poseDue, length);
+        drawnPose = Arrays.copyOf(drawnPose, POSE * length);
+        fromPose = Arrays.copyOf(fromPose, POSE * length);
+        movedTick = Arrays.copyOf(movedTick, length);
+        motionSlot = Arrays.copyOf(motionSlot, length);
+        Arrays.fill(motionSlot, old, length, NONE);
+        isTracked = Arrays.copyOf(isTracked, length);
+        trackedAt = Arrays.copyOf(trackedAt, length);
+        tracked = Arrays.copyOf(tracked, length);
+        still = Arrays.copyOf(still, length);
+        teleported = Arrays.copyOf(teleported, length);
+        restart = Arrays.copyOf(restart, length);
         Arrays.fill(itemCopy, old, length, NONE);
         fillItems = new int[length];
         fillEntries = new int[length];
@@ -792,6 +855,9 @@ public final class SceneSync implements AutoCloseable {
     /** Stops drawing {@code item}: its id becomes a hole, free for the next renderable drawn. */
     private void hide(int item) {
         dropCopy(item);
+        if (isTracked[item]) {
+            untrack(item);
+        }
         int slot = itemSlot[item];
         if (slot != NONE) {
             gpu.remove(slot);
@@ -1061,6 +1127,294 @@ public final class SceneSync implements AutoCloseable {
         }
     }
 
+    // ---------------------------------------------------------------- interpolation between fixed steps (D91)
+
+    /**
+     * Follows the steps of {@code world}, the scene's world clock: after each step the scene's world transforms are
+     * updated (D123) and the renderables it moved are captured; each frame draws them {@link Clock#blend()} of the way
+     * from their pose at the step before to the last step's, as {@link #interpolation} says (GPU by default). Nodes
+     * moved outside the steps are drawn where they are, and stop interpolating. Once, before frames run.
+     */
+    @AllowAllocation("set up once")
+    public SceneSync follow(Clock world) {
+        if (stepClock != null) {
+            throw new IllegalStateException("The scene sync follows a clock already");
+        }
+        stepClock = Objects.requireNonNull(world, "world");
+        world.afterStep(afterStep);
+        return this;
+    }
+
+    /** The clock followed ({@link #follow}), or null. */
+    public Clock clock() {
+        return stepClock;
+    }
+
+    /**
+     * Draws instances moved in steps between steps as {@code mode} says: on the GPU, on the CPU, or not at all. Those
+     * moving now are drawn where they are and start again from their next step. Set by hand, the resources' setting
+     * ({@code RenderSettings.INTERPOLATION}, which the sync otherwise follows) no longer applies to this sync.
+     */
+    public SceneSync interpolation(Interpolation mode) {
+        byHand = true;
+        switchTo(Objects.requireNonNull(mode, "mode"));
+        return this;
+    }
+
+    private void switchTo(Interpolation mode) {
+        if (mode != interpolation) {
+            stopAll();
+            interpolation = mode;
+            layout();
+        }
+    }
+
+    /** The GPU's motion records kept as the mode says: packed, or precise. With none in use. */
+    private void layout() {
+        if (interpolation.onGpu()) {
+            gpu.motion().layout(interpolation == Interpolation.GPU_PRECISE ? InstanceMotion.Layout.PRECISE
+                : InstanceMotion.Layout.PACKED);
+        }
+    }
+
+    public Interpolation interpolation() {
+        return interpolation;
+    }
+
+    /**
+     * Whether {@code node}'s renderable is drawn between steps when steps move it (true unless set): false draws it as
+     * each step leaves it. Allocates nothing once the arrays have the node's room.
+     */
+    public void interpolated(long node, boolean on) {
+        int item = room(node);
+        still[item] = !on;
+        if (!on && isTracked[item]) {
+            untrack(item);
+            markMoved(item); // drawn where it is from the next update
+        }
+    }
+
+    /**
+     * {@code node} jumps (a teleport, a respawn): its next step's move is drawn from where it lands, not blended from
+     * where it was. Call in the step that moves it. Allocates nothing once the arrays have the node's room.
+     */
+    public void teleport(long node) {
+        teleported[room(node)] = true;
+    }
+
+    /** How many renderables move between steps now: those the last step moved. */
+    public int interpolatedCount() {
+        return trackedCount;
+    }
+
+    private int room(long node) {
+        int item = NodeHandle.index(node);
+        if (item >= itemNode.length) {
+            grow(Math.max(item + 1, 2 * itemNode.length));
+        }
+        return item;
+    }
+
+    /** After each step of the clock followed: the transforms, then the renderables the step moved. */
+    private void stepped() {
+        long mark = clock.now();
+        scene.update();
+        scene.changesSince(mark, onStepChange);
+        fixedThrough = clock.now();
+        steppedSince = true;
+    }
+
+    /** A change of the step just run: a drawn renderable moved is captured, its pose before kept. */
+    private void stepChanged(long node, int changes) {
+        int item = NodeHandle.index(node);
+        if (item >= itemNode.length || itemNode[item] != node || itemSlot[item] == NONE) {
+            return;
+        }
+        if (NodeChange.has(changes, NodeChange.LAYERS)) {
+            markMoved(item); // its layers written; its pose, if interpolated, blended over it
+        }
+        if (!NodeChange.has(changes, NodeChange.TRANSFORM) || interpolation == Interpolation.OFF || still[item]) {
+            return;
+        }
+        captured++;
+        System.arraycopy(drawnPose, POSE * item, fromPose, POSE * item, POSE); // where the step before left it
+        if (!isTracked[item]) {
+            isTracked[item] = true;
+            trackedAt[item] = trackedCount;
+            tracked[trackedCount++] = item;
+        }
+        readPose(item);
+        if (teleported[item]) {
+            System.arraycopy(drawnPose, POSE * item, fromPose, POSE * item, POSE);
+            teleported[item] = false;
+            restart[item] = true;
+        }
+        movedTick[item] = stepClock.tick();
+    }
+
+    /**
+     * Whether {@code item}'s last change came from a step and it is interpolated: written by the blend, not as moved.
+     * One interpolated but changed since (moved in the frame's update) stops interpolating.
+     */
+    private boolean steppedOnly(int item) {
+        if (!isTracked[item]) {
+            return false;
+        }
+        if (scene.version(itemNode[item]) <= fixedThrough) {
+            return true;
+        }
+        untrack(item);
+        return false;
+    }
+
+    /**
+     * In a frame after steps: the renderables the last step moved get their two poses (on the GPU, one record each);
+     * those it did not move stop, drawn where they are.
+     */
+    private void followSteps() {
+        if (!steppedSince) {
+            return;
+        }
+        steppedSince = false;
+        captured = 0;
+        long tick = stepClock.tick();
+        InstanceMotion motion = gpu.motion();
+        if (interpolation.onGpu()) {
+            motion.beginStep(tick);
+        }
+        int count = 0; // records to write, in the fill lists (free until the fill)
+        int i = 0;
+        while (i < trackedCount) {
+            int item = tracked[i];
+            if (itemSlot[item] == NONE) {
+                untrack(item); // the last one moves into place i
+            } else if (movedTick[item] != tick) {
+                untrack(item);
+                markMoved(item);
+            } else {
+                if (interpolation.onGpu()) {
+                    if (motionSlot[item] == NONE) {
+                        if (motion.count() == 0) { // packed positions are kept from here: the first mover's
+                            int f = POSE * item;
+                            motion.origin(fromPose[f], fromPose[f + 1], fromPose[f + 2]);
+                        }
+                        motionSlot[item] = motion.add();
+                    }
+                    fillItems[count++] = item;
+                }
+                i++;
+            }
+        }
+        // Claimed in order on this thread, written on the job system's threads when many, as instances are
+        for (int r = 0; r < count; r++) {
+            int item = fillItems[r];
+            fillEntries[r] = motion.claim(motionSlot[item], restart[item]);
+            restart[item] = false;
+        }
+        if (jobs != null && count >= PARALLEL) {
+            jobs.parallelFor(count, GRAIN, writeMotions);
+        } else {
+            writeMotions(0, count, 0);
+        }
+    }
+
+    /** Writes the motion records of {@code fillItems[from]} to {@code fillItems[to - 1]}, on any thread. */
+    private void writeMotions(int from, int to, int worker) {
+        InstanceMotion motion = gpu.motion();
+        double[] a = fromPose;
+        double[] b = drawnPose;
+        for (int r = from; r < to; r++) {
+            int item = fillItems[r];
+            int f = POSE * item;
+            motion.write(fillEntries[r], itemSlot[item], a[f], a[f + 1], a[f + 2], (float) a[f + 3], (float) a[f + 4],
+                (float) a[f + 5], (float) a[f + 6], (float) a[f + 7], (float) a[f + 8], (float) a[f + 9], b[f],
+                b[f + 1], b[f + 2], (float) b[f + 3], (float) b[f + 4], (float) b[f + 5], (float) b[f + 6],
+                (float) b[f + 7], (float) b[f + 8], (float) b[f + 9]);
+        }
+    }
+
+    /** Each frame: the GPU's blend factor, or every moving renderable's blended pose written. */
+    private void blend() {
+        double a = stepClock.blend();
+        if (interpolation.onGpu()) {
+            gpu.motion().blend(a);
+            return;
+        }
+        blendFactor = a;
+        // Claimed in order on this thread, written on the job system's threads when many, as instances are
+        for (int i = 0; i < trackedCount; i++) {
+            fillEntries[i] = gpu.claim(itemSlot[tracked[i]]);
+        }
+        if (jobs != null && trackedCount >= PARALLEL) {
+            jobs.parallelFor(trackedCount, GRAIN, writeBlended);
+        } else {
+            writeBlended(0, trackedCount, 0);
+        }
+    }
+
+    /** Writes the blended poses of {@code tracked[from]} to {@code tracked[to - 1]}, on any thread. */
+    private void writeBlended(int from, int to, int worker) {
+        double a = blendFactor;
+        double b = 1 - a;
+        double[] p = fromPose;
+        double[] q = drawnPose;
+        for (int i = from; i < to; i++) {
+            int item = tracked[i];
+            int f = POSE * item;
+            double qx = q[f + 3];
+            double qy = q[f + 4];
+            double qz = q[f + 5];
+            double qw = q[f + 6];
+            double sign = p[f + 3] * qx + p[f + 4] * qy + p[f + 5] * qz + p[f + 6] * qw < 0 ? -a : a;
+            double rx = b * p[f + 3] + sign * qx;
+            double ry = b * p[f + 4] + sign * qy;
+            double rz = b * p[f + 5] + sign * qz;
+            double rw = b * p[f + 6] + sign * qw;
+            double length = Math.sqrt(rx * rx + ry * ry + rz * rz + rw * rw);
+            long node = itemNode[item];
+            gpu.write(fillEntries[i], itemCopy[item] != NONE ? itemCopy[item] : itemMesh[item].mesh.id,
+                itemSet[item].first, scene.layers(node), renderables.castsShadows(node),
+                b * p[f] + a * q[f], b * p[f + 1] + a * q[f + 1], b * p[f + 2] + a * q[f + 2],
+                (float) (rx / length), (float) (ry / length), (float) (rz / length), (float) (rw / length),
+                (float) (b * p[f + 7] + a * q[f + 7]), (float) (b * p[f + 8] + a * q[f + 8]),
+                (float) (b * p[f + 9] + a * q[f + 9]));
+        }
+    }
+
+    private void untrack(int item) {
+        if (motionSlot[item] != NONE) {
+            gpu.motion().remove(motionSlot[item]);
+            motionSlot[item] = NONE;
+        }
+        int at = trackedAt[item];
+        int last = tracked[--trackedCount];
+        tracked[at] = last;
+        trackedAt[last] = at;
+        isTracked[item] = false;
+    }
+
+    /** Every renderable moving between steps drawn where it is. */
+    private void stopAll() {
+        while (trackedCount > 0) {
+            int item = tracked[trackedCount - 1];
+            untrack(item);
+            if (itemSlot[item] != NONE) {
+                markMoved(item);
+            }
+        }
+    }
+
+    /** {@code item}'s node's world pose into {@code drawnPose}: position, rotation, scale. */
+    private void readPose(int item) {
+        TransformArray world = scene.worldTransforms();
+        MemorySegment s = world.segment();
+        long o = NodeHandle.index(itemNode[item]) * world.stride();
+        int f = POSE * item;
+        for (int c = 0; c < POSE; c++) {
+            drawnPose[f + c] = s.get(DOUBLE, o + 8L * c);
+        }
+    }
+
     private void markMoved(int item) {
         if (!moved[item]) {
             moved[item] = true;
@@ -1089,6 +1443,10 @@ public final class SceneSync implements AutoCloseable {
             (float) s.get(DOUBLE, o + 24), (float) s.get(DOUBLE, o + 32), (float) s.get(DOUBLE, o + 40),
             (float) s.get(DOUBLE, o + 48),
             (float) s.get(DOUBLE, o + 56), (float) s.get(DOUBLE, o + 64), (float) s.get(DOUBLE, o + 72));
+        int f = POSE * item; // the pose drawn, where its next step's move starts
+        for (int c = 0; c < POSE; c++) {
+            drawnPose[f + c] = s.get(DOUBLE, o + 8L * c);
+        }
     }
 
     private void checkOpen() {
@@ -1105,6 +1463,9 @@ public final class SceneSync implements AutoCloseable {
     public void close() {
         if (!closed) {
             destroyAll();
+            if (settingWatch != null) {
+                settingWatch.close();
+            }
             closed = true;
         }
     }

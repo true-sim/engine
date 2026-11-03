@@ -8,9 +8,9 @@ description = "Engine scene bridge for true-sim: draws scene's renderables, foll
 
 dependencies {
     api(project(":engine-render"))
-    api("com.truesim.scene:scene-render:0.58.1")
-    testImplementation("com.truesim.scene:scene-meshbuild:0.58.1")
-    testImplementation("com.truesim.scene:scene-gltf:0.58.1")
+    api("com.truesim.scene:scene-render:0.60.0")
+    testImplementation("com.truesim.scene:scene-meshbuild:0.60.0")
+    testImplementation("com.truesim.scene:scene-gltf:0.60.0")
 }
 
 // The test shaders' material records (a game's own type, as in a project of its own), as Java.

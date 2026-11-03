@@ -1559,9 +1559,9 @@ class GraphTechniquesTest {
         main.port().add(MeshletBenchmark.forward(main).clearColor(0, 0, 1)).output(Keys.SCENE_COLOR, output);
         frame();
         java.util.List<String> passes = graph.passes();
-        assertThat(passes).startsWith("scene upload", "deformation", "meshlet culling", "meshlets early",
-            "depth pyramid of scene depth, level 0").endsWith("meshlets late culling", "meshlets late"); // a pass per level
-        assertThat(passes.subList(4, passes.size() - 2)).allMatch(p -> p.startsWith("depth pyramid of scene depth, level "));
+        assertThat(passes).startsWith("scene upload", "interpolation", "deformation", "meshlet culling",
+            "meshlets early", "depth pyramid of scene depth, level 0").endsWith("meshlets late culling", "meshlets late"); // a pass per level
+        assertThat(passes.subList(5, passes.size() - 2)).allMatch(p -> p.startsWith("depth pyramid of scene depth, level "));
         assertThat(graph.pooledImages()).isEqualTo(2); // depth and its pyramid: the color is the target
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
         assertThat(red(1, 1)).isZero(); // blue clear color
@@ -1572,7 +1572,8 @@ class GraphTechniquesTest {
         main = main(camera);
         main.port().add(MeshletBenchmark.forward(main).occlusion(false)).output(Keys.SCENE_COLOR, output);
         frame();
-        assertThat(graph.passes()).containsExactly("scene upload", "deformation", "meshlet culling", "meshlets");
+        assertThat(graph.passes()).containsExactly("scene upload", "interpolation", "deformation", "meshlet culling",
+            "meshlets");
         assertThat(red(SIZE / 2, SIZE / 2)).isEqualTo(1);
         // Off through the graph's settings instead, and on again: rebuilt each time.
         graph.close();
@@ -1581,7 +1582,8 @@ class GraphTechniquesTest {
         main.port().add(MeshletBenchmark.forward(main)).output(Keys.SCENE_COLOR, output);
         graph.settings().set(RenderSettings.OCCLUSION, false);
         frame();
-        assertThat(graph.passes()).containsExactly("scene upload", "deformation", "meshlet culling", "meshlets");
+        assertThat(graph.passes()).containsExactly("scene upload", "interpolation", "deformation", "meshlet culling",
+            "meshlets");
         graph.settings().set(RenderSettings.OCCLUSION, true);
         frame();
         assertThat(graph.passes()).endsWith("meshlets late culling", "meshlets late");

@@ -55,7 +55,7 @@ class AudioPluginTest {
             Sounds world = audio.sounds(new SceneGraph(new ChangeClock()));
             ui.play(AudioSyncTest.clip(0.5f, 48_000));
             world.play(AudioSyncTest.clip(0.5f, 48_000));
-            for (int i = 0; i < 50 && audio.sync().voices() < 2; i++) {
+            for (int i = 0; i < 200 && audio.sync().voices() < 2; i++) {
                 tasks.drainCompleted();
                 engine.step();
                 Thread.sleep(5);

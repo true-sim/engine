@@ -11,6 +11,7 @@ import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.SceneGeometry;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
+import com.truesim.engine.scene.Animation;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.assets.mesh.MeshData;
@@ -61,23 +62,36 @@ final class DemoScene implements AutoCloseable {
     private final DemoCharacter character;
     private final FoxCrowd crowd;
     private final RayTracing rayTracing; // or null
+    private final Animation animation; // runs the fox's and the crowd's animators
+    private final boolean ownsAnimation; // made here, for frames recorded without an engine: advanced by update
+    private double last; // the seconds of the last update
 
     DemoScene(VulkanDevice device, FrameSlots slots, int colorFormat, int depthFormat) {
         this(device, slots, colorFormat, depthFormat, false);
     }
 
+    /**
+     * The scene in an application, its animators run by {@code animation} (the plugin, in ANIMATE): {@link #update} in
+     * UPDATE sets what plays, {@link #sync} after animation draws it.
+     */
+    DemoScene(VulkanDevice device, FrameSlots slots, int colorFormat, int depthFormat, Animation animation) {
+        this(device, slots, colorFormat, depthFormat, false, null, java.util.Objects.requireNonNull(animation));
+    }
+
     /** The scene, with ray tracing where {@code rays} and the device has it. */
     DemoScene(VulkanDevice device, FrameSlots slots, int colorFormat, int depthFormat, boolean rays) {
-        this(device, slots, colorFormat, depthFormat, rays, null);
+        this(device, slots, colorFormat, depthFormat, rays, null, null);
     }
 
     /** The scene around a showcase's {@code arena}, at dusk. */
     DemoScene(VulkanDevice device, FrameSlots slots, int colorFormat, int depthFormat, Arena arena) {
-        this(device, slots, colorFormat, depthFormat, false, arena);
+        this(device, slots, colorFormat, depthFormat, false, arena, null);
     }
 
     private DemoScene(VulkanDevice device, FrameSlots slots, int colorFormat, int depthFormat, boolean rays,
-        Arena arena) {
+        Arena arena, Animation animation) {
+        this.ownsAnimation = animation == null;
+        this.animation = ownsAnimation ? new Animation() : animation;
         this.arena = arena;
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 1 << 16, 8), slots);
         rayTracing = rays && device.rayTracing() ? new RayTracing(device, pool, ROCKS + 16) : null;
@@ -143,12 +157,13 @@ final class DemoScene implements AutoCloseable {
         String file = System.getProperty("truesim.demo.character");
         try {
             character = file == null ? null : new DemoCharacter(device, slots, pool, materials, scene,
-                java.nio.file.Path.of(file), CHARACTER_X, CHARACTER_Z, rayTracing);
+                java.nio.file.Path.of(file), CHARACTER_X, CHARACTER_Z, rayTracing,
+                this.animation);
             int foxes = Integer.getInteger("truesim.demo.foxes", 0);
-            crowd = arena != null ? new FoxCrowd(device, slots, pool, materials, scene, arena)
+            crowd = arena != null ? new FoxCrowd(device, slots, pool, materials, scene, arena, this.animation)
                 : foxes == 0 ? null : new FoxCrowd(device, slots, pool, materials, scene, java.nio.file.Path.of(
                 System.getProperty("truesim.demo.crowd", file == null ? "Fox.gltf" : file)), foxes,
-                Boolean.getBoolean("truesim.demo.foxLod"), 30, 30, rayTracing);
+                Boolean.getBoolean("truesim.demo.foxLod"), 30, 30, rayTracing, this.animation);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(e);
@@ -219,8 +234,31 @@ final class DemoScene implements AutoCloseable {
             scale, scale, scale);
     }
 
-    /** The world at {@code seconds}: rocks spun, lights moved. Before the frame records. */
+    /**
+     * The world at {@code seconds}: rocks spun, lights moved, what the fox and the crowd do. In an application this is
+     * UPDATE, and {@link #sync} follows ANIMATE; with an animation of its own, the animators run and the scene is drawn
+     * here too, before the frame records.
+     */
     void update(double seconds) {
+        set(seconds);
+        if (ownsAnimation) {
+            animation.advance(Math.max(0, seconds - last));
+            last = seconds;
+            sync();
+        }
+    }
+
+    /** Draws the fox and the crowd as animation posed them: after ANIMATE, before the frame records. */
+    void sync() {
+        if (character != null) {
+            character.draw();
+        }
+        if (crowd != null) {
+            crowd.draw();
+        }
+    }
+
+    private void set(double seconds) {
         for (int i = 0; i < ROCKS; i++) {
             float angle = (float) (rocks[5 * i + 4] * seconds + i);
             float s = rocks[5 * i + 3];
@@ -282,6 +320,9 @@ final class DemoScene implements AutoCloseable {
 
     @Override
     public void close() {
+        if (ownsAnimation) {
+            animation.stop();
+        }
         if (crowd != null) {
             crowd.close();
         }

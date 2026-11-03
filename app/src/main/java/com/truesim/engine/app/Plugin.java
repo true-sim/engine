@@ -50,7 +50,22 @@ public interface Plugin {
     default void beforeUpdate(Frame frame) {
     }
 
-    /** After the game's update, each frame, in start order: sync the scene, record the frame. */
+    /**
+     * Each fixed step of each world, after the game's {@link Application#fixedUpdate}, in start order: physics, systems
+     * of the world. The clock's {@link Clock#afterStep} hooks run after.
+     */
+    default void fixedUpdate(Step step) {
+    }
+
+    /** Each frame in {@link Phase#ANIMATE}, after the game's update, in start order: animators advance and pose. */
+    default void animate(Frame frame) {
+    }
+
+    /** Each frame in {@link Phase#LATE}, after the game's {@link Application#lateUpdate}, in start order. */
+    default void lateUpdate(Frame frame) {
+    }
+
+    /** After the game's lateUpdate, each frame, in start order: sync the scene, record the frame. */
     default void afterUpdate(Frame frame) {
     }
 

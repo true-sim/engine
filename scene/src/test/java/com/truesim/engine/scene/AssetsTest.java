@@ -64,6 +64,8 @@ class AssetsTest {
         try (engine) {
             Assets assets = engine.get(Assets.KEY);
             assertThat(assets.resources()).isNotNull();
+            assertThat(assets.resources().settings()).as("syncs on them follow render.interpolation")
+                .isSameAs(engine.settings());
             assertThat(engine.settings().get(Assets.BUDGET)).isEqualTo(512);
             engine.settings().set(Assets.BUDGET, 64);
             new Gltf(assets.paths()).register();

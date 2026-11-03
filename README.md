@@ -37,8 +37,27 @@ public final class Hello implements Application {
   after the plugins it `requires()`. A plugin that cannot start throws a `StartupFailure` with a reason for players;
   `onStartupFailure` answers retry, continue without it (optional plugins: no headset, play on the desktop) or quit.
 - **One frame:** the frame driver waits (a plugin may claim it, e.g. XR pacing; else frames start at
-  `app.frameRate`), finished jobs are delivered, plugins' `beforeUpdate`, the game's `update`, plugins' `afterUpdate`,
-  settings availability refreshed, the driver ends the frame. Nothing allocated of its own.
+  `app.frameRate`), finished jobs are delivered, plugins' `beforeUpdate` (input), then the phases (`engine.phase()`):
+  `FIXED` (each world's fixed steps: the game's `fixedUpdate(Step)`, plugins' `fixedUpdate`, the clock's after-step
+  hooks), `UPDATE` (the game's `update`), `ANIMATE` (plugins' `animate`), `LATE` (the game's and plugins'
+  `lateUpdate`); then plugins' `afterUpdate` (scene sync), settings availability refreshed, the driver ends the frame
+  (render). Nothing allocated of its own. `stepAt(nanos)` runs a frame at a time a tool or test keeps.
+- **Clocks:** `Frame` has real time (`realDelta`, `realTime`) and the app clock (`delta`, `time`: each frame's delta
+  cut to `app.maxFrameDelta`, 0.25 s unless set; `capped()` says when). Each world has a `Clock`
+  (`engine.addClock(name)`, stepped in the order made) at `app.fixedRate` steps a second (60 unless set, followed from
+  the next frame) unless given `rate(n)`: it is owed each frame's delta as an integer of nanoseconds times its rate, so
+  steps are whole ticks and never drift; `blend()` is how far it is into its next tick, `frameDelta()` how far its
+  drawn time moved. All worlds share one budget of steps per frame (`app.fixedStepBudget`, 8); ticks past it are
+  dropped and reported (`Frame.droppedTicks()`, `Clock.droppedTicks()`). The three are developer settings, read every
+  frame. Timers on a clock (`after`, `every`, `afterSeconds`, `everySeconds`) count steps and fire inside their step,
+  before the after-step hooks. `clock.afterStep(scene::update)` propagates a scene's world transforms after every step
+  (or `sceneSync.follow`).
+- **`Animation`** (engine-scene): each world's `Animators` (`animation.animators(scene, clock)`), run in `ANIMATE`:
+  sampled in parallel on the plugin's threads (`animation.threads`: every processor unless set, read when the first
+  world is made; results do not depend on them), poses written and events dispatched in order, then the scene's world
+  transforms updated, so `lateUpdate` reads this frame's joints. A world on a clock moves on by its drawn time;
+  `advance(seconds)` for frames recorded without an engine. Ground probes of foot placement run where animators sample
+  (on the threads): a `Ground` must be thread-safe.
 - **Quitting:** close buttons and the system request a quit; `onQuitRequested` allows or defers it (save first?), and a
   second request within 3 seconds or a forced one skips it. `engine.quit()` is the game's own. Shutdown stops the game,
   then the plugins in reverse order, and saves the player's settings (`saveSettings()`: the OS user folder for the
@@ -48,7 +67,7 @@ public final class Hello implements Application {
   (Vulkan instance, device, frame graph on the engine's settings, presenter pacing frames; other plugins add instance
   and device extensions or pick the GPU in the stage before it acts) and `Xr` (a headset: connects first, picks the
   GPU, starts its session with the graph and drives frames, so the game's update reads this frame's poses). The demo
-  is an `Application` on them.
+  is an `Application` on them, with `Animation` running the fox's and the crowd's animators.
 - **`Assets`** (engine-scene): the asset cache on the engine's jobs, path-addressed assets on it (`paths()`: mounts
   and importers; `mount("game", folder)` before startup) and their GPU side (`resources()`). Nothing is imported by
   default: add importers, e.g. `new Gltf(assets.paths()).register()` from scene-gltf. `assets.budgetMegabytes` is a
@@ -986,6 +1005,24 @@ renderers above, following the scene's change logs and asset cache:
   are `SceneView`s (a `RenderView` in a graph view), each at its own world position (moving one rewrites no
   instance), drawn by their views' techniques, so the rendering mode is the graph's: `ClusteredForwardShading`,
   `VisibilityBufferShading`, shadows, swapped with `port.replace`.
+- **Between fixed steps** (`sync.follow(clock)`): after each step of the world's clock the sync updates the scene's
+  world transforms and captures the renderables the step moved; each frame draws them `clock.blend()` of the way from
+  their pose at the step before to the last step's, as `render.interpolation` says (GPU by default; syncs on resources
+  given settings, as the assets plugin's are, follow it as it changes; `sync.interpolation(mode)` sets one by hand).
+  On the GPU (`GpuScene.motion()`, an `InstanceMotion`) each moving instance has a pose in each of two buffers that turn
+  over every frame with steps: a step uploads only its own pose (the step before's stays; both in a move's first step
+  or after a catch-up frame), and a compute pass after the scene upload blends them into the instance table before
+  anything reads it: frames without a step cost the CPU nothing per instance. `GPU` packs a pose into 32 bytes
+  (positions as floats from where the first mover started, within 0.7 mm 10 km from there; rotations snorm16, within
+  0.003 degrees; scales one float where uniform, else halves); `GPU_PRECISE` keeps positions in two parts (64 bytes).
+  `CPU` writes every moving
+  instance's blended pose each frame (for frames recorded without a frame graph, which run no blend pass); `OFF` draws
+  steps as they are. `sync.teleport(node)` in the step that moves it draws it where it lands; `interpolated(node,
+  false)` opts a node out; a node moved outside the steps is drawn where it is. With 30,000 rocks moved every step at
+  60 steps and 144 frames a second (2026-11-03, RX 9070 XT, on a loaded machine): `GPU` 0.61 ms of sync and 1.08 MB
+  uploaded per frame with a step, 0.001 ms and nothing without, the blend pass 0.006 ms on the GPU; `GPU_PRECISE` 0.57
+  ms and 2.04 MB, 0.009 ms; `CPU` 0.44 ms and 2.04 MB with a step, 0.24 ms and 2.04 MB without (application-api.md
+  D122).
 
 ```java
 FrameSlots slots = new FrameSlots(2);                 // shared by every graph drawing these resources
@@ -1324,8 +1361,9 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
 - `-Pcharacter=<glTF-Sample-Assets>/Models/Fox/glTF/Fox.gltf` puts the Khronos fox in a clearing at (26, 26), through
   the whole animation path: surveying, cross-fading into a walk that speeds up into a run (a blend space) and back, its
   head looking at a circling light, its tail after a wagging point (FABRIK with limits), its four feet on the terrain
-  (foot placement), skinned on the GPU. The stereo bench takes it too, with `-Peye=x,y,z,tx,ty,tz` for a camera of its
-  own (`g+h` for heights above the ground), `-Pframes=780` and `-PpngFrames=108,612 -Ppng=fox.png` for images.
+  (foot placement), skinned on the GPU; its animator runs in the `Animation` plugin. The stereo bench takes it too,
+  with `-Peye=x,y,z,tx,ty,tz` for a camera of its own (`g+h` for heights above the ground), `-Pframes=780` and
+  `-PpngFrames=108,612 -Ppng=fox.png` for images.
 - `-Peffect=x,y,z` (`g+h` for heights above the ground) plays the demo's particle effects there in the stereo bench:
   a fountain of sparks and trailed streaks over a column of smoke, an orb circling it with a ribbon, and a beam.
 - `./gradlew :engine-demo:stereoBench -Pfoxes=1000 -Pcrowd=<path to Fox.gltf> [-PfoxLod=true]` adds a crowd of foxes,

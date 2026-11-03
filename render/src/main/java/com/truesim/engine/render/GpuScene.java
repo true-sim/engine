@@ -76,6 +76,7 @@ public final class GpuScene implements AutoCloseable {
     private final FrameSlots slots;
     private final Materials defaultMaterials;
     private final com.truesim.engine.vulkan.FrameBuffer table; // common.slang's SceneTable, a copy per frame slot
+    private final InstanceMotion motion; // instances drawn between two fixed steps
     private Materials materials;
     private int count;
     private long version; // changes with every claim and removal
@@ -108,6 +109,7 @@ public final class GpuScene implements AutoCloseable {
             org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
                 | org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, slots);
         materials = defaultMaterials;
+        motion = new InstanceMotion(device, slots, 64, InstanceMotion.Layout.PACKED);
     }
 
     /**
@@ -241,6 +243,14 @@ public final class GpuScene implements AutoCloseable {
 
     void stopFollowing(Runnable follower) {
         growth.remove(follower);
+    }
+
+    /**
+     * The instances drawn between two fixed steps (D91): their poses at both, blended each frame on the GPU after the
+     * upload, into this table.
+     */
+    public InstanceMotion motion() {
+        return motion;
     }
 
     /** The instances as a frame graph imports them: set anew as the table grows, so the graph rebuilds for its size. */
@@ -530,7 +540,7 @@ public final class GpuScene implements AutoCloseable {
      * what was built from the instances (a top level) stands while it is the same.
      */
     public long version() {
-        return version;
+        return version + motion.frames(); // interpolated instances move every frame
     }
 
     /** How many instances changed since the last upload: what the next one scatters. */
@@ -603,6 +613,7 @@ public final class GpuScene implements AutoCloseable {
         if (!closed) {
             closed = true;
             instances.close();
+            motion.close();
             defaultMaterials.close();
             table.close();
         }

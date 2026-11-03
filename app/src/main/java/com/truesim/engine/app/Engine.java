@@ -30,8 +30,10 @@ import java.util.concurrent.locks.LockSupport;
  *
  * <p>{@link #create} configures the application, loads the player's settings and the command line, then starts every
  * plugin through every {@link Stage}, each after those it requires, and calls {@link Application#start}. A frame
- * ({@link #step}) waits for the frame driver, delivers finished jobs, runs the plugins' {@code beforeUpdate}, the
- * application's update and the plugins' {@code afterUpdate}, refreshes settings availability and ends the frame.
+ * ({@link #step}) waits for the frame driver, delivers finished jobs, runs the plugins' {@code beforeUpdate}, then the
+ * {@link Phase}s: each world's fixed steps on its {@link Clock} ({@link #addClock}), the application's update, the
+ * plugins' animation, the late update; then the plugins' {@code afterUpdate}, refreshes settings availability and ends
+ * the frame.
  * {@link #close} stops the application and the plugins in reverse order and saves the player's settings.
  *
  * <p>Used from the main thread only. A frame allocates nothing of its own.
@@ -42,6 +44,28 @@ public final class Engine implements AutoCloseable {
     public static final Setting<Integer> FRAME_RATE =
         Setting.integer("app.frameRate", 60, 1, 10_000, "frames per second when no plugin paces frames");
 
+    /**
+     * The longest delta a frame reports, seconds (D92): a frame after a stall (a breakpoint, a drag of the window) is cut
+     * to it, and the world clocks are owed no more. A developer setting, read every frame.
+     */
+    public static final Setting<Float> MAX_FRAME_DELTA = Setting.decimal("app.maxFrameDelta", 0.25f, 0.05f, 1f,
+        "the longest delta a frame reports, seconds: a stall is cut to it");
+
+    /**
+     * Fixed steps a second of a world clock not set otherwise ({@link Clock#rate(int)}): read every frame, so clocks
+     * following it change rate from the next frame (D89). A developer setting.
+     */
+    public static final Setting<Integer> FIXED_RATE = Setting.integer("app.fixedRate", 60, 1, Clock.MAX_RATE,
+        "fixed steps a second of a world clock not set otherwise");
+
+    /**
+     * The most fixed steps a frame runs, every world's together, in the order the clocks were made (D92): ticks owed
+     * past it are dropped and reported ({@link Frame#droppedTicks()}, {@link Clock#droppedTicks()}), so a frame slower
+     * than its steps cannot make the next one slower still. A developer setting.
+     */
+    public static final Setting<Integer> FIXED_STEP_BUDGET =
+        Setting.integer("app.fixedStepBudget", 8, 1, 1_000, "the most fixed steps a frame runs, all worlds together");
+
     /** Two quit requests within this time force the quit. */
     static final long FORCE_WITHIN_NANOS = TimeUnit.SECONDS.toNanos(3);
 
@@ -50,6 +74,9 @@ public final class Engine implements AutoCloseable {
     private final SettingRegistry registry = new SettingRegistry();
     private final TaskScheduler tasks = new TaskScheduler();
     private final Frame frame = new Frame();
+    private final Step fixedStep = new Step();
+    private Clock[] clocks = new Clock[0]; // the worlds' clocks, stepped in this order
+    private Phase phase = Phase.NONE;
     private final Startup startup = new Startup(this);
     private final Set<PluginKey<?>> installed = new LinkedHashSet<>();
     private final Map<PluginKey<?>, Plugin> active = new IdentityHashMap<>();
@@ -104,7 +131,7 @@ public final class Engine implements AutoCloseable {
         name = config.name();
         version = config.version();
         settingsFile = config.settingsFile();
-        registry.addHidden(FRAME_RATE);
+        registry.addHidden(FRAME_RATE, FIXED_STEP_BUDGET, MAX_FRAME_DELTA, FIXED_RATE);
         if (settingsFile != null) {
             settings.load(SettingsFile.load(settingsFile));
         }
@@ -301,24 +328,110 @@ public final class Engine implements AutoCloseable {
         return visible;
     }
 
-    /** Runs one frame; does nothing once quitting. Allocates nothing of its own. */
+    /** The phase running ({@link Phase#NONE} between them): e.g. to tell moves made in fixed steps from others. */
+    public Phase phase() {
+        return phase;
+    }
+
+    /**
+     * A new world's clock, stepped after those made before (the fixed world order of D92), at
+     * {@link #FIXED_RATE} (following it) until set otherwise: one per world (D88). Made by the plugin making the world;
+     * not while frames step.
+     */
+    @AllowAllocation("a world is made")
+    public Clock addClock(String name) {
+        if (phase != Phase.NONE) {
+            throw new IllegalStateException("Clocks are added outside the phases, not in " + phase);
+        }
+        Clock clock = new Clock(name, settings.get(FIXED_RATE));
+        clocks = java.util.Arrays.copyOf(clocks, clocks.length + 1);
+        clocks[clocks.length - 1] = clock;
+        return clock;
+    }
+
+    /** Stops stepping {@code clock}: its world is gone. False if it was not one of these. */
+    @AllowAllocation("a world is removed")
+    public boolean removeClock(Clock clock) {
+        List<Clock> kept = new ArrayList<>(List.of(clocks));
+        boolean removed = kept.remove(clock);
+        clocks = kept.toArray(new Clock[0]);
+        return removed;
+    }
+
+    /** Runs one frame, timed by the system clock; does nothing once quitting. Allocates nothing of its own. */
     public void step() {
+        stepAt(System.nanoTime());
+    }
+
+    /**
+     * Runs one frame starting at {@code nanos} (a {@link System#nanoTime()} reading, or any time base a tool or test
+     * keeps: only differences count). In order (D124): the frame driver's wait, finished jobs delivered, the plugins'
+     * {@code beforeUpdate} (input), each world's fixed steps ({@link Phase#FIXED}), {@link Phase#UPDATE},
+     * {@link Phase#ANIMATE}, {@link Phase#LATE}, the plugins' {@code afterUpdate} (scene sync), the frame's end
+     * (render). Does nothing once quitting. Allocates nothing of its own.
+     */
+    public void stepAt(long nanos) {
         if (!live) {
             return;
         }
-        frame.next(System.nanoTime());
+        frame.next(nanos, (long) (settings.get(MAX_FRAME_DELTA) * 1e9));
         driver.beginFrame(frame);
         tasks.drainCompleted();
         Plugin[] plugins = running;
         for (Plugin plugin : plugins) {
             plugin.beforeUpdate(frame);
         }
-        app.update(frame);
+        phase = Phase.FIXED;
+        try {
+            fixedSteps(plugins);
+            phase = Phase.UPDATE;
+            app.update(frame);
+            phase = Phase.ANIMATE;
+            for (Plugin plugin : plugins) {
+                plugin.animate(frame);
+            }
+            phase = Phase.LATE;
+            app.lateUpdate(frame);
+            for (Plugin plugin : plugins) {
+                plugin.lateUpdate(frame);
+            }
+        } finally {
+            phase = Phase.NONE;
+        }
         for (Plugin plugin : plugins) {
             plugin.afterUpdate(frame);
         }
         settings.refreshAvailability();
         driver.endFrame(frame);
+    }
+
+    /**
+     * Each world's steps owed for the frame's delta, clock by clock in their order, within one budget for all: the game's
+     * {@code fixedUpdate}, the plugins', then the clock's after-step hooks, per step. Ticks past the budget are dropped.
+     */
+    private void fixedSteps(Plugin[] plugins) {
+        int budget = settings.get(FIXED_STEP_BUDGET);
+        int rate = settings.get(FIXED_RATE);
+        int taken = 0;
+        long dropped = 0;
+        for (Clock clock : clocks) {
+            clock.follow(rate); // the setting, unless the clock's rate was set
+            long owed = clock.owe(frame.deltaNanos());
+            long run = Math.min(owed, budget - taken);
+            for (long s = 0; s < run; s++) {
+                clock.stepped();
+                fixedStep.set(clock, frame);
+                app.fixedUpdate(fixedStep);
+                for (Plugin plugin : plugins) {
+                    plugin.fixedUpdate(fixedStep);
+                }
+                clock.afterStepped();
+            }
+            taken += (int) run;
+            dropped += owed - run;
+            clock.endFrame((int) run, owed - run);
+        }
+        frame.stepped(taken, dropped);
     }
 
     /** Quits after this frame, as the game decided: no one is asked. */

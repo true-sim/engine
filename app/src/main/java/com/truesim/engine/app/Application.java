@@ -8,7 +8,9 @@ package com.truesim.engine.app;
  * public final class Hello implements Application {
  *     public static void main(String[] args) { TrueSim.run(new Hello(), args); }
  *     public void configure(AppConfig app) { app.id("hello").use(new Rendering()); }
- *     public void update(Frame frame) { ... }
+ *     public void fixedUpdate(Step step) { ... }                 // each world's fixed steps
+ *     public void update(Frame frame) { ... }                   // each frame
+ *     public void lateUpdate(Frame frame) { ... }               // each frame, after animation
  * }
  * }</pre>
  */
@@ -40,8 +42,25 @@ public interface Application {
     default void start(Engine engine) {
     }
 
-    /** Each frame, after the plugins' {@link Plugin#beforeUpdate} and before their {@link Plugin#afterUpdate}. */
+    /**
+     * Each fixed step of each world ({@link Phase#FIXED}), before the plugins' {@link Plugin#fixedUpdate}: deterministic
+     * game logic on the world's clock ({@link Step#clock()}). Several in a frame after a slow one, none in a fast one.
+     */
+    default void fixedUpdate(Step step) {
+    }
+
+    /**
+     * Each frame ({@link Phase#UPDATE}), after the plugins' {@link Plugin#beforeUpdate} and the fixed steps, before
+     * animation: what plays, what the camera does.
+     */
     default void update(Frame frame) {
+    }
+
+    /**
+     * Each frame ({@link Phase#LATE}), after animation posed the scene and before the plugins' {@link Plugin#afterUpdate}
+     * sync it: read joints, attach to them, override them.
+     */
+    default void lateUpdate(Frame frame) {
     }
 
     /** The engine shuts down: before the plugins stop. */
