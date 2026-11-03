@@ -139,6 +139,7 @@ public final class VulkanDevice implements AutoCloseable {
     /** Whether the driver can say what went wrong when the device is lost (VK_EXT_device_fault). */
     private final boolean faults;
     private final boolean hdrMetadata;
+    private final java.util.concurrent.atomic.AtomicInteger waits = new java.util.concurrent.atomic.AtomicInteger();
     // submitAndWait's command pools and fences, per queue: idle ones, and all ever made (destroyed on close).
     private final Map<Queue, java.util.ArrayDeque<OneOff>> oneOffs = new java.util.IdentityHashMap<>();
     private final java.util.List<OneOff> allOneOffs = new java.util.ArrayList<>();
@@ -774,6 +775,7 @@ public final class VulkanDevice implements AutoCloseable {
      * Vulkan requires: submits from other threads wait.
      */
     public void waitIdle() {
+        waits.incrementAndGet();
         synchronized (graphics) { // in one order, as no queue lock is taken in another
             synchronized (compute) {
                 synchronized (transfer) {
@@ -791,6 +793,7 @@ public final class VulkanDevice implements AutoCloseable {
      * so threads wait for their own work only, and gives it back.
      */
     public void submitAndWait(Queue queue, Consumer<VkCommandBuffer> commands) {
+        waits.incrementAndGet();
         OneOff oneOff = takeOneOff(queue);
         try {
             oneOff.run(queue, commands);
@@ -799,6 +802,14 @@ public final class VulkanDevice implements AutoCloseable {
                 oneOffs.get(queue).push(oneOff);
             }
         }
+    }
+
+    /**
+     * How often the CPU waited for the device so far: {@link #waitIdle} and {@link #submitAndWait} calls, from any
+     * thread. For tests and benchmarks of what stalls frames: code running while frames do should not add to it.
+     */
+    public int waits() {
+        return waits.get();
     }
 
     /** An idle command pool, buffer and fence of {@code queue}'s for {@link #submitAndWait}, made if none is idle. */
