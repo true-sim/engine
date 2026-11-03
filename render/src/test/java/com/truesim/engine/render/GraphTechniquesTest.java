@@ -3555,6 +3555,57 @@ class GraphTechniquesTest {
         }
     }
 
+    @Test
+    void aSheensAlbedoFollowsItsRoughnessUnderTheSunAndSky() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 16)) {
+            MetallicRoughnessParameters red = MR.withBaseColor(new Color(0.6, 0.1, 0.1, 1)).withRoughness(0.6f);
+            SheenParameters cyan = SheenParameters.DEFAULTS.withSheenColorFactor(new Color(0, 1, 1, 1));
+            int plain = materials.add(new Material(red));
+            // KHR_materials_sheen: roughness 0 is a sheen with no albedo, reflecting nothing and dimming nothing.
+            int smooth = materials.add(new Material(red).feature(cyan.withSheenRoughnessFactor(0)));
+            int slight = materials.add(new Material(red).feature(cyan.withSheenRoughnessFactor(0.05f)));
+            int rough = materials.add(new Material(red).feature(cyan.withSheenRoughnessFactor(1)));
+            scene.setMaterials(materials);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            List<Technique> shadings = new java.util.ArrayList<>();
+            if (device.primitiveIds()) {
+                shadings.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            }
+            int center = (SIZE / 2) * SIZE + SIZE / 2;
+            for (int pass = 0; pass <= shadings.size(); pass++) {
+                if (pass > 0) {
+                    main.port().replace(shadings.get(pass - 1));
+                }
+                int[] list = {plain, smooth, slight, rough};
+                int[] shown = new int[list.length];
+                for (int i = 0; i < list.length; i++) {
+                    scene.set(0, quadMesh, list[i], 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                    frame();
+                    shown[i] = image()[center];
+                }
+                for (int shift = 0; shift < 24; shift += 8) {
+                    assertThat((shown[1] >> shift) & 0xff).as("pass %d: roughness 0, as without", pass)
+                        .isCloseTo((shown[0] >> shift) & 0xff, within(1));
+                    assertThat((shown[2] >> shift) & 0xff).as("pass %d: nearly smooth, seen head-on: as without",
+                        pass).isCloseTo((shown[0] >> shift) & 0xff, within(1));
+                }
+                assertThat((shown[3] >> 8) & 0xff).as("pass %d: rough, its cyan shows", pass)
+                    .isGreaterThan(((shown[0] >> 8) & 0xff) + 4);
+                assertThat(shown[3] & 0xff).as("pass %d: rough, the red base dimmed", pass)
+                    .isLessThan(shown[0] & 0xff);
+            }
+            scene.setMaterials(null);
+        }
+    }
+
     /** The red, green and blue of {@code pixel}, added. */
     private static int sum(int pixel) {
         return (pixel & 0xff) + ((pixel >> 8) & 0xff) + ((pixel >> 16) & 0xff);

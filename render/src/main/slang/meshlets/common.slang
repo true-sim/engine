@@ -793,7 +793,7 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
         emissive *= 1 - s.clearcoat * coatFresnel(dot(s.clearcoatNormal, toViewer)); // seen through the coat
     }
     // Light from all around: the view's indirect-light table (an environment, later GI), or the constant sky
-    float3 color = (indirect != nullptr ? indirectLight(indirect, s, toViewer) : ambient(s, SKY_IRRADIANCE)) + emissive;
+    float3 color = (indirect != nullptr ? indirectLight(indirect, s, toViewer) : ambient(s, toViewer, SKY_IRRADIANCE)) + emissive;
     if (lights == nullptr)
     {
         color += reflected(s, toViewer, SUN, SUN_IRRADIANCE);

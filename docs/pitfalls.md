@@ -258,6 +258,17 @@ could take tile words as group counts.
 - Rule: a buffer layout shared by Java and a shader is computed once and handed over (a push field), never derived on
   both sides; test it with a region smaller than the image and with more than one bin.
 
+**A constant stood in for an integral that depends on the angle and the roughness.** Without an environment, the
+sheen's directional albedo (what it reflects of the sky, and takes from the base) was a fixed 0.157, its average at a
+mid roughness, and the sheen's roughness was clamped to 0.07: a sheen of roughness 0, which KHR_materials_sheen makes
+reflect nothing, dimmed its base by 16 % and added 16 % of its color under the sun and sky (SheenTestGrid's top row
+cyan where the Khronos reference shows none).
+- Proof: `GraphTechniquesTest.aSheensAlbedoFollowsItsRoughnessUnderTheSunAndSky` fails with the constant (the base's
+  red 63 against 75 without a sheen) and passes with `sheenAlbedo`, a fit to the lobe's integral (true-sim/engine,
+  PBR fixes from the Khronos samples).
+- Rule: an approximation of an integral is fitted to the integral over its whole domain and says how far it is off;
+  a path without the lookup table uses the same lobe the table was made from.
+
 ## Tests and measurements
 
 **A GPU time per frame that left out the frame start.** `GpuTimings` timed passes only; textures' copies and mip

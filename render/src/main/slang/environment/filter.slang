@@ -4,6 +4,7 @@
 // reflections are scaled by. Cube levels are written as 2D arrays of their faces, in Vulkan's face order (+X, -X, +Y,
 // -Y, +Z, -Z), and read as cubes.
 import bindless;
+import shading;
 
 static const float PI = 3.14159265;
 
@@ -266,8 +267,8 @@ void shMain(uint thread : SV_GroupIndex)
 
 /**
  * The BRDF lookup table, by n.v (across) and roughness (down): red and green GGX's split-sum scale and bias (Karis
- * 2013), blue the sheen's directional albedo (the Charlie distribution with Neubelt's visibility), for reflections of
- * the environment and the base a sheen leaves.
+ * 2013), blue the sheen's directional albedo (shading.slang's sheen lobe: the Charlie distribution and visibility), for
+ * reflections of the environment and the base a sheen leaves.
  */
 [shader("compute")]
 [numthreads(8, 8, 1)]
@@ -284,8 +285,7 @@ void brdfMain(uint3 id : SV_DispatchThreadID)
     float scale = 0;
     float bias = 0;
     float sheen = 0;
-    float sheenA = max(roughness, 0.07);
-    sheenA *= sheenA;
+    float sheenA = sheenAlpha(roughness);
     for (uint i = 0; i < push.samples; i++)
     {
         float2 xi = hammersley(i, push.samples);
@@ -312,8 +312,8 @@ void brdfMain(uint3 id : SV_DispatchThreadID)
         float r = sqrt(1 - z * z);
         float3 u = float3(r * cos(phi), r * sin(phi), z);
         float3 hu = normalize(u + v);
-        float visibility = 1 / (4 * (u.z + nv - u.z * nv));
-        sheen += charlie(saturate(hu.z), sheenA) * visibility * u.z * 2 * PI;
+        sheen += sheenDistribution(saturate(hu.z), sheenA) * sheenVisibility(max(u.z, 1.0e-4), nv, sheenA) * u.z
+            * 2 * PI;
     }
     images[push.target][id.xy] = float4(scale / push.samples, bias / push.samples, sheen / push.samples, 1);
 }

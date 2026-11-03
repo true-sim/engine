@@ -137,9 +137,11 @@ public float3 reflected(Surface s, float3 toViewer, float3 toLight, float3 irrad
     }
     if (any(s.sheenColor > 0))
     {
-        // A sheen over the base (KHR_materials_sheen): its lobe added, the base dimmed by what the sheen takes.
-        color *= sheenScaling(s);
-        if (nl > 0)
+        // A sheen over the base (KHR_materials_sheen): its lobe added, the base dimmed by what the sheen takes on the
+        // way in and out (the spec's albedo scaling, by the sheen's albedo towards the viewer and the light).
+        float nv = dot(s.normal, toViewer);
+        color *= min(sheenScaling(s, nv), sheenScaling(s, abs(nl)));
+        if (nl > 0 && nv > 0)
         {
             color += s.sheenColor * sheenLobe(s.normal, toViewer, h, nl, s.sheenRoughness) * irradiance * nl;
         }
@@ -250,27 +252,73 @@ float3 filmSensitivity(float opd, float3 shift)
 }
 
 /**
- * How much of the base a sheen leaves: 1 - its color's largest channel times the sheen's directional albedo, taken as
- * its average (0.157, for a mid roughness) rather than from a table.
+ * How much of the base a sheen leaves, seen or lit at the cosine `c` (KHR_materials_sheen's albedo scaling): 1 - its
+ * color's largest channel times the sheen's directional albedo there.
  */
-public float sheenScaling(Surface s)
+public float sheenScaling(Surface s, float c)
 {
-    return 1 - max(s.sheenColor.r, max(s.sheenColor.g, s.sheenColor.b)) * 0.157;
+    return 1 - max(s.sheenColor.r, max(s.sheenColor.g, s.sheenColor.b)) * sheenAlbedo(c, s.sheenRoughness);
 }
 
 /**
- * The sheen's lobe: the Charlie distribution (Estevez and Kulla 2017) times Neubelt's visibility, for normal `n`, half
- * vector `h` and cosine `nl` towards the light.
+ * The sheen's directional albedo at the cosine `nv` and perceptual `roughness`: what sheenLobe() reflects of light
+ * from all around (its integral over the hemisphere, times the cosine). A fit, A(r) exp(-K(r) / r nv^C(r)), to that
+ * integral taken numerically: within 0.021 of it for n.v from 0.1, 0.051 from 0.03 (rms 0.005). The environment's
+ * lookup table holds the same integral (environment/filter.slang's brdfMain), sampled.
+ */
+public float sheenAlbedo(float nv, float roughness)
+{
+    float r = max(roughness, 1.0e-4);
+    float a = -2.01813 + r * (3.56663 - 1.53113 * r) + 0.91413 / (r + 0.18781);
+    float k = 1.49117 + r * (-0.33299 + 0.38826 * r);
+    float c = 1.13524 - 0.14748 * r;
+    return saturate(a * exp(-k / r * pow(saturate(nv), c)));
+}
+
+/**
+ * The sheen's lobe: the Charlie distribution times its visibility (Estevez and Kulla 2017, as the glTF sample viewer),
+ * for normal `n`, half vector `h` and cosine `nl` towards the light, with the viewer above the surface.
  */
 float sheenLobe(float3 n, float3 toViewer, float3 h, float nl, float roughness)
 {
-    float a = max(roughness * roughness, 1.0e-3);
-    float nh = saturate(dot(n, h));
-    float sin2 = max(1 - nh * nh, 1.0e-4);
-    float distribution = (2 + 1 / a) * pow(sin2, 0.5 / a) / (2 * PI);
-    float nv = max(dot(n, toViewer), 1.0e-4);
-    float visibility = 1 / (4 * (nl + nv - nl * nv));
-    return distribution * visibility;
+    float a = sheenAlpha(roughness);
+    return sheenDistribution(saturate(dot(n, h)), a) * sheenVisibility(nl, max(dot(n, toViewer), 1.0e-4), a);
+}
+
+/** The Charlie distribution's alpha for perceptual `roughness`: its square (KHR_materials_sheen), above 0 to divide. */
+public float sheenAlpha(float roughness)
+{
+    return max(roughness * roughness, 1.0e-7);
+}
+
+/** The Charlie distribution (Estevez and Kulla 2017) of alpha `a`, at the cosine `nh` of the half vector. */
+public float sheenDistribution(float nh, float a)
+{
+    float sin2 = (1 - nh) * (1 + nh); // exact near nh = 0, where 1 - nh * nh rounds to 1
+    return (2 + 1 / a) * pow(sin2, 0.5 / a) / (2 * PI);
+}
+
+/**
+ * The sheen's visibility, the 1 / (4 nl nv) included (Estevez and Kulla 2017's height-correlated Smith form with
+ * their fitted Lambda, clamped to 1 as the glTF sample viewer), at the cosines `nl` and `nv`, for alpha `a`.
+ */
+public float sheenVisibility(float nl, float nv, float a)
+{
+    return saturate(1 / ((1 + sheenLambda(nv, a) + sheenLambda(nl, a)) * (4 * nv * nl)));
+}
+
+/** Estevez and Kulla's Lambda for the Charlie distribution of alpha `a`, at the cosine `c`. */
+float sheenLambda(float c, float a)
+{
+    return c < 0.5 ? exp(sheenLambdaFit(c, a)) : exp(2 * sheenLambdaFit(0.5, a) - sheenLambdaFit(1 - c, a));
+}
+
+/** Their fit of ln Lambda, its two tables' rows mixed by (1 - a)^2. */
+float sheenLambdaFit(float x, float a)
+{
+    float t = (1 - a) * (1 - a);
+    return lerp(21.5473, 25.3245, t) / (1 + lerp(3.82987, 3.32435, t) * pow(x, lerp(0.19823, 0.16801, t)))
+        + lerp(-1.97760, -1.27393, t) * x + lerp(-4.32054, -4.85967, t);
 }
 
 /** The clear coat's Fresnel, a dielectric's (index 1.5: 4 % head-on), by the cosine `c` towards the viewer. */
@@ -294,8 +342,11 @@ float lobe(float3 n, float3 toViewer, float3 h, float nl, float roughness)
     return distribution * 0.5 / max(gv + gl, 1.0e-5);
 }
 
-/** Light from all around, `irradiance` from the sky: diffuse only, darkened by the surface's occlusion. */
-public float3 ambient(Surface s, float3 irradiance)
+/**
+ * Light from all around, `irradiance` from the sky, seen from `toViewer` (unit): diffuse, a rough reflection, a sheen's
+ * and a clear coat's, darkened by the surface's occlusion.
+ */
+public float3 ambient(Surface s, float3 toViewer, float3 irradiance)
 {
     // The sky from behind too, through a surface transmitting diffusely: in its transmission color.
     float3 diffuse = (1 - s.diffuseTransmission) * s.albedo + s.diffuseTransmission * s.diffuseTransmissionColor;
@@ -303,7 +354,10 @@ public float3 ambient(Surface s, float3 irradiance)
         + surfaceFresnel(s, 1.0) * irradiance / PI * 0.5 * s.occlusion;
     if (any(s.sheenColor > 0))
     {
-        base = base * sheenScaling(s) + s.sheenColor * 0.157 * irradiance / PI * s.occlusion;
+        // The sheen lit evenly from all around reflects its albedo of it, which it takes from the base.
+        float nv = dot(s.normal, toViewer);
+        base = base * sheenScaling(s, nv) + s.sheenColor * sheenAlbedo(nv, s.sheenRoughness) * irradiance / PI
+            * s.occlusion;
     }
     if (s.clearcoat > 0)
     {

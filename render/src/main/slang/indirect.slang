@@ -125,7 +125,7 @@ public float3 indirectLight(IndirectLight* t, Surface s, float3 toViewer)
     if (any(s.sheenColor > 0))
     {
         float3 sheenLut = brdfTable(t, nv, s.sheenRoughness);
-        float albedo = sheenLut.z;
+        float albedo = min(sheenLut.z, 1.0);
         color = color * (1 - max(s.sheenColor.r, max(s.sheenColor.g, s.sheenColor.b)) * albedo)
             + s.sheenColor * sheenLight(t, reflect(-toViewer, n), s.sheenRoughness) * albedo * s.occlusion;
     }
