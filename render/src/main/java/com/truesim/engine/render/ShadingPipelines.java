@@ -185,6 +185,15 @@ final class ShadingPipelines implements AutoCloseable {
         return pipelines.size();
     }
 
+    /** How many pipelines into {@code target} ({@link #COLOR} ...) are made or being made. */
+    int count(int target) {
+        int count = 0;
+        for (Key key : pipelines.keySet()) {
+            count += key.target() == target ? 1 : 0;
+        }
+        return count;
+    }
+
     /** Nanoseconds spent making pipelines, on any thread. */
     long nanos() {
         return nanos.get();

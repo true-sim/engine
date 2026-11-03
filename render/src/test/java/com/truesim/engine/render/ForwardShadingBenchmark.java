@@ -371,8 +371,8 @@ class ForwardShadingBenchmark {
                 long waited = renderer.shading().waitedNanos();
                 int builds = graph.builds();
                 renderer.shading().coldForBenchmarks((int) System.nanoTime());
-                // A bin not drawn yet (a coat over metallic-roughness with another feature each time).
-                int added = materials.add(material(5 + extra).feature(ClearcoatParameters.DEFAULTS));
+                // A bin no table drew yet: a coat over metallic-roughness with specular, IOR or iridescence.
+                int added = materials.add(material(7 + extra).feature(ClearcoatParameters.DEFAULTS));
                 double addFrame = recordMillis(device, graph);
                 double slowest = addFrame;
                 long until = System.nanoTime() + FIRST_DRAW_GAP * 1_000_000L;
@@ -393,6 +393,188 @@ class ForwardShadingBenchmark {
                     (renderer.shading().waitedNanos() - waited) / 1e6, before, after);
                 renderer.scene().setMaterials(null);
             }
+        }
+    }
+
+    /**
+     * Depth by type with geometry hooks (#68's first hook, keep()): a depth draw of the 30,000 rocks through a camera
+     * of its own (a shadow map's), with no type having a hook (the lists as culled, the shared pipelines: nothing split),
+     * with the dissolving type registered but no rock taking it (the opaque lists split, every rock in the shared
+     * category), and with one rock in 12 dissolving. Culling's and the depth pass's GPU time (the graph's timings) and
+     * the frame's (timestamps around batches of frames); 5 rounds taking turns, ranges of the rounds' medians.
+     */
+    @Test
+    void depthByGeometryHooks() {
+        String[] configurations = {"no type with hooks", "dissolve registered, unused", "1 rock in 12 dissolving"};
+        try (VulkanInstance instance = VulkanInstance.builder().applicationName("benchmark").surfaces(false).build();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 100_000, 4));
+             GpuScene gpu = new GpuScene(device, pool, 40_000);
+             MeshletRenderer renderer = new MeshletRenderer(device, gpu, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT);
+             GpuImage copied = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+             MemoryStack stack = stackPush()) {
+            int rock = pool.add(MeshletBenchmark.rock(6));
+            int ground = pool.add(MeshletBenchmark.terrain(1024));
+            rocksOnTerrain(gpu, rock, ground, 30_000, 600, -12);
+            Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
+            RenderView depthView = renderer.createView(ViewOptions.of(1 << 20, 80_000_000));
+            ExternalImage target = new ExternalImage("depth as color", WIDTH, HEIGHT,
+                com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(copied.handle(), 0);
+            VkPhysicalDeviceProperties properties = VkPhysicalDeviceProperties.malloc(stack);
+            vkGetPhysicalDeviceProperties(device.gpu().handle(), properties);
+            double period = properties.limits().timestampPeriod();
+            LongBuffer handle = stack.mallocLong(1);
+            vkCreateQueryPool(device.handle(), VkQueryPoolCreateInfo.calloc(stack)
+                .sType(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO).queryType(VK_QUERY_TYPE_TIMESTAMP).queryCount(2),
+                null, handle);
+            long queries = handle.get(0);
+            Materials[] tables = new Materials[configurations.length];
+            try {
+                for (int c = 0; c < configurations.length; c++) {
+                    tables[c] = table(device, 4);
+                    if (c > 0) {
+                        tables[c].register(com.truesim.engine.render.materials.Dissolve.TYPE);
+                    }
+                    if (c == 2) { // material 12 (rocks 12, 24, ...) dissolves
+                        tables[c].set(MATERIALS, new Material(
+                            com.truesim.engine.render.materials.DissolveParameters.DEFAULTS));
+                    }
+                }
+                MeshletRenderer.Path[] paths = device.meshShaders()
+                    ? new MeshletRenderer.Path[] {MeshletRenderer.Path.MESH_SHADERS, MeshletRenderer.Path.INDEXED}
+                    : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED};
+                Sample[][][] samples = new Sample[paths.length][configurations.length][ROUNDS];
+                for (int round = -1; round < ROUNDS; round++) {
+                    for (int p = 0; p < paths.length; p++) {
+                        renderer.setPath(paths[p]);
+                        for (int c = 0; c < configurations.length; c++) {
+                            gpu.setMaterials(tables[c]);
+                            Sample sample = measureDepth(device, renderer, depthView, camera, target, queries,
+                                period);
+                            if (round >= 0) {
+                                samples[p][c][round] = sample;
+                            }
+                            System.out.printf(Locale.ROOT, "  round %d, %s, %s: frame %.3f ms GPU, culling %.3f ms,"
+                                + " depth %.3f ms, record %.3f ms CPU, split for %d%n", round, pathName(paths[p]),
+                                configurations[c], sample.gpu, sample.culling, sample.draws, sample.cpu,
+                                depthView.splitCategories());
+                        }
+                    }
+                }
+                System.out.println("Depth by geometry hooks, ranges over the rounds (of each round's median):");
+                for (int p = 0; p < paths.length; p++) {
+                    for (int c = 0; c < configurations.length; c++) {
+                        Sample[] all = samples[p][c];
+                        System.out.printf(Locale.ROOT, "  | %s | %s | %s | %s | %s | %s |%n", pathName(paths[p]),
+                            configurations[c], range(all, Sample::gpu), range(all, Sample::culling),
+                            range(all, Sample::draws), range(all, Sample::cpu));
+                    }
+                }
+                System.out.printf(Locale.ROOT, "  pipelines of types: depth %d%n",
+                    renderer.shading().count(ShadingPipelines.DEPTH));
+            } finally {
+                gpu.setMaterials(null);
+                for (Materials table : tables) {
+                    if (table != null) {
+                        table.close();
+                    }
+                }
+                vkDestroyQueryPool(device.handle(), queries, null);
+            }
+        }
+    }
+
+    /** A depth draw of {@code view} through {@code camera}, its depth copied into {@code target} to be built. */
+    private record DepthDraw(SceneDraw draw) implements com.truesim.engine.graph.Technique {
+        static final com.truesim.engine.graph.Key<com.truesim.engine.graph.Image> KEY =
+            com.truesim.engine.graph.Key.image("benchmark.depth");
+
+        @Override
+        public List<com.truesim.engine.graph.Key<?>> provides() {
+            return List.of(KEY);
+        }
+
+        @Override
+        public void build(com.truesim.engine.graph.GraphBuilder g) {
+            com.truesim.engine.graph.Image depth = g.request(draw).depth();
+            com.truesim.engine.graph.Image image = g.create("depth as color",
+                com.truesim.engine.graph.ImageDesc.of(com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, WIDTH,
+                    HEIGHT));
+            com.truesim.engine.vulkan.Pipeline pipeline = g.computeProgram("shaders/test/depthcopy.spv", "copyMain",
+                8);
+            g.pass("copy depth").read(depth, com.truesim.engine.graph.Access.SAMPLED_COMPUTE)
+                .write(image, com.truesim.engine.graph.Access.STORAGE_WRITE).record(ctx -> {
+                    try (MemoryStack stack = stackPush()) {
+                        long push = stack.nmalloc(4, 8);
+                        org.lwjgl.system.MemoryUtil.memPutInt(push, ctx.sampled(depth));
+                        org.lwjgl.system.MemoryUtil.memPutInt(push + 4, ctx.storage(image));
+                        pipeline.bind(ctx.unsafe().commands());
+                        pipeline.push(ctx.unsafe().commands(), push, 8);
+                        org.lwjgl.vulkan.VK10.vkCmdDispatch(ctx.unsafe().commands(), WIDTH / 8, HEIGHT / 8, 1);
+                    }
+                });
+            g.provide(KEY, image);
+        }
+    }
+
+    /** As {@link #measure}, of a depth draw: culling and the depth pass from the graph's timings. */
+    private static Sample measureDepth(VulkanDevice device, MeshletRenderer renderer, RenderView view, Camera camera,
+        ExternalImage target, long queries, double period) {
+        try (FrameGraph graph = new FrameGraph(device, 2)) {
+            graph.add(new DepthDraw(new SceneDraw(SceneGeometry.meshlets(renderer), view, camera,
+                SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, WIDTH, HEIGHT, false))).output(DepthDraw.KEY, target);
+            for (int i = 0; i < 10; i++) {
+                device.submitAndWait(device.graphics(), graph::record);
+            }
+            double[] gpu = new double[BATCHES];
+            double[] cpu = new double[BATCHES * BATCH];
+            for (int batch = 0; batch < BATCHES; batch++) {
+                int first = batch * BATCH;
+                device.submitAndWait(device.graphics(), commands -> {
+                    vkCmdResetQueryPool(commands, queries, 0, 2);
+                    vkCmdWriteTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 0);
+                    for (int i = 0; i < BATCH; i++) {
+                        long t0 = System.nanoTime();
+                        graph.record(commands);
+                        cpu[first + i] = (System.nanoTime() - t0) / 1e6;
+                        fullBarrier(commands);
+                    }
+                    vkCmdWriteTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queries, 1);
+                });
+                try (MemoryStack stack = stackPush()) {
+                    LongBuffer stamps = stack.mallocLong(2);
+                    vkGetQueryPoolResults(device.handle(), queries, 0, 2, stamps, 8,
+                        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+                    gpu[batch] = (stamps.get(1) - stamps.get(0)) * period / 1e6 / BATCH;
+                }
+            }
+            graph.timings(true);
+            double[] culling = new double[TIMED];
+            double[] draws = new double[TIMED];
+            for (int i = -4; i < TIMED; i++) {
+                device.submitAndWait(device.graphics(), graph::record);
+                GpuTimings timings = graph.timings();
+                if (i < 0 || timings == null) {
+                    continue;
+                }
+                for (int t = 0; t < timings.count(); t++) {
+                    String pass = timings.pass(t);
+                    double ms = timings.millis(t);
+                    if (Double.isNaN(ms)) {
+                        continue;
+                    }
+                    if (pass.equals("meshlet culling")) {
+                        culling[i] += ms;
+                    } else if (pass.startsWith("meshlet depth")) {
+                        draws[i] += ms;
+                    }
+                }
+            }
+            graph.timings(false);
+            return new Sample(median(gpu), median(culling), median(draws), median(cpu), 0);
         }
     }
 

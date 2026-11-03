@@ -83,6 +83,9 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     private static final int RECORD_BYTES = 16;
     /** Draw lists: one per raster bin, then one per bin for mirrored instances (drawn with clockwise front faces). */
     private static final int LISTS = 2 * MeshletRenderer.BINS;
+    /** The opaque raster bins' lists, a bit each: unmirrored and mirrored. */
+    private static final int OPAQUE_LISTS = ((1 << MeshletRenderer.BIN_BLENDED) - 1)
+        * (1 | 1 << MeshletRenderer.BINS);
     private static final float[] NO_COLOR = new float[3]; // depth and IDs: cleared to 0
     private static final ValueLayout.OfInt U32 = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfFloat F32 = ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -374,8 +377,11 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                 | 1 << MeshletRenderer.BIN_BLENDED + MeshletRenderer.BINS : 0;
             case DEPTH -> 0;
         };
+        // Depth and IDs cut their opaque lists by type with geometry hooks, where the table has such types.
+        int geometryTypes = kind == SurfaceOutput.Kind.SHADED ? 0 : materials.geometryTypeCount();
+        int byGeometry = geometryTypes == 0 ? 0 : OPAQUE_LISTS;
         Selection selection = new Selection(this, view, camera, targets.region(),
-            byType == 0 ? 1 : materials.binCount(), byType);
+            Math.max(byType == 0 ? 1 : materials.binCount(), geometryTypes + 1), byType, byGeometry);
         selections.put(view, selection);
         Buffer list = g.request(selection);
         SceneData.Buffers scene = g.request(new SceneData(renderer));
@@ -406,9 +412,9 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         targets.readIndirect(pass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
         IndirectInputs.Set indirect = targets.indirect();
         Pipeline[] pipeline = switch (kind) {
-            case DEPTH -> shared(drawDepth, selection.categories());
+            case DEPTH -> geometry(materials, drawDepth, ShadingPipelines.DEPTH, selection);
             case SHADED -> typed(materials, false, selection.categories());
-            case IDS -> shared(drawIds, selection.categories());
+            case IDS -> geometry(materials, drawIds, ShadingPipelines.IDS, selection);
         };
         pass.record(ctx -> {
             if (shadows != null) {
@@ -430,6 +436,44 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             parts[list * categories] = pipelines[list];
         }
         return parts;
+    }
+
+    /**
+     * Pipelines per part of the draw lists (list * categories + category) into depth or IDs ({@code target}): category
+     * 0 every type without geometry hooks, with {@code pipelines}' list's; in lists cut by type with hooks, category n
+     * the table's type n with them, with its own entry point running its hooks.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    private Pipeline[] geometry(Materials materials, Pipeline[] pipelines, int target, Selection selection) {
+        int categories = selection.categories();
+        Pipeline[] parts = shared(pipelines, categories);
+        if (selection.byGeometry() == 0) {
+            return parts;
+        }
+        for (int number = 1; number <= Math.min(categories - 1, materials.geometryTypeCount()); number++) {
+            MaterialType type = materials.geometryType(number);
+            for (int list = 0; list < LISTS; list++) {
+                if ((selection.byGeometry() & 1 << list) != 0) {
+                    parts[list * categories + number] = shading.get(geometryKey(type, list, target));
+                }
+            }
+        }
+        return parts;
+    }
+
+    /**
+     * What the pipeline drawing draw list {@code list}'s part of {@code type} (which has geometry hooks) into depth or
+     * IDs ({@code target}) is made of: the classic vertex stage and the type's depth or classic ID entry point.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    static ShadingPipelines.Key geometryKey(MaterialType type, int list, int target) {
+        int bin = list % MeshletRenderer.BINS;
+        boolean masked = bin == MeshletRenderer.BIN_MASKED || bin == MeshletRenderer.BIN_BLENDED;
+        return new ShadingPipelines.Key("shaders/classic/draw.spv", "classicVertexMain", false, type.geometryShader(),
+            type.name() + (masked ? "Masked" : "") + (target == ShadingPipelines.DEPTH ? "DepthMain" : "ClassicIdsMain"),
+            0, type.geometry(), (bin == MeshletRenderer.BIN_OPAQUE ? ShadingPipelines.CULL_BACK
+            : ShadingPipelines.DOUBLE_SIDED) | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0), target,
+            DRAW_PUSH);
     }
 
     /**
@@ -464,7 +508,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         int bin = list % MeshletRenderer.BINS;
         boolean masked = bin == MeshletRenderer.BIN_MASKED || bin == MeshletRenderer.BIN_BLENDED;
         return new ShadingPipelines.Key("shaders/classic/draw.spv", "classicVertexMain", false, type.forwardShader(),
-            type.name() + (weighted ? "BlendedMain" : masked ? "MaskedMain" : "FragmentMain"), features, 0,
+            type.name() + (weighted ? "BlendedMain" : masked ? "MaskedMain" : "FragmentMain"), features, type.geometry(),
             (bin == MeshletRenderer.BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED)
                 | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0),
             weighted ? ShadingPipelines.WEIGHTED : ShadingPipelines.COLOR, DRAW_PUSH);
@@ -487,12 +531,13 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
 
     /**
      * View {@code view}'s draw list for a frame: reset, then selected (each part's detail level, raster bin and, in
-     * the lists of {@code byType} (a bit each), shading bin, of {@code categories}) on the GPU, the camera set first
-     * where given (a light's), the detail for {@code region}'s render scale where given. A request: the opaque draw
-     * and the blended one of a view share one selection.
+     * the lists of {@code byType} (a bit each), shading bin, in those of {@code byGeometry} its type's number among
+     * those with geometry hooks, of {@code categories}) on the GPU, the camera set first where given (a light's), the
+     * detail for {@code region}'s render scale where given. A request: the opaque draw and the blended one of a view
+     * share one selection.
      */
     record Selection(ClassicLodGeometry geometry, RenderView view, Camera camera,
-        com.truesim.engine.graph.ViewPort region, int categories, int byType)
+        com.truesim.engine.graph.ViewPort region, int categories, int byType, int byGeometry)
         implements com.truesim.engine.graph.Request<Buffer> {
 
         @Override
@@ -514,7 +559,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                     } else if (region != null) {
                         view.detail(region.renderScale()); // detail for the size it renders this frame
                     }
-                    geometry.select(ctx.unsafe().commands(), view, ctx.address(list), categories, byType);
+                    geometry.select(ctx.unsafe().commands(), view, ctx.address(list), categories, byType,
+                        byGeometry);
                 });
             return list;
         }
@@ -580,7 +626,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     }
 
     /** Selects view {@code view}'s draws into the draw list at {@code list}. */
-    private void select(VkCommandBuffer commands, RenderView view, long list, int categories, int byType) {
+    private void select(VkCommandBuffer commands, RenderView view, long list, int categories, int byType,
+        int byGeometry) {
         view.refresh(); // from where its camera is now
         GpuScene scene = renderer.scene();
         scene.upload(commands);
@@ -597,6 +644,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             memPutLong(push + SelectPush.RECORDS, list + recordsOffset(categories));
             memPutInt(push + SelectPush.CATEGORIES, categories);
             memPutInt(push + SelectPush.BY_TYPE, byType);
+            memPutInt(push + SelectPush.BY_GEOMETRY, byGeometry);
             memPutInt(push + SelectPush.INSTANCE_COUNT, scene.highWater());
             memPutInt(push + SelectPush.MAX_DRAWS, maxDraws);
             memPutLong(push + SelectPush.MATERIALS, scene.materialsAddress()); // each part's raster bin

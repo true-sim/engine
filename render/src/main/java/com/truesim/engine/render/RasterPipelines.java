@@ -105,25 +105,16 @@ final class RasterPipelines implements AutoCloseable {
         return mesh[DEPTH] != null;
     }
 
+    /** Whether shaded draws on mesh shaders take the lean path (fragments from barycentrics and the triangle). */
+    boolean leanColor() {
+        return slimMeshes;
+    }
+
     /** Throws without primitive IDs in fragment shaders: no visibility buffer. */
     void checkIds() {
         if (indexed[IDS] == null) {
             throw new IllegalStateException("The device has no primitive IDs in fragment shaders (geometryShader)");
         }
-    }
-
-    /**
-     * Draws {@code v}'s raster bins in {@code role} ({@link #DEPTH}, {@link #IDS}) into its own rendering scope: the
-     * late phase's lists over the attachments with {@code late}, else the early (or only) phase's into cleared ones.
-     */
-    void draw(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading, int role, boolean late,
-        long colorView, long depthView, int width, int height) {
-        try (MemoryStack stack = stackPush()) {
-            beginRendering(commands, stack, colorView, depthView, width, height, 0, 0, 0, late);
-            setViewport(commands, stack, width, height);
-        }
-        drawBins(commands, scene, v, meshShading, role, late);
-        Commands.endRendering(commands);
     }
 
     /**
@@ -179,7 +170,7 @@ final class RasterPipelines implements AutoCloseable {
             ? "shaders/meshlets/lean.spv" : "shaders/meshlets/mesh.spv",
             !meshShading ? "vertexMain" : lean ? "meshLeanTypedMain" : "meshIdsTypedMain", meshShading,
             lean ? type.forwardLeanShader() : type.forwardShader(), type.name() + (lean ? "Lean" : "") + suffix,
-            features, 0, bin == BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED,
+            features, type.geometry(), bin == BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED,
             weighted ? ShadingPipelines.WEIGHTED : ShadingPipelines.COLOR, DRAW_PUSH);
     }
 
@@ -252,6 +243,116 @@ final class RasterPipelines implements AutoCloseable {
                 make(path);
             }
             return weighted[path][category];
+        }
+    }
+
+    /**
+     * What a pipeline drawing raster bin {@code bin} into depth or IDs ({@code role}) from a split list is made of: the
+     * shared fragment stage for every type without geometry hooks ({@code type} null), else {@code type}'s depth or ID
+     * entry point running its hooks, behind the geometry stage reading the split list (full vertices on mesh shaders,
+     * but for the shared opaque depth, from positions alone).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    ShadingPipelines.Key geometryKey(MaterialType type, int bin, int role, boolean meshShading) {
+        boolean masked = masking(bin);
+        boolean depth = role == DEPTH;
+        boolean slim = meshShading && slimMeshes && depth && !masked && type == null;
+        String geometryShader = !meshShading ? "shaders/meshlets/draw.spv" : "shaders/meshlets/mesh.spv";
+        String geometryEntry = !meshShading ? "vertexMain" : slim ? "meshTypedMain" : "meshIdsTypedMain";
+        String fragmentShader;
+        String fragmentEntry;
+        if (type != null) {
+            fragmentShader = type.geometryShader();
+            fragmentEntry = type.name() + (masked ? "Masked" : "") + (depth ? "DepthMain" : "IdsMain");
+        } else if (depth) {
+            fragmentShader = masked ? "shaders/meshlets/draw.spv" : null;
+            fragmentEntry = masked ? "maskedDepthMain" : null;
+        } else {
+            fragmentShader = "shaders/visibility/ids.spv";
+            fragmentEntry = masked ? "maskedIdsMain" : "idsMain";
+        }
+        return new ShadingPipelines.Key(geometryShader, geometryEntry, meshShading, fragmentShader, fragmentEntry, 0,
+            type == null ? 0 : type.geometry(), bin == BIN_OPAQUE ? ShadingPipelines.CULL_BACK
+            : ShadingPipelines.DOUBLE_SIDED, depth ? ShadingPipelines.DEPTH : ShadingPipelines.IDS, DRAW_PUSH);
+    }
+
+    /**
+     * Depth or IDs ({@link #DEPTH}, {@link #IDS}) by type with geometry hooks, from lists split into categories: per
+     * category its type with hooks (null: every type without, which share pipelines), and per opaque raster bin a
+     * pipeline running its hooks; per path, made for the path of the build and for the other when a frame first draws
+     * on it.
+     */
+    final class Geometry {
+        private final MaterialType[] types;
+        private final int role;
+        private final Pipeline[][] pipelines = new Pipeline[2][];
+
+        @AllowAllocation("building the graph, when it changes")
+        private Geometry(MaterialType[] types, int role, boolean meshShading) {
+            this.types = types;
+            this.role = role;
+            make(meshShading ? 1 : 0);
+        }
+
+        /** How many categories it draws. */
+        int categories() {
+            return types.length;
+        }
+
+        @AllowAllocation("building the graph, or a frame first drawing on the other path")
+        private void make(int path) {
+            Pipeline[] made = new Pipeline[types.length * BINS];
+            for (int category = 0; category < types.length; category++) {
+                for (int bin = 0; bin < BIN_BLENDED; bin++) {
+                    made[category * BINS + bin] = store.get(geometryKey(types[category], bin, role, path == 1));
+                }
+            }
+            pipelines[path] = made;
+        }
+
+        Pipeline pipeline(boolean meshShading, int category, int bin) {
+            int path = meshShading ? 1 : 0;
+            if (pipelines[path] == null) {
+                make(path);
+            }
+            return pipelines[path][category * BINS + bin];
+        }
+    }
+
+    /**
+     * Depth or IDs ({@code role}) by type with geometry hooks of lists split into categories, category c drawn as
+     * {@code types[c]} (null: shared by every type without hooks).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    Geometry geometry(MaterialType[] types, int role, boolean meshShading) {
+        if (role == IDS) {
+            checkIds();
+        }
+        return new Geometry(types, role, meshShading);
+    }
+
+    /**
+     * Draws {@code v}'s opaque raster bins into depth or IDs ({@code pipelines}' role) by category of its split lists,
+     * into the rendering scope open on {@code commands}: an indirect draw per raster bin and category.
+     */
+    void drawGeometry(VkCommandBuffer commands, GpuScene scene, RenderView v, boolean meshShading, boolean late,
+        Geometry pipelines) {
+        int room = v.splitCategories();
+        if (room < pipelines.categories()) {
+            throw new IllegalStateException("View " + v.index() + "'s lists are split for " + room
+                + " categories, not " + pipelines.categories());
+        }
+        try (MemoryStack stack = stackPush()) {
+            long push = typedPush(stack, scene, v, late, 0, 0, 0, room);
+            if (!meshShading) {
+                Commands.bindIndexBuffer(commands, v.frameIndices().handle(), 0, VK_INDEX_TYPE_UINT32);
+            }
+            for (int bin = 0; bin < BIN_BLENDED; bin++) {
+                for (int category = 0; category < pipelines.categories(); category++) {
+                    drawTyped(commands, v, meshShading, push, bin, category, room,
+                        pipelines.pipeline(meshShading, category, bin));
+                }
+            }
         }
     }
 

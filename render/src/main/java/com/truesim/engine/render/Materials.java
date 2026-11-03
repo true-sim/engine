@@ -100,6 +100,8 @@ public final class Materials implements AutoCloseable {
     private long rastersVersion;
     private int bins;
     private final Map<Long, Integer> binOf = new HashMap<>();
+    // The types with geometry hooks (MaterialType.geometry), in registration order: each one's number is its index + 1.
+    private final List<MaterialType> geometryTypes = new java.util.concurrent.CopyOnWriteArrayList<>();
     private int blended; // how many materials are drawn blended: the transparency pass runs while there are
     private int transmissive; // how many are transmissive: transparency copies the scene behind while there are
     /** The type of each parameters' record, where one type takes it. */
@@ -176,6 +178,12 @@ public final class Materials implements AutoCloseable {
             throw new IllegalStateException("A table names at most " + MAX_TYPES + " material types");
         }
         types.add(type);
+        if (type.geometry() != 0) {
+            if (geometryTypes.size() == 0xffff) {
+                throw new IllegalStateException("A table names at most 65,535 types with geometry hooks");
+            }
+            geometryTypes.add(type);
+        }
         if (byRecord.putIfAbsent(type.parameters(), type) != null) {
             ambiguous.add(type.parameters());
         }
@@ -290,6 +298,24 @@ public final class Materials implements AutoCloseable {
         if (masks[1] >= 0 && block + masks[1] >= at && block + masks[1] < at + bytes) {
             table.putInt(slot + MaterialLayout.MASK_TEXTURE, table.getInt(block + masks[1]));
         }
+    }
+
+    /**
+     * How many of the registered types have geometry hooks ({@link MaterialType#geometry}): depth, shadow and ID passes
+     * draw each with pipelines of its own, the other types with shared ones. Allocates nothing.
+     */
+    public int geometryTypeCount() {
+        return geometryTypes.size();
+    }
+
+    /** Type {@code number} (from 1) of those with geometry hooks, in registration order. */
+    public MaterialType geometryType(int number) {
+        return geometryTypes.get(number - 1);
+    }
+
+    /** {@code type}'s number among the types with geometry hooks, from 1; 0 if it has none. */
+    private int geometryNumber(MaterialType type) {
+        return type.geometry() == 0 ? 0 : geometryTypes.indexOf(type) + 1;
     }
 
     /** How many material types are registered. Allocates nothing. */
@@ -935,7 +961,8 @@ public final class Materials implements AutoCloseable {
         table.putInt(slot + MaterialLayout.GEOMETRY, 0);
         table.putInt(slot + MaterialLayout.FEATURES, material.featureMask());
         table.putInt(slot + MaterialLayout.FEATURE_TABLE, (int) featureTable);
-        table.putInt(slot + MaterialLayout.BIN, bin);
+        // Its shading bin, and its type's number among those with geometry hooks (materials.slang's Material.bin).
+        table.putInt(slot + MaterialLayout.BIN, bin | geometryNumber(types.get(typeId)) << 16);
         count(materials[id], -1);
         count(material, 1);
         materials[id] = material;

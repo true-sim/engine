@@ -57,6 +57,8 @@ import com.truesim.engine.render.materials.IorParameters;
 import com.truesim.common.math.Vec4;
 import com.truesim.engine.render.materials.TextureTransformParameters;
 import com.truesim.engine.render.materials.UnlitParameters;
+import com.truesim.engine.render.materials.Dissolve;
+import com.truesim.engine.render.materials.DissolveParameters;
 import com.truesim.engine.render.materials.Glow;
 import com.truesim.engine.render.materials.GlowParameters;
 import com.truesim.engine.render.materials.Tinted;
@@ -1279,9 +1281,9 @@ class GraphTechniquesTest {
                 .isThrownBy(() -> materials.update(quadMaterial, MetallicRoughnessParameters.ROUGHNESS, 0.5f));
             assertThatIllegalArgumentException().isThrownBy(() -> materials.register(Glow.TYPE));
             assertThatIllegalArgumentException().isThrownBy(() -> new MaterialType("half", GlowParameters.class,
-                GlowParameters::fromValues, 0, "a.spv", "a", "b.spv", null, "c.spv", "d.spv"));
+                GlowParameters::fromValues, 0, "a.spv", "a", "b.spv", null, "c.spv", "d.spv", "e.spv"));
             assertThatNullPointerException().as("forward entry points").isThrownBy(() -> new MaterialType("none",
-                GlowParameters.class, GlowParameters::fromValues, 0, "a.spv", "a", null, null, null, null));
+                GlowParameters.class, GlowParameters::fromValues, 0, "a.spv", "a", null, null, null, null, null));
             // At half the resolution: the glow type's bin, past bin 0, is shaded from the list classification wrote
             // into, though the render region has fewer tiles than the images the lists are spaced for.
             graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.HEADROOM, 1.5f);
@@ -1433,6 +1435,142 @@ class GraphTechniquesTest {
         } catch (IllegalArgumentException | IllegalStateException e) {
             main.port().add(shading);
         }
+    }
+
+    /**
+     * A material type with a geometry hook (dissolve: its keep() cuts a checkerboard out of its surfaces) has the same
+     * holes in color (forward, and the visibility buffer's), in a depth pass and in a shadow map (a depth draw through
+     * a camera of its own), on the meshlet paths and classic LOD; types without the hook keep the shared depth and ID
+     * pipelines, and no list is split for depth or IDs while no type has one.
+     */
+    @Test
+    void geometryHooksCutTheSameHolesInEveryPass() {
+        assertThat(Dissolve.TYPE.geometry()).as("from its parameters' attribute").isEqualTo(Material.GEOMETRY_KEEP);
+        assertThat(Glow.TYPE.geometry()).isZero();
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        try (Materials materials = new Materials(device, 8);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            materials.register(Glow.TYPE);
+            int quadMaterial = materials.add(new Material(GlowParameters.DEFAULTS));
+            scene.setMaterials(materials);
+            scene.set(0, quadMesh, quadMaterial, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            RenderView depthView = renderer.createView(ViewOptions.of(256, 1 << 12));
+            depthView.set(camera, 1, MeshletRenderer.MODE_LIT);
+            RenderView shadowView = renderer.createView(ViewOptions.of(256, 1 << 12));
+            SceneView main = main(camera);
+            SceneGeometry meshlets = SceneGeometry.meshlets(renderer);
+            SceneGeometry classics = new SceneGeometry(classic.add(quadMesh, mesh));
+            main.port().output(Keys.SCENE_COLOR, output);
+            // No type with a hook: depth draws keep their lists as culled and the shared pipelines; none is made.
+            replaceShading(main, new ClusteredForwardShading(meshlets, main, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            int whole = count(frames(3), GraphTechniquesTest::glowing);
+            assertThat(whole).as("the glowing quad").isGreaterThan(SIZE * SIZE / 10);
+            depthImage(main, new SceneDraw(meshlets, depthView, null, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT,
+                SIZE, SIZE, false));
+            assertThat(depthView.splitCategories()).as("not split for depth").isZero();
+            assertThat(renderer.shading().count(ShadingPipelines.DEPTH)).as("depth pipelines of types").isZero();
+            // The dissolving type: holes in its cells.
+            materials.register(Dissolve.TYPE);
+            materials.set(quadMaterial, new Material(DissolveParameters.DEFAULTS));
+            java.util.function.IntPredicate yellow = pixel -> red(pixel) >= 250 && green(pixel) >= 250
+                && blue(pixel) <= 5;
+            org.assertj.core.api.SoftAssertions softly = new org.assertj.core.api.SoftAssertions();
+            for (SceneGeometry geometry : new SceneGeometry[] {meshlets, classics}) {
+                boolean isClassic = geometry == classics;
+                MeshletRenderer.Path[] paths = isClassic ? new MeshletRenderer.Path[] {MeshletRenderer.Path.AUTO}
+                    : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED, MeshletRenderer.Path.AUTO};
+                for (MeshletRenderer.Path path : paths) {
+                    renderer.setPath(path);
+                    String what = (isClassic ? "classic LOD" : "meshlets") + ", " + path;
+                    replaceShading(main, new ClusteredForwardShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                    boolean[] color = mask(frames(3), yellow);
+                    int kept = count(color);
+                    softly.assertThat(kept).as("%s: a checkerboard, half the quad", what)
+                        .isBetween(whole * 3 / 10, whole * 7 / 10);
+                    boolean[] depth = mask(depthImage(main, new SceneDraw(geometry, depthView, null,
+                        SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, SIZE, SIZE, false)), pixel -> red(pixel) > 0);
+                    boolean[] shadow = mask(depthImage(main, new SceneDraw(geometry, shadowView, camera,
+                        SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, SIZE, SIZE, false)), pixel -> red(pixel) > 0);
+                    // The lean mesh path interpolates color's texture coordinates from barycentrics, depth's in the
+                    // rasterizer: at a cell's edge a pixel may fall either way. Elsewhere the same vertices: exact.
+                    int edge = path == MeshletRenderer.Path.AUTO && !isClassic && renderer.raster().leanColor()
+                        ? SIZE * 2 : 0;
+                    softly.assertThat(differing(color, depth)).as("%s: color against depth", what)
+                        .isLessThanOrEqualTo(edge);
+                    softly.assertThat(differing(color, shadow)).as("%s: color against the shadow map", what)
+                        .isLessThanOrEqualTo(edge);
+                    if (device.primitiveIds()) {
+                        replaceShading(main, new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                        boolean[] ids = mask(frames(3), yellow);
+                        softly.assertThat(differing(ids, depth)).as("%s: the visibility buffer against depth", what)
+                            .isZero(); // both from full vertices
+                    }
+                }
+            }
+            renderer.setPath(MeshletRenderer.Path.AUTO);
+            // Pipelines by pass: depth and IDs made per raster bin for the dissolving type and for the shared
+            // category of the split lists, nothing for glow or metallic-roughness.
+            int depthPipelines = renderer.shading().count(ShadingPipelines.DEPTH);
+            int idPipelines = renderer.shading().count(ShadingPipelines.IDS);
+            System.out.printf("Pipelines of types: color %d, weighted %d, depth %d, IDs %d%n",
+                renderer.shading().count(ShadingPipelines.COLOR), renderer.shading().count(ShadingPipelines.WEIGHTED),
+                depthPipelines, idPipelines);
+            softly.assertThat(depthPipelines).as("depth: shared and dissolve's, 3 raster bins, both meshlet paths and"
+                + " classic's 6 lists").isEqualTo(renderer.raster().meshShaders() ? 3 * 2 * 2 + 6 : 3 * 2 + 6);
+            softly.assertAll();
+            scene.setMaterials(null);
+        }
+    }
+
+    /**
+     * The depth of {@code draw} as red, read back after 3 frames, output in place of {@code main}'s scene color (its
+     * port off meanwhile).
+     */
+    private int[] depthImage(SceneView main, SceneDraw draw) {
+        Key<Image> key = Key.image("test.holes");
+        DepthCopy copy = new DepthCopy(key, draw);
+        main.port().removeOutput(Keys.SCENE_COLOR, output).enabled(false);
+        graph.add(copy).output(key, output);
+        int[] pixels = frames(3);
+        graph.removeOutput(key).remove(copy);
+        main.port().enabled(true).output(Keys.SCENE_COLOR, output);
+        return pixels;
+    }
+
+    private static boolean[] mask(int[] pixels, java.util.function.IntPredicate test) {
+        boolean[] mask = new boolean[pixels.length];
+        for (int i = 0; i < pixels.length; i++) {
+            mask[i] = test.test(pixels[i]);
+        }
+        return mask;
+    }
+
+    private static int count(boolean[] mask) {
+        int count = 0;
+        for (boolean set : mask) {
+            count += set ? 1 : 0;
+        }
+        return count;
+    }
+
+    private static int count(int[] pixels, java.util.function.IntPredicate test) {
+        return count(mask(pixels, test));
+    }
+
+    private static int differing(boolean[] a, boolean[] b) {
+        int count = 0;
+        for (int i = 0; i < a.length; i++) {
+            count += a[i] != b[i] ? 1 : 0;
+        }
+        return count;
     }
 
     /** Records {@code count} frames and returns the last one's pixels. */

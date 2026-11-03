@@ -85,7 +85,7 @@ public uint pixelBin(uint2 ids)
     }
     Instance instance = push.scene[0].instances[ids.x - 1];
     uint submesh = (ids.y & CLASSIC_TRIANGLE) != 0 ? (ids.y >> 24) & 0x7f : meshletSubmesh(push.scene[0].meshlets, ids.y >> 7);
-    uint bin = push.scene[0].materials[instance.materialBase + submesh].bin;
+    uint bin = materialShadingBin(push.scene[0].materials[instance.materialBase + submesh]);
     return bin < push.bins ? bin : 0; // a bin made since the graph built: shaded as metallic-roughness till it rebuilds
 }
 

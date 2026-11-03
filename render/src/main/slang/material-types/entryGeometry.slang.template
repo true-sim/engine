@@ -1,0 +1,43 @@
+// The material type's depth, shadow and ID fragment stages, for types with geometry hooks (GEOMETRY_*, here keep()):
+// drawn in place of the shared ones by types that name a hook in their parameters' attribute, from full vertices (on
+// mesh shaders too: depth-only mesh pipelines must not rely on the primitive ID, pitfalls.md), so their surfaces are
+// alike in every pass. GEOMETRY (a specialization constant) is the type's hooks.
+import meshlets.forward;
+import {module};
+
+[shader("fragment")]
+void {name}DepthMain(VertexOut in, bool front : SV_IsFrontFace)
+{
+    typedDepth<{struct}>(in, front, false);
+}
+
+[shader("fragment")]
+void {name}MaskedDepthMain(VertexOut in, bool front : SV_IsFrontFace)
+{
+    typedDepth<{struct}>(in, front, true);
+}
+
+[shader("fragment")]
+uint2 {name}IdsMain(VertexOut in, uint primitive : SV_PrimitiveID, bool front : SV_IsFrontFace) : SV_Target
+{
+    return typedIds<{struct}>(in, primitive, front, false);
+}
+
+[shader("fragment")]
+uint2 {name}MaskedIdsMain(VertexOut in, uint primitive : SV_PrimitiveID, bool front : SV_IsFrontFace) : SV_Target
+{
+    return typedIds<{struct}>(in, primitive, front, true);
+}
+
+[shader("fragment")]
+uint2 {name}ClassicIdsMain(VertexOut in, uint primitive : SV_PrimitiveID, bool front : SV_IsFrontFace) : SV_Target
+{
+    return typedClassicIds<{struct}>(in, primitive, front, false);
+}
+
+[shader("fragment")]
+uint2 {name}MaskedClassicIdsMain(VertexOut in, uint primitive : SV_PrimitiveID, bool front : SV_IsFrontFace)
+    : SV_Target
+{
+    return typedClassicIds<{struct}>(in, primitive, front, true);
+}

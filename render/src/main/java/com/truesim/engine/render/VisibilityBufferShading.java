@@ -103,7 +103,7 @@ public final class VisibilityBufferShading implements Technique {
     public long buildVersion() {
         Materials materials = renderer.scene().materials();
         return ((long) System.identityHashCode(materials) << 32 | materials.binCount())
-            + 31 * materials.graphBuffersVersion();
+            + 31 * (materials.graphBuffersVersion() + 31L * materials.rastersVersion());
     }
 
     @Override

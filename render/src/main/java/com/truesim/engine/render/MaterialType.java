@@ -28,12 +28,15 @@ import java.util.function.Function;
  * <p>Every pass shading color draws a type with its own entry points: the visibility buffer's shading, and forward
  * shading on every geometry path (indexed, mesh shaders, classic LOD), where each shading bin (a type and its
  * features) draws with pipelines of its type's forward entry points, its blended surfaces too. Depth, shadow and ID
- * passes draw every type alike.
+ * passes draw every type alike, but types with geometry hooks ({@link #geometry}): those draw there with pipelines of
+ * their own, so a cutout's holes are alike in color, depth and shadows.
  *
  * @param name            what it is called: in material data, errors and the pipeline cache
  * @param parameters      its parameters' record
  * @param fromValues      builds its parameters from data by field name (the record's {@code fromValues})
- * @param allowedFeatures the {@code Material.FEATURE_*} bits its materials may show
+ * @param allowedFeatures the {@code Material.FEATURE_*} bits its materials may show, and from bit
+ *                        {@link Material#GEOMETRY_SHIFT} its geometry hooks ({@code Material.GEOMETRY_*}): its
+ *                        parameters' attribute, as the build reads it
  * @param shader          the shader of its entry point, a resource path as
  *                        {@link com.truesim.engine.vulkan.ShaderModule#load} takes
  * @param entry           its entry point, inline ray shadows counting as lit
@@ -45,10 +48,15 @@ import java.util.function.Function;
  *                        shaders without barycentrics
  * @param forwardLeanShader the shader of its forward fragment entry points on the lean mesh path
  *                        ({@code <name>LeanMain}, {@code <name>LeanMaskedMain}, {@code <name>LeanBlendedMain})
+ * @param geometryShader  the shader of its depth and ID fragment entry points ({@code <name>DepthMain},
+ *                        {@code <name>MaskedDepthMain}, {@code <name>IdsMain}, {@code <name>MaskedIdsMain},
+ *                        {@code <name>ClassicIdsMain}, {@code <name>MaskedClassicIdsMain}), drawn where it has geometry
+ *                        hooks
  */
 public record MaterialType(String name, Class<? extends MaterialParameters> parameters,
     Function<MaterialValues, ? extends MaterialParameters> fromValues, int allowedFeatures, String shader,
-    String entry, String tracedShader, String tracedEntry, String forwardShader, String forwardLeanShader) {
+    String entry, String tracedShader, String tracedEntry, String forwardShader, String forwardLeanShader,
+    String geometryShader) {
 
     public MaterialType {
         Objects.requireNonNull(name, "name");
@@ -58,11 +66,21 @@ public record MaterialType(String name, Class<? extends MaterialParameters> para
         Objects.requireNonNull(entry, "entry");
         Objects.requireNonNull(forwardShader, "forwardShader");
         Objects.requireNonNull(forwardLeanShader, "forwardLeanShader");
+        Objects.requireNonNull(geometryShader, "geometryShader");
         if ((tracedShader == null) != (tracedEntry == null)) {
             throw new IllegalArgumentException("A traced shader and its entry point, or neither: " + name);
         }
-        if ((allowedFeatures & ~Material.FEATURES) != 0) {
+        if ((allowedFeatures & ~(Material.FEATURES | Material.GEOMETRY_HOOKS)) != 0) {
             throw new IllegalArgumentException(name + " allows features there are none of: " + allowedFeatures);
         }
+    }
+
+    /**
+     * Its geometry hooks ({@code Material.GEOMETRY_*}, e.g. {@link Material#GEOMETRY_KEEP}: its {@code keep()} makes
+     * holes): parts of the type deciding where its surfaces are, so they run in every pass drawing it, with depth,
+     * shadow and ID pipelines of its own. 0: none; it shares those passes' pipelines with every other such type.
+     */
+    public int geometry() {
+        return allowedFeatures & Material.GEOMETRY_HOOKS;
     }
 }

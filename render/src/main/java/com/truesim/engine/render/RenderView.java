@@ -61,6 +61,7 @@ public final class RenderView implements AutoCloseable {
     private int splitRoom;
     private volatile int splitCategories;
     private volatile int splitBins;
+    private volatile int splitGeometryBins;
     // The lists as imported buffers of the frame graph, which the culling and drawing passes declare.
     private final ExternalBuffer visibleImport;
     private final ExternalBuffer expandImport;
@@ -491,17 +492,21 @@ public final class RenderView implements AutoCloseable {
      */
     @AllowAllocation("building the graph, when it changes")
     void splitByType(int categories) {
-        splitByType(categories, (1 << MeshletRenderer.BINS) - 1);
+        splitByType(categories, (1 << MeshletRenderer.BINS) - 1, 0);
     }
 
     /**
-     * Has culling split the view's lists of the raster bins of {@code bins} (a bit each) by shading bin from now on,
-     * with room for {@code categories}: its split lists are made, or remade larger, now; the other bins' lists stay
-     * as culled, for draws shared by every type. Set while a graph builds, before the view is culled
+     * Has culling split the view's lists of the raster bins of {@code bins} (a bit each) from now on, with room for
+     * {@code categories}: by shading bin, or for those of {@code geometryBins} by type with geometry hooks
+     * ({@link Materials#geometryTypeCount}; 0: the others). Its split lists are made, or remade larger, now; the other
+     * bins' lists stay as culled, for draws shared by every type. Set while a graph builds, before the view is culled
      * ({@link MeshletCulling.Views#add}); a second call in a build adds bins and room.
      */
     @AllowAllocation("building the graph, when it changes")
-    synchronized void splitByType(int categories, int bins) {
+    synchronized void splitByType(int categories, int bins, int geometryBins) {
+        if ((splitBins & geometryBins & ~splitGeometryBins) != 0 || (splitGeometryBins & bins & ~geometryBins) != 0) {
+            throw new IllegalStateException("View " + index + "'s raster bins split both by shading bin and by type");
+        }
         if (categories < 1 || categories > Materials.MAX_BINS) {
             throw new IllegalArgumentException("1 to " + Materials.MAX_BINS + " shading bins: " + categories);
         }
@@ -520,12 +525,19 @@ public final class RenderView implements AutoCloseable {
         }
         splitCategories = splitRoom;
         splitBins |= bins;
+        splitGeometryBins |= geometryBins;
     }
 
     /** Culling no longer splits the view's lists (its split lists stay, for a later graph). */
     synchronized void noSplit() {
         splitCategories = 0;
         splitBins = 0;
+        splitGeometryBins = 0;
+    }
+
+    /** The raster bins (a bit each) whose lists culling splits by type with geometry hooks, not by shading bin. */
+    int splitGeometryBins() {
+        return splitGeometryBins;
     }
 
     /** The raster bins (a bit each) whose lists culling splits; 0: none. */

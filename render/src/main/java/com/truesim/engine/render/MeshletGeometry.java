@@ -54,14 +54,34 @@ public final class MeshletGeometry implements GeometryProvider {
             // visibility buffer's view draws shaded after its IDs.
             RasterPipelines.Typed pipelines = renderer.forwardPipelines();
             view.splitByType(pipelines.categories(), kind == SurfaceOutput.Kind.SHADED ? (1 << MeshletRenderer.BINS) - 1
-                : 1 << MeshletRenderer.BIN_BLENDED); // a visibility buffer's opaque bins: IDs, by shared pipelines
+                : 1 << MeshletRenderer.BIN_BLENDED, 0); // a visibility buffer's opaque bins draw IDs: below
             typed = kind == SurfaceOutput.Kind.SHADED ? pipelines : null;
         }
+        RasterPipelines.Geometry geometry = geometry(view, kind);
         culling.add(view, draw.occlusion(), before);
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         GraphBuilder.PassBuilder pass = culling.drawing(scene.read(targets.inRegion(g.pass(name(draw,
             draw.occlusion() ? " early" : ""))), BufferAccess.DRAW_READ), view);
-        record(draw, targets, pass, false, typed);
+        record(draw, targets, pass, false, typed, geometry);
+    }
+
+    /**
+     * Depth or IDs ({@code kind}) of {@code view} by type with geometry hooks, its opaque bins' lists split so, where
+     * the table has such types; else (and for shaded draws) null: every type with the shared pipelines, the lists as
+     * culled, nothing split.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    private RasterPipelines.Geometry geometry(RenderView view, SurfaceOutput.Kind kind) {
+        if (kind == SurfaceOutput.Kind.SHADED) {
+            return null;
+        }
+        RasterPipelines.Geometry geometry = renderer.geometryPipelines(kind == SurfaceOutput.Kind.DEPTH
+            ? RasterPipelines.DEPTH : RasterPipelines.IDS);
+        if (geometry != null) {
+            int opaque = (1 << MeshletRenderer.BIN_BLENDED) - 1;
+            view.splitByType(geometry.categories(), opaque, opaque);
+        }
+        return geometry;
     }
 
     /**
@@ -84,7 +104,10 @@ public final class MeshletGeometry implements GeometryProvider {
         GraphBuilder.PassBuilder pass = scene.read(targets.inRegion(g.pass(name(draw, " late"))),
             BufferAccess.DRAW_READ);
         view.declareDrawing(g, pass);
-        record(draw, targets, pass, true, typed(g, view, draw.output().kind() == SurfaceOutput.Kind.SHADED));
+        SurfaceOutput.Kind kind = draw.output().kind();
+        RasterPipelines.Geometry geometry = kind == SurfaceOutput.Kind.SHADED ? null
+            : renderer.geometryPipelines(kind == SurfaceOutput.Kind.DEPTH ? RasterPipelines.DEPTH : RasterPipelines.IDS);
+        record(draw, targets, pass, true, typed(g, view, kind == SurfaceOutput.Kind.SHADED), geometry);
     }
 
     @AllowAllocation("building the graph, when it changes")
@@ -107,11 +130,12 @@ public final class MeshletGeometry implements GeometryProvider {
 
     /**
      * Declares the attachments (cleared, or with {@code late} loaded) and records the draw: the late phase's lists with
-     * {@code late}, else the early (or only) phase's; shaded by type with {@code typed} (null: one shader).
+     * {@code late}, else the early (or only) phase's; shaded by type with {@code typed}, depth or IDs by type with
+     * geometry hooks with {@code geometry} (null: shared by every type).
      */
     @AllowAllocation("building the graph, when it changes")
     private void record(SceneDraw draw, SceneDraw.Targets targets, GraphBuilder.PassBuilder pass, boolean late,
-        RasterPipelines.Typed typed) {
+        RasterPipelines.Typed typed, RasterPipelines.Geometry geometry) {
         Image depth = targets.depth();
         Image color = targets.color();
         SurfaceOutput.Kind kind = draw.output().kind();
@@ -140,7 +164,13 @@ public final class MeshletGeometry implements GeometryProvider {
         IndirectInputs.Set indirect = targets.indirect();
         RenderView view = draw.view();
         switch (kind) {
-            case DEPTH -> pass.record(ctx -> renderer.drawAttached(ctx.unsafe().commands(), view, late, true, 0));
+            case DEPTH -> pass.record(ctx -> {
+                if (geometry != null) {
+                    renderer.drawGeometryAttached(ctx.unsafe().commands(), view, late, geometry);
+                } else {
+                    renderer.drawAttached(ctx.unsafe().commands(), view, late, true, 0);
+                }
+            });
             case SHADED -> pass.record(ctx -> {
                 if (shadows != null) {
                     shadows.prepare(ctx);
@@ -148,7 +178,13 @@ public final class MeshletGeometry implements GeometryProvider {
                 renderer.drawTypedAttached(ctx.unsafe().commands(), view, late, address(ctx, lights),
                     indirect == null ? 0 : ctx.address(indirect.table()), typed);
             });
-            case IDS -> pass.record(ctx -> renderer.drawIdsAttached(ctx.unsafe().commands(), view, late));
+            case IDS -> pass.record(ctx -> {
+                if (geometry != null) {
+                    renderer.drawGeometryAttached(ctx.unsafe().commands(), view, late, geometry);
+                } else {
+                    renderer.drawIdsAttached(ctx.unsafe().commands(), view, late);
+                }
+            });
         }
     }
 

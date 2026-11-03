@@ -3,8 +3,9 @@
 // path's rule for discrete LODs), and appends a VkDrawIndexedIndirectCommand per part of it to the list of the part's
 // raster bin (by its material: opaque, double-sided, masked, blended), a mirrored instance's to the bin's mirrored list
 // (drawn with clockwise front faces: the pool's indices wind the other way on screen). Each list is cut in parts, one
-// per category: the part's shading bin (its material's type and features) in lists drawn by type, else 0; each part
-// is drawn by one indirect draw of its own pipeline. The draw list's first words count each part's draws; draws past
+// per category: the part's shading bin (its material's type and features) in lists drawn shaded, its type's number
+// among those with geometry hooks in depth and ID lists that have such types, else 0; each part is drawn by one
+// indirect draw of its own pipeline. The draw list's first words count each part's draws; draws past
 // a part's capacity are not written, and its draw's count is capped.
 import classic.parts;
 
@@ -24,6 +25,7 @@ struct SelectPush
     Material* materials;   // for each part's raster bin and shading bin
     uint categories;       // parts per list
     uint byType;           // a bit per list (bin, then mirrored bin past BINS): its parts are shading bins
+    uint byGeometry;       // a bit per list: its parts are types with geometry hooks (materialGeometry; 0: none)
 };
 
 [[vk::push_constant]]
@@ -72,7 +74,8 @@ void selectMain(uint3 id : SV_DispatchThreadID)
         ClassicPart part = push.parts[level.firstPart + p];
         Material material = push.materials[instance.materialBase + ((part.tag >> 24) & 0x7f)];
         uint list = rasterBin(material) + (mirrored(instance) ? BINS : 0);
-        uint category = (push.byType >> list & 1) != 0 ? material.bin : 0;
+        uint category = (push.byType >> list & 1) != 0 ? materialShadingBin(material)
+            : (push.byGeometry >> list & 1) != 0 ? materialGeometry(material) : 0;
         if (category >= push.categories)
         {
             continue; // a shading bin made since the graph built: drawn from the next build, with its pipelines

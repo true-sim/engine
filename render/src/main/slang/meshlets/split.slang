@@ -1,6 +1,7 @@
-// Forward shading by material type (#67): after culling, each raster bin's list of a view is split by the meshlets'
-// shading bins (Material.bin: a type and features, as Materials numbers them), so each (raster bin, shading bin) draws
-// with one indirect draw of a pipeline of its own type and features, and no shader branches on the type. Three
+// Drawing by material type (#67): after culling, each raster bin's list of a view is split by the meshlets' shading
+// bins (materialShadingBin: a type and features, as Materials numbers them), so each (raster bin, shading bin) draws
+// with one indirect draw of a pipeline of its own type and features, and no shader branches on the type; or, for depth
+// and IDs, by type with geometry hooks (materialGeometry), whose pipelines run them, the other types in part 0. Three
 // dispatches, each a row of workgroups per raster bin: one counts the meshlets (and the indexed path's indices) of each
 // shading bin, one lays the shading bins' parts out one after another and writes their draws, one scatters each
 // meshlet's slot into its part of the split list (and on the indexed path, gives it its index range in its part, which
@@ -19,6 +20,7 @@ struct SplitPush
     uint indexed;             // 1: the indexed path, whose meshlets get index ranges by shading bin
     uint stride;              // threads per raster bin: the dispatch's x times 64
     uint bins;                // the raster bins split, a bit each: the others' lists stay as culled
+    uint geometryBins;        // the raster bins split by type with geometry hooks (materialGeometry), not shading bin
 };
 
 [[vk::push_constant]]
@@ -105,8 +107,11 @@ void splitCountMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
             if (active)
             {
                 Instance instance = push.scene[0].instances[v.instance];
-                category = push.scene[0].materials[instance.materialBase
-                    + meshletSubmesh(push.scene[0].meshlets, v.meshlet)].bin;
+                Material material = push.scene[0].materials[instance.materialBase
+                    + meshletSubmesh(push.scene[0].meshlets, v.meshlet)];
+                // Shaded draws by shading bin; depth and IDs by type with geometry hooks (0: the shared pipelines).
+                category = (push.geometryBins >> bin & 1) != 0 ? materialGeometry(material)
+                    : materialShadingBin(material);
                 // A bin made since the graph built has no pipeline yet: left out until the next build makes it
                 // (which the new bin asks for), rather than drawn as another type.
                 active = category < push.categories;

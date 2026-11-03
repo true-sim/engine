@@ -36,6 +36,13 @@ public ConstantBuffer<ForwardPush> push;
 [vk::constant_id(0)]
 public const uint FEATURES = 0;
 
+/**
+ * The geometry hooks the type has (GEOMETRY_*, its parameters' attribute's), set when its pipeline is made: hooks it
+ * does not name never run, in any pass, so every pass agrees on its surfaces.
+ */
+[vk::constant_id(1)]
+public const uint GEOMETRY = 0;
+
 // ---------------------------------------------------------------- the split lists (split.slang writes them)
 
 /** A listed meshlet of a mesh workgroup: whether there is one, and its slot in the view's visible list. */
@@ -138,12 +145,53 @@ public VertexOut lean(LeanVertex in, uint primitive, float3 bary)
 
 // ---------------------------------------------------------------- a material type's fragment stages
 
-/** Surface `s` at `pixel` shaded with material type M and the variant's FEATURES. */
+/** Surface `s` at `pixel` shaded with material type M and the variant's FEATURES; its holes (GEOMETRY_KEEP) left out. */
 public float4 shadeTyped<M : IMaterial>(VertexOut s, uint2 pixel)
 {
     float4 uvs = float4(s.uv, s.uv1);
+    discardHoles<M>(s, ddx(uvs), ddy(uvs));
     return shadeMaterial<M, NoRays>(NoRays(), push.view[0], s, push.scene[0].materials, ddx(uvs), ddy(uvs),
         push.lights, pixel, FEATURES, behind(s.instance), push.indirect);
+}
+
+/** Discards the fragment of `s` where type M's keep() makes a hole, if the type has the hook (GEOMETRY). */
+public void discardHoles<M : IMaterial>(VertexOut s, float4 dx, float4 dy)
+{
+    if ((GEOMETRY & GEOMETRY_KEEP) != 0 && !kept<M>(push.view[0], s, push.scene[0].materials, dx, dy))
+    {
+        discard;
+    }
+}
+
+// ---------------------------------------------------------------- a geometry type's depth and ID stages
+
+/**
+ * Depth only (shadow maps, depth passes) of type M's surface: its holes discarded, and with `masked` (the masked
+ * bin) the masked texels and one-sided back faces too, as the color pass discards them. Reads the push block's view
+ * and scene alone, at the bytes every raster push block has them.
+ */
+public void typedDepth<M : IMaterial>(VertexOut in, bool front, bool masked)
+{
+    if (masked)
+    {
+        discardMasked(push.scene[0].materials[in.material], in, front);
+    }
+    float4 uvs = float4(in.uv, in.uv1);
+    discardHoles<M>(in, ddx(uvs), ddy(uvs));
+}
+
+/** The visibility buffer's IDs (visibility/ids.slang's) of type M's surface, its holes and masked texels left out. */
+public uint2 typedIds<M : IMaterial>(VertexOut in, uint primitive, bool front, bool masked)
+{
+    typedDepth<M>(in, front, masked);
+    return uint2(in.instance + 1, (in.meshlet << 7) | (primitive - in.firstTriangle));
+}
+
+/** Classic LOD's IDs (classic/ids.slang's) of type M's surface, its holes and masked texels left out. */
+public uint2 typedClassicIds<M : IMaterial>(VertexOut in, uint primitive, bool front, bool masked)
+{
+    typedDepth<M>(in, front, masked);
+    return uint2(in.instance + 1, in.firstTriangle + primitive);
 }
 
 /** The opaque bins' fragments, from full vertices (the indexed path, and mesh shaders without barycentrics). */

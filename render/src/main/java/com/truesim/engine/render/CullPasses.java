@@ -353,6 +353,7 @@ final class CullPasses implements AutoCloseable {
                     memPutInt(push + SplitPush.INDEXED, meshShading ? 0 : 1);
                     memPutInt(push + SplitPush.STRIDE, groups * 64);
                     memPutInt(push + SplitPush.BINS, v.splitBins());
+                    memPutInt(push + SplitPush.GEOMETRY_BINS, v.splitGeometryBins());
                     stages[stage].push(commands, push, SplitPush.BYTES);
                     Commands.dispatch(commands, groups, BINS, 1);
                 }

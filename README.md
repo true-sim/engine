@@ -676,7 +676,45 @@ color:
 
 A shading bin first drawn rebuilds the graph with its pipelines before it draws; a material of a bin made after the
 graph built is left out of that frame (never drawn as another type). Depth, shadow and ID passes keep shared entry
-points: they read the slot alone (alpha masking from its cutoff and mask texture), whatever the type.
+points: they read the slot alone (alpha masking from its cutoff and mask texture), whatever the type, but for types
+with geometry hooks.
+
+**Geometry hooks** (the first of #68's): a type may decide where its surfaces are, in every pass. Its parameters'
+attribute names the hooks it has beside the features it allows (`[MaterialParameters(GEOMETRY_KEEP)]`; the build
+hands the mask on, and `MaterialType.geometry()` reads it), and the type overrides the hook's function, which
+`IMaterial` gives every type by default:
+
+```slang
+[MaterialParameters(GEOMETRY_KEEP)]
+public struct DissolveParameters { [Color] public float3 color = float3(1, 1, 0); public float cell = 0.25; };
+
+[MaterialType("dissolve")]
+public struct Dissolve : IMaterial
+{
+    public typealias Parameters = DissolveParameters;
+    public static Surface surface(DissolveParameters p, MaterialRef m, SurfaceInput in) { ... }
+    public override static bool keep(DissolveParameters p, MaterialRef m, SurfaceInput in) // false: a hole
+    {
+        int2 cell = int2(floor(in.uv / p.cell));
+        return ((cell.x + cell.y) & 1) == 0;
+    }
+};
+```
+
+- **The same holes everywhere.** The hooks a type has are a specialization constant (`GEOMETRY`) of all its pipelines,
+  so a hook runs in every pass or in none: its color entry points discard where `keep()` says (forward, both mesh
+  paths, classic LOD, blended), and a type with hooks gets generated depth and ID entry points
+  (`material-types/entryGeometry.slang.template`: depth, masked depth, IDs and classic LOD's IDs, from full vertices)
+  that discard alike, so its shadow maps, depth passes and visibility buffer show the holes its color does. A `keep()`
+  without the attribute's bit runs nowhere.
+- **Only those types pay.** Depth, shadow and ID passes keep one shared pipeline per raster bin for every type without
+  hooks. Where the table has types with hooks (`Materials.geometryTypeCount`, numbered as they are registered, the
+  number in the slot beside the shading bin), a depth or ID view's opaque lists are split after culling by that number
+  (0: no hooks), and each part draws with its pipeline: the shared one, or the type's. Classic LOD cuts its depth and
+  ID lists the same way. While no type has hooks nothing is split and the passes draw as before.
+- **Displacement joins the same way** (#68, not built): another bit (`GEOMETRY_DISPLACE`), a `displace()` with the
+  default doing nothing, run by the vertex stages of a type's pipelines (its geometry entry points take vertex stages
+  then), its bounds grown for culling.
 
 One shader for every type is gone (`render.forwardShading` with it). It drew types other than metallic-roughness as
 metallic-roughness's defaults (a glow material did not glow, car paint had no flakes, tinted ignored its buffer). A

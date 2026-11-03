@@ -667,21 +667,11 @@ public float3 transmitted(Surface s, View view, float3 world, float3 toViewer, u
 }
 
 /**
- * The surface color at `pixel`, with texture coordinate gradients `dx`, `dy` (per pixel), of material type M's surface
- * showing the features of `features` (FEATURE_*; where it is a constant, the code of the others is left out): the
- * fragment stage of every geometry path, and of anything shading the same surfaces. The lighting is the same for every
- * type: by the lights `lights` gives it (the frame's light list) and the sky or, without a light list (null), by the
- * sun and the sky. Shadow rays are traced by `rays` (NoRays: none).
+ * What material `ref`'s type gets at the point of `in` (seen from `view`, texture coordinate gradients `dx`, `dy`),
+ * showing the features of `features`: a back face of a double-sided material turned to the viewer.
  */
-public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
-    float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features, Background behind,
-    IndirectLight* indirect)
+public SurfaceInput surfaceInput(View view, VertexOut in, MaterialRef ref, float4 dx, float4 dy, uint features)
 {
-    if (view.mode == 2)
-    {
-        return float4(1, 1, 1, 1);
-    }
-    MaterialRef ref = { materials, in.material };
     Material m = ref.slot();
     float3 toViewer = normalize(view.eye - in.world);
     float3 normal = in.normal;
@@ -709,6 +699,39 @@ public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, V
     }
     input.color = in.color;
     input.features = features;
+    return input;
+}
+
+/**
+ * Whether the point of `in` exists on its material's surface, by type M's keep() (GEOMETRY_KEEP), with texture
+ * coordinate gradients `dx`, `dy` and the material's own features: every pass drawing a type with the hook asks it.
+ */
+public bool kept<M : IMaterial>(View view, VertexOut in, Material* materials, float4 dx, float4 dy)
+{
+    MaterialRef ref = { materials, in.material };
+    return M.keep(materialParameters<M.Parameters>(ref), ref,
+        surfaceInput(view, in, ref, dx, dy, materialFeatures(ref.slot())));
+}
+
+/**
+ * The surface color at `pixel`, with texture coordinate gradients `dx`, `dy` (per pixel), of material type M's surface
+ * showing the features of `features` (FEATURE_*; where it is a constant, the code of the others is left out): the
+ * fragment stage of every geometry path, and of anything shading the same surfaces. The lighting is the same for every
+ * type: by the lights `lights` gives it (the frame's light list) and the sky or, without a light list (null), by the
+ * sun and the sky. Shadow rays are traced by `rays` (NoRays: none).
+ */
+public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
+    float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features, Background behind,
+    IndirectLight* indirect)
+{
+    if (view.mode == 2)
+    {
+        return float4(1, 1, 1, 1);
+    }
+    MaterialRef ref = { materials, in.material };
+    Material m = ref.slot();
+    SurfaceInput input = surfaceInput(view, in, ref, dx, dy, features);
+    float3 toViewer = input.toViewer;
     Surface s = M.surface(materialParameters<M.Parameters>(ref), ref, input);
     if (view.mode == 1)
     {

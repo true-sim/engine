@@ -77,6 +77,15 @@ public record Material(MaterialType type, MaterialParameters parameters, List<Ma
     static final int FEATURE_BITS = MaterialsConstants.FEATURE_BITS;
     /** Every feature bit. */
     static final int FEATURES = (1 << FEATURE_BITS) - 1;
+    /**
+     * A geometry hook of a material type ({@link MaterialType#geometry}): its {@code keep()} says which points of its
+     * surfaces exist, in every pass (color, depth, shadows, IDs), as materials.slang's {@code GEOMETRY_KEEP}.
+     */
+    public static final int GEOMETRY_KEEP = MaterialsConstants.GEOMETRY_KEEP;
+    /** Where geometry hooks start in a type's {@link MaterialType#allowedFeatures}. */
+    public static final int GEOMETRY_SHIFT = MaterialsConstants.GEOMETRY_SHIFT;
+    /** Every geometry hook bit there is. */
+    static final int GEOMETRY_HOOKS = GEOMETRY_KEEP;
 
     /** Metallic-roughness's defaults: light gray, rough, opaque. Material 0 of every table. */
     public static final Material DEFAULT = new Material(MetallicRoughnessParameters.DEFAULTS);
