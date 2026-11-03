@@ -57,9 +57,9 @@ final class FrameExecution implements AutoCloseable {
     private final long computeTimeline;
     private long graphicsValue;
     private long computeValue;
-    private final long[][] pools; // [slot][worker * 2 + queue]
+    private final long[][] pools; // [slot][worker * 2 + queue]; grown with the workers
     private final VkCommandBuffer[][][] buffers; // [slot][worker * 2 + queue][i]
-    private final int[] used;
+    private int[] used;
     private final long[] slotGraphicsValue;
     private final long[] slotComputeValue;
     private final VulkanDevice device;
@@ -67,6 +67,7 @@ final class FrameExecution implements AutoCloseable {
     private final Queue computeQueue;
     private final int framesInFlight;
     private int slot = -1;
+    private int idleWaits;
     boolean begun;
 
     /** For {@code framesInFlight} frames recorded by {@code workers} workers onto the two queues. */
@@ -77,21 +78,39 @@ final class FrameExecution implements AutoCloseable {
         this.framesInFlight = framesInFlight;
         graphicsTimeline = timeline();
         computeTimeline = timeline();
-        pools = new long[framesInFlight][workers * 2];
-        buffers = new VkCommandBuffer[framesInFlight][workers * 2][0];
-        used = new int[workers * 2];
+        pools = new long[framesInFlight][0];
+        buffers = new VkCommandBuffer[framesInFlight][0][];
+        used = new int[0];
         slotGraphicsValue = new long[framesInFlight];
         slotComputeValue = new long[framesInFlight];
+        workers(workers);
+    }
+
+    /**
+     * Room for {@code workers} workers to record: command pools for those not had yet, in every slot. The pools of
+     * workers there were stay, also when fewer record from now on, so frames in flight keep theirs and nothing waits
+     * for the GPU.
+     */
+    @AllowAllocation("changing how frames record, rarely")
+    void workers(int workers) {
+        int had = used.length;
+        if (workers * 2 <= had) {
+            return;
+        }
+        used = Arrays.copyOf(used, workers * 2);
         try (MemoryStack stack = stackPush()) {
             LongBuffer handle = stack.mallocLong(1);
             for (int s = 0; s < framesInFlight; s++) {
-                for (int i = 0; i < workers * 2; i++) {
+                pools[s] = Arrays.copyOf(pools[s], workers * 2);
+                buffers[s] = Arrays.copyOf(buffers[s], workers * 2);
+                for (int i = had; i < workers * 2; i++) {
                     Queue queue = i % 2 == GRAPHICS ? graphicsQueue : computeQueue;
                     Vulkan.check(vkCreateCommandPool(device.handle(), VkCommandPoolCreateInfo.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO)
                         .flags(VK_COMMAND_POOL_CREATE_TRANSIENT_BIT)
                         .queueFamilyIndex(queue.family()), null, handle), "Could not create a command pool");
                     pools[s][i] = handle.get(0);
+                    buffers[s][i] = new VkCommandBuffer[0];
                 }
             }
         }
@@ -151,7 +170,13 @@ final class FrameExecution implements AutoCloseable {
     }
 
     void waitIdle() {
+        idleWaits++;
         waitFor(graphicsValue, computeValue);
+    }
+
+    /** How often everything submitted was waited for ({@link #waitIdle}), for tests of what stalls. */
+    int idleWaits() {
+        return idleWaits;
     }
 
     /** Makes sure each worker could record every chunk of each queue: workers take chunks as they come free. */

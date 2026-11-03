@@ -428,11 +428,11 @@ public final class FrameGraph implements AutoCloseable {
      * Runs {@link GraphBuilder.PassBuilder#async() async} passes on the compute queue (on by default where the device has a separate
      * one), beside the graphics work that does not depend on them. Off, they run on the graphics queue in their place.
      * On a device whose compute queue is the graphics queue, on still splits the frame into batches the same way, which
-     * runs the same code paths on one queue. The graph rebuilds on its next frame.
+     * runs the same code paths on one queue. The graph rebuilds on its next frame, without waiting for the GPU: the
+     * first batch on each queue waits for all the other queue did before (as after any rebuild).
      */
     public FrameGraph asyncCompute(boolean on) {
         if (on != asyncCompute) {
-            waitIdle();
             asyncCompute = on;
             dirty = true;
         }
@@ -442,14 +442,17 @@ public final class FrameGraph implements AutoCloseable {
     /**
      * Records with {@code jobs}' threads, in chunks of {@code passes} passes each (null: on the calling thread). The
      * chunks are submitted in order, so the GPU sees the same commands however the recording was scheduled. Pass bodies
-     * then run on worker threads, in parallel with each other: they must not share what they change.
+     * then run on worker threads, in parallel with each other: they must not share what they change. Call it between
+     * frames; it does not wait for the GPU (frames in flight keep their command pools).
      */
     @AllowAllocation("set up once")
     public FrameGraph parallel(JobSystem jobs, int passes) {
         if (passes < 1) {
             throw new IllegalArgumentException("Chunks hold at least one pass: " + passes);
         }
-        waitIdle();
+        if (execution != null && execution.begun) {
+            throw new IllegalStateException("Change how frames record between frames, not after beginFrame()");
+        }
         this.jobs = jobs;
         this.grain = passes;
         int threads = jobs == null ? 1 : jobs.threads();
@@ -458,8 +461,7 @@ public final class FrameGraph implements AutoCloseable {
             contexts[w] = new PassContext(this);
         }
         if (execution != null) {
-            execution.close();
-            execution = null;
+            execution.workers(threads);
         }
         dirty = true;
         return this;
@@ -963,6 +965,11 @@ public final class FrameGraph implements AutoCloseable {
     /** How many times the graph was built. */
     public int builds() {
         return builds;
+    }
+
+    /** How often the graph waited for everything it submitted, for tests of what stalls. */
+    int idleWaits() {
+        return execution == null ? 0 : execution.idleWaits();
     }
 
     // ---------------------------------------------------------------- building

@@ -1218,6 +1218,51 @@ class FrameGraphTest {
     }
 
     @Test
+    void howFramesRunChangesWithoutWaitingForTheGpu() {
+        Key<Image> copied = Key.image("test.copied");
+        graph.add(new Fill(A, SIZE, 1, 0, 0, 1))
+            .add(new Fill(B, SIZE, 0, 0, 1, 1))
+            .add(new Overlapping(copied, A, B))
+            .add(new Chain(OUT, copied, 3))
+            .output(OUT, output)
+            .asyncCompute(true);
+        try (com.truesim.common.jobs.JobSystem jobs = new com.truesim.common.jobs.JobSystem(3)) {
+            assertThat(submitted(2)[0]).isEqualTo(RED);
+            int waits = graph.idleWaits();
+            // Each change between frames in flight: the frames go on, ordered by the queues' semaphores.
+            for (int round = 0; round < 2; round++) {
+                graph.asyncCompute(false);
+                frames(2);
+                graph.parallel(jobs, 1);
+                frames(2);
+                graph.asyncCompute(true);
+                frames(2);
+                graph.parallel(jobs, 4);
+                frames(1);
+                graph.parallel(null, 2);
+                frames(1);
+            }
+            assertThat(graph.idleWaits()).as("waits for the GPU").isEqualTo(waits);
+            assertThat(graph.builds()).isGreaterThanOrEqualTo(11);
+            int[] texels = submitted(1);
+            assertThat(texels[0]).isEqualTo(RED);
+            assertThat(texels[SIZE - 1]).isEqualTo(BLUE);
+            graph.beginFrame();
+            assertThatIllegalStateException().isThrownBy(() -> graph.parallel(jobs, 1))
+                .withMessageContaining("between frames");
+            graph.submit(0, 0);
+        }
+    }
+
+    /** Begins and submits {@code count} frames, without waiting for them. */
+    private void frames(int count) {
+        for (int i = 0; i < count; i++) {
+            graph.beginFrame();
+            graph.submit(0, 0);
+        }
+    }
+
+    @Test
     void graphsSharingSlotsLeaveThemToTheCaller() {
         FrameSlots shared = new FrameSlots(2);
         try (FrameGraph other = new FrameGraph(device, shared)) {
