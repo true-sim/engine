@@ -1296,19 +1296,22 @@ rounds after a warm-up round, ranges of the medians; noise of 4 x 4 pixel means 
 
 | Point lights | Lights | Grid build | Hit shading | Both | Noise |
 |---|---|---|---|---|---|
-| 64 | every light | - | 4.72-4.75 ms | 4.72-4.75 ms | 1.3 % |
-| 64 | grid lists | 0.12 ms | 1.59-1.61 ms | 1.70-1.73 ms | 1.3 % |
-| 64 | grid reservoirs | 0.61 ms | 1.05-1.07 ms | 1.66-1.69 ms | 1.9 % |
-| 1,024 | every light | - | 19.21-19.30 ms | 19.21-19.30 ms | 1.4 % |
-| 1,024 | grid lists | 0.37-0.38 ms | 4.64-4.65 ms | 5.01-5.02 ms | 1.4 % |
-| 1,024 | grid reservoirs | 2.25-2.26 ms | 1.26-1.27 ms | 3.51-3.52 ms | 14.2 % |
+| 64 | every light | - | 4.71-4.75 ms | 4.71-4.75 ms | 1.3 % |
+| 64 | grid lists | 0.12 ms | 1.59-1.60 ms | 1.71 ms | 1.3 % |
+| 64 | grid reservoirs | 0.05 ms | 1.15-1.18 ms | 1.20-1.23 ms | 1.8-2.3 % |
+| 1,024 | every light | - | 19.20-19.30 ms | 19.20-19.30 ms | 1.4 % |
+| 1,024 | grid lists | 0.37-0.38 ms | 4.63 ms | 5.00-5.01 ms | 1.4 % |
+| 1,024 | grid reservoirs | 0.32 ms | 1.53-1.57 ms | 1.85-1.88 ms | 9.8-13.9 % |
 | 4,096 | every light | - | 67.5-67.8 ms | 67.5-67.8 ms | 5.0 % |
-| 4,096 | grid lists | 1.22-1.23 ms | 13.82-13.88 ms | 15.04-15.10 ms | 5.0 % |
-| 4,096 | grid reservoirs | 3.73-3.74 ms | 1.32 ms | 5.04-5.05 ms | 48.9 % |
+| 4,096 | grid lists | 1.23 ms | 13.82-13.87 ms | 15.05-15.10 ms | 5.0 % |
+| 4,096 | grid reservoirs | 1.17-1.19 ms | 2.58-2.65 ms | 3.77-3.82 ms | 38-74 % |
 
-Lists cost as many shadow rays as a cell has lights and add no noise; reservoirs cost one ray a hit whatever the
-count, their build (every reservoir of every cell, each frame) is most of their time, and their noise grows with the
-lights. Neither wins outright, so both stay; lists are the default.
+Reservoirs are built only for the cells hits used in the last `render.gi.lights.keep` frames (8; a cell's state
+kept from frame to frame), and a hit in a cell not built sums every light exactly and marks it: built for every cell
+each frame, the same grid took 0.61, 2.25 and 3.73 ms to build and 1.66, 3.51 and 5.04 ms with the hits. The noise
+rises where hits find a cell built in one frame and not in another (exact there, sampled here), and grows with the
+lights. Lists cost as many shadow rays as a cell has lights and add no noise; reservoirs cost one ray a hit whatever
+the count. Neither wins outright, so both stay; lists are the default.
 
 **Ray queries in CI:** CI's pinned Mesa 26.0.8 lavapipe exposes `VK_KHR_acceleration_structure` and
 `VK_KHR_ray_query`: `VulkanDevice.rayTracing()` is true there, and the ray-traced tests (`SegmentTracingTest`,

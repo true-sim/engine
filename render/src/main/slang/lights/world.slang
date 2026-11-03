@@ -7,7 +7,9 @@
 // - RESERVOIRS (ReGIR, Boksansky, Jukarainen and Wyman 2021): each cell holds reservoirs, each one light chosen by
 //   resampled importance sampling from candidates drawn uniformly among all lights, by what the light could give the
 //   cell (its brightness over the nearest distance from the cell's box: never 0 where it reaches); a point resamples
-//   its cell's reservoirs by what each gives it and traces one shadow ray: unbiased, constant cost, noisy.
+//   its cell's reservoirs by what each gives it and traces one shadow ray: unbiased, constant cost, noisy. Only the
+//   cells hits used the frame before are built; a hit in another (a camera moved there) sums every light, exactly,
+//   and marks its cell for the next frame.
 // Directional lights reach every point: both layouts leave them to the point, which sums them directly.
 module world;
 
@@ -39,7 +41,10 @@ public struct WorldLightGrid
     public float cutoff;           // where lights without a range end
     public uint overflow;          // lists: the most lights a cell wanted
     public uint zero;              // 0: what the build reads as the GPU's light count without such lights
-    public uint pad;
+    public uint frame;             // reservoirs: this frame's number, from 1
+    public uint* cellState;        // reservoirs: per cell the frame a hit last used it, the frame it was built (kept
+                                   // from frame to frame): cells are built only where hits used them the frame before
+    public uint* built;            // reservoirs: the cells built this frame (a count, then the cells)
 };
 
 /** Light `i` of the grid's lights (the scene's, then the GPU's), at world positions. */

@@ -171,7 +171,7 @@ public final class ReferencePathTracer implements Technique {
         Buffer topLevel = g.request(new TopLevel(rayTracing, renderer));
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         Buffer lights = g.optional(Keys.LIGHT_LIST);
-        Buffer world = worldLights != null && g.setting(LIGHTS) == Lighting.GRID
+        WorldLights.Grid world = worldLights != null && g.setting(LIGHTS) == Lighting.GRID
             ? g.request(new WorldLights(worldLights, view.camera())) : null;
         IndirectInputs.Set indirect = IndirectInputs.of(g);
         Materials materials = renderer.scene().materials();
@@ -268,7 +268,7 @@ public final class ReferencePathTracer implements Technique {
                 shadePass.read(lights, BufferAccess.STORAGE_READ);
             }
             if (world != null) {
-                shadePass.read(world, BufferAccess.STORAGE_READ);
+                world.readBy(shadePass);
             }
             if (indirect != null) {
                 indirect.readBy(shadePass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
@@ -281,7 +281,7 @@ public final class ReferencePathTracer implements Technique {
                     if (shade[bin] != null) {
                         ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, color, accumulation, current, next,
                             binTables, counts, lights, indirect, table, tablesBytes, bounce, bins, bin, settings)
-                            .world(world == null ? 0 : ctx.address(world)), binTables, table + 16L * bin);
+                            .world(world == null ? 0 : ctx.address(world.grid())), binTables, table + 16L * bin);
                     }
                 }
             });

@@ -7,7 +7,9 @@ import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 
 import com.truesim.annotations.AllowAllocation;
@@ -40,7 +42,9 @@ import org.lwjgl.system.MemoryStack;
  *   <li>{@link Mode#RESERVOIRS} (ReGIR, Boksansky, Jukarainen and Wyman, Ray Tracing Gems II, 2021): each cell keeps
  *   {@link #SLOTS} reservoirs, each a light resampled from {@link #CANDIDATES} drawn uniformly among all the lights by
  *   what it could give the cell's box (never 0 where its reach meets it); a point resamples its cell's reservoirs by
- *   what each light gives it and traces one shadow ray: unbiased, its cost constant in the light count, noisy.
+ *   what each light gives it and traces one shadow ray: unbiased, its cost constant in the light count, noisy. Only
+ *   the cells hits used in the last {@link #KEEP} frames are built (a cell's state kept from frame to frame); a hit in
+ *   another sums every light, exactly, and marks its cell for the next frame.
  * </ul>
  *
  * <p>Directional lights reach every point: points sum them directly in both. The cells are {@link #CELL} units
@@ -50,7 +54,23 @@ import org.lwjgl.system.MemoryStack;
  * @param lights the scene's lights
  * @param anchor the camera the grid is centered on (the first view's, or a headset's center)
  */
-public record WorldLights(Lights lights, Camera anchor) implements Request<Buffer> {
+public record WorldLights(Lights lights, Camera anchor) implements Request<WorldLights.Grid> {
+
+    /**
+     * The grid's buffer, and with reservoirs the cells' state kept from frame to frame (which hits used, which were
+     * built), which hits write: passes reading the grid declare both ({@link #readBy}).
+     */
+    public record Grid(Buffer grid, Buffer cells) {
+
+        /** Declares that {@code pass} reads the grid (and writes the cells' use); returns {@code pass}. */
+        public GraphBuilder.PassBuilder readBy(GraphBuilder.PassBuilder pass) {
+            pass.read(grid, BufferAccess.STORAGE_READ);
+            if (cells != null) {
+                pass.write(cells, BufferAccess.STORAGE_WRITE);
+            }
+            return pass;
+        }
+    }
 
     /** The grid's layouts. */
     public enum Mode {
@@ -80,8 +100,15 @@ public record WorldLights(Lights lights, Camera anchor) implements Request<Buffe
     public static final Setting<Integer> CANDIDATES = Setting.integer("render.gi.lights.candidates", 16, 1, 1024,
         "candidate lights drawn for each world light reservoir");
 
+    /**
+     * Reservoirs: frames a cell is still built after hits last used it. Cells are built only where hits were; a hit
+     * in a cell not built sums every light (exact, slower), so a cell kept a while spares hits that come and go.
+     */
+    public static final Setting<Integer> KEEP = Setting.integer("render.gi.lights.keep", 8, 1, 1 << 20,
+        "frames a world light cell keeps its reservoirs built after hits last used it");
+
     /** Its settings. */
-    public static final List<Setting<?>> ALL = List.of(MODE, CELL, CELLS, SLOTS, CANDIDATES);
+    public static final List<Setting<?>> ALL = List.of(MODE, CELL, CELLS, SLOTS, CANDIDATES, KEEP);
 
 
     static final int HEADER_BYTES = 128;
@@ -95,12 +122,13 @@ public record WorldLights(Lights lights, Camera anchor) implements Request<Buffe
 
     @Override
     @AllowAllocation("building the graph, when it changes")
-    public Buffer build(GraphBuilder g) {
+    public Grid build(GraphBuilder g) {
         Mode mode = g.setting(MODE);
         float cell = g.setting(CELL);
         int cells = g.setting(CELLS);
         int slots = g.setting(SLOTS);
         int candidates = g.setting(CANDIDATES);
+        int keep = g.setting(KEEP);
         float cutoff = g.setting(ClusteredLights.CUTOFF);
         for (Key<?> key : List.copyOf(lights.writers())) {
             g.optional(key); // the lights the GPU writes: this frame's
@@ -109,7 +137,13 @@ public record WorldLights(Lights lights, Camera anchor) implements Request<Buffe
         int extra = lights.gpuCapacity();
         long count = (long) cells * cells * cells;
         long dataBytes = mode == Mode.LISTS ? 4L * count * (1 + slots) : 8L * count * slots;
-        Buffer grid = g.createBuffer("world lights", HEADER_BYTES + dataBytes + (long) Lights.LIGHT_BYTES * extra);
+        // Reservoirs: the cells built this frame (their count, the build's dispatch, the cells) after the lights
+        long builtAt = HEADER_BYTES + dataBytes + (long) Lights.LIGHT_BYTES * extra;
+        long builtBytes = mode == Mode.LISTS ? 0 : 16 + 4 * count;
+        Buffer grid = g.createBuffer("world lights", builtAt + builtBytes);
+        Buffer cellState = mode == Mode.LISTS ? null : g.persistentBuffer("world light cells", 8 * count);
+        Pipeline used = g.computeProgram("shaders/lights/worldBuild.spv", "usedMain", WorldBuildPush.BYTES);
+        Pipeline args = g.computeProgram("shaders/lights/worldBuild.spv", "argsMain", WorldBuildPush.BYTES);
         Pipeline copy = g.computeProgram("shaders/lights/worldBuild.spv", "copyMain", WorldBuildPush.BYTES);
         Pipeline build = g.computeProgram("shaders/lights/worldBuild.spv", "buildMain", WorldBuildPush.BYTES);
         WorldBuildPush push = new WorldBuildPush();
@@ -118,15 +152,20 @@ public record WorldLights(Lights lights, Camera anchor) implements Request<Buffe
         if (written != null) {
             pass.read(written, BufferAccess.STORAGE_READ);
         }
+        if (cellState != null) {
+            pass.write(cellState, BufferAccess.STORAGE_WRITE).read(grid, BufferAccess.INDIRECT);
+        }
+        Pipeline[] reservoirs = {used, args};
         pass.write(grid, BufferAccess.TRANSFER_DST).write(grid, BufferAccess.STORAGE_WRITE).async()
-            .record(ctx -> record(ctx, grid, written, extra, copy, build, push, mode, cell, cells, slots, candidates,
-                cutoff, dataBytes, (int) threads));
-        return grid;
+            .record(ctx -> record(ctx, grid, cellState, written, extra, copy, build, reservoirs, push, mode, cell,
+                cells, slots, candidates, keep, cutoff, dataBytes, builtAt, (int) threads));
+        return new Grid(grid, cellState);
     }
 
-    private void record(PassContext ctx, Buffer grid, Buffer written, int extra, Pipeline copy, Pipeline build,
-        WorldBuildPush push, Mode mode, float cell, int cells, int slots, int candidates, float cutoff, long dataBytes,
-        int threads) {
+    private void record(PassContext ctx, Buffer grid, Buffer cellState, Buffer written, int extra, Pipeline copy,
+        Pipeline build, Pipeline[] reservoirs, WorldBuildPush push, Mode mode, float cell, int cells, int slots,
+        int candidates, int keep, float cutoff, long dataBytes, long builtAt, int threads) {
+        int frame = (int) ctx.frame() + 1; // from 1: 0 in a cell's state is never
         long header = ctx.address(grid);
         try (MemoryStack stack = stackPush()) {
             long data = stack.ncalloc(8, 1, HEADER_BYTES);
@@ -147,14 +186,22 @@ public record WorldLights(Lights lights, Camera anchor) implements Request<Buffe
             memPutLong(data + WorldLightGridLayout.EXTRA, header + HEADER_BYTES + dataBytes); // the GPU's, copied
             memPutLong(data + WorldLightGridLayout.DATA, header + HEADER_BYTES);
             memPutFloat(data + WorldLightGridLayout.CUTOFF, cutoff);
+            memPutInt(data + WorldLightGridLayout.FRAME, frame);
+            if (cellState != null) {
+                memPutLong(data + WorldLightGridLayout.CELL_STATE, ctx.address(cellState));
+                memPutLong(data + WorldLightGridLayout.BUILT, header + builtAt);
+            }
             Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(grid), 0, HEADER_BYTES, data);
+        }
+        if (cellState != null) {
+            ctx.fill(grid, builtAt, 16, 0); // no cells listed yet
         }
         Barriers.memory(ctx.unsafe().commands(), VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         // Without lights the GPU writes, a count of 0 all the same (a word of the header's), never a null pointer
         push.grid(header).written(written == null ? header + WorldLightGridLayout.ZERO : ctx.address(written))
-            .writtenCapacity(extra).frame((int) ctx.frame());
+            .writtenCapacity(extra).frame(frame).keep(keep);
         // The copy (and the lists' counts cleared, its threads striding over the cells)
         int copyGroups = Math.max((extra + 63) / 64, mode == Mode.LISTS ? Math.min(1024, (cells * cells * cells + 63)
             / 64) : 1);
@@ -162,8 +209,23 @@ public record WorldLights(Lights lights, Camera anchor) implements Request<Buffe
         Barriers.memory(ctx.unsafe().commands(), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-        push.threads(threads); // a thread per light (lists) or per reservoir
-        int groups = (threads + 63) / 64;
-        ctx.dispatch(build, push, Math.min(groups, 1024), (groups + 1023) / 1024, 1); // rows of 1024 groups
+        if (mode == Mode.LISTS) {
+            push.threads(threads); // a thread per light
+            int groups = (threads + 63) / 64;
+            ctx.dispatch(build, push, Math.min(groups, 1024), (groups + 1023) / 1024, 1); // rows of 1024 groups
+            return;
+        }
+        // Reservoirs only of the cells hits used the frame before: listed, the build's dispatch, the build
+        int cellGroups = (cells * cells * cells + 63) / 64;
+        ctx.dispatch(reservoirs[0], push, Math.min(cellGroups, 1024), (cellGroups + 1023) / 1024, 1);
+        Barriers.memory(ctx.unsafe().commands(), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        ctx.dispatch(reservoirs[1], push, 1);
+        Barriers.memory(ctx.unsafe().commands(), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT
+                | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        ctx.dispatchIndirect(build, push.threads(Integer.MAX_VALUE), grid, builtAt + 4); // bounded by the list
     }
 }

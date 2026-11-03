@@ -345,6 +345,21 @@ float3 worldLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uin
         }
         return sum;
     }
+    // Marked used for the next frame's build; built this frame, or every light
+    uint frame = g[0].frame;
+    g[0].cellState[2 * uint(cell)] = frame;
+    if (g[0].cellState[2 * uint(cell) + 1] != frame)
+    {
+        for (uint i = 0; i < total; i++)
+        {
+            Light l = gridLightRelative(g, i, view.position, view.positionLow);
+            if (l.type != DIRECTIONAL)
+            {
+                sum += lightOne(l, s, p, ng, v);
+            }
+        }
+        return sum;
+    }
     WorldReservoir* reservoirs = (WorldReservoir*) g[0].data + uint(cell) * slots;
     float weights = 0;
     float chosenTarget = 0;
