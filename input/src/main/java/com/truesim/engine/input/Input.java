@@ -171,7 +171,7 @@ public final class Input implements Plugin {
     private float pressThreshold = InputSettings.PRESS_THRESHOLD.defaultValue();
     private float releaseThreshold = InputSettings.RELEASE_THRESHOLD.defaultValue();
     private float holdTime = InputSettings.HOLD_TIME.defaultValue();
-    private final List<String> problems = new ArrayList<>();
+    private final Set<String> problems = new java.util.LinkedHashSet<>(); // each reported once
 
     /** Input with no actions yet: add groups with {@link #add}. */
     @AllowAllocation("set up")

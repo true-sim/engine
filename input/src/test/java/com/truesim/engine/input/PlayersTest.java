@@ -91,6 +91,19 @@ class PlayersTest {
     }
 
     @Test
+    void aDisconnectResetsThePlayersFilters() { // D86
+        ActionGroup group = ActionGroup.root("smoothedPads");
+        Axis1Action look = group.axis1("look", Binding.pad(GamepadAxis.RIGHT_X).filter(Filters.SMOOTH, 1f));
+        try (Rig rig = new Rig(group)) {
+            rig.plug(1).plug(2).frame(100); // the smoother starts at 0
+            rig.axis(1, GamepadAxis.RIGHT_X, 1).frame(100);
+            assertThat(rig.one().value(look)).isLessThan(0.2f);
+            rig.unplug(2).frame(100); // the player lost a device: its filters start again
+            assertThat(rig.one().value(look)).isEqualTo(1);
+        }
+    }
+
+    @Test
     void anUnassignedDeviceCanJoinByAPress() { // D63
         try (Rig rig = new Rig(GAME)) {
             Player two = rig.input.addPlayer();
