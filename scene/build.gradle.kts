@@ -26,6 +26,7 @@ tasks.test {
     providers.gradleProperty("gltfModels").orNull?.let { systemProperty("truesim.gltf.models", it) }
     providers.gradleProperty("gltfZoom").orNull?.let { systemProperty("truesim.gltf.zoom", it) }
     providers.gradleProperty("gltfEnvironment").orNull?.let { systemProperty("truesim.gltf.environment", it) }
+    providers.gradleProperty("gltfBackground").orNull?.let { systemProperty("truesim.gltf.background", it) }
     providers.gradleProperty("gltfAnimation").orNull?.let { systemProperty("truesim.gltf.animation", it) }
     providers.gradleProperty("gltfClip").orNull?.let { systemProperty("truesim.gltf.clip", it) }
 }

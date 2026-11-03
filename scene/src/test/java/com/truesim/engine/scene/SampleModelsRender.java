@@ -87,7 +87,8 @@ import org.lwjgl.vulkan.VkBufferImageCopy;
  * in {@code build/samples}, to compare by eye with the models' screenshots: many test models show green checks where a
  * renderer is right and red crosses where it is not. Each model is framed from the front (+z), lit by its own glTF
  * lights where it has some (KHR_lights_punctual) or else the sun, and the sky, or with {@code -PgltfEnvironment=a.hdr}
- * an HDR environment (lighting and background) besides; tone mapped with Khronos PBR Neutral. Skipped without the samples; {@code -PgltfModels=A,B} picks models.
+ * an HDR environment (lighting and background, or lighting only with {@code -PgltfBackground=none}) besides; tone
+ * mapped with Khronos PBR Neutral. Skipped without the samples; {@code -PgltfModels=A,B} picks models.
  * Posed by {@code -PgltfAnimation=t1,t2}, a clip's pointer tracks animate materials (in the material table), node
  * visibility (through layers, lights of hidden nodes going dark) and the model's lights.
  */
@@ -185,7 +186,9 @@ class SampleModelsRender {
             ViewPort port = graph.addView("main").size(SIZE, SIZE);
             RenderView view = geometry.createView(ViewOptions.of(1 << 14, 1 << 20));
             closing.add(view);
-            SceneView main = new SceneView(port, view, new Camera());
+            // One camera for the view and its techniques (the light clusters bin for it), framed below
+            Camera camera = new Camera();
+            SceneView main = new SceneView(port, view, camera);
             int usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
                 | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
             GpuImage target = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R16G16B16A16_SFLOAT, usage,
@@ -195,7 +198,7 @@ class SampleModelsRender {
                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
             GpuBuffer readback = GpuBuffer.hostVisible(device, SIZE * SIZE * 8L, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
             closing.add(readback);
-            Lights lights = lights(device, model, world, bounds, lightValues, nodes, visibility);
+            Lights lights = lights(device, slots, model, world, bounds, lightValues, nodes, visibility);
             if (lights != null) {
                 closing.add(lights);
                 port.add(new ClusteredLights(lights, main));
@@ -209,7 +212,10 @@ class SampleModelsRender {
                 int sky = textures.add(TextureFormat.RGBA16F, panorama.width(), panorama.height(), Textures.GENERATE,
                     panorama.texels());
                 Environment environment = Environment.panorama("hdr", sky, panorama.width());
-                port.add(new EnvironmentLighting(environment, main)).add(new SkyBackground(environment, main));
+                port.add(new EnvironmentLighting(environment, main));
+                if (!"none".equals(System.getProperty("truesim.gltf.background"))) { // -PgltfBackground=none: lit only
+                    port.add(new SkyBackground(environment, main));
+                }
             }
             port.add(new ClusteredForwardShading(geometry, main, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT)
                     .clearColor(0.05f, 0.05f, 0.05f))
@@ -228,7 +234,7 @@ class SampleModelsRender {
             double half = Math.tan(Math.toRadians(45) / 2) * distance * 0.85 / 0.85;
             cx += Double.parseDouble(zoom[1]) * half;
             cy += Double.parseDouble(zoom[2]) * half;
-            Camera camera = new Camera().position(cx, cy, cz + distance)
+            camera.position(cx, cy, cz + distance)
                 .set(0, 0, -1, 0, 1, 0, fov, SIZE, SIZE, Math.max(distance - radius * 2, distance * 1e-3));
             String[] poses = playing != null ? times.split(",") : new String[] {null};
             for (int pose = 0; pose < poses.length; pose++) {
@@ -242,11 +248,11 @@ class SampleModelsRender {
                 tasks.drainCompleted();
                 if (playing != null) {
                     animators.update(0); // the same pose: materials drawn since the last frame get its values too
-                    if (lights != null) {
-                        lights(lights, model, world, bounds, lightValues, nodes, visibility);
-                    }
                 }
                 scene.update();
+                if (lights != null) { // at their nodes as posed
+                    lights(lights, model, sceneMatrices(scene, nodes), bounds, lightValues, nodes, visibility);
+                }
                 renderables.update();
                 sync.update();
                 view.set(camera, 1, MeshletRenderer.MODE_LIT);
@@ -312,8 +318,8 @@ class SampleModelsRender {
      * (lux for directional lights, candela, the illuminance at 1 m, for the others), their values as animated
      * ({@code values}), dark on hidden nodes; null without any.
      */
-    private static Lights lights(VulkanDevice device, ModelData model, double[][] world, double[] bounds,
-        double[][] values, long[] placed, NodeVisibility visibility) {
+    private static Lights lights(VulkanDevice device, FrameSlots slots, ModelData model, double[][] world,
+        double[] bounds, double[][] values, long[] placed, NodeVisibility visibility) {
         int count = 0;
         for (ModelData.Node n : model.nodes()) {
             count += n.light() >= 0 ? 1 : 0;
@@ -321,13 +327,13 @@ class SampleModelsRender {
         if (count == 0) {
             return null;
         }
-        Lights lights = new Lights(device, count, 1);
+        Lights lights = new Lights(device, count, 1, slots); // a copy per frame: set every frame, as posed
         lights(lights, model, world, bounds, values, placed, visibility);
         return lights;
     }
 
-    /** Sets {@code lights} to the model's lights as {@link #lights(VulkanDevice, ModelData, double[][], double[],
-     * double[][], long[], NodeVisibility)} makes them. */
+    /** Sets {@code lights} to the model's lights as {@link #lights(VulkanDevice, FrameSlots, ModelData, double[][],
+     * double[], double[][], long[], NodeVisibility)} makes them. */
     private static void lights(Lights lights, ModelData model, double[][] world, double[] bounds, double[][] values,
         long[] placed, NodeVisibility visibility) {
         List<ModelData.Node> nodes = model.nodes();
@@ -389,17 +395,30 @@ class SampleModelsRender {
         return box;
     }
 
+    /** Each placed node's world matrix as the scene has it (posed), column-major. */
+    private static double[][] sceneMatrices(SceneGraph scene, long[] placed) {
+        double[][] world = new double[placed.length][];
+        for (int i = 0; i < placed.length; i++) {
+            com.truesim.common.math.Transform t = scene.world(placed[i]);
+            world[i] = trs(t.translation().x(), t.translation().y(), t.translation().z(), t.rotation().x(),
+                t.rotation().y(), t.rotation().z(), t.rotation().w(), t.scale().x(), t.scale().y(), t.scale().z());
+        }
+        return world;
+    }
+
     /** A node's local matrix, column-major. */
     private static double[] trs(ModelData.Node n) {
-        double x = n.rx();
-        double y = n.ry();
-        double z = n.rz();
-        double w = n.rw();
+        return trs(n.tx(), n.ty(), n.tz(), n.rx(), n.ry(), n.rz(), n.rw(), n.sx(), n.sy(), n.sz());
+    }
+
+    /** The matrix of translation ({@code tx}, ...), rotation ({@code x}, ... {@code w}), scale, column-major. */
+    private static double[] trs(double tx, double ty, double tz, double x, double y, double z, double w, double sx,
+        double sy, double sz) {
         return new double[] {
-            (1 - 2 * (y * y + z * z)) * n.sx(), 2 * (x * y + z * w) * n.sx(), 2 * (x * z - y * w) * n.sx(), 0,
-            2 * (x * y - z * w) * n.sy(), (1 - 2 * (x * x + z * z)) * n.sy(), 2 * (y * z + x * w) * n.sy(), 0,
-            2 * (x * z + y * w) * n.sz(), 2 * (y * z - x * w) * n.sz(), (1 - 2 * (x * x + y * y)) * n.sz(), 0,
-            n.tx(), n.ty(), n.tz(), 1};
+            (1 - 2 * (y * y + z * z)) * sx, 2 * (x * y + z * w) * sx, 2 * (x * z - y * w) * sx, 0,
+            2 * (x * y - z * w) * sy, (1 - 2 * (x * x + z * z)) * sy, 2 * (y * z + x * w) * sy, 0,
+            2 * (x * z + y * w) * sz, 2 * (y * z - x * w) * sz, (1 - 2 * (x * x + y * y)) * sz, 0,
+            tx, ty, tz, 1};
     }
 
     private static double[] multiply(double[] a, double[] b) {
