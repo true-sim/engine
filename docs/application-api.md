@@ -210,7 +210,8 @@ input through `Headset.input()`, one fixed OpenXR action set synced inside `Head
 `app.fixedRate` 60/s unless `rate(n)`, stepped in the order made), owed each frame's capped delta as nanoseconds
 times its rate (whole ticks, no drift), `blend()`, `renderTime()`, `frameDelta()`; one budget of steps per frame for
 all worlds (`app.fixedStepBudget`, 8; the cap `app.maxFrameDelta`, 0.25 s), ticks past it dropped and reported (D92:
-`Frame.droppedTicks()`,`Clock.droppedTicks()`, `Frame.capped()`); `Frame.realDelta()`/`realTime()` beside the app clock; `Step`, with
+`Frame.droppedTicks()`, `Clock.droppedTicks()`, `Frame.capped()`); `Frame.realDelta()`/`realTime()` beside the app
+clock; `Step`, with
 `Application.fixedUpdate(Step)` and `lateUpdate(Frame)` and `Plugin.fixedUpdate`, `animate`, `lateUpdate`;
 `Clock.afterStep` hooks (D123's transforms: `afterStep(scene::update)`, or `SceneSync.follow`); `Timer`s counting steps
 (D97: `after`, `every`, `afterSeconds`, `everySeconds`). engine-scene: the `Animation` plugin (animation.md: a world's
