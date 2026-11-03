@@ -1276,6 +1276,16 @@ view.port().add(new ReferencePathTracer(geometry, rayTracing, view, Format.R32G3
   (engine-demo's `ReferenceScreenshots`: `reference-demo.png` beside the visibility buffer's `raster-demo.png`; 1280 x
   720, 1,024 samples, 2.0 ms a sample).
 
+**The diffuse weight** (`Keys.SURFACE_DIFFUSE`, a fourth surface output beside screen-space reflections' three,
+`SurfaceOutputs.DIFFUSE_FORMAT`, 8 bits, design D10): what the diffuse light from all around the normal (the
+environment's spherical harmonics, the constant sky, later the probe volume) is weighed by in each pixel's color, so
+global illumination replaces that term exactly, as reflections replace the reflectance's
+(`theDiffuseWeightIsWhatTheDiffuseLightIsWeighedBy`: the color is the weights times the light, on both shading
+techniques). Written with the other surface outputs, when a technique asks for them: `ReflectionsBenchmark`'s
+"surface outputs only" (RX 9070 XT, 2026-11-03) took 1.388-1.404 ms at 1080p on mesh shaders against 1.343-1.355 ms
+with three outputs (measured in another session), and at 4K 2.760-2.764 against 2.686-2.691 ms (indexed) and
+2.631-2.636 against 2.609-2.616 ms (visibility buffer): about 0.02 to 0.07 ms.
+
 **Motion vectors** (`MotionVectors`, `Keys.MOTION`, design D4): per view (each eye its own), for every pixel how far
 its surface moved on screen since the frame before, in pixels from it (two 16-bit floats; a history is read at the
 pixel plus the motion), the projections' jitter taken out. Exact for rigid and skinned motion: the pixel's triangle

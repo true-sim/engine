@@ -2,7 +2,7 @@
 // technique asks for them (engine-render's SurfaceOutputs): its normal in view space (octahedral, two 16-bit signed
 // values in one word), its perceptual roughness, its specular F0, and what the environment's reflection along its
 // mirror direction is multiplied by in its color (the reflectance), so screen-space reflections replace that term
-// exactly. View space: x along the image's x (right), y along its y (down, as Vulkan's), z away from the viewer.
+// exactly, and what the diffuse light from all around its normal is (the diffuse weight), for global illumination. View space: x along the image's x (right), y along its y (down, as Vulkan's), z away from the viewer.
 module surfaces;
 
 /** A pixel's surface as shading saw it. Normal and positions camera-relative (world axes). */
@@ -12,6 +12,7 @@ public struct SurfaceOut
     public float roughness;    // perceptual
     public float3 f0;          // specular reflectance at normal incidence, metals' albedo included
     public float3 reflectance; // what the environment's reflection along reflect(-toViewer, normal) is weighed by
+    public float3 diffuse;     // what the diffuse light from all around the normal is weighed by (global illumination)
 };
 
 /** No surface: a pixel nothing covers, or one the reflections must leave alone (reflectance 0). */
@@ -22,6 +23,7 @@ public SurfaceOut noSurface()
     s.roughness = 1;
     s.f0 = 0;
     s.reflectance = 0;
+    s.diffuse = 0;
     return s;
 }
 

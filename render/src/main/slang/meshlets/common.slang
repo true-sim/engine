@@ -827,8 +827,9 @@ public float4 shadeMaterialSurface<M : IMaterial, R : IShadowRays>(R rays, View 
     }
     // Light from all around: the view's indirect-light table (an environment, later GI), or the constant sky
     float3 reflectance;
-    float3 color = (indirect != nullptr ? indirectLightWeighed(indirect, s, toViewer, reflectance)
-        : ambientWeighed(s, toViewer, SKY_IRRADIANCE, reflectance)) + emissive;
+    float3 diffuseWeight;
+    float3 color = (indirect != nullptr ? indirectLightWeights(indirect, s, toViewer, reflectance, diffuseWeight)
+        : ambientWeights(s, toViewer, SKY_IRRADIANCE, reflectance, diffuseWeight)) + emissive;
     if (lights == nullptr)
     {
         color += reflected(s, toViewer, SUN, SUN_IRRADIANCE);
@@ -863,11 +864,13 @@ public float4 shadeMaterialSurface<M : IMaterial, R : IShadowRays>(R rays, View 
         UnlitParameters unlit = materialFeature<UnlitParameters>(ref, FEATURE_UNLIT);
         color = applyUnlit(color, s, unlit);
         reflectance *= 1 - unlit.amount; // lerp(lit, albedo, amount): the lit part scaled
+        diffuseWeight *= 1 - unlit.amount;
     }
     surface.normal = s.normal;
     surface.roughness = s.roughness;
     surface.f0 = lerp(s.f0, s.albedo, s.metallic);
     surface.reflectance = reflectance;
+    surface.diffuse = diffuseWeight;
     return float4(color, s.alpha);
 }
 

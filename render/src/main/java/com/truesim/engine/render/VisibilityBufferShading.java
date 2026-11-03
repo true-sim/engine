@@ -210,7 +210,7 @@ public final class VisibilityBufferShading implements Technique {
                     .indirect(indirect == null ? 0 : ctx.address(indirect.table()));
                 if (surfaces != null) {
                     shadePush.normal(ctx.storage(surfaces.normal())).material(ctx.storage(surfaces.material()))
-                        .reflectance(ctx.storage(surfaces.reflectance()));
+                        .reflectance(ctx.storage(surfaces.reflectance())).diffuse(ctx.storage(surfaces.diffuse()));
                 }
                 ctx.dispatchIndirect(shade[bin], shadePush, tiles, list);
             }

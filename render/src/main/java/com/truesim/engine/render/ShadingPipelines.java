@@ -168,7 +168,7 @@ final class ShadingPipelines implements AutoCloseable {
                 case COLOR -> graphics.color(colorFormat).depth(depthFormat).build();
                 case COLOR_SURFACES -> graphics.color(colorFormat).color(SurfaceOutputs.NORMAL_FORMAT.vk())
                     .color(SurfaceOutputs.MATERIAL_FORMAT.vk()).color(SurfaceOutputs.REFLECTANCE_FORMAT.vk())
-                    .depth(depthFormat).build();
+                    .color(SurfaceOutputs.DIFFUSE_FORMAT.vk()).depth(depthFormat).build();
                 case DEPTH -> graphics.depth(depthFormat).build();
                 case IDS -> graphics.color(MeshletRenderer.ID_FORMAT).depth(depthFormat).build();
                 case WEIGHTED -> RasterPipelines.blended(graphics, depthFormat);

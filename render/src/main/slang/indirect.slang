@@ -97,6 +97,20 @@ public float3 indirectLight(IndirectLight* t, Surface s, float3 toViewer)
  */
 public float3 indirectLightWeighed(IndirectLight* t, Surface s, float3 toViewer, out float3 reflectance)
 {
+    float3 diffuseWeight;
+    return indirectLightWeights(t, s, toViewer, reflectance, diffuseWeight);
+}
+
+/**
+ * indirectLightWeighed, also giving what the diffuse light from all around the normal (diffuseLight(t, s.normal)) is
+ * weighed by in the result, its `diffuseWeight`: the diffuse color less what the specular takes (with its multiple
+ * scattering), the occlusion, what a sheen and a clear coat over it let through. Global illumination replaces that
+ * term by it (surfaces.slang). The part a surface transmitting diffusely takes from behind (diffuseLight(t, -n)) is
+ * left out: it is not of the light around the normal.
+ */
+public float3 indirectLightWeights(IndirectLight* t, Surface s, float3 toViewer, out float3 reflectance,
+    out float3 diffuseWeight)
+{
     float3 n = s.normal;
     float nv = saturate(dot(n, toViewer));
     float3 reflectedNormal = n;
@@ -125,6 +139,7 @@ public float3 indirectLightWeighed(IndirectLight* t, Surface s, float3 toViewer,
     float3 fmsEms = (1 - ess) * fssEss * fAvg / (1 - fAvg * (1 - ess));
     float3 specular = specularLight(t, r, s.roughness) * fssEss;
     float3 diffuseColor = (1 - s.metallic) * (1 - s.transmission) * s.albedo;
+    diffuseWeight = (fmsEms + diffuseColor * (1 - fssEss - fmsEms)) * (1 - s.diffuseTransmission) * s.occlusion;
     float3 diffuse = (fmsEms + diffuseColor * (1 - fssEss - fmsEms)) * diffuseLight(t, n);
     if (s.diffuseTransmission > 0)
     {
@@ -141,6 +156,7 @@ public float3 indirectLightWeighed(IndirectLight* t, Surface s, float3 toViewer,
         float albedo = min(sheenLut.z, 1.0);
         float base = 1 - max(s.sheenColor.r, max(s.sheenColor.g, s.sheenColor.b)) * albedo;
         reflectance *= base;
+        diffuseWeight *= base;
         color = color * base
             + s.sheenColor * sheenLight(t, reflect(-toViewer, n), s.sheenRoughness) * albedo * s.occlusion;
     }
@@ -153,6 +169,7 @@ public float3 indirectLightWeighed(IndirectLight* t, Surface s, float3 toViewer,
             * (0.04 * coatLut.x + coatLut.y) * s.occlusion;
         color = color * (1 - s.clearcoat * fresnel) + s.clearcoat * coat;
         reflectance *= 1 - s.clearcoat * fresnel;
+        diffuseWeight *= 1 - s.clearcoat * fresnel;
     }
     return color;
 }
