@@ -160,6 +160,11 @@ public final class Hrtf {
         return triangles.length / 3;
     }
 
+    /** Vertex {@code k} (0 to 2, counter-clockwise from outside) of triangle {@code t}. */
+    public int corner(int t, int k) {
+        return triangles[3 * t + k];
+    }
+
     /** Where the set comes from and its licence. */
     public String credit() {
         return credit;

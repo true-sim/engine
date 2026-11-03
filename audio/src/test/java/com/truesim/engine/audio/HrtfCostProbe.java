@@ -29,35 +29,43 @@ class HrtfCostProbe {
         long[] panned = measurePanned();
         System.out.printf("Panned, 16 voices:       median %d us, p99 %d us, max %d us%n", panned[0], panned[1],
             panned[2]);
+        for (int field : new int[] {0, 16, 64, 256}) { // past the cap: the ambisonics bus, decoded once a block
+            try (AudioRenderer r = new AudioRenderer(AudioFormat.stereo(48_000), 512)) {
+                r.commands().spatializer(new HrtfSpatializer(HrtfTest.builtIn(), 256, 20), 16);
+                long[] t = run(r, true, HrtfTest.SPATIAL_HRTF, 16 + field);
+                System.out.printf("HRTF 16 + %d in the field, moving: median %d us, p99 %d us%n", field, t[0], t[1]);
+            }
+        }
         assertThat(moving[0]).as("median microseconds a block, moving").isLessThan(600);
         assertThat(still[0]).as("median microseconds a block, still").isLessThan(600);
     }
 
     private static long[] measure(boolean moving) {
         try (AudioRenderer r = HrtfTest.renderer(256, 16)) {
-            return run(r, moving, HrtfTest.SPATIAL_HRTF);
+            return run(r, moving, HrtfTest.SPATIAL_HRTF, 16);
         }
     }
 
     private static long[] measurePanned() {
         try (AudioRenderer r = new AudioRenderer(AudioFormat.stereo(48_000), 64)) {
-            return run(r, true, Voices.SPATIAL);
+            return run(r, true, Voices.SPATIAL, 16);
         }
     }
 
-    private static long[] run(AudioRenderer r, boolean moving, int flags) {
+    private static long[] run(AudioRenderer r, boolean moving, int flags, int voices) {
         AudioClip tone = Clips.sine(48_000, 200, 0.03f, 240 * 100);
-        for (int v = 0; v < 16; v++) {
-            r.commands().play(v, tone, 0, 0, 1, 1 + 0.01f * v, Bus.SFX, flags | Voices.LOOP, 0, v);
+        r.commands().budget(voices);
+        for (int v = 0; v < voices; v++) {
+            r.commands().play(v, tone, 0, 0, v < 16 ? 1 : 0.5f, 1 + 0.01f * v, Bus.SFX, flags | Voices.LOOP, 0, v);
             r.commands().spatial(v, (float) Math.sin(v), 0.2f, (float) Math.cos(v) * 3, 1, HrtfTest.FLAT, false);
         }
         float[] out = new float[512];
         int warm = 3_000;
-        int blocks = 20_000;
+        int blocks = voices > 16 ? 5_000 : 20_000;
         long[] times = new long[blocks];
         for (int b = 0; b < warm + blocks; b++) {
             if (moving) {
-                for (int v = 0; v < 16; v++) {
+                for (int v = 0; v < voices; v++) {
                     double angle = 0.02 * b + v; // about 1° a block
                     r.commands().spatial(v, (float) Math.sin(angle) * 3, 0.2f, (float) Math.cos(angle) * 3, 1,
                         HrtfTest.FLAT, false);

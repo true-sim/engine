@@ -17,6 +17,7 @@ import static org.lwjgl.openxr.XR10.XR_REFERENCE_SPACE_TYPE_LOCAL;
 import static org.lwjgl.openxr.XR10.XR_REFERENCE_SPACE_TYPE_STAGE;
 import static org.lwjgl.openxr.XR10.XR_SESSION_STATE_EXITING;
 import static org.lwjgl.openxr.XR10.XR_SESSION_STATE_FOCUSED;
+import static org.lwjgl.openxr.XR10.XR_SESSION_STATE_VISIBLE;
 import static org.lwjgl.openxr.XR10.XR_SESSION_STATE_LOSS_PENDING;
 import static org.lwjgl.openxr.XR10.XR_SESSION_STATE_READY;
 import static org.lwjgl.openxr.XR10.XR_SESSION_STATE_STOPPING;
@@ -87,6 +88,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import org.lwjgl.PointerBuffer;
+import org.lwjgl.openxr.OCULUSAudioDeviceGuid;
 import org.lwjgl.openxr.XrApplicationInfo;
 import org.lwjgl.openxr.XrCompositionLayerBaseHeader;
 import org.lwjgl.openxr.XrCompositionLayerProjection;
@@ -164,9 +166,14 @@ public final class Headset implements AutoCloseable {
     private final String name;
     private final int recommendedWidth;
     private final int recommendedHeight;
-    /** Extensions enabled where the runtime has them: tracked hands' joints and gestures, the eyes' gaze. */
+    /**
+     * Extensions enabled where the runtime has them: tracked hands' joints and gestures, the eyes' gaze, the headset's
+     * audio device (Meta's runtime; not SteamVR's).
+     */
     private static final List<String> OPTIONAL = List.of(XR_EXT_HAND_TRACKING_EXTENSION_NAME,
-        XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME, XR_EXT_HAND_INTERACTION_EXTENSION_NAME);
+        XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME, XR_EXT_HAND_INTERACTION_EXTENSION_NAME,
+        OCULUSAudioDeviceGuid.XR_OCULUS_AUDIO_DEVICE_GUID_EXTENSION_NAME);
+    private String audioOutputDevice = "";
     private final Camera[] cameras = {new Camera(), new Camera()};
     private boolean handTracking;
     private boolean eyeGaze;
@@ -290,6 +297,9 @@ public final class Headset implements AutoCloseable {
             headset.handTracking = handTracking;
             headset.eyeGaze = eyeGaze;
             headset.handInteraction = extensions.contains(XR_EXT_HAND_INTERACTION_EXTENSION_NAME);
+            if (extensions.contains(OCULUSAudioDeviceGuid.XR_OCULUS_AUDIO_DEVICE_GUID_EXTENSION_NAME)) {
+                headset.audioOutputDevice = audioDevice(instance, stack);
+            }
             return headset;
         } catch (RuntimeException e) {
             if (!(e instanceof HeadsetException.Unavailable)) {
@@ -297,6 +307,30 @@ public final class Headset implements AutoCloseable {
             }
             throw e;
         }
+    }
+
+    /** The headset's audio output endpoint id ({@code XR_OCULUS_audio_device_guid}), or "" where it fails. */
+    @AllowAllocation("connecting, once")
+    private static String audioDevice(XrInstance instance, MemoryStack stack) {
+        int size = OCULUSAudioDeviceGuid.XR_MAX_AUDIO_DEVICE_STR_SIZE_OCULUS;
+        ByteBuffer buffer = stack.calloc(2 * size); // wchar_t: UTF-16 on Windows, the only platform offering it
+        if (OCULUSAudioDeviceGuid.xrGetAudioOutputDeviceGuidOculus(instance, buffer) < 0) {
+            return "";
+        }
+        return wide(buffer);
+    }
+
+    /** A NUL-terminated UTF-16LE string. */
+    static String wide(ByteBuffer buffer) {
+        StringBuilder s = new StringBuilder();
+        for (int i = 0; i + 1 < buffer.capacity(); i += 2) {
+            char c = (char) (buffer.get(i) & 0xFF | (buffer.get(i + 1) & 0xFF) << 8);
+            if (c == 0) {
+                break;
+            }
+            s.append(c);
+        }
+        return s.toString();
     }
 
     @AllowAllocation("connecting, once")
@@ -551,6 +585,25 @@ public final class Headset implements AutoCloseable {
         }
         view.size(width, height).output(key, eyes[eye.ordinal()]);
         return this;
+    }
+
+    /**
+     * The Windows endpoint id of the headset's audio output ({@code IMMDevice::GetId} form), where the runtime offers
+     * {@code XR_OCULUS_audio_device_guid} (Meta's does; SteamVR does not, and switches the system's default device to
+     * the headset instead); "" otherwise. {@code Audio.headsetDevice} plays on it.
+     */
+    public String audioOutputDevice() {
+        return audioOutputDevice;
+    }
+
+    /** Whether the headset shows the app now (the session visible or focused): not idle, not taken off. */
+    public boolean visible() {
+        return state == XR_SESSION_STATE_VISIBLE || state == XR_SESSION_STATE_FOCUSED;
+    }
+
+    /** Whether the app has the headset's input (focused): no system menu over it. */
+    public boolean focused() {
+        return state == XR_SESSION_STATE_FOCUSED;
     }
 
     /** Whether the runtime shows the app: a session running, frames rendered for the headset. */

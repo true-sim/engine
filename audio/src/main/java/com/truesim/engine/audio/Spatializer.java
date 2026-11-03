@@ -26,6 +26,11 @@ public interface Spatializer {
     /** A block begins: budgets per block (filter updates) start again. */
     void begin();
 
+    /** The ambisonics bus voices past its capacity are encoded into (§2.9), or null: they pan. */
+    default Ambisonics ambisonics() {
+        return null;
+    }
+
     /** Renders channel {@code channel}'s mono block {@code mono} ({@code frames} long, the block) into stereo {@code out}. */
     void process(int channel, float[] mono, float[] out, int frames);
 }

@@ -74,6 +74,7 @@ public final class HrtfSpatializer implements Spatializer {
     private final float[] kernel;
     private final int[] at = new int[3];
     private final float[] weights = new float[3];
+    private final Ambisonics ambisonics;
 
     /** A spatializer of {@code capacity} channels for blocks of {@code block} frames at {@code hrtf}'s rate. */
     @AllowAllocation("made on the game thread")
@@ -115,6 +116,15 @@ public final class HrtfSpatializer implements Spatializer {
         for (int c = 0; c < capacity; c++) {
             reset(c);
         }
+        ambisonics = new Ambisonics(hrtf, block, FIELDS);
+    }
+
+    /** Ambisonic fields (buses with voices past the cap) it decodes at most. */
+    static final int FIELDS = 16;
+
+    @Override
+    public Ambisonics ambisonics() {
+        return ambisonics;
     }
 
     @Override
@@ -262,7 +272,7 @@ public final class HrtfSpatializer implements Spatializer {
             hrtf.locate(targetDirections[o + 3 * ear], targetDirections[o + 3 * ear + 1],
                 targetDirections[o + 3 * ear + 2], at, weights);
             hrtf.interpolate(at, weights, ear, taps);
-            shift(hrtf.delay(at, weights, ear) + BASE_DELAY);
+            shift(taps, hrtf.delay(at, weights, ear) + BASE_DELAY, delayed, kernel);
             for (int p = 0; p < parts; p++) {
                 Arrays.fill(part, 0);
                 System.arraycopy(delayed, p * block, part, 0, block);
@@ -285,10 +295,11 @@ public final class HrtfSpatializer implements Spatializer {
     }
 
     /**
-     * {@link #taps} delayed by {@code delay} samples into {@link #delayed}: the integer part as an offset, the fraction
-     * by a Blackman-windowed sinc of {@value #BASE_DELAY} taps either side (made once per update, not per tap).
+     * {@code taps} delayed by {@code delay} samples (at least {@value #BASE_DELAY}) into {@code delayed}: the integer
+     * part as an offset, the fraction by a Blackman-windowed sinc of {@value #BASE_DELAY} taps either side, made once
+     * into {@code kernel} ({@code 2 × BASE_DELAY + 2} long), not per tap.
      */
-    private void shift(float delay) {
+    static void shift(float[] taps, float delay, float[] delayed, float[] kernel) {
         Arrays.fill(delayed, 0);
         int whole = (int) Math.floor(delay);
         float fraction = delay - whole;

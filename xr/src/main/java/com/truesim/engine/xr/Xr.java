@@ -104,9 +104,14 @@ public final class Xr implements Plugin {
 
     /** Frames paced by the headset: its wait, input and poses first; the graph rendered and the eyes submitted last. */
     private final class HeadsetFrames implements FrameDriver {
+        private final StateReport report = new StateReport();
+
         @Override
         public void beginFrame(Frame frame) {
             headset.beginFrame();
+            if (headset.running() || report.reported()) {
+                report.report(engine, headset.visible(), headset.focused());
+            }
         }
 
         @Override

@@ -5,6 +5,7 @@ import com.truesim.common.math.Maths;
 import com.truesim.common.math.random.Hash;
 import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.audio.Audio;
+import com.truesim.engine.audio.HeadPose;
 import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.Generator;
@@ -67,18 +68,23 @@ final class KnockingRocks implements AutoCloseable {
     private final CameraCar car;
     private int knocks;
 
-    KnockingRocks(Audio audio, DemoScene world, TaskScheduler tasks, double[] eye, double yaw) {
+    KnockingRocks(Audio audio, DemoScene world, TaskScheduler tasks, double[] eye, double yaw, HeadPose head) {
         this.world = world;
         this.tasks = tasks;
         cache = new AssetCache(tasks);
         sounds = audio.assets(cache).sounds(scene);
         listener = scene.create();
-        sounds.listeners().device(listener);
+        long camera = sounds.listeners().device(listener).id();
+        if (head != null) { // in VR the head listens (and the plugin turns the HRTF on), not the desktop camera
+            sounds.listeners().remove(camera);
+            audio.head(sounds, head);
+        }
         car = new CameraCar(audio, sounds);
         AssetRef<AudioClip> clip = AssetRef.generated(AudioAssets.CLIP, KNOCK, 0, 17);
         knock = Sound.builder().root(Play.clip(clip)).attenuation(Attenuation.near(2, 80))
             .volume(Range.db(-3, 0)).pitch(Range.semitones(-3, 3))
-            .concurrency(Concurrency.max(8).steal(Concurrency.Steal.OLDEST)).build();
+            .concurrency(Concurrency.max(8).steal(Concurrency.Steal.OLDEST))
+            .spatial(com.truesim.scene.audio.Spatial.HRTF).build(); // binaural on headphones
         // drop spots ahead of the camera, 6 to 20 m out, spread across the view
         double fx = Maths.sin(yaw);
         double fz = Maths.cos(yaw);

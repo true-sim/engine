@@ -140,6 +140,11 @@ final class Voices {
     private int[] drainBus = new int[0];
     private int[] drainLeft = new int[0];
     private final float[] binaural;
+    // The ambisonics bus (step 18): HRTF voices past the cap, encoded by direction; their gains now and wanted.
+    private Ambisonics ambisonics;
+    private final float[] fieldGains;
+    private final float[] fieldTargets;
+    private final float[] fieldInput;
 
     // Rendering listeners (step 13, §2.10): their mixes, the voices each hears and how loud, re-emitting voices.
     static final int LISTENERS = 4;
@@ -180,6 +185,9 @@ final class Voices {
         binauralMix = new float[capacity];
         binauralTarget = new float[capacity];
         binaural = new float[block];
+        fieldGains = new float[capacity * Ambisonics.CHANNELS];
+        fieldTargets = new float[capacity * Ambisonics.CHANNELS];
+        fieldInput = new float[block];
         Arrays.fill(binauralChannel, -1);
         inputs = new int[capacity];
         inputPrevious = new int[capacity];
@@ -407,6 +415,8 @@ final class Voices {
             System.arraycopy(panTarget, o, panTo, o, channels);
             attFrom[slot] = attTarget[slot];
             attTo[slot] = attTarget[slot];
+            System.arraycopy(fieldTargets, slot * Ambisonics.CHANNELS, fieldGains, slot * Ambisonics.CHANNELS,
+                Ambisonics.CHANNELS);
             dopplers[slot] = doppler;
             spatialLeft[slot] = 0;
         } else {
@@ -431,6 +441,9 @@ final class Voices {
         if (binauralChannel[slot] >= 0) {
             spatializer.place(binauralChannel[slot], x, y, z);
         }
+        if ((flags[slot] & HRTF) != 0) {
+            Ambisonics.encode(x, y, z, fieldTargets, slot * Ambisonics.CHANNELS);
+        }
     }
 
     // ---------------------------------------------------------------- binaural voices
@@ -448,6 +461,7 @@ final class Voices {
             binauralTarget[slot] = 0;
         }
         spatializer = next;
+        ambisonics = next == null ? null : next.ambisonics();
         binauralCap = next == null ? 0 : Math.min(cap, next.capacity());
         int channels = next == null ? 0 : next.capacity();
         if (channelSlot.length != channels) {
@@ -526,6 +540,9 @@ final class Voices {
     /** A layout swap renumbers the buses: tails still to drain are dropped. */
     void layoutChanged() {
         Arrays.fill(drainBus, -1);
+        if (ambisonics != null) {
+            ambisonics.clear();
+        }
     }
 
     /** Binaural candidates now: real placed HRTF voices; the most audible {@code cap} get (or keep) a channel. */
@@ -770,6 +787,9 @@ final class Voices {
                 renderMixes(blockStart, frames);
             }
             top = renderPass(graph, blockStart, frames, events, pass == 1, top);
+        }
+        if (ambisonics != null) {
+            ambisonics.decode(graph, frames);
         }
         if (mixing) {
             finishMixes(graph, frames);
@@ -1200,6 +1220,12 @@ final class Voices {
         if (channel >= 0) {
             Arrays.fill(binaural, 0, frames, 0);
         }
+        // an HRTF voice not binaural (past the cap, or fading out of it) goes to its bus's ambisonic field, not the pan
+        boolean field = spatial && (flags[slot] & HRTF) != 0 && ambisonics != null && busIndex[slot] >= 0
+            && busIndex[slot] < ambisonics.fields();
+        if (field) {
+            Arrays.fill(fieldInput, 0, frames, 0);
+        }
         if (patches[slot] != null) { // what this block reads, with the resampler's taps
             patches[slot].fill((long) (position + Math.max(rateFrom, rateTargets[slot]) * (frames - from)) + 4);
         }
@@ -1283,8 +1309,12 @@ final class Voices {
                     binaural[f] = s * mix;
                     panned = s * (1 - mix);
                 }
-                for (int c = 0; c < channels; c++) {
-                    out[f * channels + c] += panned * (panFrom[o + c] + (panTo[o + c] - panFrom[o + c]) * t);
+                if (field) {
+                    fieldInput[f] = panned;
+                } else {
+                    for (int c = 0; c < channels; c++) {
+                        out[f * channels + c] += panned * (panFrom[o + c] + (panTo[o + c] - panFrom[o + c]) * t);
+                    }
                 }
                 if (aux != null) { // the reverb send: post-fader, unpanned
                     send += sendStep;
@@ -1300,6 +1330,11 @@ final class Voices {
                 alive = false;
                 break;
             }
+        }
+        if (field) {
+            int g = slot * Ambisonics.CHANNELS;
+            ambisonics.add(busIndex[slot], fieldInput, fieldGains, fieldTargets, g, frames);
+            System.arraycopy(fieldTargets, g, fieldGains, g, Ambisonics.CHANNELS);
         }
         if (channel >= 0) {
             spatializer.process(channel, binaural, out, frames);

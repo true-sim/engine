@@ -283,8 +283,9 @@ public final class Audio implements Plugin {
      */
     @AllowAllocation("a setting changed")
     private void binaural() {
-        boolean on = settings.get(OUTPUT) == Output.HEADPHONES && renderer.format().channels() == 2
-            && !settings.get(MONO) && settings.get(HRTF_VOICES) > 0;
+        Output output = settings.get(OUTPUT);
+        boolean on = (output == Output.HEADPHONES || output == Output.AUTO && headPose != null) // VR: headphones
+            && renderer.format().channels() == 2 && !settings.get(MONO) && settings.get(HRTF_VOICES) > 0;
         int wanted = ++binauralWanted;
         if (!on) {
             preparedSpatializer = null;
@@ -315,6 +316,62 @@ public final class Audio implements Plugin {
             }
         }
         return Hrtf.builtIn(rate);
+    }
+
+    // VR (§2.10, step 18): the head as the listener.
+    private HeadPose headPose;
+    private SceneGraph headScene;
+    private long headNode;
+    private final double[] headPosition = new double[3];
+    private final float[] headOrientation = new float[4];
+
+    /**
+     * Listens from a tracked head ({@code xrInput::head}) in {@code sounds}' world: a node made for it carries a device
+     * listener and follows the pose before each frame's update (the same predicted pose the eyes use), so the game's
+     * {@code scene.update()} places it. With {@link #OUTPUT} at {@code AUTO} a followed head means headphones: HRTF
+     * on (§2.17: in VR the default is headphones). Returns the listener's id.
+     */
+    @AllowAllocation("set up once")
+    public long head(Sounds sounds, HeadPose pose) {
+        headScene = sounds.scene();
+        headNode = headScene.create();
+        headPose = pose;
+        follow();
+        binaural();
+        return sounds.listeners().device(headNode).id();
+    }
+
+    private void follow() {
+        if (headPose != null && headPose.head(headPosition, headOrientation)) {
+            headScene.setTranslation(headNode, headPosition[0], headPosition[1], headPosition[2]);
+            headScene.setRotation(headNode, headOrientation[0], headOrientation[1], headOrientation[2],
+                headOrientation[3]);
+        }
+    }
+
+    /**
+     * Plays on the headset's own audio device, Windows endpoint {@code endpointId} ({@code headset.audioOutputDevice()}
+     * where the runtime offers {@code XR_OCULUS_audio_device_guid}), matched to SDL's devices by name (SDL 3.4 has no
+     * endpoint ids): true when it now plays there. Without an id (SteamVR, which sets the system's default device to
+     * the headset instead) or a match, the output stays as it is.
+     */
+    @AllowAllocation("changing device, once")
+    public boolean headsetDevice(String endpointId) {
+        String name = endpointId == null ? "" : WindowsEndpoints.friendlyName(endpointId);
+        if (name.isEmpty() || !(output instanceof SdlOutput sdl)) {
+            LOG.info("Audio: no headset device to match ({}); the default device plays", endpointId);
+            return false;
+        }
+        if (!SdlOutput.has(name)) {
+            LOG.info("Audio: the headset's device {} is not one of SDL's; the default device plays", name);
+            return false;
+        }
+        sdl.close();
+        SdlOutput next = SdlOutput.reopen(name, renderer.format(), sdl.lowMark());
+        output = next;
+        next.start(renderer);
+        LOG.info("Audio: playing on the headset's device {}", name);
+        return true;
     }
 
     /** The spatializer the renderer was last given (null: none); set a frame after the settings ask for it. */
@@ -358,6 +415,7 @@ public final class Audio implements Plugin {
         if (sync != null) {
             sync.events();
         }
+        follow();
         if (binauralChanged) {
             binauralChanged = false;
             spatializer = preparedSpatializer;

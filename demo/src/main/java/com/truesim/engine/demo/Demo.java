@@ -192,8 +192,11 @@ public final class Demo implements Application, PlatformListener {
             System.out.println("Headset: " + headset);
             startHeadset();
         }
-        knocks = engine.find(Audio.KEY).map(audio -> new KnockingRocks(audio, world, engine.tasks(), eye, yaw))
-            .orElse(null);
+        knocks = engine.find(Audio.KEY).map(audio -> new KnockingRocks(audio, world, engine.tasks(), eye, yaw,
+            headset == null ? null : (p, o) -> headset.running() && headset.input().head(p, o))).orElse(null);
+        if (headset != null) { // Meta's runtime names the headset's audio device; SteamVR makes it the default
+            engine.find(Audio.KEY).ifPresent(audio -> audio.headsetDevice(headset.audioOutputDevice()));
+        }
         footsteps = world.character() == null ? null : engine.find(Audio.KEY)
             .map(audio -> new FoxFootsteps(audio, world.character(), engine.tasks())).orElse(null);
         System.out.println(HELP);

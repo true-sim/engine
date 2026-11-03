@@ -2,6 +2,7 @@ package com.truesim.engine.audio;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.assertj.core.api.Assertions.within;
 import static org.lwjgl.sdl.SDLInit.SDL_INIT_AUDIO;
 import static org.lwjgl.sdl.SDLInit.SDL_QuitSubSystem;
 
@@ -91,6 +92,51 @@ class AudioPluginTest {
             engine.settings().set(Audio.OUTPUT, Audio.Output.STEREO_SPEAKERS);
             engine.step();
             assertThat(audio.spatializer()).isNull();
+        }
+    }
+
+    @Test
+    void inVrTheHeadListensAndHeadphonesAreTheDefault() throws InterruptedException {
+        Audio audio = new Audio();
+        try (Engine engine = engine(audio, "dummy"); TaskScheduler tasks = new TaskScheduler();
+             AssetCache cache = new AssetCache(tasks)) {
+            audio.assets(cache);
+            SceneGraph scene = new SceneGraph(new ChangeClock());
+            Sounds sounds = audio.sounds(scene);
+            double[] where = {3, 1.7, -2};
+            long listener = audio.head(sounds, (position, orientation) -> {
+                System.arraycopy(where, 0, position, 0, 3);
+                orientation[0] = 0;
+                orientation[1] = (float) Math.sin(0.5);
+                orientation[2] = 0;
+                orientation[3] = (float) Math.cos(0.5);
+                return true;
+            });
+            for (int i = 0; i < 400 && audio.spatializer() == null; i++) {
+                engine.step();
+                scene.update(); // the game's update places the head's node
+                Thread.sleep(5);
+            }
+            assertThat(audio.spatializer()).as("AUTO with a head: headphones").isNotNull();
+            where[0] = 4;
+            engine.step();
+            scene.update();
+            engine.step();
+            assertThat(sounds.listeners().position(listener, 0)).isEqualTo(4);
+            assertThat(sounds.listeners().rotation(listener, 1)).isCloseTo(Math.sin(0.5), within(1e-6));
+            // no headset device to match: the output stays
+            assertThat(audio.headsetDevice("")).isFalse();
+            assertThat(audio.headsetDevice(null)).isFalse();
+            assertThat(audio.headsetDevice("{0.0.0.00000000}.{00000000-0000-0000-0000-000000000000}")).isFalse();
+            String first = WindowsEndpointsTest.firstEndpoint();
+            if (!first.isEmpty()) { // a real endpoint's name, which SDL's dummy driver does not list
+                assertThat(audio.headsetDevice("{0.0.0.00000000}." + first)).isFalse();
+            }
+            // the headset idle (hidden): the background rule mutes
+            engine.visibilityChanged(false);
+            engine.step();
+            engine.visibilityChanged(true);
+            engine.step();
         }
     }
 

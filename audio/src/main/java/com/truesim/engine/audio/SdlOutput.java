@@ -162,6 +162,34 @@ public final class SdlOutput implements AudioOutput {
         }
     }
 
+    /**
+     * Opens playback device {@code name} for a renderer of {@code format} (the headset's device, chosen while playing):
+     * the stream takes the renderer's format; SDL converts if the device's differs.
+     */
+    @AllowAllocation("opening a device")
+    public static SdlOutput reopen(String name, AudioFormat format, int lowMark) {
+        return open(find(name), format.block(), lowMark, format);
+    }
+
+    /** Whether a playback device is called {@code name}. */
+    @AllowAllocation("listing devices")
+    public static boolean has(String name) {
+        IntBuffer devices = SDL_GetAudioPlaybackDevices();
+        if (devices == null) {
+            return false;
+        }
+        try {
+            for (int i = 0; i < devices.remaining(); i++) {
+                if (name.equals(SDL_GetAudioDeviceName(devices.get(i)))) {
+                    return true;
+                }
+            }
+            return false;
+        } finally {
+            SDL_free(devices);
+        }
+    }
+
     /** The playback device called {@code name}, or the default one. */
     @AllowAllocation("opening a device")
     private static int find(String name) {
