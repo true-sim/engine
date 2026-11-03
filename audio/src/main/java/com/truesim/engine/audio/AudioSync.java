@@ -25,6 +25,13 @@ import com.truesim.scene.audio.Release;
 import com.truesim.scene.audio.Sound;
 import com.truesim.scene.audio.Sounds;
 import com.truesim.scene.audio.Spatial;
+import com.truesim.scene.audio.Scatter;
+import com.truesim.scene.audio.SoundField;
+import com.truesim.scene.audio.SoundNode;
+import com.truesim.scene.audio.Random;
+import com.truesim.scene.audio.Sequence;
+import com.truesim.scene.audio.Layer;
+import com.truesim.common.math.random.Hash;
 import java.util.Arrays;
 
 /**
@@ -109,6 +116,20 @@ public final class AudioSync {
         float sentCutoff;
         boolean sharesZone = true;
         boolean occKnown;
+        // many sounds (step 19): a scatter's grains, or a field's emitters (and its bed last), as slots of their own
+        int special;
+        Scatter scatter;
+        SoundField field;
+        Object[] grainClips = new Object[4];
+        int grainClipCount;
+        final int[] extras = new int[EXTRAS];
+        final int[] extraPoints = new int[EXTRAS];
+        final double[] extraWhere = new double[3 * EXTRAS];
+        int extraLive;
+        double debt;
+        int spawned;
+        long specialAt;
+        float bedSent;
 
         @AllowAllocation("a sound with more voices than any before")
         void grow(int n) {
@@ -120,6 +141,16 @@ public final class AudioSync {
             rings = Arrays.copyOf(rings, size);
         }
     }
+
+    /** A track playing a scatter's grains (§2.18). */
+    static final int SCATTER = 1;
+    /** A track playing a field from its nearest places and a bed. */
+    static final int FIELD = 2;
+    /** Grains of a scatter sounding at once at most (§2.18: k = 8), and a field's voices and its bed. */
+    static final int GRAINS = 8;
+    static final int EXTRAS = SoundField.MAX_NEAREST + 1;
+    /** The slot voice of a grain or a field's voice: no voice of the plan. */
+    private static final int EXTRA = -10;
 
     private static final byte WAITING = 0;
     private static final byte PLAYING = 1;
@@ -397,6 +428,19 @@ public final class AudioSync {
         if (kind != AudioRenderer.ENDED || t < 0) {
             return;
         }
+        if (slotVoice[slot] == EXTRA) { // a grain or a field's voice: its slot is free again
+            slotTrack[slot] = -1;
+            slotsUsed--;
+            Track track = tracks[t];
+            track.extraLive--;
+            for (int e = 0; e < EXTRAS; e++) {
+                if (track.extras[e] == slot) {
+                    track.extras[e] = -1;
+                }
+            }
+            finishIfDone(t);
+            return;
+        }
         if (slotPatch[slot] != null) {
             patches.give(slotPatch[slot]);
             slotPatch[slot] = null;
@@ -412,6 +456,9 @@ public final class AudioSync {
     /** Ends track {@code t} once nothing of it plays or will: its instance ends if it still lives. */
     private void finishIfDone(int t) {
         Track track = tracks[t];
+        if (track.extraLive > 0 || track.special != 0 && !track.stopped && !track.gone) {
+            return; // grains or field voices still sound, or the scatter or field goes on
+        }
         for (int v = 0; v < track.voices; v++) {
             if (track.state[v] == PLAYING || track.state[v] == WAITING && !track.gone) {
                 return;
@@ -448,6 +495,10 @@ public final class AudioSync {
         long heardFrame = clock.heardFrame();
         for (int t = 0; t < tracks.length; t++) {
             Track track = tracks[t];
+            if (track != null && track.sound != null && !track.gone && track.special != 0) {
+                special(t);
+                continue;
+            }
             if (track != null && track.sound != null && !track.gone) {
                 start(t);
                 if (track.sound != null && placed(track)) {
@@ -774,6 +825,7 @@ public final class AudioSync {
         Track track = tracks[t];
         if ((changes & Sounds.REMOVED) != 0) {
             track.gone = true;
+            killExtras(track);
             for (int v = 0; v < track.voices; v++) {
                 if (track.state[v] == PLAYING) {
                     commands.kill(track.slots[v]);
@@ -793,6 +845,13 @@ public final class AudioSync {
             for (int v = 0; v < track.voices; v++) {
                 if (track.state[v] == PLAYING && store.voiceNode(id, v) instanceof Play play && play.isInput()) {
                     commands.input(track.slots[v], l, schedulePoint);
+                }
+            }
+        }
+        if ((changes & (Sounds.PARAMETERS | Sounds.TIME)) != 0 && track.special != 0) {
+            for (int e = 0; e < EXTRAS; e++) { // grains and field voices pause with their instance
+                if (track.extras[e] >= 0) {
+                    commands.pause(track.extras[e], store.holding(id));
                 }
             }
         }
@@ -851,8 +910,56 @@ public final class AudioSync {
                 track.acquired[track.acquiredCount++] = clip;
             }
         }
+        track.special = 0;
+        track.scatter = null;
+        track.field = store.field(id);
+        track.grainClipCount = 0;
+        track.extraLive = 0;
+        Arrays.fill(track.extras, -1);
+        track.debt = 0;
+        track.spawned = 0;
+        track.specialAt = store.now();
+        track.bedSent = -1;
+        if (track.field != null) {
+            track.special = FIELD;
+        } else if (track.voices > 0 && store.voiceNode(id, 0) instanceof Scatter scatter) {
+            track.special = SCATTER;
+            track.scatter = scatter;
+            grainClips(track, scatter.sound());
+        }
+        if (track.special != 0) {
+            for (int v = 0; v < track.voices; v++) {
+                track.state[v] = DONE; // played as grains or field voices, not as the plan's voices
+            }
+        }
         tracked[s].put(id, t);
         return t;
+    }
+
+    /** The clips a scatter's grains choose from: every clip under its child, acquired. */
+    @AllowAllocation("a scatter with more clips than any before")
+    private void grainClips(Track track, SoundNode node) {
+        switch (node) {
+            case Play play when play.clip() != null -> {
+                if (track.grainClipCount == track.grainClips.length) {
+                    track.grainClips = Arrays.copyOf(track.grainClips, 2 * track.grainClips.length);
+                }
+                track.grainClips[track.grainClipCount++] = play.clip();
+                if (!acquired(track, play.clip())) {
+                    if (track.acquiredCount == track.acquired.length) {
+                        track.acquired = Arrays.copyOf(track.acquired, 2 * track.acquired.length);
+                    }
+                    cache.acquire(play.clip());
+                    track.acquired[track.acquiredCount++] = play.clip();
+                }
+            }
+            case Random random -> random.children().forEach(child -> grainClips(track, child));
+            case Sequence sequence -> sequence.children().forEach(child -> grainClips(track, child));
+            case Layer layer -> layer.children().forEach(child -> grainClips(track, child));
+            default -> {
+                // patches, inputs and containers of other kinds do not scatter
+            }
+        }
     }
 
     private static boolean acquired(Track track, AssetRef<AudioClip> clip) {
@@ -1111,6 +1218,16 @@ public final class AudioSync {
         Sounds store = stores[track.store];
         track.stopped = true;
         float fade = store.stopFade(track.id);
+        if (track.special != 0) { // a scatter stops spawning (its grains play out); a field's voices fade
+            for (int e = 0; e < EXTRAS && track.special == FIELD; e++) {
+                if (track.extras[e] >= 0) {
+                    commands.stop(track.extras[e], schedulePoint, Math.max(fade, 0.05f));
+                    track.extras[e] = -1;
+                }
+            }
+            finishIfDone(t);
+            return;
+        }
         boolean outro = false;
         for (int v = 0; v < track.voices; v++) {
             outro |= store.voiceOutro(track.id, v);
@@ -1253,6 +1370,303 @@ public final class AudioSync {
         }
     }
 
+    // ---------------------------------------------------------------- many sounds (step 19)
+
+    private final double[] nearestPoint = new double[3];
+    private double[] distances = new double[0];
+    private double[] ranked = new double[0];
+
+    /** A scatter or a field this frame, once its clips are loaded and someone listens. */
+    private void special(int t) {
+        Track track = tracks[t];
+        Sounds store = stores[track.store];
+        double seconds = (double) (store.now() - track.specialAt) / Sounds.TICKS_PER_SECOND;
+        track.specialAt = store.now();
+        if (track.stopped || deviceCounts[track.store] == 0) {
+            return;
+        }
+        for (int i = 0; i < track.acquiredCount; i++) {
+            @SuppressWarnings("unchecked")
+            AssetRef<AudioClip> ref = (AssetRef<AudioClip>) track.acquired[i];
+            AssetState state = cache.state(ref);
+            if (state == AssetState.FAILED) {
+                track.special = 0; // nothing to play: it ends
+                track.stopped = true;
+                finishIfDone(t);
+                return;
+            }
+            if (state != AssetState.LOADED) {
+                return;
+            }
+        }
+        if (store.holding(track.id)) {
+            return; // paused: a scatter spawns nothing; a field's voices hold with their instance
+        }
+        if (track.special == SCATTER) {
+            scatter(t, seconds);
+        } else {
+            field(t);
+        }
+    }
+
+    /**
+     * Spawns the scatter's one-shots (§2.18): as many a second as its rate (or its curve at its parameter) says, each at
+     * a hashed place around the listener (within its radius, at least a metre away, from a metre below the ears to
+     * half the radius above) with a hashed clip of its child, -4 to 0 dB and ±2 semitones; at most 8 at once (more are
+     * not spawned). Each stays where it was spawned as the listener moves.
+     */
+    private void scatter(int t, double seconds) {
+        Track track = tracks[t];
+        Sounds store = stores[track.store];
+        Scatter scatter = track.scatter;
+        double rateNow = scatter.rate();
+        if (scatter.rateCurve() != null) {
+            int index = track.sound.parameterIndex(scatter.rateCurve().parameter());
+            rateNow = scatter.rateCurve().curve().at(index < 0 ? 0 : store.parameter(track.id, index));
+        }
+        track.debt += rateNow * seconds * (store.rate(track.id) > 0 ? store.rate(track.id) : 1);
+        double[] d = devices[track.store];
+        int seed = store.seed(track.id);
+        while (track.debt >= 1) {
+            track.debt -= 0.5 + Hash.random(seed, 4 * track.spawned + 3); // gaps of 0.5 to 1.5 a mean apart
+            int g = freeExtra(track, GRAINS);
+            int slot = g < 0 ? -1 : firstFree();
+            int n = track.spawned++;
+            if (slot < 0 || track.grainClipCount == 0) {
+                continue; // eight sound already, or no slot: this one is not heard
+            }
+            double angle = 2 * Math.PI * Hash.random(seed, 4 * n);
+            double r = Math.max(1, scatter.radius() * Math.sqrt(Hash.random(seed, 4 * n + 1)));
+            double up = -1 + (scatter.radius() / 2 + 1) * Hash.random(seed, 4 * n + 2);
+            track.extraWhere[3 * g] = d[0] + r * com.truesim.common.math.Maths.sin(angle);
+            track.extraWhere[3 * g + 1] = d[1] + up;
+            track.extraWhere[3 * g + 2] = d[2] + r * com.truesim.common.math.Maths.cos(angle);
+            int pick = (int) (Hash.random(seed, 4 * n + 5) * track.grainClipCount) % track.grainClipCount;
+            @SuppressWarnings("unchecked")
+            AudioClip clip = cache.get((AssetRef<AudioClip>) track.grainClips[pick]);
+            float gain = gain(track, 0) * clip.gain() * Decibels.gain(-4 * Hash.random(seed, 4 * n + 6));
+            float pitch = pitch(track, 0) * (float) com.truesim.common.math.Maths.pow(2,
+                (4 * Hash.random(seed, 4 * n + 7) - 2) / 12);
+            if (extra(t, g, slot, clip, 0, gain, pitch, false)) {
+                placeExtra(track, g, track.extraWhere[3 * g], track.extraWhere[3 * g + 1],
+                    track.extraWhere[3 * g + 2]);
+            }
+        }
+        for (int g = 0; g < GRAINS; g++) { // the listener moves; the drops stay where they fell
+            if (track.extras[g] >= 0) {
+                placeExtra(track, g, track.extraWhere[3 * g], track.extraWhere[3 * g + 1],
+                    track.extraWhere[3 * g + 2]);
+            }
+        }
+    }
+
+    /**
+     * Plays a field (§2.18) for the store's first device listener: points at the k nearest of them (a voice keeps its
+     * point until another is more than 10 % nearer; a voice let go fades over 150 ms, a new one starts at a hashed
+     * place in the loop fading in), a line or an area at its nearest point to the listener (one voice that moves);
+     * and a bed, the clip in 2D at the summed attenuation of the samples no voice plays (power summed).
+     */
+    private void field(int t) {
+        Track track = tracks[t];
+        Sounds store = stores[track.store];
+        SoundField field = track.field;
+        double[] d = devices[track.store];
+        Attenuation attenuation = track.sound.attenuation();
+        int samples = field.samples();
+        if (distances.length < samples) {
+            growDistances(samples);
+        }
+        @SuppressWarnings("unchecked")
+        AudioClip clip = cache.get((AssetRef<AudioClip>) track.acquired[0]);
+        float gain = gain(track, 0) * clip.gain();
+        for (int i = 0; i < samples; i++) {
+            double dx = field.sample(i, 0) - d[0];
+            double dy = field.sample(i, 1) - d[1];
+            double dz = field.sample(i, 2) - d[2];
+            distances[i] = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        double bed = 0;
+        if (field.kind() == SoundField.Kind.POINTS) {
+            int k = Math.min(field.nearest(), samples);
+            System.arraycopy(distances, 0, ranked, 0, samples);
+            double kth = kthSmallest(ranked, samples, k - 1);
+            for (int e = 0; e < k; e++) { // voices whose point fell well behind the k nearest let go
+                if (track.extras[e] >= 0 && distances[track.extraPoints[e]] > 1.1 * kth) {
+                    commands.stop(track.extras[e], schedulePoint, 0.15);
+                    track.extras[e] = -1;
+                }
+            }
+            for (int e = 0; e < k; e++) {
+                if (track.extras[e] >= 0) {
+                    continue;
+                }
+                int best = -1;
+                for (int i = 0; i < samples; i++) {
+                    if (distances[i] <= kth && !voiced(track, i, k) && (best < 0 || distances[i] < distances[best])) {
+                        best = i;
+                    }
+                }
+                int slot = best < 0 ? -1 : firstFree();
+                if (slot >= 0 && extra(t, e, slot, clip, hashedOffset(store, track, best, clip), gain, pitch(track, 0),
+                        true)) {
+                    track.extraPoints[e] = best;
+                }
+            }
+            for (int e = 0; e < k; e++) {
+                if (track.extras[e] >= 0) {
+                    int p = track.extraPoints[e];
+                    placeExtra(track, e, field.sample(p, 0), field.sample(p, 1), field.sample(p, 2));
+                }
+            }
+            for (int i = 0; i < samples; i++) {
+                if (!voiced(track, i, k)) {
+                    float g = attenuation.gain((float) distances[i]);
+                    bed += g * g;
+                }
+            }
+        } else {
+            field.nearestTo(d[0], d[1], d[2], nearestPoint);
+            if (track.extras[0] < 0) {
+                int slot = firstFree();
+                if (slot >= 0) {
+                    extra(t, 0, slot, clip, hashedOffset(store, track, 0, clip), gain, pitch(track, 0), true);
+                    track.extraPoints[0] = -1;
+                }
+            }
+            if (track.extras[0] >= 0) {
+                placeExtra(track, 0, nearestPoint[0], nearestPoint[1], nearestPoint[2]);
+            }
+            double nearest = Double.POSITIVE_INFINITY;
+            for (int i = 0; i < samples; i++) {
+                float g = attenuation.gain((float) distances[i]);
+                bed += g * g;
+                nearest = Math.min(nearest, distances[i]);
+            }
+            float g = attenuation.gain((float) nearest); // the voice plays the nearest sample's share
+            bed = Math.max(0, bed - g * g);
+        }
+        float level = (float) Math.sqrt(bed) * gain;
+        int b = EXTRAS - 1;
+        if (track.extras[b] < 0 && level > 1e-4f) {
+            int slot = firstFree();
+            if (slot >= 0 && extra(t, b, slot, clip, hashedOffset(store, track, samples + 1, clip), level,
+                    pitch(track, 0), false)) {
+                track.bedSent = level;
+            }
+        } else if (track.extras[b] >= 0 && Math.abs(level - track.bedSent) > 0.01f * Math.max(level, 1e-3f)) {
+            commands.gain(track.extras[b], level, 0.1);
+            track.bedSent = level;
+        }
+    }
+
+    @AllowAllocation("a field with more places than any before")
+    private void growDistances(int samples) {
+        distances = new double[samples];
+        ranked = new double[samples];
+    }
+
+    /** Whether sample {@code i} is played by one of the first {@code k} voices. */
+    private static boolean voiced(Track track, int i, int k) {
+        for (int e = 0; e < k; e++) {
+            if (track.extras[e] >= 0 && track.extraPoints[e] == i) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Where in its loop the voice for place {@code place} starts: hashed, so neighbours do not play in step. */
+    private static double hashedOffset(Sounds store, Track track, int place, AudioClip clip) {
+        return Hash.random(store.seed(track.id), 31 + place) * clip.seconds();
+    }
+
+    /** The {@code k}-th smallest of the first {@code n} of {@code values} (0 the smallest): a quickselect. */
+    static double kthSmallest(double[] values, int n, int k) {
+        int low = 0;
+        int high = n - 1;
+        while (low < high) {
+            double pivot = values[(low + high) >>> 1];
+            int i = low;
+            int j = high;
+            while (i <= j) {
+                while (values[i] < pivot) {
+                    i++;
+                }
+                while (values[j] > pivot) {
+                    j--;
+                }
+                if (i <= j) {
+                    double x = values[i];
+                    values[i] = values[j];
+                    values[j] = x;
+                    i++;
+                    j--;
+                }
+            }
+            if (k <= j) {
+                high = j;
+            } else if (k >= i) {
+                low = i;
+            } else {
+                return values[k];
+            }
+        }
+        return values[k];
+    }
+
+    /** A free extra of the first {@code n}, or -1. */
+    private static int freeExtra(Track track, int n) {
+        for (int e = 0; e < n; e++) {
+            if (track.extras[e] < 0) {
+                return e;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Starts extra {@code e} of track {@code t} in {@code slot}: {@code clip} from {@code offset} seconds (a start from
+     * an offset fades in), looping and placed, or a one-shot grain placed, or ({@code placed} false and looping) the
+     * field's bed in 2D. False when the ring is full.
+     */
+    private boolean extra(int t, int e, int slot, AudioClip clip, double offset, float gain, float pitch,
+            boolean loop) {
+        Track track = tracks[t];
+        boolean bed = track.special == FIELD && e == EXTRAS - 1;
+        boolean placed = !bed;
+        int flags = (loop || bed ? Voices.LOOP : 0) | (placed ? Voices.SPATIAL : 0)
+            | (placed && track.sound.spatial() == Spatial.HRTF ? Voices.HRTF : 0)
+            | track.sound.priority().ordinal() << Voices.PRIORITY_SHIFT
+            | track.sound.virtualization().ordinal() << Voices.VIRTUAL_SHIFT;
+        Bus bus = track.sound.bus();
+        if (!commands.play(slot, clip, schedulePoint, offset, gain, pitch, bus, flags, 0, track.id)) {
+            return false;
+        }
+        slotTrack[slot] = t;
+        slotVoice[slot] = EXTRA;
+        slotsUsed++;
+        track.extras[e] = slot;
+        track.extraLive++;
+        return true;
+    }
+
+    /** Places extra {@code e} at a world position, relative to the store's first device listener. */
+    private void placeExtra(Track track, int e, double x, double y, double z) {
+        double[] d = devices[track.store];
+        relativeWorld(x, y, z, d, 0);
+        commands.spatial(track.extras[e], (float) relative[0], (float) relative[1], (float) relative[2], 1,
+            track.sound.attenuation(), false);
+    }
+
+    private void killExtras(Track track) {
+        for (int e = 0; e < EXTRAS; e++) {
+            if (track.extras[e] >= 0) {
+                commands.kill(track.extras[e]);
+                track.extras[e] = -1;
+            }
+        }
+    }
+
     /** Collects store {@code s}'s device listeners and where they are, as of its last advance. */
     private void listeners(int s) {
         if (deviceIds.length <= s) {
@@ -1317,10 +1731,15 @@ public final class AudioSync {
     /** As {@link #relative}, for the listener pose at {@code d[o]} (position, then rotation x, y, z, w); null: none. */
     private void relativeTo(Track track, double[] d, int o) {
         Sounds store = stores[track.store];
+        relativeWorld(store.position(track.id, 0), store.position(track.id, 1), store.position(track.id, 2), d, o);
+    }
+
+    /** As {@link #relative}, for the world position ({@code x}, {@code y}, {@code z}). */
+    private void relativeWorld(double x, double y, double z, double[] d, int o) {
         boolean none = d == null;
-        double dx = store.position(track.id, 0) - (none ? 0 : d[o]);
-        double dy = store.position(track.id, 1) - (none ? 0 : d[o + 1]);
-        double dz = store.position(track.id, 2) - (none ? 0 : d[o + 2]);
+        double dx = x - (none ? 0 : d[o]);
+        double dy = y - (none ? 0 : d[o + 1]);
+        double dz = z - (none ? 0 : d[o + 2]);
         // by the listener's inverse rotation: v + 2w (q x v) + 2 q x (q x v), q conjugated
         double qx = none ? 0 : -d[o + 3];
         double qy = none ? 0 : -d[o + 4];

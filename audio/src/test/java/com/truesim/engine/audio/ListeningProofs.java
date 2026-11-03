@@ -727,6 +727,135 @@ class ListeningProofs {
         }
     }
 
+    /** A river's rush: band-passed noise with a slow swell and bubbles (short rising tones), a 6 s seamless loop. */
+    static AudioClip river() {
+        int frames = RATE * 6;
+        int fade = RATE / 2;
+        float[] s = new float[frames + fade];
+        double b1 = 0;
+        double b2 = 0;
+        double low = 0;
+        for (int i = 0; i < s.length; i++) {
+            double t = (double) i / RATE;
+            double white = Hash.random(23, i) * 2 - 1;
+            b1 += 0.08 * (white - b1);  // a low-pass near 600 Hz
+            b2 += 0.5 * (white - b2);   // and near 5 kHz: their difference a band
+            low += 0.01 * (white - low);
+            double swell = 0.75 + 0.25 * Math.sin(2 * Math.PI * 0.21 * t) * Math.sin(2 * Math.PI * 0.53 * t + 1);
+            s[i] = (float) (swell * (0.9 * (b2 - b1) + 2.5 * low));
+        }
+        for (int n = 0; n < 220; n++) { // bubbles: 2 to 8 ms rising tones at random times
+            int at = (int) (Hash.random(29, n) * (s.length - RATE / 10));
+            double f0 = 400 + 1_100 * Hash.random(31, n);
+            double length = 0.002 + 0.006 * Hash.random(37, n);
+            double level = 0.05 + 0.15 * Hash.random(41, n);
+            double phase = 0;
+            for (int i = 0; i < length * RATE * 3; i++) {
+                double t = (double) i / RATE;
+                phase += 2 * Math.PI * f0 * (1 + t / length) / RATE;
+                s[at + i] += (float) (level * Math.sin(phase) * Math.exp(-t / length));
+            }
+        }
+        return loop(s, frames, fade, 0.6f);
+    }
+
+    /** A crowd's murmur: eight talkers (formant-filtered pulse trains in syllables) mixed, a 6 s seamless loop. */
+    static AudioClip murmur() {
+        int frames = RATE * 6;
+        int fade = RATE / 2;
+        float[] s = new float[frames + fade];
+        double[][] vowels = {{730, 1090}, {270, 2290}, {530, 1840}, {570, 840}, {300, 870}, {640, 1190}};
+        for (int talker = 0; talker < 8; talker++) {
+            double f0 = 95 + 130 * Hash.random(43, talker);
+            double phase = 0;
+            double[] y1 = new double[2];
+            double[] y2 = new double[2];
+            int syllable = -1;
+            double[] formants = vowels[0];
+            for (int i = 0; i < s.length; i++) {
+                double t = (double) i / RATE;
+                int now = (int) (t * 4.5 + talker * 0.37); // about 4.5 syllables a second
+                if (now != syllable) {
+                    syllable = now;
+                    formants = vowels[(int) (Hash.random(47 + talker, now) * vowels.length) % vowels.length];
+                }
+                double inSyllable = t * 4.5 + talker * 0.37 - now;
+                boolean pause = Hash.random(53 + talker, now / 5) < 0.25; // phrases with gaps
+                double envelope = pause ? 0 : Math.sin(Math.PI * inSyllable) * Math.sin(Math.PI * inSyllable);
+                double pitch = f0 * (1 + 0.08 * Math.sin(2 * Math.PI * 0.7 * t + talker) - 0.05 * inSyllable);
+                phase += pitch / RATE;
+                double pulse = phase - Math.floor(phase) < 0.08 ? 1 : 0;
+                double voiced = 0;
+                for (int k = 0; k < 2; k++) { // two resonators at the vowel's formants
+                    double r = 0.985;
+                    double w = 2 * Math.PI * formants[k] / RATE;
+                    double y = pulse + 2 * r * Math.cos(w) * y1[k] - r * r * y2[k];
+                    y2[k] = y1[k];
+                    y1[k] = y;
+                    voiced += y * (k == 0 ? 1 : 0.6);
+                }
+                s[i] += (float) (0.004 * envelope * voiced);
+            }
+        }
+        return loop(s, frames, fade, 0.5f);
+    }
+
+    /** {@code s} as a loop of {@code frames}: its last {@code fade} frames cross-faded into its start, peak at {@code peak}. */
+    private static AudioClip loop(float[] s, int frames, int fade, float peak) {
+        float[] out = new float[frames];
+        System.arraycopy(s, 0, out, 0, frames);
+        for (int i = 0; i < fade; i++) {
+            float w = (float) i / fade;
+            out[i] = out[i] * w + s[frames + i] * (1 - w);
+        }
+        float most = 0;
+        for (float v : out) {
+            most = Math.max(most, Math.abs(v));
+        }
+        for (int i = 0; i < frames; i++) {
+            out[i] *= peak / most;
+        }
+        return AudioClip.builder(RATE, 1).floats(out).build();
+    }
+
+    @Test
+    void walkingAlongARiverThenThroughACrowd() throws IOException, InterruptedException {
+        try (World w = new World()) {
+            AssetRef<AudioClip> water = AssetRef.generated(AudioAssets.CLIP, (v, seed) -> river(), 0, 0);
+            AssetRef<AudioClip> voices = AssetRef.generated(AudioAssets.CLIP, (v, seed) -> murmur(), 0, 1);
+            Sound rush = Sound.builder().root(Play.clip(water)).attenuation(Attenuation.builder().distance(3, 150)
+                .lowPass(20_000, 3_000).build()).volume(Range.db(-10, -10)).loop().build();
+            Sound talk = Sound.builder().root(Play.clip(voices)).attenuation(Attenuation.builder().distance(1.5f, 60)
+                .lowPass(20_000, 4_000).build()).volume(Range.db(-6, -6)).loop().build();
+            // a river winding along z = -8 from x = -60 to 60; a plaza of 300 people around (40, 0, 30)
+            w.sounds.field(rush, com.truesim.scene.audio.SoundField.line(-60, 0, -9, -30, 0, -6, 0, 0, -10, 30, 0, -7,
+                60, 0, -9));
+            double[] people = new double[3 * 300];
+            for (int i = 0; i < 300; i++) {
+                double a = 2 * Math.PI * Hash.random(61, i);
+                double r = 14 * Math.sqrt(Hash.random(67, i));
+                people[3 * i] = 40 + r * Math.cos(a);
+                people[3 * i + 1] = 1.6;
+                people[3 * i + 2] = 30 + r * Math.sin(a);
+            }
+            w.sounds.field(talk, com.truesim.scene.audio.SoundField.points(people).nearest(6));
+            w.load();
+            // 20 s along the bank, 2 m from the water, then 20 s up to and through the plaza, facing where it walks
+            for (int f = 0; f < 60 * 40; f++) {
+                double t = f / 60.0;
+                double u = Math.max(0, (t - 20) / 20);
+                double x = t < 20 ? -45 + 3.5 * t : 25 + 30 * u;
+                double z = t < 20 ? -5.5 : -5.5 + 50 * u;
+                // facing where it walks: -z turned by the heading's yaw (atan2 of its x and z) and half a turn
+                double half = (Math.PI + Math.atan2(t < 20 ? 3.5 : 30, t < 20 ? 0 : 50)) / 2;
+                w.scene.setRotation(w.head, 0, Math.sin(half), 0, Math.cos(half));
+                w.scene.setTranslation(w.head, x, 1.7, z);
+                w.frame();
+            }
+            w.write("au_step19_river_walk_then_crowd.wav");
+        }
+    }
+
     @Test
     void carPassingWithDopplerAndPanning() throws IOException, InterruptedException {
         try (World w = new World()) {
