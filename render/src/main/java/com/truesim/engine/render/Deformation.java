@@ -12,6 +12,7 @@ import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.render.layout.DeformPush;
+import com.truesim.engine.render.layout.KeepPush;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
@@ -105,6 +106,19 @@ public final class Deformation {
     private boolean written;
     private long version;
     private final long[] slotVersion;
+    // Motion vectors' memory (keepPrevious): each copy's vertices as the frame before drew them, copied aside before it
+    // is skinned anew, at its range of previousPositions; per pool mesh number a 32-byte record (motion.slang's
+    // DeformedBefore: the box they were quantized in, their range, whether this frame skinned it anew) written into
+    // plain memory and handed to the frame's copy at once; the box each copy was last skinned in.
+    private volatile boolean keepPrevious;
+    private GpuBuffer previousPositions;
+    private final RangeAllocator previousRanges = new RangeAllocator(1 << 12);
+    private long[] previousOffset = new long[64];
+    private int[] previousVertices = new int[64];
+    private float[] skinnedBounds = new float[6 * 64];
+    private MemorySegment previousTable;
+    private FrameBuffer framePrevious;
+    private int previousMeshes; // records the table holds
 
     private static int[] filled(int length) {
         int[] array = new int[length];
@@ -169,6 +183,9 @@ public final class Deformation {
             Arrays.fill(previousMatrix, old, length, -1);
             blended = Arrays.copyOf(blended, length);
             factor = Arrays.copyOf(factor, length);
+            previousOffset = Arrays.copyOf(previousOffset, length);
+            previousVertices = Arrays.copyOf(previousVertices, length);
+            skinnedBounds = Arrays.copyOf(skinnedBounds, 6 * length);
         }
         int slotCount = Math.max(1, joints + (targets + MATRIX_FLOATS - 1) / MATRIX_FLOATS);
         long first = allocateSlots(slotCount);
@@ -191,6 +208,91 @@ public final class Deformation {
         for (int j = 0; j < joints; j++) { // at rest until posed
             joint(copy, j, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
         }
+        if (keepPrevious) {
+            keep(copy);
+        }
+    }
+
+    /**
+     * Keeps each copy's vertices as the frame before drew them, from the next frame on, for motion vectors
+     * ({@link MotionVectors}): a range of a buffer of their own per copy, copied aside before each skinning, and per
+     * pool mesh where they lie and whether the frame moved them ({@link #previousTableAddress}). Set while building a
+     * graph, not while frames record. Allocates the memory when first on.
+     */
+    @AllowAllocation("set up rarely")
+    public synchronized void keepPrevious(boolean on) {
+        if (on && !keepPrevious) {
+            if (framePrevious == null) {
+                previousPositions = GpuBuffer.deviceLocal(device, 8L * previousRanges.capacity(),
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+                growTable(Math.max(64, added.length));
+            }
+            for (int i = 0; i < copyCount; i++) {
+                keep(copies[i]);
+            }
+        }
+        keepPrevious = on;
+    }
+
+    /** Whether copies' previous vertices are kept ({@link #keepPrevious}). */
+    public boolean keepsPrevious() {
+        return keepPrevious;
+    }
+
+    /** A range of the kept vertices for {@code copy}, and room for its record. */
+    @AllowAllocation("adding a copy")
+    private void keep(int copy) {
+        if (copy >= previousMeshes) {
+            growTable(Math.max(copy + 1, 2 * previousMeshes));
+        }
+        if (previousVertices[copy] > 0) {
+            return;
+        }
+        int vertices = pool.vertexCountOf(copy);
+        long first = previousRanges.allocate(vertices, 1);
+        if (first < 0) {
+            long capacity = Math.max(2 * previousRanges.capacity(), previousRanges.end() + vertices);
+            retired.add(previousPositions); // frames in flight read it; copies are kept anew from their next skinning
+            previousPositions = GpuBuffer.deviceLocal(device, 8L * capacity,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+            previousRanges.grow(capacity);
+            first = previousRanges.allocate(vertices, 1);
+        }
+        previousOffset[copy] = first;
+        previousVertices[copy] = vertices;
+    }
+
+    @AllowAllocation("adding a copy")
+    private void growTable(int meshes) {
+        MemorySegment grown = arena.allocate(32L * meshes, 16);
+        if (previousTable != null) {
+            MemorySegment.copy(previousTable, 0, grown, 0, previousTable.byteSize());
+        }
+        previousTable = grown;
+        if (framePrevious != null) {
+            retired.add(framePrevious);
+        }
+        framePrevious = FrameBuffer.create(device, 32L * meshes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, slots);
+        previousMeshes = meshes;
+    }
+
+    /**
+     * The frame's previous-vertex records (motion.slang's DeformedBefore), per pool mesh: the copy of the frame slot
+     * recording ({@link #keepPrevious} on).
+     */
+    public long previousTableAddress() {
+        return framePrevious.deviceAddress();
+    }
+
+    /** How many pool meshes the previous-vertex records cover. */
+    public int previousTableMeshes() {
+        return previousMeshes;
+    }
+
+    /** The kept vertices, quantized as the pool's ({@link #keepPrevious} on). */
+    public long previousPositionsAddress() {
+        return previousPositions.deviceAddress();
     }
 
     /** {@code slotCount} matrix slots, the matrices grown if they have not the room; the first's index. */
@@ -276,6 +378,11 @@ public final class Deformation {
             return; // added to the pool, never posed here
         }
         matrixRanges.release(firstMatrix[copy], matrixSlots[copy]);
+        if (previousVertices[copy] > 0) {
+            previousRanges.release(previousOffset[copy], previousVertices[copy]);
+            previousVertices[copy] = 0;
+            previousTable.set(ValueLayout.JAVA_INT_UNALIGNED, 32L * copy + 28, 0);
+        }
         if (previousMatrix[copy] >= 0) {
             matrixRanges.release(previousMatrix[copy], matrixSlots[copy]);
             previousMatrix[copy] = -1;
@@ -530,7 +637,8 @@ public final class Deformation {
      * Records the frame's skinning: the matrices into the frame's copy, a dispatch per posed copy, then each one's
      * meshlet spheres; barriers around it, as the mesh table it writes is not one of the graph's buffers.
      */
-    void record(PassContext ctx, SceneData.Buffers buffers, Pipeline skin, Pipeline spheres, DeformPush push) {
+    void record(PassContext ctx, SceneData.Buffers buffers, Pipeline skin, Pipeline spheres, DeformPush push,
+        Pipeline keep, KeepPush keepPush) {
         retired.release();
         releaseMorphRanges();
         int skinning = 0;
@@ -539,6 +647,23 @@ public final class Deformation {
         }
         skinned = skinning;
         uploaded = 0;
+        boolean keeping = keepPrevious;
+        if (keeping) {
+            // Which copies this frame moves from what the frame before drew (skinned before, and now anew), and the
+            // box those vertices are quantized in
+            for (int i = 0; i < copyCount; i++) {
+                int copy = copies[i];
+                long at = 32L * copy;
+                boolean moved = moves(copy);
+                for (int axis = 0; axis < 3; axis++) {
+                    previousTable.set(F32, at + 4 * axis, skinnedBounds[6 * copy + axis]);
+                    previousTable.set(F32, at + 16 + 4 * axis, skinnedBounds[6 * copy + 3 + axis]);
+                }
+                previousTable.set(ValueLayout.JAVA_INT_UNALIGNED, at + 12, (int) previousOffset[copy]);
+                previousTable.set(ValueLayout.JAVA_INT_UNALIGNED, at + 28, moved ? 1 : 0);
+            }
+            framePrevious.put(0, previousTable, 0, previousTable.byteSize());
+        }
         if (skinning == 0) {
             return; // every copy as last skinned: their vertices stay
         }
@@ -568,6 +693,20 @@ public final class Deformation {
         Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        if (keeping) {
+            // What the frame before drew, aside before the skinning overwrites it
+            keepPush.positions(ctx.address(buffers.positions())).previous(previousPositions.deviceAddress());
+            for (int i = 0; i < copyCount; i++) {
+                int copy = copies[i];
+                if (moves(copy)) {
+                    int vertices = previousVertices[copy];
+                    ctx.dispatch(keep, keepPush.from(pool.vertexBase(copy)).to((int) previousOffset[copy])
+                        .count(vertices), (vertices + 63) / 64);
+                }
+            }
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        }
         push.meshes(pool.meshTable().deviceAddress()).positions(ctx.address(buffers.positions()))
             .attributes(ctx.address(buffers.attributes())).meshlets(ctx.address(buffers.meshlets()))
             .meshletVertices(ctx.address(buffers.meshletVertices())).clusterLod(ctx.address(buffers.clusterLod()));
@@ -593,10 +732,19 @@ public final class Deformation {
             ctx.dispatch(spheres, push, (meshlets + 63) / 64);
             changed[copy] = false;
             skins[copy]++;
+            System.arraycopy(bounds, 7 * copy, skinnedBounds, 6 * copy, 6); // what its vertices are quantized in now
         }
         // Everything after reads them: culling, drawing, ray tracing
         Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    }
+
+    /**
+     * Whether this frame moves copy {@code copy}'s vertices from those the frame before drew: skinned anew, posed
+     * before, with room kept for them.
+     */
+    private boolean moves(int copy) {
+        return posed[copy] && changed[copy] && skins[copy] > 0 && previousVertices[copy] > 0;
     }
 
     private DeformPush set(DeformPush push, int copy, long matrixBase) {
@@ -615,6 +763,10 @@ public final class Deformation {
     void close() {
         if (frameMatrices != null) {
             frameMatrices.close();
+        }
+        if (framePrevious != null) {
+            framePrevious.close();
+            previousPositions.close();
         }
         morphData.close();
         retired.close();

@@ -35,6 +35,12 @@ public final class Keys {
     public static final Key<Image> UI = Key.image("truesim.ui");
 
     /**
+     * A view's motion vectors, an image ({@link MotionVectors#FORMAT}): per pixel, where its surface was on screen the
+     * frame before, in pixels from it (a history is read at the pixel plus this), the jitter taken out.
+     */
+    public static final Key<Image> MOTION = Key.image("truesim.motion");
+
+    /**
      * The opaque surfaces' normals in view space ({@link SurfaceOutputs}), written by the view's shading where a
      * technique of the view asks for them ({@link SurfaceOutputs.Consumer}).
      */
