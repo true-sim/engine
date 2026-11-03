@@ -463,32 +463,31 @@ class ReferencePathTracerTest {
     }
 
     /**
-     * Bytes the thread allocated in {@code frames} frames begun and submitted (as an application runs them), after as
-     * many to warm up.
+     * How many of {@code frames} frames begun and submitted (as an application runs them) allocated on the thread,
+     * after as many to warm up: a per-frame allocation shows in every one, the compiler's once in a few.
      */
-    static long allocatedRecording(VulkanDevice device, FrameGraph graph, int frames) {
+    static int framesAllocating(VulkanDevice device, FrameGraph graph, int frames) {
         com.sun.management.ThreadMXBean threads =
             (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
-        long allocated = 0;
+        int allocating = 0;
         for (int frame = -frames; frame < frames; frame++) {
             long before = threads.getCurrentThreadAllocatedBytes();
             graph.beginFrame();
             graph.submit(0, 0);
-            if (frame >= 0) {
-                allocated += threads.getCurrentThreadAllocatedBytes() - before;
+            if (frame >= 0 && threads.getCurrentThreadAllocatedBytes() != before) {
+                allocating++;
             }
         }
         device.waitIdle();
-        return allocated;
+        return allocating;
     }
 
     @Test
     void recordingTheReferenceAllocatesNothing() {
         for (WorldLights.Mode mode : WorldLights.Mode.values()) {
             lightsOnTheFloor(ReferencePathTracer.Lighting.GRID, mode, 1);
-            // Nothing per frame: at most a few bytes once over 320 frames (the compiler's, a run in two)
-            assertThat(allocatedRecording(device, graph, 320)).as("bytes allocated recording, %s", mode)
-                .isLessThan(320);
+            // Nothing per frame: a frame allocating once in a while is the compiler's
+            assertThat(framesAllocating(device, graph, 400)).as("frames allocating, %s", mode).isLessThan(8);
         }
     }
 

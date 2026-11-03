@@ -210,6 +210,11 @@ class MotionVectorsTest {
             assertThat(graph.passes().stream().filter(p -> p.startsWith("meshlet ids early")).count())
                 .as("one ID draw: the shading's").isOne();
             assertThat(graph.passes()).contains("motion vectors", "instances kept");
+            // Every frame skinning the quad anew, its vertices kept aside: nothing allocated per frame (an ID draw's
+            // iterator over a list did, 16 bytes a phase, until the compiler took it away: pitfalls.md)
+            pose(1);
+            assertThat(ReferencePathTracerTest.framesAllocating(device, graph, 400)).as("frames allocating")
+                .isLessThan(8);
             device.waitIdle();
         }
     }

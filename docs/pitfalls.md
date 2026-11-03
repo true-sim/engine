@@ -25,6 +25,16 @@ the same `beginFrame` allocated in the scene benchmark: in the test, the JIT hap
 - Rule: also read the scene benchmark's "bytes allocated" column; when it is not 0, measure each stage of the frame to
   find the call.
 
+**A for-each over a list allocated its iterator in every depth and ID draw.** `Materials.drawsGeometry`, asked by
+every visibility buffer ID draw (both culling phases), looped `for (MaterialType type : geometryTypes)` over a
+`CopyOnWriteArrayList`: 16 bytes a phase, every frame, for the first 700 or more frames, until the compiler removed the
+iterator. Allocation tests that warmed 320 frames read about 45 bytes a frame in any visibility buffer graph.
+- Proof: bytes allocated per pass of a frame (the thread's allocated bytes around each pass body, frames 50 to 400):
+  "meshlet ids early" and "late" 16 each every frame, none once looped by index; `MotionVectorsTest` counts frames
+  allocating and fails with the for-each (true-sim/engine, GI S0).
+- Rule: per-frame code loops over lists by index; an allocation test counts the frames that allocate (one in a few
+  hundred is the compiler) rather than trusting a warm-up to have compiled everything.
+
 **`Enum.values()` copies its array on every call.** `Format.of` allocated through it.
 - Proof: [#132](https://github.com/true-sim/engine/pull/132) (`Format.ALL`).
 - Rule: keep `values()` in a static field.
