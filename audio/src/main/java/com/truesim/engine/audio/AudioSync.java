@@ -7,6 +7,7 @@ import com.truesim.scene.assets.AssetState;
 import com.truesim.scene.audio.AudioClip;
 import com.truesim.scene.audio.Attenuation;
 import com.truesim.scene.audio.Bus;
+import com.truesim.scene.audio.Music;
 import com.truesim.scene.audio.Decibels;
 import com.truesim.scene.audio.AudioEffect;
 import com.truesim.scene.audio.Listeners;
@@ -113,6 +114,9 @@ public final class AudioSync {
         rate = renderer.format().rate();
         slotTrack = new int[renderer.voices()];
         slotVoice = new int[renderer.voices()];
+        slotMusicVoice = new long[renderer.voices()];
+        musicGain = new float[renderer.voices()];
+        stingerSlot = new boolean[renderer.voices()];
         Arrays.fill(slotTrack, -1);
     }
 
@@ -144,6 +148,31 @@ public final class AudioSync {
         return schedulePoint;
     }
 
+    // Music (step 11): its voices by slot, and its timed changes waiting for their frame.
+    private static final int MUSIC = -2;
+    private Music music;
+    private final LongIntMap musicSlots = new LongIntMap(64);
+    private final long[] slotMusicVoice;
+    private final float[] musicGain;
+    private final boolean[] stingerSlot;
+    private long[] pendingFrames = new long[16];
+    private int[] pendingKinds = new int[16];
+    private long[] pendingVoices = new long[16];
+    private float[] pendingGains = new float[16];
+    private float[] pendingSeconds = new float[16];
+    private int pendingCount;
+
+    /**
+     * Plays {@code music}'s commands (§2.12, step 11): starts on the music bus at their exact frames (streamed clips
+     * through rings), stops with their fades, and stem gains, pauses and stinger ducks at their frames, to within the
+     * frame of the update that reaches them. The game (or the plugin) calls {@code music.update()} before
+     * {@link #update()}.
+     */
+    public AudioSync music(Music music) {
+        this.music = music;
+        return this;
+    }
+
     /** Takes the renderer's events: ended voices free their slots; instances whose voices all ended end. */
     public void events() {
         renderer.poll(endings);
@@ -151,6 +180,12 @@ public final class AudioSync {
 
     private void ended(int kind, int slot, long tag, long frame) {
         int t = slotTrack[slot];
+        if (kind == AudioRenderer.ENDED && t == MUSIC) {
+            slotTrack[slot] = -1;
+            slotsUsed--;
+            musicSlots.remove(slotMusicVoice[slot]);
+            return;
+        }
         if (kind != AudioRenderer.ENDED || t < 0) {
             return;
         }
@@ -191,12 +226,120 @@ public final class AudioSync {
             marks[s] = now;
             listenerZone(s);
         }
+        if (music != null) {
+            music();
+        }
         for (int t = 0; t < tracks.length; t++) {
             Track track = tracks[t];
             if (track != null && track.sound != null && !track.gone) {
                 start(t);
                 if (track.sound != null && placed(track)) {
                     place(t);
+                }
+            }
+        }
+    }
+
+    /** Turns the music's commands into the renderer's; applies the timed ones whose frame has come. */
+    private void music() {
+        for (int c = 0; c < music.commands(); c++) {
+            long frame = music.frame(c);
+            long voice = music.voice(c);
+            switch (music.kind(c)) {
+                case Music.START, Music.STINGER -> startMusic(music.clip(c), frame, voice, music.offset(c),
+                    music.kind(c) == Music.START ? music.gain(c) : 1, music.kind(c) == Music.STINGER ? music.gain(c)
+                        : 0);
+                case Music.STOP -> {
+                    int slot = musicSlots.get(voice);
+                    if (slot >= 0) {
+                        commands.stop(slot, frame, music.seconds(c));
+                    }
+                }
+                default -> later(music.kind(c), frame, voice, music.gain(c), music.seconds(c));
+            }
+        }
+        music.clearCommands();
+        // timed changes: applied by the update whose schedule point reaches them
+        for (int i = 0; i < pendingCount; ) {
+            if (pendingFrames[i] > schedulePoint) {
+                i++;
+                continue;
+            }
+            applyLater(pendingKinds[i], pendingVoices[i], pendingGains[i], pendingSeconds[i]);
+            pendingCount--;
+            pendingFrames[i] = pendingFrames[pendingCount];
+            pendingKinds[i] = pendingKinds[pendingCount];
+            pendingVoices[i] = pendingVoices[pendingCount];
+            pendingGains[i] = pendingGains[pendingCount];
+            pendingSeconds[i] = pendingSeconds[pendingCount];
+        }
+    }
+
+    private void startMusic(AssetRef<AudioClip> ref, long frame, long voice, double offset, float gain, float duck) {
+        if (cache.state(ref) != AssetState.LOADED) {
+            return; // not primed in time: music primes before it schedules, so this is a late playlist's next
+        }
+        AudioClip clip = cache.get(ref);
+        int slot = firstFree();
+        if (slot < 0) {
+            return;
+        }
+        if (clip.streamed()) {
+            StreamRing ring = newRing(clip, false);
+            streams().add(ring);
+            commands.stream(ring);
+        }
+        int flags = com.truesim.scene.audio.Priority.HIGHEST.ordinal() << Voices.PRIORITY_SHIFT;
+        commands.play(slot, clip, frame, offset, gain * clip.gain(), 1, Bus.MUSIC, flags, 0, voice);
+        slotTrack[slot] = MUSIC;
+        slotMusicVoice[slot] = voice;
+        musicGain[slot] = gain * clip.gain();
+        stingerSlot[slot] = duck < 0;
+        slotsUsed++;
+        musicSlots.put(voice, slot);
+        if (duck < 0) { // a stinger: the other music ducks while it plays
+            later(Music.GAIN, frame, -1, Decibels.gain(duck), 0.05f);
+            later(Music.GAIN, frame + Math.round(clip.seconds() * rate), -1, 1, 0.3f);
+        }
+    }
+
+    private void later(int kind, long frame, long voice, float gain, float seconds) {
+        if (pendingCount == pendingFrames.length) {
+            growPending();
+        }
+        pendingFrames[pendingCount] = frame;
+        pendingKinds[pendingCount] = kind;
+        pendingVoices[pendingCount] = voice;
+        pendingGains[pendingCount] = gain;
+        pendingSeconds[pendingCount++] = seconds;
+    }
+
+    @AllowAllocation("more timed music changes than before")
+    private void growPending() {
+        int n = 2 * pendingFrames.length;
+        pendingFrames = Arrays.copyOf(pendingFrames, n);
+        pendingKinds = Arrays.copyOf(pendingKinds, n);
+        pendingVoices = Arrays.copyOf(pendingVoices, n);
+        pendingGains = Arrays.copyOf(pendingGains, n);
+        pendingSeconds = Arrays.copyOf(pendingSeconds, n);
+    }
+
+    /** A timed change: a voice's gain (voice -1: every music voice's duck), or a pause or resume of all music. */
+    private void applyLater(int kind, long voice, float gain, float seconds) {
+        if (kind == Music.GAIN && voice >= 0) {
+            int slot = musicSlots.get(voice);
+            if (slot >= 0) {
+                musicGain[slot] = gain;
+                commands.gain(slot, gain, seconds);
+            }
+            return;
+        }
+        for (int slot = 0; slot < slotTrack.length; slot++) {
+            if (slotTrack[slot] == MUSIC && !stingerSlot[slot]) { // a stinger does not duck itself
+                if (kind == Music.GAIN) {
+                    commands.gain(slot, musicGain[slot] * gain, seconds);
+                } else {
+                    commands.pause(slot, kind == Music.PAUSE);
                 }
             }
         }
@@ -470,7 +613,7 @@ public final class AudioSync {
 
     private int firstFree() {
         for (int slot = 0; slot < slotTrack.length; slot++) {
-            if (slotTrack[slot] < 0) {
+            if (slotTrack[slot] == -1) { // -1 free; music's are -2
                 return slot;
             }
         }

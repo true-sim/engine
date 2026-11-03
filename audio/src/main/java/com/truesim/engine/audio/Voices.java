@@ -112,6 +112,7 @@ final class Voices {
     private final float[] auxFrom;
     private final float[] auxTo;
     private final boolean[] starving;
+    private final float[] lastPlayed;
     private final long[] resumes;
     private final float[] dryGains;
     private int starvations;
@@ -180,6 +181,7 @@ final class Voices {
         auxFrom = new float[capacity];
         auxTo = new float[capacity];
         starving = new boolean[capacity];
+        lastPlayed = new float[2 * capacity];
         resumes = new long[capacity];
         dryGains = new float[capacity];
         dopplerAlpha = (float) (1 - Maths.exp(-(double) AudioFormat.DEFAULT_BLOCK / rate / 0.05));
@@ -709,12 +711,19 @@ final class Voices {
             float t = (float) (f + 1) / frames;
             float g = gain * env * att * realGain * dry;
             if (stereo) {
-                float l = read(slot, position, 0, loop) * g;
-                float r = read(slot, position, 1, loop) * g;
+                // a starved stream holds what it played last, fading (dry), not whatever the ring holds
+                boolean hold = ring != null && starving[slot];
+                float l = (hold ? lastPlayed[2 * slot] : read(slot, position, 0, loop)) * g;
+                float r = (hold ? lastPlayed[2 * slot + 1] : read(slot, position, 1, loop)) * g;
+                if (ring != null && !hold) {
+                    lastPlayed[2 * slot] = l / Math.max(g, 1e-30f);
+                    lastPlayed[2 * slot + 1] = r / Math.max(g, 1e-30f);
+                }
                 out[f * channels] += l * (panFrom[o] + (panTo[o] - panFrom[o]) * t);
                 out[f * channels + 1] += r * (panFrom[o + 1] + (panTo[o + 1] - panFrom[o + 1]) * t);
             } else {
-                float s = read(slot, position, 0, loop);
+                boolean hold = ring != null && starving[slot];
+                float s = hold ? lastPlayed[2 * slot] : read(slot, position, 0, loop);
                 if (spatial) {
                     for (int c = 1; c < clipChannels[slot]; c++) {
                         s += read(slot, position, c, loop);
@@ -722,6 +731,9 @@ final class Voices {
                     s /= clipChannels[slot];
                     low += coef * (s - low); // the air's low-pass: one pole
                     s = low;
+                }
+                if (ring != null && !hold) {
+                    lastPlayed[2 * slot] = s;
                 }
                 s *= g;
                 for (int c = 0; c < channels; c++) {

@@ -15,6 +15,7 @@ import com.truesim.engine.settings.SettingGroup;
 import com.truesim.engine.settings.SettingTier;
 import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.audio.Bus;
+import com.truesim.scene.audio.Music;
 import com.truesim.scene.audio.Sounds;
 import com.truesim.scene.core.SceneGraph;
 import java.lang.management.GarbageCollectorMXBean;
@@ -248,6 +249,18 @@ public final class Audio implements Plugin {
             settings.get(DYNAMIC_RANGE).ordinal());
     }
 
+    private Music music;
+
+    /** The music player (§2.12): music over the renderer's clock, its clips through the asset cache; made once. */
+    @AllowAllocation("set up once")
+    public Music music() {
+        if (music == null) {
+            music = new Music(renderer().clock(), new CachedMusicClips(cache));
+            sync().music(music);
+        }
+        return music;
+    }
+
     /** The mixer: the layout, snapshots, player volumes. */
     public Mixer mixer() {
         renderer();
@@ -278,6 +291,9 @@ public final class Audio implements Plugin {
     public void afterUpdate(Frame frame) {
         if (sync == null) {
             return;
+        }
+        if (music != null) {
+            music.update();
         }
         long ticks = Math.round(frame.delta() * Sounds.TICKS_PER_SECOND);
         for (Sounds world : worlds) {
