@@ -1,0 +1,24 @@
+// The material type's forward shading on the lean mesh path (lean.slang's vertices, the rest from the triangle): a
+// fragment entry point per raster bin, drawn for each of the type's shading bins (FEATURES) by its own draw (#67).
+import meshlets.forward;
+import {module};
+
+[shader("fragment")]
+float4 {name}LeanMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bary : SV_Barycentrics) : SV_Target
+{
+    return typedLean<{struct}>(in, primitive, bary);
+}
+
+[shader("fragment")]
+float4 {name}LeanMaskedMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bary : SV_Barycentrics,
+    bool front : SV_IsFrontFace) : SV_Target
+{
+    return typedLeanMasked<{struct}>(in, primitive, bary, front);
+}
+
+[shader("fragment")]
+BlendedOut {name}LeanBlendedMain(LeanVertex in, uint primitive : SV_PrimitiveID, float3 bary : SV_Barycentrics,
+    bool front : SV_IsFrontFace)
+{
+    return typedLeanBlended<{struct}>(in, primitive, bary, front);
+}

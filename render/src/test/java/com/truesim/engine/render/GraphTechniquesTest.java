@@ -1295,6 +1295,90 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void forwardShadingDrawsEachMaterialTypeWithItsOwnShader() {
+        // The lit floor, metallic-roughness, and a quad standing on it, of the type under test (#67).
+        scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);
+        scene.removeFrom(2);
+        Camera camera = new Camera().set(0, -1, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        try (Materials materials = new Materials(device, 8)) {
+            materials.register(Glow.TYPE);
+            int quadMaterial = materials.add(new Material(GlowParameters.DEFAULTS));
+            scene.setMaterials(materials);
+            scene.set(1, quad, quadMaterial, 0, -0.5f, -2.5f, HALF, 0, 0, HALF, 0.4f, 0.4f, 0.4f);
+            SceneView main = main(camera);
+            main.port().add(new ClusteredForwardShading(SceneGeometry.meshlets(renderer), main,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0.5f))
+                .output(Keys.SCENE_COLOR, output);
+            assertThat(graph.settings().get(RenderSettings.FORWARD_SHADING)).as("the default")
+                .isEqualTo(ForwardShading.PER_TYPE);
+            for (MeshletRenderer.Path path : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED,
+                MeshletRenderer.Path.AUTO}) {
+                renderer.setPath(path);
+                // Opaque, then masked (the masked raster bin's entry points), each drawn per type and with the one
+                // shader; three frames each, so both occlusion phases have drawn (pitfalls.md).
+                for (Material glow : new Material[] {new Material(GlowParameters.DEFAULTS),
+                    new Material(GlowParameters.DEFAULTS).alphaMask(0.5f)}) {
+                    materials.set(quadMaterial, glow);
+                    graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.PER_TYPE);
+                    int[] typed = frames(3);
+                    graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.SINGLE);
+                    int[] single = frames(3);
+                    assertThat(glowing(typed)).as("the quad glows by its own type, %s, %s", path,
+                        glow.masked() ? "masked" : "opaque").isGreaterThan(SIZE * SIZE / 40);
+                    assertThat(glowing(single)).as("the one shader draws it as metallic-roughness's defaults")
+                        .isZero();
+                    int floor = 0;
+                    for (int i = 0; i < typed.length; i++) {
+                        if (!glowing(typed[i])) {
+                            assertThat(difference(typed[i], single[i])).as("pixel %d, metallic-roughness alike, %s",
+                                i, path).isLessThanOrEqualTo(2);
+                            floor++;
+                        }
+                    }
+                    assertThat(floor).as("the floor's pixels").isGreaterThan(SIZE * SIZE / 4);
+                }
+                // A feature's bin (metallic-roughness with a clear coat): its variant shows the coat as the one
+                // shader's branch does.
+                materials.set(quadMaterial, new Material(MR.withBaseColor(new Color(0.8f, 0.2f, 0.1f, 1)))
+                    .feature(ClearcoatParameters.DEFAULTS));
+                graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.PER_TYPE);
+                int[] typed = frames(3);
+                graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.SINGLE);
+                int[] single = frames(3);
+                int coated = 0;
+                for (int i = 0; i < typed.length; i++) {
+                    assertThat(difference(typed[i], single[i])).as("pixel %d, coated, %s", i, path)
+                        .isLessThanOrEqualTo(2);
+                    coated += (typed[i] & 0xff) > 2 * ((typed[i] >> 16) & 0xff) ? 1 : 0;
+                }
+                assertThat(coated).as("the red coated quad's pixels").isGreaterThan(SIZE * SIZE / 40);
+            }
+            assertThat(renderer.forwardPipelineCount()).as("pipelines by type made").isPositive();
+            renderer.setPath(MeshletRenderer.Path.AUTO);
+            graph.settings().set(RenderSettings.FORWARD_SHADING, ForwardShading.PER_TYPE);
+            scene.setMaterials(null);
+        }
+    }
+
+    /** Records {@code count} frames and returns the last one's pixels. */
+    private int[] frames(int count) {
+        for (int i = 0; i < count; i++) {
+            frame();
+        }
+        return pixels.memory().toArray(ValueLayout.JAVA_INT);
+    }
+
+    /** The largest difference of two pixels' color channels, 0 to 255. */
+    private static int difference(int a, int b) {
+        int worst = 0;
+        for (int shift = 0; shift < 24; shift += 8) {
+            worst = Math.max(worst, Math.abs(((a >> shift) & 0xff) - ((b >> shift) & 0xff)));
+        }
+        return worst;
+    }
+
+    @Test
     void materialsNameBuffersTheHostOrTheGraphWrites() {
         assumeThat(device.primitiveIds()).as("primitive IDs in fragment shaders").isTrue();
         scene.set(0, quad, 0, -1, -4, 0, 0, 0, 1, 4, 4, 4);

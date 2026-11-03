@@ -45,11 +45,18 @@ public final class MeshletGeometry implements GeometryProvider {
         float casterDetail = camera != null ? g.setting(ShadowSettings.CASTER_DETAIL) : 1;
         Runnable before = camera != null ? () -> view.camera(camera, casterDetail) // the view's mode kept
             : region != null ? () -> view.detail(region.renderScale()) : null;
-        MeshletCulling.Views culling = g.request(new MeshletCulling(renderer)).add(view, draw.occlusion(), before);
+        MeshletCulling.Views culling = g.request(new MeshletCulling(renderer));
+        RasterPipelines.Typed typed = null;
+        if (draw.output().kind() == SurfaceOutput.Kind.SHADED
+            && g.setting(RenderSettings.FORWARD_SHADING) == ForwardShading.PER_TYPE) {
+            typed = renderer.forwardPipelines(); // shaded by type, from lists split by shading bin as culled
+            view.splitByType(typed.categories());
+        }
+        culling.add(view, draw.occlusion(), before);
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         GraphBuilder.PassBuilder pass = culling.drawing(scene.read(targets.inRegion(g.pass(name(draw,
             draw.occlusion() ? " early" : ""))), BufferAccess.DRAW_READ), view);
-        record(draw, targets, pass, false);
+        record(draw, targets, pass, false, typed);
     }
 
     /**
@@ -72,7 +79,7 @@ public final class MeshletGeometry implements GeometryProvider {
         GraphBuilder.PassBuilder pass = scene.read(targets.inRegion(g.pass(name(draw, " late"))),
             BufferAccess.DRAW_READ);
         view.declareDrawing(g, pass);
-        record(draw, targets, pass, true);
+        record(draw, targets, pass, true, typed(g, view, draw.output().kind() == SurfaceOutput.Kind.SHADED));
     }
 
     @AllowAllocation("building the graph, when it changes")
@@ -85,11 +92,22 @@ public final class MeshletGeometry implements GeometryProvider {
     }
 
     /**
-     * Declares the attachments (cleared, or with {@code late} loaded) and records the draw: the late phase's lists with
-     * {@code late}, else the early (or only) phase's.
+     * Forward shading by type's pipelines for a draw of {@code view}, if it is {@code shaded}, the graph's settings ask
+     * for it and culling splits the view's lists (its shaded draw did: {@link #drawFirst}); else null.
      */
     @AllowAllocation("building the graph, when it changes")
-    private void record(SceneDraw draw, SceneDraw.Targets targets, GraphBuilder.PassBuilder pass, boolean late) {
+    private RasterPipelines.Typed typed(GraphBuilder g, RenderView view, boolean shaded) {
+        return shaded && view.splitCategories() > 0
+            && g.setting(RenderSettings.FORWARD_SHADING) == ForwardShading.PER_TYPE ? renderer.forwardPipelines() : null;
+    }
+
+    /**
+     * Declares the attachments (cleared, or with {@code late} loaded) and records the draw: the late phase's lists with
+     * {@code late}, else the early (or only) phase's; shaded by type with {@code typed} (null: one shader).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    private void record(SceneDraw draw, SceneDraw.Targets targets, GraphBuilder.PassBuilder pass, boolean late,
+        RasterPipelines.Typed typed) {
         Image depth = targets.depth();
         Image color = targets.color();
         SurfaceOutput.Kind kind = draw.output().kind();
@@ -123,8 +141,13 @@ public final class MeshletGeometry implements GeometryProvider {
                 if (shadows != null) {
                     shadows.prepare(ctx);
                 }
-                renderer.drawAttached(ctx.unsafe().commands(), view, late, false, address(ctx, lights),
-                    indirect == null ? 0 : ctx.address(indirect.table()));
+                if (typed != null) {
+                    renderer.drawTypedAttached(ctx.unsafe().commands(), view, late, address(ctx, lights),
+                        indirect == null ? 0 : ctx.address(indirect.table()), typed);
+                } else {
+                    renderer.drawAttached(ctx.unsafe().commands(), view, late, false, address(ctx, lights),
+                        indirect == null ? 0 : ctx.address(indirect.table()));
+                }
             });
             case IDS -> pass.record(ctx -> renderer.drawIdsAttached(ctx.unsafe().commands(), view, late));
         }
@@ -162,12 +185,18 @@ public final class MeshletGeometry implements GeometryProvider {
         targets.readBehind(pass);
         BlendedTargets.Kind kind = targets.kind();
         com.truesim.engine.graph.Image behind = targets.behind();
+        RasterPipelines.Typed typed = typed(g, view, true); // by type where the view's shaded draw split its lists
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
             }
-            renderer.drawBlendedAttached(ctx.unsafe().commands(), view, kind, address(ctx, lights),
-                SceneBehind.words(ctx, behind), targets.indirectAddress(ctx));
+            if (typed != null) {
+                renderer.drawBlendedTypedAttached(ctx.unsafe().commands(), view, kind, address(ctx, lights),
+                    SceneBehind.words(ctx, behind), targets.indirectAddress(ctx), typed);
+            } else {
+                renderer.drawBlendedAttached(ctx.unsafe().commands(), view, kind, address(ctx, lights),
+                    SceneBehind.words(ctx, behind), targets.indirectAddress(ctx));
+            }
         });
     }
 

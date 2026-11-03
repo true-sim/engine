@@ -1,0 +1,22 @@
+// The material type's forward shading, from full vertices (the indexed path, and mesh shaders without barycentrics):
+// a fragment entry point per raster bin, drawn for each of the type's shading bins (FEATURES) by its own draw (#67).
+import meshlets.forward;
+import {module};
+
+[shader("fragment")]
+float4 {name}FragmentMain(VertexOut in) : SV_Target
+{
+    return typedFragment<{struct}>(in);
+}
+
+[shader("fragment")]
+float4 {name}MaskedMain(VertexOut in, bool front : SV_IsFrontFace) : SV_Target
+{
+    return typedMasked<{struct}>(in, front);
+}
+
+[shader("fragment")]
+BlendedOut {name}BlendedMain(VertexOut in, bool front : SV_IsFrontFace)
+{
+    return typedBlended<{struct}>(in, front);
+}

@@ -184,6 +184,37 @@ public uint binIndexCapacity(View view, uint bin)
     return bin == 0 ? view.maxIndices : view.binIndices;
 }
 
+// ---------------------------------------------------------------- lists split by shading bin (split.slang, #67)
+
+/** Words per (raster bin, shading bin) in the header of a view's split lists. */
+public static const uint SPLIT_WORDS = 32;
+/**
+ * In such an entry: its meshlets; the cursor scattering them; its indices (indexed path); their cursor. Each index word
+ * lies two after its meshlet word: split.slang adds both in one go.
+ */
+public static const uint SPLIT_COUNT = 0;
+public static const uint SPLIT_CURSOR = 1;
+public static const uint SPLIT_INDICES = 2;
+public static const uint SPLIT_INDEX_CURSOR = 3;
+/** Its first slot in the bin's part of the split list; its first index in the bin's part of the index buffer. */
+public static const uint SPLIT_BASE = 4;
+public static const uint SPLIT_INDEX_BASE = 5;
+/** Its mesh dispatch (x, y, z), at word 8; its indexed draw (VkDrawIndexedIndirectCommand), at word 16. */
+public static const uint SPLIT_MESH_COMMAND = 8;
+public static const uint SPLIT_DRAW_COMMAND = 16;
+
+/** The header entry of raster bin `bin` and shading bin `category` in split lists of room for `categories`. */
+public uint splitEntry(uint bin, uint category, uint categories)
+{
+    return (bin * categories + category) * SPLIT_WORDS;
+}
+
+/** Where the split slot list starts, after the header. */
+public uint splitList(uint categories)
+{
+    return BINS * categories * SPLIT_WORDS;
+}
+
 /**
  * `instance` relative to `view`'s camera: its world position minus the camera's, the high parts and the rest apart,
  * so the difference keeps what floats near the camera can hold.
@@ -572,7 +603,9 @@ public float4 shadeSurface<R : IShadowRays>(R rays, View view, VertexOut in, Mat
     Material m = materials[in.material];
     if (materialType(m) != 0)
     {
-        // Forward shading draws only metallic-roughness for now: other types as its defaults.
+        // The one shader (render.forwardShading SINGLE) draws other types as metallic-roughness's defaults; by type,
+        // each draws with entry points of its own (forward.slang). This branch lost the device on an integrated GPU
+        // (pitfalls.md, #151).
         return shadeMaterial<DefaultSurface, R>(rays, view, in, materials, dx, dy, lights, pixel,
             materialFeatures(m), behind, indirect);
     }

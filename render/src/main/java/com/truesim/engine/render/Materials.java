@@ -96,6 +96,8 @@ public final class Materials implements AutoCloseable {
     // The shading bins: per bin its type id and features, in the order they first appeared; never dropped.
     private int[] binTypes = new int[16];
     private int[] binFeatures = new int[16];
+    private int[] binRasters = new int[16]; // per bin, a bit per raster bin its materials drew in; never cleared
+    private long rastersVersion;
     private int bins;
     private final Map<Long, Integer> binOf = new HashMap<>();
     private int blended; // how many materials are drawn blended: the transparency pass runs while there are
@@ -768,6 +770,7 @@ public final class Materials implements AutoCloseable {
         if (bins == binTypes.length) {
             binTypes = Arrays.copyOf(binTypes, 2 * bins);
             binFeatures = Arrays.copyOf(binFeatures, 2 * bins);
+            binRasters = Arrays.copyOf(binRasters, 2 * bins);
         }
         binTypes[bins] = typeId;
         binFeatures[bins] = features;
@@ -803,6 +806,28 @@ public final class Materials implements AutoCloseable {
     /** Bin {@code bin}'s material type. */
     public MaterialType binType(int bin) {
         return types.get(binTypes[java.util.Objects.checkIndex(bin, bins)]);
+    }
+
+    /**
+     * The raster bins materials of shading bin {@code bin} drew in, a bit each ({@code 1 << MeshletRenderer.BIN_*}),
+     * since they first did: forward shading by type makes a bin's pipelines for those only. Never cleared.
+     */
+    public int binRasters(int bin) {
+        return binRasters[java.util.Objects.checkIndex(bin, bins)];
+    }
+
+    /**
+     * Changes as a shading bin first draws in another raster bin ({@link #binRasters}) or a bin is numbered: forward
+     * shading by type rebuilds the graph with the pipelines it then needs. Allocates nothing.
+     */
+    public long rastersVersion() {
+        return rastersVersion + bins;
+    }
+
+    /** The raster bin of {@code material}, as meshlets/common.slang's rasterBin. */
+    private static int rasterBin(Material material) {
+        return material.drawnBlended() ? MeshletRenderer.BIN_BLENDED : material.masked() ? MeshletRenderer.BIN_MASKED
+            : material.doubleSided() ? MeshletRenderer.BIN_DOUBLE_SIDED : MeshletRenderer.BIN_OPAQUE;
     }
 
     /** Bin {@code bin}'s features ({@code Material.FEATURE_*} bits). */
@@ -862,6 +887,11 @@ public final class Materials implements AutoCloseable {
     private void write(int id, Material material) {
         int typeId = typeId(material);
         int bin = bin(typeId, material.featureMask());
+        int raster = 1 << rasterBin(material);
+        if ((binRasters[bin] & raster) == 0) {
+            binRasters[bin] |= raster;
+            rastersVersion++;
+        }
         long bytes = align(material.parameters().bytes());
         for (MaterialFeature feature : material.features()) {
             bytes += align(feature.bytes());
