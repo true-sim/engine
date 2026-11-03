@@ -1620,6 +1620,159 @@ class GraphTechniquesTest {
         }
     }
 
+    /** A material of the feature matrix: its features in order; the last one is the one proven to change the image. */
+    private record FeatureCase(String name, Material base, MaterialFeature... features) {
+        Material material(int features) {
+            Material m = base;
+            for (int i = 0; i < features; i++) {
+                m = m.feature(this.features[i]);
+            }
+            return m;
+        }
+    }
+
+    /** Pixels of {@code a} and {@code b} differing by more than {@code by} in a channel; and the mean difference. */
+    private static double[] compare(int[] a, int[] b, int by) {
+        int over = 0;
+        long sum = 0;
+        for (int i = 0; i < a.length; i++) {
+            int d = difference(a[i], b[i]);
+            over += d > by ? 1 : 0;
+            sum += d;
+        }
+        return new double[] {over, (double) sum / a.length};
+    }
+
+    /**
+     * Metallic-roughness with each engine feature (and combinations), and a custom type with one, drawn on every color
+     * path (forward on the indexed path and mesh shaders, the visibility buffer, classic LOD forward and visibility
+     * buffer), opaque and blended (weighted and drawn as opaque): each path reads back as forward on the indexed path
+     * within a tolerance, and that differs from the material without its last feature, so the feature drew. One
+     * frame each, 64 x 64; a red glowing wall behind for what transmission lets through.
+     */
+    @Test
+    void everyPathShadesEveryFeatureAlike() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        MetallicRoughnessParameters paint = MR.withBaseColor(new Color(0.8f, 0.3f, 0.2f, 0.6f)).withRoughness(0.35f)
+            .withMetallic(0);
+        MetallicRoughnessParameters glass = MR.withBaseColor(new Color(1, 1, 1, 0.6f)).withRoughness(0.05f)
+            .withMetallic(0);
+        MetallicRoughnessParameters metal = MR.withBaseColor(new Color(0.5f, 0.5f, 0.5f, 0.6f)).withRoughness(0.35f)
+            .withMetallic(1);
+        TransmissionParameters through = TransmissionParameters.DEFAULTS.withTransmissionFactor(1);
+        VolumeParameters volume = VolumeParameters.DEFAULTS.withThicknessFactor(0.5f).withAttenuationDistance(1)
+            .withAttenuationColor(new Color(0.3f, 1, 1, 1));
+        ClearcoatParameters coat = ClearcoatParameters.DEFAULTS;
+        SheenParameters sheen = SheenParameters.DEFAULTS.withSheenColorFactor(new Color(1, 1, 1, 1))
+            .withSheenRoughnessFactor(0.5f);
+        FeatureCase[] cases = {
+            new FeatureCase("clearcoat", new Material(paint), coat),
+            new FeatureCase("unlit", new Material(paint), UnlitParameters.DEFAULTS),
+            new FeatureCase("specular", new Material(paint), SpecularParameters.DEFAULTS
+                .withSpecularColorFactor(new Color(0, 1, 0, 1))),
+            new FeatureCase("ior", new Material(paint), IorParameters.DEFAULTS.withIor(3)),
+            new FeatureCase("sheen", new Material(paint), sheen),
+            new FeatureCase("transmission", new Material(glass), through),
+            new FeatureCase("volume", new Material(glass), through, volume),
+            new FeatureCase("anisotropy", new Material(paint), AnisotropyParameters.DEFAULTS
+                .withAnisotropyStrength(1)),
+            new FeatureCase("iridescence", new Material(metal), IridescenceParameters.DEFAULTS
+                .withIridescenceFactor(1).withIridescenceThicknessMaximum(300)),
+            new FeatureCase("diffuse transmission", new Material(paint), DiffuseTransmissionParameters.DEFAULTS
+                .withDiffuseTransmissionFactor(1).withDiffuseTransmissionColorFactor(new Color(0, 0, 1, 1))),
+            new FeatureCase("clearcoat + sheen", new Material(paint).feature(coat), sheen),
+            new FeatureCase("transmission + volume + dispersion", new Material(glass), through, volume,
+                DispersionParameters.DEFAULTS.withDispersion(10)),
+            new FeatureCase("car paint + clearcoat", new Material(CarPaintParameters.DEFAULTS.withBase(paint)
+                .withFlakeColor(new Color(1, 1, 0, 1)).withFlakes(0.5f)), coat),
+        };
+        String[] modes = {"opaque", "blended, weighted", "blended, as opaque"};
+        String[] paths = {"forward, indexed", "forward, mesh shaders", "visibility buffer", "classic LOD forward",
+            "classic LOD visibility buffer"};
+        int[][][][] images = new int[cases.length][modes.length][paths.length][];
+        int[][] without = new int[cases.length][];
+        try (Materials materials = new Materials(device, 8);
+             ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, 16)) {
+            materials.register(CarPaint.TYPE);
+            int wall = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1)
+                .withEmissive(new Color(1, 0, 0, 1))));
+            int quadMaterial = materials.add(cases[0].material(0));
+            scene.setMaterials(materials);
+            // The wall smaller than the quad seen in front of it, so its edges show through (refraction, dispersion);
+            // the quad turned to halfway between the camera and the sun, its highlight in the middle (coats, IOR,
+            // specular, anisotropy).
+            scene.set(0, quadMesh, wall, 0, 0, -3, 0, 0, 0, 1, 0.5f, 0.5f, 0.5f);
+            scene.set(1, quadMesh, quadMaterial, 0, 0, -2, -0.2750f, 0.1375f, 0, 0.9516f, 1, 1, 1);
+            scene.removeFrom(2);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            SceneGeometry meshlets = SceneGeometry.meshlets(renderer);
+            SceneGeometry classics = new SceneGeometry(classic.add(quadMesh, mesh));
+            main.port().output(Keys.SCENE_COLOR, output);
+            for (int path = 0; path < paths.length; path++) {
+                boolean ids = paths[path].endsWith("visibility buffer");
+                if (ids && !device.primitiveIds()) {
+                    continue;
+                }
+                SceneGeometry geometry = paths[path].startsWith("classic") ? classics : meshlets;
+                renderer.setPath(path == 0 ? MeshletRenderer.Path.INDEXED : MeshletRenderer.Path.AUTO);
+                replaceShading(main, ids ? new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0) : new ClusteredForwardShading(geometry, main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+                for (int mode = 0; mode < modes.length; mode++) {
+                    main.port().remove(Transparency.ID).add(mode == 2 ? new OpaqueTransparency(geometry, main)
+                        : new WeightedBlendedTransparency(geometry, main));
+                    for (int c = 0; c < cases.length; c++) {
+                        Material material = cases[c].material(cases[c].features().length);
+                        materials.set(quadMaterial, mode == 0 ? material : material.alphaBlend());
+                        images[c][mode][path] = frames(1);
+                        if (path == 0 && mode == 0) {
+                            materials.set(quadMaterial, cases[c].material(cases[c].features().length - 1));
+                            without[c] = frames(1);
+                        }
+                    }
+                }
+                main.port().remove(Transparency.ID);
+            }
+            renderer.setPath(MeshletRenderer.Path.AUTO);
+            scene.setMaterials(null);
+        }
+        // Each path against forward on the indexed path: at most 1% of the pixels more than 6 apart in a channel (a
+        // quad's edge, a highlight interpolated a little otherwise), a mean difference of at most 1. Each feature
+        // against the material without it: 1% of the pixels more than 6 apart (dispersion
+        // changes the fringes of the wall seen through the glass alone, 57 pixels; the others 185-999 of the quad's 999).
+        org.assertj.core.api.SoftAssertions softly = new org.assertj.core.api.SoftAssertions();
+        double worstShare = 0;
+        double worstMean = 0;
+        for (int c = 0; c < cases.length; c++) {
+            double[] changed = compare(images[c][0][0], without[c], 6);
+            System.out.printf(java.util.Locale.ROOT, "  %s: %.0f pixels changed by its last feature%n", cases[c].name(),
+                changed[0]);
+            softly.assertThat(changed[0]).as("%s: changes the image", cases[c].name())
+                .isGreaterThan(SIZE * SIZE / 100.0);
+            for (int mode = 0; mode < modes.length; mode++) {
+                for (int path = 1; path < paths.length; path++) {
+                    if (images[c][mode][path] == null) {
+                        continue;
+                    }
+                    double[] d = compare(images[c][mode][0], images[c][mode][path], 6);
+                    worstShare = Math.max(worstShare, d[0] / (SIZE * SIZE));
+                    worstMean = Math.max(worstMean, d[1]);
+                    softly.assertThat(d[0]).as("%s, %s, %s: pixels off", cases[c].name(), modes[mode], paths[path])
+                        .isLessThanOrEqualTo(SIZE * SIZE / 100.0);
+                    softly.assertThat(d[1]).as("%s, %s, %s: mean difference", cases[c].name(), modes[mode],
+                        paths[path]).isLessThanOrEqualTo(1.0);
+                }
+            }
+        }
+        System.out.printf(java.util.Locale.ROOT, "Feature matrix: worst share of pixels more than 6 off %.4f, worst mean"
+            + " difference %.3f%n", worstShare, worstMean);
+        softly.assertAll();
+    }
+
     /** Records {@code count} frames and returns the last one's pixels. */
     private int[] frames(int count) {
         for (int i = 0; i < count; i++) {
