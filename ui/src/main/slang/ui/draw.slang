@@ -253,6 +253,12 @@ float2 across(uint* p, float2 px)
     return (px - lo) / max(hi - lo, 1e-6);
 }
 
+/** A texel `s` of an image (straight alpha) times a tint, premultiplied. */
+float4 tinted(float4 s, uint* p)
+{
+    return float4(s.rgb * s.a, s.a) * color(p, COLOR_A);
+}
+
 Texture2D<float4> sampled(uint* p)
 {
     return textures[NonUniformResourceIndex(push.textures[p[TEXTURE]])];
@@ -262,13 +268,20 @@ Texture2D<float4> sampled(uint* p)
  * A glyph of an MTSDF atlas: the median of the three channels is the multi-channel distance (0.5 on the edge), alpha
  * the true distance, which the outline reads; PIXEL_RANGE is the atlas's range in screen pixels at this size. With
  * FLAG_RASTER it is hinted coverage instead (small text): its quad lies on whole pixels, a texel per pixel, and the
- * texel's alpha times the colour's is the glyph.
+ * texel's alpha times the colour's is the glyph. With FLAG_COLOR it is a colour bitmap (an emoji): the page is
+ * RGBA8_SRGB (the view decodes to linear before filtering), straight alpha with its colours bled into transparent
+ * texels, drawn as an image is: premultiplied, times colour A (white with the text's opacity).
  */
 float4 glyph(uint* p, float2 px)
 {
     float2 uv = lerp(unorms(p[UV]), unorms(p[UV + 1]), across(p, px));
     float4 m = sampled(p).SampleLevel(samplers[LINEAR_CLAMP], uv, 0);
-    if (((p[HEADER] >> 8) & FLAG_RASTER) != 0)
+    uint flags = (p[HEADER] >> 8) & 0xff;
+    if ((flags & FLAG_COLOR) != 0)
+    {
+        return tinted(m, p);
+    }
+    if ((flags & FLAG_RASTER) != 0)
     {
         return color(p, COLOR_A) * m.a;
     }
@@ -287,12 +300,6 @@ float4 glyph(uint* p, float2 px)
         c += color(p, COLOR_B) * max(outer - fill, 0);
     }
     return c;
-}
-
-/** A texel `s` of an image (straight alpha) times a tint, premultiplied. */
-float4 tinted(float4 s, uint* p)
-{
-    return float4(s.rgb * s.a, s.a) * color(p, COLOR_A);
 }
 
 float4 image(uint* p, float2 px)

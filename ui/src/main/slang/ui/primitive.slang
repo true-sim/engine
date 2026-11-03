@@ -16,9 +16,13 @@ public static const uint NINE_SLICE = 5;
 public static const uint LINE = 6;
 public static const uint KINDS = 7;
 
-/** Flags (header bits 8-15): a box filled by a linear gradient; a glyph of hinted coverage, not an MTSDF. */
+/**
+ * Flags (header bits 8-15): a box filled by a linear gradient; a glyph of hinted coverage, not an MTSDF; a glyph of
+ * colour texels (an emoji bitmap on an sRGB page, straight alpha).
+ */
 public static const uint FLAG_GRADIENT = 1;
 public static const uint FLAG_RASTER = 2;
+public static const uint FLAG_COLOR = 4;
 
 /** Word offsets. */
 public static const uint HEADER = 0;
