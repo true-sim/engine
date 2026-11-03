@@ -25,8 +25,10 @@ import java.util.function.Function;
  * int lake = materials.add(new Material(WaterParameters.DEFAULTS));
  * }</pre>
  *
- * <p>For now {@link VisibilityBufferShading} shades by type; forward shading draws other types as metallic-roughness's
- * defaults.
+ * <p>{@link VisibilityBufferShading} shades by type, and so does forward shading with
+ * {@link RenderSettings#FORWARD_SHADING} {@code PER_TYPE} (the default): each shading bin (a type and its features) draws
+ * with pipelines of its type's forward entry points. With {@code SINGLE}, one shader draws every type, the others than
+ * metallic-roughness as its defaults.
  *
  * @param name            what it is called: in material data, errors and the pipeline cache
  * @param parameters      its parameters' record
@@ -38,10 +40,22 @@ import java.util.function.Function;
  * @param tracedShader    the shader of its entry point tracing inline ray shadows (ray queries), or null for none:
  *                        then it is shaded without them where they are on
  * @param tracedEntry     that entry point; null with no shader
+ * @param forwardShader   the shader of its forward fragment entry points from full vertices ({@code <name>FragmentMain},
+ *                        {@code <name>MaskedMain}, {@code <name>BlendedMain}), or null for none: then forward shading
+ *                        draws it with the single shader
+ * @param forwardLeanShader the shader of its forward fragment entry points on the lean mesh path
+ *                        ({@code <name>LeanMain}, {@code <name>LeanMaskedMain}, {@code <name>LeanBlendedMain}), or null
  */
 public record MaterialType(String name, Class<? extends MaterialParameters> parameters,
     Function<MaterialValues, ? extends MaterialParameters> fromValues, int allowedFeatures, String shader,
-    String entry, String tracedShader, String tracedEntry) {
+    String entry, String tracedShader, String tracedEntry, String forwardShader, String forwardLeanShader) {
+
+    /** A type without forward entry points of its own: forward shading draws it with the single shader. */
+    public MaterialType(String name, Class<? extends MaterialParameters> parameters,
+        Function<MaterialValues, ? extends MaterialParameters> fromValues, int allowedFeatures, String shader,
+        String entry, String tracedShader, String tracedEntry) {
+        this(name, parameters, fromValues, allowedFeatures, shader, entry, tracedShader, tracedEntry, null, null);
+    }
 
     public MaterialType {
         Objects.requireNonNull(name, "name");

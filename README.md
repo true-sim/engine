@@ -530,8 +530,8 @@ try (Textures textures = new Textures(device); Materials materials = new Materia
   is laid over the type's surface where the material has a `ClearcoatParameters` section. The visibility buffer sorts
   the screen's 8x8 tiles into a list per type and feature combination they show and shades each with one indirect
   dispatch of its own variant (a specialization constant), holding only its features' code: a plain material never
-  pays for a coat. Forward shading branches on the material's features; it draws types other than metallic-roughness
-  as its defaults for now.
+  pays for a coat. Forward shading does the same by draws: each type and feature combination draws with pipelines of
+  its own ("Forward shading by type" below).
 - **Textures** live in the bindless set and are sampled by slot, trilinear and anisotropic (`Bindless.MATERIAL`, up to
   16x where the GPU allows).
 - **One shading model** (`shading.slang`): Lambert diffuse and a GGX specular lobe with height-correlated Smith
@@ -653,6 +653,58 @@ Both light each pixel with the light list's lights for it (and the sky), or with
 | the same, 256 point lights | 1.48 ms | 0.93 ms |
 | the same, 4,096 point lights | 5.56 ms | 1.71 ms |
 | 3,000 rocks, 1,024 point lights (`Screenshots.renderLights`) | 1.86 ms | 0.74 ms |
+
+**Forward shading by type** (#67, `render.forwardShading`, `PER_TYPE` by default). A `[MaterialType]` gets forward
+fragment entry points generated too (`material-types/entryForward*.slang.template`: per raster bin, from full vertices
+and on the lean mesh path), and each shading bin (a type and the features its materials show, numbered as the visibility
+buffer numbers them) draws with pipelines of its type's entry points, its features a specialization constant, made
+for the raster bins its materials draw in. After culling, a view drawn shaded has its lists split by shading bin
+(`meshlets/split.slang`: count, lay out, scatter, three small dispatches per cull): each (raster bin, shading bin)
+draws with one indirect draw from its part, and on the indexed path the expansion writes each part's indices in a range
+of its own. No shader branches on the type, and every type shades as itself; `SINGLE` keeps the one shader branching
+on it, which draws other types as metallic-roughness's defaults. A bin first drawn rebuilds the graph with its
+pipelines before it draws. Depth, shadow and ID passes keep their shared entry points: no type has a geometry half yet
+(clip, and displacement with #68), and they read the slot alone. The blended bin draws by type where the view's shaded
+draw split its lists (the visibility buffer's blended bin keeps the one shader), and classic LOD's draws keep it too.
+
+Measured with `ForwardShadingBenchmark` (`TRUESIM_BENCHMARK=true`) on an RX 9070 XT at 1920 x 1080, 2026-11-03: 30,000
+rocks on the terrain (87,193 meshlets drawn), the rocks' materials spread over 1, 4 or 12 shading bins (metallic-
+roughness; with glow, tinted and car paint; and with 8 feature combinations of metallic-roughness), occlusion culling
+on. Configurations took turns in 5 rounds after an uncounted warm-up round; ranges of the rounds' medians. GPU frame
+time from timestamps around batches of 8 frames; culling (both phases, the split and the indexed expansion included) and
+the forward draws (both phases) from the graph's pass timings; CPU time of recording a frame:
+
+| Path | Bins | Shading | Frame (GPU) | Culling | Forward draws | Record (CPU) | Draws |
+|---|---|---|---|---|---|---|---|
+| mesh shaders | 1 | by type | 1.129-1.691 ms | 0.122-0.158 ms | 0.964-1.267 ms | 0.023-0.029 ms | 2 |
+| mesh shaders | 1 | single | 1.147-1.417 ms | 0.123-0.141 ms | 0.949-1.075 ms | 0.021-0.027 ms | 6 |
+| mesh shaders | 4 | by type | 0.943-0.994 ms | 0.128-0.130 ms | 0.783-0.797 ms | 0.025-0.033 ms | 8 |
+| mesh shaders | 4 | single | 1.118-1.138 ms | 0.106-0.125 ms | 0.925-1.003 ms | 0.024-0.027 ms | 6 |
+| mesh shaders | 12 | by type | 1.053-1.105 ms | 0.137-0.140 ms | 0.876-0.886 ms | 0.031-0.041 ms | 24 |
+| mesh shaders | 12 | single | 1.160-1.184 ms | 0.106-0.124 ms | 0.964-0.989 ms | 0.021-0.027 ms | 6 |
+| indexed | 1 | by type | 0.779-0.783 ms | 0.213-0.215 ms | 0.544-0.551 ms | 0.025-0.032 ms | 2 |
+| indexed | 1 | single | 0.819-0.829 ms | 0.189-0.207 ms | 0.559-0.566 ms | 0.029-0.030 ms | 6 |
+| indexed | 4 | by type | 0.755-0.777 ms | 0.223-0.229 ms | 0.499-0.504 ms | 0.034-0.035 ms | 8 |
+| indexed | 4 | single | 0.803-0.844 ms | 0.188-0.210 ms | 0.546-0.570 ms | 0.023-0.030 ms | 6 |
+| indexed | 12 | by type | 0.845-0.857 ms | 0.262-0.266 ms | 0.538-0.541 ms | 0.033-0.042 ms | 24 |
+| indexed | 12 | single | 0.855-0.863 ms | 0.188-0.208 ms | 0.587-0.599 ms | 0.023-0.030 ms | 6 |
+
+The mesh path's 1-bin "by type" range comes from one slow round (the others 1.129-1.143 ms). The split costs 0.01-0.03
+ms of culling on mesh shaders and 0.02-0.07 ms on the indexed path; the draws, specialized to their features and free
+of the type branch, gain more, except with one bin on mesh shaders, where the two are even. Recording costs a few
+microseconds more per frame (a draw per shading bin). Pipelines (cold: compiled with a specialization constant never
+used, so the driver's disk cache had none): the single shader's opaque pipeline took 450-500 ms to compile on either
+path, a pipeline by type 70-150 ms (glow 70-95, metallic-roughness 100-125, metallic-roughness with a coat and sheen
+120-155). By type, a table makes one pipeline per shading bin and raster bin drawn: 1, 4 and 12 for the tables above
+(the renderer makes the single shader's 5 shaded pipelines per path, a raster bin each and the weighted blended
+one, when it is made). A bin first drawn while frames run costs the frame that draws it the rebuild and its
+pipelines: 170 ms cold, 1-3 ms with the driver's cache warm; with the single shader the rebuild alone (0.3-3 ms).
+Warm, a table's pipelines by type took 1-4 ms in all.
+
+On the integrated GPU (#151, 2026-11-03), by type does not show a fix: `SceneSyncTest` lost the device in 15 of 36
+tests with the single shader; by type, the 10 tests that ran failed (7 device losses, 3 failed submits) before the GPU
+dropped out of the device list. Both times the first loss came in a test drawing metallic-roughness materials only
+(faults at 0x2000000000 and at 0x0). One run each; no run of the code before this change on the same driver state.
 
 Next (#46): light binning, shadows per light, buckets, transparency and post effects as swappable techniques.
 

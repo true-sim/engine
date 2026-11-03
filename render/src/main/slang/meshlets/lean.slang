@@ -4,55 +4,9 @@
 // has them, from its three vertices). A mesh shader's outputs reach fragment shaders through memory on some GPUs: with
 // the full VertexOut (some 20 values a vertex) the path took twice as long as the indexed one on an RX 9070 XT, while
 // rebuilding whole vertices per pixel instead (tried too) cost more where triangles cover many pixels.
-import meshlets.common;
-
-/** As mesh.slang's MeshPush: the renderer sets the one block for both. */
-struct LeanPush
-{
-    View* view;               // the shaded fields at the same bytes in every raster block: draw.slang's fragment
-    SceneTable* scene;        // shader serves them all (common.slang's SceneTable: the frame's scene buffers)
-    LightListHeader* lights;  // at 16: the light list, or null: the sun
-    IndirectLight* indirect;  // at 24: the view's indirect-light table (indirect.slang), or null: the constant sky
-    VisibleMeshlet* visible;
-    uint* visibleCount;
-    uint bin;
-    uint late;
-    uint background;          // at 56: the scene behind, for transmission (common.slang's Background); 0: none
-    uint backgroundRegion;
-};
-
-[[vk::push_constant]]
-ConstantBuffer<LeanPush> push;
-
-/** The scene behind, as the push block names it, for a fragment of instance `instance`. */
-Background behind(uint instance)
-{
-    Background b = { push.background, push.backgroundRegion,
-        push.background != 0 ? maxScale(push.scene[0].instances[instance]) : 1.0 };
-    return b;
-}
-
-/** Byte i of the pool's meshlet triangles. */
-uint triangleByte(uint* triangles, uint i)
-{
-    return (triangles[i >> 2] >> ((i & 3) * 8)) & 0xff;
-}
-
-/** A triangle, as its primitive ID: its visible meshlet's slot, then its number in the meshlet (7 bits). */
-struct LeanPrimitive
-{
-    uint id : SV_PrimitiveID;
-};
-
-struct LeanVertex
-{
-    float4 position : SV_Position;
-    float3 world : WORLD;
-    float3 normal : NORMAL;
-    float4 tangent : TANGENT;
-    float2 uv : UV;
-    float2 uv1 : UV1;
-};
+// The push block, the vertices and lean() are forward.slang's, shared with the fragment stages generated per material
+// type.
+import meshlets.forward;
 
 [shader("mesh")]
 [outputtopology("triangle")]
@@ -62,11 +16,11 @@ void meshLeanMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out ver
 {
     View view = push.view[0];
     uint* triangleBytes = push.scene[0].meshletTriangles; // loaded once, read per triangle
-    uint index = group.y * 65535 + group.x;
     // Past the list's end a workgroup outputs nothing, through the one SetMeshOutputCounts below all the same: with a
     // second call on an early exit, the driver of an AMD Radeon(TM) Graphics drew nothing at all (pitfalls.md).
-    bool listed = index < min(push.visibleCount[visibleCountWord(push.bin, push.late)], binDrawCapacity(view, push.bin));
-    uint slot = binFirstSlot(view, push.bin) + index;
+    ListedMeshlet found = listedMeshlet(view, group.y * 65535 + group.x);
+    bool listed = found.listed;
+    uint slot = found.slot;
     VisibleMeshlet v = listed ? push.visible[slot] : (VisibleMeshlet) 0;
     Instance instance = relative(push.scene[0].instances[v.instance], view);
     MeshEntry mesh = push.scene[0].meshes[instance.mesh];
@@ -99,41 +53,50 @@ void meshLeanMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out ver
     }
 }
 
-/** The fragment's surface: the interpolated values, and the flat or rare ones from triangle `primitive`. */
-VertexOut lean(LeanVertex in, uint primitive, float3 bary)
+/** A typed draw's: the meshlets of one shading bin of the raster bin, through the split list (split.slang). */
+[shader("mesh")]
+[outputtopology("triangle")]
+[numthreads(64, 1, 1)]
+void meshLeanTypedMain(uint3 group : SV_GroupID, uint thread : SV_GroupIndex, out vertices LeanVertex vertices[64],
+    out indices uint3 triangles[124], out primitives LeanPrimitive primitives[124])
 {
-    VisibleMeshlet visible = push.visible[primitive >> 7];
+    View view = push.view[0];
     uint* triangleBytes = push.scene[0].meshletTriangles; // loaded once, read per triangle
-    Instance instance = push.scene[0].instances[visible.instance];
-    MeshEntry mesh = push.scene[0].meshes[instance.mesh & INSTANCE_MESH]; // the mesh word holds flags too
-    uint m = visible.meshlet;
-    VertexOut s;
-    s.position = in.position;
-    s.world = in.world;
-    s.normal = in.normal;
-    s.tangent = in.tangent;
-    s.uv = in.uv;
-    s.uv1 = in.uv1;
-    s.color = 1;
-    if ((mesh.attributeFormat & 16) != 0) // COLOR: from the triangle's vertices
+    // Past the list's end a workgroup outputs nothing, through the one SetMeshOutputCounts below all the same: with a
+    // second call on an early exit, the driver of an AMD Radeon(TM) Graphics drew nothing at all (pitfalls.md).
+    ListedMeshlet found = listedTypedMeshlet(view, group.y * 65535 + group.x);
+    bool listed = found.listed;
+    uint slot = found.slot;
+    VisibleMeshlet v = listed ? push.visible[slot] : (VisibleMeshlet) 0;
+    Instance instance = relative(push.scene[0].instances[v.instance], view);
+    MeshEntry mesh = push.scene[0].meshes[instance.mesh];
+    uint w = v.meshlet * 8;
+    uint vertexOffset = push.scene[0].meshlets[w];
+    uint triangleOffset = push.scene[0].meshlets[w + 1];
+    uint counts = listed ? push.scene[0].meshlets[w + 2] : 0;
+    uint vertexCount = counts & 0xff;
+    uint triangleCount = (counts >> 8) & 0xff;
+    SetMeshOutputCounts(vertexCount, triangleCount);
+    if (thread < vertexCount)
     {
-        uint w = m * 8;
-        uint first = mesh.indexBase + push.scene[0].meshlets[w + 1] + (primitive & 0x7f) * 3;
-        uint vertexBase = mesh.meshletVertexBase + push.scene[0].meshlets[w];
-        s.color = 0;
-        for (uint k = 0; k < 3; k++)
-        {
-            uint vertex = mesh.vertexBase + push.scene[0].meshletVertices[vertexBase
-                + triangleByte(triangleBytes, first + woundCorner(k, mirrored(instance)))]; // as the drawn corners
-            uint word = attributeWord(mesh, push.scene[0].attributes, vertex, 4);
-            s.color += bary[k] * float4(word & 0xff, (word >> 8) & 0xff, (word >> 16) & 0xff, word >> 24) / 255.0;
-        }
+        uint vertex = mesh.vertexBase
+            + push.scene[0].meshletVertices[mesh.meshletVertexBase + vertexOffset + thread];
+        VertexOut out = transformVertex(view, instance, mesh, vertex, push.scene[0].positions,
+            push.scene[0].attributes, v.meshlet,
+            counts >> 16);
+        vertices[thread].position = out.position;
+        vertices[thread].world = out.world;
+        vertices[thread].normal = out.normal;
+        vertices[thread].tangent = out.tangent;
+        vertices[thread].uv = out.uv;
+        vertices[thread].uv1 = out.uv1;
     }
-    s.meshlet = m;
-    s.material = instance.materialBase + (push.scene[0].meshlets[m * 8 + 2] >> 16);
-    s.instance = visible.instance;
-    s.firstTriangle = 0;
-    return s;
+    for (uint t = thread; t < triangleCount; t += 64)
+    {
+        uint b = mesh.indexBase + triangleOffset + t * 3;
+        triangles[t] = wound(uint3(triangleByte(triangleBytes, b), triangleByte(triangleBytes, b + 1), triangleByte(triangleBytes, b + 2)), mirrored(instance));
+        primitives[t].id = slot << 7 | t;
+    }
 }
 
 [shader("fragment")]

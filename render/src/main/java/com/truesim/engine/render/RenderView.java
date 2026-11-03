@@ -11,6 +11,7 @@ import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.ExternalBuffer;
 import com.truesim.engine.graph.GraphBuilder;
+import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.ViewLayout;
 import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.FrameBuffer;
@@ -53,6 +54,12 @@ public final class RenderView implements AutoCloseable {
     private boolean visibilityGrown; // replaced by a bigger one, cleared at the next cull
     private final VulkanDevice device;
     private GpuBuffer frameIndices; // the indexed path's, made when it first draws
+    // Its lists split by shading bin (split.slang), for forward shading by type: made when a graph first splits it,
+    // with room for splitRoom shading bins; split while splitCategories > 0 (set by the graph's build).
+    private GpuBuffer split;
+    private ExternalBuffer splitImport;
+    private int splitRoom;
+    private volatile int splitCategories;
     // The lists as imported buffers of the frame graph, which the culling and drawing passes declare.
     private final ExternalBuffer visibleImport;
     private final ExternalBuffer expandImport;
@@ -415,10 +422,15 @@ public final class RenderView implements AutoCloseable {
             visibleImport.set(visible); // a new size: the graph rebuilds
             putLong(ViewLayout.LISTS_VISIBLE, visible.deviceAddress());
         }
+        options = resized;
+        if (split != null && split.size() != splitBytes(splitRoom)) {
+            renderer.retire(split);
+            split = newSplit(splitRoom);
+            splitImport.set(split);
+        }
         putInt(ViewLayout.MAX_DRAWS, draws);
         putInt(ViewLayout.BIN_DRAWS, binDraws);
         boolean indexed = frameIndices != null;
-        options = resized;
         if (indexed && frameIndices.size() != 12L * resized.allTriangles()) {
             dropIndices();
             frameIndices();
@@ -430,7 +442,7 @@ public final class RenderView implements AutoCloseable {
     public long bytes() {
         return (long) BYTES * renderer.viewConstants().slots().count() + visible.size() + expandCommand.size() + drawCommand.size()
             + drawCount.size() + (visibility == null ? 0 : visibility.size())
-            + (frameIndices == null ? 0 : frameIndices.size());
+            + (frameIndices == null ? 0 : frameIndices.size()) + (split == null ? 0 : split.size());
     }
 
     /** The world position along {@code axis} of the view's camera, as last {@link #set}. */
@@ -470,6 +482,58 @@ public final class RenderView implements AutoCloseable {
 
     GpuBuffer drawCount() {
         return drawCount;
+    }
+
+    /**
+     * Has culling split the view's lists by shading bin from now on (forward shading by type), with room for
+     * {@code categories} shading bins (a table's {@link Materials#binCount}): its split lists are made, or remade
+     * larger, now. Set while a graph builds, before the view is culled ({@link MeshletCulling.Views#add}).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    synchronized void splitByType(int categories) {
+        if (categories < 1 || categories > Materials.MAX_BINS) {
+            throw new IllegalArgumentException("1 to " + Materials.MAX_BINS + " shading bins: " + categories);
+        }
+        if (categories > splitRoom) {
+            int room = Math.min(Materials.MAX_BINS, Math.max(categories, 2 * splitRoom));
+            if (split != null) {
+                renderer.retire(split);
+            }
+            split = newSplit(room);
+            splitRoom = room;
+            if (splitImport == null) {
+                splitImport = new ExternalBuffer("view " + index + " split lists", split);
+            } else {
+                splitImport.set(split);
+            }
+        }
+        splitCategories = splitRoom;
+    }
+
+    /** Culling no longer splits the view's lists (its split lists stay, for a later graph). */
+    void noSplit() {
+        splitCategories = 0;
+    }
+
+    /** The shading bins the view's split lists have room for while culling splits them; 0: it does not. */
+    int splitCategories() {
+        return splitCategories;
+    }
+
+    /** The split lists: a header entry per raster bin and shading bin (common.slang's SPLIT_*), then the slots. */
+    GpuBuffer split() {
+        return split;
+    }
+
+    /** Bytes of split lists with room for {@code room} shading bins: the header, the slot list and a spare word. */
+    private long splitBytes(int room) {
+        return 4L * ((long) MeshletRenderer.BINS * room * CommonConstants.SPLIT_WORDS + options.allDraws() + 4);
+    }
+
+    private GpuBuffer newSplit(int room) {
+        return GpuBuffer.deviceLocal(device, splitBytes(room), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+            | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+            | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     }
 
     /** Lets the indexed path's index buffer go, once no frame in flight reads it: the path is mesh shaders now. */
@@ -520,6 +584,10 @@ public final class RenderView implements AutoCloseable {
         if (visibilityImport != null) {
             pass.write(g.importBuffer(visibilityImport), BufferAccess.STORAGE_WRITE);
         }
+        if (splitCategories > 0) { // reset, then counted, laid out and scattered by the split's dispatches
+            Buffer lists = g.importBuffer(splitImport);
+            pass.write(lists, BufferAccess.TRANSFER_DST).write(lists, BufferAccess.STORAGE_WRITE);
+        }
         indicesDeclared = renderer.path() == MeshletRenderer.Path.INDEXED;
         if (indicesDeclared) { // the expansion writes the index buffer: made now, while the graph builds
             GpuBuffer indices = frameIndices();
@@ -537,6 +605,10 @@ public final class RenderView implements AutoCloseable {
             .read(g.importBuffer(drawImport), BufferAccess.INDIRECT)
             .read(g.importBuffer(visibleImport), BufferAccess.DRAW_READ)
             .read(g.importBuffer(countImport), BufferAccess.DRAW_READ);
+        if (splitCategories > 0) {
+            Buffer lists = g.importBuffer(splitImport);
+            pass.read(lists, BufferAccess.INDIRECT).read(lists, BufferAccess.DRAW_READ);
+        }
         if (indicesDeclared) {
             pass.read(g.importBuffer(indicesImport), BufferAccess.INDEX);
         }
@@ -575,7 +647,7 @@ public final class RenderView implements AutoCloseable {
     void freeBuffers(Retiring retiring) {
         closed = true;
         for (AutoCloseable buffer : new AutoCloseable[] {visible, expandCommand, drawCommand, drawCount,
-            visibility, frameIndices, noIndices}) {
+            visibility, frameIndices, noIndices, split}) {
             if (buffer == null) {
                 continue;
             }

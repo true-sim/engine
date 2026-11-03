@@ -225,6 +225,7 @@ public final class Pipeline implements AutoCloseable {
         private int stencilCompare;
         private int stencilPass = VK_STENCIL_OP_KEEP;
         private int stencilReference;
+        private int[] constants = new int[0];
 
         private Graphics(VulkanDevice device) {
             this.device = device;
@@ -326,6 +327,16 @@ public final class Pipeline implements AutoCloseable {
             return this;
         }
 
+        /**
+         * Sets its specialization constants (32-bit, as {@code [vk::constant_id(i)]}) i = 0, 1, ... to
+         * {@code values}, in every stage: variants the driver compiles with those values known, as
+         * {@link Pipeline#compute(VulkanDevice, ShaderModule, String, int, int...)}'s.
+         */
+        public Graphics constants(int... values) {
+            this.constants = values.clone();
+            return this;
+        }
+
         public Pipeline build() {
             if (stages.isEmpty()) {
                 throw new IllegalStateException("A graphics pipeline needs shader stages");
@@ -341,6 +352,19 @@ public final class Pipeline implements AutoCloseable {
                         .stage(stage.stage)
                         .module(stage.module.handle())
                         .pName(stack.UTF8(stage.entry));
+                }
+                if (constants.length > 0) {
+                    VkSpecializationMapEntry.Buffer entries = VkSpecializationMapEntry.calloc(constants.length, stack);
+                    ByteBuffer data = stack.malloc(4 * constants.length);
+                    for (int i = 0; i < constants.length; i++) {
+                        entries.get(i).constantID(i).offset(4 * i).size(4);
+                        data.putInt(4 * i, constants[i]);
+                    }
+                    VkSpecializationInfo specialization = VkSpecializationInfo.calloc(stack).pMapEntries(entries)
+                        .pData(data);
+                    for (int i = 0; i < stages.size(); i++) {
+                        shaderStages.get(i).pSpecializationInfo(specialization);
+                    }
                 }
                 var colorFormats = stack.mallocInt(colors.size());
                 VkPipelineColorBlendAttachmentState.Buffer blends =

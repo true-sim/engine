@@ -38,11 +38,16 @@ public final class ClusteredForwardShading implements Technique {
         this.depthFormat = depthFormat;
     }
 
-    /** The graph buffers the scene's materials name: one named anew rebuilds the graph, which orders its writers first. */
+    /**
+     * The graph buffers the scene's materials name: one named anew rebuilds the graph, which orders its writers first;
+     * and its table and shading bins with the raster bins they draw in: shaded by type
+     * ({@link RenderSettings#FORWARD_SHADING}), a bin first drawn rebuilds the graph with its pipelines before it draws.
+     */
     @Override
     public long buildVersion() {
         Materials materials = geometry.renderer().scene().materials();
-        return materials == null ? 0 : materials.graphBuffersVersion();
+        return materials == null ? 0 : materials.graphBuffersVersion()
+            + 31 * (materials.rastersVersion() + 31L * System.identityHashCode(materials));
     }
 
     /** The color behind everything; read when recording, so it may change every frame. */

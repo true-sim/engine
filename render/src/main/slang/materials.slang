@@ -12,7 +12,7 @@
 //     [MaterialParameters(FEATURE_CLEARCOAT)]          // the features the type allows
 //     struct WaterParameters { [Color] float3 deep = float3(0.02, 0.1, 0.15); [Range(0, 4)] float waves = 1; };
 //
-//     [MaterialType("water")]                          // the visibility buffer's entry points come generated
+//     [MaterialType("water")]                          // its visibility buffer and forward entry points come generated
 //     struct Water : IMaterial
 //     {
 //         typealias Parameters = WaterParameters;

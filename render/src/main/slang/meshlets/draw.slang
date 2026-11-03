@@ -1,32 +1,8 @@
 // The indexed path's draw: all visible meshlets' triangles in one indexed draw. Each index is a visible meshlet's slot
 // and its local vertex (slot << 8 | local); the vertex shader finds the instance, the meshlet and the pool vertex from
 // it. The fragment shader serves the mesh shader path too.
-import meshlets.common;
-
-struct DrawPush
-{
-    View* view;               // the shaded fields at the same bytes in every raster block: draw.slang's fragment
-    SceneTable* scene;        // shader serves them all (common.slang's SceneTable: the frame's scene buffers)
-    LightListHeader* lights;  // at 16: the light list, or null: the sun
-    IndirectLight* indirect;  // at 24: the view's indirect-light table (indirect.slang), or null: the constant sky
-    VisibleMeshlet* visible;
-    uint64_t unused;
-    uint unusedBin;
-    uint unusedLate;
-    uint background;          // at 56: the scene behind, for transmission (common.slang's Background); 0: none
-    uint backgroundRegion;
-};
-
-[[vk::push_constant]]
-ConstantBuffer<DrawPush> push;
-
-/** The scene behind, as the push block names it, for a fragment of instance `instance`. */
-Background behind(uint instance)
-{
-    Background b = { push.background, push.backgroundRegion,
-        push.background != 0 ? maxScale(push.scene[0].instances[instance]) : 1.0 };
-    return b;
-}
+// The push block (forward.slang's ForwardPush), behind() and the type's generated fragment stages are forward.slang's.
+import meshlets.forward;
 
 [shader("vertex")]
 VertexOut vertexMain(uint index : SV_VulkanVertexID)

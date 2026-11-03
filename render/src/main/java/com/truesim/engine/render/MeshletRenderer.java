@@ -438,6 +438,43 @@ public final class MeshletRenderer implements AutoCloseable {
         raster.drawBlended(commands, scene, own(view), path() == Path.MESH_SHADERS, kind, clusters, behind, indirect);
     }
 
+    /**
+     * Forward shading by type: the pipelines of the scene's material table's shading bins as they are now, for the
+     * path the next frame takes, made where they are not yet. While a graph builds.
+     */
+    RasterPipelines.Typed forwardPipelines() {
+        return raster.typed(scene.materials(), path() == Path.MESH_SHADERS);
+    }
+
+    /**
+     * How many pipelines forward shading by type ({@link ForwardShading#PER_TYPE}) made so far: a shading bin's for each
+     * raster bin its materials draw in, on the path drawn.
+     */
+    public int forwardPipelineCount() {
+        return raster.typedCount();
+    }
+
+    /** Nanoseconds spent making forward shading's pipelines by type so far ({@link #forwardPipelineCount}). */
+    public long forwardPipelineNanos() {
+        return raster.typedNanos();
+    }
+
+    /**
+     * Like {@link #drawAttached}, shaded by type: each shading bin with {@code pipelines}, from the view's lists split
+     * by shading bin as culling split them ({@link RenderView#splitByType}). Allocates nothing.
+     */
+    void drawTypedAttached(VkCommandBuffer commands, RenderView view, boolean late, long clusters, long indirect,
+        RasterPipelines.Typed pipelines) {
+        raster.drawTyped(commands, scene, own(view), path() == Path.MESH_SHADERS, late, clusters, indirect, pipelines);
+    }
+
+    /** Like {@link #drawBlendedAttached}, shaded by type ({@link #drawTypedAttached}). Allocates nothing. */
+    void drawBlendedTypedAttached(VkCommandBuffer commands, RenderView view, BlendedTargets.Kind kind, long clusters,
+        long behind, long indirect, RasterPipelines.Typed pipelines) {
+        raster.drawBlendedTyped(commands, scene, own(view), path() == Path.MESH_SHADERS, kind, clusters, behind,
+            indirect, pipelines);
+    }
+
     /** The scene it draws. */
     public GpuScene scene() {
         return scene;

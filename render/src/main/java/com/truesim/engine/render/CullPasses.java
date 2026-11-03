@@ -32,6 +32,7 @@ import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.CullPush;
 import com.truesim.engine.render.layout.ExpandPush;
 import com.truesim.engine.render.layout.InstancePush;
+import com.truesim.engine.render.layout.SplitPush;
 import com.truesim.engine.render.layout.ViewLayout;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Bindless;
@@ -64,6 +65,8 @@ final class CullPasses implements AutoCloseable {
     private static final int PHASE_LATE = CommonConstants.PHASE_LATE;
     /** Rows of one instance dispatch: the guaranteed workgroup count. */
     private static final int MAX_ROWS = 65_535;
+    /** Workgroups per raster bin counting and scattering a split list, each looping over it. */
+    private static final int SPLIT_GROUPS = 256;
     /** Rows one buffer update writes: 8 bytes each, a few KiB of the stack. */
     private static final int ROWS_PER_UPDATE = 512;
     // The shaders' Occlusion struct, the same in the instance and cull pushes: its fields from its start.
@@ -82,6 +85,12 @@ final class CullPasses implements AutoCloseable {
     private final Pipeline instancesPass;
     private final Pipeline cull;
     private final Pipeline expand;
+    private final Pipeline expandTyped; // a split view's, in the split list's order
+    // Forward shading by type: the lists of views split by shading bin (split.slang), counted, laid out, scattered.
+    private final Pipeline splitCount;
+    private final Pipeline splitLayout;
+    private final Pipeline splitScatter;
+    private final Pipeline[] splitStages; // the three in order, never written
     private int maxChunks;
     private GpuBuffer chunks; // grown as frames want more (grow)
     private final GpuBuffer chunkCommand;
@@ -103,11 +112,17 @@ final class CullPasses implements AutoCloseable {
         this.maxChunks = chunks;
         try (ShaderModule instanceShader = ShaderModule.load(device, "shaders/meshlets/instances.spv");
              ShaderModule cullShader = ShaderModule.load(device, "shaders/meshlets/cull.spv");
-             ShaderModule expandShader = ShaderModule.load(device, "shaders/meshlets/expand.spv")) {
+             ShaderModule expandShader = ShaderModule.load(device, "shaders/meshlets/expand.spv");
+             ShaderModule splitShader = ShaderModule.load(device, "shaders/meshlets/split.spv")) {
             instancesPass = Pipeline.compute(device, instanceShader, "instancesMain", InstancePush.BYTES);
             cull = Pipeline.compute(device, cullShader, "cullMain", CullPush.BYTES);
             expand = Pipeline.compute(device, expandShader, "expandMain", ExpandPush.BYTES);
+            expandTyped = Pipeline.compute(device, expandShader, "expandTypedMain", ExpandPush.BYTES);
+            splitCount = Pipeline.compute(device, splitShader, "splitCountMain", SplitPush.BYTES);
+            splitLayout = Pipeline.compute(device, splitShader, "splitLayoutMain", SplitPush.BYTES);
+            splitScatter = Pipeline.compute(device, splitShader, "splitScatterMain", SplitPush.BYTES);
         }
+        splitStages = new Pipeline[] {splitCount, splitLayout, splitScatter};
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         this.chunks = GpuBuffer.deviceLocal(device, 16L * chunks, storage);
         // The cull dispatch (x, y, z), the chunks wanted this frame, the end of those written, and the most a frame
@@ -223,6 +238,10 @@ final class CullPasses implements AutoCloseable {
                     Commands.fillBuffer(commands, v.drawCount().handle(), 0, VK_WHOLE_SIZE, 0); // counts, indices wanted
                 }
                 v.clearGrownVisibility(commands);
+                if (v.splitCategories() > 0) { // the split lists' counts and cursors: laid out anew from them
+                    Commands.fillBuffer(commands, v.split().handle(), 0,
+                        4L * BINS * v.splitCategories() * CommonConstants.SPLIT_WORDS, 0);
+                }
                 // The late phase keeps the blended bin's commands: its lists are appended to (visibleCountWord).
                 int resetBins = early != null ? BINS : MeshletRenderer.BIN_BLENDED;
                 Commands.updateBuffer(commands, v.expandCommand().handle(), 0, 16 * resetBins, dispatches);
@@ -272,6 +291,7 @@ final class CullPasses implements AutoCloseable {
             cull.push(commands, push, CullPush.BYTES);
             Commands.dispatchIndirect(commands, chunkCommand.handle(), 0);
         }
+        split(commands, views, early, count, meshShading);
         if (meshShading) { // the lists and their dispatches feed the mesh shaders
             if (!ordered) {
                 Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
@@ -293,11 +313,58 @@ final class CullPasses implements AutoCloseable {
         }
     }
 
+    /**
+     * Forward shading by type: splits the lists of the views that ask for it ({@link RenderView#splitCategories}) by
+     * shading bin, after the cull pass: counts, lays out (each shading bin's part and draw), scatters; on the indexed
+     * path, before the expansion, which then writes each shading bin's indices in a range of their own.
+     */
+    private void split(VkCommandBuffer commands, RenderView[] views, boolean[] early, int count,
+        boolean meshShading) {
+        boolean any = false;
+        for (int i = 0; i < count; i++) {
+            any |= views[i].splitCategories() > 0;
+        }
+        if (!any) {
+            return;
+        }
+        Pipeline[] stages = splitStages;
+        for (int stage = 0; stage < 3; stage++) {
+            // The cull pass's lists (then the stage before's counts and layout) feed the stage.
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+                    | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            stages[stage].bind(commands);
+            for (int i = 0; i < count; i++) {
+                RenderView v = views[i];
+                if (v.splitCategories() == 0) {
+                    continue;
+                }
+                // Threads per raster bin, each looping over the bin's list: up to 256 groups, fewer for short lists.
+                int groups = stage == 1 ? 1 : (int) Math.min(SPLIT_GROUPS, (v.options().allDraws() + 63L) / 64);
+                try (MemoryStack stack = stackPush()) {
+                    long push = stack.nmalloc(8, SplitPush.BYTES);
+                    memPutLong(push + SplitPush.VIEW, v.address());
+                    memPutLong(push + SplitPush.SCENE, scene.tableAddress());
+                    memPutLong(push + SplitPush.VISIBLE, v.visible().deviceAddress());
+                    memPutLong(push + SplitPush.VISIBLE_COUNT, v.drawCount().deviceAddress());
+                    memPutLong(push + SplitPush.TYPED, v.split().deviceAddress());
+                    memPutInt(push + SplitPush.CATEGORIES, v.splitCategories());
+                    memPutInt(push + SplitPush.LATE, early == null ? 1 : 0);
+                    memPutInt(push + SplitPush.INDEXED, meshShading ? 0 : 1);
+                    memPutInt(push + SplitPush.STRIDE, groups * 64);
+                    stages[stage].push(commands, push, SplitPush.BYTES);
+                    Commands.dispatch(commands, groups, BINS, 1);
+                }
+            }
+        }
+    }
+
     /** The indexed path's expansion of each view's lists, per raster bin, into its index buffer. */
     private void expand(VkCommandBuffer commands, RenderView[] views, boolean[] early, int count) {
-        expand.bind(commands);
         for (int i = 0; i < count; i++) {
             RenderView v = views[i];
+            boolean split = v.splitCategories() > 0;
+            (split ? expandTyped : expand).bind(commands);
             for (int bin = 0; bin < BINS; bin++) {
                 try (MemoryStack stack = stackPush()) {
                     long push = stack.nmalloc(8, ExpandPush.BYTES);
@@ -311,6 +378,8 @@ final class CullPasses implements AutoCloseable {
                     memPutLong(push + ExpandPush.INDICES, v.frameIndices().deviceAddress());
                     memPutInt(push + ExpandPush.BIN, bin);
                     memPutInt(push + ExpandPush.LATE, early == null ? 1 : 0);
+                    memPutLong(push + ExpandPush.TYPED, split ? v.split().deviceAddress() : 0);
+                    memPutInt(push + ExpandPush.CATEGORIES, v.splitCategories());
                     expand.push(commands, push, ExpandPush.BYTES);
                     Commands.dispatchIndirect(commands, v.expandCommand().handle(), 16L * bin);
                 }
@@ -364,6 +433,10 @@ final class CullPasses implements AutoCloseable {
             instancesPass.close();
             cull.close();
             expand.close();
+            expandTyped.close();
+            splitCount.close();
+            splitLayout.close();
+            splitScatter.close();
             chunks.close();
             chunkCommand.close();
         }
