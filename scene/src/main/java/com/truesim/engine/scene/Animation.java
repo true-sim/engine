@@ -7,6 +7,10 @@ import com.truesim.engine.app.Frame;
 import com.truesim.engine.app.Phase;
 import com.truesim.engine.app.Plugin;
 import com.truesim.engine.app.PluginKey;
+import com.truesim.engine.app.Stage;
+import com.truesim.engine.app.Startup;
+import com.truesim.engine.settings.EngineSettings;
+import com.truesim.engine.settings.Setting;
 import com.truesim.scene.animation.Animators;
 import com.truesim.scene.core.SceneGraph;
 import java.util.Arrays;
@@ -20,7 +24,7 @@ import java.util.Objects;
  * world transforms are brought up to date ({@link SceneGraph#update()}), so {@code LATE} reads this frame's joints.
  *
  * <pre>{@code
- * app.use(new Animation());
+ * app.use(new Animation());                                   // animation.threads: every processor unless set
  * Animators animators = engine.get(Animation.KEY).animators(scene, clock); // the world's, run every frame from now on
  * Animator fox = animators.add(rig, nodes);
  * // in update: fox.input(move, speed); fox.lookAt(look).target(x, y, z);
@@ -38,7 +42,14 @@ public final class Animation implements Plugin {
     /** Its key. */
     public static final PluginKey<Animation> KEY = PluginKey.of("animation", Animation.class);
 
-    private int threads = Runtime.getRuntime().availableProcessors();
+    /**
+     * The threads animators sample on: 0 (the default) every processor, 1 the main thread alone. Read when the first
+     * world's animators are made, so a change takes effect at the next start.
+     */
+    public static final Setting<Integer> THREADS = Setting.integer("animation.threads", 0, 0, 1024,
+        "threads animators sample on (0: every processor, 1: the main thread alone)").restartNeeded();
+
+    private EngineSettings settings; // the engine's once started, or given for frames recorded without one
     private JobSystem jobs; // made with the first world sampling in parallel
     private Animators[] animators = new Animators[0];
     private SceneGraph[] scenes = new SceneGraph[0];
@@ -50,16 +61,27 @@ public final class Animation implements Plugin {
         return KEY;
     }
 
-    /** Samples on {@code count} threads (1: on the main thread alone); every processor by default. Before any world. */
-    public Animation threads(int count) {
-        if (count < 1) {
-            throw new IllegalArgumentException("Not a thread count: " + count);
+    /** The plugin: its settings are the engine's, from when it starts. */
+    public Animation() {
+    }
+
+    /** Animation for frames recorded without an engine ({@link #advance}), on {@code settings} ({@link #THREADS}). */
+    public Animation(EngineSettings settings) {
+        this.settings = Objects.requireNonNull(settings, "settings");
+    }
+
+    @Override
+    @AllowAllocation("starting up")
+    public void start(Stage stage, Startup startup) {
+        if (stage == Stage.BEFORE_INSTANCE) {
+            settings = startup.settings();
+            startup.registry().addHidden(THREADS);
         }
-        if (animators.length > 0) {
-            throw new IllegalStateException("The threads are set before the first world's animators");
-        }
-        threads = count;
-        return this;
+    }
+
+    /** The threads the animators sample on: 1 until a world samples in parallel. */
+    public int threadCount() {
+        return jobs == null ? 1 : jobs.threads();
     }
 
     /** The animators of {@code scene}, animated every frame on the frame's delta from now on. */
@@ -79,8 +101,10 @@ public final class Animation implements Plugin {
                 throw new IllegalArgumentException("The scene has its animators already");
             }
         }
-        if (jobs == null && threads > 1) {
-            jobs = new JobSystem(threads);
+        if (jobs == null && animators.length == 0) {
+            int set = settings == null ? 0 : settings.get(THREADS);
+            int threads = set == 0 ? Runtime.getRuntime().availableProcessors() : set;
+            jobs = threads > 1 ? new JobSystem(threads) : null;
         }
         Animators made = new Animators(scene, jobs);
         int n = animators.length;

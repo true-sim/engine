@@ -6,13 +6,11 @@ package com.truesim.engine.app;
  *
  * <p>Two of the clocks (application-api.md D88) are here: real time ({@link #realDelta()}, {@link #realTime()}), as the
  * system clock measured it, and the app clock ({@link #delta()}, {@link #time()}), the same with each frame's delta cut
- * to {@link #MAX_DELTA} (D92), which the game and the world clocks run on. Each world has a {@link Clock} of its own.
+ * to {@link Engine#MAX_FRAME_DELTA} (0.25 s unless set; D92), which the game and the world clocks run on. Each world
+ * has a {@link Clock} of its own.
  */
 public final class Frame {
 
-    /** The longest delta a frame reports: a frame after a stall (a breakpoint, a drag of the window) is cut to this. */
-    public static final double MAX_DELTA = 0.25;
-    static final long MAX_DELTA_NANOS = 250_000_000L;
 
     private long number = -1;
     private long deltaNanos;
@@ -24,16 +22,18 @@ public final class Frame {
     private int steps;
     private long droppedTicks;
     private long lastNanos = Long.MIN_VALUE;
+    private double maxDelta;
 
     Frame() {
     }
 
-    /** Starts the next frame at {@code nanos} ({@link System#nanoTime()}). */
-    void next(long nanos) {
+    /** Starts the next frame at {@code nanos} ({@link System#nanoTime()}), its delta cut to {@code maxNanos}. */
+    void next(long nanos, long maxNanos) {
         number++;
         long real = lastNanos == Long.MIN_VALUE ? 0 : Math.max(0, nanos - lastNanos);
-        capped = real > MAX_DELTA_NANOS;
-        deltaNanos = Math.min(real, MAX_DELTA_NANOS);
+        capped = real > maxNanos;
+        deltaNanos = Math.min(real, maxNanos);
+        maxDelta = maxNanos / 1e9;
         delta = deltaNanos / 1e9;
         time += delta;
         realDelta = real / 1e9;
@@ -54,7 +54,7 @@ public final class Frame {
         return number;
     }
 
-    /** The seconds since the frame before on the app clock, at most {@link #MAX_DELTA}; 0 for the first. */
+    /** The seconds since the frame before on the app clock, at most {@link #maxDelta()}; 0 for the first. */
     public double delta() {
         return delta;
     }
@@ -79,7 +79,12 @@ public final class Frame {
         return realTime;
     }
 
-    /** Whether the frame's delta was cut to {@link #MAX_DELTA}: a stall, reported (D92). */
+    /** The longest delta this frame could report, seconds: {@link Engine#MAX_FRAME_DELTA} as it was. */
+    public double maxDelta() {
+        return maxDelta;
+    }
+
+    /** Whether the frame's delta was cut to {@link #maxDelta()}: a stall, reported (D92). */
     public boolean capped() {
         return capped;
     }

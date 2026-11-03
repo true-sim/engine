@@ -206,11 +206,11 @@ input through `Headset.input()`, one fixed OpenXR action set synced inside `Head
 ## 6. Game logic and time
 
 **Built since (2026-11-03):** `engine-app`: `Phase` (`FIXED`, `UPDATE`, `ANIMATE`, `LATE`; `engine.phase()`),
-`Engine.stepAt(nanos)` running a frame in D124's order; `Clock` per world (D88, D89: `engine.addClock(name)`, 60/s
-unless `rate(n)`, stepped in the order made), owed each frame's capped delta as nanoseconds times its rate (whole
-ticks, no drift), `blend()`, `renderTime()`, `frameDelta()`; one budget of steps per frame for all worlds
-(`Engine.FIXED_STEP_BUDGET`, 8), ticks past it dropped and reported (D92: `Frame.droppedTicks()`,
-`Clock.droppedTicks()`, `Frame.capped()`); `Frame.realDelta()`/`realTime()` beside the app clock; `Step`, with
+`Engine.stepAt(nanos)` running a frame in D124's order; `Clock` per world (D88, D89: `engine.addClock(name)`,
+`app.fixedRate` 60/s unless `rate(n)`, stepped in the order made), owed each frame's capped delta as nanoseconds
+times its rate (whole ticks, no drift), `blend()`, `renderTime()`, `frameDelta()`; one budget of steps per frame for
+all worlds (`app.fixedStepBudget`, 8; the cap `app.maxFrameDelta`, 0.25 s), ticks past it dropped and reported (D92:
+`Frame.droppedTicks()`,`Clock.droppedTicks()`, `Frame.capped()`); `Frame.realDelta()`/`realTime()` beside the app clock; `Step`, with
 `Application.fixedUpdate(Step)` and `lateUpdate(Frame)` and `Plugin.fixedUpdate`, `animate`, `lateUpdate`;
 `Clock.afterStep` hooks (D123's transforms: `afterStep(scene::update)`, or `SceneSync.follow`); `Timer`s counting steps
 (D97: `after`, `every`, `afterSeconds`, `everySeconds`). engine-scene: the `Animation` plugin (animation.md: a world's
@@ -225,7 +225,8 @@ ground included, in its parallel part, and documents `Ground` as thread-safe).
 
 - **D88** Clocks: real time, app clock, one clock per world.
 - **D89** (decided) Fixed steps per world, each world's clock with its own rate, 60/s by default; the shared budget
-  (D92) caps the total. Worlds step out of phase, so reading another world gives its latest state.
+  (D92) caps the total. Worlds step out of phase, so reading another world gives its latest state. Settings (built):
+  `app.fixedRate` (60, 1 to 10,000: the rate of clocks not given one, followed from the next frame).
 - **D90** (revised 2026-11-03: `ANIMATE` added, animation.md) Phases: `FIXED`, `UPDATE`, `ANIMATE`, `LATE`, then scene
   update and rendering. `ANIMATE` runs the worlds' animators between the game's update (which sets what plays) and
   `LATE` (which reads and overrides joints).
@@ -238,10 +239,12 @@ ground included, in its parallel part, and documents `Ground` as thread-safe).
   upload writing the instance table; `render.interpolation` GPU (packed poses, 32 B; the default), GPU_PRECISE
   (positions in two parts, 64 B), CPU or OFF, followed without app code by every `SceneSync` on the assets plugin's resources
   (`SceneResources.settings`), switched at its next update (set by hand on a sync, the setting no longer applies to
-  it); motion vectors not yet read from it.
+  it); motion vectors not yet read from it. Settings: `render.interpolation` (above); the animation plugin's
+  `animation.threads` (0: every processor; read when its first world is made).
 - **D92** (revised) Frame delta capped (0.25 s); one budget of fixed steps per frame shared by all worlds, in a fixed
   world order; when it is hit, the remaining accumulated time is discarded. Accumulation is in whole ticks, not
-  floating-point seconds. Caps are reported.
+  floating-point seconds. Caps are reported. Settings (built): `app.maxFrameDelta` (0.25 s, 0.05 to 1) and
+  `app.fixedStepBudget` (8, 1 to 1,000), both read every frame.
 - **D93** Three ways to write logic, all inside the same phases: the game class, behaviours, game systems.
 - **D96** (scoped) A fixed step is deterministic on the same build and machine class, given the same inputs per step
   and the same order. Transcendental math in `FIXED` uses `StrictMath`; replays record input per step; no hash

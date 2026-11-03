@@ -49,7 +49,8 @@ class AnimationTest {
     /** A game on the animation plugin, logging where the foot is in each phase. */
     static class Game implements Application {
         final List<String> log = new ArrayList<>();
-        final Animation animation;
+        final Animation animation = new Animation();
+        final int threads;
         final SceneGraph scene = new SceneGraph(new ChangeClock());
         boolean withClock;
         Engine engine;
@@ -59,13 +60,13 @@ class AnimationTest {
         boolean quiet;
         long foot;
 
-        Game(Animation animation) {
-            this.animation = animation;
+        Game(int threads) {
+            this.threads = threads;
         }
 
         @Override
         public void configure(AppConfig app) {
-            app.use(animation).defaults(Engine.FRAME_RATE, 10_000);
+            app.use(animation).defaults(Engine.FRAME_RATE, 10_000).defaults(Animation.THREADS, threads);
         }
 
         @Override
@@ -104,7 +105,7 @@ class AnimationTest {
 
     @Test
     void animatorsRunInAnimateBetweenUpdateAndLateWithWorldTransformsUpToDate() {
-        Game game = new Game(new Animation().threads(1));
+        Game game = new Game(1);
         try (Engine engine = Engine.create(game)) {
             engine.stepAt(0);
             engine.stepAt(100 * MS); // the game starts the clip in UPDATE; ANIMATE moves it on by the frame: 1 m
@@ -121,7 +122,7 @@ class AnimationTest {
 
     @Test
     void aWorldOnAClockAnimatesByItsDrawnTime() {
-        Game game = new Game(new Animation().threads(1));
+        Game game = new Game(1);
         game.withClock = true;
         try (Engine engine = Engine.create(game)) {
             engine.settings().set(Engine.FIXED_STEP_BUDGET, 1);
@@ -134,6 +135,26 @@ class AnimationTest {
         }
     }
 
+    private static com.truesim.engine.settings.EngineSettings settings(int threads) {
+        com.truesim.engine.settings.EngineSettings settings = new com.truesim.engine.settings.EngineSettings();
+        settings.set(Animation.THREADS, threads);
+        return settings;
+    }
+
+    @Test
+    void theThreadsSettingChoosesTheJobSystem() {
+        for (int threads : new int[] {1, 3}) {
+            Game game = new Game(threads);
+            try (Engine engine = Engine.create(game)) {
+                assertThat(game.animation.threadCount()).isEqualTo(threads);
+            }
+        }
+        Game every = new Game(0); // every processor
+        try (Engine engine = Engine.create(every)) {
+            assertThat(every.animation.threadCount()).isEqualTo(Math.max(1, Runtime.getRuntime().availableProcessors()));
+        }
+    }
+
     @Test
     void parallelSamplingGivesTheSerialResult() {
         double[] serial = crowd(1);
@@ -143,7 +164,7 @@ class AnimationTest {
 
     /** 200 sliding animators at their own speeds after 30 frames on {@code threads}: every foot's world x. */
     private static double[] crowd(int threads) {
-        Animation animation = new Animation().threads(threads);
+        Animation animation = new Animation(settings(threads));
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Animators animators = animation.animators(scene);
         long[] feet = new long[200];
@@ -198,7 +219,7 @@ class AnimationTest {
 
     @Test
     void aSceneHasOneSetOfAnimatorsAndRemovedWorldsStop() {
-        Animation animation = new Animation().threads(1);
+        Animation animation = new Animation(settings(1));
         SceneGraph scene = new SceneGraph(new ChangeClock());
         Animators animators = animation.animators(scene);
         assertThatIllegalArgumentException().isThrownBy(() -> animation.animators(scene));
@@ -211,7 +232,7 @@ class AnimationTest {
 
     @Test
     void framesAnimatingWorldsAllocateNothing() {
-        Game game = new Game(new Animation().threads(2));
+        Game game = new Game(2);
         game.withClock = true;
         try (Engine engine = Engine.create(game)) {
             game.quiet = true;

@@ -43,18 +43,21 @@ public final class Hello implements Application {
   `lateUpdate`); then plugins' `afterUpdate` (scene sync), settings availability refreshed, the driver ends the frame
   (render). Nothing allocated of its own. `stepAt(nanos)` runs a frame at a time a tool or test keeps.
 - **Clocks:** `Frame` has real time (`realDelta`, `realTime`) and the app clock (`delta`, `time`: each frame's delta
-  cut to 0.25 s, `capped()` says when). Each world has a `Clock` (`engine.addClock(name)`, stepped in the order made),
-  60 steps a second unless `rate(n)`: it is owed each frame's delta as an integer of nanoseconds times its rate, so
+  cut to `app.maxFrameDelta`, 0.25 s unless set; `capped()` says when). Each world has a `Clock`
+  (`engine.addClock(name)`, stepped in the order made) at `app.fixedRate` steps a second (60 unless set, followed from
+  the next frame) unless given `rate(n)`: it is owed each frame's delta as an integer of nanoseconds times its rate, so
   steps are whole ticks and never drift; `blend()` is how far it is into its next tick, `frameDelta()` how far its
-  drawn time moved. All worlds share one budget of steps per frame (`app.fixedStepBudget`, 8, a developer setting);
-  ticks past it are dropped and reported (`Frame.droppedTicks()`, `Clock.droppedTicks()`). Timers on a clock (`after`,
-  `every`, `afterSeconds`, `everySeconds`) count steps and fire inside their step, before the after-step hooks.
-  `clock.afterStep(scene::update)` propagates a scene's world transforms after every step (or `sceneSync.follow`).
+  drawn time moved. All worlds share one budget of steps per frame (`app.fixedStepBudget`, 8); ticks past it are
+  dropped and reported (`Frame.droppedTicks()`, `Clock.droppedTicks()`). The three are developer settings, read every
+  frame. Timers on a clock (`after`, `every`, `afterSeconds`, `everySeconds`) count steps and fire inside their step,
+  before the after-step hooks. `clock.afterStep(scene::update)` propagates a scene's world transforms after every step
+  (or `sceneSync.follow`).
 - **`Animation`** (engine-scene): each world's `Animators` (`animation.animators(scene, clock)`), run in `ANIMATE`:
-  sampled in parallel on the plugin's threads (`threads(n)`; results do not depend on them), poses written and events
-  dispatched in order, then the scene's world transforms updated, so `lateUpdate` reads this frame's joints. A world on
-  a clock moves on by its drawn time; `advance(seconds)` for frames recorded without an engine. Ground probes of foot
-  placement run where animators sample (on the threads): a `Ground` must be thread-safe.
+  sampled in parallel on the plugin's threads (`animation.threads`: every processor unless set, read when the first
+  world is made; results do not depend on them), poses written and events dispatched in order, then the scene's world
+  transforms updated, so `lateUpdate` reads this frame's joints. A world on a clock moves on by its drawn time;
+  `advance(seconds)` for frames recorded without an engine. Ground probes of foot placement run where animators sample
+  (on the threads): a `Ground` must be thread-safe.
 - **Quitting:** close buttons and the system request a quit; `onQuitRequested` allows or defers it (save first?), and a
   second request within 3 seconds or a forced one skips it. `engine.quit()` is the game's own. Shutdown stops the game,
   then the plugins in reverse order, and saves the player's settings (`saveSettings()`: the OS user folder for the

@@ -45,6 +45,20 @@ public final class Engine implements AutoCloseable {
         Setting.integer("app.frameRate", 60, 1, 10_000, "frames per second when no plugin paces frames");
 
     /**
+     * The longest delta a frame reports, seconds (D92): a frame after a stall (a breakpoint, a drag of the window) is cut
+     * to it, and the world clocks are owed no more. A developer setting, read every frame.
+     */
+    public static final Setting<Float> MAX_FRAME_DELTA = Setting.decimal("app.maxFrameDelta", 0.25f, 0.05f, 1f,
+        "the longest delta a frame reports, seconds: a stall is cut to it");
+
+    /**
+     * Fixed steps a second of a world clock not set otherwise ({@link Clock#rate(int)}): read every frame, so clocks
+     * following it change rate from the next frame (D89). A developer setting.
+     */
+    public static final Setting<Integer> FIXED_RATE = Setting.integer("app.fixedRate", 60, 1, Clock.MAX_RATE,
+        "fixed steps a second of a world clock not set otherwise");
+
+    /**
      * The most fixed steps a frame runs, every world's together, in the order the clocks were made (D92): ticks owed
      * past it are dropped and reported ({@link Frame#droppedTicks()}, {@link Clock#droppedTicks()}), so a frame slower
      * than its steps cannot make the next one slower still. A developer setting.
@@ -117,7 +131,7 @@ public final class Engine implements AutoCloseable {
         name = config.name();
         version = config.version();
         settingsFile = config.settingsFile();
-        registry.addHidden(FRAME_RATE, FIXED_STEP_BUDGET);
+        registry.addHidden(FRAME_RATE, FIXED_STEP_BUDGET, MAX_FRAME_DELTA, FIXED_RATE);
         if (settingsFile != null) {
             settings.load(SettingsFile.load(settingsFile));
         }
@@ -320,15 +334,16 @@ public final class Engine implements AutoCloseable {
     }
 
     /**
-     * A new world's clock, stepped after those made before (the fixed world order of D92), at {@link Clock#DEFAULT_RATE}
-     * until set otherwise: one per world (D88). Made by the plugin making the world; not while frames step.
+     * A new world's clock, stepped after those made before (the fixed world order of D92), at
+     * {@link #FIXED_RATE} (following it) until set otherwise: one per world (D88). Made by the plugin making the world;
+     * not while frames step.
      */
     @AllowAllocation("a world is made")
     public Clock addClock(String name) {
         if (phase != Phase.NONE) {
             throw new IllegalStateException("Clocks are added outside the phases, not in " + phase);
         }
-        Clock clock = new Clock(name);
+        Clock clock = new Clock(name, settings.get(FIXED_RATE));
         clocks = java.util.Arrays.copyOf(clocks, clocks.length + 1);
         clocks[clocks.length - 1] = clock;
         return clock;
@@ -359,7 +374,7 @@ public final class Engine implements AutoCloseable {
         if (!live) {
             return;
         }
-        frame.next(nanos);
+        frame.next(nanos, (long) (settings.get(MAX_FRAME_DELTA) * 1e9));
         driver.beginFrame(frame);
         tasks.drainCompleted();
         Plugin[] plugins = running;
@@ -396,9 +411,11 @@ public final class Engine implements AutoCloseable {
      */
     private void fixedSteps(Plugin[] plugins) {
         int budget = settings.get(FIXED_STEP_BUDGET);
+        int rate = settings.get(FIXED_RATE);
         int taken = 0;
         long dropped = 0;
         for (Clock clock : clocks) {
+            clock.follow(rate); // the setting, unless the clock's rate was set
             long owed = clock.owe(frame.deltaNanos());
             long run = Math.min(owed, budget - taken);
             for (long s = 0; s < run; s++) {

@@ -5,9 +5,10 @@ import java.util.Arrays;
 import java.util.Objects;
 
 /**
- * A world's clock (application-api.md D88, D89): it runs the world's fixed steps at its own rate, 60 a second by
- * default. Each frame it is owed the frame's time ({@link Frame#delta()}, capped), counted in whole ticks: what it is
- * owed is kept as an integer of nanoseconds times its rate, so a tick is exactly 10^9 of them and no rounding drifts.
+ * A world's clock (application-api.md D88, D89): it runs the world's fixed steps at its own rate, the engine's
+ * {@link Engine#FIXED_RATE} (60 a second unless set) until given one. Each frame it is owed the frame's time
+ * ({@link Frame#delta()}, capped), counted in whole ticks: what it is owed is kept as an integer of nanoseconds times
+ * its rate, so a tick is exactly 10^9 of them and no rounding drifts.
  * The engine steps every clock in the order made ({@link Engine#addClock}), within one budget of steps per frame shared
  * by all ({@link Engine#FIXED_STEP_BUDGET}, D92); ticks past the budget are dropped and counted
  * ({@link #droppedTicks()}), the part of a tick left over is kept.
@@ -21,14 +22,13 @@ import java.util.Objects;
  */
 public final class Clock {
 
-    /** Steps a second unless set otherwise. */
-    public static final int DEFAULT_RATE = 60;
     /** The most steps a second a clock takes. */
     public static final int MAX_RATE = 10_000;
     static final long NANOS_PER_SECOND = 1_000_000_000L;
 
     private final String name;
-    private int rate = DEFAULT_RATE;
+    private int rate;
+    private boolean ownRate;    // set by rate(n): the engine's fixed rate no longer applies
     private long owed;          // nanoseconds times the rate not yet stepped: under NANOS_PER_SECOND after stepping
     private long tick;          // steps so far
     private long rateTick;      // the tick when the rate was last set
@@ -42,8 +42,9 @@ public final class Clock {
     private Timer[] timers = new Timer[0];
     private int timerCount;
 
-    Clock(String name) {
+    Clock(String name, int rate) {
         this.name = Objects.requireNonNull(name, "name");
+        this.rate = rate;
     }
 
     /** Its name: the world's, in reports. */
@@ -61,13 +62,25 @@ public final class Clock {
      * is kept as the same fraction of the new tick. Allocates nothing.
      */
     public Clock rate(int stepsPerSecond) {
+        change(stepsPerSecond);
+        ownRate = true;
+        return this;
+    }
+
+    /** The engine's fixed rate ({@link Engine#FIXED_RATE}) at a frame's start: taken unless the rate was set. */
+    void follow(int fixedRate) {
+        if (!ownRate && fixedRate != rate) {
+            change(fixedRate);
+        }
+    }
+
+    private void change(int stepsPerSecond) {
         if (stepsPerSecond < 1 || stepsPerSecond > MAX_RATE) {
             throw new IllegalArgumentException("A clock steps 1 to " + MAX_RATE + " times a second: " + stepsPerSecond);
         }
         rateTime = time();
         rateTick = tick;
         rate = stepsPerSecond;
-        return this;
     }
 
     /** Steps so far: the tick of the last step, 0 before the first. */

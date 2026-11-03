@@ -204,12 +204,45 @@ class PhasesTest {
             engine.stepAt(3_000 * MS); // a breakpoint: 3 s
             assertThat(engine.frame().capped()).isTrue();
             assertThat(engine.frame().realDelta()).isEqualTo(3.0);
-            assertThat(engine.frame().delta()).isEqualTo(Frame.MAX_DELTA);
-            assertThat(engine.frame().time()).isEqualTo(Frame.MAX_DELTA);
+            assertThat(engine.frame().delta()).isEqualTo(0.25);
+            assertThat(engine.frame().time()).isEqualTo(0.25);
             assertThat(engine.frame().realTime()).isEqualTo(3.0);
             assertThat(clock.tick()).isEqualTo(15); // 0.25 s at 60/s
             engine.stepAt(3_010 * MS);
             assertThat(engine.frame().capped()).isFalse();
+        }
+    }
+
+    @Test
+    void theTimingSettingsTakeEffectFromTheNextFrame() {
+        try (Engine engine = Engine.create(new Game(new ArrayList<>()))) {
+            engine.settings().set(Engine.FIXED_STEP_BUDGET, 100);
+            Clock following = engine.addClock("following");
+            Clock own = engine.addClock("own").rate(20);
+            assertThat(following.rate()).isEqualTo(60);
+            engine.stepAt(0);
+            // The cap: a 0.5 s stall is cut to 0.25 s by default, to 0.5 once the setting allows it
+            engine.stepAt(500 * MS);
+            assertThat(engine.frame().delta()).isEqualTo(0.25);
+            assertThat(engine.frame().capped()).isTrue();
+            engine.settings().set(Engine.MAX_FRAME_DELTA, 0.5f);
+            engine.stepAt(1_000 * MS);
+            assertThat(engine.frame().delta()).isEqualTo(0.5);
+            assertThat(engine.frame().capped()).isFalse();
+            assertThat(engine.frame().maxDelta()).isEqualTo(0.5);
+            // The fixed rate: clocks following it change rate from the next frame, a clock with its own rate keeps it
+            long before = following.tick();
+            engine.settings().set(Engine.FIXED_RATE, 10);
+            engine.stepAt(1_500 * MS);
+            assertThat(following.rate()).isEqualTo(10);
+            assertThat(following.tick() - before).isEqualTo(5);
+            assertThat(own.rate()).isEqualTo(20);
+            assertThat(engine.addClock("new").rate()).isEqualTo(10);
+            // The budget: the next frame runs no more steps than it allows, the rest dropped
+            engine.settings().set(Engine.FIXED_STEP_BUDGET, 3);
+            engine.stepAt(2_000 * MS);
+            assertThat(engine.frame().steps()).isEqualTo(3);
+            assertThat(engine.frame().droppedTicks()).isPositive();
         }
     }
 
