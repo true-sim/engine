@@ -174,7 +174,7 @@ public void typedDepth<M : IMaterial>(VertexOut in, bool front, bool masked)
 {
     if (masked)
     {
-        discardMasked(push.scene[0].materials[in.material], in, front);
+        discardMasked(push.scene[0].materials, in, front);
     }
     float4 uvs = float4(in.uv, in.uv1);
     discardHoles<M>(in, ddx(uvs), ddy(uvs));
@@ -203,14 +203,14 @@ public float4 typedFragment<M : IMaterial>(VertexOut in)
 /** The masked bin's: one-sided materials' back faces discarded with the masked texels. */
 public float4 typedMasked<M : IMaterial>(VertexOut in, bool front)
 {
-    discardMasked(push.scene[0].materials[in.material], in, front);
+    discardMasked(push.scene[0].materials, in, front);
     return shadeTyped<M>(in, uint2(in.position.xy));
 }
 
 /** The blended bin's, into the transparency pass's targets. */
 public BlendedOut typedBlended<M : IMaterial>(VertexOut in, bool front)
 {
-    discardMasked(push.scene[0].materials[in.material], in, front); // masked transmissive materials draw here too
+    discardMasked(push.scene[0].materials, in, front); // masked transmissive materials draw here too
     return weighBlended(shadeTyped<M>(in, uint2(in.position.xy)), length(in.world));
 }
 
@@ -224,7 +224,7 @@ public float4 typedLean<M : IMaterial>(LeanVertex in, uint primitive, float3 bar
 public float4 typedLeanMasked<M : IMaterial>(LeanVertex in, uint primitive, float3 bary, bool front)
 {
     VertexOut s = lean(in, primitive, bary);
-    discardMasked(push.scene[0].materials[s.material], s, front);
+    discardMasked(push.scene[0].materials, s, front);
     return shadeTyped<M>(s, uint2(in.position.xy));
 }
 
@@ -232,6 +232,6 @@ public float4 typedLeanMasked<M : IMaterial>(LeanVertex in, uint primitive, floa
 public BlendedOut typedLeanBlended<M : IMaterial>(LeanVertex in, uint primitive, float3 bary, bool front)
 {
     VertexOut s = lean(in, primitive, bary);
-    discardMasked(push.scene[0].materials[s.material], s, front);
+    discardMasked(push.scene[0].materials, s, front);
     return weighBlended(shadeTyped<M>(s, uint2(in.position.xy)), length(s.world));
 }

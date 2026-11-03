@@ -21,6 +21,6 @@ uint2 classicIdsMain(VertexOut in, uint primitive : SV_PrimitiveID) : SV_Target
 [shader("fragment")]
 uint2 maskedClassicIdsMain(VertexOut in, uint primitive : SV_PrimitiveID, bool front : SV_IsFrontFace) : SV_Target
 {
-    discardMasked(push.scene[0].materials[in.material], in, front);
+    discardMasked(push.scene[0].materials, in, front);
     return uint2(in.instance + 1, in.firstTriangle + primitive);
 }

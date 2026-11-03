@@ -583,10 +583,11 @@ public static const float3 SKY_IRRADIANCE = float3(0.78539816 / 1.02);
  * Discards what a masked material does not draw at this fragment: its masked texels, and back faces unless it is
  * double-sided (the masked bin draws without culling). Every pass rasterizing the masked bin calls it, shadows too.
  */
-public void discardMasked(Material m, VertexOut in, bool front)
+public void discardMasked(Material* materials, VertexOut in, bool front)
 {
     float4 uvs = float4(in.uv, in.uv1);
-    if ((!front && !materialDoubleSided(m)) || alphaClipped(m, uvs, ddx(uvs), ddy(uvs), in.color))
+    if ((!front && !materialDoubleSided(materials[in.material]))
+        || alphaClipped(materials, in.material, uvs, ddx(uvs), ddy(uvs), in.color))
     {
         discard;
     }

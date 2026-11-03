@@ -94,7 +94,8 @@ public bool clipped(RayScene* scene, uint id, uint primitive, float2 bary)
     BottomLevel level = ((BottomLevel*)scene.bottom)[meshIndex];
     uint t = level.firstIndex + primitive * 3;
     uint w = meshletWord(scene, mesh, level, t);
-    Material m = ((Material*)scene.materials)[instance.materialBase + (scene.meshlets[w + 2] >> 16)];
+    uint id = instance.materialBase + (scene.meshlets[w + 2] >> 16);
+    Material m = ((Material*)scene.materials)[id];
     if (!materialMasked(m))
     {
         return false;
@@ -122,7 +123,7 @@ public bool clipped(RayScene* scene, uint id, uint primitive, float2 bary)
             color += weights[k] * float4(word & 0xff, (word >> 8) & 0xff, (word >> 16) & 0xff, word >> 24) / 255.0;
         }
     }
-    return alphaClipped(m, float4(uv, uv), float4(0), float4(0), color);
+    return alphaClipped((Material*)scene.materials, id, float4(uv, uv), float4(0), float4(0), color);
 }
 
 /**

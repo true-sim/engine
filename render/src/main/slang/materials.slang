@@ -207,11 +207,13 @@ public bool materialMasked(Material m)
 }
 
 /**
- * Whether `m` masks this point out: alpha (its mask alpha, times its mask texture's, times the vertex color's) below
- * the cutoff, at texture coordinates `uvs` (both sets) with gradients `dx`, `dy`. Opaque materials mask nothing.
+ * Whether material `id` of the table at `table` masks this point out: alpha (its mask alpha, times its mask texture's,
+ * times the vertex color's) below the cutoff, at texture coordinates `uvs` (both sets) with gradients `dx`, `dy`.
+ * Opaque materials mask nothing.
  */
-public bool alphaClipped(Material m, float4 uvs, float4 dx, float4 dy, float4 color)
+public bool alphaClipped(Material* table, uint id, float4 uvs, float4 dx, float4 dy, float4 color)
 {
+    Material m = table[id];
     if (!materialMasked(m))
     {
         return false;
@@ -219,10 +221,18 @@ public bool alphaClipped(Material m, float4 uvs, float4 dx, float4 dy, float4 co
     float alpha = m.maskAlpha * color.a;
     if (m.maskTexture >= 0)
     {
-        // In its UV set (`uvs`: the first, then the second); not moved by a transform, which the slot does not hold.
+        // In its UV set (`uvs`: the first, then the second), moved by its transform as the color passes sample it
         bool second = (uint(m.maskTexture) & TEXTURE_UV1) != 0;
-        alpha *= sampleTexture(m.maskTexture, second ? uvs.zw : uvs.xy, second ? dx.zw : dx.xy, second ? dy.zw : dy.xy)
-            .a;
+        float2 uv = second ? uvs.zw : uvs.xy;
+        float2 du = second ? dx.zw : dx.xy;
+        float2 dv = second ? dy.zw : dy.xy;
+        if ((m.features & FEATURE_TEXTURE_TRANSFORM) != 0)
+        {
+            MaterialRef ref = { table, id };
+            transformUv(m.maskTexture, materialFeatureAt<TextureTransformParameters>(ref, FEATURE_TEXTURE_TRANSFORM),
+                uv, du, dv);
+        }
+        alpha *= sampleTexture(m.maskTexture, uv, du, dv).a;
     }
     return alpha < float(m.header >> 16) / 65535.0;
 }
@@ -292,10 +302,24 @@ public float4 sampleTexture(int texture, SurfaceInput in)
     float2 uv = second ? in.uv1 : in.uv;
     float2 dx = second ? in.dx1 : in.dx;
     float2 dy = second ? in.dy1 : in.dy;
-    uint t = (uint(texture) >> TEXTURE_TRANSFORM_SHIFT) & 0xf;
-    if (t != 0 && in.transforms != nullptr)
+    if (in.transforms != nullptr)
     {
-        TextureTransformParameters p = *in.transforms;
+        transformUv(texture, in.transforms, uv, dx, dy);
+    }
+    return sampleTexture(texture, uv, dx, dy);
+}
+
+/**
+ * Texture coordinates `uv` and their gradients `dx`, `dy` moved by the transform texture reference `texture` names (none:
+ * unchanged), of a material's texture transforms `transforms` (not null).
+ */
+public void transformUv(int texture, TextureTransformParameters* transforms, inout float2 uv, inout float2 dx,
+    inout float2 dy)
+{
+    uint t = (uint(texture) >> TEXTURE_TRANSFORM_SHIFT) & 0xf;
+    if (t != 0)
+    {
+        TextureTransformParameters p = *transforms;
         float4 transforms[8] = { p.transform1, p.transform2, p.transform3, p.transform4, p.transform5, p.transform6,
             p.transform7, p.transform8 };
         float4 tr = transforms[min(t, 8u) - 1];
@@ -308,7 +332,6 @@ public float4 sampleTexture(int texture, SurfaceInput in)
         dx = mul(m, dx);
         dy = mul(m, dy);
     }
-    return sampleTexture(texture, uv, dx, dy);
 }
 
 /** Unit normal `n` bent by tangent-space normal map `texture` (by `scale`) at this point, if there are tangents. */

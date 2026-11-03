@@ -369,7 +369,8 @@ try (GeometryPool pool = new GeometryPool(device, slots);              // starts
   `doubleSided(true)`; opaque and one-sided by default). The cull pass puts each meshlet in its view's list of its
   material's bin, and each bin draws with a pipeline of its own: ordinary opaque meshlets keep the fastest (back faces
   culled, no discard, early depth), double-sided ones draw without culling (their normal-cone test skipped, back faces
-  lit as the front), masked ones without culling and with a fragment variant discarding masked texels and one-sided
+  lit as the front), masked ones without culling and with a fragment variant discarding masked texels (the mask
+  texture sampled in its UV set, moved by its texture transform, as the color passes sample it) and one-sided
   back faces. Every pass rasterizing them uses the same variants, so shadow maps, depth and the visibility buffer
   mask what the camera does; classic LOD draws through the same bins. A view's extra bins have room for a quarter of
   its opaque bin by default (`ViewOptions.withBins`); `RenderView.visibleMeshlets(bin)` counts each. Ray tracing
@@ -470,7 +471,8 @@ classic renderer would add a 32-bit index buffer per mesh and per discrete LOD; 
 
 A material is its **type** (how its parameters become a surface), the type's **parameters**, the **features** it
 shows, and how it rasterizes. Type 0 is metallic-roughness as in glTF: a base color, metalness, roughness, a
-tangent-space normal map, occlusion and emission, each a factor times an optional texture.
+tangent-space normal map, occlusion and emission, each a factor times an optional texture (occlusion in the ORM
+texture's red, or in an occlusion texture of its own with its own UV set and transform).
 
 ```java
 try (Textures textures = new Textures(device); Materials materials = new Materials(device, 1024)) {

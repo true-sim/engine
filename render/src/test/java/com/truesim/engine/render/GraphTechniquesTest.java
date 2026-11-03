@@ -2729,6 +2729,112 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void anOcclusionTextureOfItsOwnDarkensTheAmbientLightWithItsOwnTransform() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        // Two texels, nearest: occluded (black) on the left half of UV space, open (white) on the right.
+        java.lang.foreign.MemorySegment texels = java.lang.foreign.Arena.ofAuto().allocate(8, 4);
+        texels.setAtIndex(ValueLayout.JAVA_INT, 0, 0xff000000);
+        texels.setAtIndex(ValueLayout.JAVA_INT, 1, 0xffffffff);
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8)) {
+            int texture = TextureSampler.NEAREST.of(textures.color(2, 1, texels));
+            MetallicRoughnessParameters white = MR.withBaseColor(new Color(0.8, 0.8, 0.8, 1)).withRoughness(1);
+            int plain = materials.add(new Material(white));
+            int occluded = materials.add(new Material(white.withOcclusionTexture(texture)));
+            // Moved by half, as glTF's KHR_texture_transform on the occlusion texture alone: open on the left.
+            int moved = materials.add(new Material(white.withOcclusionTexture(TextureSampler.transform(texture, 1)))
+                .feature(TextureTransformParameters.DEFAULTS.withTransform1(new Vec4(0.5, 0, 1, 1))));
+            int weak = materials.add(new Material(white.withOcclusionTexture(texture).withOcclusion(0)));
+            scene.setMaterials(materials);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            List<Technique> shadings = new java.util.ArrayList<>();
+            if (device.primitiveIds()) {
+                shadings.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            }
+            int left = (SIZE / 2) * SIZE + SIZE * 3 / 8; // the quad's UV 0.25 across
+            int right = (SIZE / 2) * SIZE + SIZE * 5 / 8; // and 0.75
+            for (int pass = 0; pass <= shadings.size(); pass++) {
+                if (pass > 0) {
+                    main.port().replace(shadings.get(pass - 1));
+                }
+                scene.set(0, quadMesh, plain, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                int lit = image()[left] & 0xff;
+                assertThat(image()[right] & 0xff).as("pass %d: unoccluded, even", pass).isCloseTo(lit, within(2));
+                scene.set(0, quadMesh, occluded, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                assertThat(image()[left] & 0xff).as("pass %d: the sky occluded on the left", pass)
+                    .isLessThan(lit - 20);
+                assertThat(image()[right] & 0xff).as("pass %d: open on the right", pass).isCloseTo(lit, within(2));
+                scene.set(0, quadMesh, moved, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                assertThat(image()[left] & 0xff).as("pass %d: moved, open on the left", pass).isCloseTo(lit,
+                    within(2));
+                assertThat(image()[right] & 0xff).as("pass %d: moved, occluded on the right", pass)
+                    .isLessThan(lit - 20);
+                scene.set(0, quadMesh, weak, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                assertThat(image()[left] & 0xff).as("pass %d: strength 0, none", pass).isCloseTo(lit, within(2));
+            }
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
+    void alphaMasksFollowTheirTexturesTransform() {
+        MeshData mesh = twoUvQuad();
+        int quadMesh = pool.add(mesh);
+        // Two texels, nearest: transparent on the left half of UV space, opaque on the right.
+        java.lang.foreign.MemorySegment texels = java.lang.foreign.Arena.ofAuto().allocate(8, 4);
+        texels.setAtIndex(ValueLayout.JAVA_INT, 0, 0x00ffffff);
+        texels.setAtIndex(ValueLayout.JAVA_INT, 1, 0xffffffff);
+        try (Textures textures = new Textures(device); Materials materials = new Materials(device, 8)) {
+            int texture = TextureSampler.NEAREST.of(textures.color(2, 1, texels));
+            MetallicRoughnessParameters glowing = MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1)
+                .withEmissive(new Color(1, 1, 1, 1));
+            int plain = materials.add(new Material(glowing.withBaseColorTexture(texture)).alphaMask(0.5f));
+            // Moved by half: the opaque texels on the left, as the color the mask comes with.
+            int moved = materials.add(new Material(glowing.withBaseColorTexture(TextureSampler.transform(texture, 1)))
+                .feature(TextureTransformParameters.DEFAULTS.withTransform1(new Vec4(0.5, 0, 1, 1)))
+                .alphaMask(0.5f));
+            scene.setMaterials(materials);
+            scene.removeFrom(1);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            SceneView main = main(camera);
+            main.port().add(MeshletBenchmark.forward(main).occlusion(false).clearColor(0, 0, 0))
+                .output(Keys.SCENE_COLOR, output);
+            List<Technique> shadings = new java.util.ArrayList<>();
+            if (device.primitiveIds()) {
+                shadings.add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            }
+            int left = (SIZE / 2) * SIZE + SIZE * 3 / 8; // the quad's UV 0.25 across
+            int right = (SIZE / 2) * SIZE + SIZE * 5 / 8; // and 0.75
+            for (int pass = 0; pass <= shadings.size(); pass++) {
+                if (pass > 0) {
+                    main.port().replace(shadings.get(pass - 1));
+                }
+                scene.set(0, quadMesh, plain, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                assertThat(image()[left] & 0xff).as("pass %d: masked out on the left", pass).isZero();
+                assertThat(image()[right] & 0xff).as("pass %d: drawn on the right", pass).isGreaterThan(200);
+                scene.set(0, quadMesh, moved, 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                frame();
+                assertThat(image()[left] & 0xff).as("pass %d: moved, drawn on the left", pass).isGreaterThan(200);
+                assertThat(image()[right] & 0xff).as("pass %d: moved, masked out on the right", pass).isZero();
+            }
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
     void unlitMaterialsShowTheirBaseColorAsItIs() {
         MeshData mesh = twoUvQuad();
         int quadMesh = pool.add(mesh);
