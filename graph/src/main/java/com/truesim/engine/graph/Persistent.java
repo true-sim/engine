@@ -33,6 +33,7 @@ import com.truesim.engine.vulkan.Images;
 import com.truesim.engine.vulkan.VulkanDevice;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkClearColorValue;
+import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkFormatProperties;
 import org.lwjgl.vulkan.VkImageSubresourceRange;
 
@@ -54,10 +55,13 @@ final class Persistent implements AutoCloseable {
     private final GpuBuffer[] gpuBuffers;
     long firstFrame; // a history's first frame: its previous buffer holds zeros until the frame after
     long built; // the last build that asked for it
+    // Clears it (and moves an image into its layout): recorded once, at the start of the first frame it is in.
+    private final java.util.function.Consumer<VkCommandBuffer> initialize;
+    private boolean initialized;
 
     /**
      * An image of {@code desc}: 2D, one sample, its layers (a cube's faces) and mip levels as it says, a sampled and a
-     * storage slot per level where it has several. Waits for the GPU once, to clear it.
+     * storage slot per level where it has several. Cleared by {@link #initialize}.
      */
     @AllowAllocation("made rarely")
     Persistent(VulkanDevice device, String key, ImageDesc desc) {
@@ -107,7 +111,7 @@ final class Persistent implements AutoCloseable {
             image.storage = device.bindless().addStorage(gpuImage.view());
         }
         long handle = gpuImage.handle();
-        device.submitAndWait(device.graphics(), commands -> {
+        initialize = commands -> {
             if (depth) {
                 Images.transition(commands, handle, aspect, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
                     VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -125,12 +129,12 @@ final class Persistent implements AutoCloseable {
             Images.transition(commands, handle, aspect, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
                 VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, desc.mips(), desc.layers());
-        });
+        };
     }
 
     /**
      * {@code count} buffers (one; two for a history) of {@code size} bytes, shared by the queues of {@code families}.
-     * Waits for the GPU once, to zero them.
+     * Zeroed by {@link #initialize}.
      */
     @AllowAllocation("made rarely")
     Persistent(VulkanDevice device, String key, long size, int count, int... families) {
@@ -150,11 +154,25 @@ final class Persistent implements AutoCloseable {
             gpuBuffers[b] = GpuBuffer.deviceLocal(device, size, usage, families);
             buffers[b] = new ExternalBuffer(b == 0 ? key : key + " (last frame)", gpuBuffers[b]);
         }
-        device.submitAndWait(device.graphics(), commands -> {
+        initialize = commands -> {
             for (GpuBuffer buffer : gpuBuffers) {
                 Commands.fillBuffer(commands, buffer.handle(), 0, buffer.size(), 0);
             }
-        });
+        };
+    }
+
+    /** Whether {@link #initialize} was recorded. */
+    boolean initialized() {
+        return initialized;
+    }
+
+    /**
+     * Records its clear (and an image's move into its layout) into {@code commands}, ahead of the first frame using it:
+     * the graph does it in the seam of the build that made it, without waiting for the GPU.
+     */
+    void initialize(VkCommandBuffer commands) {
+        initialize.accept(commands);
+        initialized = true;
     }
 
     /** Whether it is an image of {@code wanted}, or {@code count} buffers of {@code wantedSize} bytes. */

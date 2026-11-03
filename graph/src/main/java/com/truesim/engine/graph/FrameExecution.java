@@ -57,9 +57,9 @@ final class FrameExecution implements AutoCloseable {
     private final long computeTimeline;
     private long graphicsValue;
     private long computeValue;
-    private final long[][] pools; // [slot][worker * 2 + queue]
+    private final long[][] pools; // [slot][worker * 2 + queue]; grown with the workers
     private final VkCommandBuffer[][][] buffers; // [slot][worker * 2 + queue][i]
-    private final int[] used;
+    private int[] used;
     private final long[] slotGraphicsValue;
     private final long[] slotComputeValue;
     private final VulkanDevice device;
@@ -67,6 +67,7 @@ final class FrameExecution implements AutoCloseable {
     private final Queue computeQueue;
     private final int framesInFlight;
     private int slot = -1;
+    private int idleWaits;
     boolean begun;
 
     /** For {@code framesInFlight} frames recorded by {@code workers} workers onto the two queues. */
@@ -77,21 +78,39 @@ final class FrameExecution implements AutoCloseable {
         this.framesInFlight = framesInFlight;
         graphicsTimeline = timeline();
         computeTimeline = timeline();
-        pools = new long[framesInFlight][workers * 2];
-        buffers = new VkCommandBuffer[framesInFlight][workers * 2][0];
-        used = new int[workers * 2];
+        pools = new long[framesInFlight][0];
+        buffers = new VkCommandBuffer[framesInFlight][0][];
+        used = new int[0];
         slotGraphicsValue = new long[framesInFlight];
         slotComputeValue = new long[framesInFlight];
+        workers(workers);
+    }
+
+    /**
+     * Room for {@code workers} workers to record: command pools for those not had yet, in every slot. The pools of
+     * workers there were stay, also when fewer record from now on, so frames in flight keep theirs and nothing waits
+     * for the GPU.
+     */
+    @AllowAllocation("changing how frames record, rarely")
+    void workers(int workers) {
+        int had = used.length;
+        if (workers * 2 <= had) {
+            return;
+        }
+        used = Arrays.copyOf(used, workers * 2);
         try (MemoryStack stack = stackPush()) {
             LongBuffer handle = stack.mallocLong(1);
             for (int s = 0; s < framesInFlight; s++) {
-                for (int i = 0; i < workers * 2; i++) {
+                pools[s] = Arrays.copyOf(pools[s], workers * 2);
+                buffers[s] = Arrays.copyOf(buffers[s], workers * 2);
+                for (int i = had; i < workers * 2; i++) {
                     Queue queue = i % 2 == GRAPHICS ? graphicsQueue : computeQueue;
                     Vulkan.check(vkCreateCommandPool(device.handle(), VkCommandPoolCreateInfo.calloc(stack)
                         .sType(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO)
                         .flags(VK_COMMAND_POOL_CREATE_TRANSIENT_BIT)
                         .queueFamilyIndex(queue.family()), null, handle), "Could not create a command pool");
                     pools[s][i] = handle.get(0);
+                    buffers[s][i] = new VkCommandBuffer[0];
                 }
             }
         }
@@ -151,7 +170,13 @@ final class FrameExecution implements AutoCloseable {
     }
 
     void waitIdle() {
+        idleWaits++;
         waitFor(graphicsValue, computeValue);
+    }
+
+    /** How often everything submitted was waited for ({@link #waitIdle}), for tests of what stalls. */
+    int idleWaits() {
+        return idleWaits;
     }
 
     /** Makes sure each worker could record every chunk of each queue: workers take chunks as they come free. */
@@ -159,8 +184,9 @@ final class FrameExecution implements AutoCloseable {
         int graphicsChunks = batches.graphicsChunks();
         int computeChunks = batches.computeChunks();
         for (int i = 0; i < used.length; i++) {
-            // The calling thread (worker 0) records the frame start too, when recording on several threads.
-            int needed = i % 2 == GRAPHICS ? graphicsChunks + (i == GRAPHICS ? 1 : 0) : computeChunks;
+            // The calling thread (worker 0) records the frame start too, when recording on several threads, and the
+            // prologue of a graph just built.
+            int needed = i % 2 == GRAPHICS ? graphicsChunks + (i == GRAPHICS ? 2 : 0) : computeChunks;
             if (buffers[slot][i].length < needed) {
                 grow(i, needed);
             }
@@ -200,10 +226,15 @@ final class FrameExecution implements AutoCloseable {
 
     /**
      * Submits {@code batches} in order, each to its queue: their chunks' command buffers {@code chunkCommands}, and
-     * {@code frameStart} (null: none) ahead of the first graphics chunk. Allocates nothing.
+     * {@code frameStart} (null: none) ahead of the first graphics chunk. A {@code prologue} (null: none) goes to the
+     * graphics queue first, on its own, after all both queues did before; every batch of the frame runs after it.
+     * Allocates nothing.
      */
     void submit(CompiledGraph.Batches batches, VkCommandBuffer frameStart, VkCommandBuffer[] chunkCommands,
-        long[] acquired, int acquiredCount, long[] renderFinished, int finishedCount) {
+        long[] acquired, int acquiredCount, long[] renderFinished, int finishedCount, VkCommandBuffer prologue) {
+        if (prologue != null) {
+            submitPrologue(prologue);
+        }
         int[] batchQueue = batches.queue();
         int[] batchFirstChunk = batches.firstChunk();
         int[] batchWait = batches.waitFor();
@@ -214,7 +245,7 @@ final class FrameExecution implements AutoCloseable {
         boolean acquireWaited = acquiredCount == 0;
         // Both queues once the compute queue ever ran: a build without async passes still follows one with them,
         // whose compute work of the frames in flight may use what this frame does (pooled images, histories).
-        boolean bothQueues = computeValue > 0;
+        boolean bothQueues = computeValue > 0 || prologue != null;
         boolean firstGraphics = true;
         boolean firstCompute = true;
         for (int b = 0; b < batchQueue.length; b++) {
@@ -286,6 +317,27 @@ final class FrameExecution implements AutoCloseable {
         slotGraphicsValue[slot] = graphicsValue;
         slotComputeValue[slot] = computeValue;
         begun = false;
+    }
+
+    /** Submits {@code prologue} to the graphics queue, after all both queues submitted, signalling the next value. */
+    private void submitPrologue(VkCommandBuffer prologue) {
+        try (MemoryStack stack = stackPush()) {
+            long info = stack.ncalloc(VkCommandBufferSubmitInfo.ALIGNOF, 1, VkCommandBufferSubmitInfo.SIZEOF);
+            commandBufferInfo(info, prologue);
+            long wait = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 1, VkSemaphoreSubmitInfo.SIZEOF);
+            semaphore(wait, computeTimeline, computeValue);
+            long signal = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 1, VkSemaphoreSubmitInfo.SIZEOF);
+            semaphore(signal, graphicsTimeline, ++graphicsValue);
+            long submit = stack.ncalloc(VkSubmitInfo2.ALIGNOF, 1, VkSubmitInfo2.SIZEOF);
+            memPutInt(submit + VkSubmitInfo2.STYPE, VK_STRUCTURE_TYPE_SUBMIT_INFO_2);
+            memPutInt(submit + VkSubmitInfo2.WAITSEMAPHOREINFOCOUNT, computeValue > 0 ? 1 : 0);
+            memPutAddress(submit + VkSubmitInfo2.PWAITSEMAPHOREINFOS, wait);
+            memPutInt(submit + VkSubmitInfo2.COMMANDBUFFERINFOCOUNT, 1);
+            memPutAddress(submit + VkSubmitInfo2.PCOMMANDBUFFERINFOS, info);
+            memPutInt(submit + VkSubmitInfo2.SIGNALSEMAPHOREINFOCOUNT, 1);
+            memPutAddress(submit + VkSubmitInfo2.PSIGNALSEMAPHOREINFOS, signal);
+            graphicsQueue.submit(1, submit, 0);
+        }
     }
 
     /**

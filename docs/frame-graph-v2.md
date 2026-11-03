@@ -878,6 +878,17 @@ is released.
   deferred. Transient images take 147 MB in slots for forward shading, as much as the peak of images alive at once,
   and 184 MB against a 160 MB peak for the visibility buffer: aliasing could save 24 MB at most there, so it is
   deferred too.
+- **Rebuild waits (2026-11-03):** the graph's own part of a rebuild waits for no frame in flight but with GPU timings
+  on: switching `asyncCompute` or `parallel` no longer waits, new persistent resources are cleared and histories joined
+  in the next frame (with async passes, in a graphics-queue prologue the frame's batches wait for), counted by
+  `FrameGraphTest`. Background pipeline compilation measured first (`StereoBench rebuild`, RX 9070 XT): only 4
+  programs go through the graph's cache, 1.2 ms in all at the first build and none at rebuilds; renderers make their
+  pipelines when constructed. A rebuild cost the frame 3.6 ms against 1.2 (technique builds and the compiler). Still
+  deferred: compiling off the render thread would save nothing measured.
+- **Phase 8 measured (2026-11-03, `StreamBench large`, RX 9070 XT):** frames streaming a cell (two meshes of up to
+  131,000 triangles and a 2048 x 2048 texture with mips) take up to 1.78 ms of graphics-queue GPU time against a 0.77
+  ms median, the uploads' copies and mips recorded in the frame; nothing over 11.1 ms. `StreamQueue` would move the
+  copies (not the mips) to the transfer queue.
 - **Phase 7 status (2026-10-31):** landed by 0.74: imported buffers on async queues and buffers swapped without a
   rebuild (earlier), persistent images and buffers (`g.persistent`, `g.persistentBuffer`) and history buffers
   (`g.historyBuffer`). A persistent image is one layer, mip level and sample for now.

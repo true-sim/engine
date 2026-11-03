@@ -1218,6 +1218,51 @@ class FrameGraphTest {
     }
 
     @Test
+    void howFramesRunChangesWithoutWaitingForTheGpu() {
+        Key<Image> copied = Key.image("test.copied");
+        graph.add(new Fill(A, SIZE, 1, 0, 0, 1))
+            .add(new Fill(B, SIZE, 0, 0, 1, 1))
+            .add(new Overlapping(copied, A, B))
+            .add(new Chain(OUT, copied, 3))
+            .output(OUT, output)
+            .asyncCompute(true);
+        try (com.truesim.common.jobs.JobSystem jobs = new com.truesim.common.jobs.JobSystem(3)) {
+            assertThat(submitted(2)[0]).isEqualTo(RED);
+            int waits = graph.idleWaits();
+            // Each change between frames in flight: the frames go on, ordered by the queues' semaphores.
+            for (int round = 0; round < 2; round++) {
+                graph.asyncCompute(false);
+                frames(2);
+                graph.parallel(jobs, 1);
+                frames(2);
+                graph.asyncCompute(true);
+                frames(2);
+                graph.parallel(jobs, 4);
+                frames(1);
+                graph.parallel(null, 2);
+                frames(1);
+            }
+            assertThat(graph.idleWaits()).as("waits for the GPU").isEqualTo(waits);
+            assertThat(graph.builds()).isGreaterThanOrEqualTo(11);
+            int[] texels = submitted(1);
+            assertThat(texels[0]).isEqualTo(RED);
+            assertThat(texels[SIZE - 1]).isEqualTo(BLUE);
+            graph.beginFrame();
+            assertThatIllegalStateException().isThrownBy(() -> graph.parallel(jobs, 1))
+                .withMessageContaining("between frames");
+            graph.submit(0, 0);
+        }
+    }
+
+    /** Begins and submits {@code count} frames, without waiting for them. */
+    private void frames(int count) {
+        for (int i = 0; i < count; i++) {
+            graph.beginFrame();
+            graph.submit(0, 0);
+        }
+    }
+
+    @Test
     void graphsSharingSlotsLeaveThemToTheCaller() {
         FrameSlots shared = new FrameSlots(2);
         try (FrameGraph other = new FrameGraph(device, shared)) {
@@ -2169,6 +2214,36 @@ class FrameGraphTest {
         graph.invalidate();
         assertThat(frame()[0]).isEqualTo(0xffffffff);
         assertThat(frame()[0]).isIn(RED, BLUE);
+    }
+
+    @Test
+    void rebuildsMakingPersistentResourcesOrJoiningHistoriesWaitForNoFrame() {
+        // Async passes read a persistent buffer first thing and write a history; a rebuild between frames in flight
+        // makes the buffer anew (another size) and joins the history: both are prepared in a prologue the frame's
+        // batches wait for, not by waiting for the GPU. The new buffer reads as zeros in its first frame.
+        int[] frames = {0};
+        long[] size = {4L * SIZE * SIZE};
+        graph.asyncCompute(true).add(new Lambda(List.of(OUT), g -> {
+            Buffer kept = g.persistentBuffer("kept", size[0]);
+            History history = g.history("async colors", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            Image seen = g.create("seen", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("look").read(kept, BufferAccess.TRANSFER_SRC).write(seen, Access.TRANSFER_DST).async()
+                .record(ctx -> unpack(ctx, kept, seen));
+            g.pass("remember").write(history.current(), Access.TRANSFER_DST).async()
+                .record(ctx -> clear(ctx, history.current(), frames[0]++ % 2, 0, 0, 1));
+            g.pass("dirty").read(seen, Access.TRANSFER_SRC).write(kept, BufferAccess.TRANSFER_DST)
+                .record(ctx -> ctx.fill(kept, RED));
+            g.provide(OUT, seen);
+        })).output(OUT, output);
+        assertThat(submitted(3)[0]).as("what the frame before left").isEqualTo(RED);
+        frames(2);
+        int waits = device.waits();
+        size[0] = 8L * SIZE * SIZE;
+        graph.invalidate();
+        frames(1);
+        assertThat(device.waits()).as("waits for the GPU").isEqualTo(waits);
+        assertThat(submitted(0)[0]).as("a new persistent buffer's first frame").isZero();
+        assertThat(submitted(1)[0]).isEqualTo(RED);
     }
 
     /**
