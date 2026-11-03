@@ -108,6 +108,9 @@ final class Voices {
     private final float dopplerAlpha;
     private final int crossfadeBlocks;
     private final StreamRing[] rings;
+    private final int[] auxIndex;
+    private final float[] auxFrom;
+    private final float[] auxTo;
     private final boolean[] starving;
     private final long[] resumes;
     private final float[] dryGains;
@@ -173,6 +176,9 @@ final class Voices {
         audibility = new float[capacity];
         scratch = new float[capacity];
         rings = new StreamRing[capacity];
+        auxIndex = new int[capacity];
+        auxFrom = new float[capacity];
+        auxTo = new float[capacity];
         starving = new boolean[capacity];
         resumes = new long[capacity];
         dryGains = new float[capacity];
@@ -240,6 +246,9 @@ final class Voices {
         clips[slot] = clip;
         segments[slot] = clip.segment();
         rings[slot] = ring;
+        auxIndex[slot] = -1;
+        auxFrom[slot] = 0;
+        auxTo[slot] = 0;
         starving[slot] = false;
         dryGains[slot] = 1;
         pcm16[slot] = clip.encoding() == AudioClip.Encoding.PCM16;
@@ -343,6 +352,15 @@ final class Voices {
         }
         dopplers[slot] += (dopplerTargets[slot] - dopplers[slot]) * dopplerAlpha;
         rateTargets[slot] = baseRates[slot] * pitches[slot] * dopplers[slot];
+    }
+
+    /** Sends {@code slot} to aux bus {@code bus} (-1 none) at {@code gain}, reached over the next block. */
+    void send(int slot, int bus, float gain) {
+        if (bus != auxIndex[slot]) {
+            auxFrom[slot] = 0; // a new aux: from silence
+        }
+        auxIndex[slot] = bus;
+        auxTo[slot] = gain;
     }
 
     /** Moves the gain to {@code gain} over {@code frames} (64 at least, so nothing clicks). */
@@ -492,7 +510,8 @@ final class Voices {
                 stepSpatial(slot);
             }
             boolean alive = reality[slot] == VIRTUAL ? keepTime(slot, blockStart, frames)
-                : renderVoice(slot, graph.buffer(busIndex[slot]), blockStart, frames);
+                : renderVoice(slot, graph.buffer(busIndex[slot]), auxIndex[slot] < 0 ? null
+                    : graph.buffer(auxIndex[slot]), blockStart, frames);
             if (!alive) {
                 ended(slot, blockStart + frames, events);
             }
@@ -616,7 +635,7 @@ final class Voices {
     }
 
     /** Renders one voice into {@code out}; false when it ended. */
-    private boolean renderVoice(int slot, float[] out, long blockStart, int frames) {
+    private boolean renderVoice(int slot, float[] out, float[] aux, long blockStart, int frames) {
         int from = (int) Math.max(0, starts[slot] - blockStart);
         boolean loop = (flags[slot] & LOOP) != 0;
         boolean stereo = clipChannels[slot] >= 2 && (flags[slot] & SPATIAL) == 0 && channels >= 2;
@@ -642,6 +661,8 @@ final class Voices {
         float low = lowPass[slot];
         float coef = lowCoef[slot];
         StreamRing ring = rings[slot];
+        float send = auxFrom[slot];
+        float sendStep = (auxTo[slot] - send) / frames;
         float dry = dryGains[slot];
         float dryStep = 1 / (0.005f * rate);
         for (int f = from; f < frames; f++) {
@@ -706,6 +727,12 @@ final class Voices {
                 for (int c = 0; c < channels; c++) {
                     out[f * channels + c] += s * (panFrom[o + c] + (panTo[o + c] - panFrom[o + c]) * t);
                 }
+                if (aux != null) { // the reverb send: post-fader, unpanned
+                    send += sendStep;
+                    for (int c = 0; c < channels; c++) {
+                        aux[f * channels + c] += s * send;
+                    }
+                }
             }
             position += rateFrom + rateStep * f;
             if (loop && position >= loopEnd) {
@@ -721,6 +748,7 @@ final class Voices {
         envelopes[slot] = env;
         lowPass[slot] = low;
         dryGains[slot] = dry;
+        auxFrom[slot] = auxTo[slot];
         if (ring != null) {
             ring.readTo((long) position - 2);
         }

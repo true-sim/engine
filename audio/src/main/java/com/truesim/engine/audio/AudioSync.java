@@ -8,7 +8,9 @@ import com.truesim.scene.audio.AudioClip;
 import com.truesim.scene.audio.Attenuation;
 import com.truesim.scene.audio.Bus;
 import com.truesim.scene.audio.Decibels;
+import com.truesim.scene.audio.AudioEffect;
 import com.truesim.scene.audio.Listeners;
+import com.truesim.scene.audio.ReverbZones;
 import com.truesim.scene.audio.Release;
 import com.truesim.scene.audio.Sound;
 import com.truesim.scene.audio.Sounds;
@@ -187,6 +189,7 @@ public final class AudioSync {
                 rebuild(s);
             }
             marks[s] = now;
+            listenerZone(s);
         }
         for (int t = 0; t < tracks.length; t++) {
             Track track = tracks[t];
@@ -568,6 +571,9 @@ public final class AudioSync {
 
     // ---------------------------------------------------------------- positions
 
+    /** The aux bus reverb sends go to, when the layout has it. */
+    public static final Bus REVERB = Bus.aux("reverb");
+
     /** Speed of sound for Doppler, metres a second. */
     static final double SOUND_SPEED = 343;
     /** A jump of the relative position larger than this in a frame is a teleport: no Doppler from it. */
@@ -578,6 +584,46 @@ public final class AudioSync {
     private double[][] devices = new double[0][];
     private int[] deviceCounts = new int[0];
     private final Listeners.Visitor collect = this::collect;
+
+    private float sentDecay = Float.NaN;
+    private float sentDamping = Float.NaN;
+
+    /**
+     * Blends the reverb of the zone the first device listener of store {@code s} is in over the layout's own reverb
+     * by the zone's weight there (§2.11), sending it when it moved by more than 1 %.
+     */
+    private void listenerZone(int s) {
+        Sounds store = stores[s];
+        if (store.isUi() || deviceCounts[s] == 0 || !commands.layout().contains(REVERB)) {
+            return;
+        }
+        AudioEffect base = null;
+        java.util.List<AudioEffect> chain = commands.layout().buses().get(commands.layout().indexOf(REVERB)).effects();
+        for (int i = 0; i < chain.size(); i++) {
+            if (chain.get(i).name().equals("reverb")) {
+                base = chain.get(i);
+            }
+        }
+        if (base == null) {
+            return;
+        }
+        double[] d = devices[s];
+        ReverbZones zones = store.reverbZones();
+        long zone = zones.size() == 0 ? 0 : zones.strongest(d[0], d[1], d[2]);
+        float w = zone == 0 ? 0 : zones.weight(zone, d[0], d[1], d[2]);
+        float decay = Reverb.decayOf(base);
+        float damping = Reverb.dampingOf(base);
+        if (zone != 0) {
+            AudioEffect r = zones.reverb(zone);
+            decay += (Reverb.decayOf(r) - decay) * w;
+            damping += (Reverb.dampingOf(r) - damping) * w;
+        }
+        if (!(Math.abs(decay - sentDecay) <= 0.01f * decay) || !(Math.abs(damping - sentDamping) <= 0.01f)) {
+            sentDecay = decay;
+            sentDamping = damping;
+            commands.reverb(REVERB, decay, damping);
+        }
+    }
 
     /** Collects store {@code s}'s device listeners and where they are, as of its last advance. */
     private void listeners(int s) {
@@ -726,9 +772,25 @@ public final class AudioSync {
         track.placed = true;
         track.listener = listener;
         Attenuation attenuation = track.sound.attenuation();
+        // the reverb send (§2.11): the attenuation's by distance, times how much the emitter is in a zone (all of it
+        // where the world has none)
+        boolean reverb = commands.layout().contains(REVERB);
+        float send = 0;
+        if (reverb) {
+            ReverbZones zones = store.reverbZones();
+            double ex = store.position(track.id, 0);
+            double ey = store.position(track.id, 1);
+            double ez = store.position(track.id, 2);
+            long zone = zones.size() == 0 ? 0 : zones.strongest(ex, ey, ez);
+            float inZone = zones.size() == 0 ? 1 : zone == 0 ? 0 : zones.weight(zone, ex, ey, ez);
+            send = attenuation.reverbSend((float) distance) * inZone;
+        }
         for (int v = 0; v < track.voices; v++) {
             if (track.state[v] == PLAYING) {
                 commands.spatial(track.slots[v], (float) x, (float) y, (float) z, doppler, attenuation, changed);
+                if (reverb) {
+                    commands.send(track.slots[v], REVERB, send);
+                }
             }
         }
     }

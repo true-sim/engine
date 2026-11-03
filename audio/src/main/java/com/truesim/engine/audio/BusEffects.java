@@ -40,6 +40,7 @@ final class BusEffects {
             case "limiter" -> new LimiterEffect(new Limiter(rate, channels, record.value("ceiling", -1)));
             case "delay" -> new Delay(record.value("time", 0.25f), record.value("feedback", 0.3f),
                 record.value("mix", 0.3f), rate, channels);
+            case "reverb" -> Reverb.create(record, rate, channels);
             default -> throw new IllegalArgumentException("No built-in effect " + record.name());
         };
     }

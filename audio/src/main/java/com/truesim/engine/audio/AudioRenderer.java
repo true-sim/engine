@@ -48,6 +48,8 @@ public final class AudioRenderer implements AutoCloseable {
     static final int STREAM = 12;
     static final int BUS_FILTER = 13;
     static final int ACCESS = 14;
+    static final int SEND = 15;
+    static final int REVERB = 16;
 
     /** Receives events. */
     @FunctionalInterface
@@ -126,6 +128,12 @@ public final class AudioRenderer implements AutoCloseable {
         BusGraph g = graph;
         int i = g.layout().indexOf(bus);
         return i < 0 ? 1 : g.duckGain(i);
+    }
+
+    /** {@code bus}'s reverb's decay now, seconds (0 without one): for tests, on the audio thread. */
+    float reverbDecay(Bus bus) {
+        int i = graph.layout().indexOf(bus);
+        return i < 0 ? 0 : graph.reverbDecay(i);
     }
 
     /** Times a streamed voice ran dry. */
@@ -252,6 +260,8 @@ public final class AudioRenderer implements AutoCloseable {
                 case STREAM -> pendingRing = (StreamRing) r.refs[c];
                 case BUS_FILTER -> graph.filters(slot, (float) values[v], (float) values[v + 1]);
                 case ACCESS -> access.set(values[v] != 0, (float) values[v + 1], (int) values[v + 2]);
+                case SEND -> voices.send(slot, (int) values[v], (float) values[v + 1]);
+                case REVERB -> graph.reverb(slot, (float) values[v], (float) values[v + 1]);
                 case GAIN -> voices.gain(slot, (float) values[v], (int) values[v + 1]);
                 case PITCH -> voices.pitch(slot, (float) values[v]);
                 case PAN -> voices.pan(slot, (float) values[v]);
@@ -417,6 +427,17 @@ public final class AudioRenderer implements AutoCloseable {
          */
         public boolean accessibility(boolean mono, float balance, int dynamicRange) {
             return send(ACCESS, 0, 0, mono ? 1 : 0, balance, dynamicRange);
+        }
+
+        /** Sends voice {@code slot} to aux bus {@code aux} ({@code null}: none) at {@code gain}. */
+        public boolean send(int slot, Bus aux, float gain) {
+            int bus = aux == null || !sent.layout().contains(aux) ? -1 : sent.index(aux);
+            return send(SEND, slot, 0, bus, gain);
+        }
+
+        /** Sets the decay (seconds) and damping of {@code aux}'s reverb: a zone's blended in. */
+        public boolean reverb(Bus aux, float decay, float damping) {
+            return send(REVERB, sent.index(aux), 0, decay, damping);
         }
 
         /** Sets the real voices at most (AU7: 64 by default). */

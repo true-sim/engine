@@ -139,6 +139,25 @@ final class BusGraph {
         highCuts[i] = highPass;
     }
 
+    /** Sets the decay and damping of bus {@code i}'s reverbs (a zone blended in). On the audio thread. */
+    void reverb(int i, float decay, float damping) {
+        for (BusEffects.Effect effect : effects[i]) {
+            if (effect instanceof Reverb r) {
+                r.set(decay, damping);
+            }
+        }
+    }
+
+    /** Bus {@code i}'s reverb's decay now, seconds; 0 without one. For tests. */
+    float reverbDecay(int i) {
+        for (BusEffects.Effect effect : effects[i]) {
+            if (effect instanceof Reverb r) {
+                return r.decay();
+            }
+        }
+        return 0;
+    }
+
     /** Bus {@code i}'s peak over the last meter period (about 1/30 s), linear. */
     float meterPeak(int i) {
         return meterPeaks[i];

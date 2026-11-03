@@ -169,6 +169,35 @@ class ListeningProofs {
     }
 
     @Test
+    void knocksAsTheListenerWalksIntoAHall() throws IOException, InterruptedException {
+        try (World w = new World()) {
+            w.renderer.commands().layout(com.truesim.scene.audio.BusLayout.builder()
+                .bus(com.truesim.scene.audio.Bus.SFX, b -> b.send(AudioSync.REVERB, -3))
+                .aux(AudioSync.REVERB, b -> b.effect(com.truesim.scene.audio.AudioEffect.named("reverb")
+                    .set("preset", 3))).build());
+            long hall = w.scene.create();
+            w.scene.setTranslation(hall, 30, 0, 0);
+            w.scene.update();
+            w.sounds.reverbZones().sphere(hall, 14, 8, com.truesim.scene.audio.AudioEffect.named("reverb")
+                .set("preset", 1), 0);
+            AssetRef<AudioClip> clip = AssetRef.generated(AudioAssets.CLIP, (v, seed) -> knock(v), 1, 0);
+            Sound knock = Sound.builder().root(Play.clip(clip)).attenuation(Attenuation.builder().distance(1, 80)
+                .reverbSend(0.4f, 1).build()).pitch(Range.semitones(-2, 2)).build();
+            w.sounds.fire(knock, 0, 0, -1000);
+            w.load();
+            for (int f = 0; f < 60 * 14; f++) {
+                double x = 30.0 * f / (60 * 11);
+                w.scene.setTranslation(w.head, Math.min(30, x), 0, 0);
+                if (f % 42 == 0) {
+                    w.sounds.fire(knock, Math.min(30, x) + 2, 0, -3);
+                }
+                w.frame();
+            }
+            w.write("au_step10_walking_into_a_hall_reverb.wav");
+        }
+    }
+
+    @Test
     void carPassingWithDopplerAndPanning() throws IOException, InterruptedException {
         try (World w = new World()) {
             AssetRef<AudioClip> clip = AssetRef.generated(AudioAssets.CLIP, (hz, seed) -> engine(hz), 110.0, 0);
