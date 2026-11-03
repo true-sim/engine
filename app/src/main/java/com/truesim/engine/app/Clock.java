@@ -38,6 +38,7 @@ public final class Clock {
     private int lastDropped;    // ticks dropped in the last frame
     private double renderTime;  // the time drawn in the last frame: the last step's plus the blend
     private double frameDelta;  // how far the drawn time moved in the last frame
+    private boolean paused;
     private Runnable[] after = new Runnable[0];
     private Timer[] timers = new Timer[0];
     private int timerCount;
@@ -81,6 +82,27 @@ public final class Clock {
         rateTime = time();
         rateTick = tick;
         rate = stepsPerSecond;
+    }
+
+    /**
+     * Pauses the world (application-api.md D128): from the next frame it takes no steps and fires no timers, and is owed
+     * no time while paused, so resuming does not catch up. Input clears the edges its fixed steps would see (D60), so
+     * resuming never fires a press made while paused. Other worlds, the update and the UI keep running.
+     */
+    public Clock pause() {
+        paused = true;
+        return this;
+    }
+
+    /** Resumes stepping from the next frame, owed time from then on. */
+    public Clock resume() {
+        paused = false;
+        return this;
+    }
+
+    /** Whether it is paused ({@link #pause()}). */
+    public boolean paused() {
+        return paused;
     }
 
     /** Steps so far: the tick of the last step, 0 before the first. */

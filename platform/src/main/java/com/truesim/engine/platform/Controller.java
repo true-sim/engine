@@ -74,6 +74,16 @@ public abstract sealed class Controller permits Gamepad, Joystick {
         return orEmpty(SDL_GetJoystickPath(joystick));
     }
 
+    /**
+     * SDL's GUID as 32 hex digits: bus, vendor, product and version, the same for identical controllers; with
+     * {@link #serial()} and {@link #path()} it tells a device again when it is plugged back in. Empty when unknown.
+     */
+    @AllowAllocation("a GUID is a string")
+    public String guid() {
+        check();
+        return Platform.guid(id);
+    }
+
     /** The USB vendor id; 0 when unknown. */
     public int vendor() {
         check();

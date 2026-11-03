@@ -40,6 +40,11 @@ class PhasesTest {
         }
 
         @Override
+        public void beforeFixedUpdate(Step step) {
+            log.add("before fixed " + step.clock().name() + " " + step.tick() + " " + engine.phase());
+        }
+
+        @Override
         public void fixedUpdate(Step step) {
             log.add("plugin fixed " + step.clock().name() + " " + step.tick() + " " + engine.phase());
         }
@@ -110,11 +115,35 @@ class PhasesTest {
             log.clear();
             engine.stepAt(2 * 16_666_667L + 1); // two ticks at 60/s
             assertThat(log).containsExactly("input NONE",
-                "fixed world 1 FIXED", "plugin fixed world 1 FIXED", "transforms 1 FIXED",
-                "fixed world 2 FIXED", "plugin fixed world 2 FIXED", "transforms 2 FIXED",
+                "before fixed world 1 FIXED", "fixed world 1 FIXED", "plugin fixed world 1 FIXED", "transforms 1 FIXED",
+                "before fixed world 2 FIXED", "fixed world 2 FIXED", "plugin fixed world 2 FIXED", "transforms 2 FIXED",
                 "update UPDATE", "animate ANIMATE", "late LATE", "plugin late LATE", "sync NONE");
             assertThat(engine.phase()).isEqualTo(Phase.NONE);
             assertThat(engine.frame().steps()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void aPausedClockTakesNoStepsFiresNoTimersAndIsOwedNothing() {
+        List<String> log = new ArrayList<>();
+        try (Engine engine = Engine.create(new Game(log))) {
+            Clock paused = engine.addClock("paused");
+            Clock other = engine.addClock("other");
+            int[] fired = new int[1];
+            paused.every(1, () -> fired[0]++);
+            engine.stepAt(0);
+            paused.pause();
+            assertThat(paused.paused()).isTrue();
+            engine.stepAt(100 * MS); // six ticks owed to the running clock
+            assertThat(paused.tick()).isZero();
+            assertThat(paused.stepsLastFrame()).isZero();
+            assertThat(paused.frameDelta()).isZero();
+            assertThat(fired[0]).isZero();
+            assertThat(other.tick()).isEqualTo(6);
+            paused.resume();
+            engine.stepAt(100 * MS + 16_666_667L); // owed only the time since resuming: one tick
+            assertThat(paused.tick()).isEqualTo(1);
+            assertThat(fired[0]).isEqualTo(1);
         }
     }
 

@@ -103,7 +103,11 @@ import static org.lwjgl.sdl.SDLVideo.SDL_EnableScreenSaver;
 import static org.lwjgl.sdl.SDLVideo.SDL_ScreenSaverEnabled;
 import static org.lwjgl.sdl.SDLVulkan.SDL_Vulkan_GetInstanceExtensions;
 import static org.lwjgl.sdl.SDLInit.SDL_Quit;
+import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoystickFromID;
+import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoystickGUIDForID;
 import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoystickNameForID;
+import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoystickPathForID;
+import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoystickSerial;
 import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoystickProductForID;
 import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoystickVendorForID;
 import static org.lwjgl.sdl.SDLJoystick.SDL_GetJoysticks;
@@ -143,6 +147,7 @@ import org.lwjgl.sdl.SDL_CommonEvent;
 import org.lwjgl.sdl.SDL_DisplayMode;
 import org.lwjgl.sdl.SDL_DropEvent;
 import org.lwjgl.sdl.SDL_Event;
+import org.lwjgl.sdl.SDL_GUID;
 import org.lwjgl.sdl.SDL_GamepadAxisEvent;
 import org.lwjgl.sdl.SDL_GamepadButtonEvent;
 import org.lwjgl.sdl.SDL_GamepadDeviceEvent;
@@ -570,7 +575,30 @@ public final class Platform implements AutoCloseable {
         boolean stick = kind == InputDevice.Kind.GAMEPAD || kind == InputDevice.Kind.JOYSTICK;
         int vendor = stick ? SDL_GetJoystickVendorForID(id) & 0xffff : 0;
         int product = stick ? SDL_GetJoystickProductForID(id) & 0xffff : 0;
-        return new InputDevice(id, kind, name == null ? "" : name, vendor, product);
+        if (!stick) {
+            return new InputDevice(id, kind, name == null ? "" : name, vendor, product);
+        }
+        long open = SDL_GetJoystickFromID(id); // opened as it connected; 0 if not (then no serial)
+        String serial = open == 0 ? null : SDL_GetJoystickSerial(open);
+        String path = SDL_GetJoystickPathForID(id);
+        return new InputDevice(id, kind, name == null ? "" : name, vendor, product, guid(id), serial == null ? "" : serial,
+            path == null ? "" : path);
+    }
+
+    /** SDL's GUID of joystick {@code id} as 32 lower-case hex digits; empty for an id SDL does not know. */
+    @AllowAllocation("devices change rarely")
+    static String guid(int id) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            SDL_GUID guid = SDL_GetJoystickGUIDForID(id, SDL_GUID.malloc(stack));
+            StringBuilder hex = new StringBuilder(32);
+            boolean any = false;
+            for (int i = 0; i < 16; i++) {
+                int b = guid.data(i) & 0xff;
+                any |= b != 0;
+                hex.append(Character.forDigit(b >> 4, 16)).append(Character.forDigit(b & 15, 16));
+            }
+            return any ? hex.toString() : "";
+        }
     }
 
     // ---------------------------------------------------------------- gamepads and joysticks

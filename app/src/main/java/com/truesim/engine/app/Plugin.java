@@ -31,6 +31,14 @@ public interface Plugin {
     }
 
     /**
+     * Plugins it starts after when they are installed, without needing them: input samples the devices after the
+     * desktop has read their events, so a frame's input is that frame's.
+     */
+    default List<PluginKey<?>> after() {
+        return List.of();
+    }
+
+    /**
      * Whether the game can run without it: a failure to start it may be answered with
      * {@link StartupFailure.Response#CONTINUE_WITHOUT}. Code using an optional plugin reads it with
      * {@link Engine#find}.
@@ -48,6 +56,13 @@ public interface Plugin {
 
     /** Before the game's update, each frame, in start order: sample input, drain what finished. */
     default void beforeUpdate(Frame frame) {
+    }
+
+    /**
+     * Each fixed step of each world, before the game's {@link Application#fixedUpdate}, in start order: input readies
+     * the edges the step sees (application-api.md D60). Reads only; the step's work goes in {@link #fixedUpdate}.
+     */
+    default void beforeFixedUpdate(Step step) {
     }
 
     /**

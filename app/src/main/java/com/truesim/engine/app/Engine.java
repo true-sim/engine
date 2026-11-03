@@ -163,13 +163,13 @@ public final class Engine implements AutoCloseable {
         while (!left.isEmpty()) {
             Plugin next = null;
             for (Plugin plugin : left) {
-                if (placed.containsAll(plugin.requires())) {
+                if (placed.containsAll(plugin.requires()) && after(plugin, placed, left)) {
                     next = plugin;
                     break;
                 }
             }
             if (next == null) {
-                throw new IllegalStateException("The plugins require each other in a cycle: "
+                throw new IllegalStateException("The plugins require (or start after) each other in a cycle: "
                     + left.stream().map(p -> p.key().name()).toList());
             }
             left.remove(next);
@@ -177,6 +177,20 @@ public final class Engine implements AutoCloseable {
             order.add(next);
         }
         return order;
+    }
+
+    /** Whether every plugin {@code plugin} starts after ({@link Plugin#after}) is placed or not installed. */
+    private static boolean after(Plugin plugin, Set<PluginKey<?>> placed, List<Plugin> left) {
+        for (PluginKey<?> key : plugin.after()) {
+            if (!placed.contains(key)) {
+                for (Plugin other : left) {
+                    if (other.key() == key) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
     }
 
     @AllowAllocation("starting up")
@@ -416,11 +430,18 @@ public final class Engine implements AutoCloseable {
         long dropped = 0;
         for (Clock clock : clocks) {
             clock.follow(rate); // the setting, unless the clock's rate was set
+            if (clock.paused()) {
+                clock.endFrame(0, 0); // owed nothing: no steps, no timers
+                continue;
+            }
             long owed = clock.owe(frame.deltaNanos());
             long run = Math.min(owed, budget - taken);
             for (long s = 0; s < run; s++) {
                 clock.stepped();
                 fixedStep.set(clock, frame);
+                for (Plugin plugin : plugins) {
+                    plugin.beforeFixedUpdate(fixedStep);
+                }
                 app.fixedUpdate(fixedStep);
                 for (Plugin plugin : plugins) {
                     plugin.fixedUpdate(fixedStep);

@@ -251,6 +251,23 @@ class EngineTest {
     }
 
     @Test
+    void aPluginStartsAfterThoseItFollowsWhenTheyAreInstalled() {
+        List<String> log = new ArrayList<>();
+        Logged desktop = new Logged("desktop", log);
+        Logged input = new Logged("input", log) {
+            @Override
+            public List<PluginKey<?>> after() {
+                return List.of(desktop.key, PluginKey.of("xr", Logged.class)); // xr: not installed, not waited for
+            }
+        };
+        try (Engine engine = Engine.create(new App(log, input, desktop))) {
+            log.clear();
+            engine.stepAt(0);
+            assertThat(log).containsSubsequence("desktop before 0", "input before 0");
+        }
+    }
+
+    @Test
     void configurationMistakesAreCaughtBeforeAnythingStarts() {
         List<String> log = new ArrayList<>();
         Logged xr = new Logged("xr", log, PluginKey.of("rendering", Logged.class));
