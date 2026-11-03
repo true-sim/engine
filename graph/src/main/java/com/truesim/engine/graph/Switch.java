@@ -99,6 +99,11 @@ public final class Switch implements Technique {
     }
 
     @Override
+    public List<Key<?>> reads() {
+        return technique.reads();
+    }
+
+    @Override
     public Id<? extends Technique> id() {
         return technique.id();
     }

@@ -58,6 +58,8 @@ public final class RenderSettings {
         all.add(CHANGE_LIST);
         all.add(CHANGE_LIST_CHUNK);
         all.add(STREAM_BUDGET);
+        all.add(Transparency.MODE);
+        all.add(Transparency.SORTED_RUNS);
         all.addAll(ClusteredLights.ALL);
         all.addAll(ShadowSettings.ALL);
         all.addAll(DisplayTransform.ALL);

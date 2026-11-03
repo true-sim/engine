@@ -29,7 +29,9 @@ import com.truesim.engine.graph.Load;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Store;
 import com.truesim.engine.render.layout.ClassicPush;
+import com.truesim.engine.render.layout.ClassicSortPush;
 import com.truesim.engine.render.layout.CommonConstants;
+import com.truesim.engine.render.layout.ParticleConstants;
 import com.truesim.engine.render.layout.SelectPush;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Commands;
@@ -415,7 +417,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         IndirectInputs.Set indirect = targets.indirect();
         Pipeline[] pipeline = switch (kind) {
             case DEPTH -> geometry(materials, drawDepth, ShadingPipelines.DEPTH, selection);
-            case SHADED -> typed(materials, false, selection.categories());
+            case SHADED -> typed(materials, ShadingPipelines.COLOR, selection.categories());
             case IDS -> geometry(materials, drawIds, ShadingPipelines.IDS, selection);
         };
         pass.record(ctx -> {
@@ -480,11 +482,13 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
 
     /**
      * Pipelines per part of the draw lists (list * {@code categories} + category, category a shading bin of
-     * {@code materials}): its type's forward entry point with only its features, into color or with {@code weighted}
-     * into weighted transparency's targets; null where no material of the bin draws in the list's raster bin.
+     * {@code materials}): its type's forward entry point with only its features, into {@code target} (color; for the
+     * blended lists weighted transparency's targets, or over the color); null where no material of the bin draws in
+     * the list's raster bin.
      */
     @AllowAllocation("building the graph, when it changes")
-    private Pipeline[] typed(Materials materials, boolean weighted, int categories) {
+    private Pipeline[] typed(Materials materials, int target, int categories) {
+        boolean weighted = target == ShadingPipelines.WEIGHTED;
         Pipeline[] parts = new Pipeline[LISTS * categories];
         for (int category = 0; category < Math.min(categories, materials.binCount()); category++) {
             MaterialType type = materials.binType(category);
@@ -492,10 +496,10 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             int rasters = materials.binDrawn(category);
             for (int list = 0; list < LISTS; list++) {
                 int bin = list % MeshletRenderer.BINS;
-                if ((rasters & 1 << bin) == 0 || weighted && bin != MeshletRenderer.BIN_BLENDED) {
+                if ((rasters & 1 << bin) == 0 || target != ShadingPipelines.COLOR && bin != MeshletRenderer.BIN_BLENDED) {
                     continue;
                 }
-                parts[list * categories + category] = shading.get(forwardKey(type, features, list, weighted));
+                parts[list * categories + category] = shading.get(forwardKey(type, features, list, target));
             }
         }
         return parts;
@@ -506,14 +510,15 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
      * is made of: the classic vertex stage and the type's forward entry point from full vertices.
      */
     @AllowAllocation("building the graph, when it changes")
-    static ShadingPipelines.Key forwardKey(MaterialType type, int features, int list, boolean weighted) {
+    static ShadingPipelines.Key forwardKey(MaterialType type, int features, int list, int target) {
+        boolean weighted = target == ShadingPipelines.WEIGHTED;
         int bin = list % MeshletRenderer.BINS;
         boolean masked = bin == MeshletRenderer.BIN_MASKED || bin == MeshletRenderer.BIN_BLENDED;
         return new ShadingPipelines.Key("shaders/classic/draw.spv", "classicVertexMain", false, type.forwardShader(),
             type.name() + (weighted ? "BlendedMain" : masked ? "MaskedMain" : "FragmentMain"), features, type.geometry(),
             (bin == MeshletRenderer.BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED)
                 | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0),
-            weighted ? ShadingPipelines.WEIGHTED : ShadingPipelines.COLOR, DRAW_PUSH);
+            target, DRAW_PUSH);
     }
 
     /** Bytes of a draw list of {@code categories} parts per list: the parts' counts, their commands, their records. */
@@ -587,7 +592,14 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         GraphBuilder.PassBuilder pass = scene.read(targets.inRegion(g.pass("classic LOD blended")),
             BufferAccess.DRAW_READ).read(list, BufferAccess.INDIRECT).read(list, BufferAccess.DRAW_READ);
         boolean weighted = targets.kind() == BlendedTargets.Kind.WEIGHTED;
-        if (weighted) {
+        boolean sorted = targets.kind() == BlendedTargets.Kind.SORTED;
+        Buffer order = sorted ? sort(g, view, selection, list, scene) : null;
+        if (order != null) {
+            pass.read(order, BufferAccess.INDIRECT);
+        }
+        if (sorted) {
+            pass.attach(targets.color(), Load.LOAD, Store.STORE).attachDepthReadOnly(targets.depth());
+        } else if (weighted) {
             if (load) {
                 pass.attach(targets.accumulated(), Load.LOAD, Store.STORE).attach(targets.revealage(), Load.LOAD,
                     Store.STORE);
@@ -610,7 +622,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         targets.readBehind(pass);
         com.truesim.engine.graph.Image behind = targets.behind();
         int categories = selection.categories();
-        Pipeline[] pipeline = typed(materials, weighted, categories);
+        Pipeline[] pipeline = typed(materials, weighted ? ShadingPipelines.WEIGHTED : sorted ? ShadingPipelines.OVER
+            : ShadingPipelines.COLOR, categories);
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);
@@ -621,10 +634,69 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             for (int category = 0; category < categories; category++) {
                 for (int drawList = MeshletRenderer.BIN_BLENDED; drawList < LISTS; drawList += MeshletRenderer.BINS) {
                     int part = drawList * categories + category;
-                    recordPart(ctx, pipeline[part], part, view, address, list, words, indirect, categories);
+                    if (order == null) {
+                        recordPart(ctx, pipeline[part], part, view, address, list, words, indirect, categories);
+                    } else { // the part's draws farthest first, from the sorted commands
+                        int sortedPart = (drawList == MeshletRenderer.BIN_BLENDED ? 0 : categories) + category;
+                        recordPart(ctx, pipeline[part], part, view, address, list, words, indirect, categories,
+                            order, (long) COMMAND_BYTES * maxDraws * sortedPart);
+                    }
                 }
             }
         });
+    }
+
+    /**
+     * The blended parts of view {@code view}'s draw list {@code list} sorted farthest first within each part
+     * (classic/sort.slang, with the particles' radix sort): per blended part (unmirrored, then mirrored, each shading
+     * bin) {@code maxDraws} commands, in order. Passes of this build.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    private Buffer sort(GraphBuilder g, RenderView view, Selection selection, Buffer list, SceneData.Buffers scene) {
+        int categories = selection.categories();
+        if (2 * categories > 254) {
+            throw new IllegalStateException("Classic LOD sorts the blended draws of at most 127 shading bins, not "
+                + categories);
+        }
+        long draws = 2L * categories * maxDraws;
+        String name = "classic LOD blended sort, view " + view.index();
+        Buffer keys = g.createBuffer(name + " keys", 8 * draws);
+        Buffer other = g.createBuffer(name + " keys, other", 8 * draws);
+        long groups = (draws + ParticleConstants.SORT_GROUP - 1) / ParticleConstants.SORT_GROUP;
+        Buffer histogram = g.createBuffer(name + " counts", 64 * groups);
+        Buffer args = g.createBuffer(name + " args", 4L * (4 + 2 * categories));
+        Buffer sorted = g.createBuffer(name + " commands", COMMAND_BYTES * draws);
+        String shader = "shaders/classic/sort.spv";
+        Pipeline argsProgram = g.computeProgram(shader, "classicSortArgsMain", ClassicSortPush.BYTES);
+        Pipeline keysProgram = g.computeProgram(shader, "classicSortKeysMain", ClassicSortPush.BYTES);
+        Pipeline placeProgram = g.computeProgram(shader, "classicSortPlaceMain", ClassicSortPush.BYTES);
+        int threads = (int) ((draws + 63) / 64);
+        int x = Math.min(threads, PassContext.MAX_GROUPS);
+        int y = (threads + PassContext.MAX_GROUPS - 1) / PassContext.MAX_GROUPS;
+        ClassicSortPush argsPush = new ClassicSortPush();
+        g.pass(name + " args").read(list, BufferAccess.STORAGE_READ).write(args, BufferAccess.STORAGE_WRITE)
+            .record(ctx -> ctx.dispatch(argsProgram, common(ctx, argsPush, view, list, categories)
+                .args(ctx.address(args)), 1));
+        ClassicSortPush keysPush = new ClassicSortPush();
+        scene.read(g.pass(name + " keys"), BufferAccess.STORAGE_READ).read(list, BufferAccess.STORAGE_READ)
+            .read(args, BufferAccess.STORAGE_READ).write(keys, BufferAccess.STORAGE_WRITE)
+            .record(ctx -> ctx.dispatch(keysProgram, common(ctx, keysPush, view, list, categories)
+                .args(ctx.address(args)).keys(ctx.address(keys)), x, y, 1));
+        RadixPasses.add(g, name, args, keys, other, histogram, 8);
+        ClassicSortPush placePush = new ClassicSortPush();
+        g.pass(name + " place").read(list, BufferAccess.STORAGE_READ).read(args, BufferAccess.STORAGE_READ)
+            .read(keys, BufferAccess.STORAGE_READ).write(sorted, BufferAccess.STORAGE_WRITE)
+            .record(ctx -> ctx.dispatch(placeProgram, common(ctx, placePush, view, list, categories)
+                .args(ctx.address(args)).keys(ctx.address(keys)).sorted(ctx.address(sorted)), x, y, 1));
+        return sorted;
+    }
+
+    /** What every pass of a classic sort sets. */
+    private ClassicSortPush common(PassContext ctx, ClassicSortPush push, RenderView view, Buffer list,
+        int categories) {
+        return push.view(view.address()).scene(renderer.scene().tableAddress()).draws(ctx.address(list))
+            .records(ctx.address(list) + recordsOffset(categories)).categories(categories).maxDraws(maxDraws)
+            .group(ParticleConstants.SORT_GROUP);
     }
 
     /** Selects view {@code view}'s draws into the draw list at {@code list}. */
@@ -694,6 +766,12 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
      */
     private void recordPart(PassContext ctx, Pipeline pipeline, int part, RenderView view, long lights,
         Buffer list, long behind, long indirect, int categories) {
+        recordPart(ctx, pipeline, part, view, lights, list, behind, indirect, categories, null, 0);
+    }
+
+    /** Like the above, the part's commands from {@code sortedCommands} at {@code offset} where given (else the list's). */
+    private void recordPart(PassContext ctx, Pipeline pipeline, int part, RenderView view, long lights,
+        Buffer list, long behind, long indirect, int categories, Buffer sortedCommands, long offset) {
         if (pipeline == null) {
             return;
         }
@@ -710,8 +788,13 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             Commands.bindIndexBuffer(commands, indices.handle(), 0, VK_INDEX_TYPE_UINT32);
             pipeline.bind(commands);
             pipeline.push(commands, push, DRAW_PUSH);
-            Commands.drawIndexedIndirectCount(commands, handle, commandsOffset(categories) + (long) COMMAND_BYTES
-                * maxDraws * part, handle, 4L * part, maxDraws, COMMAND_BYTES);
+            if (sortedCommands == null) {
+                Commands.drawIndexedIndirectCount(commands, handle, commandsOffset(categories) + (long) COMMAND_BYTES
+                    * maxDraws * part, handle, 4L * part, maxDraws, COMMAND_BYTES);
+            } else {
+                Commands.drawIndexedIndirectCount(commands, ctx.unsafe().buffer(sortedCommands), offset, handle,
+                    4L * part, maxDraws, COMMAND_BYTES);
+            }
         }
     }
 

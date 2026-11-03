@@ -43,6 +43,18 @@ public interface Technique {
     }
 
     /**
+     * The keys this technique only reads, as the techniques ordered before it (by {@link #order()}) leave them, taking
+     * each with {@link GraphBuilder#read}: the scene's depth as the opaque scene left it for a background drawn behind
+     * transparency, say. It stands among the key's modifiers in its order, so a technique changing the key later (one
+     * drawing transparent surfaces into the depth) runs after it, and one it needs to run first (the opaque scene)
+     * before it; required plainly ({@link GraphBuilder#require}) it would need the version after every modifier, which
+     * is a cycle when one of those needs this technique's result. Never one of {@link #modifies()}. None by default.
+     */
+    default List<Key<?>> reads() {
+        return List.of();
+    }
+
+    /**
      * The technique's id, for others to order themselves against and for the graph to remove it by; null (the default)
      * for a technique nothing refers to.
      */

@@ -483,10 +483,16 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   depth or ID passes; its lists are appended to across both occlusion phases (one counter) and drawn once, after the
   late cull. How they are drawn is a frame graph technique, one per view under `Transparency.ID`, modifying
   `SCENE_COLOR` at `Anchor.TRANSPARENT`, swapped with `port.replace` (which now also replaces by id):
-  `WeightedBlendedTransparency` (weighted blended order-independent transparency, resolved in place; the default a
-  preset adds) or `OpaqueTransparency` (as opaque, color and depth); sorted meshlets or per-pixel lists would be more of
-  them. A view without one draws no blended surfaces. Providers draw the bin per `RenderView` (`drawBlended`); classic
+  `WeightedBlendedTransparency` (weighted blended order-independent transparency, resolved in place) or
+  `OpaqueTransparency` (as opaque, color and depth); sorted meshlets came later (D136x), per-pixel lists would be more
+  of them. A view without one draws no blended surfaces. Providers draw the bin per `RenderView` (`drawBlended`); classic
   LOD's selection is a shared request. Blended surfaces cast no shadows yet (a shadow decision, not transparency's).
+- **D136x** (built) Sorted transparency: `SortedTransparency` sorts a view's blended meshlets back to front on the GPU
+  after the culling's split (the particles' radix sort reused) and blends them over the scene's color in runs of one
+  shading bin, so the order holds across material types; classic LOD sorts within each shading bin. `render.transparency`
+  (`Transparency.MODE`: `SORTED`, the default, `WEIGHTED`, `OPAQUE`) picks a view's way through `ChosenTransparency`;
+  both correct ways stay, since they trade off (sorted: exact for surfaces apart; weighted: no sort, for masses of thin
+  layers). Measured against weighted and the opaque front-to-back sort (not kept) in the README's Transparency section.
 - **D136c** (built) Specular, IOR and sheen as features (modules `materials/specular.slang`, `ior.slang`,
   `sheen.slang`, field names glTF's own so imported data converts as it is): the surface carries a dielectric's
   reflectance head-on (`f0`, from the IOR, scaled and tinted by specular) and at grazing angles (`f90`), and a sheen

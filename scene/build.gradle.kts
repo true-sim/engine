@@ -29,6 +29,7 @@ tasks.test {
     providers.gradleProperty("gltfBackground").orNull?.let { systemProperty("truesim.gltf.background", it) }
     providers.gradleProperty("gltfAnimation").orNull?.let { systemProperty("truesim.gltf.animation", it) }
     providers.gradleProperty("gltfClip").orNull?.let { systemProperty("truesim.gltf.clip", it) }
+    providers.gradleProperty("gltfTransparency").orNull?.let { systemProperty("truesim.gltf.transparency", it) }
 }
 
 // The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.

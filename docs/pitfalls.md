@@ -249,6 +249,18 @@ techniques from culling, they do not build a technique.
 - Rule: a technique whose work only leaves the frame (readbacks, side effects) modifies a key its frames always make
   (`Keys.SCENE_COLOR` of the main view), as `RayTracedShadows` modifies the light list.
 
+**A technique that only read a key required its last version.** `SkyBackground` (at `Anchor.OPAQUE`) required the
+scene's depth; `OpaqueTransparency` (at `Anchor.TRANSPARENT`) modifies the depth and the color. Requiring a key builds
+every modifier of it first, so the sky needed transparency built, and transparency needed the color after the sky: the
+build failed with "Techniques require each other's results in a cycle". `ParticleDraw.beforeGlass` had the same cycle.
+- Proof: `FrameGraphTest.aReaderTakesAKeyAsTheTechniquesBeforeItLeftIt` fails with `require` and passes with
+  `Technique.reads()`/`GraphBuilder.read`; `SortedTransparencyTest.aSkyBuildsWithEveryTransparency` builds the sky with
+  every transparency technique (true-sim/engine, sorted transparency). A reader stands among a key's modifiers, so a
+  plain `require` of the key builds it too: transparency then reads the depth in its order as well, or a particle draw
+  after it (a reader) was needed before it (`ParticleDrawTest.particlesBeforeGlassAreTintedByItAndThoseAfterItAreNot`).
+- Rule: a technique that reads a key at its place in the frame (a background, soft particles, transparency testing the
+  opaque depth) lists it in `reads()` and takes it with `g.read`; `require` is for a key's final version.
+
 **A layout computed twice, from two sizes.** The visibility buffer's per-bin tile lists were spaced by the whole image's
 tile count where Java dispatched them and by the render region's where `resolve.slang` classified into them. With
 dynamic resolution every bin past 0 read another bin's header: its pixels went unshaded, and its indirect dispatch

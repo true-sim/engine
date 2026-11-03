@@ -1602,6 +1602,114 @@ class FrameGraphTest {
         assertThat(graph.passes()).containsExactly("fill b");
     }
 
+    /**
+     * Modifies {@code key} at {@code stage}: its columns 0 to SIZE / 2 copied from {@code other} as the techniques
+     * before it left that, which it {@link Technique#reads() reads} there, or with {@code require} requires (its last
+     * version), as a sky behind the scene reads the opaque depth.
+     */
+    record CopyAt(Key<Image> key, Key<Image> other, int stage, boolean require) implements Technique {
+        @Override
+        public List<Key<?>> provides() {
+            return List.of();
+        }
+
+        @Override
+        public List<Key<?>> modifies() {
+            return List.of(key);
+        }
+
+        @Override
+        public List<Key<?>> reads() {
+            return require ? List.of() : List.of(other);
+        }
+
+        @Override
+        public Order order() {
+            return Order.at(new Anchor("stage " + stage, stage));
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image image = g.modify(key);
+            Image from = require ? g.require(other) : g.read(other);
+            g.pass("copy at " + stage).read(from, Access.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
+                .record(ctx -> copy(ctx, from, image, 0, SIZE / 2));
+        }
+    }
+
+    /** Modifies both keys at {@code stage}: each painted green, the first only in its last quarter. */
+    record PaintBoth(Key<Image> key, Key<Image> other, int stage) implements Technique {
+        @Override
+        public List<Key<?>> provides() {
+            return List.of();
+        }
+
+        @Override
+        public List<Key<?>> modifies() {
+            return List.of(key, other);
+        }
+
+        @Override
+        public Order order() {
+            return Order.at(new Anchor("stage " + stage, stage));
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image image = g.modify(key);
+            Image second = g.modify(other);
+            g.pass("paint both " + stage).write(image, Access.TRANSFER_DST).write(second, Access.TRANSFER_DST)
+                .record(ctx -> {
+                    clear(ctx, second, 0, 1, 0, 1);
+                    clear(ctx, image, 0, 1, 0, 1); // the whole of it, then its first three quarters back below
+                });
+        }
+    }
+
+    @Test
+    void aReaderTakesAKeyAsTheTechniquesBeforeItLeftIt() {
+        // As a sky (stage 10) reads the opaque depth (B) while transparency drawn as opaque (stage 20) writes the
+        // depth and the color (A) after it. Requiring the depth's last version needs the later technique first: a
+        // cycle. Reading it in order takes it as it was before stage 20.
+        fails(A, "cycle", new Fill(A, SIZE, 1, 0, 0, 1), new Fill(B, SIZE, 0, 0, 1, 1), new CopyAt(A, B, 10, true),
+            new PaintBoth(A, B, 20));
+        graph.close();
+        graph = new FrameGraph(device, 2).add(new Fill(A, SIZE, 1, 0, 0, 1)).add(new Fill(B, SIZE, 0, 0, 1, 1))
+            .add(new PaintBoth(A, B, 20)).add(new CopyAt(A, B, 10, false)).output(A, output);
+        assertThat(frame()[0]).as("the reader's copy of B before stage 20, painted over after").isEqualTo(GREEN);
+        assertThat(graph.passes()).containsSubsequence("fill a", "fill b", "copy at 10", "paint both 20");
+        graph.close();
+        // Without the painter: the reader's copy of B (blue) on the left, A's red on the right.
+        graph = new FrameGraph(device, 2).add(new Fill(A, SIZE, 1, 0, 0, 1)).add(new Fill(B, SIZE, 0, 0, 1, 1))
+            .add(new CopyAt(A, B, 10, false)).output(A, output);
+        int[] texels = frame();
+        assertThat(texels[0]).isEqualTo(BLUE);
+        assertThat(texels[SIZE - 1]).isEqualTo(RED);
+        // Only a reader reads; a technique both modifying and reading a key fails.
+        rejects(List.of(OUT), g -> g.read(A), "cannot read test.a");
+        fails(A, "both modifies and reads test.b", new Fill(A, SIZE, 1, 0, 0, 1), new Fill(B, SIZE, 0, 0, 1, 1),
+            new Technique() {
+                @Override
+                public List<Key<?>> provides() {
+                    return List.of();
+                }
+
+                @Override
+                public List<Key<?>> modifies() {
+                    return List.of(A, B);
+                }
+
+                @Override
+                public List<Key<?>> reads() {
+                    return List.of(B);
+                }
+
+                @Override
+                public void build(GraphBuilder g) {
+                }
+            });
+    }
+
     @Test
     void modifiersOfOneIdReplaceEachOther() {
         // Two modifiers of one id provide nothing: replace swaps them by their id, as transparency techniques are.

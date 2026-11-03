@@ -198,6 +198,24 @@ public final class MeshletGeometry implements GeometryProvider {
         if (load) {
             throw new IllegalStateException("Meshlets are drawn first, before other geometry");
         }
+        RasterPipelines.Typed typed = typed(g, view, true); // by type: the view's opaque draw split its lists
+        if (typed == null) {
+            throw new IllegalStateException("View " + view.index() + " draws blended surfaces but its lists are not "
+                + "split by shading bin: its opaque draw is built first, shaded or as IDs with blended materials");
+        }
+        if (targets.kind() == BlendedTargets.Kind.SORTED) {
+            // Farthest first, by the culling: run slots enough for every shading bin drawing blended, and the setting's
+            int[] numbers = typed.blendedNumbers();
+            int drawn = 0;
+            for (int number : numbers) {
+                drawn = Math.max(drawn, number + 1);
+            }
+            if (drawn > 0) {
+                int slots = Math.max(drawn, Math.min(g.setting(Transparency.SORTED_RUNS),
+                    Materials.MAX_BINS / drawn));
+                g.request(new MeshletCulling(renderer)).sortBlended(view, slots, numbers);
+            }
+        }
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         GraphBuilder.PassBuilder pass = scene.read(targets.inRegion(g.pass("meshlets blended")),
             BufferAccess.DRAW_READ);
@@ -206,6 +224,8 @@ public final class MeshletGeometry implements GeometryProvider {
             pass.attach(targets.accumulated(), Clear.color(0, 0, 0, 0))
                 .attach(targets.revealage(), Clear.color(1, 1, 1, 1))
                 .attachDepthReadOnly(targets.depth());
+        } else if (targets.kind() == BlendedTargets.Kind.SORTED) {
+            pass.attach(targets.color(), Load.LOAD, Store.STORE).attachDepthReadOnly(targets.depth());
         } else {
             pass.attach(targets.color(), Load.LOAD, Store.STORE).attachDepth(targets.depth(), Load.LOAD, Store.STORE);
         }
@@ -220,11 +240,6 @@ public final class MeshletGeometry implements GeometryProvider {
         targets.readBehind(pass);
         BlendedTargets.Kind kind = targets.kind();
         com.truesim.engine.graph.Image behind = targets.behind();
-        RasterPipelines.Typed typed = typed(g, view, true); // by type: the view's opaque draw split its lists
-        if (typed == null) {
-            throw new IllegalStateException("View " + view.index() + " draws blended surfaces but its lists are not "
-                + "split by shading bin: its opaque draw is built first, shaded or as IDs with blended materials");
-        }
         pass.record(ctx -> {
             if (shadows != null) {
                 shadows.prepare(ctx);

@@ -45,6 +45,15 @@ public final class WeightedBlendedTransparency implements Transparency {
         return List.of(Keys.SCENE_COLOR);
     }
 
+    /**
+     * The scene's depth, tested: as the techniques before it leave it (the opaque scene's), so techniques after it
+     * that read the depth (particles) need not be built before it.
+     */
+    @Override
+    public List<Key<?>> reads() {
+        return List.of(Keys.SCENE_DEPTH);
+    }
+
     @Override
     public long buildVersion() {
         return Transparency.buildVersion(geometry.renderer().scene().materials());
@@ -53,13 +62,19 @@ public final class WeightedBlendedTransparency implements Transparency {
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
+        build(g, null);
+    }
+
+    /** Builds it, testing {@code taken} (null: the scene's depth as read in its order), the depth a caller took. */
+    @AllowAllocation("building the graph, when it changes")
+    void build(GraphBuilder g, Image taken) {
         view.checkBuilding(g, this);
         Image color = g.modify(Keys.SCENE_COLOR);
         Materials materials = geometry.renderer().scene().materials();
         if (materials == null || !materials.hasBlended()) {
             return; // nothing blended: the color as it is
         }
-        Image depth = g.require(Keys.SCENE_DEPTH);
+        Image depth = taken != null ? taken : g.read(Keys.SCENE_DEPTH);
         Image behind = Transparency.behind(g, materials, color);
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));

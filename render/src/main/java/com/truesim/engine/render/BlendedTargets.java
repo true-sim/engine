@@ -12,10 +12,11 @@ import java.util.Objects;
  * (null: all of it).
  *
  * @param kind how the blended surfaces are drawn
- * @param color the scene's color ({@link Kind#OPAQUE}); null otherwise
+ * @param color the scene's color ({@link Kind#OPAQUE}, {@link Kind#SORTED}); null otherwise
  * @param accumulated weighted color times alpha, and alpha, added up ({@link Kind#WEIGHTED}); null otherwise
  * @param revealage the product of 1 - alpha ({@link Kind#WEIGHTED}); null otherwise
- * @param depth the scene's depth: tested ({@link Kind#WEIGHTED}), or tested and written ({@link Kind#OPAQUE})
+ * @param depth the scene's depth: tested ({@link Kind#WEIGHTED}, {@link Kind#SORTED}), or tested and written
+ *              ({@link Kind#OPAQUE})
  * @param lights the light list, or null
  * @param shadows the shadow inputs, or null
  * @param region the render region, or null
@@ -31,7 +32,12 @@ public record BlendedTargets(Kind kind, Image color, Image accumulated, Image re
         /** Into accumulated color and revealage, over the opaque depth (weighted blended transparency). */
         WEIGHTED,
         /** Into the scene's color and depth, as opaque. */
-        OPAQUE
+        OPAQUE,
+        /**
+         * Over the scene's color, farthest first, blended by alpha, over the opaque depth ({@link SortedTransparency}):
+         * providers sort what they draw.
+         */
+        SORTED
     }
 
     public BlendedTargets {

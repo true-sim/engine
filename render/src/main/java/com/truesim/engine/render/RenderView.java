@@ -62,6 +62,14 @@ public final class RenderView implements AutoCloseable {
     private volatile int splitCategories;
     private volatile int splitBins;
     private volatile int splitGeometryBins;
+    // Its blended bin sorted far to near after the split (meshlets/sort.slang), for SortedTransparency: in runs of
+    // sortSlots slots of sortCategories shading bins, while sortSlots > 0 (set by the graph's build); the keys, counts
+    // and runs in one buffer, made when a graph first sorts the view.
+    private GpuBuffer sort;
+    private ExternalBuffer sortImport;
+    private volatile int sortSlots;
+    private volatile int sortCategories;
+    private volatile int[] sortDrawn = new int[0];
     // The lists as imported buffers of the frame graph, which the culling and drawing passes declare.
     private final ExternalBuffer visibleImport;
     private final ExternalBuffer expandImport;
@@ -430,6 +438,9 @@ public final class RenderView implements AutoCloseable {
             split = newSplit(splitRoom);
             splitImport.set(split);
         }
+        if (sort != null) {
+            sortBuffer();
+        }
         putInt(ViewLayout.MAX_DRAWS, draws);
         putInt(ViewLayout.BIN_DRAWS, binDraws);
         boolean indexed = frameIndices != null;
@@ -444,7 +455,8 @@ public final class RenderView implements AutoCloseable {
     public long bytes() {
         return (long) BYTES * renderer.viewConstants().slots().count() + visible.size() + expandCommand.size() + drawCommand.size()
             + drawCount.size() + (visibility == null ? 0 : visibility.size())
-            + (frameIndices == null ? 0 : frameIndices.size()) + (split == null ? 0 : split.size());
+            + (frameIndices == null ? 0 : frameIndices.size()) + (split == null ? 0 : split.size())
+            + (sort == null ? 0 : sort.size());
     }
 
     /** The world position along {@code axis} of the view's camera, as last {@link #set}. */
@@ -528,11 +540,115 @@ public final class RenderView implements AutoCloseable {
         splitGeometryBins |= geometryBins;
     }
 
-    /** Culling no longer splits the view's lists (its split lists stay, for a later graph). */
+    /** Culling no longer splits the view's lists (its split lists stay, for a later graph), nor sorts them. */
     synchronized void noSplit() {
         splitCategories = 0;
         splitBins = 0;
         splitGeometryBins = 0;
+        sortSlots = 0;
+        sortCategories = 0;
+    }
+
+    /**
+     * Has culling sort the view's blended bin farthest first after splitting it ({@link SortedTransparency}): in runs
+     * of one drawn shading bin, each drawn by a (run slot, drawn shading bin) entry of the split lists, {@code slots}
+     * run slots (at least as many as drawn shading bins). {@code drawn} numbers the table's shading bins among those
+     * drawn (-1: not drawn). Set while a graph builds; the sort's buffer is made now, the split lists' room grown.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    synchronized void sortBlended(int slots, int[] drawn) {
+        int categories = 0;
+        for (int d : drawn) {
+            categories = Math.max(categories, d + 1);
+        }
+        if (categories < 1 || categories > 254 || drawn.length > Materials.MAX_BINS
+            || (long) slots * categories > Materials.MAX_BINS || slots < categories) {
+            throw new IllegalArgumentException("Sorted blended surfaces of " + categories + " shading bins in " + slots
+                + " run slots: 1 to 254 bins, at least as many slots, at most " + Materials.MAX_BINS + " entries");
+        }
+        splitByType(slots * categories, 1 << MeshletRenderer.BIN_BLENDED, 0);
+        sortSlots = slots;
+        sortCategories = categories;
+        sortDrawn = drawn.clone();
+        sortBuffer();
+    }
+
+    /** Per shading bin of the table, its number among those the sort draws, or -1; as {@link #sortBlended} set. */
+    int[] sortDrawn() {
+        return sortDrawn;
+    }
+
+    /** Run slots of the blended bin's sort; 0: not sorted. */
+    int sortSlots() {
+        return sortSlots;
+    }
+
+    /** Shading bins of the blended bin's sort: the run slots' entries are slot * this + shading bin. */
+    int sortCategories() {
+        return sortCategories;
+    }
+
+    /** The sort's buffer ({@link #sortOffset}). */
+    GpuBuffer sort() {
+        return sort;
+    }
+
+    /** Keys a sort of the view holds: the blended bin's room. */
+    int sortCapacity() {
+        return options.binDraws();
+    }
+
+    /**
+     * Where part {@code part} of the sort's buffer starts: 0 the keys, 1 the other keys, 2 the radix counts, 3 the
+     * arguments (32 words), 4 the blocks' counts, 5 the runs (3 words per slot, up to {@link Materials#MAX_BINS}), 6 the
+     * drawn shading bins' numbers (a word per shading bin of the table), 7 the end.
+     */
+    long sortOffset(int part) {
+        long keys = sortCapacity();
+        long groups = (keys + com.truesim.engine.render.layout.ParticleConstants.SORT_GROUP - 1)
+            / com.truesim.engine.render.layout.ParticleConstants.SORT_GROUP;
+        long blocks = (keys + 1023) / 1024;
+        long at = 0;
+        for (int i = 0; i < part; i++) { // each part 256-byte aligned; allocates nothing
+            long size = switch (i) {
+                case 0, 1 -> 8 * keys;
+                case 2 -> 64 * groups;
+                case 3 -> 128;
+                case 4 -> 8 * blocks;
+                case 5 -> 12L * Materials.MAX_BINS;
+                default -> 4L * Materials.MAX_BINS;
+            };
+            at += (size + 255) & ~255L;
+        }
+        return at;
+    }
+
+    /** The sort's buffer, made or remade for the lists' size. */
+    @AllowAllocation("building the graph, or resizing")
+    private void sortBuffer() {
+        if (sort != null && sort.size() == sortOffset(7)) {
+            return;
+        }
+        if (sort != null) {
+            renderer.retire(sort);
+        }
+        sort = GpuBuffer.deviceLocal(device, sortOffset(7), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+            | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+            | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        if (sortImport == null) {
+            sortImport = new ExternalBuffer("view " + index + " sort", sort);
+        } else {
+            sortImport.set(sort);
+        }
+    }
+
+    /** Declares that {@code pass} (the culling) sorts the view's lists where it does: the sort's buffer. */
+    void declareSorting(GraphBuilder g, GraphBuilder.PassBuilder pass) {
+        if (sortSlots > 0) {
+            Buffer buffer = g.importBuffer(sortImport);
+            pass.write(buffer, BufferAccess.TRANSFER_DST).write(buffer, BufferAccess.STORAGE_WRITE)
+                .read(buffer, BufferAccess.INDIRECT);
+        }
     }
 
     /** The raster bins (a bit each) whose lists culling splits by type with geometry hooks, not by shading bin. */
@@ -677,7 +793,7 @@ public final class RenderView implements AutoCloseable {
     void freeBuffers(Retiring retiring) {
         closed = true;
         for (AutoCloseable buffer : new AutoCloseable[] {visible, expandCommand, drawCommand, drawCount,
-            visibility, frameIndices, noIndices, split}) {
+            visibility, frameIndices, noIndices, split, sort}) {
             if (buffer == null) {
                 continue;
             }

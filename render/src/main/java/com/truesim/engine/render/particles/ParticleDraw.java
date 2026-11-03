@@ -146,6 +146,15 @@ public final class ParticleDraw implements Technique {
         return List.of(Keys.SCENE_COLOR);
     }
 
+    /**
+     * The scene's depth, which it tests and fades into, as the techniques before it leave it: the opaque scene's
+     * before glass, also where transparency writes the depth after it ({@link com.truesim.engine.render.OpaqueTransparency}).
+     */
+    @Override
+    public List<Key<?>> reads() {
+        return List.of(Keys.SCENE_DEPTH);
+    }
+
     /** Over the blended materials: at {@link Anchor#TRANSPARENT}, after {@link Transparency#ID} (or before, before glass). */
     @Override
     public Order order() {
@@ -167,7 +176,7 @@ public final class ParticleDraw implements Technique {
                 + (g.view() == null ? "the frame" : g.view()) + ": add it to its view");
         }
         Image color = g.modify(Keys.SCENE_COLOR);
-        Image depth = g.require(Keys.SCENE_DEPTH);
+        Image depth = g.read(Keys.SCENE_DEPTH);
         Buffer pool = g.require(ParticleKeys.PARTICLES);
         Buffer state = g.require(ParticleKeys.STATE);
         Buffer side = g.require(ParticleKeys.SIDE);

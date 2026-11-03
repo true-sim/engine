@@ -177,15 +177,19 @@ public final class MeshletRenderer implements AutoCloseable {
             if ((rasters & 1 << raster) == 0) {
                 continue;
             }
-            shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, false));
+            shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, ShadingPipelines.COLOR));
             if (raster == BIN_BLENDED) {
-                shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, true));
+                shading.prepare(this.raster.forwardKey(type, features, raster, meshShading,
+                    ShadingPipelines.WEIGHTED));
+                shading.prepare(this.raster.forwardKey(type, features, raster, meshShading, ShadingPipelines.OVER));
             }
             for (ClassicLodGeometry classic : classics) {
                 for (int list = raster; list < 2 * BINS; list += BINS) {
-                    shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, false));
+                    shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, ShadingPipelines.COLOR));
                     if (raster == BIN_BLENDED) {
-                        shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, true));
+                        shading.prepare(ClassicLodGeometry.forwardKey(type, features, list,
+                            ShadingPipelines.WEIGHTED));
+                        shading.prepare(ClassicLodGeometry.forwardKey(type, features, list, ShadingPipelines.OVER));
                     }
                 }
             }
