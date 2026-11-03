@@ -1180,6 +1180,16 @@ renderers above, following the scene's change logs and asset cache:
   uploaded per frame with a step, 0.001 ms and nothing without, the blend pass 0.006 ms on the GPU; `GPU_PRECISE` 0.57
   ms and 2.04 MB, 0.009 ms; `CPU` 0.44 ms and 2.04 MB with a step, 0.24 ms and 2.04 MB without (application-api.md
   D122).
+- **Skinned joints between fixed steps** (animation.md A5): an animator on fixed steps (`animator.fixedSteps(true)`)
+  runs in the `Animation` plugin's `FIXED`, once per step of its world's clock, deterministic whatever the frame rate.
+  The sync following that clock poses the skinned copies whose joints a step moved, on its job system, and draws them
+  between their last two steps' poses, the skinning matrices blended linearly (each vertex that part of the way
+  between the two poses), as `render.interpolation` says: on the GPU the skinning blends both steps' matrices kept in
+  the deformation's buffer, on the CPU the sync writes the blend each frame, `OFF` draws steps. `sync.teleport(body)`
+  in a step snaps the joints; joints moved outside the steps are drawn as posed. 1,000 characters of 24 joints at 60
+  steps and 144 frames a second (`SkinnedCrowdBenchmark`): animated every frame, 2.4 ms of main thread every frame; on
+  fixed steps blended on the GPU, 2.6–3.3 ms in frames with a step and 0.01–0.03 ms in the others (half the time per
+  second), 1.7 times the joint matrices uploaded, the same 0.49 ms of GPU deformation (application-api.md D91).
 
 ```java
 FrameSlots slots = new FrameSlots(2);                 // shared by every graph drawing these resources

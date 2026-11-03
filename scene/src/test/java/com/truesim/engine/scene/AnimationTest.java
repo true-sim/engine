@@ -58,6 +58,7 @@ class AnimationTest {
         Animator animator;
         Animators animators;
         boolean quiet;
+        AnimationClip clip = SLIDE; // played from the second frame
         long foot;
 
         Game(int threads) {
@@ -84,7 +85,7 @@ class AnimationTest {
         @Override
         public void update(Frame frame) {
             if (frame.number() == 1) {
-                animator.play(SLIDE);
+                animator.play(clip);
             }
             if (!quiet) {
                 log.add("update " + footX());
@@ -242,6 +243,58 @@ class AnimationTest {
                 now[0] += 7 * MS;
                 engine.stepAt(now[0]);
             });
+            game.animator.fixedSteps(true); // in the world's fixed steps
+            assertAllocationFree(() -> {
+                now[0] += 7 * MS;
+                engine.stepAt(now[0]);
+            });
         }
+    }
+
+    /** The hip turning about y, 3 rad a second, and sliding as {@link #SLIDE}: a rotation slerped between keys. */
+    private static final AnimationClip TURN = new AnimationClip("turn", List.of(
+        new Track("hip", 0, Track.Property.TRANSLATION, Track.Interpolation.LINEAR, new float[] {0, 100},
+            new float[] {0, 0, 0, 1000, 0, 0}, 0),
+        new Track("hip", 0, Track.Property.ROTATION, Track.Interpolation.LINEAR, new float[] {0, 0.5f, 1},
+            new float[] {0, 0, 0, 1, 0, (float) Math.sin(0.75), 0, (float) Math.cos(0.75), 0, 1, 0, 0}, 0)));
+
+    @Test
+    void animatorsOnFixedStepsRunInTheStepsAndGiveTheSamePosesWhateverTheFrameRate() {
+        // The same 60 steps (1 s at 60 a second) in frames of 7 ms, and in frames of 3 to 40 ms: each step's pose, read
+        // after it (the clock's hook), is the same to the bit; the frame's ANIMATE leaves it alone.
+        double[] even = steppedPoses(new long[] {7});
+        double[] uneven = steppedPoses(new long[] {3, 40, 11, 29, 17, 5, 33});
+        assertThat(uneven).containsExactly(even);
+        assertThat(even[3 * 59]).as("the hip slid 10 m a second").isCloseTo(10.0, within(1e-6));
+    }
+
+    /** Each step's hip x and foot x and z (world) for 60 steps of a fixed animator, frames as long as {@code frames}. */
+    private static double[] steppedPoses(long[] frames) {
+        double[] poses = new double[3 * 60];
+        Game game = new Game(2);
+        game.withClock = true;
+        game.quiet = true;
+        try (Engine engine = Engine.create(game)) {
+            game.clock.rate(60).afterStep(game.scene::update).afterStep(() -> {
+                int at = 3 * (int) (game.clock.tick() - 1);
+                if (at < poses.length) {
+                    long hip = game.animator.node(0);
+                    poses[at] = game.scene.world(hip).translation().x();
+                    poses[at + 1] = game.scene.world(game.foot).translation().x();
+                    poses[at + 2] = game.scene.world(game.foot).translation().z();
+                }
+            });
+            game.clip = TURN;
+            game.animator.fixedSteps(true);
+            long now = 0;
+            int f = 0;
+            engine.stepAt(0);
+            while (game.clock.tick() < 60) {
+                now += frames[f++ % frames.length] * MS;
+                engine.stepAt(Math.min(now, 1_000_000_000L + MS));
+                assertThat(game.animator.updated()).isTrue();
+            }
+        }
+        return poses;
     }
 }

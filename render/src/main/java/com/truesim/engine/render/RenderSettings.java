@@ -20,7 +20,7 @@ public final class RenderSettings {
      * How instances moved in fixed steps are drawn between steps (D91): blended on the GPU, on the CPU, or not at all.
      */
     public static final Setting<Interpolation> INTERPOLATION = Setting.choice("render.interpolation", Interpolation.GPU,
-        "how instances moved in fixed steps are drawn between steps");
+        "how instances and skinned joints moved in fixed steps are drawn between steps");
 
     /**
      * Where the instances' changes are written before the GPU scatters them: into plain memory copied when the frame

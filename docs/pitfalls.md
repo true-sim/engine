@@ -39,6 +39,14 @@ scene benchmark burned (embers alive), most of the "sync" column.
 - Rule: tables rewritten every frame are written into plain memory and handed to the frame buffer with one `put`;
   per-field writes are for a few fields that change.
 
+**A flag every thread writes ping-pongs between their caches.** Posing skinned copies on the sync's job system (A5),
+every matrix value that changed set one `written` field of the `Deformation` (and `changed[copy]` for its copy): the
+sync of 1,000 skinned characters (24 joints) took 3.2 ms a frame on 32 threads against 0.5 ms posed one after another,
+and the CPU path's blend 2.0 ms against 0.15. Reading the flag first and writing it only when not yet set brought them
+to 0.33 and 0.07 ms.
+- Proof: `SkinnedCrowdBenchmark` (engine-scene), run before and after the change in the same session (A5 branch).
+- Rule: in code run on many threads, a shared flag or counter is read before it is written, or kept per thread.
+
 ## Frame graph
 
 **A write is visible to nothing until a barrier.** The compiler once marked a write's own stage and access visible, so

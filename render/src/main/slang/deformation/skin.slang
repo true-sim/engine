@@ -5,7 +5,8 @@
 // perpendicular). Its first thread writes the copy's mesh entry: box, sphere and the detail sphere grown by how far
 // the joints move. spheresMain, a thread per meshlet, after: each meshlet's sphere around its posed vertices, cone
 // culling off, and the cluster LOD spheres grown alike, so detail selection keeps the rest pose's order. Morph
-// targets, if the copy has weights, move the rest vertices before skinning.
+// targets, if the copy has weights, move the rest vertices before skinning. A copy moved in fixed steps (A5) is drawn
+// between the previous step's joints and weights and the current step's, blended linearly by the frame's factor.
 import meshlets.common;
 
 struct DeformPush
@@ -19,6 +20,8 @@ struct DeformPush
     float* matrices;           // the copy's joints, 12 floats each: rows of a 3x4 matrix, in the mesh's space; then
                                // its morph targets' weights
     uint* morph;               // its morph targets: per vertex its first record, and one more; then the records
+    float* previous;           // blended between steps (A5): the previous step's joints and weights, as matrices'
+    float blend;               // how far from the previous step's pose to the current one; negative: not blended
     float3 boxMin;             // the posed mesh's box
     float growth;              // the farthest any joint or morph moves a point of its box
     float3 boxExtent;
@@ -32,11 +35,26 @@ struct DeformPush
 [[vk::push_constant]]
 ConstantBuffer<DeformPush> push;
 
-/** Joint `j`'s matrix. */
+/** Joint `j`'s matrix of the pose at `matrices`. */
+float3x4 joint(float* matrices, uint j)
+{
+    float* m = matrices + 12 * j;
+    return float3x4(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+}
+
+/**
+ * Joint `j`'s matrix as drawn: the current pose's, or blended between steps the previous pose's moved `blend` of the
+ * way to it (linearly: each vertex is drawn that part of the way between where the two poses put it).
+ */
 float3x4 joint(uint j)
 {
-    float* m = push.matrices + 12 * j;
-    return float3x4(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+    float3x4 current = joint(push.matrices, j);
+    if (push.blend < 0)
+    {
+        return current;
+    }
+    float3x4 previous = joint(push.previous, j);
+    return previous + push.blend * (current - previous);
 }
 
 /** Octahedral 2 x snorm16 of a unit vector, the first value's low bit `low`. */
@@ -100,12 +118,18 @@ void skinMain(uint3 id : SV_DispatchThreadID)
     {
         uint* morph = push.morph;
         float* morphWeights = push.matrices + 12 * push.joints;
+        float* previousWeights = push.previous + 12 * push.joints;
         uint* records = morph + (push.vertices + 1);
         uint end = morph[v + 1];
         for (uint r = morph[v]; r < end; r++)
         {
             uint* w = records + 5 * r;
             float k = morphWeights[w[0] & 0xffff];
+            if (push.blend >= 0)
+            {
+                float before = previousWeights[w[0] & 0xffff];
+                k = before + push.blend * (k - before);
+            }
             if (k != 0)
             {
                 uint w1 = w[1];

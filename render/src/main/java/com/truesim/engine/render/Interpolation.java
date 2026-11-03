@@ -2,7 +2,10 @@ package com.truesim.engine.render;
 
 /**
  * How instances moved in fixed steps are drawn between steps (application-api.md D91, D122): each frame shows the
- * world {@code blend} of the way from its pose at the step before to the last step's.
+ * world {@code blend} of the way from its pose at the step before to the last step's. Skinned joints moved in fixed
+ * steps (animators on fixed steps, animation.md A5) follow the same choice: on the GPU the skinning blends the two
+ * steps' joint matrices ({@link Deformation#blended(int, boolean)}; both GPU values alike), on the CPU the sync blends
+ * them into the copy's matrices each frame, off they are drawn as each step leaves them.
  */
 public enum Interpolation {
     /**

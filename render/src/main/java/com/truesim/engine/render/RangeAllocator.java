@@ -42,6 +42,11 @@ public final class RangeAllocator {
         release(old, capacity - old);
     }
 
+    /** Where the last range in use ends: what a copy of everything in use must cover. Allocates nothing. */
+    public long end() {
+        return count > 0 && starts[count - 1] + lengths[count - 1] == capacity ? starts[count - 1] : capacity;
+    }
+
     /** How much is free in all, though perhaps not in one piece. */
     public long free() {
         return free;

@@ -82,6 +82,9 @@ public final class SceneSync implements AutoCloseable {
     /** Instances written per task, and from how many on the writes run on the job system's threads. */
     private static final int GRAIN = 1024;
     private static final int PARALLEL = 4 * GRAIN;
+    /** Copies posed per task, and from how many on they are posed on the job system's threads. */
+    private static final int POSE_GRAIN = 8;
+    private static final int POSE_PARALLEL = 4 * POSE_GRAIN;
 
     private final SceneResources resources;
     private final Renderables renderables;
@@ -92,6 +95,7 @@ public final class SceneSync implements AutoCloseable {
     private final JobSystem.RangeTask fill = this::fill;
     private final JobSystem.RangeTask writeMotions = this::writeMotions;
     private final JobSystem.RangeTask writeBlended = this::writeBlended;
+    private final JobSystem.RangeTask writeJoints = this::writeJoints;
     private final Renderables.Visitor onRenderableChange = (node, changes) -> reconcile(node);
     private final NodeChange.Visitor onSceneChange = this::sceneChanged;
     private long seen;
@@ -130,10 +134,20 @@ public final class SceneSync implements AutoCloseable {
     private int[] stamp = new int[64]; // by node index: the registration that watched it last, against duplicates
     private int stamps;
     private int posed; // copies posed in the last update
-    private final double[] relative = new double[12]; // the node's world transform, inverted
-    private final double[] jointWorld = new double[12];
-    private final double[] matrix = new double[12];
-    private final double[] box = new double[6];
+    // Scratch for posing copies, one per thread posing (the job system's workers, or the calling thread alone), and the
+    // copies to pose this update: posed in parallel when many.
+    private final Scratch[] scratches;
+    private int[] poseItems = new int[64];
+    private int poseCount;
+    private final JobSystem.RangeTask poseMany = this::poseMany;
+
+    /** What posing a copy works in: the node's world transform inverted, a joint's, its matrix, the pose's box. */
+    private static final class Scratch {
+        final double[] relative = new double[12];
+        final double[] jointWorld = new double[12];
+        final double[] matrix = new double[12];
+        final double[] box = new double[6];
+    }
 
     // Instance ids (itemSlot) are the GpuScene's, stable while drawn, the lowest free one taken: what the GPU keeps per
     // instance (occlusion history, later previous transforms) stays with its instance.
@@ -184,6 +198,27 @@ public final class SceneSync implements AutoCloseable {
     private boolean listChanged;                    // either, since the last update
     private boolean byHand;                         // interpolation(mode) was called: the setting no longer applies
 
+    // Joints moved in steps (A5), by node index of the skinned renderables: those drawn between their last two steps'
+    // poses (densely, with their places), those the step running moved, the tick of their last step and of a teleport,
+    // and the boxes of their last pose and of the pose their step's move started from; on the CPU path each one's two
+    // poses (the deformation's values), blended into its copy each frame.
+    private static final int BOX = 7;
+    private static final int JOINT_GRAIN = 16;   // skinned renderables blended per task on the CPU path
+    private boolean[] jointsTracked = new boolean[64];
+    private int[] jointsAt = new int[64];
+    private int[] jointItems = new int[64];
+    private int jointCount;
+    private boolean[] jointsDue = new boolean[64];
+    private int[] dueItems = new int[64];
+    private int dueCount;
+    private long[] jointsTick = new long[64];
+    private long[] snapTick = new long[64];
+    private double[] lastBox = new double[64 * BOX];
+    private double[] fromBox = new double[64 * BOX];
+    private float[][] fromValues = new float[64][];
+    private float[][] toValues = new float[64][];
+    private double jointFactor;                     // the frame's, for the CPU's blends
+
     private final Map<AssetRef<MeshData>, ViewMesh> meshes = new HashMap<>();
 
     /** A mesh this scene's renderables use: the shared upload, and the list of this scene's items using it. */
@@ -219,6 +254,10 @@ public final class SceneSync implements AutoCloseable {
     @AllowAllocation("created rarely")
     public SceneSync(SceneResources resources, Renderables renderables, GpuScene gpu, JobSystem jobs) {
         this.jobs = jobs;
+        scratches = new Scratch[jobs == null ? 1 : jobs.threads()];
+        for (int i = 0; i < scratches.length; i++) {
+            scratches[i] = new Scratch();
+        }
         this.resources = Objects.requireNonNull(resources, "resources");
         this.renderables = Objects.requireNonNull(renderables, "renderables");
         this.gpu = Objects.requireNonNull(gpu, "gpu");
@@ -338,15 +377,16 @@ public final class SceneSync implements AutoCloseable {
         for (int i = 0; i < count; i++) {
             fillEntries[i] = gpu.claim(itemSlot[fillItems[i]]);
         }
-        posed = 0;
+        poseCount = 0;
         for (int i = 0; i < skinnedCount; i++) {
             int item = skinned[i];
             if (poseAll || poseDue[item] || itemMesh[item].mesh.data.morphTargetCount() > 0) {
-                pose(item);
-                posed++;
+                poseItems[poseCount++] = item;
             }
             poseDue[item] = false;
         }
+        posed = poseCount;
+        poseListed();
         if (jobs != null && count >= PARALLEL) {
             jobs.parallelFor(count, GRAIN, fill);
         } else {
@@ -358,6 +398,9 @@ public final class SceneSync implements AutoCloseable {
         movedCount = 0;
         if (stepClock != null && trackedCount > 0) {
             blend();
+        }
+        if (stepClock != null && jointCount > 0) {
+            blendJoints();
         }
     }
 
@@ -665,19 +708,27 @@ public final class SceneSync implements AutoCloseable {
             markMoved(item);
         }
         if (NodeChange.has(changes, NodeChange.TRANSFORM) && item < watchHead.length) {
-            watched(item);
+            watched(node, item);
         }
     }
 
-    /** Marks the copies watching node index {@code index} to pose; drops entries of copies gone. */
-    private void watched(int index) {
+    /**
+     * Marks the copies watching {@code node} (node index {@code index}) to pose; drops entries of copies gone. A copy
+     * whose joints move between steps is posed in the steps: moved after the last one (in the frame), it stops.
+     */
+    private void watched(long node, int index) {
         int previous = NONE;
         int entry = watchHead[index];
         while (entry != NONE) {
             int next = watchNext[entry];
             int item = watchItem[entry];
             if (itemCopy[item] == watchCopy[entry]) {
-                poseDue[item] = true;
+                if (!jointsTracked[item]) {
+                    poseDue[item] = true;
+                } else if (scene.version(node) > fixedThrough) {
+                    untrackJoints(item); // moved outside the steps: drawn as posed now, from its next step again
+                    poseDue[item] = true;
+                }
                 previous = entry;
             } else { // its copy is gone: unlinked, free for the next
                 if (previous == NONE) {
@@ -808,6 +859,18 @@ public final class SceneSync implements AutoCloseable {
         itemCopy = Arrays.copyOf(itemCopy, length);
         itemCopySkinned = Arrays.copyOf(itemCopySkinned, length);
         poseDue = Arrays.copyOf(poseDue, length);
+        poseItems = Arrays.copyOf(poseItems, length);
+        jointsTracked = Arrays.copyOf(jointsTracked, length);
+        jointsAt = Arrays.copyOf(jointsAt, length);
+        jointItems = Arrays.copyOf(jointItems, length);
+        jointsDue = Arrays.copyOf(jointsDue, length);
+        dueItems = Arrays.copyOf(dueItems, length);
+        jointsTick = Arrays.copyOf(jointsTick, length);
+        snapTick = Arrays.copyOf(snapTick, length);
+        lastBox = Arrays.copyOf(lastBox, BOX * length);
+        fromBox = Arrays.copyOf(fromBox, BOX * length);
+        fromValues = Arrays.copyOf(fromValues, length);
+        toValues = Arrays.copyOf(toValues, length);
         drawnPose = Arrays.copyOf(drawnPose, POSE * length);
         fromPose = Arrays.copyOf(fromPose, POSE * length);
         movedTick = Arrays.copyOf(movedTick, length);
@@ -953,6 +1016,9 @@ public final class SceneSync implements AutoCloseable {
         if (itemCopy[item] == NONE) {
             return;
         }
+        if (jointsTracked[item]) {
+            untrackJoints(item);
+        }
         resources.removeCopy(itemCopy[item]); // after its instance stops naming it: written this update
         itemCopy[item] = NONE;
         for (int i = 0; i < skinnedCount; i++) {
@@ -972,6 +1038,29 @@ public final class SceneSync implements AutoCloseable {
      * largest moves, so moved (or the rest box so grown), and how far any point moves.
      */
     private void pose(int item) {
+        pose(item, scratches[0]);
+    }
+
+    /** Poses the copies listed ({@link #poseItems}): on the job system's threads when many, each copy alone. */
+    private void poseListed() {
+        if (jobs != null && poseCount >= POSE_PARALLEL) {
+            jobs.parallelFor(poseCount, POSE_GRAIN, poseMany);
+        } else {
+            poseMany(0, poseCount, 0);
+        }
+    }
+
+    /** Poses {@code poseItems[from]} to {@code poseItems[to - 1]}, on any thread: copies write their own records. */
+    private void poseMany(int from, int to, int worker) {
+        Scratch scratch = scratches[worker];
+        for (int i = from; i < to; i++) {
+            pose(poseItems[i], scratch);
+        }
+    }
+
+    /** {@link #pose(int)} in {@code scratch}, on any thread for different items. */
+    private void pose(int item, Scratch scratch) {
+        double[] box = scratch.box;
         long node = itemNode[item];
         MeshData data = itemMesh[item].mesh.data;
         int copy = itemCopy[item];
@@ -986,7 +1075,7 @@ public final class SceneSync implements AutoCloseable {
         box[3] = box[4] = box[5] = Double.NEGATIVE_INFINITY;
         double growth = 0;
         if (itemCopySkinned[item]) {
-            growth = skin(node, data, copy, morph);
+            growth = skin(node, data, copy, morph, scratch);
         }
         if (box[0] > box[3]) { // no joint moves a vertex: the rest box
             for (int axis = 0; axis < 3; axis++) {
@@ -994,15 +1083,31 @@ public final class SceneSync implements AutoCloseable {
                 box[3 + axis] = data.boxMin(axis) + data.boxExtent(axis);
             }
         }
-        deformation.bounds(copy, box[0] - morph, box[1] - morph, box[2] - morph, box[3] + morph, box[4] + morph,
-            box[5] + morph, growth + morph);
+        int b = BOX * item; // the pose's box; between steps, grown to hold the pose the step's move started from too
+        lastBox[b] = box[0] - morph;
+        lastBox[b + 1] = box[1] - morph;
+        lastBox[b + 2] = box[2] - morph;
+        lastBox[b + 3] = box[3] + morph;
+        lastBox[b + 4] = box[4] + morph;
+        lastBox[b + 5] = box[5] + morph;
+        lastBox[b + 6] = growth + morph;
+        double[] from = jointsTracked[item] ? fromBox : lastBox;
+        deformation.bounds(copy, Math.min(lastBox[b], from[b]), Math.min(lastBox[b + 1], from[b + 1]),
+            Math.min(lastBox[b + 2], from[b + 2]), Math.max(lastBox[b + 3], from[b + 3]),
+            Math.max(lastBox[b + 4], from[b + 4]), Math.max(lastBox[b + 5], from[b + 5]),
+            Math.max(lastBox[b + 6], from[b + 6]));
     }
 
     /**
-     * Sets each palette joint's matrix and fills {@link #box} with the joints' rest boxes, grown by {@code morph}, so
-     * moved (to be grown by it again: a morph's move is moved too); returns how far a point of them moves.
+     * Sets each palette joint's matrix and fills the scratch's box with the joints' rest boxes, grown by
+     * {@code morph}, so moved (to be grown by it again: a morph's move is moved too); returns how far a point of them
+     * moves.
      */
-    private double skin(long node, MeshData data, int copy, double morph) {
+    private double skin(long node, MeshData data, int copy, double morph, Scratch scratch) {
+        double[] relative = scratch.relative;
+        double[] jointWorld = scratch.jointWorld;
+        double[] matrix = scratch.matrix;
+        double[] box = scratch.box;
         SkinBinding skin = renderables.skin(node);
         world(node, matrix);
         invert(matrix, relative);
@@ -1145,7 +1250,11 @@ public final class SceneSync implements AutoCloseable {
      * Follows the steps of {@code world}, the scene's world clock: after each step the scene's world transforms are
      * updated (D123) and the renderables it moved are captured; each frame draws them {@link Clock#blend()} of the way
      * from their pose at the step before to the last step's, as {@link #interpolation} says (GPU by default). Nodes
-     * moved outside the steps are drawn where they are, and stop interpolating. Once, before frames run.
+     * moved outside the steps are drawn where they are, and stop interpolating. Skinned renderables whose joints a step
+     * moves (an animator on fixed steps, animation.md A5; physics) are posed after the step and drawn between their
+     * last two steps' poses alike: their joint matrices blended linearly (each vertex drawn that part of the way
+     * between where the two poses put it), on the GPU by the skinning or on the CPU here, as {@link #interpolation}
+     * says; their bounds hold both poses. Once, before frames run.
      */
     @AllowAllocation("set up once")
     public SceneSync follow(Clock world) {
@@ -1204,19 +1313,33 @@ public final class SceneSync implements AutoCloseable {
             untrack(item);
             markMoved(item); // drawn where it is from the next update
         }
+        if (!on && jointsTracked[item]) {
+            untrackJoints(item); // its joints too: posed as each step leaves them
+            poseDue[item] = true;
+        }
     }
 
     /**
      * {@code node} jumps (a teleport, a respawn): its next step's move is drawn from where it lands, not blended from
-     * where it was. Call in the step that moves it. Allocates nothing once the arrays have the node's room.
+     * where it was; a skinned renderable's joints moved in the step (its animator reset, a new pose) snap to the step's
+     * pose alike. Call in the step that moves it. Allocates nothing once the arrays have the node's room.
      */
     public void teleport(long node) {
-        teleported[room(node)] = true;
+        int item = room(node);
+        teleported[item] = true;
+        if (stepClock != null) {
+            snapTick[item] = stepClock.tick();
+        }
     }
 
     /** How many renderables move between steps now: those the last step moved. */
     public int interpolatedCount() {
         return trackedCount;
+    }
+
+    /** How many skinned renderables' joints move between steps now (A5): those whose joints the last step moved. */
+    public int interpolatedSkinCount() {
+        return jointCount;
     }
 
     private int room(long node) {
@@ -1234,19 +1357,35 @@ public final class SceneSync implements AutoCloseable {
         scene.changesSince(mark, onStepChange);
         fixedThrough = clock.now();
         steppedSince = true;
+        if (dueCount > 0) {
+            captureJoints();
+        }
     }
 
-    /** A change of the step just run: a drawn renderable moved is captured, its pose before kept. */
+    /**
+     * A change of the step just run: a drawn renderable moved is captured, its pose before kept; skinned renderables
+     * whose joints it moved are posed after the step ({@link #captureJoints}).
+     */
     private void stepChanged(long node, int changes) {
+        int index = NodeHandle.index(node);
+        boolean joint = NodeChange.has(changes, NodeChange.TRANSFORM) && interpolation != Interpolation.OFF
+            && index < watchHead.length && stepWatched(index);
+        if (!captureMove(node, changes) && joint) {
+            captured++; // drawn by interpolation, not by the frame's sync
+        }
+    }
+
+    /** A change of the step just run to a drawn renderable's node: captured if it moved; whether it was. */
+    private boolean captureMove(long node, int changes) {
         int item = NodeHandle.index(node);
         if (item >= itemNode.length || itemNode[item] != node || itemSlot[item] == NONE) {
-            return;
+            return false;
         }
         if (NodeChange.has(changes, NodeChange.LAYERS)) {
             markMoved(item); // its layers written; its pose, if interpolated, blended over it
         }
         if (!NodeChange.has(changes, NodeChange.TRANSFORM) || interpolation == Interpolation.OFF || still[item]) {
-            return;
+            return false;
         }
         captured++;
         System.arraycopy(drawnPose, POSE * item, fromPose, POSE * item, POSE); // where the step before left it
@@ -1262,6 +1401,140 @@ public final class SceneSync implements AutoCloseable {
             restart[item] = true;
         }
         movedTick[item] = stepClock.tick();
+        return true;
+    }
+
+    /**
+     * Marks the drawn skinned copies watching node index {@code index}, moved by the step just run, to pose after it;
+     * whether any watch it.
+     */
+    private boolean stepWatched(int index) {
+        boolean any = false;
+        for (int entry = watchHead[index]; entry != NONE; entry = watchNext[entry]) {
+            int item = watchItem[entry];
+            if (itemCopy[item] != watchCopy[entry] || !itemCopySkinned[item] || itemSlot[item] == NONE || still[item]) {
+                continue;
+            }
+            any = true;
+            if (!jointsDue[item]) {
+                jointsDue[item] = true;
+                dueItems[dueCount++] = item;
+            }
+        }
+        return any;
+    }
+
+    /**
+     * After a step: poses the skinned copies whose joints it moved, each step's pose kept beside the one before (on the
+     * GPU, by the deformation; on the CPU, here), their bounds holding both; a teleport in the step snaps to its pose.
+     */
+    private void captureJoints() {
+        long tick = stepClock.tick();
+        var deformation = resources.pool().deformation();
+        boolean onGpu = interpolation.onGpu();
+        poseCount = 0;
+        for (int i = 0; i < dueCount; i++) {
+            int item = dueItems[i];
+            jointsDue[item] = false;
+            int copy = itemCopy[item];
+            if (copy == NONE || itemSlot[item] == NONE || !itemCopySkinned[item]) {
+                continue;
+            }
+            int b = BOX * item;
+            System.arraycopy(lastBox, b, fromBox, b, BOX); // the pose drawn till now: where the step's move starts
+            if (!jointsTracked[item]) {
+                trackJoints(item, copy, onGpu);
+            } else if (onGpu) {
+                deformation.step(copy);
+            } else {
+                float[] swap = fromValues[item];
+                fromValues[item] = toValues[item];
+                toValues[item] = swap;
+            }
+            poseItems[poseCount++] = item;
+        }
+        poseListed(); // the step's poses, their bounds holding the ones before too
+        for (int i = 0; i < poseCount; i++) {
+            int item = poseItems[i];
+            int copy = itemCopy[item];
+            int b = BOX * item;
+            if (!onGpu) {
+                deformation.read(copy, toValues[item]);
+            }
+            if (snapTick[item] == tick) { // teleported in the step: drawn at its pose, not blended towards it
+                if (onGpu) {
+                    deformation.snap(copy);
+                } else {
+                    System.arraycopy(toValues[item], 0, fromValues[item], 0, toValues[item].length);
+                }
+                System.arraycopy(lastBox, b, fromBox, b, BOX);
+                deformation.bounds(copy, lastBox[b], lastBox[b + 1], lastBox[b + 2], lastBox[b + 3], lastBox[b + 4],
+                    lastBox[b + 5], lastBox[b + 6]);
+            }
+            jointsTick[item] = tick;
+        }
+        dueCount = 0;
+    }
+
+    /** Draws {@code item}'s copy between steps from now on, starting from its pose drawn till now. */
+    @AllowAllocation("a skinned renderable's joints first moved in steps: room for its two poses")
+    private void trackJoints(int item, int copy, boolean onGpu) {
+        var deformation = resources.pool().deformation();
+        if (onGpu) {
+            deformation.blended(copy, true);
+        } else {
+            int n = deformation.valueCount(copy);
+            if (fromValues[item] == null || fromValues[item].length != n) {
+                fromValues[item] = new float[n];
+                toValues[item] = new float[n];
+            }
+            deformation.read(copy, fromValues[item]);
+        }
+        jointsTracked[item] = true;
+        jointsAt[item] = jointCount;
+        jointItems[jointCount++] = item;
+    }
+
+    /** Stops drawing {@code item}'s copy between steps: drawn as posed (its current pose, until posed again). */
+    private void untrackJoints(int item) {
+        int copy = itemCopy[item];
+        var deformation = resources.pool().deformation();
+        if (copy != NONE && deformation.blended(copy)) {
+            deformation.blended(copy, false);
+        }
+        int at = jointsAt[item];
+        int last = jointItems[--jointCount];
+        jointItems[at] = last;
+        jointsAt[last] = at;
+        jointsTracked[item] = false;
+    }
+
+    /** Each frame: each copy between steps blended by the clock's factor, on the GPU or here. */
+    private void blendJoints() {
+        double a = stepClock.blend();
+        if (interpolation.onGpu()) {
+            var deformation = resources.pool().deformation();
+            for (int i = 0; i < jointCount; i++) {
+                deformation.blend(itemCopy[jointItems[i]], a);
+            }
+            return;
+        }
+        jointFactor = a;
+        if (jobs != null && jointCount >= 4 * JOINT_GRAIN) {
+            jobs.parallelFor(jointCount, JOINT_GRAIN, writeJoints);
+        } else {
+            writeJoints(0, jointCount, 0);
+        }
+    }
+
+    /** Writes the blended poses of {@code jointItems[from]} to {@code jointItems[to - 1]}, on any thread. */
+    private void writeJoints(int from, int to, int worker) {
+        var deformation = resources.pool().deformation();
+        double a = jointFactor;
+        for (int i = from; i < to; i++) {
+            int item = jointItems[i];
+            deformation.blendInto(itemCopy[item], fromValues[item], toValues[item], a);
+        }
     }
 
     /**
@@ -1290,6 +1563,16 @@ public final class SceneSync implements AutoCloseable {
         steppedSince = false;
         captured = 0;
         long tick = stepClock.tick();
+        int j = 0;
+        while (j < jointCount) { // skinned copies whose joints the last step did not move stop, drawn as posed
+            int item = jointItems[j];
+            if (jointsTick[item] != tick) {
+                untrackJoints(item); // the last one moves into place j
+                poseDue[item] = true;
+            } else {
+                j++;
+            }
+        }
         InstanceMotion motion = gpu.motion();
         if (interpolation.onGpu()) {
             motion.beginStep(tick);
@@ -1407,6 +1690,11 @@ public final class SceneSync implements AutoCloseable {
 
     /** Every renderable moving between steps drawn where it is. */
     private void stopAll() {
+        while (jointCount > 0) {
+            int item = jointItems[jointCount - 1];
+            untrackJoints(item);
+            poseDue[item] = true;
+        }
         while (trackedCount > 0) {
             int item = tracked[trackedCount - 1];
             untrack(item);

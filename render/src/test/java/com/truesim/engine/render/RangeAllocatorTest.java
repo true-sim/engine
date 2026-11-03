@@ -76,4 +76,19 @@ class RangeAllocatorTest {
         assertThat(ranges.pieces()).isEqualTo(1);
         return starts;
     }
+
+    @Test
+    void theEndIsWhereTheLastRangeInUseEnds() {
+        RangeAllocator ranges = new RangeAllocator(100);
+        assertThat(ranges.end()).isZero();
+        long a = ranges.allocate(10, 1);
+        long b = ranges.allocate(20, 1);
+        assertThat(ranges.end()).isEqualTo(30);
+        ranges.release(a, 10);
+        assertThat(ranges.end()).as("a hole below stays").isEqualTo(30);
+        ranges.release(b, 20);
+        assertThat(ranges.end()).isZero();
+        ranges.allocate(100, 1);
+        assertThat(ranges.end()).as("full").isEqualTo(100);
+    }
 }

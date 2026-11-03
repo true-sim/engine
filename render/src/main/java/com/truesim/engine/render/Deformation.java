@@ -43,6 +43,10 @@ import java.util.Arrays;
  * the targets' deltas, uploaded once per mesh, are added to the rest vertices before skinning; a copy may have no
  * joints then. The box and growth count the morphs' moves as well.
  *
+ * <p>A copy moved in fixed steps may be drawn between two steps' poses ({@link #blended(int, boolean)}, decision A5):
+ * its previous step's matrices and weights are kept beside the current ones and the skinning blends them by the
+ * frame's factor ({@link #blend}), so frames without a step write nothing per joint on the CPU.
+ *
  * <p>A copy draws as its source until its first bounds; posed, it is skinned in the frames whose pose (joints, weights
  * or bounds) differs from the one it was last skinned with, and keeps its vertices in the others. Its meshlets' spheres are recomputed from the posed vertices, cone culling is off for it, and its
  * detail spheres grow by {@code growth}, the farthest any joint moves a point of its box. Allocates nothing per frame.
@@ -73,6 +77,11 @@ public final class Deformation {
     private boolean[] posed = new boolean[64];
     private boolean[] changed = new boolean[64]; // posed anew since its last skinning: skinned again
     private int[] skins = new int[64]; // how many times it was skinned: ray tracing refits it when this changes
+    // Copies blended between two steps' poses (A5): the previous step's matrices and weights (-1: none kept), whether
+    // it blends, and how far from the previous pose to the current one it is drawn.
+    private int[] previousMatrix = filled(64);
+    private boolean[] blended = new boolean[64];
+    private float[] factor = new float[64];
     // Morph targets by source mesh number, uploaded once while copies of it are added: their bytes' start in morphData
     // (offsets per vertex and one more, then the records) and how many copies use them. Ranges let go wait for the
     // frames that may read them.
@@ -89,6 +98,19 @@ public final class Deformation {
     private int[] copies = new int[64];
     private int copyCount;
     private int skinned; // in the frame recorded last
+    private long uploaded; // bytes of matrices and weights the frame recorded last copied for the GPU
+    // The matrices' version (counting frames that found them written) and the one each frame slot's copy holds: a slot
+    // holding the current one is not copied again (copies blended between steps skin anew each frame, from the same
+    // matrices until the next step).
+    private boolean written;
+    private long version;
+    private final long[] slotVersion;
+
+    private static int[] filled(int length) {
+        int[] array = new int[length];
+        Arrays.fill(array, -1);
+        return array;
+    }
 
     @AllowAllocation("made with its pool")
     Deformation(VulkanDevice device, GeometryPool pool, FrameSlots slots) {
@@ -96,6 +118,8 @@ public final class Deformation {
         this.pool = pool;
         this.slots = slots;
         this.retired = new Retiring(slots);
+        this.slotVersion = new long[slots.count()];
+        Arrays.fill(slotVersion, -1);
         this.matrixRanges = new RangeAllocator(256);
         this.matrices = arena.allocate(256L * MATRIX_FLOATS * 4, 16);
         this.morphRanges = new RangeAllocator(1 << 16);
@@ -140,17 +164,14 @@ public final class Deformation {
             posed = Arrays.copyOf(posed, length);
             changed = Arrays.copyOf(changed, length);
             skins = Arrays.copyOf(skins, length);
+            int old = previousMatrix.length;
+            previousMatrix = Arrays.copyOf(previousMatrix, length);
+            Arrays.fill(previousMatrix, old, length, -1);
+            blended = Arrays.copyOf(blended, length);
+            factor = Arrays.copyOf(factor, length);
         }
         int slotCount = Math.max(1, joints + (targets + MATRIX_FLOATS - 1) / MATRIX_FLOATS);
-        long first = matrixRanges.allocate(slotCount, 1);
-        if (first < 0) {
-            long capacity = Math.max(2 * matrixRanges.capacity(), matrixRanges.capacity() + slotCount);
-            MemorySegment grown = arena.allocate(capacity * MATRIX_FLOATS * 4, 16);
-            MemorySegment.copy(matrices, 0, grown, 0, matrices.byteSize());
-            matrices = grown; // the arena frees it with the rest
-            matrixRanges.grow(capacity);
-            first = matrixRanges.allocate(slotCount, 1);
-        }
+        long first = allocateSlots(slotCount);
         if (targets > 0) {
             holdMorphs(source, mesh);
         }
@@ -162,6 +183,7 @@ public final class Deformation {
         posed[copy] = false;
         skins[copy] = 0;
         matrices.asSlice(4L * MATRIX_FLOATS * first, 4L * MATRIX_FLOATS * slotCount).fill((byte) 0); // weights 0
+        written = true;
         if (copyCount == copies.length) {
             copies = Arrays.copyOf(copies, 2 * copyCount);
         }
@@ -169,6 +191,21 @@ public final class Deformation {
         for (int j = 0; j < joints; j++) { // at rest until posed
             joint(copy, j, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0);
         }
+    }
+
+    /** {@code slotCount} matrix slots, the matrices grown if they have not the room; the first's index. */
+    @AllowAllocation("adding a copy, or blending one")
+    private long allocateSlots(int slotCount) {
+        long first = matrixRanges.allocate(slotCount, 1);
+        if (first < 0) {
+            long capacity = Math.max(2 * matrixRanges.capacity(), matrixRanges.capacity() + slotCount);
+            MemorySegment grown = arena.allocate(capacity * MATRIX_FLOATS * 4, 16);
+            MemorySegment.copy(matrices, 0, grown, 0, matrices.byteSize());
+            matrices = grown; // the arena frees it with the rest
+            matrixRanges.grow(capacity);
+            first = matrixRanges.allocate(slotCount, 1);
+        }
+        return first;
     }
 
     /** Uploads {@code mesh}'s morph targets for copies of {@code source}, unless they are already. */
@@ -239,6 +276,11 @@ public final class Deformation {
             return; // added to the pool, never posed here
         }
         matrixRanges.release(firstMatrix[copy], matrixSlots[copy]);
+        if (previousMatrix[copy] >= 0) {
+            matrixRanges.release(previousMatrix[copy], matrixSlots[copy]);
+            previousMatrix[copy] = -1;
+        }
+        blended[copy] = false;
         if (targetCount[copy] > 0) {
             releaseMorphs(pool.deformedFrom(copy));
         }
@@ -257,6 +299,11 @@ public final class Deformation {
     /** How many copies the frame recorded last skinned: those whose pose changed. */
     public int skinnedLastFrame() {
         return skinned;
+    }
+
+    /** Bytes of joint matrices and morph weights the frame recorded last copied for the GPU (0: none skinned). */
+    public long bytesUploadedLastFrame() {
+        return uploaded;
     }
 
     /**
@@ -324,7 +371,120 @@ public final class Deformation {
         float f = (float) value;
         if (Float.floatToRawIntBits(matrices.get(F32, at)) != Float.floatToRawIntBits(f)) {
             matrices.set(F32, at, f);
-            changed[copy] = true;
+            // Read before written: copies are posed on many threads, and a flag every thread writes ping-pongs
+            if (!changed[copy]) {
+                changed[copy] = true;
+            }
+            if (!written) {
+                written = true;
+            }
+        }
+    }
+
+    /**
+     * Whether copy {@code copy} is drawn between two steps' poses (decision A5: joints moved in fixed steps), blended on
+     * the GPU: from now on {@link #joint} and {@link #weight} write the current step's pose, {@link #step} begins the
+     * next, and {@link #blend} says how far from the previous one to the current one each frame draws. Turned on, the
+     * previous pose is the current one (nothing moves until the next step); turned off, the current one is drawn and
+     * the previous one's room let go. The caller gives bounds holding both poses.
+     */
+    public void blended(int copy, boolean on) {
+        added(copy);
+        if (on == blended[copy]) {
+            return;
+        }
+        blended[copy] = on;
+        changed[copy] = true;
+        if (on) {
+            previousMatrix[copy] = (int) allocateSlots(matrixSlots[copy]);
+            snap(copy);
+            factor[copy] = 1;
+        } else { // the higher of its two rooms let go (steps swap them), so the matrices copied for the GPU end lower
+            if (firstMatrix[copy] > previousMatrix[copy]) {
+                MemorySegment.copy(matrices, 4L * MATRIX_FLOATS * firstMatrix[copy], matrices,
+                    4L * MATRIX_FLOATS * previousMatrix[copy], 4L * MATRIX_FLOATS * matrixSlots[copy]);
+                int lower = previousMatrix[copy];
+                previousMatrix[copy] = firstMatrix[copy];
+                firstMatrix[copy] = lower;
+                written = true;
+            }
+            matrixRanges.release(previousMatrix[copy], matrixSlots[copy]); // frames in flight read their own copies
+            previousMatrix[copy] = -1;
+        }
+    }
+
+    /** Whether copy {@code copy} is drawn between two steps' poses ({@link #blended(int, boolean)}). */
+    public boolean blended(int copy) {
+        return copy >= 0 && copy < added.length && added[copy] && blended[copy];
+    }
+
+    /**
+     * Copy {@code copy}, blended, begins a step's pose: its current pose becomes the previous one, and every joint and
+     * weight is to be written anew. Allocates nothing.
+     */
+    public void step(int copy) {
+        added(copy);
+        if (!blended[copy]) {
+            throw new IllegalStateException("Copy " + copy + " is not blended between steps");
+        }
+        int current = firstMatrix[copy];
+        firstMatrix[copy] = previousMatrix[copy];
+        previousMatrix[copy] = current;
+        changed[copy] = true;
+    }
+
+    /** Copy {@code copy}, blended, starts from its current pose (a teleport): the previous pose is set to it. */
+    public void snap(int copy) {
+        added(copy);
+        if (!blended[copy]) {
+            throw new IllegalStateException("Copy " + copy + " is not blended between steps");
+        }
+        long bytes = 4L * MATRIX_FLOATS * matrixSlots[copy];
+        MemorySegment.copy(matrices, 4L * MATRIX_FLOATS * firstMatrix[copy], matrices,
+            4L * MATRIX_FLOATS * previousMatrix[copy], bytes);
+        changed[copy] = true;
+        written = true;
+    }
+
+    /**
+     * How far from its previous step's pose to its current one copy {@code copy}, blended, is drawn this frame: 0 to 1
+     * (a clock's {@code blend()}). Skinned again when it changes. Allocates nothing.
+     */
+    public void blend(int copy, double amount) {
+        added(copy);
+        float f = (float) Math.max(0, Math.min(1, amount));
+        if (factor[copy] != f) {
+            factor[copy] = f;
+            changed[copy] |= blended[copy];
+        }
+    }
+
+    /** How many values copy {@code copy}'s pose has: 12 per joint (a 3x4 matrix's rows), then a weight per target. */
+    public int valueCount(int copy) {
+        added(copy);
+        return MATRIX_FLOATS * jointCount[copy] + targetCount[copy];
+    }
+
+    /** Copy {@code copy}'s current pose, {@link #valueCount} values, into {@code out}: as {@link #joint} wrote it. */
+    public void read(int copy, float[] out) {
+        long at = 4L * MATRIX_FLOATS * firstMatrix[copy];
+        int n = valueCount(copy);
+        for (int i = 0; i < n; i++) {
+            out[i] = matrices.get(F32, at + 4L * i);
+        }
+    }
+
+    /**
+     * Writes copy {@code copy}'s current pose as {@code a} of the way from {@code from} to {@code to} (poses as
+     * {@link #read} gives): two steps' poses blended on the CPU. Matrices blend linearly, so each vertex is drawn that
+     * part of the way between where the two poses put it. On any thread for different copies; allocates nothing.
+     */
+    public void blendInto(int copy, float[] from, float[] to, double a) {
+        long at = 4L * MATRIX_FLOATS * firstMatrix[copy];
+        int n = MATRIX_FLOATS * jointCount[copy] + targetCount[copy];
+        float k = (float) a;
+        for (int i = 0; i < n; i++) {
+            put(copy, at + 4L * i, from[i] + k * (to[i] - from[i]));
         }
     }
 
@@ -378,18 +538,30 @@ public final class Deformation {
             skinning += posed[copies[i]] && changed[copies[i]] ? 1 : 0;
         }
         skinned = skinning;
+        uploaded = 0;
         if (skinning == 0) {
             return; // every copy as last skinned: their vertices stay
         }
-        long bytes = 4L * MATRIX_FLOATS * matrixRanges.capacity();
-        if (frameMatrices == null || frameMatrices.size() < bytes) {
+        long room = 4L * MATRIX_FLOATS * matrixRanges.capacity();
+        long bytes = 4L * MATRIX_FLOATS * matrixRanges.end(); // up to the last copy's: the rest is not read
+        if (frameMatrices == null || frameMatrices.size() < room) {
             if (frameMatrices != null) {
                 retired.add(frameMatrices);
             }
-            frameMatrices = FrameBuffer.create(device, bytes,
+            frameMatrices = FrameBuffer.create(device, room,
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, slots);
+            Arrays.fill(slotVersion, -1);
         }
-        frameMatrices.put(0, matrices, 0, bytes);
+        if (written) {
+            version++;
+            written = false;
+        }
+        int slot = slots.current();
+        if (slotVersion[slot] != version) { // else this slot's copy is the current one: skinned anew from it
+            frameMatrices.put(0, matrices, 0, bytes);
+            slotVersion[slot] = version;
+            uploaded = bytes;
+        }
         long matrixBase = frameMatrices.deviceAddress();
         var commands = ctx.unsafe().commands();
         // Frames before read the mesh table, positions and records this overwrites
@@ -432,6 +604,8 @@ public final class Deformation {
         int source = pool.deformedFrom(copy);
         push.morph(targetCount[copy] > 0 ? morphData.deviceAddress() + morphStart[source] : 0)
             .joints(jointCount[copy]).targets(targetCount[copy]);
+        push.previous(matrixBase + 4L * MATRIX_FLOATS * (blended[copy] ? previousMatrix[copy] : firstMatrix[copy]))
+            .blend(blended[copy] ? factor[copy] : -1);
         return push.matrices(matrixBase + 4L * MATRIX_FLOATS * firstMatrix[copy]).source(source)
             .target(copy).growth(bounds[b + 6]).boxMin(bounds[b], bounds[b + 1], bounds[b + 2])
             .boxExtent(bounds[b + 3], bounds[b + 4], bounds[b + 5]);

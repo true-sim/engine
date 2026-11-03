@@ -218,6 +218,9 @@ clock; `Step`, with
 `Animators` in `ANIMATE`, parallel sampling, ordered writes and events, world transforms updated before `LATE`; a world
 on a clock animates by its drawn time, A5), and D91 (below): `SceneSync.follow(clock)`, `interpolation(...)`,
 `teleport`, `interpolated(node, false)`; engine-render: `InstanceMotion`, `Interpolation`, `RenderSettings.INTERPOLATION`.
+A5's opt-in (2026-11-03, scene's `Animator.fixedSteps(true)`, `Animators.step`): the `Animation` plugin steps a world's
+animators on fixed steps in `FIXED` (`Plugin.fixedUpdate`, after the game's, by the step's length), and their skinned
+joints are drawn between steps like other nodes moved in `FIXED` (D91, below: `Deformation.blended`, `blend`, `step`).
 Not yet: pausing a world (D128), behaviours and game systems, BaseGame's `fixedUpdate` hook. Two gaps that need scene:
 D123's "change logging once per frame" (`SceneGraph` has no update that propagates without logging; each step's
 `scene.update()` logs, which is also how the sync finds what a step moved: the log grows rather than drop changes, so a
@@ -242,6 +245,44 @@ ground included, in its parallel part, and documents `Ground` as thread-safe).
   (`SceneResources.settings`), switched at its next update (set by hand on a sync, the setting no longer applies to
   it); motion vectors not yet read from it. Settings: `render.interpolation` (above); the animation plugin's
   `animation.threads` (0: every processor; read when its first world is made).
+  **Skinned joints moved in steps** (animators on fixed steps, animation.md A5; built 2026-11-03): joints are scene
+  nodes but not instances, and the deformation pass reads joint matrices, not instance poses, so D91's instance path
+  cannot carry them; the sync follows them the same way instead. After a step it poses the skinned copies whose joints
+  (or their ancestors below the mesh's node) the step moved, on its job system, keeping the step before's matrices; each
+  frame draws them `clock.blend()` of the way, the 3x4 skinning matrices (and morph weights) blended linearly, so every
+  vertex lies that part of the way between where the two poses put it (exact for a test reading the posed vertices back;
+  a joint turning 360° a second at 60 steps shrinks a vertex's offset by at most 0.14 % mid-step, against blending joint
+  rotations, which would cost a pose per frame); the bounds hold both poses. `render.interpolation` chooses where:
+  `GPU`/`GPU_PRECISE` keep both steps' matrices in the deformation's buffer (the previous step's room taken while a copy
+  blends, the steps swapping the two) and the skinning blends them by a per-copy factor in its push constants;
+  `CPU` keeps both poses in the sync and writes the blend into the copy's matrices each frame (on its job system);
+  `OFF` draws each step's pose. `teleport(node)` of a skinned node in the step snaps its joints to the step's pose;
+  `interpolated(node, false)` opts its joints out too; joints moved outside the steps (a late update's override) stop
+  blending until their next step; a copy whose joints a step left alone is drawn as posed. With the animator's
+  `updateEvery(n)`, it samples every nth step and its joints blend across the step that moved them and hold between,
+  as a frame-rate animator holds between turns (blending over all n steps would draw them n − 1 steps late).
+  **Measured** (`SkinnedCrowdBenchmark`, engine-scene: 1,000 characters of 24 joints and 1,728 vertices, each its own
+  animator bending every joint, 32 sampling threads, 1920 x 1080, 60 steps and 144 frames a second of simulated time,
+  RX 9070 XT and Ryzen 9 9950X3D; medians over three rounds of each run in turn; "phases" is `engine.stepAt`: the
+  steps, with their animators and the joints' capture, and `ANIMATE`):
+
+  | | phases, frame with a step | sync | phases + sync, frame without | matrices uploaded a frame | GPU deformation |
+  |---|---|---|---|---|---|
+  | animated every frame | 2.0–2.1 ms | 0.37–0.41 ms | 2.4 ms | 1.15 MB every frame | 0.49 ms every frame |
+  | fixed steps, GPU blend | 2.4–3.1 ms | 0.20–0.23 ms | 0.01–0.025 ms | 2.30 MB, 1.92 MB on average | 0.49–0.51 ms every frame |
+  | fixed steps, CPU blend | 2.4–2.8 ms | 0.27–0.30 ms | 0.09–0.13 ms | 1.15 MB every frame | 0.49–0.51 ms every frame |
+  | fixed steps, OFF | 1.8–2.4 ms | 0.35–0.45 ms | 0.01 ms | 1.15 MB with a step only | 0.49 ms with a step only |
+
+  0 bytes allocated per frame (median) in every run. Per second the main thread spends about 350 ms animating every
+  frame, 175 ms on fixed steps blended on the GPU, 180 ms blended on the CPU and 150 ms drawn as stepped; it uploads
+  166, 276, 166 and 69 MB of joint matrices. The blend costs the GPU nothing measurable (the deformation pass takes
+  0.49 ms in every run), the GPU path 48 bytes of GPU-visible memory more per joint of a blending copy. A frame with a
+  step costs 0.2–0.9 ms more than a frame animating every frame (the step's capture visits its changes once more), every
+  other frame next to nothing. **Verdict:** the GPU blend holds as the default (least CPU; 1.7 times the matrix bytes),
+  the CPU blend stays the `render.interpolation` choice it is for instances; no setting of their own. Built along the
+  way: the sync poses copies on its job system (the frame-rate crowd's sync went from 2.4 to 0.4 ms); the deformation
+  copies its matrices up to the last copy's (`RangeAllocator.end`), not its whole room, and not again into a frame slot
+  that holds them already; a flag written by every posing thread cost 3.2 ms (docs/pitfalls.md).
 - **D92** (revised) Frame delta capped (0.25 s); one budget of fixed steps per frame shared by all worlds, in a fixed
   world order; when it is hit, the remaining accumulated time is discarded. Accumulation is in whole ticks, not
   floating-point seconds. Caps are reported. Settings (built): `app.maxFrameDelta` (0.25 s, 0.05 to 1) and
