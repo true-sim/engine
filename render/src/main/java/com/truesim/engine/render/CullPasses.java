@@ -28,10 +28,13 @@ import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.ExternalBuffer;
 import com.truesim.engine.graph.GraphBuilder;
+import com.truesim.engine.render.layout.BlendedSortPush;
 import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.CullPush;
 import com.truesim.engine.render.layout.ExpandPush;
 import com.truesim.engine.render.layout.InstancePush;
+import com.truesim.engine.render.layout.ParticleConstants;
+import com.truesim.engine.render.layout.ParticleSortPush;
 import com.truesim.engine.render.layout.SplitPush;
 import com.truesim.engine.render.layout.ViewLayout;
 import com.truesim.engine.vulkan.Barriers;
@@ -91,6 +94,17 @@ final class CullPasses implements AutoCloseable {
     private final Pipeline splitLayout;
     private final Pipeline splitScatter;
     private final Pipeline[] splitStages; // the three in order, never written
+    // Sorting a view's split bin by distance (meshlets/sort.slang), with the particles' radix sort (count, scan,
+    // scatter: particles/sort.slang).
+    private final Pipeline sortArgs;
+    private final Pipeline sortKeys;
+    private final Pipeline sortBlocks;
+    private final Pipeline sortScan;
+    private final Pipeline sortPlace;
+    private final Pipeline sortEntries;
+    private final Pipeline radixCount;
+    private final Pipeline radixScan;
+    private final Pipeline radixScatter;
     private int maxChunks;
     private GpuBuffer chunks; // grown as frames want more (grow)
     private final GpuBuffer chunkCommand;
@@ -121,6 +135,18 @@ final class CullPasses implements AutoCloseable {
             splitCount = Pipeline.compute(device, splitShader, "splitCountMain", SplitPush.BYTES);
             splitLayout = Pipeline.compute(device, splitShader, "splitLayoutMain", SplitPush.BYTES);
             splitScatter = Pipeline.compute(device, splitShader, "splitScatterMain", SplitPush.BYTES);
+        }
+        try (ShaderModule sortShader = ShaderModule.load(device, "shaders/meshlets/sort.spv");
+             ShaderModule radixShader = ShaderModule.load(device, "shaders/particles/sort.spv")) {
+            sortArgs = Pipeline.compute(device, sortShader, "sortArgsMain", BlendedSortPush.BYTES);
+            sortKeys = Pipeline.compute(device, sortShader, "sortKeysMain", BlendedSortPush.BYTES);
+            sortBlocks = Pipeline.compute(device, sortShader, "sortBlocksMain", BlendedSortPush.BYTES);
+            sortScan = Pipeline.compute(device, sortShader, "sortScanMain", BlendedSortPush.BYTES);
+            sortPlace = Pipeline.compute(device, sortShader, "sortPlaceMain", BlendedSortPush.BYTES);
+            sortEntries = Pipeline.compute(device, sortShader, "sortEntriesMain", BlendedSortPush.BYTES);
+            radixCount = Pipeline.compute(device, radixShader, "sortCountMain", ParticleSortPush.BYTES);
+            radixScan = Pipeline.compute(device, radixShader, "sortScanMain", ParticleSortPush.BYTES);
+            radixScatter = Pipeline.compute(device, radixShader, "sortScatterMain", ParticleSortPush.BYTES);
         }
         splitStages = new Pipeline[] {splitCount, splitLayout, splitScatter};
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
@@ -292,6 +318,7 @@ final class CullPasses implements AutoCloseable {
             Commands.dispatchIndirect(commands, chunkCommand.handle(), 0);
         }
         split(commands, views, early, count, meshShading);
+        sort(commands, views, early, count, meshShading);
         if (meshShading) { // the lists and their dispatches feed the mesh shaders
             if (!ordered) {
                 Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
@@ -358,6 +385,128 @@ final class CullPasses implements AutoCloseable {
                     Commands.dispatch(commands, groups, BINS, 1);
                 }
             }
+        }
+    }
+
+    /**
+     * Sorts the blended bins of the views that ask for it ({@link RenderView#sortBlended}) farthest first in runs, after
+     * the split and before the expansion, in the phase drawing them: the late one, or the only one.
+     */
+    private void sort(VkCommandBuffer commands, RenderView[] views, boolean[] early, int count, boolean meshShading) {
+        for (int i = 0; i < count; i++) {
+            RenderView v = views[i];
+            if (v.splitCategories() > 0 && v.sortSlots() > 0 && (early == null || !early[i])) {
+                sortBin(commands, v, MeshletRenderer.BIN_BLENDED, early == null, meshShading);
+            }
+        }
+    }
+
+    /** One sort of view {@code v}'s raster bin {@code bin} (meshlets/sort.slang), its dispatches each after the last. */
+    private void sortBin(VkCommandBuffer commands, RenderView v, int bin, boolean late, boolean meshShading) {
+        long base = v.sort().deviceAddress();
+        long handle = v.sort().handle();
+        long keys = base + v.sortOffset(0);
+        long other = base + v.sortOffset(1);
+        long argsOffset = v.sortOffset(3);
+        long args = base + argsOffset;
+        int[] drawn = v.sortDrawn();
+        try (MemoryStack stack = stackPush()) {
+            long table = stack.nmalloc(4, 4 * Math.max(1, drawn.length)); // the drawn shading bins' numbers
+            memPutInt(table, -1);
+            for (int b = 0; b < drawn.length; b++) {
+                memPutInt(table + 4L * b, drawn[b]);
+            }
+            Commands.updateBuffer(commands, handle, v.sortOffset(6), 4L * Math.max(1, drawn.length), table);
+            Barriers.memory(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                    | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT
+                    | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+                    | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+            long push = stack.ncalloc(8, 1, BlendedSortPush.BYTES);
+            memPutLong(push + BlendedSortPush.VIEW, v.address());
+            memPutLong(push + BlendedSortPush.SCENE, scene.tableAddress());
+            memPutLong(push + BlendedSortPush.VISIBLE, v.visible().deviceAddress());
+            memPutLong(push + BlendedSortPush.VISIBLE_COUNT, v.drawCount().deviceAddress());
+            memPutLong(push + BlendedSortPush.TYPED, v.split().deviceAddress());
+            memPutLong(push + BlendedSortPush.KEYS, keys);
+            memPutLong(push + BlendedSortPush.ARGS, args);
+            memPutLong(push + BlendedSortPush.BLOCKS, base + v.sortOffset(4));
+            memPutLong(push + BlendedSortPush.RUNS, base + v.sortOffset(5));
+            memPutLong(push + BlendedSortPush.DRAWN_BINS, base + v.sortOffset(6));
+            memPutInt(push + BlendedSortPush.BIN, bin);
+            memPutInt(push + BlendedSortPush.LATE, late ? 1 : 0);
+            memPutInt(push + BlendedSortPush.CATEGORIES, v.sortCategories());
+            memPutInt(push + BlendedSortPush.TABLE_BINS, drawn.length);
+            memPutInt(push + BlendedSortPush.ROOM, v.splitCategories());
+            memPutInt(push + BlendedSortPush.SLOTS, Math.max(1, v.sortSlots()));
+            memPutInt(push + BlendedSortPush.INDEXED, meshShading ? 0 : 1);
+            memPutInt(push + BlendedSortPush.GROUP, ParticleConstants.SORT_GROUP);
+            long radix = stack.ncalloc(8, 1, ParticleSortPush.BYTES);
+            memPutLong(radix + ParticleSortPush.HISTOGRAM, base + v.sortOffset(2));
+            sortStep(commands, sortArgs, push, -1, 0);
+            sortStep(commands, sortKeys, push, handle, argsOffset + 16);
+            // Over the distance's 24 bits, then (where the runs need it) the shading bin's 8:
+            // an even number of passes each, the result back in the first buffer
+            radix(commands, radix, handle, argsOffset, args, keys, other, 0, 6);
+            sortStep(commands, sortBlocks, push, handle, argsOffset + 48);
+            sortStep(commands, sortScan, push, -1, 0);
+            radix(commands, radix, handle, argsOffset + 32, args + 32, keys, other, 6, 2);
+            memPutInt(push + BlendedSortPush.FINAL, 1);
+            sortStep(commands, sortBlocks, push, handle, argsOffset + 48);
+            sortStep(commands, sortScan, push, -1, 0);
+            sortStep(commands, sortPlace, push, handle, argsOffset + 48);
+            sortStep(commands, sortEntries, push, -1, 0);
+            // The split lists feed the expansion, the draws and their commands
+            sortBarrier(commands);
+        }
+    }
+
+    /**
+     * A dispatch of {@code pipeline} with the push block at {@code push}: one group without {@code handle} (-1), else
+     * indirect from {@code offset} of buffer {@code handle}; after a barrier on what dispatches before wrote.
+     */
+    private static void sortStep(VkCommandBuffer commands, Pipeline pipeline, long push, long handle, long offset) {
+        sortBarrier(commands);
+        pipeline.bind(commands);
+        pipeline.push(commands, push, BlendedSortPush.BYTES);
+        if (handle == -1) {
+            Commands.dispatch(commands, 1, 1, 1);
+        } else {
+            Commands.dispatchIndirect(commands, handle, offset);
+        }
+    }
+
+    private static void sortBarrier(VkCommandBuffer commands) {
+        Barriers.memory(commands, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
+                | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+    }
+
+    /**
+     * {@code passes} passes of the particles' radix sort from digit {@code first} over the keys at {@code keys} (and
+     * {@code other}), its dispatch and key count at {@code argsOffset} of buffer {@code handle} ({@code args}).
+     */
+    private void radix(VkCommandBuffer commands, long push, long handle, long argsOffset, long args, long keys,
+        long other, int first, int passes) {
+        memPutLong(push + ParticleSortPush.ARGS, args);
+        for (int pass = first; pass < first + passes; pass++) {
+            boolean even = (pass - first) % 2 == 0;
+            memPutLong(push + ParticleSortPush.SOURCE, even ? keys : other);
+            memPutLong(push + ParticleSortPush.TARGET, even ? other : keys);
+            memPutInt(push + ParticleSortPush.SHIFT, 4 * pass);
+            sortBarrier(commands);
+            radixCount.bind(commands);
+            radixCount.push(commands, push, ParticleSortPush.BYTES);
+            Commands.dispatchIndirect(commands, handle, argsOffset);
+            sortBarrier(commands);
+            radixScan.bind(commands);
+            radixScan.push(commands, push, ParticleSortPush.BYTES);
+            Commands.dispatch(commands, 1, 1, 1);
+            sortBarrier(commands);
+            radixScatter.bind(commands);
+            radixScatter.push(commands, push, ParticleSortPush.BYTES);
+            Commands.dispatchIndirect(commands, handle, argsOffset);
         }
     }
 
@@ -439,6 +588,10 @@ final class CullPasses implements AutoCloseable {
             splitCount.close();
             splitLayout.close();
             splitScatter.close();
+            for (Pipeline pipeline : new Pipeline[] {sortArgs, sortKeys, sortBlocks, sortScan, sortPlace, sortEntries,
+                radixCount, radixScan, radixScatter}) {
+                pipeline.close();
+            }
             chunks.close();
             chunkCommand.close();
         }

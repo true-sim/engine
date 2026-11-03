@@ -44,7 +44,7 @@ import com.truesim.engine.render.RenderSettings;
 import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.VisibilityBufferShading;
-import com.truesim.engine.render.WeightedBlendedTransparency;
+import com.truesim.engine.render.ChosenTransparency;
 import com.truesim.engine.render.shadows.CascadedShadowMaps;
 import com.truesim.engine.scene.Animation;
 import com.truesim.engine.settings.EngineSettings;
@@ -289,7 +289,7 @@ public final class Demo implements Application, PlatformListener {
             CASCADES, 150);
         cascades.add(sun);
         port.add(shading(view)).add(new ClusteredLights(world.lights(), view)).add(sun)
-            .add(new WeightedBlendedTransparency(world.geometry(), view));
+            .add(new ChosenTransparency(world.geometry(), view));
         shaded.add(view);
         return view;
     }
@@ -298,7 +298,7 @@ public final class Demo implements Application, PlatformListener {
     private SceneView eyeView(ViewPort port, Camera through, Technique sun) {
         SceneView view = world.geometry().createView(port, through, CAMERA).set(1, MeshletRenderer.MODE_LIT);
         port.add(shading(view)).add(new ClusteredLights(world.lights(), view)).add(sun)
-            .add(new WeightedBlendedTransparency(world.geometry(), view));
+            .add(new ChosenTransparency(world.geometry(), view));
         shaded.add(view);
         return view;
     }

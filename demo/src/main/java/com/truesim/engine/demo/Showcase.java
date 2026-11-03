@@ -21,7 +21,7 @@ import com.truesim.engine.render.Keys;
 import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ViewOptions;
-import com.truesim.engine.render.WeightedBlendedTransparency;
+import com.truesim.engine.render.ChosenTransparency;
 import com.truesim.engine.render.particles.ParticleDraw;
 import com.truesim.engine.render.shadows.CascadedShadowMaps;
 import com.truesim.engine.vulkan.Format;
@@ -108,7 +108,7 @@ public final class Showcase {
                 : new ParticleDraw(effects.particles(), view, head))
             .add(cascades);
         if (ShowcaseEffects.GLASS > 0) { // windows: blended glass, and the fires drawn before it
-            port.add(new WeightedBlendedTransparency(world.geometry(), view))
+            port.add(new ChosenTransparency(world.geometry(), view))
                 .add(ParticleDraw.beforeGlass(effects.particles(), view, head));
         }
         return cascades;

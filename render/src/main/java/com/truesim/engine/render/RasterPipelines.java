@@ -164,19 +164,21 @@ final class RasterPipelines implements AutoCloseable {
 
     /**
      * What a pipeline drawing raster bin {@code bin} of a shading bin of {@code type} with {@code features} into color
-     * (or with {@code weighted}, the blended bin into weighted transparency's targets) is made of: the type's forward
-     * entry point behind the geometry stage reading the split list, on mesh shaders or the indexed path.
+     * into {@code target} (the blended bin also {@link ShadingPipelines#WEIGHTED}, weighted transparency's targets, or
+     * {@link ShadingPipelines#OVER}, over the scene's color) is made of: the type's forward entry point behind the
+     * geometry stage reading the split list, on mesh shaders or the indexed path.
      */
     @AllowAllocation("building the graph, when it changes")
-    ShadingPipelines.Key forwardKey(MaterialType type, int features, int bin, boolean meshShading, boolean weighted) {
+    ShadingPipelines.Key forwardKey(MaterialType type, int features, int bin, boolean meshShading, int target) {
         boolean lean = meshShading && slimMeshes;
+        boolean weighted = target == ShadingPipelines.WEIGHTED;
         String suffix = weighted ? "BlendedMain" : masking(bin) ? "MaskedMain" : lean ? "Main" : "FragmentMain";
         return new ShadingPipelines.Key(!meshShading ? "shaders/meshlets/draw.spv" : lean
             ? "shaders/meshlets/lean.spv" : "shaders/meshlets/mesh.spv",
             !meshShading ? "vertexMain" : lean ? "meshLeanTypedMain" : "meshIdsTypedMain", meshShading,
             lean ? type.forwardLeanShader() : type.forwardShader(), type.name() + (lean ? "Lean" : "") + suffix,
             features, type.geometry(), bin == BIN_OPAQUE ? ShadingPipelines.CULL_BACK : ShadingPipelines.DOUBLE_SIDED,
-            weighted ? ShadingPipelines.WEIGHTED : ShadingPipelines.COLOR, DRAW_PUSH);
+            target, DRAW_PUSH);
     }
 
     /**
@@ -191,6 +193,7 @@ final class RasterPipelines implements AutoCloseable {
         // Per path (0: indexed, 1: mesh shaders): per shading bin * BINS + raster bin; null where none draws or not yet
         private final Pipeline[][] shaded = new Pipeline[2][];
         private final Pipeline[][] weighted = new Pipeline[2][];
+        private final Pipeline[][] over = new Pipeline[2][];
 
         @AllowAllocation("building the graph, when it changes")
         private Typed(Materials materials, boolean meshShading) {
@@ -216,19 +219,23 @@ final class RasterPipelines implements AutoCloseable {
         private void make(int path) {
             Pipeline[] s = new Pipeline[types.length * BINS];
             Pipeline[] w = new Pipeline[types.length];
+            Pipeline[] o = new Pipeline[types.length];
             for (int category = 0; category < types.length; category++) {
                 for (int bin = 0; bin < BINS; bin++) {
                     if ((rasters[category] & 1 << bin) != 0) {
                         s[category * BINS + bin] = store.get(forwardKey(types[category], features[category], bin,
-                            path == 1, false));
+                            path == 1, ShadingPipelines.COLOR));
                         if (bin == BIN_BLENDED) {
                             w[category] = store.get(forwardKey(types[category], features[category], bin, path == 1,
-                                true));
+                                ShadingPipelines.WEIGHTED));
+                            o[category] = store.get(forwardKey(types[category], features[category], bin, path == 1,
+                                ShadingPipelines.OVER));
                         }
                     }
                 }
             }
             weighted[path] = w;
+            over[path] = o;
             shaded[path] = s;
         }
 
@@ -239,6 +246,26 @@ final class RasterPipelines implements AutoCloseable {
                 make(path);
             }
             return shaded[path][category * BINS + bin];
+        }
+
+        /** Shading bin {@code category}'s pipeline blending over the scene's color; null where none draws blended. */
+        Pipeline over(boolean meshShading, int category) {
+            int path = meshShading ? 1 : 0;
+            if (over[path] == null) {
+                make(path);
+            }
+            return over[path][category];
+        }
+
+        /** The shading bins drawing blended, numbered among themselves (-1: none), as sorts number them. */
+        @AllowAllocation("building the graph, when it changes")
+        int[] blendedNumbers() {
+            int[] numbers = new int[types.length];
+            int next = 0;
+            for (int category = 0; category < types.length; category++) {
+                numbers[category] = (rasters[category] & 1 << BIN_BLENDED) != 0 ? next++ : -1;
+            }
+            return numbers;
         }
 
         /** Shading bin {@code category}'s weighted blended pipeline on the path; null where it draws nothing blended. */
@@ -402,10 +429,36 @@ final class RasterPipelines implements AutoCloseable {
             if (!meshShading) {
                 Commands.bindIndexBuffer(commands, v.frameIndices().handle(), 0, VK_INDEX_TYPE_UINT32);
             }
+            if (kind == BlendedTargets.Kind.SORTED && v.sortSlots() > 0) {
+                drawRuns(commands, v, meshShading, push, room, pipelines);
+                return;
+            }
             for (int category = 0; category < pipelines.categories(); category++) {
                 drawTyped(commands, v, meshShading, push, BIN_BLENDED, category, room,
                     weighted ? pipelines.weighted(meshShading, category)
+                        : kind == BlendedTargets.Kind.SORTED ? pipelines.over(meshShading, category)
                         : pipelines.shaded(meshShading, category, BIN_BLENDED));
+            }
+        }
+    }
+
+    /**
+     * The blended bin sorted farthest first by culling ({@link RenderView#sortBlended}): run slot by run slot, the
+     * entry of each drawn shading bin (one of them holds the slot's run, the others nothing), each drawn over the
+     * scene's color with its pipeline, so the meshlets blend back to front across shading bins.
+     */
+    private static void drawRuns(VkCommandBuffer commands, RenderView v, boolean meshShading, long push, int room,
+        Typed pipelines) {
+        int slots = v.sortSlots();
+        int drawn = v.sortCategories();
+        int[] numbers = v.sortDrawn();
+        for (int slot = 0; slot < slots; slot++) {
+            for (int category = 0; category < Math.min(numbers.length, pipelines.categories()); category++) {
+                int number = numbers[category];
+                if (number >= 0) {
+                    drawTyped(commands, v, meshShading, push, BIN_BLENDED, slot * drawn + number, room,
+                        pipelines.over(meshShading, category));
+                }
             }
         }
     }

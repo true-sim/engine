@@ -725,7 +725,8 @@ color:
 - **Forward, meshlets** (indexed and mesh shaders): after culling, a view drawn shaded has its lists split by shading
   bin (`meshlets/split.slang`: count, lay out, scatter, three small dispatches per cull): each (raster bin, shading
   bin) draws with one indirect draw from its part, and on the indexed path the expansion writes each part's indices in
-  a range of its own. The blended bin draws the same way, into weighted transparency's targets or as opaque.
+  a range of its own. The blended bin draws the same way, into weighted transparency's targets, as opaque, or sorted
+  back to front over the scene ([Transparency](#transparency)).
 - **The visibility buffer**: opaque pixels are shaded per type by its compute passes; its blended bin, drawn after the
   IDs, splits the view's blended list alone (the opaque bins keep their lists for the shared ID pipelines) and draws by
   type like forward.
@@ -862,6 +863,80 @@ dropped out of the device list. Both times the first loss came in a test drawing
 (faults at 0x2000000000 and at 0x0). One run each; no run of the code before this change on the same driver state.
 
 Next (#46): light binning, shadows per light, buckets, transparency and post effects as swappable techniques.
+
+### Transparency
+
+Blended materials (`Material.alphaBlend`, glTF's `BLEND`) and transmissive ones are drawn over a view's opaque scene by
+the view's transparency technique (`Transparency.ID`, one per view, at `Anchor.TRANSPARENT`). Two are correct and trade
+off, and `render.transparency` (`Transparency.MODE`, read by `ChosenTransparency`) picks one, the graph rebuilding when
+it changes:
+
+```java
+view.port().add(new ChosenTransparency(geometry, view));                // render.transparency: SORTED by default
+graph.settings().set(Transparency.MODE, Transparency.Mode.WEIGHTED);    // or SortedTransparency, ... directly
+```
+
+- **`SORTED`** (`SortedTransparency`, the default): blended meshlets sorted back to front on the GPU and blended over
+  the scene's color ("over", by alpha), testing the opaque depth. Exact for surfaces apart: red glass in front of blue
+  reads differently from blue in front of red, a nearly opaque layer hides what is behind it, and the far wall of a
+  glass bowl draws before its near wall (CompareTransmission's bowl, doubled under weighted blending, is clean). After
+  the culling's split (and before the indexed path's expansion, which then writes indices in the sorted order),
+  `meshlets/sort.slang` keys each blended meshlet by the squared distance of its bounding sphere's center from the eye
+  (24 bits, farthest first) and sorts with the particles' radix sort (`particles/sort.slang`, 6 passes); the sorted
+  list is cut into runs of one shading bin, and each run is a (run slot, shading bin) entry of the split lists'
+  header, drawn by its type's pipeline, so the order holds across material types. `render.transparency.runs`
+  (`Transparency.SORTED_RUNS`, 16) run slots are drawn, each an indirect draw per shading bin drawing blended; a view
+  with more runs (shading bins interleaving in depth) has its meshlets ordered by shading bin first (two more radix
+  passes), each shading bin's back to front. Per view: each eye of a headset, each window sorts from its own eye.
+  Forward and visibility buffer views, both meshlet paths. Classic LOD sorts each instance's draws by its mesh's
+  bounding sphere within each shading bin (and mirrored or not), the shading bins one after another.
+  Approximate where surfaces intersect, or where one meshlet's center misorders it against another overlapping it
+  (a large meshlet across a small one): the order is per meshlet, not per pixel.
+- **`WEIGHTED`** (`WeightedBlendedTransparency`): weighted blended order-independent transparency (McGuire and Bavoil),
+  one pass into two targets and a resolve, no sort. Cheap for masses of thin layers of similar color; the same image
+  whatever the order (red over blue reads as blue over red: `SortedTransparencyTest` measures it 46 of 255 off the
+  exact composite of two layers of alpha 0.6).
+- **`OPAQUE`** (`OpaqueTransparency`): drawn as opaque, into the color and depth.
+
+Transmissive surfaces sample the opaque scene behind them (`SceneBehind`, copied before transparency), refracted; under
+`SORTED` a transmissive layer covers the blended ones behind it as far as it is opaque. Particles (`ParticleDraw`) are
+drawn after the blended surfaces, emitter by emitter back to front, or before glass (`ParticleDraw.beforeGlass`), not
+interleaved with them: emitters as entries of the meshlet sort would need their pipelines in its runs.
+
+What it costs (`TransparencyBenchmark`, RX 9070 XT, 2026-11-03, 1920 x 1080, 5,000 rocks on the terrain and glass
+panes of 2 triangles each, double-sided, alpha 0.3; 4 rounds after a warm-up round, ranges of the rounds' medians;
+culling includes the sort; with 100,000 panes 82,212 are in view):
+
+| Path | Panes | Way | Frame (GPU) | Culling (+ sort) | Blended draw | Resolve | Recording (CPU) |
+|---|---|---|---|---|---|---|---|
+| mesh shaders | 100 | weighted | 0.496-0.500 ms | 0.103-0.107 ms | 0.012 ms | 0.006 ms | 0.027-0.032 ms |
+| mesh shaders | 100 | sorted | 0.534-0.574 ms | 0.145-0.157 ms | 0.017-0.018 ms | - | 0.054-0.064 ms |
+| mesh shaders | 10,000 | weighted | 0.693-0.830 ms | 0.116-0.136 ms | 0.183-0.231 ms | 0.016-0.017 ms | 0.027-0.040 ms |
+| mesh shaders | 10,000 | sorted | 0.718-0.981 ms | 0.169-0.208 ms | 0.185-0.246 ms | - | 0.054-0.055 ms |
+| mesh shaders | 100,000 | weighted | 2.837-2.871 ms | 0.271-0.274 ms | 2.060-2.078 ms | 0.035 ms | 0.027-0.028 ms |
+| mesh shaders | 100,000 | sorted | 2.689-2.704 ms | 0.328-0.331 ms | 1.905-1.923 ms | - | 0.054-0.059 ms |
+| indexed | 100 | weighted | 0.387-0.389 ms | 0.131 ms | 0.011-0.012 ms | 0.006 ms | 0.030-0.031 ms |
+| indexed | 100 | sorted | 0.421-0.429 ms | 0.178-0.192 ms | 0.008 ms | - | 0.056-0.058 ms |
+| indexed | 10,000 | weighted | 0.586-0.641 ms | 0.167-0.174 ms | 0.155-0.165 ms | 0.018 ms | 0.030-0.039 ms |
+| indexed | 10,000 | sorted | 0.643-0.683 ms | 0.231-0.244 ms | 0.146-0.157 ms | - | 0.056-0.057 ms |
+| indexed | 100,000 | weighted | 2.207-2.248 ms | 0.397-0.399 ms | 1.457-1.464 ms | 0.018 ms | 0.030-0.033 ms |
+| indexed | 100,000 | sorted | 2.054-2.062 ms | 0.440-0.463 ms | 1.241-1.300 ms | - | 0.056-0.059 ms |
+
+The sort costs 0.04-0.07 ms of GPU time at every count (32 dispatches, most of them short); drawing sorted, into the
+scene's color alone, costs no more than into weighted blending's two targets, and less with many panes, with no
+resolve. Panes of two shading bins interleaving in depth (more runs than slots: ordered by shading bin first) cost
+up to 0.10 ms more (frames with 100, 10,000 and 100,000 panes: mesh shaders 0.538-0.619, 0.764-0.974 and 2.680-2.689 ms; indexed
+0.444-0.484, 0.665-0.738 and 2.149-2.155 ms). Recording takes 0.03 ms more of CPU time. Hence sorted by default; weighted stays for masses of
+layers where its order-independence is wanted.
+
+**Opaque draws front to back: measured, not kept.** Sorting a forward view's opaque split lists nearest first within
+each shading bin (the same sort, every occlusion phase) against drawing them as culled, two-phase occlusion culling on,
+`TransparencyBenchmark`'s scene with rocks only (2026-11-03, the settled rounds 2 and 3 of 4): 30,000 rocks on mesh
+shaders 2.582-2.612 ms against 2.409-2.410 ms sorted (draws 0.10 ms shorter, the sort 0.19 ms); on the indexed path
+1.673-1.686 ms against 1.818-1.820 ms; 3,000 rocks 0.367-0.413 ms against 0.496-0.623 ms (mesh shaders) and
+0.296-0.324 ms against 0.429-0.526 ms (indexed). The occlusion culling's early phase already draws much of what is in
+front first, so the draws gain about as much as the sort costs, and lose where the scene is light: no clear win, so
+the sort is not offered for opaque draws.
 
 
 ## Ray tracing
@@ -1346,7 +1421,8 @@ particles.update(effects, runtime.spawns());
   for budgets and debugging.
 - **Drawing** (`ParticleDraw`, a technique per view, `addPerView`): each emitter instance's GPU box is culled against
   the view's frustum (its indirect draw gets no instances), then every billboard renderer draws, emitters as wholes
-  back to front by distance, after the blended materials (`Transparency.ID`), within the view's render region.
+  back to front by distance, after the blended materials (`Transparency.ID`; not interleaved with sorted ones),
+  within the view's render region.
   Billboards face the camera's position, the view plane, their velocity (stretched by speed) or their emitter's up
   axis; blending is premultiplied, alpha to additive by the renderer's `alphaToAdd`; flipbooks play over life or by
   age, frames blended; soft particles fade into the opaque depth over a distance, or by the view ray's path through

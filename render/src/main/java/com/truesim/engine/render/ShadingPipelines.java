@@ -38,6 +38,11 @@ final class ShadingPipelines implements AutoCloseable {
     static final int IDS = 2;
     /** Into weighted blended transparency's targets, the opaque depth tested, not written. */
     static final int WEIGHTED = 3;
+    /**
+     * Into the scene's color, blended over it by the fragment's alpha ({@link SortedTransparency}), the opaque depth
+     * tested, not written.
+     */
+    static final int OVER = 4;
 
     /** Culls back faces (counter-clockwise front faces). */
     static final int CULL_BACK = 0;
@@ -162,6 +167,8 @@ final class ShadingPipelines implements AutoCloseable {
                 case DEPTH -> graphics.depth(depthFormat).build();
                 case IDS -> graphics.color(MeshletRenderer.ID_FORMAT).depth(depthFormat).build();
                 case WEIGHTED -> RasterPipelines.blended(graphics, depthFormat);
+                case OVER -> graphics.color(colorFormat).blend(0, Pipeline.Blend.ALPHA).depth(depthFormat)
+                    .depthTest(org.lwjgl.vulkan.VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false).build();
                 default -> throw new IllegalArgumentException("No target " + key.target());
             };
             nanos.addAndGet(System.nanoTime() - start);

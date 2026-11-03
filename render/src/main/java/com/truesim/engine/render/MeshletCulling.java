@@ -93,6 +93,16 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
             return this;
         }
 
+        /**
+         * Has the culling sort {@code view}'s blended bin farthest first, in {@code slots} runs of one drawn shading
+         * bin each ({@link RenderView#sortBlended}); {@code view} is culled here already.
+         */
+        public Views sortBlended(RenderView view, int slots, int[] drawn) {
+            view.sortBlended(slots, drawn);
+            view.declareSorting(g, pass);
+            return this;
+        }
+
         /** Declares that {@code drawing} draws {@code view} as culled here (its lists); returns {@code drawing}. */
         public GraphBuilder.PassBuilder drawing(GraphBuilder.PassBuilder drawing, RenderView view) {
             view.declareDrawing(g, drawing);

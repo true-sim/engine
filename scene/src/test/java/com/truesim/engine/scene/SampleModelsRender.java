@@ -45,7 +45,8 @@ import com.truesim.engine.render.SceneGeometry;
 import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.ViewOptions;
-import com.truesim.engine.render.WeightedBlendedTransparency;
+import com.truesim.engine.render.ChosenTransparency;
+import com.truesim.engine.render.Transparency;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -90,7 +91,8 @@ import org.lwjgl.vulkan.VkBufferImageCopy;
  * an HDR environment (lighting and background, or lighting only with {@code -PgltfBackground=none}) besides; tone
  * mapped with Khronos PBR Neutral. Skipped without the samples; {@code -PgltfModels=A,B} picks models.
  * Posed by {@code -PgltfAnimation=t1,t2}, a clip's pointer tracks animate materials (in the material table), node
- * visibility (through layers, lights of hidden nodes going dark) and the model's lights.
+ * visibility (through layers, lights of hidden nodes going dark) and the model's lights. Blended surfaces are drawn as
+ * {@code -PgltfTransparency=SORTED} (the default), {@code WEIGHTED} or {@code OPAQUE} says.
  */
 class SampleModelsRender {
 
@@ -179,6 +181,8 @@ class SampleModelsRender {
             closing.add(sync);
             FrameGraph graph = new FrameGraph(device, slots);
             closing.add(graph);
+            graph.settings().set(Transparency.MODE, Transparency.Mode.valueOf(System.getProperty(
+                "truesim.gltf.transparency", Transparency.Mode.SORTED.name())));
             MeshletRenderer renderer = new MeshletRenderer(device, gpu, VK_FORMAT_R16G16B16A16_SFLOAT,
                 VK_FORMAT_D32_SFLOAT, slots);
             closing.add(renderer);
@@ -219,7 +223,7 @@ class SampleModelsRender {
             }
             port.add(new ClusteredForwardShading(geometry, main, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT)
                     .clearColor(0.05f, 0.05f, 0.05f))
-                .add(new WeightedBlendedTransparency(geometry, main)).add(new Readback(readback))
+                .add(new ChosenTransparency(geometry, main)).add(new Readback(readback))
                 .output(Keys.SCENE_COLOR, output);
             // Framed from the front, the bounds' sphere filling the view.
             double cx = (bounds[0] + bounds[3]) / 2;
