@@ -1221,6 +1221,146 @@ by inline rays (`shadows-mapped.png`, `shadows-cascaded.png`, `shadows-traced.pn
 side by side, and where rays and the single map differ. Cascades put the detail near the camera: there they come close
 to the traced shadows, where one map over the whole area shows texel steps.
 
+### Global illumination: foundations
+
+The first stage (S0) of global illumination: what every later technique is built on and measured against. Nothing
+here lights the real-time image yet.
+
+**The reference path tracer** (`ReferencePathTracer`, in place of a view's shading technique) path traces the view's
+scene progressively as ground truth: one path per pixel per frame through the frame's top level (ray queries in
+compute), accumulated in 32-bit floats until `render.reference.samples`; it starts again when the camera, the
+instances or the materials change, or on `restart()`. A wavefront, a pass per step and bounce: camera rays, nearest
+hits, hits sorted by shading bin, shading. Paths see the scene as drawing does: the same instances, posed copies and
+materials, the view's light list (with the lights the GPU writes) and its environment, the constant sky without one.
+
+```java
+view.port().add(new ReferencePathTracer(geometry, rayTracing, view, Format.R32G32B32A32_SFLOAT.vk()))
+    .add(new ClusteredLights(lights, view));
+```
+
+- **Every material type shades as itself at ray hits** (design D5): each bounce's hits are counted, laid out and
+  scattered by shading bin (as `meshlets/split.slang` does), and each bin is shaded by one indirect dispatch of its
+  type's generated hit entry point (`material-types/entryHit.slang.template`, `MaterialType.hitShader`): the type's
+  `surface()` with the engine's features (`typedSurface`, which `shadeMaterial` uses too), texture filtering by ray
+  cones. No shader branches on the type. Measured against one shader switching over the types (as the build would
+  generate it, features read at run time: `test/singleHit.slang`, through `singleHitShader`; the same image,
+  `oneShaderSwitchingOverTheTypesShadesHitsAsTheirBinsDo`) with `HitShadingBenchmark` (RX 9070 XT, 2026-11-03,
+  3,000 rocks over 7 shading bins of 5 types, 2 bounces, binning and shading passes, 4 rounds after a warm-up):
+
+  | Rays | Way | Binning | Shading | Both |
+  |---|---|---|---|---|
+  | 256 x 256 (512 probes of 128) | binned, a dispatch per bin | 0.04 ms | 0.10 ms | 0.14-0.15 ms |
+  | 256 x 256 | one shader switching | - | 0.25 ms | 0.25 ms |
+  | 1920 x 1080 | binned, a dispatch per bin | 0.84-0.99 ms | 1.10-1.27 ms | 1.95-2.27 ms |
+  | 1920 x 1080 | one shader switching | - | 2.75-3.34 ms | 2.75-3.34 ms |
+
+  Binning costs its passes and still wins at both sizes: the switch's shading alone takes longer than binning and
+  shading by type. It is not offered. A type's geometry hook (`keep()`) makes holes at hits as in every pass (shadow
+  rays still stop at them: occlusion tests only alpha masks).
+- **Light transport:** the BRDF shading uses (`reflected()`), sampled by its lobes (Lambert by the cosine, GGX and the
+  clear coat by their visible normals, diffuse transmission behind), every light of the list by a shadow ray
+  (next-event estimation), emission and the environment where paths meet them, transmission refracted through thin
+  walls and into volumes (Beer's law inside), blended materials covering by their alpha, back faces of one-sided
+  materials let through as drawing culls them. Russian roulette from `render.reference.roulette`; at most
+  `render.reference.bounces`. Not traced: dispersion, baked occlusion textures; emissive surfaces and the environment
+  are found by paths meeting them (no light sampling of them yet, design S7).
+- **Lights at hits:** every light of the list (`render.reference.lights = ALL`, exact), or the world light grid
+  (`GRID`, below), as `worldLights(lights)` names it.
+- **Tested against closed forms** (`ReferencePathTracerTest`, on lavapipe in CI too): the white furnace (a closed box
+  giving off E and reflecting albedo rho everywhere is E / (1 - rho), within 1 %), an open plane under the constant
+  sky and a uniform environment (albedo times the sky, within 1 %), the Cornell box converging as one over the root of
+  the samples with its walls' colors on the floor, a glow material lighting a floor magenta and car paint showing its
+  flakes at hits.
+- **Images:** `TRUESIM_SCREENSHOTS=true` renders the Cornell box (`reference-cornell.png`, 512 x 512, 4,096 samples in
+  23 s on an RX 9070 XT; 1.3 % noise left in 4 x 4 pixel means) and the demo's scene from where the demo starts
+  (engine-demo's `ReferenceScreenshots`: `reference-demo.png` beside the visibility buffer's `raster-demo.png`; 1280 x
+  720, 1,024 samples, 2.0 ms a sample).
+
+**The diffuse weight** (`Keys.SURFACE_DIFFUSE`, a fourth surface output beside screen-space reflections' three,
+`SurfaceOutputs.DIFFUSE_FORMAT`, 8 bits, design D10): what the diffuse light from all around the normal (the
+environment's spherical harmonics, the constant sky, later the probe volume) is weighed by in each pixel's color, so
+global illumination replaces that term exactly, as reflections replace the reflectance's
+(`theDiffuseWeightIsWhatTheDiffuseLightIsWeighedBy`: the color is the weights times the light, on both shading
+techniques). Written with the other surface outputs, when a technique asks for them: `ReflectionsBenchmark`'s
+"surface outputs only" (RX 9070 XT, 2026-11-03) took 1.388-1.404 ms at 1080p on mesh shaders against 1.343-1.355 ms
+with three outputs (measured in another session), and at 4K 2.760-2.764 against 2.686-2.691 ms (indexed) and
+2.631-2.636 against 2.609-2.616 ms (visibility buffer): about 0.02 to 0.07 ms.
+
+**Motion vectors** (`MotionVectors`, `Keys.MOTION`, design D4): per view (each eye its own), for every pixel how far
+its surface moved on screen since the frame before, in pixels from it (two 16-bit floats; a history is read at the
+pixel plus the motion), the projections' jitter taken out. Exact for rigid and skinned motion: the pixel's triangle
+comes from visibility buffer IDs (the visibility buffer's own draw, shared; for forward shading a second render view
+of the same camera), rebuilt at this frame's pose and at the frame before's: the instance table as the frame before
+left it (a copy kept every frame after the upload and interpolation, so D91's interpolated instances and any writer
+alike), skinned copies' vertices as they were drawn (copied aside before each skinning,
+`Deformation.keepPrevious`), the frame before's view-projection relative to this frame's camera. The sky moves with
+the camera's turn. `MotionVectorsTest` reads back an instance moved, a skinned quad moved by its joints, still
+surfaces and the sky, the camera moving and stopping, on both shading techniques; `motion-demo.png` shows the demo's.
+The frame before's render region is not kept yet: with dynamic resolution changing it, the motion is in this frame's
+region's pixels.
+
+**World lights for ray hits** (`WorldLights`, a shared request, design D2): light clusters serve a view's pixels; hits
+off the screen need lights by world position. A grid of `render.gi.lights.cells` cells along each axis of
+`render.gi.lights.cell` units, around an anchor camera, built once a frame from the scene's lights and those the GPU
+writes (particle lights); points outside it take every light, directional lights are summed directly. Two layouts
+trade off, `render.gi.lights`:
+
+- `LISTS`: each cell lists the lights whose reach meets its box (`render.gi.lights.slots`, overflow noted), built a
+  thread per light; a hit sums them all with a shadow ray each. Exact: the reference with it draws the same image as
+  with every light (`theWorldLightGridsListsLightHitsAsEveryLightDoes`).
+- `RESERVOIRS` (ReGIR, Boksansky, Jukarainen and Wyman 2021): each cell keeps reservoirs, each a light resampled from
+  `render.gi.lights.candidates` drawn uniformly by what it could give the cell's box (never 0 where it reaches); a hit
+  resamples its cell's reservoirs by what each gives it and traces one shadow ray. Unbiased
+  (`theWorldLightGridsReservoirsConvergeToEveryLight`), constant cost, noisy.
+
+`WorldLightsBenchmark` (`TRUESIM_BENCHMARK=true`), RX 9070 XT, 2026-11-03: the reference path tracer's hits (2
+bounces) at 1920 x 1080 over 3,000 rocks at night, 256 lights the GPU writes circling over them and 64 to 4,096 point
+lights over 200 x 200 units, a grid of 64 cells of 8 units (64 slots for lists, 16 reservoirs of 16 candidates); 4
+rounds after a warm-up round, ranges of the medians; noise of 4 x 4 pixel means after 16 samples:
+
+| Point lights | Lights | Grid build | Hit shading | Both | Noise |
+|---|---|---|---|---|---|
+| 64 | every light | - | 4.71-4.75 ms | 4.71-4.75 ms | 1.3 % |
+| 64 | grid lists | 0.12 ms | 1.59-1.60 ms | 1.71 ms | 1.3 % |
+| 64 | grid reservoirs | 0.05 ms | 1.15-1.18 ms | 1.20-1.23 ms | 1.8-2.3 % |
+| 1,024 | every light | - | 19.20-19.30 ms | 19.20-19.30 ms | 1.4 % |
+| 1,024 | grid lists | 0.37-0.38 ms | 4.63 ms | 5.00-5.01 ms | 1.4 % |
+| 1,024 | grid reservoirs | 0.32 ms | 1.53-1.57 ms | 1.85-1.88 ms | 9.8-13.9 % |
+| 4,096 | every light | - | 67.5-67.8 ms | 67.5-67.8 ms | 5.0 % |
+| 4,096 | grid lists | 1.23 ms | 13.82-13.87 ms | 15.05-15.10 ms | 5.0 % |
+| 4,096 | grid reservoirs | 1.17-1.19 ms | 2.58-2.65 ms | 3.77-3.82 ms | 38-74 % |
+
+Reservoirs are built only for the cells hits used in the last `render.gi.lights.keep` frames (8; a cell's state
+kept from frame to frame), and a hit in a cell not built sums every light exactly and marks it: built for every cell
+each frame, the same grid took 0.61, 2.25 and 3.73 ms to build and 1.66, 3.51 and 5.04 ms with the hits. The noise
+rises where hits find a cell built in one frame and not in another (exact there, sampled here), and grows with the
+lights. Lists cost as many shadow rays as a cell has lights and add no noise; reservoirs cost one ray a hit whatever
+the count. Neither wins outright, so both stay; lists are the default.
+
+**GI test scenes** (engine-scene's tests, `gi.GiScenes`): scenes built in code, exact and repeatable, by name, for
+every GI stage's tests and benchmarks: `sun-room` (a closed room lit by the sun and sky through one window: mostly
+bounced light), `leak-5cm`, `leak-25cm`, `leak-50cm` (a closed dark room beside a sunlit one, the wall between that
+thick: the reference is black, any light there is a leak), `bleeding` (strongly colored walls and floor under a
+ceiling light), `screens` (a dark room lit only by emissive panels), the dynamic `toggle` (a point light on, then off),
+`door` (shut, then open to the sun) and `mover` (a red block beside a white wall, moved 2 m), and `cornell`. Boxes of
+plain materials (a cube with its faces' normals), the sun's shadows ray traced. `gi.GiHarness` renders a scene in a
+state path traced or in real time, `gi.GiError` compares an image with a reference (the mean relative luminance
+error, its median, 95th and 99th percentiles per pixel, the bias, and the mean absolute difference for black
+references), and `GiScenesTest` checks in CI that every scene traces and the dark rooms are black.
+`TRUESIM_SCREENSHOTS=true ./gradlew :engine-scene:test --tests '*GiReferences' -PgiOut=<directory>` writes each
+scene's reference (640 x 400, 4,096 samples: 4 to 9 s each on an RX 9070 XT) and real-time image as PNGs at the
+reference's exposure, and the reference as raw floats for later stages to compare against, with a table of the
+real-time image's error (no GI yet: the environment's light reaches closed rooms, 452 % too bright in `sun-room`,
+0.30 of luminance in the leak rooms' black; rooms lit by bounces alone come out black). Sponza, the large interior, is
+added by `-PgiSponza=<Khronos glTF Sample Assets>/Models/Sponza/glTF/Sponza.gltf` (`gi.GiSponza`: three views, the
+sun through the courtyard, 960 x 540, 2,048 samples: 7 to 9 s each): its files are under their own licence, read from
+where they are, never committed.
+
+**Ray queries in CI:** CI's pinned Mesa 26.0.8 lavapipe exposes `VK_KHR_acceleration_structure` and
+`VK_KHR_ray_query`: `VulkanDevice.rayTracing()` is true there, and the ray-traced tests (`SegmentTracingTest`,
+`ShadowsTest`'s) run in CI rather than being skipped. Ray-traced tests still assume `device.rayTracing()`, and the
+reference's tests are small (32 x 32 pixels) for a CPU's ray tracing.
+
 ## Frame graph
 
 `engine-graph` assembles the frame from **techniques**, such as the meshlet scene, bloom or tone mapping, without any

@@ -31,7 +31,8 @@ public struct ShadePush
     uint* tiles;               // classification: the first bin's tile list; shading: this pass's bin's
     uint normal;               // with SURFACES, storage slots of the surface outputs (surfaces.slang): the normal,
     uint material;             // F0 and roughness,
-    uint reflectance;          // and the reflectance
+    uint reflectance;          // the reflectance
+    uint diffuse;              // and the diffuse weight
 };
 
 /** The features a variant of a shading pass shows (FEATURE_*): set when its pipeline is made. */
@@ -48,6 +49,7 @@ void writeSurface(View view, uint2 p, SurfaceOut surface, float covered)
     uintImages[push.normal][p] = uint2(packNormal(toView(viewAxes(view.viewProjection), surface.normal)), 0);
     images[push.material][p] = float4(saturate(surface.f0), saturate(surface.roughness));
     images[push.reflectance][p] = float4(saturate(surface.reflectance), covered);
+    images[push.diffuse][p] = float4(saturate(surface.diffuse), covered);
 }
 
 /** Tiles per row before the next row of groups: an indirect dispatch's groups are (min(count, this), rows, 1). */

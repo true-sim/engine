@@ -25,6 +25,16 @@ the same `beginFrame` allocated in the scene benchmark: in the test, the JIT hap
 - Rule: also read the scene benchmark's "bytes allocated" column; when it is not 0, measure each stage of the frame to
   find the call.
 
+**A for-each over a list allocated its iterator in every depth and ID draw.** `Materials.drawsGeometry`, asked by
+every visibility buffer ID draw (both culling phases), looped `for (MaterialType type : geometryTypes)` over a
+`CopyOnWriteArrayList`: 16 bytes a phase, every frame, for the first 700 or more frames, until the compiler removed the
+iterator. Allocation tests that warmed 320 frames read about 45 bytes a frame in any visibility buffer graph.
+- Proof: bytes allocated per pass of a frame (the thread's allocated bytes around each pass body, frames 50 to 400):
+  "meshlet ids early" and "late" 16 each every frame, none once looped by index; `MotionVectorsTest` counts frames
+  allocating and fails with the for-each (true-sim/engine, GI S0).
+- Rule: per-frame code loops over lists by index; an allocation test counts the frames that allocate (one in a few
+  hundred is the compiler) rather than trusting a warm-up to have compiled everything.
+
 **`Enum.values()` copies its array on every call.** `Format.of` allocated through it.
 - Proof: [#132](https://github.com/true-sim/engine/pull/132) (`Format.ALL`).
 - Rule: keep `values()` in a static field.
@@ -70,6 +80,16 @@ eyes, located inside `Headset.render` just before the frame records, could not h
   `RenderView.refresh` (the culling reads the camera again where it changed), and the scene with it.
 - Rule: per-frame inputs that the docs say are read when the frame runs are read there, not copied when handed over;
   test the order an app uses (set once, change later), not only set-then-draw.
+
+**The frame before's view-projection stayed after the camera stopped.** A render view wrote its matrices, and with
+them the frame before's (for motion vectors), only in frames where its camera changed. A camera that moved and then
+stood kept the last move as the frame before's: every still pixel read 2 pixels of motion for ever after.
+- Proof: `MotionVectorsTest`'s "the camera stopped" frame read 2.0 instead of 0 on both shading techniques, and passes
+  with the view writing again on the frame's first cull while the frame before's differs (`RenderView.refresh(first)`,
+  true-sim/engine, GI S0). A fix writing again on every refresh read 0 for the moving frame too: the late cull's
+  refresh of the same frame made the frame before's this frame's (one frame slot counts no frames).
+- Rule: a value of the frame before is written every frame, not only when the current one changes; a test of it
+  includes a frame after the change stops.
 
 **One technique instance in two views built for one of them only.** The graph keeps each technique's view in an
 identity map, so the same `CascadedShadowMaps` added to both eyes' views filled the second view's shadow table twice
@@ -231,6 +251,17 @@ structure update rules); the validation layers reported nothing; the RX 9070 XT 
   ("invalid read at 0x0 ... in no buffer"), and passes with the fix (true-sim/engine, scene ray tracing PR).
 - Rule: an instance left out of a top level names an empty bottom level with mask 0, never reference 0; anything else
   that changes which instances are active rebuilds the top level instead of refitting it.
+
+**A cluster hierarchy's finest level is not all of the mesh.** Bottom levels were built from one detail level's
+meshlet range (the last, "finest"). In a cluster hierarchy the levels are the DAG's depths: parts that simplify no
+further keep their meshlets in coarser levels, so Sponza's finest level held 80 of its 103 submeshes; its floor and
+some arches were missing from every ray (the reference showed the sky through the floor, ray-traced shadows lacked
+casters), while rasterizing, which selects by error, drew them.
+- Proof: per level, the submeshes its meshlets name (Sponza: 103 in all, 80 in the last level); the meshlets whose own
+  error is 0 name all 103. `ReferencePathTracerTest.rayTracedLevelsHoldEveryPartOfAClusterHierarchy` (a bumpy grid
+  beside a two-triangle quad) sees the sky through the quad without the fix (true-sim/engine, GI S0).
+- Rule: a bottom level is built from the level's cut (own error at most the level's, parent's above it), as drawing
+  selects, and rays find a triangle's meshlet through that list, not a range.
 
 **A build transform of a flat mesh was not invertible.** Bottom levels scale quantized positions by the mesh's box;
 a flat quad's box has no height, so the scale was 0 on one axis (VUID-VkTransformMatrixKHR-matrix-03799). The

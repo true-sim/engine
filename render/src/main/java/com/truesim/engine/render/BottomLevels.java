@@ -81,6 +81,7 @@ final class BottomLevels {
     private final boolean quantized;
     private GpuBuffer table; // per pool mesh, grown with the pool
     private Structure[] bottom;
+    private GpuBuffer[] lists; // per pool mesh: the meshlets its bottom level is built from (BottomLevel.list)
     private long bytes;
     private long version; // counts changes to the bottom levels: top levels built before see them at their next build
     // With frames in flight (the pool's frame slots), bottom levels build in frames: each on its way through the
@@ -139,6 +140,7 @@ final class BottomLevels {
         this.quantized = structures.quantized();
         int meshes = pool.capacity().meshes();
         bottom = new Structure[meshes];
+        lists = new GpuBuffer[meshes];
         pendingOf = new Pending[meshes];
         table = GpuBuffer.hostVisible(device, (long) BottomLevelLayout.BYTES * meshes,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
@@ -240,6 +242,7 @@ final class BottomLevels {
     private void growMeshes() {
         int meshes = pool.capacity().meshes();
         bottom = java.util.Arrays.copyOf(bottom, meshes);
+        lists = java.util.Arrays.copyOf(lists, meshes);
         pendingOf = java.util.Arrays.copyOf(pendingOf, meshes);
         GpuBuffer old = table;
         table = GpuBuffer.hostVisible(device, (long) BottomLevelLayout.BYTES * meshes,
@@ -267,12 +270,9 @@ final class BottomLevels {
         }
         version++; // instances of the mesh enter top levels at their next build
         MeshLevel chosen = data.levels().get(level);
-        int firstMeshlet = chosen.firstMeshlet();
-        int lastMeshlet = firstMeshlet + chosen.meshletCount() - 1;
-        int firstIndex = data.meshletTriangleOffset(firstMeshlet);
+        int[] cut = cut(data, chosen);
         describe(mesh, data, chosen);
-        int endIndex = data.meshletTriangleOffset(lastMeshlet) + 3 * data.meshletTriangleCount(lastMeshlet);
-        int triangles = (endIndex - firstIndex) / 3;
+        int triangles = triangleCount(data, cut);
         int usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
             | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
         GpuBuffer decoded = null;
@@ -280,8 +280,7 @@ final class BottomLevels {
         // The level's triangles as 32-bit indices, only while building: the bottom level keeps its own copy.
         GpuBuffer indices;
         try (Arena arena = Arena.ofConfined()) {
-            indices = GpuBuffer.upload(device, data.expandIndices(arena).asSlice(4L * firstIndex,
-                4L * (endIndex - firstIndex)), usage);
+            indices = GpuBuffer.upload(device, cutIndices(arena, data, cut), usage);
         }
         try (MemoryStack stack = stackPush()) {
             long vertices;
@@ -413,21 +412,84 @@ final class BottomLevels {
      * What rays alpha-testing mesh {@code mesh}'s triangles look up ({@code BottomLevel}): the level its bottom level
      * is built from, the triangle its first is, and how many submeshes (instance materials) its meshlets name.
      */
+    @AllowAllocation("adding a bottom level, once per mesh")
     void describe(int mesh, MeshData data, MeshLevel level) {
         if (mesh >= bottom.length) {
             growMeshes();
         }
+        int[] cut = cut(data, level);
         int submeshes = 0;
-        for (int m = level.firstMeshlet(); m < level.firstMeshlet() + level.meshletCount(); m++) {
+        GpuBuffer list = GpuBuffer.hostVisible(device, 8L * cut.length,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        int first = 0;
+        for (int i = 0; i < cut.length; i++) {
+            int m = cut[i];
             submeshes = Math.max(submeshes, data.meshletSubmesh(m) + 1);
+            list.memory().set(ValueLayout.JAVA_INT_UNALIGNED, 8L * i, m);
+            list.memory().set(ValueLayout.JAVA_INT_UNALIGNED, 8L * i + 4, first);
+            first += data.meshletTriangleCount(m);
         }
+        if (lists[mesh] != null) {
+            structures.retire(lists[mesh]::close); // frames in flight read it
+        }
+        lists[mesh] = list;
         MemorySegment entry = table.memory().asSlice((long) BottomLevelLayout.BYTES * mesh,
             BottomLevelLayout.BYTES);
         entry.set(ValueLayout.JAVA_INT_UNALIGNED, BottomLevelLayout.FIRST_MESHLET, level.firstMeshlet());
-        entry.set(ValueLayout.JAVA_INT_UNALIGNED, BottomLevelLayout.MESHLET_COUNT, level.meshletCount());
+        entry.set(ValueLayout.JAVA_INT_UNALIGNED, BottomLevelLayout.MESHLET_COUNT, cut.length);
         entry.set(ValueLayout.JAVA_INT_UNALIGNED, BottomLevelLayout.SUBMESHES, submeshes);
-        entry.set(ValueLayout.JAVA_INT_UNALIGNED, BottomLevelLayout.FIRST_INDEX,
-            data.meshletTriangleOffset(level.firstMeshlet()));
+        entry.set(ValueLayout.JAVA_INT_UNALIGNED, BottomLevelLayout.FIRST_INDEX, 0);
+        entry.set(ValueLayout.JAVA_LONG_UNALIGNED, BottomLevelLayout.LIST, list.deviceAddress());
+    }
+
+    /**
+     * The meshlets a bottom level of detail level {@code level} is built from: the mesh's cut at the level's error,
+     * the meshlets whose own error is at most it and whose parent's is above it, as drawing selects them (a flat
+     * mesh's every meshlet, a discrete level's own). In a cluster hierarchy the cut need not be the level's range:
+     * parts that simplify no further keep their meshlets in coarser levels (Sponza's full detail is 103 submeshes'
+     * meshlets of which its finest level holds 80).
+     */
+    @AllowAllocation("adding a bottom level, once per mesh")
+    static int[] cut(MeshData data, MeshLevel level) {
+        double error = level.error();
+        double[] lod = new double[10];
+        int[] cut = new int[data.meshletCount()];
+        int count = 0;
+        for (int m = 0; m < data.meshletCount(); m++) {
+            data.meshletLod(m, lod);
+            if (lod[4] <= error && lod[9] > error) {
+                cut[count++] = m;
+            }
+        }
+        if (count == 0) { // no lod data: the level's range
+            for (int m = level.firstMeshlet(); m < level.firstMeshlet() + level.meshletCount(); m++) {
+                cut[count++] = m;
+            }
+        }
+        return java.util.Arrays.copyOf(cut, count);
+    }
+
+    /** How many triangles meshlets {@code cut} of {@code data} hold. */
+    static int triangleCount(MeshData data, int[] cut) {
+        int triangles = 0;
+        for (int m : cut) {
+            triangles += data.meshletTriangleCount(m);
+        }
+        return triangles;
+    }
+
+    /** The triangles of meshlets {@code cut} of {@code data}, in that order, as 32-bit mesh vertex indices. */
+    @AllowAllocation("adding a bottom level, once per mesh")
+    static MemorySegment cutIndices(Arena arena, MeshData data, int[] cut) {
+        MemorySegment all = data.expandIndices(arena);
+        MemorySegment indices = arena.allocate(12L * triangleCount(data, cut), 4);
+        long at = 0;
+        for (int m : cut) {
+            long bytes = 12L * data.meshletTriangleCount(m);
+            MemorySegment.copy(all, 4L * data.meshletTriangleOffset(m), indices, at, bytes);
+            at += bytes;
+        }
+        return indices;
     }
 
     /** Stages {@code mesh}'s level for a build in a later frame ({@link #add}). */
@@ -435,16 +497,14 @@ final class BottomLevels {
     private void addDeferred(int mesh, MeshData data, int level) {
         MeshLevel chosen = data.levels().get(level);
         describe(mesh, data, chosen);
-        int firstMeshlet = chosen.firstMeshlet();
-        int lastMeshlet = firstMeshlet + chosen.meshletCount() - 1;
-        int firstIndex = data.meshletTriangleOffset(firstMeshlet);
-        int endIndex = data.meshletTriangleOffset(lastMeshlet) + 3 * data.meshletTriangleCount(lastMeshlet);
+        int[] cut = cut(data, chosen);
+        int triangleTotal = triangleCount(data, cut);
         int usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
             | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         FrameUploads uploads = pool.uploads(); // staged with the mesh's own data: on the GPU in the same frame
-        GpuBuffer indices = GpuBuffer.deviceLocal(device, 4L * (endIndex - firstIndex), usage);
+        GpuBuffer indices = GpuBuffer.deviceLocal(device, 12L * triangleTotal, usage);
         try (Arena arena = Arena.ofConfined()) {
-            uploads.write(indices, 0, data.expandIndices(arena).asSlice(4L * firstIndex, 4L * (endIndex - firstIndex)));
+            uploads.write(indices, 0, cutIndices(arena, data, cut));
         }
         GpuBuffer decoded = null;
         GpuBuffer transform = null;
@@ -482,7 +542,7 @@ final class BottomLevels {
             format = VK_FORMAT_R32G32B32_SFLOAT;
         }
         // Staged now, the uploads arrive in the next frame; it is built at the start of the one after.
-        Pending staged = new Pending(mesh, (endIndex - firstIndex) / 3, data.vertexCount(), vertices, quantized,
+        Pending staged = new Pending(mesh, triangleTotal, data.vertexCount(), vertices, quantized,
             stride, format, indices, decoded, transform, slots.frames() + 2);
         pendingOf[mesh] = staged;
         pending.add(staged);
@@ -494,6 +554,11 @@ final class BottomLevels {
         deformed.remove(mesh);
         if (mesh >= bottom.length) {
             return; // never added
+        }
+        if (lists[mesh] != null) {
+            GpuBuffer list = lists[mesh];
+            lists[mesh] = null;
+            structures.retire(list::close); // frames in flight read it
         }
         Pending onItsWay = pendingOf[mesh];
         if (onItsWay != null) {
@@ -715,6 +780,11 @@ final class BottomLevels {
         for (Structure structure : bottom) {
             if (structure != null) {
                 structures.destroy(structure);
+            }
+        }
+        for (GpuBuffer list : lists) {
+            if (list != null) {
+                list.close();
             }
         }
         table.close();

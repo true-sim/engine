@@ -93,6 +93,9 @@ public final class RenderView implements AutoCloseable {
     private float beforeJitterY;
     private boolean beforeSet;
     private long writtenFrame = -1;
+    // Whether the frame before's view-projection or jitter written last differs from the current one: the next frame
+    // writes again, though the camera stays, so the frame before's is this one's (motion vectors: none when still).
+    private boolean previousStale;
     private Camera camera; // as last set: read again when the frame culls, if it moved since
     private float errorPixels;
     private int mode;
@@ -167,7 +170,17 @@ public final class RenderView implements AutoCloseable {
      * culls the view, so the frame draws from where the camera is then. Allocates nothing.
      */
     synchronized void refresh() {
-        if (camera == null || !changed(camera)) {
+        refresh(false);
+    }
+
+    /**
+     * {@link #refresh()}, where {@code first} is the frame's first cull of the view (its early phase, or its only one):
+     * there a camera that stopped since the frame before also writes its matrices again, so the frame before's are
+     * this frame's (with one frame slot no frames are counted: only the first cull tells a new frame).
+     */
+    synchronized void refresh(boolean first) {
+        if (camera == null || !changed(camera) && !(previousStale && (slots.isSingle() ? first
+            : frameOfWrite() != writtenFrame))) {
             return; // refreshed already this frame, maybe by another pass on another thread
         }
         write(camera);
@@ -242,6 +255,11 @@ public final class RenderView implements AutoCloseable {
         double dy = beforeSet ? camera.position(1) - beforePosition[1] : 0;
         double dz = beforeSet ? camera.position(2) - beforePosition[2] : 0;
         float[] previous = beforeSet ? before : matrix;
+        boolean stale = dx != 0 || dy != 0 || dz != 0 || beforeJitterX != jitterX || beforeJitterY != jitterY;
+        for (int i = 0; i < 16 && !stale; i++) {
+            stale = previous[i] != matrix[i];
+        }
+        previousStale = stale;
         for (int row = 0; row < 4; row++) {
             for (int column = 0; column < 3; column++) {
                 putFloat(ViewLayout.PREVIOUS_VIEW_PROJECTION + 4L * (4 * column + row), previous[4 * column + row]);

@@ -220,7 +220,7 @@ final class CullPasses implements AutoCloseable {
         retiring.release(); // culls of one frame may run on several threads: it locks
         scene.upload(commands);
         for (int v = 0; v < count; v++) {
-            views[v].refresh(); // from where their cameras are now
+            views[v].refresh(phase(early, v) != PHASE_LATE); // from where their cameras are now
         }
         // Declared to a graph that orders everything it touches: the indexed path's index buffers too, where the build
         // declared them and the views have them (else, e.g. the path changed since, its own barriers).

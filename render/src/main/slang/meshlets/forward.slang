@@ -161,6 +161,7 @@ public struct ShadedSurface
     public uint normal : SV_Target1;      // view space, packNormal's
     public float4 material : SV_Target2;  // F0, perceptual roughness
     public float4 reflectance : SV_Target3;
+    public float4 diffuse : SV_Target4;   // the diffuse weight
 };
 
 /** `color` with its `surface` as the targets take them, the normal in the view's space. */
@@ -171,6 +172,7 @@ public ShadedSurface surfaceTargets(float4 color, SurfaceOut surface)
     out.normal = packNormal(toView(viewAxes(push.view[0].viewProjection), surface.normal));
     out.material = float4(saturate(surface.f0), saturate(surface.roughness));
     out.reflectance = float4(saturate(surface.reflectance), 1);
+    out.diffuse = float4(saturate(surface.diffuse), 1);
     return out;
 }
 

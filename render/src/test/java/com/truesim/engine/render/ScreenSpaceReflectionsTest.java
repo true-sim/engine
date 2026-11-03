@@ -574,6 +574,61 @@ class ScreenSpaceReflectionsTest {
     }
 
     @Test
+    void theDiffuseWeightIsWhatTheDiffuseLightIsWeighedBy() {
+        // Under a uniform environment and no lights, a dielectric's color is the diffuse light (the environment's
+        // color) times its diffuse weight plus the reflection (the same color) times its reflectance: both outputs
+        // replace their terms exactly. Half unlit, half of each and half its base color.
+        float c = 0.5f;
+        try (Materials materials = new Materials(device, 8); Lights lights = new Lights(device, 1, 1)) {
+            int coated = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.4f, 0.2f, 1))
+                .withRoughness(0.5f)).feature(UnlitParameters.DEFAULTS.withAmount(0.5f)));
+            scene.setMaterials(materials);
+            floor(0, coated);
+            scene.removeFrom(1);
+            lights.setCount(0);
+            Camera camera = ahead();
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            List<Function<SceneView, Technique>> shadings = new ArrayList<>();
+            shadings.add(v -> MeshletBenchmark.forward(v).clearColor(0, 0, 0));
+            if (device.primitiveIds()) {
+                shadings.add(v -> new VisibilityBufferShading(SceneGeometry.meshlets(renderer), v,
+                    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT).clearColor(0, 0, 0));
+            }
+            Environment environment = Environment.uniform("grey", c, c, c);
+            SceneView main = new SceneView(graph.addView("main").size(SIZE, SIZE), view, camera)
+                .set(1, MeshletRenderer.MODE_LIT);
+            main.port().add(new EnvironmentLighting(environment, main, SMALL)).add(new ClusteredLights(lights, main))
+                .add(new Reader());
+            int[] floorPixel = pixelOf(0, -1, 4);
+            for (int i = 0; i < shadings.size(); i++) {
+                if (i > 0) {
+                    main.port().replace(shadings.get(i).apply(main));
+                } else {
+                    main.port().add(shadings.get(i).apply(main));
+                }
+                main.port().output(Keys.SCENE_COLOR, output);
+                int color = at(frames(), floorPixel[0], floorPixel[1]);
+                main.port().removeOutput(Keys.SCENE_COLOR).output(Keys.SURFACE_DIFFUSE, output);
+                int diffuse = at(frames(), floorPixel[0], floorPixel[1]);
+                main.port().removeOutput(Keys.SURFACE_DIFFUSE).output(Keys.SURFACE_REFLECTANCE, output);
+                int reflectance = at(frames(), floorPixel[0], floorPixel[1]);
+                main.port().removeOutput(Keys.SURFACE_REFLECTANCE);
+                assertThat(diffuse >>> 24).as("a surface").isEqualTo(255);
+                assertThat(red(diffuse)).as("the base's red").isGreaterThan(green(diffuse) + 20);
+                int[] channels = {red(color), green(color), blue(color)};
+                int[] weights = {red(diffuse) + red(reflectance), green(diffuse) + green(reflectance),
+                    blue(diffuse) + blue(reflectance)};
+                for (int k = 0; k < 3; k++) {
+                    double base = new double[] {0.8, 0.4, 0.2}[k] * 255 * 0.5;
+                    assertThat(channels[k]).as("channel %d: (diffuse weight + reflectance) x the light", k)
+                        .isCloseTo((int) Math.round(weights[k] * c + base), org.assertj.core.data.Offset.offset(3));
+                }
+            }
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
     void reflectingFramesAllocateNothing() {
         try (Materials materials = new Materials(device, 8)) {
             int mirror = materials.add(metal(0.2f));

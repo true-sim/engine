@@ -716,47 +716,16 @@ public bool kept<M : IMaterial>(View view, VertexOut in, Material* materials, fl
 }
 
 /**
- * The surface color at `pixel`, with texture coordinate gradients `dx`, `dy` (per pixel), of material type M's surface
- * showing the features of `features` (FEATURE_*; where it is a constant, the code of the others is left out): the
- * fragment stage of every geometry path, and of anything shading the same surfaces. The lighting is the same for every
- * type: by the lights `lights` gives it (the frame's light list) and the sky or, without a light list (null), by the
- * sun and the sky. Shadow rays are traced by `rays` (NoRays: none).
+ * Material type M's surface at the point of `input`, of material `ref`, showing the features of `features` (FEATURE_*;
+ * where it is a constant, the code of the others is left out): the type's surface() with the engine's features applied,
+ * as every way of shading takes it, rasterized and at ray hits. Its light given off goes into `emissive`, as seen
+ * through a clear coat.
  */
-public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
-    float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features, Background behind,
-    IndirectLight* indirect)
+public Surface typedSurface<M : IMaterial>(MaterialRef ref, SurfaceInput input, uint features, out float3 emissive)
 {
-    SurfaceOut surface;
-    return shadeMaterialSurface<M, R>(rays, view, in, materials, dx, dy, lights, pixel, features, behind, indirect,
-        surface);
-}
-
-/** The radiance the constant sky reflects from every direction (shading.slang's ambientWeighed). */
-public static const float3 SKY_REFLECTED = SKY_IRRADIANCE * 0.5 / 3.14159265;
-
-/**
- * shadeMaterial, also giving the shaded `surface` (surfaces.slang): what the surface outputs hold, its reflectance
- * the weight of the environment's reflection (the view's indirect-light table's specularLight, or SKY_REFLECTED
- * without a table) in the color returned.
- */
-public float4 shadeMaterialSurface<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in,
-    Material* materials, float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features,
-    Background behind, IndirectLight* indirect, out SurfaceOut surface)
-{
-    surface = noSurface();
-    if (view.mode == 2)
-    {
-        return float4(1, 1, 1, 1);
-    }
-    MaterialRef ref = { materials, in.material };
     Material m = ref.slot();
-    SurfaceInput input = surfaceInput(view, in, ref, dx, dy, features);
     float3 toViewer = input.toViewer;
     Surface s = M.surface(materialParameters<M.Parameters>(ref), ref, input);
-    if (view.mode == 1)
-    {
-        s.albedo = meshletColor(in.meshlet) * in.color.rgb;
-    }
     // The features, the engine's: on any type's surface.
     s.clearcoat = 0;
     if ((features & FEATURE_IOR) != 0)
@@ -805,16 +774,62 @@ public float4 shadeMaterialSurface<M : IMaterial, R : IShadowRays>(R rays, View 
         s.iridescenceFresnel = thinFilm(s.iridescenceIor, s.iridescenceThickness, nv,
             lerp(s.f0, s.albedo, s.metallic));
     }
-    float3 emissive = s.emissive;
+    emissive = s.emissive;
     if ((features & FEATURE_CLEARCOAT) != 0)
     {
         applyClearcoat(s, materialFeature<ClearcoatParameters>(ref, FEATURE_CLEARCOAT), input);
         emissive *= 1 - s.clearcoat * coatFresnel(dot(s.clearcoatNormal, toViewer)); // seen through the coat
     }
+    return s;
+}
+
+/**
+ * The surface color at `pixel`, with texture coordinate gradients `dx`, `dy` (per pixel), of material type M's surface
+ * showing the features of `features` (FEATURE_*; where it is a constant, the code of the others is left out): the
+ * fragment stage of every geometry path, and of anything shading the same surfaces. The lighting is the same for every
+ * type: by the lights `lights` gives it (the frame's light list) and the sky or, without a light list (null), by the
+ * sun and the sky. Shadow rays are traced by `rays` (NoRays: none).
+ */
+public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
+    float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features, Background behind,
+    IndirectLight* indirect)
+{
+    SurfaceOut surface;
+    return shadeMaterialSurface<M, R>(rays, view, in, materials, dx, dy, lights, pixel, features, behind, indirect,
+        surface);
+}
+
+/** The radiance the constant sky reflects from every direction (shading.slang's ambientWeighed). */
+public static const float3 SKY_REFLECTED = SKY_IRRADIANCE * 0.5 / 3.14159265;
+
+/**
+ * shadeMaterial, also giving the shaded `surface` (surfaces.slang): what the surface outputs hold, its reflectance
+ * the weight of the environment's reflection (the view's indirect-light table's specularLight, or SKY_REFLECTED
+ * without a table) in the color returned.
+ */
+public float4 shadeMaterialSurface<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in,
+    Material* materials, float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features,
+    Background behind, IndirectLight* indirect, out SurfaceOut surface)
+{
+    surface = noSurface();
+    if (view.mode == 2)
+    {
+        return float4(1, 1, 1, 1);
+    }
+    MaterialRef ref = { materials, in.material };
+    SurfaceInput input = surfaceInput(view, in, ref, dx, dy, features);
+    float3 toViewer = input.toViewer;
+    float3 emissive;
+    Surface s = typedSurface<M>(ref, input, features, emissive);
+    if (view.mode == 1)
+    {
+        s.albedo = meshletColor(in.meshlet) * in.color.rgb;
+    }
     // Light from all around: the view's indirect-light table (an environment, later GI), or the constant sky
     float3 reflectance;
-    float3 color = (indirect != nullptr ? indirectLightWeighed(indirect, s, toViewer, reflectance)
-        : ambientWeighed(s, toViewer, SKY_IRRADIANCE, reflectance)) + emissive;
+    float3 diffuseWeight;
+    float3 color = (indirect != nullptr ? indirectLightWeights(indirect, s, toViewer, reflectance, diffuseWeight)
+        : ambientWeights(s, toViewer, SKY_IRRADIANCE, reflectance, diffuseWeight)) + emissive;
     if (lights == nullptr)
     {
         color += reflected(s, toViewer, SUN, SUN_IRRADIANCE);
@@ -849,11 +864,13 @@ public float4 shadeMaterialSurface<M : IMaterial, R : IShadowRays>(R rays, View 
         UnlitParameters unlit = materialFeature<UnlitParameters>(ref, FEATURE_UNLIT);
         color = applyUnlit(color, s, unlit);
         reflectance *= 1 - unlit.amount; // lerp(lit, albedo, amount): the lit part scaled
+        diffuseWeight *= 1 - unlit.amount;
     }
     surface.normal = s.normal;
     surface.roughness = s.roughness;
     surface.f0 = lerp(s.f0, s.albedo, s.metallic);
     surface.reflectance = reflectance;
+    surface.diffuse = diffuseWeight;
     return float4(color, s.alpha);
 }
 

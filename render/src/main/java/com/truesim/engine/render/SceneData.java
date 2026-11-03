@@ -8,6 +8,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.layout.BlendPush;
 import com.truesim.engine.render.layout.DeformPush;
+import com.truesim.engine.render.layout.KeepPush;
 import com.truesim.engine.vulkan.Pipeline;
 import java.util.List;
 import java.util.Objects;
@@ -104,11 +105,14 @@ public record SceneData(MeshletRenderer renderer) implements Request<SceneData.B
         Pipeline skin = g.computeProgram("shaders/deformation/skin.spv", "skinMain", DeformPush.BYTES);
         Pipeline spheres = g.computeProgram("shaders/deformation/skin.spv", "spheresMain", DeformPush.BYTES);
         DeformPush push = new DeformPush();
+        // Skinned copies' vertices as the frame before drew them, kept for motion vectors (MotionVectors)
+        Pipeline keep = g.computeProgram("shaders/deformation/keep.spv", "keepMain", KeepPush.BYTES);
+        KeepPush keepPush = new KeepPush();
         g.pass("deformation").write(buffers.positions, BufferAccess.STORAGE_WRITE)
             .write(buffers.attributes, BufferAccess.STORAGE_WRITE).write(buffers.meshlets, BufferAccess.STORAGE_WRITE)
             .read(buffers.meshletVertices, BufferAccess.STORAGE_READ)
             .write(buffers.clusterLod, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> pool.deformation().record(ctx, buffers, skin, spheres, push));
+            .record(ctx -> pool.deformation().record(ctx, buffers, skin, spheres, push, keep, keepPush));
         return buffers;
     }
 }

@@ -874,10 +874,12 @@ public final class Materials implements AutoCloseable {
     /**
      * Whether instances take a material of a type with geometry hooks ({@link MaterialType#geometry}): depth, shadow
      * and ID passes then split their lists by such types; until then they draw every type alike, nothing split.
+     * Allocates nothing: asked by every depth and ID draw, each frame (an iterator over the list allocated until the
+     * compiler took it away, pitfalls.md).
      */
     public boolean drawsGeometry() {
-        for (MaterialType type : geometryTypes) {
-            int id = types.indexOf(type);
+        for (int t = 0; t < geometryTypes.size(); t++) {
+            int id = types.indexOf(geometryTypes.get(t));
             for (int bin = 0; bin < bins; bin++) {
                 if (binTypes[bin] == id && binDrawn(bin) != 0) {
                     return true;

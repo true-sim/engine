@@ -362,9 +362,22 @@ public float3 ambient(Surface s, float3 toViewer, float3 irradiance)
  */
 public float3 ambientWeighed(Surface s, float3 toViewer, float3 irradiance, out float3 reflectance)
 {
+    float3 diffuseWeight;
+    return ambientWeights(s, toViewer, irradiance, reflectance, diffuseWeight);
+}
+
+/**
+ * ambientWeighed, also giving what the sky's diffuse light (irradiance / pi from every side) is weighed by in the
+ * result, its `diffuseWeight` (as indirect.slang's indirectLightWeights; the diffuse transmission's part too, the
+ * constant sky being the same behind).
+ */
+public float3 ambientWeights(Surface s, float3 toViewer, float3 irradiance, out float3 reflectance,
+    out float3 diffuseWeight)
+{
     reflectance = surfaceFresnel(s, 1.0) * s.occlusion;
     // The sky from behind too, through a surface transmitting diffusely: in its transmission color.
     float3 diffuse = (1 - s.diffuseTransmission) * s.albedo + s.diffuseTransmission * s.diffuseTransmissionColor;
+    diffuseWeight = (1 - s.metallic) * (1 - s.transmission) * diffuse * s.occlusion;
     float3 base = (1 - s.metallic) * (1 - s.transmission) * diffuse / PI * irradiance * s.occlusion
         + surfaceFresnel(s, 1.0) * irradiance / PI * 0.5 * s.occlusion;
     if (any(s.sheenColor > 0))
@@ -372,6 +385,7 @@ public float3 ambientWeighed(Surface s, float3 toViewer, float3 irradiance, out 
         // The sheen lit evenly from all around reflects its albedo of it, which it takes from the base.
         float nv = dot(s.normal, toViewer);
         reflectance *= sheenScaling(s, nv);
+        diffuseWeight *= sheenScaling(s, nv);
         base = base * sheenScaling(s, nv) + s.sheenColor * sheenAlbedo(nv, s.sheenRoughness) * irradiance / PI
             * s.occlusion;
     }
@@ -379,6 +393,7 @@ public float3 ambientWeighed(Surface s, float3 toViewer, float3 irradiance, out 
     {
         float coat = s.clearcoat * 0.04;
         reflectance *= 1 - coat;
+        diffuseWeight *= 1 - coat;
         base = base * (1 - coat) + coat * irradiance / PI * 0.5 * s.occlusion;
     }
     return base;

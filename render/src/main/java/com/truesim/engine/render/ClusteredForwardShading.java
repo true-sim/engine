@@ -76,7 +76,7 @@ public final class ClusteredForwardShading implements Technique {
 
     /** The scene's color and depth, and its surface outputs ({@link SurfaceOutputs}: written only when asked for). */
     static final List<Key<?>> PROVIDES = List.of(Keys.SCENE_COLOR, Keys.SCENE_DEPTH, Keys.SURFACE_NORMAL,
-        Keys.SURFACE_MATERIAL, Keys.SURFACE_REFLECTANCE);
+        Keys.SURFACE_MATERIAL, Keys.SURFACE_REFLECTANCE, Keys.SURFACE_DIFFUSE);
 
     @Override
     @AllowAllocation("building the graph, when it changes")

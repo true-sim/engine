@@ -12,7 +12,8 @@ import java.util.List;
  * The surface outputs of a view's opaque shading pass: what later passes know of each pixel's surface, written by the
  * pass that shades it (forward on both meshlet paths and classic LOD, or the visibility buffer's shading) only when a
  * technique of the view asks for them ({@link Consumer}); without one, no image, no attachment and no shader writes
- * them. Provided under {@link Keys#SURFACE_NORMAL}, {@link Keys#SURFACE_MATERIAL} and {@link Keys#SURFACE_REFLECTANCE}
+ * them. Provided under {@link Keys#SURFACE_NORMAL}, {@link Keys#SURFACE_MATERIAL}, {@link Keys#SURFACE_REFLECTANCE} and
+ * {@link Keys#SURFACE_DIFFUSE}
  * (surfaces.slang has the encodings):
  *
  * <ul>
@@ -22,7 +23,12 @@ import java.util.List;
  *   <li><b>reflectance</b> ({@link #REFLECTANCE_FORMAT}): in rgb, what the environment's reflection along the mirror
  *   direction at the pixel's roughness is weighed by in its color (the split sum's scale and bias, the occlusion, what
  *   a sheen or a clear coat over it lets through; 0 where shading bent the reflection, or nothing covers the pixel),
- *   so a technique can replace that term ({@link ScreenSpaceReflections}); a is 1 where a surface was shaded.
+ *   so a technique can replace that term ({@link ScreenSpaceReflections}); a is 1 where a surface was shaded;
+ *   <li><b>diffuse weight</b> ({@link #DIFFUSE_FORMAT}, {@link Keys#SURFACE_DIFFUSE}): in rgb, what the diffuse light
+ *   from all around the normal (the environment's spherical harmonics, the constant sky, later the probe volume) is
+ *   weighed by in its color: the diffuse color less what the specular takes, the occlusion, what a sheen, a clear coat
+ *   or unlit leave of it; a diffuse transmission's light from behind is not counted. Global illumination replaces that
+ *   term by it, as screen-space reflections replace the reflectance's; a is 1 where a surface was shaded.
  * </ul>
  *
  * <p>Post materials will read them the same way: a technique implementing {@link Consumer} and requiring the keys.
@@ -36,6 +42,8 @@ public final class SurfaceOutputs {
     public static final Format MATERIAL_FORMAT = Format.R8G8B8A8_UNORM;
     /** The reflectance's. */
     public static final Format REFLECTANCE_FORMAT = Format.R8G8B8A8_UNORM;
+    /** The diffuse weight's (design D10: 8 bits, as the reflectance). */
+    public static final Format DIFFUSE_FORMAT = Format.R8G8B8A8_UNORM;
 
     private SurfaceOutputs() {
     }
@@ -50,13 +58,13 @@ public final class SurfaceOutputs {
         boolean wantsSurfaces(GraphBuilder g);
     }
 
-    /** The three images. */
-    public record Images(Image normal, Image material, Image reflectance) {
+    /** The four images. */
+    public record Images(Image normal, Image material, Image reflectance, Image diffuse) {
 
-        /** All three, in the order of the shaders' targets 1 to 3. */
+        /** All four, in the order of the shaders' targets 1 to 4. */
         @AllowAllocation("building the graph, when it changes")
         public List<Image> all() {
-            return List.of(normal, material, reflectance);
+            return List.of(normal, material, reflectance, diffuse);
         }
     }
 
@@ -76,7 +84,8 @@ public final class SurfaceOutputs {
     static Images create(GraphBuilder g, String name, int width, int height) {
         return new Images(g.create(name + " normal", ImageDesc.of(NORMAL_FORMAT, width, height)),
             g.create(name + " material", ImageDesc.of(MATERIAL_FORMAT, width, height)),
-            g.create(name + " reflectance", ImageDesc.of(REFLECTANCE_FORMAT, width, height)));
+            g.create(name + " reflectance", ImageDesc.of(REFLECTANCE_FORMAT, width, height)),
+            g.create(name + " diffuse weight", ImageDesc.of(DIFFUSE_FORMAT, width, height)));
     }
 
     /**
@@ -89,9 +98,10 @@ public final class SurfaceOutputs {
         g.provide(Keys.SURFACE_NORMAL, provided.normal());
         g.provide(Keys.SURFACE_MATERIAL, provided.material());
         g.provide(Keys.SURFACE_REFLECTANCE, provided.reflectance());
+        g.provide(Keys.SURFACE_DIFFUSE, provided.diffuse());
     }
 
     /** The keys shading techniques provide them under. */
     static final List<com.truesim.engine.graph.Key<?>> KEYS = List.of(Keys.SURFACE_NORMAL, Keys.SURFACE_MATERIAL,
-        Keys.SURFACE_REFLECTANCE);
+        Keys.SURFACE_REFLECTANCE, Keys.SURFACE_DIFFUSE);
 }

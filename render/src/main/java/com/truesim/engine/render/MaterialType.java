@@ -29,7 +29,8 @@ import java.util.function.Function;
  * shading on every geometry path (indexed, mesh shaders, classic LOD), where each shading bin (a type and its
  * features) draws with pipelines of its type's forward entry points, its blended surfaces too. Depth, shadow and ID
  * passes draw every type alike, but types with geometry hooks ({@link #geometry}): those draw there with pipelines of
- * their own, so a cutout's holes are alike in color, depth and shadows.
+ * their own, so a cutout's holes are alike in color, depth and shadows. Ray hits are shaded by type as well: the
+ * reference path tracer sorts its hits by shading bin and shades each bin with its type's hit entry point.
  *
  * @param name            what it is called: in material data, errors and the pipeline cache
  * @param parameters      its parameters' record
@@ -52,11 +53,16 @@ import java.util.function.Function;
  *                        {@code <name>MaskedDepthMain}, {@code <name>IdsMain}, {@code <name>MaskedIdsMain},
  *                        {@code <name>ClassicIdsMain}, {@code <name>MaskedClassicIdsMain}), drawn where it has geometry
  *                        hooks
+ * @param hitShader       the shader of its shading at ray hits ({@code <name>HitMain}, ray queries): the paths whose
+ *                        hits show its materials, each shading bin by a dispatch of its own
+ *                        ({@link ReferencePathTracer}); null: its hits are not shaded (devices without ray tracing
+ *                        never load it)
+ * @param hitEntry        that entry point; null with no shader
  */
 public record MaterialType(String name, Class<? extends MaterialParameters> parameters,
     Function<MaterialValues, ? extends MaterialParameters> fromValues, int allowedFeatures, String shader,
     String entry, String tracedShader, String tracedEntry, String forwardShader, String forwardLeanShader,
-    String geometryShader) {
+    String geometryShader, String hitShader, String hitEntry) {
 
     public MaterialType {
         Objects.requireNonNull(name, "name");
@@ -67,6 +73,9 @@ public record MaterialType(String name, Class<? extends MaterialParameters> para
         Objects.requireNonNull(forwardShader, "forwardShader");
         Objects.requireNonNull(forwardLeanShader, "forwardLeanShader");
         Objects.requireNonNull(geometryShader, "geometryShader");
+        if ((hitShader == null) != (hitEntry == null)) {
+            throw new IllegalArgumentException("A hit shader and its entry point, or neither: " + name);
+        }
         if ((tracedShader == null) != (tracedEntry == null)) {
             throw new IllegalArgumentException("A traced shader and its entry point, or neither: " + name);
         }

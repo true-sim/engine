@@ -196,13 +196,11 @@ final class DeformedBottomLevels {
     /** {@code level} of {@code data}'s triangles on the GPU: staged with the pool's uploads with frames in flight. */
     @AllowAllocation("a source's first copy")
     private Triangles upload(MeshData data, MeshLevel level) {
-        int firstMeshlet = level.firstMeshlet();
-        int lastMeshlet = firstMeshlet + level.meshletCount() - 1;
-        int firstIndex = data.meshletTriangleOffset(firstMeshlet);
-        int endIndex = data.meshletTriangleOffset(lastMeshlet) + 3 * data.meshletTriangleCount(lastMeshlet);
+        int[] cut = BottomLevels.cut(data, level);
+        int triangleTotal = BottomLevels.triangleCount(data, cut);
         GpuBuffer indices;
         try (Arena arena = Arena.ofConfined()) {
-            var slice = data.expandIndices(arena).asSlice(4L * firstIndex, 4L * (endIndex - firstIndex));
+            var slice = BottomLevels.cutIndices(arena, data, cut);
             if (deferred) {
                 indices = GpuBuffer.deviceLocal(device, slice.byteSize(), USAGE);
                 pool.uploads().write(indices, 0, slice);
@@ -210,7 +208,7 @@ final class DeformedBottomLevels {
                 indices = GpuBuffer.upload(device, slice, USAGE); // without frames in flight: set up, waited for
             }
         }
-        return new Triangles(indices, (endIndex - firstIndex) / 3, deferred ? slots.frames() + 2 : 0);
+        return new Triangles(indices, triangleTotal, deferred ? slots.frames() + 2 : 0);
     }
 
     /** Whether pool mesh {@code mesh} is a copy with a level here, traced or on its way. */
