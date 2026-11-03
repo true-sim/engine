@@ -844,6 +844,110 @@ class GraphTechniquesTest {
     }
 
     @Test
+    void preparedMeshesAndTexturesStreamedOnTheTransferQueueDrawTheirFirstFrame() {
+        // Every frame a prepared mesh and texture come (those of two frames before go): copied on the transfer queue,
+        // the frame waiting for them on the GPU, a generated mip chain made in the frame after the image is acquired.
+        // They draw in the frame right after they were added, as with copies in the frame (budget 0), and alike.
+        int[][] seen = new int[2][];
+        for (int run = 0; run < 2; run++) {
+            seen[run] = streamFrames(run == 0 ? 64L << 20 : 0);
+        }
+        assertThat(seen[0]).as("the transfer queue's frames are the frame copies'").containsExactly(seen[1]);
+    }
+
+    /**
+     * Eight frames streaming a prepared quad and texture each, with a transfer budget of {@code budget}; the red and
+     * green pixels of the last two frames (red: a generated chain, green: a given level).
+     */
+    private int[] streamFrames(long budget) {
+        GpuBuffer[] readbacks = {GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT),
+            GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)};
+        graph.close();
+        graph = new FrameGraph(device, 2);
+        MeshData mesh = twoUvQuad();
+        try (GeometryPool streamed = new GeometryPool(device, GeometryPool.Capacity.of(64, 8, 4), graph.frameSlots());
+             Textures textures = new Textures(device, graph.frameSlots());
+             Materials materials = new Materials(device, 16, graph.frameSlots());
+             GpuScene moving = new GpuScene(device, streamed, 4, graph.frameSlots());
+             MeshletRenderer drawing = new MeshletRenderer(device, moving, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots())) {
+            streamed.streamBudget(budget);
+            textures.streamBudget(budget); // the same queue's
+            moving.setMaterials(materials);
+            SceneGeometry geometry = SceneGeometry.meshlets(drawing);
+            Camera camera = new Camera().set(0, 0, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
+            ViewPort port = graph.addView("main").size(SIZE, SIZE);
+            SceneView movingView = geometry.createView(port, camera, ViewOptions.of(256, 1 << 12));
+            port.add(new ClusteredForwardShading(geometry, movingView, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)
+                    .clearColor(0, 0, 0))
+                .add(new Readback(graph, readbacks)).output(Keys.SCENE_COLOR, output);
+            int[] meshes = new int[8];
+            int[] texture = new int[8];
+            int[] material = new int[8];
+            int[] counts = new int[4];
+            int waits = 0;
+            for (int frame = 0; frame < 8; frame++) {
+                if (frame == 2) {
+                    waits = device.waits();
+                }
+                graph.beginFrame();
+                if (frame >= 2) {
+                    moving.remove(0);
+                    materials.remove(material[frame - 2]);
+                    textures.remove(texture[frame - 2]);
+                    streamed.remove(meshes[frame - 2]);
+                }
+                java.lang.foreign.MemorySegment texels = java.lang.foreign.Arena.ofAuto().allocate(4L * 4 * 4, 4);
+                for (int i = 0; i < 16; i++) {
+                    texels.setAtIndex(ValueLayout.JAVA_INT, i, frame % 2 == 0 ? 0xff0000ff : 0xff00ff00);
+                }
+                Textures.Prepared preparedTexture = frame % 2 == 0 ? textures.prepareColor(4, 4, texels)
+                    : textures.prepare(TextureFormat.RGBA8_SRGB, 4, 4, 1, texels);
+                meshes[frame] = streamed.add(streamed.prepare(mesh));
+                texture[frame] = textures.add(preparedTexture);
+                material[frame] = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1)).withRoughness(1)
+                    .withEmissive(new Color(1, 1, 1, 1)).withEmissiveTexture(texture[frame])));
+                moving.set(0, meshes[frame], material[frame], 0, 0, -2, 0, 0, 0, 1, 1, 1, 1);
+                movingView.set(1, MeshletRenderer.MODE_LIT);
+                graph.submit(0, 0);
+                if (frame == 7) {
+                    assertThat(device.waits()).as("waits for the GPU while streaming").isEqualTo(waits);
+                    device.waitIdle();
+                    for (int slot = 0; slot < 2; slot++) {
+                        for (int i = 0; i < SIZE * SIZE; i++) {
+                            int pixel = readbacks[slot].memory().getAtIndex(ValueLayout.JAVA_INT, i);
+                            int r = pixel & 0xff;
+                            int g = (pixel >> 8) & 0xff;
+                            counts[2 * slot] += r > 2 * g + 20 ? 1 : 0;
+                            counts[2 * slot + 1] += g > 2 * r + 20 ? 1 : 0;
+                        }
+                    }
+                }
+            }
+            // Frame 7 (slot 1) drew its green texture and quad, frame 6 (slot 0) its red one: each its first frame.
+            assertThat(counts[0]).as("frame 6: red").isGreaterThan(SIZE * SIZE / 8);
+            assertThat(counts[1]).as("frame 6: no green").isZero();
+            assertThat(counts[3]).as("frame 7: green").isGreaterThan(SIZE * SIZE / 8);
+            assertThat(counts[2]).as("frame 7: no red").isZero();
+            com.truesim.engine.vulkan.StreamQueue stream = streamed.streamQueue();
+            assertThat(stream.budget()).isEqualTo(budget);
+            if (budget > 0) {
+                assertThat(stream.bytesStreamed()).as("streamed on the transfer queue").isPositive();
+            } else {
+                assertThat(stream.bytesStreamed()).as("all copied in the frames").isZero();
+            }
+            moving.setMaterials(null);
+            device.waitIdle();
+            return counts;
+        } finally {
+            device.waitIdle();
+            for (GpuBuffer readback : readbacks) {
+                readback.close();
+            }
+        }
+    }
+
+    @Test
     void changesWrittenInPlaceDrawAsCopiedOnes() {
         // The instances' changes (and their motion's) written in place, in GPU-visible chunks, draw as copied ones.
         assertThat(scene.changeList()).as("copied by default").isEqualTo(com.truesim.engine.vulkan.RecordBuffer

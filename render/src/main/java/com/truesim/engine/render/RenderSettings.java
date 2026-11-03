@@ -36,6 +36,15 @@ public final class RenderSettings {
     public static final Setting<Integer> CHANGE_LIST_CHUNK = Setting.integer("render.changeListChunk", 1024, 64, 65536,
         "KiB of each chunk of an in-place change list");
 
+    /**
+     * MiB a frame of prepared meshes and textures copied on the transfer queue, beside the frames in flight; what comes
+     * after (or everything, with 0) is copied in the frame on the graphics queue. Either way it draws from the next
+     * frame. Streaming 131,000-triangle tiles with 2048 x 2048 textures, frames adding them took 0.8 ms of graphics
+     * queue time instead of 1.5 (frame-graph-v2.md, phase 8).
+     */
+    public static final Setting<Integer> STREAM_BUDGET = Setting.integer("render.streamBudget", 64, 0, 4096,
+        "MiB a frame of streamed meshes and textures copied on the transfer queue (0: in the frame)");
+
     /** Every render setting: these, the light clusters', the shadows' and the display transform's. */
     public static final List<Setting<?>> ALL = all();
 
@@ -48,6 +57,7 @@ public final class RenderSettings {
         all.add(INTERPOLATION);
         all.add(CHANGE_LIST);
         all.add(CHANGE_LIST_CHUNK);
+        all.add(STREAM_BUDGET);
         all.addAll(ClusteredLights.ALL);
         all.addAll(ShadowSettings.ALL);
         all.addAll(DisplayTransform.ALL);

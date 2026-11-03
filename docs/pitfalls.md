@@ -252,6 +252,21 @@ could take tile words as group counts.
 
 ## Tests and measurements
 
+**A GPU time per frame that left out the frame start.** `GpuTimings` timed passes only; textures' copies and mip
+chains are recorded in the frame start (`FrameSlots.recordStart`), before every pass, so `StreamBench`'s "GPU per
+frame" (1.78 ms at worst for frames streaming a 2048 x 2048 texture) left them out.
+- Proof: a reading of `FrameGraph.recordChunks` and `FrameTooling` (timestamps around passes only); since the frame
+  start is timed (`GpuTimings.frameStartMillis`), the same frames read 2.4 to 3.2 ms (true-sim/engine#101, streaming
+  on the transfer queue).
+- Rule: a GPU time meant as "the frame's" adds `frameStartMillis` to the passes' total.
+
+**Freeing a staging buffer on the frame's thread can take milliseconds.** With the transfer queue's staging buffers
+freed in `pool.add`, single adds took up to 12 ms (frames of up to 9 to 14 ms in `StreamBench large`); timed, one
+free (a shared arena's close and VMA's free of 2.5 to 16 MB) took up to 2.4 ms.
+- Proof: timings inside `StreamQueue.release`; with the frees on a thread of their own, the worst `pool.add` fell to
+  1.3-3.0 ms and frames over 4 ms from 2-5 to 0 (true-sim/engine#101).
+- Rule: free large staging memory off the frame's thread once the GPU is done with it.
+
 **A chunk size derived from the capacity at construction stayed after growth.** The change list prototype sized its
 chunks by `min(capacity, chunk bytes / record)`; instance motion's buffers start with 64 records and grow, so their
 chunks stayed at 64 records: 469 chunks (and dispatches) for 30,000 motion records, 0.1 ms of uploads that looked like

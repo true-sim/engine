@@ -54,6 +54,8 @@ public final class GpuTimings implements AutoCloseable {
     private long results; // native, RESULT_BYTES per query of one slot
     private long frame = -1;
     private double span = Double.NaN; // the first timed pass's start to the last one's end
+    private int startFamily; // the frame start's queue family: the graphics queue's
+    private double start = Double.NaN; // the frame start's commands (uploads), timed after the passes' queries
 
     @AllowAllocation("set up once")
     GpuTimings(VulkanDevice device, int slots) {
@@ -80,8 +82,10 @@ public final class GpuTimings implements AutoCloseable {
      * {@code i} runs on. The GPU must not use the old queries any more.
      */
     @AllowAllocation("building the graph, when it changes")
-    void build(GraphBuilder.PassInfo[] order, int[] families) {
+    void build(GraphBuilder.PassInfo[] order, int[] families, int graphicsFamily) {
         destroy();
+        startFamily = graphicsFamily;
+        start = Double.NaN;
         passes = order.length;
         names = new String[passes];
         for (int i = 0; i < passes; i++) {
@@ -95,7 +99,7 @@ public final class GpuTimings implements AutoCloseable {
         if (passes == 0) {
             return;
         }
-        int queries = 2 * passes * slots;
+        int queries = 2 * (passes + 1) * slots;
         try (MemoryStack stack = stackPush()) {
             VkQueryPoolCreateInfo info = VkQueryPoolCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO)
@@ -106,7 +110,7 @@ public final class GpuTimings implements AutoCloseable {
             pool = handle.get(0);
         }
         Commands.resetQueryPool(device.handle(), pool, 0, queries);
-        results = MemoryUtil.nmemCalloc(2L * passes, RESULT_BYTES);
+        results = MemoryUtil.nmemCalloc(2L * (passes + 1), RESULT_BYTES);
     }
 
     /** Writes pass {@code pass}'s start (or with {@code end}, its end) timestamp of frame slot {@code slot}. */
@@ -114,6 +118,14 @@ public final class GpuTimings implements AutoCloseable {
         if (pool != 0 && validMask[family[pass]] != 0) {
             Commands.writeTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pool,
                 2 * (slot * passes + pass) + (end ? 1 : 0));
+        }
+    }
+
+    /** Writes the frame start's start (or with {@code end}, its end) timestamp of frame slot {@code slot}. */
+    void writeStart(VkCommandBuffer commands, int slot, boolean end) {
+        if (pool != 0 && validMask[startFamily] != 0) {
+            Commands.writeTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pool,
+                2 * (slots * passes + slot) + (end ? 1 : 0));
         }
     }
 
@@ -160,6 +172,28 @@ public final class GpuTimings implements AutoCloseable {
             span = ((latest - earliest) & mask) * nanosPerTick / 1e6;
         }
         Commands.resetQueryPool(device.handle(), pool, first, 2 * passes);
+        int startQuery = 2 * (slots * passes + slot);
+        result = Commands.getQueryPoolResults(device.handle(), pool, startQuery, 2, 2L * RESULT_BYTES, results,
+            RESULT_BYTES, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if (result < 0) {
+            Vulkan.check(result, "Could not read the timestamps");
+        }
+        if (memGetLong(results + 8) != 0 && memGetLong(results + RESULT_BYTES + 8) != 0) {
+            start = ((memGetLong(results + RESULT_BYTES) - memGetLong(results)) & validMask[startFamily])
+                * nanosPerTick / 1e6;
+        } else {
+            start = Double.NaN;
+        }
+        Commands.resetQueryPool(device.handle(), pool, startQuery, 2);
+    }
+
+    /**
+     * How long the frame start took on the graphics queue, in milliseconds: the commands recorded ahead of every pass
+     * (uploads with commands of their own, such as textures and their mips; {@code FrameSlots.recordStart}), not
+     * counted in {@link #totalMillis}; {@code NaN} if the last finished frame had none timed.
+     */
+    public double frameStartMillis() {
+        return start;
     }
 
     /** The passes timed: the graph's, in the order they record. */

@@ -231,7 +231,8 @@ final class FrameExecution implements AutoCloseable {
      * Allocates nothing.
      */
     void submit(CompiledGraph.Batches batches, VkCommandBuffer frameStart, VkCommandBuffer[] chunkCommands,
-        long[] acquired, int acquiredCount, long[] renderFinished, int finishedCount, VkCommandBuffer prologue) {
+        long[] acquired, int acquiredCount, long[] renderFinished, int finishedCount, VkCommandBuffer prologue,
+        java.util.List<com.truesim.engine.vulkan.FrameSlots.FrameWait> external) {
         if (prologue != null) {
             submitPrologue(prologue);
         }
@@ -269,9 +270,19 @@ final class FrameExecution implements AutoCloseable {
                 }
                 // Waits: the other queue's batch this one depends on (or, first on its queue, all the other queue
                 // did in the frame before, as images pass between queues), and the acquired image.
-                long waits = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 1 + acquiredCount,
+                long waits = stack.ncalloc(VkSemaphoreSubmitInfo.ALIGNOF, 1 + acquiredCount + external.size(),
                     VkSemaphoreSubmitInfo.SIZEOF);
                 int waitCount = 0;
+                if (queue == GRAPHICS ? firstGraphics : firstCompute) {
+                    // Uploads on other queues (streaming) that the frame's commands read: before the first on each.
+                    for (int w = 0; w < external.size(); w++) {
+                        com.truesim.engine.vulkan.FrameSlots.FrameWait wait = external.get(w);
+                        if (wait.value() > 0) {
+                            semaphore(waits + (long) waitCount++ * VkSemaphoreSubmitInfo.SIZEOF, wait.semaphore(),
+                                wait.value());
+                        }
+                    }
+                }
                 long otherBase = queue == GRAPHICS ? computeBase : graphicsBase;
                 long otherValue = batchWait[b] > 0 ? otherBase + batchWait[b] : 0;
                 if ((queue == GRAPHICS ? firstGraphics : firstCompute) && bothQueues) {
@@ -280,8 +291,8 @@ final class FrameExecution implements AutoCloseable {
                 firstGraphics &= queue != GRAPHICS;
                 firstCompute &= queue != COMPUTE;
                 if (otherValue > 0) {
-                    semaphore(waits, queue == GRAPHICS ? computeTimeline : graphicsTimeline, otherValue);
-                    waitCount++;
+                    semaphore(waits + (long) waitCount++ * VkSemaphoreSubmitInfo.SIZEOF,
+                        queue == GRAPHICS ? computeTimeline : graphicsTimeline, otherValue);
                 }
                 boolean acquire = !acquireWaited && (batches.acquire()[b] || b == lastGraphicsBatch);
                 if (acquire) {
