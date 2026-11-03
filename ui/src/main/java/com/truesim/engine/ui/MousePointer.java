@@ -29,6 +29,19 @@ public final class MousePointer implements PointerSource, PlatformListener {
     /** The pointer id the mouse has in the UI's input. */
     public static final int ID = 1;
 
+    /**
+     * Maps the mouse's position in a window into the UI's pixels: for a UI shown in several windows (docking's OS
+     * windows, {@link UiOsWindows}). Must not allocate.
+     */
+    @FunctionalInterface
+    public interface Mapper {
+        /**
+         * The UI position of the mouse at {@code x, y} in window {@code windowId} (window coordinates) into
+         * {@code out}; false if that window is not the UI's (the event is then the main window's or ignored).
+         */
+        boolean map(int windowId, float x, float y, float[] out);
+    }
+
     private final Window window; // the window whose UI it points into, or null: any, unscaled
     private final Input input;   // whose mouse capture hides it, or null
     private float x;
@@ -37,6 +50,9 @@ public final class MousePointer implements PointerSource, PlatformListener {
     private float wheelX;
     private float wheelY;
     private boolean seen;
+    private boolean mapped; // x, y are UI pixels already, from the mapper
+    private Mapper mapper;
+    private final float[] at = new float[2];
 
     /**
      * The mouse in {@code window} (events of other windows ignored; positions scaled to its pixels), hidden while
@@ -52,8 +68,31 @@ public final class MousePointer implements PointerSource, PlatformListener {
         this(null, null);
     }
 
+    /** Maps positions of every window the UI shows in through {@code value} (null: only its own window). */
+    public MousePointer mapper(Mapper value) {
+        mapper = value;
+        return this;
+    }
+
     private boolean ours(int windowId) {
         return window == null || window.id() == windowId;
+    }
+
+    /** Takes {@code mx, my} in window {@code windowId} as the mouse's place; false if the event is not the UI's. */
+    private boolean place(int windowId, float mx, float my) {
+        if (mapper != null && mapper.map(windowId, mx, my, at)) {
+            x = at[0];
+            y = at[1];
+            mapped = true;
+            return true;
+        }
+        if (!ours(windowId)) {
+            return false;
+        }
+        x = mx;
+        y = my;
+        mapped = false;
+        return true;
     }
 
     private float scaleX() {
@@ -67,9 +106,7 @@ public final class MousePointer implements PointerSource, PlatformListener {
     @Override
     public void mouseMoved(long timestamp, int windowId, int mouse, float mx, float my, float dx, float dy,
         int buttons) {
-        if (ours(windowId)) {
-            x = mx;
-            y = my;
+        if (place(windowId, mx, my)) {
             held = buttons;
             seen = true;
         }
@@ -78,9 +115,7 @@ public final class MousePointer implements PointerSource, PlatformListener {
     @Override
     public void mouseButton(long timestamp, int windowId, int mouse, MouseButton button, boolean down, int clicks,
         float mx, float my) {
-        if (ours(windowId)) {
-            x = mx;
-            y = my;
+        if (place(windowId, mx, my)) {
             held = down ? held | button.mask() : held & ~button.mask();
             seen = true;
         }
@@ -88,7 +123,7 @@ public final class MousePointer implements PointerSource, PlatformListener {
 
     @Override
     public void mouseWheel(long timestamp, int windowId, int mouse, float dx, float dy) {
-        if (ours(windowId)) {
+        if (ours(windowId) || mapper != null && mapper.map(windowId, x, y, at)) {
             wheelX += dx;
             wheelY += dy;
         }
@@ -106,7 +141,7 @@ public final class MousePointer implements PointerSource, PlatformListener {
         int buttons = (held & MouseButton.LEFT.mask()) != 0 ? Pointer.PRIMARY : 0;
         buttons |= (held & MouseButton.RIGHT.mask()) != 0 ? Pointer.SECONDARY : 0;
         buttons |= (held & MouseButton.MIDDLE.mask()) != 0 ? Pointer.MIDDLE : 0;
-        ui.pointer(ID, Pointer.Kind.MOUSE).moveTo(x * scaleX(), y * scaleY()).buttons(buttons)
+        ui.pointer(ID, Pointer.Kind.MOUSE).moveTo(mapped ? x : x * scaleX(), mapped ? y : y * scaleY()).buttons(buttons)
             .scroll(wheelX, wheelY);
         wheelX = 0;
         wheelY = 0;

@@ -24,8 +24,26 @@ import com.truesim.ui.core.input.UiInput;
  */
 public final class UiTextInput implements TextInputHost, TextListener {
 
+    /**
+     * Finds the window a text field is in, for a UI shown in several windows (docking's OS windows, {@link UiOsWindows}).
+     */
+    @FunctionalInterface
+    public interface Locator {
+        /**
+         * The window showing UI point {@code uiX, uiY}, with its region's origin (UI pixels) and window coordinates per
+         * UI pixel in {@code toWindow} (x, y, scale); null: the UI's own window.
+         */
+        Window locate(float uiX, float uiY, float[] toWindow);
+    }
+
     private final UiCommands commands;
-    private final Window window;
+    private final Window home;
+    private Window window; // the window text input runs on: the home one, or the one holding the field
+    private Locator locator;
+    private final float[] located = new float[3];
+    private float originX;
+    private float originY;
+    private float windowScale;
     private float scale = 1;
     private final StringBuilder typed = new StringBuilder();
     private final StringBuilder composition = new StringBuilder();
@@ -37,7 +55,19 @@ public final class UiTextInput implements TextInputHost, TextListener {
     /** Text input through {@code commands}' text context, started on {@code window} (null: none, for tests). */
     public UiTextInput(UiCommands commands, Window window) {
         this.commands = commands;
+        this.home = window;
         this.window = window;
+    }
+
+    /** Starts text input on the window holding the field, as {@code value} finds it (null: always its own). */
+    public UiTextInput locator(Locator value) {
+        locator = value;
+        return this;
+    }
+
+    /** The window text input runs on now (its own, or the one holding the focused field), or null. */
+    public Window window() {
+        return window;
     }
 
     /** Window coordinates per UI pixel (a high-density display's pixels per window unit inverted). */
@@ -56,6 +86,24 @@ public final class UiTextInput implements TextInputHost, TextListener {
     public void start(float x, float y, float width, float height, int textKind) {
         commands.textContext().textKind(windowKind(textKind));
         commands.startText(this);
+        Window to = locator == null ? null : locator.locate(x, y, located);
+        if (to == null) {
+            to = home;
+            originX = 0;
+            originY = 0;
+            windowScale = 0;
+        } else {
+            originX = located[0];
+            originY = located[1];
+            windowScale = located[2];
+        }
+        if (to != window) {
+            if (window != null && active && !window.isClosed()) {
+                window.stopTextInput(); // the field moved to another window: its input goes there
+            }
+            window = to;
+            active = false;
+        }
         if (window != null && (!active || kind != textKind || !window.textInputActive())) {
             window.startTextInput(windowKind(textKind));
         }
@@ -76,8 +124,9 @@ public final class UiTextInput implements TextInputHost, TextListener {
     @Override
     public void area(float x, float y, float width, float height) {
         if (window != null) {
-            window.textInputArea(Math.round(x * scale), Math.round(y * scale), Math.max(1, Math.round(width * scale)),
-                Math.max(1, Math.round(height * scale)), 0);
+            float s = windowScale > 0 ? windowScale : scale;
+            window.textInputArea(Math.round((x - originX) * s), Math.round((y - originY) * s),
+                Math.max(1, Math.round(width * s)), Math.max(1, Math.round(height * s)), 0);
         }
     }
 
@@ -86,7 +135,7 @@ public final class UiTextInput implements TextInputHost, TextListener {
     public void stop() {
         active = false;
         commands.stopText();
-        if (window != null) {
+        if (window != null && !window.isClosed()) {
             window.stopTextInput();
         }
         if (!composition.isEmpty()) { // the field went away while composing: the composition ends

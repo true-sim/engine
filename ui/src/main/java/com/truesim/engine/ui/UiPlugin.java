@@ -51,6 +51,10 @@ import java.util.function.Function;
  * <li><b>The window</b>: the display's content scale ({@code Window.displayScale()}) is the layout's content scale, so
  * the UI keeps its size in points on a high-density display; the mouse cursor follows the UI's ({@code cursor} in
  * styles) while the pointer is over the UI.</li>
+ * <li><b>OS windows</b> for docking ({@link #osWindows()}, with a window and a presenter): given a host
+ * ({@code osWindows().host(new OsDockHost(overlays, dock, osWindows()))}), each frame draws every OS window's region
+ * of the UI into it, maps the mouse of every window into the UI, starts text input on the window holding the field,
+ * and closes a window's area when its close button is pressed.</li>
  * </ul>
  *
  * <p>Per frame it allocates nothing: the input, the layers and the cursor change are kept.
@@ -82,6 +86,7 @@ public final class UiPlugin implements Plugin {
     private Window window;
     private Platform platform;
     private Desktop desktop;
+    private UiOsWindows osWindows;
     private SystemCursor shownCursor;
     private float shownScale = -1;
     private PointerSource[] sources = new PointerSource[0];
@@ -184,7 +189,22 @@ public final class UiPlugin implements Plugin {
             text = new UiTextInput(commands, window);
             ui.interaction().textInputHost(text);
             ui.interaction().clipboard(new SdlClipboard(platform));
+            if (target != null) {
+                osWindows = new UiOsWindows(platform, graph, rendering.presenter(), window, renderer,
+                    target.settings());
+                desktop.listen(osWindows);
+                mouse.mapper(osWindows);
+                text.locator(osWindows);
+            }
         }
+    }
+
+    /**
+     * Docking's OS windows over this UI's window ({@link UiOsWindows}): give it an {@code OsDockHost} and panels tear
+     * out into windows of their own. Null without a window or a presenter (headless). From {@link Stage#RUN}.
+     */
+    public UiOsWindows osWindows() {
+        return osWindows;
     }
 
     /** The UI; from the first startup stage on. */
@@ -257,6 +277,9 @@ public final class UiPlugin implements Plugin {
         int height = view.height();
         ui.update(width, height);
         renderer.submit(ui.layers(), ui.layerCount(), ui.textures(), width, height);
+        if (osWindows != null) {
+            osWindows.submit(ui);
+        }
         if (platform != null && mouse != null) {
             SystemCursor wanted = SYSTEM[ui.interaction().cursor(MousePointer.ID).ordinal()];
             if (wanted != shownCursor) {
@@ -270,6 +293,11 @@ public final class UiPlugin implements Plugin {
     public void stop() {
         if (desktop != null && mouse != null) {
             desktop.unlisten(mouse);
+        }
+        if (osWindows != null) {
+            desktop.unlisten(osWindows);
+            osWindows.closeAll();
+            osWindows = null;
         }
         if (commands != null) {
             commands.close();
