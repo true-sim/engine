@@ -569,7 +569,8 @@ Drawing and shading are separate, and each is swappable:
   Lights and cameras are the application's: it reads their animated values from the same sink or `Animator.value`.
   - `MeshletGeometry`: a renderer's meshlets, with cluster LOD.
   - `ClassicLodGeometry`: the same instances drawn the classic way.
-    - It takes discrete LODs (`MeshBuilder.buildDiscrete`) or flat meshes, added with `add(mesh, data)`.
+    - It takes discrete LODs (`MeshBuilder.buildDiscrete`) or flat meshes, added with `add(mesh, data)`. Adding waits
+      for no frame in flight: the indices are copied first thing in the next frame, the first to draw the mesh.
     - A compute pass per view culls every instance against the frustum and picks one whole level by the same error
       rule. It writes an indexed indirect draw per submesh run of that level, and one `vkCmdDrawIndexedIndirectCount`
       draws them all.
@@ -913,7 +914,11 @@ final class Bloom implements Technique {
 ```
 
 The graph is rebuilt only when it changes: techniques, outputs or implementations, an external image resized, or
-`invalidate()`. Per-frame data lives in the techniques, and pass bodies read it when recording.
+`invalidate()`. Per-frame data lives in the techniques, and pass bodies read it when recording. The graph's own part of
+a rebuild waits for no frame in flight, except with GPU timings on (or just turned off): histories are joined and new
+persistent images and buffers cleared at the start of the next frame (with async passes, in a prologue on the graphics
+queue that the frame's batches wait for), and switching `asyncCompute` or `parallel` between frames waits for nothing
+either (tested with synchronization validation and a count of the waits).
 
 **Running frames.** The graph runs its frames itself, on the graphics and compute queues:
 
