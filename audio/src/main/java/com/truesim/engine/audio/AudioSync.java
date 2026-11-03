@@ -13,7 +13,9 @@ import com.truesim.scene.audio.Music;
 import com.truesim.scene.audio.Patch;
 import com.truesim.scene.audio.Decibels;
 import com.truesim.scene.audio.AudioEffect;
+import com.truesim.scene.audio.ListenerMix;
 import com.truesim.scene.audio.Listeners;
+import com.truesim.scene.audio.Play;
 import com.truesim.scene.audio.ReverbZones;
 import com.truesim.scene.audio.Release;
 import com.truesim.scene.audio.Sound;
@@ -119,6 +121,8 @@ public final class AudioSync {
         slotVoice = new int[renderer.voices()];
         slotMusicVoice = new long[renderer.voices()];
         slotPatch = new PatchVoice[renderer.voices()];
+        heardSent = new float[Voices.LISTENERS * 2 * renderer.voices()];
+        Arrays.fill(renderStores, -1);
         musicGain = new float[renderer.voices()];
         stingerSlot = new boolean[renderer.voices()];
         Arrays.fill(slotTrack, -1);
@@ -175,6 +179,176 @@ public final class AudioSync {
     public AudioSync music(Music music) {
         this.music = music;
         return this;
+    }
+
+    // Rendering listeners (step 13): the renderer's four, by scene listener and store; what each hears of each slot.
+    private final long[] renderIds = new long[Voices.LISTENERS];
+    private final int[] renderStores = new int[Voices.LISTENERS];
+    private final boolean[] renderSeen = new boolean[Voices.LISTENERS];
+    private final ListenerMix[] renderMixes = new ListenerMix[Voices.LISTENERS];
+    private final double[] renders = new double[7 * Voices.LISTENERS];
+    private final ListenerTap[] taps = new ListenerTap[Voices.LISTENERS];
+    private final int[] order = new int[Voices.LISTENERS];
+    private final int[] sentOrder = new int[Voices.LISTENERS];
+    private int sentOrderCount = -1;
+    private final float[] heardSent;
+    private int listenersDropped;
+
+    /** The tap of rendering listener {@code listener} (its mix made with {@code tap()}); null if none. */
+    public ListenerTap tap(long listener) {
+        for (int l = 0; l < Voices.LISTENERS; l++) {
+            if (renderStores[l] >= 0 && renderIds[l] == listener) {
+                return taps[l];
+            }
+        }
+        return null;
+    }
+
+    /** Rendering listeners past the renderer's four, not rendered. */
+    public int listenersDropped() {
+        return listenersDropped;
+    }
+
+    /** The renderer's index of rendering listener {@code listener} of store {@code s}; -1 for none. */
+    private int renderIndex(int s, long listener) {
+        for (int l = 0; l < Voices.LISTENERS; l++) {
+            if (renderStores[l] == s && renderIds[l] == listener) {
+                return l;
+            }
+        }
+        return -1;
+    }
+
+    /** A rendering listener seen this frame: given a renderer index (set up when new or its mix changed), and placed. */
+    private void rendering(int s, long listener, Listeners listeners) {
+        int l = renderIndex(s, listener);
+        if (l < 0) {
+            for (int k = 0; k < Voices.LISTENERS && l < 0; k++) {
+                l = renderStores[k] < 0 ? k : -1;
+            }
+            if (l < 0) {
+                listenersDropped++;
+                return;
+            }
+            renderStores[l] = s;
+            renderIds[l] = listener;
+            renderMixes[l] = null;
+        }
+        renderSeen[l] = true;
+        ListenerMix mix = listeners.mix(listener);
+        if (mix != renderMixes[l]) {
+            setUp(l, mix);
+        }
+        for (int i = 0; i < 3; i++) {
+            renders[7 * l + i] = listeners.position(listener, i);
+        }
+        for (int i = 0; i < 4; i++) {
+            renders[7 * l + 3 + i] = listeners.rotation(listener, i);
+        }
+    }
+
+    @AllowAllocation("a rendering listener set up: its tap")
+    private void setUp(int l, ListenerMix mix) {
+        renderMixes[l] = mix;
+        if (mix.tapped() && (taps[l] == null || taps[l].channels() != mix.channels())) {
+            taps[l] = new ListenerTap(mix.channels(), 1 << 16);
+        } else if (!mix.tapped()) {
+            taps[l] = null;
+        }
+        commands.listener(l, true, mix.channels(), Decibels.gain(mix.gain()), mix.deviceBus(), taps[l]);
+    }
+
+    /** Listeners not seen this frame are turned off; the order is sent when it changed. */
+    private void renderingDone() {
+        for (int l = 0; l < Voices.LISTENERS; l++) {
+            if (renderStores[l] >= 0 && !renderSeen[l]) {
+                commands.listener(l, false, 1, 0, null, null);
+                renderStores[l] = -1;
+                renderMixes[l] = null;
+                taps[l] = null;
+                Arrays.fill(heardSent, l * heardSent.length / Voices.LISTENERS,
+                    (l + 1) * heardSent.length / Voices.LISTENERS, 0);
+            }
+            renderSeen[l] = false;
+        }
+        int count = 0;
+        for (int s = 0; s < stores.length; s++) {
+            Listeners listeners = stores[s].listeners();
+            for (int i = 0; i < listeners.orderCount() && count < order.length; i++) {
+                int l = renderIndex(s, listeners.order(i));
+                if (l >= 0) {
+                    order[count++] = l;
+                }
+            }
+        }
+        boolean same = count == sentOrderCount;
+        for (int i = 0; same && i < count; i++) {
+            same = order[i] == sentOrder[i];
+        }
+        if (!same && commands.order(order, count)) {
+            System.arraycopy(order, 0, sentOrder, 0, count);
+            sentOrderCount = count;
+        }
+    }
+
+    /**
+     * What each rendering listener hears of track {@code t}'s voices (§2.10): placed sounds on buses its mix hears,
+     * within its max distance, attenuated by the sound's curve and panned for a stereo mix; sent when changed.
+     */
+    private void hear(int t) {
+        Track track = tracks[t];
+        Bus bus = track.sound.bus();
+        Attenuation attenuation = track.sound.attenuation();
+        int voices = slotTrack.length;
+        for (int l = 0; l < Voices.LISTENERS; l++) {
+            float left = 0;
+            float right = 0;
+            ListenerMix mix = renderMixes[l];
+            if (renderStores[l] == track.store && mix != null && mix.hears(bus)) {
+                relativeTo(track, renders, 7 * l);
+                double x = relative[0];
+                double distance = Math.sqrt(x * x + relative[1] * relative[1] + relative[2] * relative[2]);
+                if (distance <= mix.maxDistance()) {
+                    float a = attenuation.gain((float) distance);
+                    if (mix.channels() == 2) {
+                        double pan = distance > 1e-6 ? Math.max(-1, Math.min(1, x / distance)) : 0;
+                        left = (float) (a * com.truesim.common.math.Maths.cos((pan + 1) * com.truesim.common.math.Maths.PI / 4));
+                        right = (float) (a * com.truesim.common.math.Maths.sin((pan + 1) * com.truesim.common.math.Maths.PI / 4));
+                    } else {
+                        left = a;
+                        right = a;
+                    }
+                }
+            }
+            for (int v = 0; v < track.voices; v++) {
+                if (track.state[v] != PLAYING) {
+                    continue;
+                }
+                int slot = track.slots[v];
+                int i = 2 * (l * voices + slot);
+                if (Math.abs(heardSent[i] - left) > 1e-4f || Math.abs(heardSent[i + 1] - right) > 1e-4f) {
+                    if (commands.listen(slot, l, left, right)) {
+                        heardSent[i] = left;
+                        heardSent[i + 1] = right;
+                    }
+                }
+            }
+        }
+    }
+
+    /** Starts a voice re-emitting the listener its instance is given as input (none yet: silent until one is). */
+    private boolean startInput(int t, int v) {
+        Track track = tracks[t];
+        if (firstFree() < 0) {
+            return false;
+        }
+        int l = renderIndex(track.store, stores[track.store].input(track.id));
+        if (!commands.inputNext(l)) {
+            return false;
+        }
+        long at = schedulePoint + Math.round(stores[track.store].voiceDelay(track.id, v) * rate);
+        play(t, v, null, at);
+        return track.state[v] == PLAYING;
     }
 
     // Patches (step 12): the voice each slot plays, back to its pool when the slot ends.
@@ -247,6 +421,7 @@ public final class AudioSync {
             marks[s] = now;
             listenerZone(s);
         }
+        renderingDone();
         if (music != null) {
             music();
         }
@@ -256,6 +431,7 @@ public final class AudioSync {
                 start(t);
                 if (track.sound != null && placed(track)) {
                     place(t);
+                    hear(t);
                 }
             }
         }
@@ -410,6 +586,14 @@ public final class AudioSync {
         if ((changes & Sounds.STOPPED) != 0) {
             stop(t);
         }
+        if ((changes & Sounds.INPUT) != 0) {
+            int l = renderIndex(s, store.input(id));
+            for (int v = 0; v < track.voices; v++) {
+                if (track.state[v] == PLAYING && store.voiceNode(id, v) instanceof Play play && play.isInput()) {
+                    commands.input(track.slots[v], l, schedulePoint);
+                }
+            }
+        }
         if ((changes & (Sounds.PARAMETERS | Sounds.TIME)) != 0) {
             for (int v = 0; v < track.voices; v++) {
                 if (track.state[v] == PLAYING) {
@@ -449,8 +633,9 @@ public final class AudioSync {
             track.starts[v] = 0;
             track.rings[v] = null;
             AssetRef<AudioClip> clip = store.voiceClip(id, v);
-            boolean patch = store.voiceNode(id, v) instanceof Patch;
-            track.state[v] = clip == null && !patch ? DONE : WAITING; // inputs and scatters come with later steps
+            boolean procedural = store.voiceNode(id, v) instanceof Patch
+                || store.voiceNode(id, v) instanceof Play play && play.isInput();
+            track.state[v] = clip == null && !procedural ? DONE : WAITING; // scatters come with a later step
             if (clip != null && !acquired(track, clip)) {
                 cache.acquire(clip);
                 track.acquired[track.acquiredCount++] = clip;
@@ -522,6 +707,11 @@ public final class AudioSync {
             }
             if (store.voiceNode(id, v) instanceof Patch patch) {
                 waiting |= !startPatch(t, v, patch);
+                anyStarted |= track.state[v] == PLAYING;
+                continue;
+            }
+            if (store.voiceNode(id, v) instanceof Play play && play.isInput()) {
+                waiting |= !startInput(t, v);
                 anyStarted |= track.state[v] == PLAYING;
                 continue;
             }
@@ -672,6 +862,10 @@ public final class AudioSync {
         Bus bus = store.isUi() ? Bus.UI : track.sound.bus();
         // the clip's gain to its target loudness (measured at import) rides on the voice's
         float clipGain = clip == null ? 1 : clip.gain();
+        for (int l = 0; l < Voices.LISTENERS; l++) {
+            heardSent[2 * (l * slotTrack.length + slot)] = 0;
+            heardSent[2 * (l * slotTrack.length + slot) + 1] = 0;
+        }
         if (!commands.play(slot, clip, at, 0, gain(track, v) * clipGain, pitch(track, v), bus, flags, 0, track.id)) {
             return; // the ring is full: tried again next frame
         }
@@ -881,6 +1075,7 @@ public final class AudioSync {
         int s = storeNow;
         Listeners listeners = stores[s].listeners();
         if (listeners.rendering(listener)) {
+            rendering(s, listener, listeners);
             return;
         }
         int n = deviceCounts[s];
@@ -905,17 +1100,21 @@ public final class AudioSync {
      * {@link #relative}: in doubles until here, with the store's listener at the origin unrotated when it has none.
      */
     private void relative(Track track, int n) {
+        relativeTo(track, n < 0 ? null : devices[track.store], 7 * n);
+    }
+
+    /** As {@link #relative}, for the listener pose at {@code d[o]} (position, then rotation x, y, z, w); null: none. */
+    private void relativeTo(Track track, double[] d, int o) {
         Sounds store = stores[track.store];
-        double[] d = devices[track.store];
-        boolean none = n < 0;
-        double dx = store.position(track.id, 0) - (none ? 0 : d[7 * n]);
-        double dy = store.position(track.id, 1) - (none ? 0 : d[7 * n + 1]);
-        double dz = store.position(track.id, 2) - (none ? 0 : d[7 * n + 2]);
+        boolean none = d == null;
+        double dx = store.position(track.id, 0) - (none ? 0 : d[o]);
+        double dy = store.position(track.id, 1) - (none ? 0 : d[o + 1]);
+        double dz = store.position(track.id, 2) - (none ? 0 : d[o + 2]);
         // by the listener's inverse rotation: v + 2w (q x v) + 2 q x (q x v), q conjugated
-        double qx = none ? 0 : -d[7 * n + 3];
-        double qy = none ? 0 : -d[7 * n + 4];
-        double qz = none ? 0 : -d[7 * n + 5];
-        double qw = none ? 1 : d[7 * n + 6];
+        double qx = none ? 0 : -d[o + 3];
+        double qy = none ? 0 : -d[o + 4];
+        double qz = none ? 0 : -d[o + 5];
+        double qw = none ? 1 : d[o + 6];
         double tx = 2 * (qy * dz - qz * dy);
         double ty = 2 * (qz * dx - qx * dz);
         double tz = 2 * (qx * dy - qy * dx);

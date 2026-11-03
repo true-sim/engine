@@ -13,6 +13,7 @@ import com.truesim.scene.audio.Decibels;
 import com.truesim.scene.audio.Play;
 import com.truesim.scene.audio.Range;
 import com.truesim.scene.audio.Sound;
+import com.truesim.scene.audio.SoundInstance;
 import com.truesim.scene.audio.Sounds;
 import com.truesim.scene.core.SceneGraph;
 import java.io.IOException;
@@ -413,6 +414,84 @@ class ListeningProofs {
                 w.frame();
             }
             w.write("au_step12_v8_gears_and_pass_by.wav");
+        }
+    }
+
+    @Test
+    void streetCamerasHeardFromATelevision() throws IOException, InterruptedException {
+        try (World w = new World()) {
+            var tvBus = com.truesim.scene.audio.Bus.child(com.truesim.scene.audio.Bus.SFX, "tv");
+            w.renderer.commands().layout(com.truesim.scene.audio.BusLayout.builder()
+                .bus(com.truesim.scene.audio.Bus.SFX, b -> b.send(AudioSync.REVERB, -10))
+                .bus(tvBus, b -> b.effect(com.truesim.scene.audio.AudioEffect.named("eq.bandPass").set("low", 280)
+                    .set("high", 4_500)).effect(com.truesim.scene.audio.AudioEffect.named("compressor")
+                    .set("threshold", -24).set("ratio", 4).set("makeup", 6)))
+                .aux(AudioSync.REVERB, b -> b.effect(com.truesim.scene.audio.AudioEffect.named("reverb")
+                    .set("preset", 3))).build());
+            w.sync.patches().register(com.truesim.engine.audio.dsp.Vehicles.v8());
+            var rpm = com.truesim.engine.audio.dsp.Vehicles.RPM;
+            var load = com.truesim.engine.audio.dsp.Vehicles.LOAD;
+            // two street cameras far away; the living room's television 2.5 m ahead of the head
+            long cam1 = w.scene.create();
+            w.scene.setTranslation(cam1, 300, 1.5, 0);
+            long cam2 = w.scene.create();
+            w.scene.setTranslation(cam2, -400, 1.5, 0);
+            long tvNode = w.scene.create();
+            w.scene.setTranslation(tvNode, 0, 0.5, -2.5);
+            w.scene.update();
+            var one = w.sounds.listeners().render(cam1, com.truesim.scene.audio.ListenerMix.mono()
+                .buses(com.truesim.scene.audio.Bus.SFX).maxDistance(120).gain(9));
+            var two = w.sounds.listeners().render(cam2, com.truesim.scene.audio.ListenerMix.mono()
+                .buses(com.truesim.scene.audio.Bus.SFX).maxDistance(120).gain(9));
+            Sound speaker = Sound.builder().bus(tvBus).root(com.truesim.scene.audio.Play.input())
+                .attenuation(Attenuation.builder().distance(0.5, 30).reverbSend(0.5f, 1).build()).build();
+            AssetRef<AudioClip> knockClip = AssetRef.generated(AudioAssets.CLIP, (v, seed) -> knock(v), 2, 0);
+            Sound knock = Sound.builder().root(Play.clip(knockClip)).attenuation(Attenuation.near(1, 80))
+                .pitch(Range.semitones(-2, 2)).build();
+            // the second camera: rain on a roof, pink noise through a band, a gust now and then
+            w.sync.patches().register(com.truesim.engine.audio.dsp.Patch.builder("rain").graph(g -> g.output(
+                g.add(() -> com.truesim.engine.audio.dsp.Filter.bandPass(2_500, 0.6)).in(g.add(
+                    () -> com.truesim.engine.audio.dsp.Noise.pink().seed(4))).plus(g.add(
+                    () -> com.truesim.engine.audio.dsp.Crackle.of().seed(9)).set("rate", 90).times(0.5)).times(0.6)))
+                .build());
+            w.sounds.play(Sound.builder().root(com.truesim.scene.audio.Patch.named("rain"))
+                .attenuation(Attenuation.near(2, 60)).loop().build(), -398, 2, -3);
+            w.sounds.fire(knock, 0, 0, -1000);
+            w.load();
+            SoundInstance tv = w.sounds.play(speaker, tvNode).input(one);
+            SoundInstance car = null;
+            long carNode = w.scene.create();
+            for (int f = 0; f < 60 * 22; f++) {
+                double t = f / 60.0;
+                if (t < 4 && f % 50 == 0) {
+                    w.sounds.fire(knock, 302, 1, -2); // someone knocking at a door by the first camera
+                }
+                if (f == 60 * 4) {
+                    car = w.sounds.play(Sound.builder().root(com.truesim.scene.audio.Patch.named("v8", rpm, load,
+                        com.truesim.engine.audio.dsp.Vehicles.SHIFT)).attenuation(Attenuation.near(3, 300))
+                        .loop().build(), carNode);
+                }
+                if (car != null) {
+                    double ct = t - 4;
+                    w.scene.setTranslation(carNode, 300 - 60 + 14 * ct, 0, -8);
+                    car.set(rpm, (float) (2_500 + 300 * ct), 0.05).set(load, 0.7f, 0.1);
+                    if (ct > 8.5) {
+                        car.stop(0.3);
+                        car = null;
+                    }
+                }
+                if (f == 60 * 13) {
+                    tv.input(two); // switch channel
+                }
+                if (f == 60 * 17) {
+                    w.sounds.fire(knock, 1.5, 0, -1); // a knock in the room itself: full band, near
+                }
+                if (f == 60 * 19) {
+                    tv.stop(); // off
+                }
+                w.frame();
+            }
+            w.write("au_step13_street_cameras_on_a_tv.wav");
         }
     }
 

@@ -53,6 +53,11 @@ public final class AudioRenderer implements AutoCloseable {
     static final int REVERB = 16;
     static final int PATCH = 17;
     static final int PATCH_INPUT = 18;
+    static final int LISTENER = 19;
+    static final int LISTEN = 20;
+    static final int ORDER = 21;
+    static final int INPUT = 22;
+    static final int INPUT_NEXT = 23;
 
     /** Receives events. */
     @FunctionalInterface
@@ -72,6 +77,7 @@ public final class AudioRenderer implements AutoCloseable {
     private final float[] block;
     private StreamRing pendingRing;
     private PatchVoice pendingPatch;
+    private int pendingInput = -1;
     private BusGraph graph;
     private long frame;
     /** Frames of {@link #block} not handed out yet: renders of any length are cut from whole blocks. */
@@ -84,7 +90,7 @@ public final class AudioRenderer implements AutoCloseable {
         this.format = Objects.requireNonNull(format, "format");
         commands = new Ring(1 << 15);
         events = new Ring(1 << 13);
-        this.voices = new Voices(voices, format.channels(), format.rate());
+        this.voices = new Voices(voices, format.channels(), format.rate(), format.block());
         limiter = new Limiter(format.rate(), format.channels());
         access = new Accessibility(format.rate(), format.channels());
         clock = new RenderClock(format.rate(), limiter.latency());
@@ -240,6 +246,11 @@ public final class AudioRenderer implements AutoCloseable {
         render(scratch, 0, format.block());
     }
 
+    /** Blocks rendering listener {@code l} has rendered: it renders only while something consumes its mix. */
+    public long listenerBlocks(int l) {
+        return voices.listenerBlocks(l);
+    }
+
     /** The last block rendered, interleaved. */
     float[] block() {
         return block;
@@ -258,10 +269,17 @@ public final class AudioRenderer implements AutoCloseable {
                     Bus bus = (Bus) r.refs[c];
                     voices.play(slot, (AudioClip) r.refs2[c], Math.max(frame, r.frames[c] - latency), values[v + 2],
                         (float) values[v], (float) values[v + 1], bus, graph.index(bus), (int) values[v + 3],
-                        (float) values[v + 4], r.tags[c], pendingRing, pendingPatch);
+                        (float) values[v + 4], r.tags[c], pendingRing, pendingPatch, pendingInput);
                     pendingRing = null;
                     pendingPatch = null;
+                    pendingInput = -1;
                 }
+                case INPUT_NEXT -> pendingInput = (int) values[v];
+                case INPUT -> voices.input(slot, (int) values[v], Math.max(frame, r.frames[c] - latency));
+                case LISTENER -> voices.listener(slot, values[v] != 0, (int) values[v + 1], (float) values[v + 2],
+                    r.refs[c] == null ? -1 : graph.index((Bus) r.refs[c]), (ListenerTap) r.refs2[c]);
+                case LISTEN -> voices.listen(slot, (int) values[v], (float) values[v + 1], (float) values[v + 2]);
+                case ORDER -> voices.order((int) values[v], values, v + 1);
                 case PATCH -> pendingPatch = (PatchVoice) r.refs[c];
                 case PATCH_INPUT -> voices.patchInput(slot, (int) values[v], (float) values[v + 1], (int) values[v + 2],
                     values[v + 3] != 0, r.frames[c] - latency, frame);
@@ -369,6 +387,55 @@ public final class AudioRenderer implements AutoCloseable {
             commands.values[v + 3] = trigger ? 1 : 0;
             commands.publish();
             return true;
+        }
+
+        /**
+         * Sets up rendering listener {@code l} (0 to 3; §2.10): mono or stereo, a linear gain, routed to device bus
+         * {@code bus} and to {@code tap} (each may be null); {@code active} false turns it off.
+         */
+        public boolean listener(int l, boolean active, int channels, float gain, Bus bus, ListenerTap tap) {
+            int c = claim(LISTENER, l, 0);
+            if (c < 0) {
+                return false;
+            }
+            int v = c * Ring.VALUES;
+            commands.values[v] = active ? 1 : 0;
+            commands.values[v + 1] = channels;
+            commands.values[v + 2] = gain;
+            commands.refs[c] = bus;
+            commands.refs2[c] = tap;
+            commands.publish();
+            return true;
+        }
+
+        /** Rendering listener {@code l} hears voice {@code slot} at {@code left} and {@code right} (ramped a block). */
+        public boolean listen(int slot, int l, float left, float right) {
+            return send(LISTEN, slot, 0, l, left, right);
+        }
+
+        /** The rendering listeners' order: {@code count} indices, each after those it hears (up to 4). */
+        public boolean order(int[] listeners, int count) {
+            int c = claim(ORDER, 0, 0);
+            if (c < 0) {
+                return false;
+            }
+            int v = c * Ring.VALUES;
+            commands.values[v] = Math.min(count, Ring.VALUES - 1);
+            for (int i = 0; i < Math.min(count, Ring.VALUES - 1); i++) {
+                commands.values[v + 1 + i] = listeners[i];
+            }
+            commands.publish();
+            return true;
+        }
+
+        /** Voice {@code slot} now re-emits listener {@code l}'s mix (-1 none), cross-fading 30 ms from {@code frame}. */
+        public boolean input(int slot, int l, long frame) {
+            return send(INPUT, slot, frame, l, 0);
+        }
+
+        /** The next {@link #play} re-emits listener {@code l}'s mix (its clip ignored, may be null). */
+        public boolean inputNext(int l) {
+            return send(INPUT_NEXT, 0, 0, l, 0);
         }
 
         /** The next {@link #play} reads {@code ring} instead of the clip's memory: a streamed voice. */

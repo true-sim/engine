@@ -125,9 +125,47 @@ final class Voices {
     private int highest;
     private long ended;
 
+    // Rendering listeners (step 13, §2.10): their mixes, the voices each hears and how loud, re-emitting voices.
+    static final int LISTENERS = 4;
+    private static final int MIX_RING = 4_096;
+    private final int block;
+    private final boolean[] mixActive = new boolean[LISTENERS];
+    private final int[] mixChannels = new int[LISTENERS];
+    private final float[] mixGain = new float[LISTENERS];
+    private final int[] mixBus = new int[LISTENERS];
+    private final ListenerTap[] mixTaps = new ListenerTap[LISTENERS];
+    private final float[][] mixOut;
+    private final float[][] mixRing = new float[LISTENERS][MIX_RING];
+    private final boolean[] mixRenders = new boolean[LISTENERS];
+    private final boolean[] mixDone = new boolean[LISTENERS];
+    private final long[] mixBlocks = new long[LISTENERS];
+    private final float[] loopGains = {1, 1, 1, 1};
+    private final float[][] mixRms = new float[LISTENERS][8];
+    private final int[] mixOrder = new int[LISTENERS];
+    private int mixOrderCount;
+    private final float[][] heardFrom;
+    private final float[][] heardTo;
+    private final float[] heardMax;
+    private final float[][] voiceBuffers;
+    private final int[] inputs;
+    private final int[] inputPrevious;
+    private final long[] inputSwitched;
+
     @AllowAllocation("made with its renderer")
-    Voices(int capacity, int channels, int rate) {
+    Voices(int capacity, int channels, int rate, int block) {
         this.capacity = capacity;
+        this.block = block;
+        mixOut = new float[LISTENERS][2 * block];
+        heardFrom = new float[LISTENERS][2 * capacity];
+        heardTo = new float[LISTENERS][2 * capacity];
+        heardMax = new float[capacity];
+        voiceBuffers = new float[capacity][block];
+        inputs = new int[capacity];
+        inputPrevious = new int[capacity];
+        inputSwitched = new long[capacity];
+        Arrays.fill(inputs, -1);
+        Arrays.fill(inputPrevious, -1);
+        Arrays.fill(mixBus, -1);
         this.channels = channels;
         this.rate = rate;
         panner = new Panner(channels);
@@ -244,8 +282,11 @@ final class Voices {
      * offset fades in over 20 ms; one from the beginning plays its first sample as it is.
      */
     void play(int slot, AudioClip clip, long start, double offset, float gain, float pitch, Bus bus, int busIdx,
-            int flagBits, float pan, long tag, StreamRing ring, PatchVoice patch) {
+            int flagBits, float pan, long tag, StreamRing ring, PatchVoice patch, int input) {
         states[slot] = WAITING;
+        inputs[slot] = input;
+        inputPrevious[slot] = -1;
+        unheard(slot);
         tags[slot] = tag;
         flags[slot] = flagBits;
         clips[slot] = clip;
@@ -256,7 +297,7 @@ final class Voices {
         auxTo[slot] = 0;
         starving[slot] = false;
         dryGains[slot] = 1;
-        if (patch != null) { // a patch: mono at the mix rate, endless; its ring is filled as the voice reads
+        if (patch != null || input >= 0) { // a patch or a listener's mix: mono at the mix rate, endless
             segments[slot] = null;
             pcm16[slot] = false;
             clipChannels[slot] = 1;
@@ -296,7 +337,7 @@ final class Voices {
         audibility[slot] = 1;
         rates[slot] = baseRates[slot] * pitch;
         rateTargets[slot] = rates[slot];
-        positions[slot] = patch != null ? 0 : offset * clip.rate();
+        positions[slot] = input >= 0 ? start : patch != null ? 0 : offset * clip.rate(); // an input: by mix frame
         gains[slot] = gain;
         gainTargets[slot] = gain;
         gainLeft[slot] = 0;
@@ -434,6 +475,9 @@ final class Voices {
         clips[slot] = null;
         segments[slot] = null;
         patches[slot] = null;
+        inputs[slot] = -1;
+        inputPrevious[slot] = -1;
+        unheard(slot);
         buses[slot] = null;
         ended++;
     }
@@ -486,6 +530,9 @@ final class Voices {
 
     /** One tap of {@code slot}'s clip: frame {@code i} (wrapped into the loop, 0 past the end), {@code channel}. */
     private float tap(int slot, long i, int channel, boolean loop) {
+        if (inputs[slot] >= 0 || inputPrevious[slot] >= 0) {
+            return inputSample(slot, i);
+        }
         if (patches[slot] != null) {
             return patches[slot].sample(i);
         }
@@ -536,12 +583,35 @@ final class Voices {
         if (blocks++ % 4 == 0) {
             choose(graph, blockStart, events);
         }
+        mixing = beginMixes(blockStart, frames);
         int top = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            if (pass == 1 && mixing) {
+                renderMixes(blockStart, frames);
+            }
+            top = renderPass(graph, blockStart, frames, events, pass == 1, top);
+        }
+        if (mixing) {
+            finishMixes(graph, frames);
+        }
+        for (int l = 0; l < LISTENERS; l++) {
+            System.arraycopy(heardTo[l], 0, heardFrom[l], 0, 2 * highest);
+        }
+        highest = top;
+    }
+
+    private boolean mixing;
+
+    /** One pass over the voices: clips and patches first, then those re-emitting listeners' mixes. */
+    private int renderPass(BusGraph graph, long blockStart, int frames, Ring events, boolean inputPass, int top) {
         for (int slot = 0; slot < highest; slot++) {
             if (states[slot] == FREE) {
                 continue;
             }
-            top = slot + 1;
+            top = Math.max(top, slot + 1);
+            if ((inputs[slot] >= 0 || inputPrevious[slot] >= 0) != inputPass) {
+                continue;
+            }
             if (starts[slot] >= blockStart + frames) {
                 continue;
             }
@@ -556,7 +626,229 @@ final class Voices {
                 ended(slot, blockStart + frames, events);
             }
         }
-        highest = top;
+        return top;
+    }
+
+    // ---------------------------------------------------------------- rendering listeners
+
+    /** Sets up rendering listener {@code l} (or turns it off): channels, linear gain, device bus or -1, tap or null. */
+    void listener(int l, boolean active, int channels, float gain, int bus, ListenerTap tap) {
+        if (active && !mixActive[l]) {
+            Arrays.fill(mixRing[l], 0);
+            mixBlocks[l] = 0;
+            loopGains[l] = 1;
+        }
+        mixActive[l] = active;
+        mixChannels[l] = channels;
+        mixGain[l] = gain;
+        mixBus[l] = bus;
+        mixTaps[l] = tap;
+        if (!active) {
+            for (int slot = 0; slot < capacity; slot++) {
+                heardTo[l][2 * slot] = 0;
+                heardTo[l][2 * slot + 1] = 0;
+            }
+        }
+    }
+
+    /** The order rendering listeners render in: each after those it hears through a chain. */
+    void order(int count, double[] values, int from) {
+        mixOrderCount = count;
+        for (int i = 0; i < count; i++) {
+            mixOrder[i] = (int) values[from + i];
+        }
+    }
+
+    /** How loud rendering listener {@code l} hears {@code slot}, left and right (a mono mix uses the left). */
+    void listen(int slot, int l, float left, float right) {
+        heardTo[l][2 * slot] = left;
+        heardTo[l][2 * slot + 1] = right;
+        float max = 0;
+        for (int k = 0; k < LISTENERS; k++) {
+            max = Math.max(max, Math.max(heardTo[k][2 * slot], heardTo[k][2 * slot + 1]));
+        }
+        heardMax[slot] = max;
+    }
+
+    /** {@code slot} re-emits listener {@code l}'s mix from mix frame {@code now} on: a switch cross-fades 30 ms. */
+    void input(int slot, int l, long now) {
+        if (inputs[slot] != l && states[slot] != FREE) {
+            inputPrevious[slot] = inputs[slot] >= 0 ? inputs[slot] : -1;
+            inputs[slot] = l;
+            inputSwitched[slot] = now;
+        }
+    }
+
+    private void unheard(int slot) {
+        for (int l = 0; l < LISTENERS; l++) {
+            heardTo[l][2 * slot] = 0;
+            heardTo[l][2 * slot + 1] = 0;
+            heardFrom[l][2 * slot] = 0;
+            heardFrom[l][2 * slot + 1] = 0;
+        }
+        heardMax[slot] = 0;
+    }
+
+    /** Blocks rendering listener {@code l} has rendered (it renders only while something consumes it). */
+    long listenerBlocks(int l) {
+        return mixBlocks[l];
+    }
+
+    /** An input voice's sample at mix frame {@code i}: its listener's mix, cross-faded from the one before. */
+    private float inputSample(int slot, long i) {
+        float now = inputs[slot] >= 0 ? mixed(inputs[slot], i) : 0;
+        if (inputPrevious[slot] < 0) {
+            return now;
+        }
+        float t = (i - inputSwitched[slot]) / (0.03f * rate);
+        if (t >= 1) {
+            inputPrevious[slot] = -1;
+            return now;
+        }
+        float t0 = Math.max(0, t);
+        return mixed(inputPrevious[slot], i) * (1 - t0) + now * t0;
+    }
+
+    private float mixed(int l, long frame) {
+        return mixActive[l] ? mixRing[l][(int) (frame & (MIX_RING - 1))] : 0;
+    }
+
+    /**
+     * Which rendering listeners render this block (lazily: those a real voice re-emits, or routed to a device bus or a
+     * tap); the others' rings fall silent for it. True when any renders.
+     */
+    private boolean beginMixes(long blockStart, int frames) {
+        boolean any = false;
+        for (int l = 0; l < LISTENERS; l++) {
+            mixDone[l] = false;
+            mixRenders[l] = mixActive[l] && (mixBus[l] >= 0 || mixTaps[l] != null || consumed(l, blockStart + frames));
+            any |= mixRenders[l];
+            if (mixActive[l] && !mixRenders[l]) {
+                for (int f = 0; f < frames; f++) {
+                    mixRing[l][(int) ((blockStart + f) & (MIX_RING - 1))] = 0;
+                }
+            }
+        }
+        return any;
+    }
+
+    private boolean consumed(int l, long blockEnd) {
+        for (int slot = 0; slot < highest; slot++) {
+            if (states[slot] != FREE && (inputs[slot] == l || inputPrevious[slot] == l) && starts[slot] < blockEnd
+                && reality[slot] != VIRTUAL && (envelopes[slot] > 0 || envelopeTargets[slot] > 0)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Renders the listeners in their order (then any the order does not list yet). */
+    private void renderMixes(long blockStart, int frames) {
+        for (int k = 0; k < mixOrderCount; k++) {
+            int l = mixOrder[k];
+            if (l >= 0 && l < LISTENERS && mixRenders[l] && !mixDone[l]) {
+                mix(l, blockStart, frames);
+            }
+        }
+        for (int l = 0; l < LISTENERS; l++) {
+            if (mixRenders[l] && !mixDone[l]) {
+                mix(l, blockStart, frames);
+            }
+        }
+    }
+
+    /**
+     * Mixes listener {@code l}: the voices it hears (read once in the first pass), and those re-emitting other
+     * listeners' mixes, this block's when that listener rendered already, else its previous block's (a cycle: one
+     * block of delay, at -6 dB times the loop's howl guard). Never its own re-emission. Then its gain and a soft clip,
+     * its ring for those re-emitting it, and the howl detector.
+     */
+    private void mix(int l, long blockStart, int frames) {
+        float[] o = mixOut[l];
+        int ch = mixChannels[l];
+        Arrays.fill(o, 0, frames * ch, 0);
+        float[] from = heardFrom[l];
+        float[] to = heardTo[l];
+        for (int slot = 0; slot < highest; slot++) {
+            float l0 = from[2 * slot];
+            float r0 = from[2 * slot + 1];
+            float l1 = to[2 * slot];
+            float r1 = to[2 * slot + 1];
+            if (states[slot] == FREE || starts[slot] >= blockStart + frames || l0 + r0 + l1 + r1 == 0) {
+                continue;
+            }
+            int m = inputs[slot];
+            boolean input = m >= 0 || inputPrevious[slot] >= 0;
+            if (!input) {
+                if (reality[slot] == VIRTUAL) {
+                    continue;
+                }
+                add(o, ch, voiceBuffers[slot], null, 0, 1, frames, l0, r0, l1, r1);
+            } else if (m != l && inputPrevious[slot] != l && m >= 0 && mixActive[m]) { // never itself
+                int delay = mixDone[m] ? 0 : frames;
+                float g = gains[slot] * envelopes[slot] * realGains[slot] * (delay > 0 ? 0.5f * loopGains[m] : 1);
+                add(o, ch, null, mixRing[m], blockStart - delay, g, frames, l0, r0, l1, r1);
+            }
+        }
+        float gain = mixGain[l];
+        double energy = 0;
+        for (int i = 0; i < frames * ch; i++) {
+            float x = Math.max(-3, Math.min(3, o[i] * gain));
+            float x2 = x * x;
+            o[i] = x * (27 + x2) / (27 + 9 * x2); // a soft clip: what feeds back stays bounded
+            energy += o[i] * o[i];
+        }
+        float[] ring = mixRing[l];
+        for (int f = 0; f < frames; f++) {
+            ring[(int) ((blockStart + f) & (MIX_RING - 1))] = ch == 2 ? 0.5f * (o[2 * f] + o[2 * f + 1]) : o[f];
+        }
+        // the howl detector: louder than 8 blocks ago by a fifth lowers the loops through it
+        float rms = (float) Math.sqrt(energy / (frames * ch));
+        int at = (int) (mixBlocks[l] & 7);
+        float before = mixRms[l][at];
+        mixRms[l][at] = rms;
+        if (mixBlocks[l] >= 8 && rms > 1e-5f && rms > 1.2f * before) {
+            loopGains[l] = Math.max(0.01f, loopGains[l] * 0.7f);
+        } else if (rms < 1e-5f) {
+            loopGains[l] = Math.min(1, loopGains[l] * 1.002f); // back only in silence: a howl does not regrow
+        }
+        mixBlocks[l]++;
+        mixDone[l] = true;
+    }
+
+    /** Adds a mono source (a buffer, or a ring from mix frame {@code start}) times {@code g}, panned and ramped. */
+    private static void add(float[] o, int ch, float[] buffer, float[] ring, long start, float g,
+            int frames, float l0, float r0, float l1, float r1) {
+        for (int f = 0; f < frames; f++) {
+            float x = (buffer != null ? buffer[f] : ring[(int) ((start + f) & (MIX_RING - 1))]) * g;
+            float t = (float) (f + 1) / frames;
+            o[f * ch] += x * (l0 + (l1 - l0) * t);
+            if (ch == 2) {
+                o[f * ch + 1] += x * (r0 + (r1 - r0) * t);
+            }
+        }
+    }
+
+    /** Listeners routed to a device bus mix into it; tapped ones write their tap. */
+    private void finishMixes(BusGraph graph, int frames) {
+        for (int l = 0; l < LISTENERS; l++) {
+            if (!mixRenders[l]) {
+                continue;
+            }
+            float[] o = mixOut[l];
+            int ch = mixChannels[l];
+            if (mixBus[l] >= 0) {
+                float[] bus = graph.buffer(mixBus[l]);
+                for (int f = 0; f < frames; f++) {
+                    for (int c = 0; c < channels; c++) {
+                        bus[f * channels + c] += o[f * ch + Math.min(c, ch - 1)];
+                    }
+                }
+            }
+            if (mixTaps[l] != null) {
+                mixTaps[l].write(o, frames);
+            }
+        }
     }
 
     /**
@@ -571,8 +863,8 @@ final class Voices {
                 continue;
             }
             // a fade still to come or under way counts as heard until it is done
-            float a = Math.abs(gainTargets[slot]) * Math.max(envelopes[slot], envelopeTargets[slot]) * attTarget[slot]
-                * graph.gain(busIndex[slot]);
+            float a = Math.abs(gainTargets[slot]) * Math.max(envelopes[slot], envelopeTargets[slot])
+                * Math.max(attTarget[slot], heardMax[slot]) * graph.gain(busIndex[slot]); // or a listener hears it
             boolean wasReal = reality[slot] == REAL || reality[slot] == TO_REAL;
             boolean audible = a >= (wasReal ? SILENT : AUDIBLE);
             int priority = Math.min(4, flags[slot] >>> PRIORITY_SHIFT & 7);
@@ -682,6 +974,15 @@ final class Voices {
         double position = positions[slot];
         double rateFrom = rates[slot];
         double rateStep = (rateTargets[slot] - rateFrom) / frames;
+        boolean input = inputs[slot] >= 0 || inputPrevious[slot] >= 0;
+        if (input) { // a listener's mix plays by mix frame: no pitch, no Doppler
+            rateFrom = 1;
+            rateStep = 0;
+        }
+        float[] heard = mixing && !input && heardMax[slot] > 0 ? voiceBuffers[slot] : null;
+        if (heard != null) {
+            Arrays.fill(heard, 0, frames, 0);
+        }
         float gain = gains[slot];
         float env = envelopes[slot];
         float envTarget = envelopeTargets[slot];
@@ -775,6 +1076,9 @@ final class Voices {
                 }
                 if (ring != null && !hold) {
                     lastPlayed[2 * slot] = s;
+                }
+                if (heard != null) { // what rendering listeners hear: before the device's attenuation and pan
+                    heard[f] = s * gain * env * realGain * dry;
                 }
                 s *= g;
                 for (int c = 0; c < channels; c++) {
