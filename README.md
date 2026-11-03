@@ -18,6 +18,7 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 | `engine-scene`    | `com.truesim.engine.scene`    | Draws scenes: scene's renderables and assets onto renderers, one view per scene and camera |
 | `engine-audio`    | `com.truesim.engine.audio`    | Sound: the mixer on an allocation-free audio thread, SDL3 output, offline rendering |
 | `engine-xr`       | `com.truesim.engine.xr`       | VR headsets through OpenXR: their eyes as frame graph views, a desktop mirror |
+| `engine-ui`       | `com.truesim.engine.ui`       | The ui toolkit's engine side: its renderer (`Keys.UI`), the `ui` actions as UI commands, the mouse pointer |
 
 ## Application
 
@@ -236,6 +237,59 @@ Capture capture = input.capture(one, JUMP);   // the next input becomes a bindin
 - **Cost:** 200 actions for 4 players, events every frame: about 40 to 60 us a frame on a Ryzen 9 9950X3D under load
   from other work, without JaCoCo (`InputBenchmarkTest`, 2026-11-03), 0 bytes allocated; a fixed step readying its
   edges, well under a microsecond.
+
+## UI
+
+`engine-ui` is the engine's side of the [ui](https://github.com/true-sim/ui) toolkit (its design: ui's
+`docs/ui.md`): it implements the interfaces ui-core declares and never the other way round.
+
+- **Renderer** (`GpuUiRenderer`, ui-core's `UiRenderer`): a frame graph technique providing a view's `Keys.UI`
+  image (premultiplied, linear, 1.0 paper white, at the view's output size), which `DisplayTransform` composites after
+  the tone curve. Each frame, after the UI recorded and before the frame records, `submit(layers, count, textures,
+  width, height)` copies only what changed: a draw list's dirty range and its clips, a texture's dirty region; an
+  unchanged frame uploads 0 bytes (`uploadedBytes()`). One draw per layer, without vertex buffers, pulls six vertices per
+  primitive (rounded boxes with borders and gradients, blurred shadows, MTSDF glyphs, images, nine-slices, lines,
+  clipped by rounded rectangles); long runs of one kind (text floods) get their kind's own shader (`Batching.ADAPTIVE`,
+  chosen by `UiBenchmark` over one draw per layer and a draw per run of a kind).
+- **Input** (`UiActions`, `UiCommands`, `MousePointer`): the `ui` action group of design section 10 with keyboard,
+  mouse and gamepad defaults, bindings as settings (`input.ui.navigation.accept`); `UiCommands` (a
+  `UiCommandSource`) adds each player's presses of the frame as `UiCommand`s, with repeats (`ui.repeatDelay`,
+  `ui.repeatRate`), `EXTEND_SELECTION` while Shift is held, text commands while a field took the keyboard
+  (`startText`/`stopText`), and the gamepad's confirm button as a setting (`ui.confirmButton`: the platform's, south
+  or east). `MousePointer` (a `PointerSource`) reads the mouse from the platform's events directly.
+- **Tunables** (`UiTunables`): ui-core's `Tunable`s as settings of the same name and range, written back each frame.
+
+```java
+GpuUiRenderer renderer = new GpuUiRenderer(graph);
+view.add(renderer);                                        // the view's Keys.UI
+presenter.outputTransform(new DisplayTransform());          // composites it (needed to show a UI)
+UiCommands commands = new UiCommands(input, engine.settings(), () -> frame.realTime());
+MousePointer mouse = new MousePointer(window, input);
+desktop.listen(mouse);
+UiTunables tunables = new UiTunables(engine.settings()).add(registry, uiGroup, uiTunables);
+// each frame, at its start (after input sampled), so nothing waits a frame:
+tunables.update();
+uiInput.beginFrame();
+commands.poll(uiInput);
+mouse.poll(uiInput);
+// ... the UI updates, lays out and records its draw lists ...
+renderer.submit(layers, layerCount, uiTextures, window.pixelWidth(), window.pixelHeight());
+presenter.render();
+```
+
+Benchmarks (`TRUESIM_BENCHMARK=true ./gradlew :engine-ui:test --tests '*UiBenchmark'`, without JaCoCo or
+validation; RX 9070 XT, 2026-11-03; GPU time of the UI pass and the frame start at 3840 x 2160):
+
+| Scene | Uber (1 draw a layer) | Per kind | Adaptive (default) | Target |
+|---|---|---|---|---|
+| HUD: 500 elements, 5,000 glyphs, about a quarter of the screen | 0.096-0.102 ms, 1 draw | 0.157-0.165 ms, 1,075 draws | 0.103 ms, 1 draw | 0.15 ms |
+| 100,000 glyphs | 0.28-0.30 ms | 0.27-0.29 ms | 0.29 ms | 0.4 ms |
+| 100,000 glyphs over a full-screen translucent backdrop | 0.40-0.45 ms | 0.39-0.43 ms | 0.44 ms | (0.4 ms) |
+
+Submitting an unchanged HUD takes 0.1 us and uploads nothing; with 50 elements re-recorded a frame, 3 us (one dirty
+range spanning them: 400 KB). Numbers vary by a few percent between sessions sharing the GPU; compare within a run.
+`UiScreenshots` (`TRUESIM_SCREENSHOTS=true`, `TRUESIM_SCREENSHOTS_DIR=<dir>`) writes a gallery of every primitive at
+three scales.
 
 ## Vulkan
 
@@ -1866,5 +1920,6 @@ add to it what is verified, nothing else.
 ./gradlew build
 ```
 
-Sibling checkouts (`../build-logic`, `../common-math`, `../common-jobs`, `../scene`) are used automatically when
+Sibling checkouts (`../build-logic`, `../common-math`, `../common-state`, `../common-jobs`, `../common-graph`,
+`../scene`, `../ui`) are used automatically when
 present (override with `-Ptruesim.<repo>=<path>`); otherwise they come from GitHub Packages.

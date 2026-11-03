@@ -44,7 +44,7 @@ class UiScreenshots {
         for (int i = 0; i < 6; i++) {
             float x = 30 + i * 160;
             float sigma = (1 + i * 3) * s;
-            list.shadow((x + 4) * s, (120 + 6) * s, (x + 124) * s, (190 + 6) * s, Rgba.pack(0, 0, 0, 0.7f),
+            list.shadow((x + 8) * s, (120 + 10) * s, (x + 128) * s, (190 + 10) * s, Rgba.pack(0, 0, 0, 0.9f),
                 10 * s, 10 * s, 10 * s, 10 * s, sigma);
             list.box(x * s, 120 * s, (x + 120) * s, 190 * s, Rgba.srgb(229, 233, 240, 1), 10 * s, 10 * s, 10 * s,
                 10 * s, 0, 0);
