@@ -9,6 +9,7 @@ import com.truesim.engine.settings.Setting;
 import com.truesim.engine.settings.SettingGroup;
 import com.truesim.engine.settings.SettingRegistry;
 import com.truesim.ui.core.Tunable;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -23,7 +24,8 @@ class UiTunablesTest {
         SettingRegistry registry = new SettingRegistry();
         SettingGroup group = SettingGroup.root("ui", "settings.ui", 50);
         UiTunables tunables = new UiTunables(settings).add(registry, group, scale, blink);
-        Setting<Float> setting = tunables.setting(scale);
+        @SuppressWarnings("unchecked")
+        Setting<Float> setting = (Setting<Float>) tunables.setting(scale);
         assertThat(setting.name()).isEqualTo("ui.scale");
         assertThat(setting.min()).isEqualTo(0.5f);
         assertThat(setting.max()).isEqualTo(3f);
@@ -48,5 +50,32 @@ class UiTunablesTest {
         assertThat(scale.get()).isEqualTo(2f);
         assertThatIllegalArgumentException().isThrownBy(() -> tunables.add(null, null,
             Tunable.of("ui.scale", 1, 0, 2, "again")));
+    }
+
+    @Test
+    void choiceTunablesBecomeChoiceSettings() {
+        Tunable mode = Tunable.choice("ui.text.smallText", List.of("HINTED", "MTSDF"), "HINTED", "small text");
+        EngineSettings settings = new EngineSettings().load(Map.of("ui.text.smallText", "mtsdf"));
+        SettingRegistry registry = new SettingRegistry();
+        UiTunables tunables = new UiTunables(settings).add(registry, null, mode);
+        @SuppressWarnings("unchecked")
+        Setting<String> setting = (Setting<String>) tunables.setting(mode);
+        assertThat(setting.kind()).isEqualTo(Setting.Kind.CHOICE);
+        assertThat(setting.choices()).containsExactly("HINTED", "MTSDF");
+        assertThat(setting.defaultValue()).isEqualTo("HINTED");
+        assertThat(setting.description()).isEqualTo("small text");
+        assertThat(registry.find("ui.text.smallText")).isNotNull();
+        assertThat(mode.option()).as("the saved value at once").isEqualTo("MTSDF");
+        settings.set(setting, "HINTED");
+        tunables.update();
+        assertThat(mode.option()).isEqualTo("HINTED");
+        long version = mode.version();
+        tunables.update();
+        assertThat(mode.version()).isEqualTo(version);
+        assertAllocationFree(() -> {
+            mode.set(mode.index() == 0 ? 1 : 0);
+            tunables.update();
+        });
+        assertThat(mode.option()).isEqualTo("HINTED");
     }
 }

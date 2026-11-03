@@ -52,6 +52,16 @@ class EngineSettingsTest {
         assertThat(CURVE.parse("reinhard")).isEqualTo(Curve.REINHARD);
         assertThat(CURVE.parse("filmic")).isNull();
         assertThat(CURVE.format(Curve.ACES)).isEqualTo("ACES");
+        Setting<String> named = Setting.choice("ui.text.smallText", "HINTED", List.of("HINTED", "MTSDF"), "small text");
+        assertThat(named.kind()).isEqualTo(Setting.Kind.CHOICE);
+        assertThat(named.choices()).containsExactly("HINTED", "MTSDF");
+        assertThat(named.restartNeeded().choices()).containsExactly("HINTED", "MTSDF");
+        assertThat(named.parse("mtsdf")).isEqualTo("MTSDF");
+        assertThat(named.parse("soft")).isNull();
+        assertThat(named.allows("MTSDF")).isTrue();
+        assertThat(named.allows("mtsdf")).isFalse();
+        assertThat(named.format("HINTED")).isEqualTo("HINTED");
+        assertThatIllegalArgumentException().isThrownBy(() -> Setting.choice("x", "C", List.of("A", "B"), "not one"));
         assertThat(SIZE.format(512)).isEqualTo("512");
         assertThat(SIZE.allows(512)).isTrue();
         assertThat(SIZE.allows(100)).isFalse();

@@ -1,6 +1,7 @@
 package com.truesim.engine.settings;
 
 import com.truesim.annotations.AllowAllocation;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.function.Function;
@@ -35,7 +36,7 @@ public final class Setting<T> {
         DECIMAL,
         /** Free text. */
         TEXT,
-        /** One of an enum's constants. */
+        /** One of an enum's constants, or of named options. */
         CHOICE
     }
 
@@ -49,9 +50,15 @@ public final class Setting<T> {
     private final Number min;
     private final Number max;
     private final boolean live;
+    private final List<String> options; // a choice among named options; null otherwise
 
     private Setting(String name, Kind kind, Class<?> type, T defaultValue, String description, Function<String, T> parse,
         Predicate<T> valid, Number min, Number max, boolean live) {
+        this(name, kind, type, defaultValue, description, parse, valid, min, max, live, null);
+    }
+
+    private Setting(String name, Kind kind, Class<?> type, T defaultValue, String description, Function<String, T> parse,
+        Predicate<T> valid, Number min, Number max, boolean live, List<String> options) {
         if (name.isBlank() || !name.equals(name.strip()) || name.contains("=")) {
             throw new IllegalArgumentException("A setting's name is a word or dotted words: '" + name + "'");
         }
@@ -65,6 +72,7 @@ public final class Setting<T> {
         this.min = min;
         this.max = max;
         this.live = live;
+        this.options = options;
         if (!valid.test(defaultValue)) {
             throw new IllegalArgumentException(name + ": its default " + defaultValue + " is not allowed");
         }
@@ -101,9 +109,28 @@ public final class Setting<T> {
             s -> Enum.valueOf(type, s.toUpperCase(Locale.ROOT)), v -> true, null, null, true);
     }
 
+    /**
+     * One of {@code options} by name: a choice declared by names rather than an enum (a UI tunable's choice). Text
+     * matches an option ignoring case.
+     */
+    public static Setting<String> choice(String name, String defaultValue, List<String> options, String description) {
+        List<String> copy = List.copyOf(options);
+        return new Setting<>(name, Kind.CHOICE, String.class, defaultValue, description, s -> option(copy, s),
+            copy::contains, null, null, true, copy);
+    }
+
+    private static String option(List<String> options, String text) {
+        for (String option : options) {
+            if (option.equalsIgnoreCase(text)) {
+                return option;
+            }
+        }
+        return null;
+    }
+
     /** This setting, taking effect only when what reads it is made again: not while running. */
     public Setting<T> restartNeeded() {
-        return new Setting<>(name, kind, type, defaultValue, description, parse, valid, min, max, false);
+        return new Setting<>(name, kind, type, defaultValue, description, parse, valid, min, max, false, options);
     }
 
     public String name() {
@@ -132,8 +159,11 @@ public final class Setting<T> {
         return max;
     }
 
-    /** The constants a choice may take; empty for other kinds. */
+    /** The constants or names a choice may take; empty for other kinds. */
     public Object[] choices() {
+        if (options != null) {
+            return options.toArray();
+        }
         return kind == Kind.CHOICE ? type.getEnumConstants() : new Object[0];
     }
 
