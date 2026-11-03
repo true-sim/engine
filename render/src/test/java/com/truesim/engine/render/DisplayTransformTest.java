@@ -94,15 +94,45 @@ class DisplayTransformTest {
         }
     }
 
+    /** A view's UI: premultiplied {@code rgba} everywhere, provided as {@link Keys#UI}. */
+    private record Ui(float red, float green, float blue, float alpha) implements Technique {
+        @Override
+        public List<Key<?>> provides() {
+            return List.of(Keys.UI);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image image = g.create("ui", ImageDesc.of(Format.R16G16B16A16_SFLOAT, SIZE, SIZE));
+            g.pass("ui").write(image, Access.TRANSFER_DST)
+                .record(ctx -> ctx.clear(image.whole(), red, green, blue, alpha));
+            g.provide(Keys.UI, image);
+        }
+    }
+
     /** The first pixel's red, green and blue after transforming scene color {@code rgb} for {@code encoding}. */
     private float[] shown(DisplayEncoding encoding, DisplayTransform.Curve curve, float... rgb) {
+        return shown(encoding, curve, null, settings -> { }, rgb);
+    }
+
+    /**
+     * The first pixel's red, green and blue after transforming scene color {@code rgb} with {@code ui} over it (or
+     * none), the graph's settings changed by {@code settings}.
+     */
+    private float[] shown(DisplayEncoding encoding, DisplayTransform.Curve curve, Ui ui,
+        java.util.function.Consumer<com.truesim.engine.settings.EngineSettings> settings, float... rgb) {
         try (FrameGraph graph = new FrameGraph(device, 2)) {
             graph.settings().set(DisplayTransform.CURVE, curve);
+            settings.accept(graph.settings());
             ExternalImage out = new ExternalImage("shown", SIZE, SIZE, Format.R16G16B16A16_SFLOAT,
                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
-            graph.addView("main").size(SIZE, SIZE).add(new Scene(rgb[0], rgb[1], rgb[2]))
-                .add(new DisplayTransform().transform(SCENE, SHOWN, encoding)).output(SHOWN, out);
+            com.truesim.engine.graph.ViewPort view = graph.addView("main").size(SIZE, SIZE)
+                .add(new Scene(rgb[0], rgb[1], rgb[2]));
+            if (ui != null) {
+                view.add(ui);
+            }
+            view.add(new DisplayTransform().transform(SCENE, SHOWN, encoding)).output(SHOWN, out);
             device.submitAndWait(device.graphics(), commands -> {
                 graph.record(commands);
                 try (MemoryStack stack = stackPush()) {
@@ -153,7 +183,59 @@ class DisplayTransformTest {
         assertThat(rolled[0]).as("five times white: rolled off below the peak").isCloseTo(1000 * 0.5f / 80,
             within(2e-2f));
         assertThat(DisplayTransform.ALL).containsExactly(DisplayTransform.CURVE, DisplayTransform.EXPOSURE,
-            DisplayTransform.PAPER_WHITE, DisplayTransform.PEAK);
+            DisplayTransform.PAPER_WHITE, DisplayTransform.PEAK, DisplayTransform.UI_BRIGHTNESS);
+    }
+
+    /** Nits of a PQ-encoded value: SMPTE ST 2084's inverse. */
+    private static double nits(double encoded) {
+        double p = Math.pow(encoded, 1 / 78.84375);
+        return 10000 * Math.pow(Math.max(p - 0.8359375, 0) / (18.8515625 - 18.6875 * p), 1 / 0.1593017578125);
+    }
+
+    @Test
+    void hdr10ShowsTheUisWhiteAtPaperWhite() {
+        for (float paperWhite : new float[] {100, 203, 400}) {
+            // Over a scene five times white: the UI covers it, whatever the curve made of it.
+            float[] white = shown(DisplayEncoding.HDR10_PQ, DisplayTransform.Curve.ACES, new Ui(1, 1, 1, 1),
+                s -> s.set(DisplayTransform.PAPER_WHITE, paperWhite), 5, 5, 5);
+            for (float c : white) {
+                assertThat(nits(c)).as("white UI at paper white " + paperWhite).isCloseTo(paperWhite,
+                    within(paperWhite * 0.01));
+            }
+        }
+        float[] brighter = shown(DisplayEncoding.HDR10_PQ, DisplayTransform.Curve.NONE, new Ui(1, 1, 1, 1),
+            s -> s.set(DisplayTransform.UI_BRIGHTNESS, 1.5f), 0, 0, 0);
+        assertThat(nits(brighter[0])).as("ui.brightness, relative to paper white").isCloseTo(300, within(3.0));
+        float[] glow = shown(DisplayEncoding.HDR10_PQ, DisplayTransform.Curve.NONE, new Ui(20, 20, 20, 1),
+            s -> { }, 0, 0, 0);
+        assertThat(nits(glow[0])).as("HDR-intense UI clipped at the peak").isCloseTo(1000, within(10.0));
+    }
+
+    @Test
+    void sdrShowsTheUisColorsExactlyOverABrightScene() {
+        float[] shown = shown(DisplayEncoding.SDR_SRGB, DisplayTransform.Curve.ACES, new Ui(0.25f, 0.5f, 0.75f, 1),
+            s -> s.set(DisplayTransform.EXPOSURE, 4f), 16, 16, 16);
+        assertThat(shown).as("not exposed, not tone mapped").containsExactly(new float[] {0.25f, 0.5f, 0.75f},
+            within(1e-3f));
+        float[] none = shown(DisplayEncoding.SDR_SRGB, DisplayTransform.Curve.NONE, new Ui(0, 0, 0, 0), s -> { },
+            0.5f, 0.25f, 1);
+        assertThat(none).as("a transparent UI leaves the scene").containsExactly(new float[] {0.5f, 0.25f, 1},
+            within(1e-3f));
+    }
+
+    @Test
+    void theUiBlendsByItsAlpha() {
+        // Premultiplied red at half coverage over gray: 0.5 * (1 - 0.5) + 0.25.
+        float[] sdr = shown(DisplayEncoding.SDR_SRGB, DisplayTransform.Curve.NONE, new Ui(0.25f, 0, 0, 0.5f),
+            s -> { }, 0.5f, 0.5f, 0.5f);
+        assertThat(sdr).containsExactly(new float[] {0.5f, 0.25f, 0.25f}, within(1e-3f));
+        // scRGB, paper white 200 (2.5 x 80 nits): the scene's 200 nits halved, the UI's half white added.
+        float[] scrgb = shown(DisplayEncoding.SCRGB_LINEAR, DisplayTransform.Curve.NONE, new Ui(0.5f, 0.5f, 0, 0.5f),
+            s -> { }, 1, 1, 1);
+        assertThat(scrgb).containsExactly(new float[] {2.5f, 2.5f, 1.25f}, within(5e-3f));
+        float[] scrgbWhite = shown(DisplayEncoding.SCRGB_LINEAR, DisplayTransform.Curve.ACES, new Ui(1, 1, 1, 1),
+            s -> s.set(DisplayTransform.PAPER_WHITE, 400f), 3, 0, 0);
+        assertThat(scrgbWhite).as("400 nits over 80").containsExactly(new float[] {5, 5, 5}, within(5e-3f));
     }
 
     @Test
