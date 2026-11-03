@@ -1,4 +1,4 @@
-package com.truesim.engine.scene;
+package com.truesim.engine.demo;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assumptions.assumeThat;
@@ -16,6 +16,8 @@ import com.truesim.common.collision.TriangleMeshShape;
 import com.truesim.common.math.Quat;
 import com.truesim.common.math.Transform;
 import com.truesim.common.math.Vec3;
+import com.truesim.engine.audio.SegmentTracer;
+import com.truesim.engine.audio.TracedAudioWorld;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
@@ -49,9 +51,10 @@ import org.junit.jupiter.api.Test;
 /**
  * Occlusion rays traced on the GPU against what physics traces for the same walls (§2.11, audio step 19): boxes as
  * convex bodies against meshes crossed going in, and as triangle meshes against every triangle crossed; validated.
- * Prints the agreement and the time per frame of batches of 64 and 4,096 rays.
+ * Prints the agreement and the time per frame of batches of 64 and 4,096 rays. Here, where the app joins the
+ * renderer's tracing and audio's world.
  */
-class TracedAudioWorldTest {
+class TracedOcclusionTest {
 
     private static final Key<Image> TARGET = Key.image("test.target");
     private static final AudioMaterial[] TABLE = {null, AudioMaterial.CONCRETE, AudioMaterial.GLASS,
@@ -238,16 +241,15 @@ class TracedAudioWorldTest {
                 for (int i = 0; i < RAYS; i++) {
                     traced[i] = new Transmission();
                 }
-                TracedAudioWorld bodies = new TracedAudioWorld(tracing, m -> m < TABLE.length ? TABLE[m] : null,
-                    TracedAudioWorld.Crossings.ENTERING);
+                SegmentTracer tracer = SegmentTracer.of(tracing.capacity(), SegmentTracing.WORDS, tracing::submit,
+                    tracing::collect);
+                TracedAudioWorld bodies = new TracedAudioWorld(tracer, m -> m < TABLE.length ? TABLE[m] : null);
                 assertThat(bodies.capacity()).isEqualTo(RAYS);
-                assertThat(bodies.tracing()).isSameAs(tracing);
-                assertThat(tracing.frontsOnly()).isTrue();
+                tracing.frontsOnly(true);
                 assertThat(await(graph, bodies, bodies.submit(rays, RAYS), traced)).isEqualTo(RAYS);
                 double[] convex = compare(physics(boxes, false), rays, traced, "convex bodies, crossings going in");
-                TracedAudioWorld meshes = new TracedAudioWorld(tracing, m -> m < TABLE.length ? TABLE[m] : null,
-                    TracedAudioWorld.Crossings.EVERY);
-                assertThat(tracing.frontsOnly()).isFalse();
+                TracedAudioWorld meshes = new TracedAudioWorld(tracer, m -> m < TABLE.length ? TABLE[m] : null);
+                tracing.frontsOnly(false);
                 assertThat(await(graph, meshes, meshes.submit(rays, RAYS), traced)).isEqualTo(RAYS);
                 double[] sides = compare(physics(boxes, true), rays, traced, "triangle meshes, every crossing");
                 // One ray of 4,096 differs here, by physics' fault: stepping out of a curtain box in doubling steps

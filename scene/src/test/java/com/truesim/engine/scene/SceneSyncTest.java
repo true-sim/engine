@@ -646,25 +646,21 @@ class SceneSyncTest {
         assertThat(resources.materialOf(sync.firstMaterialOf(green))).isEqualTo(GREEN);
         assertThat(resources.materialOf(-1)).isNull();
         assertThat(resources.materialOf(1 << 20)).isNull();
-        // Red is concrete, green nothing (open): through the middle of each square (its diagonal, two triangles met
-        // as one crossing), and above both.
-        TracedAudioWorld world = TracedAudioWorld.byAsset(segments, resources,
-            m -> m.equals(RED) ? com.truesim.scene.audio.AudioMaterial.CONCRETE : null,
-            TracedAudioWorld.Crossings.EVERY);
-        com.truesim.scene.audio.Transmission[] out = new com.truesim.scene.audio.Transmission[3];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = new com.truesim.scene.audio.Transmission();
-        }
-        long ticket = world.submit(new double[] {1, 0, 0, 1, 0, -6, -1, 0, 0, -1, 0, -6, 0.5, 5, 0, 0.5, 5, -6}, 3);
-        int count = world.collect(ticket, out, 0);
+        // The crossings name the scene's material ids: through the middle of each square (its diagonal, two triangles
+        // met as one crossing), and above both.
+        long ticket = segments.submit(new double[] {1, 0, 0, 1, 0, -6, -1, 0, 0, -1, 0, -6, 0.5, 5, 0, 0.5, 5, -6}, 3);
+        int[] words = new int[com.truesim.engine.render.SegmentTracing.WORDS * 3];
+        int count = segments.collect(ticket, words);
         for (int frame = 0; frame < 16 && count < 0; frame++) {
             frame(List.of(graph), List.of(sync), camera);
-            count = world.collect(ticket, out, 0);
+            count = segments.collect(ticket, words);
         }
         assertThat(count).isEqualTo(3);
-        assertThat(out[0].mid()).as("through red").isEqualTo(com.truesim.scene.audio.AudioMaterial.CONCRETE.mid());
-        assertThat(out[1].mid()).as("through green, open").isEqualTo(1);
-        assertThat(out[2].mid()).as("past both").isEqualTo(1);
+        assertThat(words[0]).as("through red, one crossing").isEqualTo(1);
+        assertThat(resources.materialOf(words[2])).as("through red").isEqualTo(RED);
+        assertThat(words[com.truesim.engine.render.SegmentTracing.WORDS]).as("through green, one crossing").isEqualTo(1);
+        assertThat(resources.materialOf(words[com.truesim.engine.render.SegmentTracing.WORDS + 2])).as("through green").isEqualTo(GREEN);
+        assertThat(words[2 * com.truesim.engine.render.SegmentTracing.WORDS]).as("past both").isZero();
         int redMaterial = sync.firstMaterialOf(red);
         renderables.remove(red);
         frame(List.of(graph), List.of(sync), camera);

@@ -9,7 +9,6 @@ description = "Engine scene bridge for true-sim: draws scene's renderables, foll
 dependencies {
     api(project(":engine-render"))
     api("com.truesim.scene:scene-render:0.58.0")
-    api(project(":engine-audio")) // TracedAudioWorld: occlusion rays through the ray tracing structures
     testImplementation("com.truesim.scene:scene-meshbuild:0.58.0")
     testImplementation("com.truesim.scene:scene-gltf:0.58.0")
 }

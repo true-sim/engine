@@ -1209,15 +1209,16 @@ audio.ui().play(CLICK);
   and a 2D bed at the rest's summed attenuation.
 - **Occlusion** (§2.11): `sync.occlusion(world, jobs)` traces sounds marked `Occlusion.RAYS`, 64 rays a frame
   round-robin, through an `AudioWorld` (physics: `CollisionAudioWorld`), smoothed (attack 100 ms, release 300 ms).
-  On devices with ray tracing, `sync.occlusion(new TracedAudioWorld(segments, materials, Crossings.ENTERING))`
-  (engine-scene) traces them on the GPU instead, through the render's top level: the frame's rays go out as one batch
-  of a `SegmentTracing` in the main view, the results come back a frame or more later (up to 4 batches out) and the
-  smoothing hides the wait. Materials are the triangles' render materials mapped to `AudioMaterial`s
-  (`TracedAudioWorld.byAsset(segments, resources, asset -> ...)`); `ENTERING` counts a closed mesh once, as physics
-  counts a convex body, `EVERY` each triangle, as physics counts a triangle mesh. On 4,096 random rays through 25
-  boxes the two agree on every ray as triangle meshes and on all but one as convex bodies (physics stepping out of
-  one box in doubling steps lands inside the next); a batch of 4,096 rays costs the GPU 0.04 ms and the game thread
-  0.03 ms a frame, where physics takes 7.6 ms on one thread (RX 9070 XT, `TracedAudioWorldTest`, 2026-11-03).
+  On devices with ray tracing, the app joins the render's `SegmentTracing` (which knows nothing of audio) to an
+  engine-audio `TracedAudioWorld` and gives it to `sync.occlusion(world)`:
+  `new TracedAudioWorld(SegmentTracer.of(segments.capacity(), SegmentTracing.WORDS, segments::submit,
+  segments::collect), id -> ...)`. The frame's rays go out as one batch of the tracing in the main view, the results
+  come back a frame or more later (up to 4 batches out) and the smoothing hides the wait. The table maps the scene's
+  material ids to `AudioMaterial`s (`resources.materialOf(id)` names their assets); `segments.frontsOnly(true)` counts
+  a closed mesh once, as physics counts a convex body, `false` each triangle, as physics counts a triangle mesh. On
+  4,096 random rays through 25 boxes the two agree on every ray as triangle meshes and on all but one as convex
+  bodies (physics stepping out of one box in doubling steps lands inside the next); a batch of 4,096 rays costs the GPU 0.04 ms and the game thread
+  0.03 ms a frame, where physics takes 7.6 ms on one thread (RX 9070 XT, demo's `TracedOcclusionTest`, 2026-11-03).
   Without ray tracing there is no `SegmentTracing`: give the physics world, or none.
 - **VR**: `audio.head(sounds, xrInput::head)` listens from the headset (and turns the HRTF on with `audio.output` at
   `AUTO`); `audio.headsetDevice(headset.audioOutputDevice())` plays on the headset's device where the runtime names
