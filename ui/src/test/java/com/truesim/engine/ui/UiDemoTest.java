@@ -2,7 +2,6 @@ package com.truesim.engine.ui;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.GraphBuilder;
@@ -17,6 +16,7 @@ import com.truesim.ui.controls.Ui;
 import com.truesim.ui.core.Element;
 import com.truesim.ui.core.UiState;
 import com.truesim.ui.core.draw.UiTextures;
+import com.truesim.ui.fonts.cjk.BundledCjkFonts;
 import com.truesim.ui.layout.Layout;
 import com.truesim.ui.style.StyleSheet;
 import com.truesim.ui.style.tss.SourceLoader;
@@ -32,8 +32,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * The A1 demo: a HUD styled by the default theme ({@code .tss}), laid out by ui-layout, its text shaped by HarfBuzz and
- * drawn from msdfgen MTSDF atlases, rendered by the engine into the UI image and composited after the tone curve over
- * a bright scene, in SDR and HDR10. With {@code TRUESIM_SCREENSHOTS=true} it writes the frames as PNGs.
+ * drawn from msdfgen MTSDF atlases (FreeType's hinted raster below 13 px) over the bundled fonts, rendered by the
+ * engine into the UI image and composited after the tone curve over a bright scene, in SDR and HDR10. With {@code TRUESIM_SCREENSHOTS=true} it writes the frames as PNGs.
  */
 class UiDemoTest {
 
@@ -77,11 +77,15 @@ class UiDemoTest {
         return Tss.compile(loader, "demo.tss").sheet();
     }
 
+    /**
+     * The real text path over the bundled fonts (the same on every machine): HarfBuzz, msdfgen MTSDF, and FreeType's
+     * hinted raster for text below 13 px (ui.text.smallText HINTED, the default).
+     */
     static TextSystem text(UiTextures textures) {
         NativeTextBackend backend = new NativeTextBackend();
-        FontRegistry fonts = FontRegistry.system(backend);
-        assumeTrue(fonts.match("sans-serif", 400, false) != null, "no system font");
-        GlyphAtlas atlas = new GlyphAtlas(textures, backend.msdfGenerator(), null, null, new AtlasSettings());
+        FontRegistry fonts = BundledCjkFonts.registry(backend);
+        GlyphAtlas atlas = new GlyphAtlas(textures, backend.msdfGenerator(), backend.newRasterizer(), null, null,
+            new AtlasSettings());
         return new TextSystem(fonts, backend.newShaper(), atlas);
     }
 

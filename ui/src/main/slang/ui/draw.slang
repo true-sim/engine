@@ -260,12 +260,18 @@ Texture2D<float4> sampled(uint* p)
 
 /**
  * A glyph of an MTSDF atlas: the median of the three channels is the multi-channel distance (0.5 on the edge), alpha
- * the true distance, which the outline reads; PIXEL_RANGE is the atlas's range in screen pixels at this size.
+ * the true distance, which the outline reads; PIXEL_RANGE is the atlas's range in screen pixels at this size. With
+ * FLAG_RASTER it is hinted coverage instead (small text): its quad lies on whole pixels, a texel per pixel, and the
+ * texel's alpha times the colour's is the glyph.
  */
 float4 glyph(uint* p, float2 px)
 {
     float2 uv = lerp(unorms(p[UV]), unorms(p[UV + 1]), across(p, px));
     float4 m = sampled(p).SampleLevel(samplers[LINEAR_CLAMP], uv, 0);
+    if (((p[HEADER] >> 8) & FLAG_RASTER) != 0)
+    {
+        return color(p, COLOR_A) * m.a;
+    }
     float range = word(p, PIXEL_RANGE);
     // The atlas encodes distances up to half its range either side of the edge; an edge moved (bold) or an outline
     // reaching further would find only the clamped encoding there and fill the whole quad: both are kept within it.
