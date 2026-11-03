@@ -8,6 +8,7 @@ import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.Materials;
 import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.Textures;
+import com.truesim.engine.scene.Animation;
 import com.truesim.engine.scene.SceneResources;
 import com.truesim.engine.scene.SceneSync;
 import com.truesim.engine.vulkan.FrameSlots;
@@ -68,7 +69,7 @@ final class DemoCharacter implements AutoCloseable {
     private final SceneResources resources;
     private final SceneGraph scene = new SceneGraph(new ChangeClock());
     private final Renderables renderables = new Renderables(scene);
-    private final Animators animators = new Animators(scene);
+    private final Animators animators; // run by the animation plugin, in ANIMATE
     private final SceneSync sync;
     private final long holder;
     private long body; // the node drawing its skinned mesh
@@ -83,15 +84,15 @@ final class DemoCharacter implements AutoCloseable {
     private final double[] tailRoot = new double[3];
     private final Joint[] feet = new Joint[4];
     private boolean moving;
-    private double last;
 
     /**
      * The fox from {@code file}, at world ({@code x}, {@code z}) on the terrain, drawn into {@code gpu}; traced by
-     * {@code rayTracing}, if not null.
+     * {@code rayTracing}, if not null; its animator run by {@code animation}.
      */
     DemoCharacter(VulkanDevice device, FrameSlots slots, GeometryPool pool, Materials materials, GpuScene gpu,
         Path file, double x, double z,
-        RayTracing rayTracing) throws InterruptedException {
+        RayTracing rayTracing, Animation animation) throws InterruptedException {
+        animators = animation.animators(scene);
         this.x = x;
         this.z = z;
         textures = new Textures(device, slots);
@@ -208,7 +209,10 @@ final class DemoCharacter implements AutoCloseable {
         return cache.get(ref);
     }
 
-    /** The fox at {@code seconds}, looking at world ({@code lx}, {@code ly}, {@code lz}). Before the frame records. */
+    /**
+     * The fox at {@code seconds}, looking at world ({@code lx}, {@code ly}, {@code lz}): what plays and where, in UPDATE;
+     * the animation plugin poses it in ANIMATE, {@link #draw} draws it.
+     */
     void update(double seconds, double lx, double ly, double lz) {
         tasks.drainCompleted(); // meshes and textures arriving
         double t = seconds % LOOP;
@@ -231,9 +235,11 @@ final class DemoCharacter implements AutoCloseable {
         tailRoot[1] = DemoMeshes.height(x, z) + 0.9;
         tailRoot[2] = z - behind * Maths.cos(yaw) - side * Maths.sin(yaw);
         animator.fabrik(tail).target(tailRoot[0], tailRoot[1], tailRoot[2]).weight(0.8);
-        animators.update(Math.max(0, seconds - last));
-        last = seconds;
-        scene.update();
+    }
+
+    /** Draws the fox as animation posed it: after the frame's ANIMATE (the animation plugin's), before it records. */
+    void draw() {
+        tasks.drainCompleted(); // meshes and textures arriving
         renderables.update();
         sync.update();
     }

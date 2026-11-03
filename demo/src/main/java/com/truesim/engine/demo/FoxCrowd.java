@@ -9,6 +9,7 @@ import com.truesim.engine.render.GpuScene;
 import com.truesim.engine.render.Materials;
 import com.truesim.engine.render.RayTracing;
 import com.truesim.engine.render.Textures;
+import com.truesim.engine.scene.Animation;
 import com.truesim.engine.scene.SceneResources;
 import com.truesim.engine.scene.SceneSync;
 import com.truesim.engine.vulkan.FrameSlots;
@@ -78,7 +79,7 @@ final class FoxCrowd implements AutoCloseable {
     private final double[] turn;
     private final double[] phase;
     private final double[] where; // per fox: x and z where it is now
-    private double last;
+    private final Animation animation;
     private long lastAnimation; // nanoseconds the last update spent in the animators and the scene graph
     // Timings, after a warm-up: nanoseconds summed and updates counted; copies the GPU skinned.
     private long animating;
@@ -95,18 +96,20 @@ final class FoxCrowd implements AutoCloseable {
      */
     FoxCrowd(VulkanDevice device, FrameSlots slots, GeometryPool pool, Materials materials, GpuScene gpu, Path file,
         int count, boolean lod, double eyeX, double eyeZ,
-        RayTracing rayTracing) throws InterruptedException {
-        this(device, slots, pool, materials, gpu, file, count, lod, eyeX, eyeZ, rayTracing, null);
+        RayTracing rayTracing, Animation animation) throws InterruptedException {
+        this(device, slots, pool, materials, gpu, file, count, lod, eyeX, eyeZ, rayTracing, null, animation);
     }
 
     /** The arena's foxes roaming in it, drawn into {@code gpu}, with level of detail by distance from the camera. */
     FoxCrowd(VulkanDevice device, FrameSlots slots, GeometryPool pool, Materials materials, GpuScene gpu,
-        DemoScene.Arena arena) throws InterruptedException {
-        this(device, slots, pool, materials, gpu, arena.fox(), arena.foxes(), true, arena.x(), arena.z(), null, arena);
+        DemoScene.Arena arena, Animation animation) throws InterruptedException {
+        this(device, slots, pool, materials, gpu, arena.fox(), arena.foxes(), true, arena.x(), arena.z(), null, arena,
+            animation);
     }
 
     private FoxCrowd(VulkanDevice device, FrameSlots slots, GeometryPool pool, Materials materials, GpuScene gpu,
-        Path file, int count, boolean lod, double eyeX, double eyeZ, RayTracing rayTracing, DemoScene.Arena arena)
+        Path file, int count, boolean lod, double eyeX, double eyeZ, RayTracing rayTracing, DemoScene.Arena arena,
+        Animation animation)
         throws InterruptedException {
         this.pool = pool;
         this.rayTracing = rayTracing;
@@ -117,7 +120,8 @@ final class FoxCrowd implements AutoCloseable {
             resources.rayTracing(rayTracing); // its meshes and skinned copies traced
         }
         sync = new SceneSync(resources, renderables, gpu, jobs);
-        animators = new Animators(scene, jobs);
+        this.animation = animation;
+        animators = animation.animators(scene); // sampled in parallel on the plugin's threads
         PathAssets paths = new PathAssets(cache);
         paths.mounts().add("crowd", PathSource.folder(file.getParent()));
         new Gltf(paths).register();
@@ -267,31 +271,35 @@ final class FoxCrowd implements AutoCloseable {
         }
     }
 
-    /** The crowd at {@code seconds}, looking at world ({@code lx}, {@code ly}, {@code lz}). Before the frame records. */
+    /**
+     * The crowd at {@code seconds}, looking at world ({@code lx}, {@code ly}, {@code lz}): where they go and look, in
+     * UPDATE; the animation plugin poses them in ANIMATE, {@link #draw} draws them.
+     */
     void update(double seconds, double lx, double ly, double lz) {
-        boolean time = ++updates > 30; // after a warm-up
         tasks.drainCompleted();
         place(seconds);
         for (Animator a : crowd) {
             a.lookAt(look).target(lx, ly, lz).weight(1);
         }
+    }
+
+    /** Draws the crowd as animation posed it: after the frame's ANIMATE, before it records; times both. */
+    void draw() {
+        boolean time = ++updates > 30; // after a warm-up
+        long animated = animation.lastNanos(animators);
         long start = System.nanoTime();
-        animators.update(Math.max(0, seconds - last));
-        last = seconds;
-        scene.update();
-        long animated = System.nanoTime();
         renderables.update();
         sync.update();
         long synced = System.nanoTime();
-        lastAnimation = animated - start;
+        lastAnimation = animated;
         if (time) {
-            animating += animated - start;
-            syncing += synced - animated;
+            animating += animated;
+            syncing += synced - start;
             timed++;
         }
     }
 
-    /** Nanoseconds the last {@link #update} spent animating: the animators and the scene graph's transforms. */
+    /** Nanoseconds the last frame spent animating the crowd (the plugin's ANIMATE): animators and transforms. */
     long lastAnimation() {
         return lastAnimation;
     }

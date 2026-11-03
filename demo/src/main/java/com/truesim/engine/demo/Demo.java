@@ -44,6 +44,7 @@ import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.VisibilityBufferShading;
 import com.truesim.engine.render.WeightedBlendedTransparency;
 import com.truesim.engine.render.shadows.CascadedShadowMaps;
+import com.truesim.engine.scene.Animation;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.vulkan.PresentMode;
 import com.truesim.engine.xr.Eye;
@@ -157,7 +158,7 @@ public final class Demo implements Application, PlatformListener {
     @Override
     public void configure(AppConfig app) {
         app.id("truesim-demo").name("true-sim demo").saveSettings(settingsFile)
-            .use(new Desktop(), new Rendering().validation(validation), new Audio());
+            .use(new Desktop(), new Rendering().validation(validation), new Audio(), new Animation());
         if (vr) {
             app.use(Xr.ifAvailable());
         }
@@ -181,7 +182,7 @@ public final class Demo implements Application, PlatformListener {
         Rendering rendering = engine.get(Rendering.KEY);
         graph = rendering.graph().timings(true);
         presenter = rendering.presenter().outputTransform(new DisplayTransform());
-        world = new DemoScene(rendering.device(), graph.frameSlots(), COLOR, DEPTH);
+        world = new DemoScene(rendering.device(), graph.frameSlots(), COLOR, DEPTH, engine.get(Animation.KEY));
         System.out.println("GPU: " + rendering.device().gpu().name() + (validation ? ", validation on" : ""));
         window = platform.createWindow(WindowOptions.of("true-sim demo", 1600, 900), settings.scoped("main"));
         main = graph.addView("main");
@@ -223,9 +224,6 @@ public final class Demo implements Application, PlatformListener {
         if (knocks != null) {
             knocks.update(dt, eye, yaw);
         }
-        if (footsteps != null) {
-            footsteps.update(eye, yaw);
-        }
         for (CascadedShadowMaps sun : cascades) {
             sun.update();
         }
@@ -245,6 +243,15 @@ public final class Demo implements Application, PlatformListener {
             window.setTitle(status(titledFrames * 1e9 / (now - titled)));
             titled = now;
             titledFrames = 0;
+        }
+    }
+
+    /** After the animation plugin posed the fox and the crowd: draw them, and hear the fox's footsteps. */
+    @Override
+    public void lateUpdate(Frame frame) {
+        world.sync();
+        if (footsteps != null) {
+            footsteps.update(eye, yaw);
         }
     }
 
