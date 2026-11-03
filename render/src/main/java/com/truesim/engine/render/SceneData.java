@@ -77,12 +77,13 @@ public record SceneData(MeshletRenderer renderer) implements Request<SceneData.B
             g.importBuffer(geometry[0]), g.importBuffer(geometry[1]), g.importBuffer(geometry[2]),
             g.importBuffer(geometry[3]), g.importBuffer(geometry[4]), g.importBuffer(geometry[5]), List.copyOf(named));
         InstanceMotion motion = scene.motion();
-        Buffer motions = g.importBuffer(motion.graphBuffer());
+        Buffer motions = g.importBuffer(motion.firstGraph());
+        Buffer motionsBefore = g.importBuffer(motion.secondGraph());
         pool.uploadInPasses();
         scene.uploadInPasses();
         motion.uploadInPasses();
         g.pass("scene upload").write(buffers.instances, BufferAccess.STORAGE_WRITE)
-            .write(motions, BufferAccess.STORAGE_WRITE)
+            .write(motions, BufferAccess.STORAGE_WRITE).write(motionsBefore, BufferAccess.STORAGE_WRITE)
             .write(buffers.positions, BufferAccess.TRANSFER_DST).write(buffers.attributes, BufferAccess.TRANSFER_DST)
             .write(buffers.meshlets, BufferAccess.TRANSFER_DST).write(buffers.meshletVertices, BufferAccess.TRANSFER_DST)
             .write(buffers.meshletTriangles, BufferAccess.TRANSFER_DST)
@@ -95,9 +96,10 @@ public record SceneData(MeshletRenderer renderer) implements Request<SceneData.B
         // Instances moved in fixed steps drawn between their last two poses (D91), before anything reads them
         Pipeline blend = g.computeProgram("shaders/interpolation/blend.spv", "blendMain", BlendPush.BYTES);
         BlendPush blendPush = new BlendPush();
-        g.pass("interpolation").read(motions, BufferAccess.STORAGE_READ)
+        g.pass("interpolation").read(motions, BufferAccess.STORAGE_READ).read(motionsBefore, BufferAccess.STORAGE_READ)
             .write(buffers.instances, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> motion.record(ctx, ctx.address(motions), ctx.address(buffers.instances), blend, blendPush));
+            .record(ctx -> motion.record(ctx, ctx.address(motions), ctx.address(motionsBefore),
+                ctx.address(buffers.instances), blend, blendPush));
         // Deformed copies posed right after: every reader sees them as any mesh
         Pipeline skin = g.computeProgram("shaders/deformation/skin.spv", "skinMain", DeformPush.BYTES);
         Pipeline spheres = g.computeProgram("shaders/deformation/skin.spv", "spheresMain", DeformPush.BYTES);

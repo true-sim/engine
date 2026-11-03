@@ -1006,15 +1006,20 @@ renderers above, following the scene's change logs and asset cache:
   world transforms and captures the renderables the step moved; each frame draws them `clock.blend()` of the way from
   their pose at the step before to the last step's, as `render.interpolation` says (GPU by default; syncs on resources
   given settings, as the assets plugin's are, follow it as it changes; `sync.interpolation(mode)` sets one by hand).
-  On the GPU, a step's moved instances each get one 112-byte motion record with both poses
-  (`GpuScene.motion()`, an `InstanceMotion`), and a compute pass after the scene upload blends them into the instance
-  table before anything reads it: frames without a step cost the CPU nothing per instance. `CPU` writes every moving
+  On the GPU (`GpuScene.motion()`, an `InstanceMotion`) each moving instance has a pose in each of two buffers that turn
+  over every frame with steps: a step uploads only its own pose (the step before's stays; both in a move's first step
+  or after a catch-up frame), and a compute pass after the scene upload blends them into the instance table before
+  anything reads it: frames without a step cost the CPU nothing per instance. `GPU` packs a pose into 32 bytes
+  (positions as floats from where the first mover started, within 0.7 mm 10 km from there; rotations snorm16, within
+  0.003 degrees; scales one float where uniform, else halves); `GPU_PRECISE` keeps positions in two parts (64 bytes).
+  `CPU` writes every moving
   instance's blended pose each frame (for frames recorded without a frame graph, which run no blend pass); `OFF` draws
   steps as they are. `sync.teleport(node)` in the step that moves it draws it where it lands; `interpolated(node,
   false)` opts a node out; a node moved outside the steps is drawn where it is. With 30,000 rocks moved every step at
-  60 steps and 144 frames a second (2026-11-03, RX 9070 XT): GPU 0.50 ms of sync and 3.48 MB uploaded per frame with a
-  step, 0.002 ms and nothing without, the blend pass 0.013 ms on the GPU; CPU 0.63 ms and 2.04 MB with a step, 0.44 ms
-  and 2.04 MB without (application-api.md D122).
+  60 steps and 144 frames a second (2026-11-03, RX 9070 XT, on a loaded machine): `GPU` 0.61 ms of sync and 1.08 MB
+  uploaded per frame with a step, 0.001 ms and nothing without, the blend pass 0.006 ms on the GPU; `GPU_PRECISE` 0.57
+  ms and 2.04 MB, 0.009 ms; `CPU` 0.44 ms and 2.04 MB with a step, 0.24 ms and 2.04 MB without (application-api.md
+  D122).
 
 ```java
 FrameSlots slots = new FrameSlots(2);                 // shared by every graph drawing these resources

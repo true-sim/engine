@@ -76,6 +76,17 @@ class InterpolationTest {
     private static final long MS = 1_000_000L;
     private static final int SIZE = 32;
     private static final double FAR = 1e6; // far from the origin: the position's two parts both matter
+    private static final double FAR_AWAY = 10_000; // the packed layout's precision is given at 10 km from its origin
+    private static final double[] FAR_SCALE = {1.1, 2.3, 3.7}; // halves on the packed layout: none exact
+
+    /** The far square's rotation at a step: about (1, 2, 3), 0.3 rad a step. */
+    private static final class FarPose {
+        static double[] rotation(long tick) {
+            double angle = 0.3 * tick;
+            double s = Math.sin(angle / 2) / Math.sqrt(14);
+            return new double[] {s, 2 * s, 3 * s, Math.cos(angle / 2)};
+        }
+    }
 
     private VulkanInstance instance;
     private VulkanDevice device;
@@ -179,10 +190,21 @@ class InterpolationTest {
         Clock clock;
         boolean moving = true;
         long teleportAt = -1;
+        long far = -1; // a second square 10 km along x, moving from the second step on, scaled unevenly; or none
 
         World() {
+            this(false);
+        }
+
+        World(boolean second) {
             scene.setTranslation(node, FAR, 0, FAR);
             renderables.set(node, SceneSyncTest.SQUARE, List.of(SceneSyncTest.RED));
+            if (second) {
+                far = scene.create();
+                scene.setTranslation(far, FAR + FAR_AWAY, 0, FAR);
+                scene.setScale(far, FAR_SCALE[0], FAR_SCALE[1], FAR_SCALE[2]);
+                renderables.set(far, SceneSyncTest.SQUARE, List.of(SceneSyncTest.RED));
+            }
             graph = closing(new FrameGraph(device, slots));
             MeshletRenderer renderer = closing(new MeshletRenderer(device, gpu, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_FORMAT_D32_SFLOAT, slots));
@@ -222,6 +244,11 @@ class InterpolationTest {
             if (step.tick() == teleportAt) {
                 sync.teleport(node);
             }
+            if (far >= 0 && step.tick() >= 2) {
+                double[] q = FarPose.rotation(step.tick());
+                scene.setTranslation(far, FAR + FAR_AWAY + 0.37 * step.tick(), 0.25 * step.tick(), FAR);
+                scene.setRotation(far, q[0], q[1], q[2], q[3]);
+            }
         }
 
         /** A frame at {@code millis}: the engine's phases (the steps), then the scene synced and drawn. */
@@ -247,6 +274,27 @@ class InterpolationTest {
             return ((double) high - FAR) + low;
         }
 
+        /**
+         * Instance {@code id}'s pose as drawn in the last frame, into {@code out}: its position relative to
+         * ({@link #FAR}, 0, {@link #FAR}), its rotation, its scale.
+         */
+        void drawn(int id, double[] out) {
+            device.waitIdle();
+            MemorySegment m = readbacks[lastSlot].memory();
+            long o = (long) id * GpuScene.INSTANCE_BYTES;
+            for (int c = 0; c < 3; c++) {
+                float high = m.get(ValueLayout.JAVA_FLOAT_UNALIGNED, o + InstanceLayout.POSITION + 4 * c);
+                float low = m.get(ValueLayout.JAVA_FLOAT_UNALIGNED, o + InstanceLayout.POSITION_LOW + 4 * c);
+                out[c] = ((double) high - (c == 1 ? 0 : FAR)) + low;
+            }
+            for (int c = 0; c < 4; c++) {
+                out[3 + c] = m.get(ValueLayout.JAVA_FLOAT_UNALIGNED, o + InstanceLayout.ROTATION + 4 * c);
+            }
+            for (int c = 0; c < 3; c++) {
+                out[7 + c] = m.get(ValueLayout.JAVA_FLOAT_UNALIGNED, o + InstanceLayout.SCALE + 4 * c);
+            }
+        }
+
         /** The instance's rotation angle about y as drawn in the last frame. */
         double drawnAngle() {
             MemorySegment m = readbacks[lastSlot].memory();
@@ -266,7 +314,7 @@ class InterpolationTest {
                     tasks.drainCompleted();
                 }
             }
-            assertThat(sync.instanceCount()).isEqualTo(1);
+            assertThat(sync.instanceCount()).isEqualTo(far >= 0 ? 2 : 1);
             moving = true;
         }
     }
@@ -274,6 +322,81 @@ class InterpolationTest {
     @Test
     void theGpuBlendsTheLastTwoStepsByTheFramesFactor() throws InterruptedException {
         blendsTheLastTwoSteps(Interpolation.GPU);
+    }
+
+    @Test
+    void theGpuBlendsPrecisePosesTheSame() throws InterruptedException {
+        blendsTheLastTwoSteps(Interpolation.GPU_PRECISE);
+    }
+
+    @Test
+    void aCatchUpFrameBlendsFromTheStepBeforeItsLast() throws InterruptedException {
+        for (Interpolation mode : new Interpolation[] {Interpolation.GPU, Interpolation.GPU_PRECISE}) {
+            World world = new World();
+            try (Engine engine = Engine.create(world)) {
+                world.sync.interpolation(mode);
+                world.settle(engine);
+                world.frame(engine, 100);
+                world.frame(engine, 200);
+                world.frame(engine, 400); // steps 3 and 4 in one frame: the GPU holds step 2's pose, not 3's
+                world.frame(engine, 450);
+                assertThat(world.drawnX()).as(mode.name()).isCloseTo(3.5, within(1e-3));
+                world.frame(engine, 500); // and one step again: step 4's pose is on the GPU now
+                world.frame(engine, 550);
+                assertThat(world.drawnX()).as(mode.name()).isCloseTo(4.5, within(1e-3));
+            }
+        }
+    }
+
+    @Test
+    void packedPosesStayWithinAMillimetreAndAHundredthOfADegree10KmFromTheirOrigin() throws InterruptedException {
+        for (Interpolation mode : new Interpolation[] {Interpolation.GPU, Interpolation.GPU_PRECISE}) {
+            World world = new World(true);
+            try (Engine engine = Engine.create(world)) {
+                world.sync.interpolation(mode);
+                world.settle(engine);
+                double[] drawn = new double[10];
+                double position = 0;
+                double degrees = 0;
+                double scale = 0;
+                for (long t = 30; t <= 1200; t += 30) {
+                    world.frame(engine, t);
+                    long tick = world.clock.tick();
+                    if (tick < 4) {
+                        continue; // both of the far square's poses from its steps
+                    }
+                    double b = world.clock.blend();
+                    world.drawn(world.sync.slotOf(world.far), drawn);
+                    double at = tick - 1 + b;
+                    position = Math.max(position, Math.max(Math.abs(drawn[0] - (FAR_AWAY + 0.37 * at)),
+                        Math.max(Math.abs(drawn[1] - 0.25 * at), Math.abs(drawn[2]))));
+                    double[] from = FarPose.rotation(tick - 1);
+                    double[] to = FarPose.rotation(tick);
+                    double[] q = new double[4];
+                    double length = 0;
+                    for (int c = 0; c < 4; c++) {
+                        q[c] = (1 - b) * from[c] + b * to[c];
+                        length += q[c] * q[c];
+                    }
+                    double dot = 0;
+                    double drawnLength = 0;
+                    for (int c = 0; c < 4; c++) {
+                        dot += q[c] / Math.sqrt(length) * drawn[3 + c];
+                        drawnLength += drawn[3 + c] * drawn[3 + c];
+                    }
+                    degrees = Math.max(degrees, Math.toDegrees(2 * Math.acos(Math.min(1,
+                        Math.abs(dot) / Math.sqrt(drawnLength)))));
+                    for (int c = 0; c < 3; c++) {
+                        scale = Math.max(scale, Math.abs(drawn[7 + c] / FAR_SCALE[c] - 1));
+                    }
+                }
+                System.out.printf(java.util.Locale.ROOT, "%s 10 km from the origin: position within %.3f mm, rotation "
+                    + "%.5f degrees, scale %.5f%%%n", mode, 1000 * position, degrees, 100 * scale);
+                assertThat(position).as(mode + ", metres").isLessThan(1e-3);
+                assertThat(degrees).as(mode + ", degrees").isLessThan(0.01);
+                assertThat(scale).as(mode + ", relative scale").isLessThan(1e-3);
+            }
+        }
     }
 
     @Test
@@ -299,7 +422,7 @@ class InterpolationTest {
                 }
             }
             assertThat(world.sync.interpolatedCount()).isEqualTo(1);
-            assertThat(world.gpu.motion().count()).isEqualTo(mode == Interpolation.GPU ? 1 : 0);
+            assertThat(world.gpu.motion().count()).isEqualTo(mode.onGpu() ? 1 : 0);
         }
     }
 
@@ -375,8 +498,15 @@ class InterpolationTest {
 
     @Test
     void aTeleportIsDrawnWhereItLandsWithoutBlendingAcross() throws InterruptedException {
+        for (Interpolation mode : new Interpolation[] {Interpolation.GPU, Interpolation.GPU_PRECISE, Interpolation.CPU}) {
+            teleport(mode);
+        }
+    }
+
+    private void teleport(Interpolation mode) throws InterruptedException {
         World world = new World();
         try (Engine engine = Engine.create(world)) {
+            world.sync.interpolation(mode);
             world.teleportAt = 3;
             world.settle(engine);
             world.frame(engine, 100);

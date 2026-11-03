@@ -303,7 +303,10 @@ class SceneBenchmark {
             sync.follow(clock);
             long[] now = {0};
             int held = 0; // motion records while drawn on the GPU
-            for (com.truesim.engine.render.Interpolation mode : com.truesim.engine.render.Interpolation.values()) {
+            com.truesim.engine.render.Interpolation[] modes = com.truesim.engine.render.Interpolation.values();
+            for (int run = 0; run < 3 * modes.length; run++) { // three rounds of every mode, in turn: a loaded
+                com.truesim.engine.render.Interpolation mode = modes[run % modes.length]; // machine shows in all alike
+                String name = mode.name();
                 sync.interpolation(mode);
                 long[] steps = new long[STEP_FRAMES];
                 long[] syncs = new long[STEP_FRAMES];
@@ -327,8 +330,7 @@ class SceneBenchmark {
                     sync.update();
                     long t2 = System.nanoTime();
                     long upload = (long) sync.gpu().pendingCount() * (GpuScene.INSTANCE_BYTES + 4)
-                        + (long) sync.gpu().motion().pendingCount()
-                        * (com.truesim.engine.render.InstanceMotion.RECORD_BYTES + 4);
+                        + sync.gpu().motion().pendingBytes();
                     cameraView.set(camera, 1, MeshletRenderer.MODE_LIT);
                     graph.submit(0, 0);
                     slots.end();
@@ -348,18 +350,22 @@ class SceneBenchmark {
                     }
                 }
                 held = Math.max(held, sync.gpu().motion().highWater());
-                System.out.printf(Locale.ROOT, "  30,000 rocks in fixed steps, %-4s frames with a step: steps %7.3f "
-                    + "sync %7.3f ms, %,d bytes uploaded; without: steps %7.3f sync %7.3f ms, %,d bytes; blend pass "
-                    + "%.4f ms GPU; %,d bytes allocated (median), %,d max%n", mode,
+                System.out.printf(Locale.ROOT, "  30,000 rocks in fixed steps, %-15s frames with a step: steps %7.3f "
+                    + "sync %7.3f ms, %,d bytes uploaded (%,d the most); without: steps %7.3f sync %7.3f ms, %,d bytes; blend pass "
+                    + "%.4f ms GPU; %,d bytes allocated (median), %,d max%n", name,
                     median(steps, stepped, true) / 1e6, median(syncs, stepped, true) / 1e6,
-                    median(uploaded, stepped, true), median(steps, stepped, false) / 1e6,
+                    median(uploaded, stepped, true), Arrays.stream(uploaded).max().orElse(0), median(steps, stepped, false) / 1e6,
                     median(syncs, stepped, false) / 1e6, median(uploaded, stepped, false),
                     gpuFrames == 0 ? 0 : gpuBlend / gpuFrames, median(allocated, stepped, null),
                     Arrays.stream(allocated).max().orElse(0));
             }
-            System.out.printf(Locale.ROOT, "  interpolation's memory per moving instance: %d bytes on the GPU (a motion "
-                + "record; %,d records in the GPU run), %d bytes on the CPU per drawn instance (two poses in doubles)%n",
-                com.truesim.engine.render.InstanceMotion.RECORD_BYTES, held, 2 * 10 * 8);
+            for (com.truesim.engine.render.InstanceMotion.Layout layout
+                : com.truesim.engine.render.InstanceMotion.Layout.values()) {
+                System.out.printf(Locale.ROOT, "  interpolation's GPU memory per moving instance, %s: %d bytes (%d a "
+                    + "record)%n", layout, layout.gpuBytes(), layout.recordBytes());
+            }
+            System.out.printf(Locale.ROOT, "  %,d slots in the GPU runs; %d bytes on the CPU per drawn instance (two "
+                + "poses in doubles)%n", held, 2 * 10 * 8);
             sync.interpolation(com.truesim.engine.render.Interpolation.OFF);
         }
         graph.timings(false);

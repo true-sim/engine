@@ -172,6 +172,7 @@ public final class SceneSync implements AutoCloseable {
     private int trackedCount;
     private boolean[] still = new boolean[64];      // opted out: drawn as stepped
     private boolean[] teleported = new boolean[64]; // its next move starts from where it lands
+    private boolean[] restart = new boolean[64];    // teleported: the GPU's pose before is not where it starts
     private long fixedThrough = Long.MIN_VALUE;     // the stamp of the last step's changes
     private int captured;                           // changes captured in steps since the last update
     private boolean steppedSince;                   // a step ran since the last update
@@ -231,6 +232,7 @@ public final class SceneSync implements AutoCloseable {
         com.truesim.engine.settings.EngineSettings followed = resources.settings();
         if (followed != null) { // render.interpolation as the player sets it, switched at the next update
             interpolation = followed.get(RenderSettings.INTERPOLATION);
+            layout();
             settingWatch = followed.onChange(RenderSettings.INTERPOLATION, () -> settingChanged = true);
         }
     }
@@ -804,6 +806,7 @@ public final class SceneSync implements AutoCloseable {
         tracked = Arrays.copyOf(tracked, length);
         still = Arrays.copyOf(still, length);
         teleported = Arrays.copyOf(teleported, length);
+        restart = Arrays.copyOf(restart, length);
         Arrays.fill(itemCopy, old, length, NONE);
         fillItems = new int[length];
         fillEntries = new int[length];
@@ -1162,6 +1165,15 @@ public final class SceneSync implements AutoCloseable {
         if (mode != interpolation) {
             stopAll();
             interpolation = mode;
+            layout();
+        }
+    }
+
+    /** The GPU's motion records kept as the mode says: packed, or precise. With none in use. */
+    private void layout() {
+        if (interpolation.onGpu()) {
+            gpu.motion().layout(interpolation == Interpolation.GPU_PRECISE ? InstanceMotion.Layout.PRECISE
+                : InstanceMotion.Layout.PACKED);
         }
     }
 
@@ -1235,6 +1247,7 @@ public final class SceneSync implements AutoCloseable {
         if (teleported[item]) {
             System.arraycopy(drawnPose, POSE * item, fromPose, POSE * item, POSE);
             teleported[item] = false;
+            restart[item] = true;
         }
         movedTick[item] = stepClock.tick();
     }
@@ -1266,6 +1279,9 @@ public final class SceneSync implements AutoCloseable {
         captured = 0;
         long tick = stepClock.tick();
         InstanceMotion motion = gpu.motion();
+        if (interpolation.onGpu()) {
+            motion.beginStep(tick);
+        }
         int count = 0; // records to write, in the fill lists (free until the fill)
         int i = 0;
         while (i < trackedCount) {
@@ -1276,8 +1292,12 @@ public final class SceneSync implements AutoCloseable {
                 untrack(item);
                 markMoved(item);
             } else {
-                if (interpolation == Interpolation.GPU) {
+                if (interpolation.onGpu()) {
                     if (motionSlot[item] == NONE) {
+                        if (motion.count() == 0) { // packed positions are kept from here: the first mover's
+                            int f = POSE * item;
+                            motion.origin(fromPose[f], fromPose[f + 1], fromPose[f + 2]);
+                        }
                         motionSlot[item] = motion.add();
                     }
                     fillItems[count++] = item;
@@ -1287,7 +1307,9 @@ public final class SceneSync implements AutoCloseable {
         }
         // Claimed in order on this thread, written on the job system's threads when many, as instances are
         for (int r = 0; r < count; r++) {
-            fillEntries[r] = motion.claim(motionSlot[fillItems[r]]);
+            int item = fillItems[r];
+            fillEntries[r] = motion.claim(motionSlot[item], restart[item]);
+            restart[item] = false;
         }
         if (jobs != null && count >= PARALLEL) {
             jobs.parallelFor(count, GRAIN, writeMotions);
@@ -1314,7 +1336,7 @@ public final class SceneSync implements AutoCloseable {
     /** Each frame: the GPU's blend factor, or every moving renderable's blended pose written. */
     private void blend() {
         double a = stepClock.blend();
-        if (interpolation == Interpolation.GPU) {
+        if (interpolation.onGpu()) {
             gpu.motion().blend(a);
             return;
         }

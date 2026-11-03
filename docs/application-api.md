@@ -233,9 +233,10 @@ ground included, in its parallel part, and documents `Ground` as thread-safe).
   step runs, `SceneSync` uploads the previous and current world transforms of instances moved in `FIXED`; each frame
   passes one blend factor. Frames without a step cost no CPU, and the same data gives motion vectors. A teleport or
   spawn sets previous = current. The scene graph keeps simulated values only. **Measured first** (D122). On by default
-  for nodes moved in `FIXED`; a node can opt out. Built as: `InstanceMotion` records (112 B: both poses) scattered
-  with the instances, a blend pass after the scene upload writing the instance table; `render.interpolation` GPU (the
-  default), CPU or OFF, followed without app code by every `SceneSync` on the assets plugin's resources
+  for nodes moved in `FIXED`; a node can opt out. Built as: `InstanceMotion` poses in two buffers that turn over each
+  frame with steps (a step uploads its own pose only), scattered with the instances, a blend pass after the scene
+  upload writing the instance table; `render.interpolation` GPU (packed poses, 32 B; the default), GPU_PRECISE
+  (positions in two parts, 64 B), CPU or OFF, followed without app code by every `SceneSync` on the assets plugin's resources
   (`SceneResources.settings`), switched at its next update (set by hand on a sync, the setting no longer applies to
   it); motion vectors not yet read from it.
 - **D92** (revised) Frame delta capped (0.25 s); one budget of fixed steps per frame shared by all worlds, in a fixed
@@ -285,6 +286,30 @@ ground included, in its parallel part, and documents `Ground` as thread-safe).
 
   The GPU path's step frames take about half the time they did; bytes, the blend pass (0.013 ms) and allocation (0)
   are unchanged. The CPU path's frames without a step drop to a quarter to a half, but every one still writes 2.04 MB.
+
+  **Pose formats (2026-11-03, later),** each built and measured in the same session (three rounds in turn, the machine
+  loaded by other work; ranges over the rounds), sync on frames with a step with parallel writes:
+
+  | GPU layout | uploaded a step | GPU memory per mover | blend pass | sync, frame with a step | precision 10 km out |
+  |---|---|---|---|---|---|
+  | both poses a step, two-part positions (as built first) | 3.48 MB (116 B) | 112 B | 0.009–0.013 ms | 0.56–0.69 ms | exact (floats in two parts) |
+  | (a) previous kept on the GPU, two-part positions | 2.04 MB (68 B) | 128 B | 0.008–0.009 ms | 0.56–0.82 ms | exact |
+  | (b) both poses a step, packed | 2.04 MB (68 B) | 64 B | 0.007–0.008 ms | 0.62–0.94 ms | as (c): the same packing (not measured apart) |
+  | (c) previous kept, packed | 1.08 MB (36 B) | 64 B | 0.005–0.007 ms | 0.61–0.95 ms | 0.71 mm, 0.0025°, scale 0.036% |
+
+  0 bytes allocated per frame (median) in every layout; a few frames of a few hundred bytes appeared in some rounds, in
+  every mode including `OFF` and CPU, after a mode had switched (cause not found). The sync time on a step frame does
+  not follow the bytes: about 0.2–0.45 ms of it is claiming 30,000 records one after another (each its entry in the
+  change list), which every layout pays; the writes themselves run on the job system. (a) uploads a step's pose only,
+  and both poses in a move's first step, after a catch-up frame (the GPU holds a pose two steps old then) and after a
+  teleport; stopped instances lose their slot and are written where they stopped (the stopped list the sync keeps
+  already; a GPU copy would keep blending them every frame, so it was not built). (c) beats (b) in bytes at the same
+  memory and precision, and (a) beats the first layout in bytes and blend time for 16 B more memory per mover. (c)
+  against (a) trades precision for half the bytes and memory: positions are floats from where the first instance
+  started moving (the records' origin; within 0.71 mm 10 km from it, measured, about 1 mm per 10 km farther),
+  rotations four snorm16 (0.0025°), scales one float where uniform, else three halves (0.036%). So both are values of
+  `render.interpolation`: `GPU` is (c), the default; `GPU_PRECISE` is (a). The first layout and (b) are gone.
+  Spreading a step's writes over the following frames was rejected: it adds a step of latency.
 - **D123** (new; built 2026-11-03, logging per step until scene has an update without logging: §6 "Built since")
   World transforms are propagated after every fixed step (transforms only; change logging once per
   frame), so step 2 never reads stale parent transforms and a catch-up frame does not overflow the change log.

@@ -109,7 +109,7 @@ public final class GpuScene implements AutoCloseable {
             org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
                 | org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, slots);
         materials = defaultMaterials;
-        motion = new InstanceMotion(device, slots, 64);
+        motion = new InstanceMotion(device, slots, 64, InstanceMotion.Layout.PACKED);
     }
 
     /**
