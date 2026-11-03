@@ -8,4 +8,5 @@ description = "Engine input for true-sim: actions in groups, bindings saved as s
 dependencies {
     api(project(":engine-platform"))
     implementation("com.truesim.common:common-math:0.6.0") // filters' curves and smoothing
+    testImplementation("org.lwjgl:lwjgl-sdl") // events pushed through SDL to the desktop
 }

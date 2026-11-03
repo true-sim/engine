@@ -316,7 +316,7 @@ public final class Player {
         }
         b.adapt();
         b.satisfied = held && b.magnitude(b.dims) >= input.releaseThreshold();
-        if (b.satisfied && b.modifierCount > 0) {
+        if (b.satisfied && b.modifierCount > 0 && b.binary) { // a button chord; held-button-and-move is not one
             for (int k = 0; k < b.inputCount; k++) {
                 take(b.inputClass[k], b.inputIndex[k], b.modifierCount);
             }

@@ -86,6 +86,24 @@ class ActionsTest {
     }
 
     @Test
+    void aModifierOnAnAxisGatesItAndTakesNothing() {
+        ActionGroup group = ActionGroup.root("looking");
+        BinaryAction held = group.binary("held", Binding.mouse(com.truesim.engine.platform.MouseButton.RIGHT));
+        Axis2Action look = group.axis2("look", Binding.axes2d(Controls.MOUSE_X, Controls.MOUSE_Y)
+            .with(Controls.mouse(com.truesim.engine.platform.MouseButton.RIGHT)));
+        try (Rig rig = new Rig(group)) {
+            rig.events().mouseMoved(0, 1, 0, 0, 0, 5, 0, 0);
+            rig.frame();
+            assertThat(rig.one().x(look)).isZero(); // not held
+            rig.events().mouseButton(0, 1, 0, com.truesim.engine.platform.MouseButton.RIGHT, true, 1, 0, 0);
+            rig.events().mouseMoved(0, 1, 0, 0, 0, 5, 0, 0);
+            rig.frame();
+            assertThat(rig.one().x(look)).isEqualTo(5);
+            assertThat(rig.one().down(held)).isTrue();
+        }
+    }
+
+    @Test
     void modifiersAreLeftRightOrEitherAndAnyPadButtonCanBeOne() { // D71
         ActionGroup group = ActionGroup.root("mods");
         BinaryAction left = group.binary("left", Binding.chord(Controls.key(Key.LEFT_ALT), Controls.key(Key.X)));

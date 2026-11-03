@@ -31,7 +31,12 @@ import java.util.function.Function;
  * pad:SOUTH device(030000005e0400001202000000007200,,)  only the device captured (D72)
  * </pre>
  *
- * Bindings in game code name generic controls ({@link Controls}); a specific device is recorded only when a player
+ * A binary action's chord, held, takes its controls from the bindings with fewer modifiers that frame (D69: the most
+ * specific binding wins, chords suppress their parts): with Ctrl+S held, S does not also walk back and Ctrl does not
+ * crouch, and Ctrl+Shift+S takes them from Ctrl+S. A modifier on an analog binding only gates it (the right mouse
+ * button held to look with the mouse) and takes nothing.
+ *
+ * <p>Bindings in game code name generic controls ({@link Controls}); a specific device is recorded only when a player
  * captures one ({@link Capture}).
  */
 public final class Binding {

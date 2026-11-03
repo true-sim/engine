@@ -32,7 +32,7 @@ final class Bound {
     final float[] raw = new float[6];
     final float[] value = new float[3];
     boolean modifiersHeld;
-    boolean satisfied;         // held and pushed: a chord takes its controls from less specific bindings (D69)
+    boolean satisfied;         // held and pushed: a binary action's chord takes its controls from less specific ones
     // Over frames (reset with the filters, D86).
     boolean latched;           // the hysteresis' state (D77)
     boolean under;             // pressed before timing
