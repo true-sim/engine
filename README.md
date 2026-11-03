@@ -675,9 +675,9 @@ color:
   go by type.
 
 A shading bin an instance first draws rebuilds the graph with its pipelines before it draws (made ahead: below); a
-material of a bin made after the graph built is left out of that frame (never drawn as another type). Depth, shadow and ID passes keep shared entry
-points: they read the slot alone (alpha masking from its cutoff and mask texture), whatever the type, but for types
-with geometry hooks.
+material of a bin made after the graph built is left out of that frame (never drawn as another type). Depth, shadow
+and ID passes keep shared entry points: they read the slot alone (alpha masking from its cutoff and mask texture),
+whatever the type, but for types with geometry hooks.
 
 **Geometry hooks** (the first of #68's): a type may decide where its surfaces are, in every pass. Its parameters'
 attribute names the hooks it has beside the features it allows (`[MaterialParameters(GEOMETRY_KEEP)]`; the build
