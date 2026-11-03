@@ -28,6 +28,7 @@ public final class InputContext {
     private MouseMode mouse = MouseMode.INHERIT;
     private boolean blocking;
     private boolean takesText;
+    private int textKind;
     private TextListener text;
     long pushed; // when it was pushed (an increasing number), 0 when not on the stack
 
@@ -106,6 +107,20 @@ public final class InputContext {
 
     TextListener textListener() {
         return text;
+    }
+
+    /**
+     * The kind of text it takes: {@code Window.TEXT_INPUT_TEXT}, {@code TEXT_INPUT_PASSWORD} (no IME),
+     * {@code TEXT_INPUT_NUMBER}, {@code TEXT_INPUT_MULTILINE}; text input starts with it.
+     */
+    public InputContext textKind(int kind) {
+        textKind = kind;
+        return this;
+    }
+
+    /** The kind of text it takes. */
+    public int textKind() {
+        return textKind;
     }
 
     /** Whether it is on the stack. */

@@ -102,6 +102,9 @@ class ContextsTest {
             assertThat(typed).containsExactly("[ka]", "w");
             assertThat(rig.input.textContext()).isSameAs(field);
             assertThat(rig.input.desktopSource().takingText()).isTrue();
+            assertThat(rig.input.textKind()).as("plain text unless said").isZero();
+            assertThat(field.textKind(1).textKind()).isEqualTo(1); // a password: text input starts with it
+            assertThat(rig.input.textKind()).isEqualTo(1);
             assertThat(rig.one().y(MOVE)).isZero();          // W types; it does not walk
             assertThat(rig.one().down(CONFIRM)).isTrue();    // the field's own binding still works
             rig.plug(1).axis(1, GamepadAxis.LEFT_Y, -1).frame();
@@ -110,6 +113,7 @@ class ContextsTest {
             rig.frame();
             assertThat(rig.input.textContext()).isNull();
             assertThat(rig.input.desktopSource().takingText()).isFalse();
+            assertThat(rig.input.textKind()).isZero();
             rig.events().text(1, "x");
             assertThat(typed).hasSize(2);
             rig.axis(1, GamepadAxis.LEFT_Y, 0).frame();
