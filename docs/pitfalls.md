@@ -71,6 +71,16 @@ eyes, located inside `Headset.render` just before the frame records, could not h
 - Rule: per-frame inputs that the docs say are read when the frame runs are read there, not copied when handed over;
   test the order an app uses (set once, change later), not only set-then-draw.
 
+**The frame before's view-projection stayed after the camera stopped.** A render view wrote its matrices, and with
+them the frame before's (for motion vectors), only in frames where its camera changed. A camera that moved and then
+stood kept the last move as the frame before's: every still pixel read 2 pixels of motion for ever after.
+- Proof: `MotionVectorsTest`'s "the camera stopped" frame read 2.0 instead of 0 on both shading techniques, and passes
+  with the view writing again on the frame's first cull while the frame before's differs (`RenderView.refresh(first)`,
+  true-sim/engine, GI S0). A fix writing again on every refresh read 0 for the moving frame too: the late cull's
+  refresh of the same frame made the frame before's this frame's (one frame slot counts no frames).
+- Rule: a value of the frame before is written every frame, not only when the current one changes; a test of it
+  includes a frame after the change stops.
+
 **One technique instance in two views built for one of them only.** The graph keeps each technique's view in an
 identity map, so the same `CascadedShadowMaps` added to both eyes' views filled the second view's shadow table twice
 and the first view's never: its floor was lit where it should be shadowed, with no error.

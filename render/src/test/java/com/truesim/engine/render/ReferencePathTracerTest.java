@@ -22,8 +22,6 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.vulkan.Commands;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.List;
 import org.lwjgl.system.MemoryUtil;
 import com.truesim.engine.graph.ExternalImage;
@@ -404,7 +402,7 @@ class ReferencePathTracerTest {
         assertThat(pb).as("yellow: little blue").isLessThan(pr * 0.3f);
     }
 
-    /** Provides {@link #GPU_LIGHTS}: writes {@code count} point lights into the lights the GPU writes, as particles do. */
+    /** Provides {@link #GPU_LIGHTS}: writes {@code count} point lights into the lights the GPU writes, as particles. */
     private record GpuLightWriter(Lights lights, int count) implements Technique {
 
         @Override
@@ -418,18 +416,20 @@ class ReferencePathTracerTest {
             g.pass("gpu lights").write(written, BufferAccess.TRANSFER_DST).record(ctx -> {
                 try (MemoryStack stack = stackPush()) {
                     int bytes = 16 + 80 * count;
-                    ByteBuffer data = stack.calloc(bytes).order(ByteOrder.LITTLE_ENDIAN);
-                    data.putInt(0, count);
+                    long data = stack.ncalloc(16, 1, bytes); // no ByteBuffer: frames allocate nothing
+                    MemoryUtil.memPutInt(data, count);
                     for (int i = 0; i < count; i++) {
-                        int o = 16 + 80 * i;
-                        data.putFloat(o, -2.5f + 5f * i / count).putFloat(o + 4, -0.6f).putFloat(o + 8, -3.5f);
-                        data.putFloat(o + 12, 1.5f); // range
-                        data.putFloat(o + 16, 0.3f).putFloat(o + 20, 0.2f).putFloat(o + 24, 1.0f);
-                        data.putInt(o + 28, 0); // a point
-                        data.putInt(o + 52, -1);
+                        long o = data + 16 + 80L * i;
+                        MemoryUtil.memPutFloat(o, -2.5f + 5f * i / count);
+                        MemoryUtil.memPutFloat(o + 4, -0.6f);
+                        MemoryUtil.memPutFloat(o + 8, -3.5f);
+                        MemoryUtil.memPutFloat(o + 12, 1.5f); // range
+                        MemoryUtil.memPutFloat(o + 16, 0.3f);
+                        MemoryUtil.memPutFloat(o + 20, 0.2f);
+                        MemoryUtil.memPutFloat(o + 24, 1.0f);
+                        MemoryUtil.memPutInt(o + 52, -1);
                     }
-                    Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(written), 0, bytes,
-                        MemoryUtil.memAddress(data));
+                    Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(written), 0, bytes, data);
                 }
             });
             g.provide(GPU_LIGHTS, written);
@@ -460,6 +460,36 @@ class ReferencePathTracerTest {
         graph.settings().set(ReferencePathTracer.LIGHTS, lighting).set(WorldLights.MODE, mode)
             .set(WorldLights.CELL, 0.5f).set(WorldLights.SLOTS, mode == WorldLights.Mode.LISTS ? 64 : 16);
         return frames(frames);
+    }
+
+    /**
+     * Bytes the thread allocated in {@code frames} frames begun and submitted (as an application runs them), after as
+     * many to warm up.
+     */
+    static long allocatedRecording(VulkanDevice device, FrameGraph graph, int frames) {
+        com.sun.management.ThreadMXBean threads =
+            (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
+        long allocated = 0;
+        for (int frame = -frames; frame < frames; frame++) {
+            long before = threads.getCurrentThreadAllocatedBytes();
+            graph.beginFrame();
+            graph.submit(0, 0);
+            if (frame >= 0) {
+                allocated += threads.getCurrentThreadAllocatedBytes() - before;
+            }
+        }
+        device.waitIdle();
+        return allocated;
+    }
+
+    @Test
+    void recordingTheReferenceAllocatesNothing() {
+        for (WorldLights.Mode mode : WorldLights.Mode.values()) {
+            lightsOnTheFloor(ReferencePathTracer.Lighting.GRID, mode, 1);
+            // Nothing per frame: at most a few bytes once over 320 frames (the compiler's, a run in two)
+            assertThat(allocatedRecording(device, graph, 320)).as("bytes allocated recording, %s", mode)
+                .isLessThan(320);
+        }
     }
 
     @Test

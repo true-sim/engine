@@ -18,7 +18,7 @@ public static const uint WORLD_LISTS = 1;
 public static const uint WORLD_RESERVOIRS = 2;
 public static const uint WORLD_DIRECTIONAL = 4; // directional lights the header names
 
-/** The grid: 112 bytes (128 kept), then the cells' data, then the lights the GPU wrote, copied. Read a field at a time. */
+/** The grid: 112 bytes (128 kept), then the cells' data, then the lights the GPU wrote. Read a field at a time. */
 [HostLayout]
 public struct WorldLightGrid
 {

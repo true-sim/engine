@@ -273,7 +273,7 @@ float3 lightAt(Light light, float3 p, out float3 toLight, out float distance)
     return irradiance;
 }
 
-/** What one light would add at `p` on surface `s` seen from `v`, unshadowed; the way to it into `toLight`, `distance`. */
+/** What one light would add at `p` on surface `s` seen from `v`, unshadowed; the way to it into `toLight`. */
 float3 lightUnshadowed(Light light, Surface s, float3 p, float3 v, out float3 toLight, out float distance)
 {
     float3 irradiance = lightAt(light, p, toLight, distance);
