@@ -21,6 +21,7 @@ import com.truesim.engine.settings.SettingRegistry;
 import com.truesim.ui.controls.Ui;
 import com.truesim.ui.core.Tunable;
 import com.truesim.ui.core.input.Cursor;
+import com.truesim.ui.core.input.PointerSource;
 import com.truesim.ui.core.input.UiInput;
 import java.util.List;
 import java.util.Objects;
@@ -38,12 +39,15 @@ import java.util.function.Function;
  * ({@code settings.ui}); changed settings reach the tunables at each frame's start.</li>
  * <li><b>Input</b>: the {@code ui} action group ({@link UiActions#UI}) is added to input; each frame starts with the
  * frame's {@link UiCommands}, the {@link MousePointer} and the typed text and IME composition of {@link UiTextInput}
- * written into one {@link UiInput}. The window's clipboard ({@link SdlClipboard}) is the UI's.</li>
- * <li><b>The frame</b>: at each frame's start ({@link #beforeUpdate}), after input sampled the devices, the UI
- * processes that input and updates ({@code ui.update(width, height, input, nanos)}, the view's size in pixels, the
- * frame's real time), and its layers are submitted to its {@link GpuUiRenderer}, a technique of the view providing
- * {@code Keys.UI}. What the UI's listeners change is shown in the same frame; the game's own changes to the UI in its
- * update show from the next frame on.</li>
+ * written into one {@link UiInput}, with any other {@link PointerSource}s added ({@link #pointers}: a virtual
+ * cursor, touch, tests). The window's clipboard ({@link SdlClipboard}) is the UI's.</li>
+ * <li><b>The frame, in two phases</b> (no frame of latency either way): at its start ({@link #beforeUpdate}), after
+ * input sampled the devices, the UI processes that input ({@code ui.input(input, nanos)}, the frame's real time):
+ * picking, events, focus, commands and text, so the game's update sees this frame's clicks. After the game's update
+ * and late update ({@link #afterUpdate}) the UI updates ({@code ui.update(width, height)}, the view's size in pixels:
+ * listeners, animations, styles, layout, recording) and its layers are submitted to its {@link GpuUiRenderer}, a
+ * technique of the view providing {@code Keys.UI}, so what the input, the UI's listeners and the game changed shows
+ * in this frame.</li>
  * <li><b>The window</b>: the display's content scale ({@code Window.displayScale()}) is the layout's content scale, so
  * the UI keeps its size in points on a high-density display; the mouse cursor follows the UI's ({@code cursor} in
  * styles) while the pointer is over the UI.</li>
@@ -80,6 +84,7 @@ public final class UiPlugin implements Plugin {
     private Desktop desktop;
     private SystemCursor shownCursor;
     private float shownScale = -1;
+    private PointerSource[] sources = new PointerSource[0];
 
     /**
      * The UI made by {@code factory} at startup, given the textures it should use (null: its own, or its text
@@ -87,6 +92,14 @@ public final class UiPlugin implements Plugin {
      */
     public UiPlugin(Function<com.truesim.ui.core.draw.UiTextures, Ui> factory) {
         this.factory = Objects.requireNonNull(factory, "factory");
+    }
+
+    /** Adds {@code source}'s pointers to the UI's input each frame, after the mouse's; returns this. */
+    @AllowAllocation("sources are added when the game is set up")
+    public UiPlugin pointers(PointerSource source) {
+        sources = java.util.Arrays.copyOf(sources, sources.length + 1);
+        sources[sources.length - 1] = Objects.requireNonNull(source, "source");
+        return this;
     }
 
     /** Draws on the view named {@code name} (default: the view the first window presents, else the first view). */
@@ -202,6 +215,7 @@ public final class UiPlugin implements Plugin {
         return commands;
     }
 
+    /** At the frame's start: settings, the frame's input sampled into the UI's, the UI's first phase (input). */
     @Override
     public void beforeUpdate(Frame frame) {
         if (view == null) {
@@ -224,9 +238,24 @@ public final class UiPlugin implements Plugin {
         if (text != null) {
             text.poll(input);
         }
+        for (PointerSource source : sources) {
+            source.poll(input);
+        }
+        ui.input(input, (long) (frame.realTime() * 1e9));
+    }
+
+    /**
+     * After the game's update and late update: the UI's second phase (what the game changed shows in this frame) and
+     * the submit of its layers; the mouse cursor follows the UI's.
+     */
+    @Override
+    public void afterUpdate(Frame frame) {
+        if (view == null) {
+            return;
+        }
         int width = view.width();
         int height = view.height();
-        ui.update(width, height, input, (long) (frame.realTime() * 1e9));
+        ui.update(width, height);
         renderer.submit(ui.layers(), ui.layerCount(), ui.textures(), width, height);
         if (platform != null && mouse != null) {
             SystemCursor wanted = SYSTEM[ui.interaction().cursor(MousePointer.ID).ordinal()];
