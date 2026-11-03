@@ -570,7 +570,9 @@ public final class FrameGraph implements AutoCloseable {
                 frameStart = execution.commandBuffer(0, GRAPHICS);
                 bindless.bind(frameStart, true);
                 recordSeam(frameStart);
+                tooling.frameStart(frameStart, recordSlot, false);
                 frameSlots.recordStart(frameStart);
+                tooling.frameStart(frameStart, recordSlot, true);
                 Vulkan.check(Commands.endCommandBuffer(frameStart), "Could not finish recording");
                 jobs.parallelFor(batches.chunkBatch().length, 1, recordChunks);
             } else {
@@ -578,7 +580,7 @@ public final class FrameGraph implements AutoCloseable {
                 recordChunks(0, batches.chunkBatch().length, 0);
             }
             execution.submit(batches, frameStart, chunkCommands, acquired, acquiredCount, renderFinished,
-                finishedCount, prologue);
+                finishedCount, prologue, frameSlots.waits());
             submitted = true;
         } finally {
             // A build or a pass that threw leaves the graph usable: the frame is dropped, the next one begins (a graph
@@ -699,7 +701,9 @@ public final class FrameGraph implements AutoCloseable {
             boolean last = batch == batches.lastGraphicsBatch() && c == batches.firstChunk()[batch + 1] - 1;
             if (c == batches.firstGraphicsChunk() && frameStart == null) {
                 recordSeam(commands); // a graph just built: its histories joined
+                tooling.frameStart(commands, recordSlot, false);
                 frameSlots.recordStart(commands); // uploads and such, ahead of every pass on the graphics queue
+                tooling.frameStart(commands, recordSlot, true);
             }
             recordPasses(commands, batches.chunkFirstPass()[c], batches.chunkEndPass()[c], last, contexts[worker]);
             Vulkan.check(Commands.endCommandBuffer(commands), "Could not finish recording");

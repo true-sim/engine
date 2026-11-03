@@ -221,11 +221,15 @@ try (VulkanInstance instance = VulkanInstance.builder().applicationName("game").
   written straight through, for callers that wait for the GPU between frames.
 - **Records that change a few at a time:** a `RecordBuffer` is a device-local buffer of fixed-size records (any
   multiple of 16 bytes: instances, particles, game data per object). Changing one writes its bytes once into a list of
-  changes (`claim`, then the bytes in `changes()`; a record at most once per upload, from any thread once claimed); the
-  frame's first commands copy the list into the frame slot's upload buffer (`GpuBuffer.hostWritten`: write-combined,
-  or BAR memory where the GPU has it) and a compute pass scatters it. The CPU pays per record changed, frames in flight
-  keep no copies (the queue orders the scatter after the frames before), and shaders read device-local memory.
-  `GpuScene`'s instances are one.
+  changes (`claim`, then the bytes in `changes(entry)` at `offset(entry)`; a record at most once per upload, from any
+  thread once claimed); the frame's first commands copy the list into the frame slot's upload buffer
+  (`GpuBuffer.hostWritten`: write-combined, or BAR memory where the GPU has it) and a compute pass scatters it. The CPU
+  pays per record changed, frames in flight keep no copies (the queue orders the scatter after the frames before), and
+  shaders read device-local memory. `GpuScene`'s instances are one. `changeList(DIRECT, chunkBytes)` writes the
+  changes in place instead, into recycled chunks of GPU-visible host memory the scatter reads where they are: the
+  thread recording copies nothing (0.6 ms less at 100,000 changed instances), but the writers pay about as much more
+  and the scatter reads over the bus (0.2 ms more on an RX 9070 XT), so the copy stays the default
+  (`render.changeList`, `render.changeListChunk`; measured in docs/frame-graph-v2.md, phase 8).
 - **Work at the frame's start:** `FrameSlots.register(FrameStart)` records commands before every frame's passes (the
   frame graph calls `recordStart`); `FrameUploads` and `RecordBuffer` use it, and so may a game.
 
@@ -350,6 +354,13 @@ try (GeometryPool pool = new GeometryPool(device, slots);              // starts
   copies (`FrameUploads.record(staging, ...)`). Streaming tiles of 131,000 triangles with a 2048 x 2048 texture each
   at 90 Hz: the worst frame went from 14.9 ms to 4.0 ms, frames over 4 ms from 37 to none (`StreamBench --args=large`
   against `large direct`).
+- **Streamed on the transfer queue:** prepared meshes' and textures' copies are submitted on the transfer queue
+  (`StreamQueue`) when they are added, beside the frames in flight; the next frame waits for them on the GPU before its
+  first commands, so they still draw from the next frame. Images change owner (released there, acquired in the frame,
+  where a generated mip chain is blitted); the pool's buffers are shared with the transfer family. Frames adding
+  131,000-triangle tiles with 2048 x 2048 textures took 0.8-1.0 ms of graphics-queue time instead of 1.5-1.7 (max
+  1.3-1.5 instead of 2.4-3.2; RX 9070 XT, 2026-11-03). Up to `render.streamBudget` MiB a frame (64; 0: every copy in
+  the frame); past it, uploads go through the frame as before.
 - **Culling on the GPU:** an instance pass tests instance bounds and splits each visible instance into chunks of 64
   meshlets; the chunk count is written straight into an indirect command, so only visible work is launched. Each
   meshlet is tested by the cluster LOD rule (its group's error projected on screen at most the allowed pixels, its
@@ -1382,8 +1393,10 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
 - `./gradlew :engine-demo:streamBench` flies over a grid of cells for 30 s at 90 Hz: cells coming into range get
   meshes built on worker threads, a texture, materials and instances, those leaving lose them. It reports frame work
   percentiles, GPU time per frame and the slowest frames with what happened in them (`--args=rays` builds bottom
-  levels too, `large` streams 131,000-triangle tiles and 2048 x 2048 textures, `direct` stages them on the frame's
-  thread instead of preparing them on the loaders').
+  levels too, `large` streams 131,000-triangle tiles and 2048 x 2048 textures, `heavy` 295,000-triangle tiles and
+  4096 x 4096 textures, `direct` stages them on the frame's thread instead of preparing them on the loaders', `inframe`
+  copies them in the frame instead of on the transfer queue). GPU time per frame includes the frame start, where
+  textures' copies and mip chains are recorded (`GpuTimings.frameStartMillis`).
 - `./gradlew :engine-demo:stereoBench` times the scene drawn for two eyes at a Quest 3's eye size, offscreen, pass by
   pass and grouped by kind (`--args="visibility"` for the visibility buffer, `-Procks=20000` for more rocks,
   `shared` for one set of shadow cascades, `rebuild` for what rebuilds and resizes cost the render thread, `noshadows`

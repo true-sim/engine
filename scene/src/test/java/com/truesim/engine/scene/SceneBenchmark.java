@@ -136,6 +136,9 @@ class SceneBenchmark {
 
     @Test
     void drawTheRocksThroughTheScene() throws InterruptedException {
+        if (SCENARIO.contains("change list")) {
+            return;
+        }
         FrameSlots slots = new FrameSlots(2);
         try (VulkanInstance instance = VulkanInstance.builder().applicationName("benchmark").surfaces(false).build();
              VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
@@ -266,6 +269,206 @@ class SceneBenchmark {
             sync.close();
             particles.close();
         }
+    }
+
+    /** Rocks in the change-list benchmark: enough to move 100,000 a frame. */
+    private static final int MANY = 100_000;
+    private static final int CHANGE_FRAMES = 240;
+    /** The rocks the fixed steps move. */
+    private static int stepMoving;
+    private static long changeNow;
+
+    /**
+     * The GPU change list (#101 follow-up): 1,000, 30,000 and 100,000 of 100,000 rocks moving every frame, with
+     * interpolation off (records written every frame) and on the GPU (moves in fixed steps at 60 Hz, frames at 144 Hz:
+     * motion records on frames with a step). Prints per scenario the writers' time (the sync), the render thread's time
+     * in the record uploads, the GPU time of the scene upload pass, the frame, the change list's host and pinned
+     * memory and what the main thread allocated. Run with {@code TRUESIM_BENCHMARK_SCENARIO=change list}.
+     */
+    @Test
+    void changeList() throws InterruptedException {
+        if (!SCENARIO.contains("change list")) {
+            return;
+        }
+        FrameSlots slots = new FrameSlots(2);
+        try (VulkanInstance instance = VulkanInstance.builder().applicationName("benchmark").surfaces(false).build();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 100_000, 4), slots);
+             Materials materials = new Materials(device, 64, slots);
+             Textures textures = new Textures(device, slots);
+             TaskScheduler tasks = new TaskScheduler();
+             com.truesim.common.jobs.JobSystem jobs = new com.truesim.common.jobs.JobSystem(WRITERS);
+             AssetCache assets = new AssetCache(tasks);
+             SceneResources resources = new SceneResources(assets, pool, materials, textures);
+             GpuScene gpu = new GpuScene(device, pool, MANY + 1024, slots);
+             MeshletRenderer renderer = new MeshletRenderer(device, gpu, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, slots);
+             GpuImage shaded = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+             FrameGraph graph = new FrameGraph(device, slots)) {
+            // TRUESIM_CHANGE_LIST (render.changeList: copy, direct), TRUESIM_CHANGE_LIST_CHUNK (KiB)
+            gpu.changeList(com.truesim.engine.vulkan.RecordBuffer.ChangeList.valueOf(System.getenv()
+                .getOrDefault("TRUESIM_CHANGE_LIST", "copy").toUpperCase(Locale.ROOT)),
+                Integer.parseInt(System.getenv().getOrDefault("TRUESIM_CHANGE_LIST_CHUNK", "1024")));
+            System.out.printf(Locale.ROOT, "Change list benchmark on %s, %,d rocks, writers %d, change list %s, chunks "
+                + "%s KiB%n", device.gpu().name(), MANY, WRITERS, gpu.changeList(),
+                System.getenv().getOrDefault("TRUESIM_CHANGE_LIST_CHUNK", "1024"));
+            ChangeClock clock = new ChangeClock();
+            SceneGraph scene = new SceneGraph(clock, MANY + 1024, SceneGraph.DEFAULT_LOG_CAPACITY);
+            Renderables renderables = new Renderables(scene);
+            long ground = scene.create();
+            scene.setTranslation(ground, FAR, GROUND_Y, FAR);
+            renderables.set(ground, GROUND, List.of(GRASS));
+            long[] rocks = new long[MANY];
+            double[] placed = new double[MANY * 3];
+            SplittableRandom random = new SplittableRandom(11);
+            for (int i = 0; i < MANY; i++) {
+                rocks[i] = scene.create();
+                place(scene, rocks[i], random, placed, i);
+                renderables.set(rocks[i], ROCK, List.of(GRANITE));
+            }
+            Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
+            SceneSync sync = new SceneSync(resources, renderables, gpu, WRITERS > 1 ? jobs : null);
+            sync.interpolation(com.truesim.engine.render.Interpolation.OFF);
+            SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+            ViewPort port = graph.addView("main").size(WIDTH, HEIGHT);
+            SceneView main = geometry.createView(port, camera, ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
+            RenderView cameraView = main.view();
+            camera.position(FAR, 0, FAR);
+            ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, Format.R8G8B8A8_UNORM,
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+                .set(shaded.handle(), 0);
+            port.add(new ClusteredForwardShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
+                .output(Keys.SCENE_COLOR, target);
+            Stats unused = new Stats();
+            frame(graph, slots, tasks, scene, renderables, sync, cameraView, camera, unused, 0);
+            while (resources.uploadedMeshCount() < 2) {
+                Thread.sleep(1);
+                frame(graph, slots, tasks, scene, renderables, sync, cameraView, camera, unused, 0);
+            }
+            graph.timings(true);
+            int[] counts = {1_000, 30_000, MANY};
+            for (int round = 0; round < 2; round++) {
+                for (int moving : counts) {
+                    changeRun("OFF", moving, false, null, graph, slots, tasks, scene, renderables, sync,
+                        cameraView, camera, rocks, placed);
+                }
+            }
+            com.truesim.engine.app.Application world = new com.truesim.engine.app.Application() {
+                @Override
+                public void configure(com.truesim.engine.app.AppConfig app) {
+                    app.defaults(com.truesim.engine.app.Engine.FRAME_RATE, 10_000);
+                }
+
+                @Override
+                public void fixedUpdate(com.truesim.engine.app.Step step) {
+                    double up = 0.01 * (step.tick() % 7);
+                    for (int r = 0; r < stepMoving; r++) {
+                        scene.setTranslation(rocks[r], placed[3 * r], placed[3 * r + 1] + up, placed[3 * r + 2]);
+                    }
+                }
+            };
+            try (com.truesim.engine.app.Engine engine = com.truesim.engine.app.Engine.create(world)) {
+                com.truesim.engine.app.Clock steps = engine.addClock("rocks");
+                sync.follow(steps);
+                sync.interpolation(com.truesim.engine.render.Interpolation.GPU);
+                for (int round = 0; round < 2; round++) {
+                    for (int moving : counts) {
+                        changeRun("GPU", moving, true, new Object[] {engine, steps}, graph, slots, tasks, scene,
+                            renderables, sync, cameraView, camera, rocks, placed);
+                    }
+                }
+                sync.interpolation(com.truesim.engine.render.Interpolation.OFF);
+            }
+            device.waitIdle();
+            sync.close();
+        }
+    }
+
+    /** One change-list scenario: {@code moving} rocks moved every frame (or every fixed step). */
+    private static void changeRun(String mode, int moving, boolean stepped, Object[] stepping, FrameGraph graph,
+        FrameSlots slots, TaskScheduler tasks, SceneGraph scene, Renderables renderables, SceneSync sync,
+        RenderView cameraView, Camera camera, long[] rocks, double[] placed) {
+        com.truesim.engine.app.Engine engine = stepping == null ? null : (com.truesim.engine.app.Engine) stepping[0];
+        com.truesim.engine.app.Clock steps = stepping == null ? null : (com.truesim.engine.app.Clock) stepping[1];
+        stepMoving = moving;
+        long[] syncs = new long[CHANGE_FRAMES];
+        long[] uploads = new long[CHANGE_FRAMES];
+        long[] frames = new long[CHANGE_FRAMES];
+        long[] allocated = new long[CHANGE_FRAMES];
+        long[] gpuNanos = new long[CHANGE_FRAMES];
+        boolean[] gpuKept = new boolean[CHANGE_FRAMES];
+        int gpuCount = 0;
+        boolean[] steppedAt = new boolean[4096]; // by the graph's frame number, for its timings two frames late
+        boolean[] kept = new boolean[CHANGE_FRAMES];
+        long[] now = {changeNow};
+        long records = 0;
+        for (int frame = -150; frame < CHANGE_FRAMES; frame++) {
+            long bytes = THREADS.getCurrentThreadAllocatedBytes();
+            long t0 = System.nanoTime();
+            int slot = graph.beginFrame();
+            slots.begin(slot);
+            long graphFrame = slots.frames();
+            tasks.drainCompleted();
+            boolean step;
+            if (engine != null) {
+                now[0] += 1_000_000_000L / 144;
+                changeNow = now[0];
+                engine.stepAt(now[0]);
+                step = steps.stepsLastFrame() > 0;
+            } else {
+                step = true;
+                double up = 0.01 * ((frame + 150) % 7);
+                for (int r = 0; r < moving; r++) {
+                    scene.setTranslation(rocks[r], placed[3 * r], placed[3 * r + 1] + up, placed[3 * r + 2]);
+                }
+            }
+            scene.update();
+            renderables.update();
+            long t1 = System.nanoTime();
+            sync.update();
+            long t2 = System.nanoTime();
+            int pending = sync.gpu().pendingCount() + sync.gpu().motion().pendingCount();
+            cameraView.set(camera, 1, MeshletRenderer.MODE_LIT);
+            long u0 = sync.gpu().uploadNanos();
+            graph.submit(0, 0);
+            slots.end();
+            long t3 = System.nanoTime();
+            steppedAt[(int) (graphFrame % steppedAt.length)] = step && frame >= 0;
+            if (frame >= 0) {
+                syncs[frame] = t2 - t1;
+                uploads[frame] = sync.gpu().uploadNanos() - u0;
+                frames[frame] = t3 - t0;
+                allocated[frame] = THREADS.getCurrentThreadAllocatedBytes() - bytes;
+                kept[frame] = step;
+                records = Math.max(records, pending);
+                com.truesim.engine.graph.GpuTimings timings = graph.timings();
+                for (int p = 0; timings != null && p < timings.count(); p++) {
+                    if (timings.pass(p).equals("scene upload") && gpuCount < CHANGE_FRAMES
+                        && steppedAt[(int) (timings.frame() % steppedAt.length)]) {
+                        gpuKept[gpuCount] = true;
+                        gpuNanos[gpuCount++] = (long) (timings.millis(p) * 1e6);
+                    }
+                }
+            }
+        }
+        System.out.printf(Locale.ROOT, "  %s %,7d moving (%,d records max): sync %7.3f (max %6.3f) upload %6.3f (max %6.3f)"
+            + " GPU scene upload %6.3f (max %6.3f) frame %6.3f ms; host %,d B, pinned %,d B; allocated %,d (max %,d)%n",
+            mode, moving, records, median(syncs, kept, true) / 1e6, max(syncs, kept) / 1e6,
+            median(uploads, kept, true) / 1e6, max(uploads, kept) / 1e6, median(gpuNanos, gpuKept, true) / 1e6,
+            max(gpuNanos, gpuKept) / 1e6, median(frames, kept, true) / 1e6,
+            sync.gpu().changeListHostBytes(), sync.gpu().changeListPinnedBytes(),
+            median(allocated, null, null), Arrays.stream(allocated).max().orElse(0));
+    }
+
+    private static long max(long[] values, boolean[] kept) {
+        long max = 0;
+        for (int i = 0; i < values.length; i++) {
+            if (kept == null || kept[i]) {
+                max = Math.max(max, values[i]);
+            }
+        }
+        return max;
     }
 
     /** Frames measured per fixed-step scenario: enough of both kinds, steps and none, at 144 frames to 60 steps. */

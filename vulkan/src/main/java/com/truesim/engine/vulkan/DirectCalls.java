@@ -22,12 +22,26 @@ public final class DirectCalls {
     private static final MethodHandle WAIT_SEMAPHORES =
         LINKER.downcallHandle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
 
+    private static final MethodHandle SEMAPHORE_COUNTER =
+        LINKER.downcallHandle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG));
+
     private final long device;
     private final MemorySegment waitSemaphores;
+    private final MemorySegment semaphoreCounter;
 
     DirectCalls(VkDevice device) {
         this.device = device.address();
         this.waitSemaphores = MemorySegment.ofAddress(device.getCapabilities().vkWaitSemaphores);
+        this.semaphoreCounter = MemorySegment.ofAddress(device.getCapabilities().vkGetSemaphoreCounterValue);
+    }
+
+    /** {@code vkGetSemaphoreCounterValue}: a timeline semaphore's value into {@code value} (a 64-bit word's address). */
+    public int semaphoreCounterValue(long semaphore, long value) {
+        try {
+            return (int) SEMAPHORE_COUNTER.invokeExact(semaphoreCounter, device, semaphore, value);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
     }
 
     /** {@code vkWaitSemaphores}: waits as {@code info} (a {@code VkSemaphoreWaitInfo}) says; returns the result. */

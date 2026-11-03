@@ -432,6 +432,11 @@ after the acquire, because the transfer queue cannot blit.
 
 **Control.** Budgets for bytes in flight, priority, cancellation, and eviction through the asset cache.
 
+**As built (phase 8):** loads are submitted when added rather than collected at `beginFrame`, and the next frame
+waits on the GPU for the last value submitted, so streamed content appears in the same frame as with copies in the
+frame (never a frame later); the budget is bytes per frame (`render.streamBudget`), over which uploads go through the
+frame instead of waiting. Measurements under phase 8 in §7.
+
 ### 4.14 Internal structure and device-free tests (#96)
 
 ```
@@ -888,7 +893,72 @@ is released.
 - **Phase 8 measured (2026-11-03, `StreamBench large`, RX 9070 XT):** frames streaming a cell (two meshes of up to
   131,000 triangles and a 2048 x 2048 texture with mips) take up to 1.78 ms of graphics-queue GPU time against a 0.77
   ms median, the uploads' copies and mips recorded in the frame; nothing over 11.1 ms. `StreamQueue` would move the
-  copies (not the mips) to the transfer queue.
+  copies (not the mips) to the transfer queue. Correction (same day): those GPU times summed the passes only; the
+  frame start, where the textures' copies and mip chains are recorded, was not timed (`GpuTimings.frameStartMillis`
+  now is, and `StreamBench` adds it).
+- **Phase 8 status (2026-11-03): `StreamQueue` landed** (engine-vulkan). `GeometryPool.add(Prepared)` and
+  `Textures.add(Prepared)` (the scene path's adds) record their copies on the transfer queue and submit them at once,
+  signalling a timeline semaphore; the next frame's first batch on each queue waits for its value
+  (`FrameSlots.FrameWait`, read by the graph's submit). Pool buffers are shared concurrently with the transfer family;
+  images end with a release to the graphics family and are acquired in the next frame's start, where a generated mip
+  chain is blitted. So nothing draws later than before: what is added draws from the next frame, as with copies in the
+  frame (`GraphTechniquesTest.preparedMeshesAndTexturesStreamedOnTheTransferQueueDrawTheirFirstFrame`). A budget per
+  frame (`render.streamBudget`, 64 MiB; the first upload of a frame always fits) sends what comes after through the
+  frame as before, and 0 turns streaming off; a pool buffer grown sends adds through the frame until the frame copying
+  it has finished. Staging buffers are freed on a thread of the queue's (freeing one took up to 2.4 ms on the frame's
+  thread), and the first submit is made when the queue is (about 10 ms the first time). Measured (RX 9070 XT, 30 s at
+  90 Hz, three interleaved runs each, ranges; GPU time is the graphics queue's, frame start included):
+
+  | `StreamBench` | in the frame | transfer queue |
+  |---|---|---|
+  | large: GPU, frames adding (mean) | 1.51-1.68 ms | 0.82-0.98 ms |
+  | large: GPU max | 2.41-3.22 ms | 1.31-1.47 ms |
+  | large: GPU p99 | 1.71-1.84 ms | 1.17-1.30 ms |
+  | large: GPU standard deviation | 0.21-0.29 ms | 0.16-0.22 ms |
+  | large: GPU, frames streaming nothing | 0.76-0.98 ms | 0.75-0.97 ms |
+  | large: frame work max / over 4 ms | 4.75-7.59 ms / 2-4 | 2.55-4.87 ms / 0-1 |
+  | large: frame work standard deviation | 0.30-0.33 ms | 0.25-0.27 ms |
+  | large: frames adding, frame work (mean) | 1.22-1.34 ms | 1.40-1.49 ms |
+  | large: render thread in `pool.add`, 30 s | 8.1-12.2 ms | 29.6-32.7 ms |
+  | heavy (295,000-triangle tiles, 4096 x 4096 textures): GPU, frames adding | 3.56-3.91 ms | 2.96-3.02 ms |
+  | heavy: GPU max | 6.98-7.76 ms | 5.35-6.84 ms |
+  | heavy: frames over 11.1 ms of frame work | 17-36 | 8-11 |
+
+  The copies leave the graphics queue (0.5 to 0.9 ms a frame that adds), and frame times vary less; what stays is
+  the mip chains' blits and, on the render thread, a submit per add (about 0.1 ms; `pool.add` 0.12 ms instead of
+  0.035 on average). The heavy runs' worst frames (20 to 120 ms) are in `textures.add` and the loaders' allocations
+  in both, not in streaming. A clear win on the discrete GPU, so on by default. The integrated GPU could not be
+  measured: `StreamBench` loses the device there with copies in the frame too, also at the commit before (3a34ff0),
+  as `GraphTechniquesTest`'s streaming tests do (#151, #152).
+- **The GPU change list measured (2026-11-03, `SceneBenchmark` "change list", RX 9070 XT and the Ryzen 9 9950X3D's
+  integrated GPU, 32 writer threads):** 100,000 rocks, 1,000 to 100,000 moving every frame (interpolation off) or
+  every 60 Hz fixed step at 144 frames a second (interpolation on the GPU, motion records), medians over 240 frames,
+  ranges over interleaved runs. Today's list (`COPY`) is written by the writers into plain memory and copied by the
+  thread recording into the slot's upload buffer (BAR memory). Written in place instead, into GPU-visible host-cached
+  memory that the scatter reads where it is: (A) one buffer of the capacity per frame in flight, (B) recycled 1 MiB
+  chunks (`DIRECT`). A and B took the same times (A: 13.7 MB pinned against B's 7.3 MB at 30,000 changes, and growing
+  with the capacity), so A was dropped. Copy against B, discrete GPU (ms; "upload" is the thread recording, "sync" the
+  writers' parallel fill as the frame's thread waits for it, "GPU" the scene upload pass):
+
+  | moving | interpolation | sync copy / B | upload copy / B | GPU copy / B |
+  |---|---|---|---|---|
+  | 1,000 | off | 0.018-0.019 / 0.023-0.026 | 0.004-0.005 / 0.002 | 0.002 / 0.004-0.005 |
+  | 30,000 | off | 0.252-0.279 / 0.374-0.400 | 0.158-0.167 / 0.006-0.007 | 0.006-0.007 / 0.051-0.055 |
+  | 100,000 | off | 0.711-0.727 / 1.082-1.112 | 0.594-0.616 / 0.019-0.028 | 0.024 / 0.223 |
+  | 30,000 | GPU | 0.538-0.571 / 0.624-0.677 | 0.084-0.090 / 0.006-0.007 | 0.004 / 0.028-0.030 |
+  | 100,000 | GPU | 1.765-1.883 / 2.022-2.185 | 0.334-0.356 / 0.035-0.059 | 0.011 / 0.075-0.119 |
+
+  B takes the copy off the thread recording (0.16 ms at 30,000, 0.6 ms at 100,000) but its writers pay most of it
+  back (they write memory not in cache, the next frame's chunks rotating through the frames in flight): sync plus
+  upload is 0.42 against 0.39 ms at 30,000 and 1.32 against 1.11 at 100,000 with interpolation off, 0.63 against 0.64
+  and 2.13 against 2.19 with it on the GPU. The scatter reads the changes over the bus: 0.05 to 0.2 ms more on the
+  graphics queue. Integrated GPU (one round each): sync plus upload equal within the noise (30,000 off: 0.49-0.50
+  against 0.48-0.52; 100,000 off 1.28-1.29 against 1.33; on the GPU 2.15-2.32 against 2.21-2.33), the scatter 10 to
+  20% slower (100,000 off: 0.223-0.227 against 0.265-0.272 ms), since it reads host memory either way. Memory at
+  100,000 moving: copy 6.9 MB of host memory (the list, of the capacity) and 13.7 MB of BAR upload buffers; B 14.7 MB
+  of pinned chunks and no list. Nothing allocates per frame either way. A trade-off, so both stay behind
+  `render.changeList` (`COPY` by default: less GPU time and writer time for the same frame-thread total;
+  `DIRECT` where the thread recording is the one to spare) and `render.changeListChunk` (KiB, 1024).
 - **Phase 7 status (2026-10-31):** landed by 0.74: imported buffers on async queues and buffers swapped without a
   rebuild (earlier), persistent images and buffers (`g.persistent`, `g.persistentBuffer`) and history buffers
   (`g.historyBuffer`). A persistent image is one layer, mip level and sample for now.

@@ -37,6 +37,8 @@ public final class FrameSlots {
     private final List<FrameBuffer> buffers = new ArrayList<>();
     private final List<FrameStart> starts = new ArrayList<>();
     private final List<Runnable> ends = new ArrayList<>();
+    private final List<FrameWait> waits = new ArrayList<>();
+    private StreamQueue stream; // the frames' stream queue, once opened
     private int current = -1;
     private int last = -1;
     private long frames;
@@ -116,6 +118,41 @@ public final class FrameSlots {
     /** Stops running {@code end} as frames end. */
     public void removeOnEnd(Runnable end) {
         ends.remove(end);
+    }
+
+    /**
+     * Work submitted to another queue that the frames recorded from now on wait for on the GPU before their first
+     * commands, on every queue: a timeline semaphore and the value it reaches ({@link StreamQueue}).
+     */
+    public interface FrameWait {
+        /** The timeline semaphore. */
+        long semaphore();
+
+        /** The value frames wait for: what was submitted last (0: nothing yet). */
+        long value();
+    }
+
+    /** Frames recorded from now on wait for {@code wait} (a frame graph's submit reads {@link #waits}). */
+    public void addWait(FrameWait wait) {
+        waits.add(Objects.requireNonNull(wait, "wait"));
+    }
+
+    /** Frames no longer wait for {@code wait}. */
+    public void removeWait(FrameWait wait) {
+        waits.remove(wait);
+    }
+
+    /** What frames wait for before their first commands: read when they are submitted. */
+    public List<FrameWait> waits() {
+        return waits;
+    }
+
+    StreamQueue stream() {
+        return stream;
+    }
+
+    void stream(StreamQueue stream) {
+        this.stream = stream;
     }
 
     /** The open slot, or -1 between frames. */

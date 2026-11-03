@@ -87,6 +87,7 @@ public final class Textures implements AutoCloseable {
     private final int[] formatFeatures; // per format: what the GPU does with images of it (optimal tiling)
     private final FrameSlots slots;
     private final FrameUploads uploads;
+    private final com.truesim.engine.vulkan.StreamQueue stream; // prepared textures' copies, or null
     // Live textures by bindless slot, and removed ones waiting for the frames that may sample them.
     private final Map<Integer, GpuImage> images = new HashMap<>();
     private final Map<Integer, Long> sizes = new HashMap<>();
@@ -108,6 +109,8 @@ public final class Textures implements AutoCloseable {
         this.slots = slots;
         this.uploads = new FrameUploads(device, slots);
         this.retiring = new Retiring(slots);
+        this.stream = com.truesim.engine.vulkan.StreamQueue.open(device, slots,
+            (long) RenderSettings.STREAM_BUDGET.defaultValue() << 20);
         TextureFormat[] formats = TextureFormat.values();
         formatFeatures = new int[formats.length];
         try (MemoryStack stack = stackPush()) {
@@ -304,6 +307,16 @@ public final class Textures implements AutoCloseable {
         prepared.taken = true;
         Upload upload = prepared.upload;
         boolean[] gone = new boolean[1];
+        GpuBuffer staged = prepared.staging;
+        if (stream != null && stream.submit(staged.size(), commands -> transfer(commands, staged, upload, stream),
+            staged)) {
+            uploads.recordCommands(commands -> {
+                if (!gone[0]) {
+                    acquire(commands, upload, stream);
+                }
+            });
+            return register(upload, gone);
+        }
         uploads.record(prepared.staging, (commands, staging, offset) -> {
             if (!gone[0]) {
                 upload.record(commands, staging, offset);
@@ -312,9 +325,77 @@ public final class Textures implements AutoCloseable {
         return register(upload, gone);
     }
 
+    /** {@link GeometryPool#streamBudget}: the budget of the transfer queue these textures share. */
+    public void streamBudget(long bytes) {
+        if (stream != null) {
+            stream.budget(bytes);
+        }
+    }
+
     private void checkOpen() {
         if (closed) {
             throw new IllegalStateException("The textures are closed");
+        }
+    }
+
+    /**
+     * Records {@code upload}'s copies on the transfer queue ({@code stream}): every level made transfer-destination,
+     * the given levels copied (level 0 where the chain is generated), then released to the graphics family (where the
+     * transfer queue has a family of its own) in the layout the frame continues from.
+     */
+    private static void transfer(VkCommandBuffer commands, GpuBuffer staging, Upload upload,
+        com.truesim.engine.vulkan.StreamQueue stream) {
+        GpuImage image = upload.image();
+        int mips = upload.mips();
+        int given = upload.generate() ? 1 : mips;
+        try (MemoryStack stack = stackPush()) {
+            barrier(commands, stack, image, 0, mips, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            long regions = stack.ncalloc(VkBufferImageCopy.ALIGNOF, given, VkBufferImageCopy.SIZEOF);
+            long at = 0;
+            for (int mip = 0; mip < given; mip++) {
+                int width = Math.max(1, upload.width() >> mip);
+                int height = Math.max(1, upload.height() >> mip);
+                long region = regions + (long) mip * VkBufferImageCopy.SIZEOF;
+                memPutLong(region + VkBufferImageCopy.BUFFEROFFSET, at);
+                layers(region + VkBufferImageCopy.IMAGESUBRESOURCE, mip);
+                memPutInt(region + VkBufferImageCopy.IMAGEEXTENT, width);
+                memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 4, height);
+                memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 8, 1);
+                at += upload.format().levelBytes(width, height);
+            }
+            nvkCmdCopyBufferToImage(commands, staging.handle(), image.handle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                given, regions);
+            int after = upload.generate() ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+                : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            boolean release = stream.separate();
+            barrier(commands, stack, image, 0, mips, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, after,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_NONE,
+                VK_ACCESS_2_NONE, release ? stream.family() : VK_QUEUE_FAMILY_IGNORED,
+                release ? stream.graphicsFamily() : VK_QUEUE_FAMILY_IGNORED);
+        }
+    }
+
+    /**
+     * In the frame, after {@link #transfer}: the image acquired from the transfer family (where it has one of its own)
+     * and, where the chain is generated, its levels blitted from level 0.
+     */
+    private static void acquire(VkCommandBuffer commands, Upload upload, com.truesim.engine.vulkan.StreamQueue stream) {
+        GpuImage image = upload.image();
+        if (stream.separate()) {
+            int layout = upload.generate() ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+                : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            try (MemoryStack stack = stackPush()) {
+                barrier(commands, stack, image, 0, upload.mips(), layout, layout, VK_PIPELINE_STAGE_2_NONE,
+                    VK_ACCESS_2_NONE, upload.generate() ? VK_PIPELINE_STAGE_2_TRANSFER_BIT
+                        : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                    upload.generate() ? VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT
+                        : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, stream.family(), stream.graphicsFamily());
+            }
+        }
+        if (upload.generate()) {
+            blits(commands, image, upload.width(), upload.height(), upload.mips());
         }
     }
 
@@ -379,6 +460,13 @@ public final class Textures implements AutoCloseable {
             memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 8, 1);
             nvkCmdCopyBufferToImage(commands, staging.handle(), image.handle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                 region);
+        }
+        blits(commands, image, width, height, mips);
+    }
+
+    /** Levels 1 on blitted from level 0 (in transfer-destination layout, as every level), all left shader-readable. */
+    private static void blits(VkCommandBuffer commands, GpuImage image, int width, int height, int mips) {
+        try (MemoryStack stack = stackPush()) {
             for (int mip = 1; mip < mips; mip++) {
                 barrier(commands, stack, image, mip - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -405,6 +493,13 @@ public final class Textures implements AutoCloseable {
 
     private static void barrier(VkCommandBuffer commands, MemoryStack stack, GpuImage image, int firstMip, int mips,
         int oldLayout, int newLayout, long srcStage, long srcAccess, long dstStage, long dstAccess) {
+        barrier(commands, stack, image, firstMip, mips, oldLayout, newLayout, srcStage, srcAccess, dstStage, dstAccess,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED);
+    }
+
+    private static void barrier(VkCommandBuffer commands, MemoryStack stack, GpuImage image, int firstMip, int mips,
+        int oldLayout, int newLayout, long srcStage, long srcAccess, long dstStage, long dstAccess, int srcFamily,
+        int dstFamily) {
         if (mips == 0) {
             return;
         }
@@ -416,8 +511,8 @@ public final class Textures implements AutoCloseable {
         memPutLong(barrier + VkImageMemoryBarrier2.DSTACCESSMASK, dstAccess);
         memPutInt(barrier + VkImageMemoryBarrier2.OLDLAYOUT, oldLayout);
         memPutInt(barrier + VkImageMemoryBarrier2.NEWLAYOUT, newLayout);
-        memPutInt(barrier + VkImageMemoryBarrier2.SRCQUEUEFAMILYINDEX, VK_QUEUE_FAMILY_IGNORED);
-        memPutInt(barrier + VkImageMemoryBarrier2.DSTQUEUEFAMILYINDEX, VK_QUEUE_FAMILY_IGNORED);
+        memPutInt(barrier + VkImageMemoryBarrier2.SRCQUEUEFAMILYINDEX, srcFamily);
+        memPutInt(barrier + VkImageMemoryBarrier2.DSTQUEUEFAMILYINDEX, dstFamily);
         memPutLong(barrier + VkImageMemoryBarrier2.IMAGE, image.handle());
         long range = barrier + VkImageMemoryBarrier2.SUBRESOURCERANGE;
         memPutInt(range + VkImageSubresourceRange.ASPECTMASK, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -504,6 +599,9 @@ public final class Textures implements AutoCloseable {
             closed = true;
             device.waitIdle();
             uploads.close();
+            if (stream != null) {
+                stream.close();
+            }
             for (Map.Entry<Integer, GpuImage> entry : images.entrySet()) {
                 device.bindless().removeSampled(entry.getKey());
                 entry.getValue().close();

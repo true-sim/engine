@@ -110,6 +110,38 @@ public final class GpuScene implements AutoCloseable {
                 | org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, slots);
         materials = defaultMaterials;
         motion = new InstanceMotion(device, slots, 64, InstanceMotion.Layout.PACKED);
+        changeList(RenderSettings.CHANGE_LIST.defaultValue(), RenderSettings.CHANGE_LIST_CHUNK.defaultValue());
+    }
+
+    /**
+     * Writes the changes of instances (and of their motion between steps) into lists of kind {@code list}, in chunks of
+     * {@code chunkKib} KiB where in place ({@link RenderSettings#CHANGE_LIST}, {@link RenderSettings#CHANGE_LIST_CHUNK}):
+     * from the next upload on if changes wait.
+     */
+    public void changeList(RecordBuffer.ChangeList list, int chunkKib) {
+        long bytes = 1024L * chunkKib;
+        instances.changeList(list, bytes);
+        motion.changeList(list, bytes);
+    }
+
+    /** The kind of list the instances' changes are written into now. */
+    public RecordBuffer.ChangeList changeList() {
+        return instances.changeList();
+    }
+
+    /** Bytes of plain memory the change lists hold (instances and motion): for benchmarks. */
+    public long changeListHostBytes() {
+        return instances.hostBytes() + motion.hostBytes();
+    }
+
+    /** Bytes of GPU-visible memory the changes go through (instances and motion): for benchmarks. */
+    public long changeListPinnedBytes() {
+        return instances.pinnedBytes() + motion.pinnedBytes();
+    }
+
+    /** Nanoseconds the uploads of changes took on the threads recording frames, so far: for benchmarks. */
+    public long uploadNanos() {
+        return instances.uploadNanos() + motion.uploadNanos();
     }
 
     /**
@@ -357,7 +389,7 @@ public final class GpuScene implements AutoCloseable {
         double z, float qx, float qy, float qz, float qw, float sx, float sy, float sz) {
         long o = instances.offset(entry);
         check(mesh, material);
-        MemorySegment m = instances.changes();
+        MemorySegment m = instances.changes(entry);
         m.set(FLOAT, o + InstanceLayout.ROTATION, qx);
         m.set(FLOAT, o + InstanceLayout.ROTATION + 4, qy);
         m.set(FLOAT, o + InstanceLayout.ROTATION + 8, qz);

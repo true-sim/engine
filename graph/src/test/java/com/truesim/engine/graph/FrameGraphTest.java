@@ -1371,6 +1371,74 @@ class FrameGraphTest {
     }
 
     @Test
+    void framesWaitForWhatOtherQueuesSignalBeforeTheirFirstCommands() throws InterruptedException {
+        // A timeline semaphore the host signals, standing in for the transfer queue's (StreamQueue).
+        long semaphore;
+        try (MemoryStack stack = stackPush()) {
+            var type = org.lwjgl.vulkan.VkSemaphoreTypeCreateInfo.calloc(stack)
+                .sType(org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO)
+                .semaphoreType(org.lwjgl.vulkan.VK12.VK_SEMAPHORE_TYPE_TIMELINE);
+            var made = stack.mallocLong(1);
+            org.lwjgl.vulkan.VK10.vkCreateSemaphore(device.handle(), org.lwjgl.vulkan.VkSemaphoreCreateInfo.calloc(stack)
+                .sType(org.lwjgl.vulkan.VK10.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO).pNext(type.address()), null, made);
+            semaphore = made.get(0);
+        }
+        long[] value = {0};
+        com.truesim.engine.vulkan.FrameSlots.FrameWait wait = new com.truesim.engine.vulkan.FrameSlots.FrameWait() {
+            @Override
+            public long semaphore() {
+                return semaphore;
+            }
+
+            @Override
+            public long value() {
+                return value[0];
+            }
+        };
+        try (GpuBuffer probe = GpuBuffer.hostVisible(device, 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+            probe.memory().fill((byte) 0);
+            ExternalBuffer external = new ExternalBuffer("probe", probe);
+            graph.add(new Lambda(List.of(OUT), g -> {
+                Buffer buffer = g.importBuffer(external);
+                Image image = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+                g.pass("fill probe").write(buffer, BufferAccess.TRANSFER_DST).write(image, Access.TRANSFER_DST)
+                    .record(ctx -> {
+                        ctx.fill(buffer, 5);
+                        clear(ctx, image, 0, 0, 0, 1);
+                    });
+                // Work on the compute queue too, which waits as well (and for the graphics queue's batch before)
+                Buffer scratch = g.createBuffer("scratch", 16);
+                g.pass("async fill").write(scratch, BufferAccess.TRANSFER_DST).async().sideEffects()
+                    .record(ctx -> ctx.fill(scratch, 1));
+                g.provide(OUT, image);
+            })).output(OUT, output).asyncCompute(true);
+            graph.frameSlots().addWait(wait);
+            graph.beginFrame();
+            graph.submit(0, 0); // nothing submitted elsewhere yet (value 0): no wait
+            device.waitIdle();
+            assertThat(graph.batches()).as("both queues wait").anyMatch(batch -> batch.startsWith("compute"));
+            assertThat(probe.memory().get(java.lang.foreign.ValueLayout.JAVA_INT, 0)).isEqualTo(5);
+            probe.memory().fill((byte) 0);
+            value[0] = 1; // submitted, not yet done
+            graph.beginFrame();
+            graph.submit(0, 0);
+            Thread.sleep(200);
+            assertThat(probe.memory().get(java.lang.foreign.ValueLayout.JAVA_INT, 0)).as("the frame waits").isZero();
+            try (MemoryStack stack = stackPush()) {
+                org.lwjgl.vulkan.VK12.vkSignalSemaphore(device.handle(), org.lwjgl.vulkan.VkSemaphoreSignalInfo
+                    .calloc(stack).sType(org.lwjgl.vulkan.VK12.VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO)
+                    .semaphore(semaphore).value(1));
+            }
+            device.waitIdle();
+            assertThat(probe.memory().get(java.lang.foreign.ValueLayout.JAVA_INT, 0)).as("once signalled").isEqualTo(5);
+            graph.frameSlots().removeWait(wait);
+        } finally {
+            device.waitIdle();
+            org.lwjgl.vulkan.VK10.vkDestroySemaphore(device.handle(), semaphore, null);
+        }
+    }
+
+    @Test
     void timingsAndReadbacksOfSubmittedFramesAllocateNothing() {
         long[] delivered = new long[2];
         graph.add(new Fill(A, SIZE, 1, 0, 0, 1))
@@ -1403,6 +1471,7 @@ class FrameGraphTest {
         assertThat(timings.count()).isEqualTo(graph.passes().size());
         assertThat(timings.pass(0)).isEqualTo(graph.passes().get(0));
         assertThat(timings.totalMillis()).isNotNegative();
+        assertThat(timings.frameStartMillis()).as("the frame start, timed apart from the passes").isNotNegative();
         for (int i = 0; i < timings.count(); i++) {
             assertThat(timings.millis(i)).as(timings.pass(i)).satisfiesAnyOf(m -> assertThat(m).isNaN(),
                 m -> assertThat(m).isNotNegative());

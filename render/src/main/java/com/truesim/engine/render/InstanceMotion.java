@@ -96,6 +96,9 @@ public final class InstanceMotion implements AutoCloseable {
     private int[] currentEntry;
     private int[] previousEntry;
     private int claims;
+    // The change lists of the buffers, made and to be made
+    private RecordBuffer.ChangeList list = RecordBuffer.ChangeList.COPY;
+    private long chunkBytes = RecordBuffer.CHUNK_BYTES;
     // The packed layout's origin
     private double originX;
     private double originY;
@@ -123,6 +126,7 @@ public final class InstanceMotion implements AutoCloseable {
             made = new RecordBuffer[2];
             for (int b = 0; b < 2; b++) {
                 made[b] = new RecordBuffer(device, kept.bytes, capacity, slots);
+                made[b].changeList(list, chunkBytes);
                 if (inPasses) {
                     made[b].uploadInPasses();
                 }
@@ -271,7 +275,7 @@ public final class InstanceMotion implements AutoCloseable {
 
     private static void pose(RecordBuffer records, int entry, int instance, double x, double y, double z, float qx,
         float qy, float qz, float qw, float sx, float sy, float sz) {
-        MemorySegment m = records.changes();
+        MemorySegment m = records.changes(entry);
         long o = records.offset(entry);
         m.set(FLOAT, o + PoseLayout.ROTATION, qx);
         m.set(FLOAT, o + PoseLayout.ROTATION + 4, qy);
@@ -288,7 +292,7 @@ public final class InstanceMotion implements AutoCloseable {
 
     private void packedPose(RecordBuffer records, int entry, int instance, double x, double y, double z, float qx,
         float qy, float qz, float qw, float sx, float sy, float sz) {
-        MemorySegment m = records.changes();
+        MemorySegment m = records.changes(entry);
         long o = records.offset(entry);
         boolean uniform = sx == sy && sy == sz;
         vector(m, o + PackedPoseLayout.POSITION, (float) (x - originX), (float) (y - originY), (float) (z - originZ));
@@ -379,6 +383,42 @@ public final class InstanceMotion implements AutoCloseable {
 
     ExternalBuffer secondGraph() {
         return secondGraph;
+    }
+
+    /** The buffers' change lists from now on ({@link RecordBuffer#changeList}). */
+    void changeList(RecordBuffer.ChangeList list, long chunkBytes) {
+        this.list = list;
+        this.chunkBytes = chunkBytes;
+        for (RecordBuffer[] made : buffers) {
+            if (made != null) {
+                made[0].changeList(list, chunkBytes);
+                made[1].changeList(list, chunkBytes);
+            }
+        }
+    }
+
+    long hostBytes() {
+        long bytes = 0;
+        for (RecordBuffer[] made : buffers) {
+            bytes += made == null ? 0 : made[0].hostBytes() + made[1].hostBytes();
+        }
+        return bytes;
+    }
+
+    long pinnedBytes() {
+        long bytes = 0;
+        for (RecordBuffer[] made : buffers) {
+            bytes += made == null ? 0 : made[0].pinnedBytes() + made[1].pinnedBytes();
+        }
+        return bytes;
+    }
+
+    long uploadNanos() {
+        long nanos = 0;
+        for (RecordBuffer[] made : buffers) {
+            nanos += made == null ? 0 : made[0].uploadNanos() + made[1].uploadNanos();
+        }
+        return nanos;
     }
 
     void uploadInPasses() {

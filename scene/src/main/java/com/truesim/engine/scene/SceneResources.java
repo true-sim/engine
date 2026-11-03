@@ -106,6 +106,7 @@ public final class SceneResources implements AutoCloseable {
     }
 
     private com.truesim.engine.settings.EngineSettings settings; // followed by the syncs, or null
+    private com.truesim.engine.settings.EngineSettings.Subscription budgetWatch; // render.streamBudget, or null
     private final AssetCache assets;
     private final GeometryPool pool;
     private final Materials materials;
@@ -571,9 +572,24 @@ public final class SceneResources implements AutoCloseable {
      * {@link SceneSync} draws what moves in fixed steps, switched as it changes); the assets plugin gives the engine's.
      * Set before the syncs are made; null (the default): none, each sync as set by hand.
      */
+    @AllowAllocation("set once")
     public SceneResources settings(com.truesim.engine.settings.EngineSettings followed) {
+        if (budgetWatch != null) {
+            budgetWatch.close();
+            budgetWatch = null;
+        }
         this.settings = followed;
+        if (followed != null) { // render.streamBudget: the transfer queue's share of each frame, as set
+            followBudget();
+            budgetWatch = followed.onChange(com.truesim.engine.render.RenderSettings.STREAM_BUDGET, this::followBudget);
+        }
         return this;
+    }
+
+    private void followBudget() {
+        long bytes = (long) settings.get(com.truesim.engine.render.RenderSettings.STREAM_BUDGET) << 20;
+        pool.streamBudget(bytes);
+        textures.streamBudget(bytes);
     }
 
     /** The settings scenes drawing these resources follow, or null. */
@@ -1502,6 +1518,9 @@ public final class SceneResources implements AutoCloseable {
         if (!closed) {
             closed = true;
             assets.removeListener(listener);
+            if (budgetWatch != null) {
+                budgetWatch.close();
+            }
         }
     }
 }

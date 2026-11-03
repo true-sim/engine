@@ -131,6 +131,8 @@ public final class StreamBench {
     private static Textures sharedTextures;
 
     private static boolean large;
+    private static boolean heavy;
+    private static boolean inFrame; // copies in the frame, not on the transfer queue // larger still: terrain tiles of 295,000 triangles, 4096 x 4096 textures
     // Render-thread time in the engine's calls, for the report: meshes added, textures added; total and worst ms.
     private static final double[] meshMillis = new double[2];
     private static final double[] textureMillis = new double[2];
@@ -150,8 +152,10 @@ public final class StreamBench {
         int color = VK_FORMAT_R16G16B16A16_SFLOAT;
         int depth = VK_FORMAT_D32_SFLOAT;
         boolean rays = List.of(args).contains("rays"); // bottom levels for ray tracing too, as meshes come
-        large = List.of(args).contains("large");
+        heavy = List.of(args).contains("heavy");
+        large = heavy || List.of(args).contains("large");
         direct = List.of(args).contains("direct");
+        inFrame = List.of(args).contains("inframe");
         boolean grow = List.of(args).contains("grow"); // the pool starts small and grows as meshes come
         ExecutorService builders = Executors.newFixedThreadPool(3);
         try (VulkanInstance instance = VulkanInstance.builder().applicationName("stream bench").surfaces(false)
@@ -166,6 +170,9 @@ public final class StreamBench {
              GpuScene scene = new GpuScene(device, pool, 8192, graph.frameSlots());
              Lights lights = new Lights(device, 4, 8, graph.frameSlots())) {
             scene.setMaterials(materials);
+            if (inFrame) { // render.streamBudget 0: every copy in the frame, on the graphics queue
+                pool.streamBudget(0);
+            }
             sharedPool = pool;
             sharedTextures = textures;
             com.truesim.engine.render.RayTracing rayTracing = rays && device.rayTracing()
@@ -252,7 +259,8 @@ public final class StreamBench {
                     graph.builds() - builds));
                 com.truesim.engine.graph.GpuTimings gpu = graph.timings();
                 if (gpu != null && gpu.frame() >= 1 && gpu.frame() <= frames.size()) {
-                    frames.get((int) gpu.frame() - 1).gpu = gpu.totalMillis(); // frames count from 1
+                    double frameStart = gpu.frameStartMillis(); // the frame start's uploads (textures, mips) too
+                    frames.get((int) gpu.frame() - 1).gpu = gpu.totalMillis() + (Double.isNaN(frameStart) ? 0 : frameStart);
                 }
             }
             device.waitIdle();
@@ -284,14 +292,14 @@ public final class StreamBench {
     private static Built buildMeshes(long seed) {
         List<MeshData> meshes = new ArrayList<>();
         if (large) {
-            meshes.add(DemoMeshes.terrain(256)); // 66,000 vertices, 131,000 triangles
+            meshes.add(DemoMeshes.terrain(heavy ? 384 : 256)); // 66,000 vertices, 131,000 triangles (heavy: 295,000)
             meshes.add(DemoMeshes.rock(4));
         } else {
             for (int m = 0; m < MESHES_PER_CELL; m++) {
                 meshes.add(DemoMeshes.rock(3 + (int) ((seed + m) % 2)));
             }
         }
-        int size = large ? 2048 : 256;
+        int size = heavy ? 4096 : large ? 2048 : 256;
         MemorySegment texels = Arena.ofAuto().allocate(4L * size * size);
         int tint = (int) (seed * 2654435761L);
         for (int i = 0; i < size * size; i++) {
@@ -376,10 +384,10 @@ public final class StreamBench {
     private static void report(List<Frame> frames, GeometryPool pool, Textures textures, Materials materials) {
         List<Frame> timed = frames.subList(60, frames.size()); // after start-up
         double[] millis = timed.stream().mapToDouble(Frame::millis).sorted().toArray();
-        System.out.printf(Locale.ROOT, "Frame work, %d frames at 90 Hz: p50 %.2f ms, p95 %.2f, p99 %.2f, max %.2f; over "
-                + "the 11.1 ms budget: %d, over 4 ms: %d%n", millis.length, at(millis, 0.5), at(millis, 0.95),
-            at(millis, 0.99), millis[millis.length - 1], Arrays.stream(millis).filter(m -> m > 11.1).count(),
-            Arrays.stream(millis).filter(m -> m > 4).count());
+        System.out.printf(Locale.ROOT, "Frame work, %d frames at 90 Hz: p50 %.2f ms, p95 %.2f, p99 %.2f, max %.2f, "
+                + "standard deviation %.3f; over the 11.1 ms budget: %d, over 4 ms: %d%n", millis.length,
+            at(millis, 0.5), at(millis, 0.95), at(millis, 0.99), millis[millis.length - 1], deviation(millis),
+            Arrays.stream(millis).filter(m -> m > 11.1).count(), Arrays.stream(millis).filter(m -> m > 4).count());
         int added = timed.stream().mapToInt(Frame::meshesAdded).sum();
         int removed = timed.stream().mapToInt(Frame::meshesRemoved).sum();
         int builds = timed.stream().mapToInt(Frame::builds).sum();
@@ -397,9 +405,19 @@ public final class StreamBench {
         System.out.printf(Locale.ROOT, "Mean ms: frames streaming nothing %.2f, adding %.2f, removing %.2f, rebuilding "
             + "%.2f%n", plain, adding, removing, rebuilding);
         double[] gpu = timed.stream().mapToDouble(f -> f.gpu).filter(g -> !Double.isNaN(g)).sorted().toArray();
-        System.out.printf(Locale.ROOT, "GPU per frame, %d timed: p50 %.2f ms, p95 %.2f, p99 %.2f, max %.2f; over 11.1 "
-                + "ms: %d%n", gpu.length, at(gpu, 0.5), at(gpu, 0.95), at(gpu, 0.99), gpu[gpu.length - 1],
+        System.out.printf(Locale.ROOT, "GPU per frame (graphics queue, frame start included), %d timed: p50 %.2f ms, "
+                + "p95 %.2f, p99 %.2f, max %.2f, standard deviation %.3f; over 11.1 ms: %d%n", gpu.length, at(gpu, 0.5),
+            at(gpu, 0.95), at(gpu, 0.99), gpu[gpu.length - 1], deviation(gpu),
             Arrays.stream(gpu).filter(g -> g > 11.1).count());
+        double gpuAdding = timed.stream().filter(f -> f.meshesAdded() > 0 && !Double.isNaN(f.gpu))
+            .mapToDouble(f -> f.gpu).average().orElse(0);
+        double gpuQuiet = timed.stream().filter(f -> f.meshesAdded() == 0 && f.meshesRemoved() == 0
+            && !Double.isNaN(f.gpu)).mapToDouble(f -> f.gpu).average().orElse(0);
+        double gpuAddingMax = timed.stream().filter(f -> f.meshesAdded() > 0 && !Double.isNaN(f.gpu))
+            .mapToDouble(f -> f.gpu).max().orElse(0);
+        System.out.printf(Locale.ROOT, "GPU mean ms: frames adding %.3f (max %.3f), streaming nothing %.3f; stream "
+            + "queue: %s%n", gpuAdding, gpuAddingMax, gpuQuiet,
+            inFrame || direct ? "none, copies in the frame" : "transfer");
         System.out.println("Slowest GPU frames:");
         timed.stream().filter(f -> !Double.isNaN(f.gpu)).sorted((a, b) -> Double.compare(b.gpu, a.gpu)).limit(8)
             .forEach(f -> System.out.printf(Locale.ROOT, "  frame %4d  GPU %7.2f ms (CPU %5.2f)  meshes +%d -%d, "
@@ -410,6 +428,11 @@ public final class StreamBench {
         timed.stream().sorted((a, b) -> Double.compare(b.millis(), a.millis())).limit(12).forEach(f ->
             System.out.printf(Locale.ROOT, "  frame %4d  %7.2f ms  meshes +%d -%d, textures +%d, rebuilds %d%n",
                 f.index, f.millis, f.meshesAdded, f.meshesRemoved, f.textures, f.builds));
+    }
+
+    private static double deviation(double[] values) {
+        double mean = Arrays.stream(values).average().orElse(0);
+        return Math.sqrt(Arrays.stream(values).map(v -> (v - mean) * (v - mean)).average().orElse(0));
     }
 
     private static double at(double[] sorted, double fraction) {

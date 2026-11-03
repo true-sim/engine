@@ -107,6 +107,12 @@ public final class GeometryPool implements AutoCloseable {
     private final ExternalBuffer[] graphBuffers;
     private final FrameSlots slots;
     private final FrameUploads uploads;
+    // Prepared meshes' copies on the transfer queue, within its budget per frame; null without frames to defer to.
+    private final com.truesim.engine.vulkan.StreamQueue stream;
+    private final int[] families; // the pool's buffers are shared with these queue families (none: exclusive)
+    // A buffer grown copies the old one into the new in a frame; until that frame finishes, the transfer queue writing
+    // the new one could be overwritten by the copy: prepared meshes go through the frame until then.
+    private long streamAfter;
     // Buffers replaced by bigger ones: until the frame copying from them records, then until no frame reads them.
     private final List<GpuBuffer> replaced = new ArrayList<>();
     private final List<java.util.function.IntConsumer> removing = new ArrayList<>(); // what follows removals
@@ -178,6 +184,10 @@ public final class GeometryPool implements AutoCloseable {
         this.slots = Objects.requireNonNull(slots, "slots");
         this.uploads = new FrameUploads(device, slots);
         this.oldBuffers = new Retiring(slots);
+        this.stream = com.truesim.engine.vulkan.StreamQueue.open(device, slots,
+            (long) RenderSettings.STREAM_BUDGET.defaultValue() << 20);
+        this.families = stream != null && stream.separate()
+            ? new int[] {device.graphics().family(), device.compute().family(), stream.family()} : new int[0];
         int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         long triangleIndices = 3L * capacity.triangles();
         // Positions are ray tracing's build input too, where the device traces rays: bottom-level acceleration
@@ -187,13 +197,13 @@ public final class GeometryPool implements AutoCloseable {
         tableUsage = usage;
         dataUsage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         positionUsage = dataUsage | buildInput;
-        positions = GpuBuffer.deviceLocal(device, (long) MeshData.POSITION_BYTES * capacity.vertices(), positionUsage);
+        positions = GpuBuffer.deviceLocal(device, (long) MeshData.POSITION_BYTES * capacity.vertices(), positionUsage, families);
         positionsOnGpu = positions;
-        attributes = GpuBuffer.deviceLocal(device, 28L * capacity.vertices(), dataUsage);
-        meshletVertices = GpuBuffer.deviceLocal(device, 4L * capacity.meshlets() * 255, dataUsage);
-        meshletTriangles = GpuBuffer.deviceLocal(device, (triangleIndices + 3) & ~3L, dataUsage);
-        meshlets = GpuBuffer.deviceLocal(device, (long) MeshData.MESHLET_BYTES * capacity.meshlets(), dataUsage);
-        clusterLod = GpuBuffer.deviceLocal(device, (long) MeshData.CLUSTER_LOD_BYTES * capacity.meshlets(), dataUsage);
+        attributes = GpuBuffer.deviceLocal(device, 28L * capacity.vertices(), dataUsage, families);
+        meshletVertices = GpuBuffer.deviceLocal(device, 4L * capacity.meshlets() * 255, dataUsage, families);
+        meshletTriangles = GpuBuffer.deviceLocal(device, (triangleIndices + 3) & ~3L, dataUsage, families);
+        meshlets = GpuBuffer.deviceLocal(device, (long) MeshData.MESHLET_BYTES * capacity.meshlets(), dataUsage, families);
+        clusterLod = GpuBuffer.deviceLocal(device, (long) MeshData.CLUSTER_LOD_BYTES * capacity.meshlets(), dataUsage, families);
         meshTable = GpuBuffer.hostVisible(device, (long) MESH_ENTRY_BYTES * capacity.meshes(), usage);
         levels = GpuBuffer.hostVisible(device, 8L * MAX_LEVELS * capacity.meshes(), usage);
         graphBuffers = new ExternalBuffer[] {new ExternalBuffer("positions", positions),
@@ -349,7 +359,7 @@ public final class GeometryPool implements AutoCloseable {
         GpuBuffer meshletTriangles = this.meshletTriangles;
         GpuBuffer meshlets = this.meshlets;
         GpuBuffer clusterLod = this.clusterLod;
-        uploads.record(prepared.staging, (commands, staging, offset) -> {
+        com.truesim.engine.vulkan.FrameUploads.Staged copies = (commands, staging, offset) -> {
             copy(commands, staging, 0, positions, (long) MeshData.POSITION_BYTES * vertexBase,
                 mesh.positions().byteSize());
             copy(commands, staging, prepared.attributes, attributes, attributeBase, mesh.attributes().byteSize());
@@ -361,7 +371,12 @@ public final class GeometryPool implements AutoCloseable {
                 mesh.meshlets().byteSize());
             copy(commands, staging, prepared.clusterLod, clusterLod, (long) MeshData.CLUSTER_LOD_BYTES * meshletBase,
                 mesh.clusterLod().byteSize());
-        });
+        };
+        boolean streamed = stream != null && slots.isFinished(streamAfter) && stream.submit(prepared.staging.size(),
+            commands -> copies.record(commands, prepared.staging, 0), prepared.staging);
+        if (!streamed) {
+            uploads.record(prepared.staging, copies);
+        }
     }
 
     private static void copy(VkCommandBuffer commands, GpuBuffer from, long fromOffset, GpuBuffer to, long toOffset,
@@ -700,7 +715,8 @@ public final class GeometryPool implements AutoCloseable {
      * no frame reads it.
      */
     private GpuBuffer grown(GpuBuffer old, long bytes, int usage) {
-        GpuBuffer grown = GpuBuffer.deviceLocal(device, bytes, usage);
+        GpuBuffer grown = GpuBuffer.deviceLocal(device, bytes, usage, families);
+        streamAfter = Long.MAX_VALUE; // until the frame copying it is recorded, then until it finishes
         synchronized (replaced) {
             replaced.add(old);
         }
@@ -708,6 +724,7 @@ public final class GeometryPool implements AutoCloseable {
             Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
             copy(commands, old, 0, grown, 0, old.size());
+            streamAfter = slots.retireAt();
             Barriers.memory(commands, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
             if (positionsOnGpu == old) {
@@ -991,6 +1008,22 @@ public final class GeometryPool implements AutoCloseable {
     }
 
     /**
+     * Streams up to {@code bytes} a frame of prepared meshes and textures on the transfer queue
+     * ({@link RenderSettings#STREAM_BUDGET}); what comes after, or everything with 0, is copied in the frame as before.
+     * The budget is shared by everything streaming into frames of these frame slots (the {@link Textures} too).
+     */
+    public void streamBudget(long bytes) {
+        if (stream != null) {
+            stream.budget(bytes);
+        }
+    }
+
+    /** The transfer queue prepared meshes stream on, or null without frames to defer to. */
+    public com.truesim.engine.vulkan.StreamQueue streamQueue() {
+        return stream;
+    }
+
+    /**
      * Every mesh's level table, {@link #MAX_LEVELS} entries of 8 bytes per mesh number. For custom passes, by device
      * address.
      */
@@ -1004,6 +1037,9 @@ public final class GeometryPool implements AutoCloseable {
             closed = true;
             deformation.close();
             uploads.close();
+            if (stream != null) {
+                stream.close();
+            }
             for (GpuBuffer buffer : new GpuBuffer[] {positions, attributes, meshletVertices, meshletTriangles,
                 meshlets, clusterLod, meshTable, levels}) {
                 buffer.close();

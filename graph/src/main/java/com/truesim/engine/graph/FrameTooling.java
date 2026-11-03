@@ -119,7 +119,7 @@ final class FrameTooling {
                 int family = batches.queue()[batches.chunkBatch()[c]] == GRAPHICS ? graphicsFamily : computeFamily;
                 Arrays.fill(families, batches.chunkFirstPass()[c], batches.chunkEndPass()[c], family);
             }
-            timings.build(order, families);
+            timings.build(order, families, graphicsFamily);
         } else if (timings != null) {
             timings.close();
             timings = null;
@@ -148,6 +148,13 @@ final class FrameTooling {
             timings.write(commands, slot, pass, false);
         }
         return labelled;
+    }
+
+    /** Before ({@code end} false) or after the frame start's commands of frame slot {@code slot}: timed. */
+    void frameStart(VkCommandBuffer commands, int slot, boolean end) {
+        if (timingsOn && timings != null) {
+            timings.writeStart(commands, slot, end);
+        }
     }
 
     /** After pass {@code pass}: its end timed and, if {@code labelled}, its label closed. Allocates nothing. */
