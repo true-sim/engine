@@ -46,8 +46,8 @@ public final class RenderSettings {
         "MiB a frame of streamed meshes and textures copied on the transfer queue (0: in the frame)");
 
     /**
-     * Every render setting: these, transparency's and screen-space reflections', the light clusters', the shadows' and
-     * the display transform's.
+     * Every render setting: these, transparency's and screen-space reflections', the light clusters', the world
+     * light grid's, the reference path tracer's, the shadows' and the display transform's.
      */
     public static final List<Setting<?>> ALL = all();
 
@@ -65,6 +65,8 @@ public final class RenderSettings {
         all.add(Transparency.SORTED_RUNS);
         all.addAll(ScreenSpaceReflections.ALL);
         all.addAll(ClusteredLights.ALL);
+        all.addAll(WorldLights.ALL);
+        all.addAll(ReferencePathTracer.ALL);
         all.addAll(ShadowSettings.ALL);
         all.addAll(DisplayTransform.ALL);
         return List.copyOf(all);

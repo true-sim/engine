@@ -16,6 +16,16 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
 import com.truesim.common.math.color.Color;
+import com.truesim.engine.graph.Buffer;
+import com.truesim.engine.graph.BufferAccess;
+import com.truesim.engine.graph.GraphBuilder;
+import com.truesim.engine.graph.Key;
+import com.truesim.engine.graph.Technique;
+import com.truesim.engine.vulkan.Commands;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.List;
+import org.lwjgl.system.MemoryUtil;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.render.materials.CarPaint;
@@ -99,7 +109,7 @@ class ReferencePathTracerTest {
         view = renderer.createView(ViewOptions.of(256, 1 << 12));
         rayTracing = new RayTracing(device, pool, 32);
         rayTracing.add(quad, quadMesh, quadMesh.levels().size() - 1);
-        lights = new Lights(device, 4, 4);
+        lights = new Lights(device, 64, 4);
         graph = new FrameGraph(device, 2);
     }
 
@@ -392,6 +402,95 @@ class ReferencePathTracerTest {
         assertThat(pr).as("lit").isGreaterThan(0.05f);
         assertThat(pg).isCloseTo(pr, within(pr * 0.2f));
         assertThat(pb).as("yellow: little blue").isLessThan(pr * 0.3f);
+    }
+
+    /** Provides {@link #GPU_LIGHTS}: writes {@code count} point lights into the lights the GPU writes, as particles do. */
+    private record GpuLightWriter(Lights lights, int count) implements Technique {
+
+        @Override
+        public List<Key<?>> provides() {
+            return List.of(GPU_LIGHTS);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Buffer written = g.importBuffer(lights.gpuLightsBuffer());
+            g.pass("gpu lights").write(written, BufferAccess.TRANSFER_DST).record(ctx -> {
+                try (MemoryStack stack = stackPush()) {
+                    int bytes = 16 + 80 * count;
+                    ByteBuffer data = stack.calloc(bytes).order(ByteOrder.LITTLE_ENDIAN);
+                    data.putInt(0, count);
+                    for (int i = 0; i < count; i++) {
+                        int o = 16 + 80 * i;
+                        data.putFloat(o, -2.5f + 5f * i / count).putFloat(o + 4, -0.6f).putFloat(o + 8, -3.5f);
+                        data.putFloat(o + 12, 1.5f); // range
+                        data.putFloat(o + 16, 0.3f).putFloat(o + 20, 0.2f).putFloat(o + 24, 1.0f);
+                        data.putInt(o + 28, 0); // a point
+                        data.putInt(o + 52, -1);
+                    }
+                    Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(written), 0, bytes,
+                        MemoryUtil.memAddress(data));
+                }
+            });
+            g.provide(GPU_LIGHTS, written);
+        }
+    }
+
+    static final Key<Buffer> GPU_LIGHTS = Key.buffer("test.gpuLights");
+
+    /** A floor and quads standing on it, lit by 40 point lights of the scene and 8 the GPU writes, in the dark. */
+    private float[] lightsOnTheFloor(ReferencePathTracer.Lighting lighting, WorldLights.Mode mode, int frames) {
+        graph.close();
+        graph = new FrameGraph(device, 2);
+        int white = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.8f, 0.8f, 1))).feature(LAMBERT));
+        wall(0, white, 0, -1, -4, UP, 4);
+        wall(1, white, -1, -0.5f, -4, PLUS_Z, 0.5f);
+        wall(2, white, 1.2f, -0.5f, -4.5f, PLUS_X, 0.5f);
+        camera.position(0, 0, 0).set(0, -0.6, -1, 0, 1, 0, Math.PI / 2, size, size, 0.01);
+        java.util.SplittableRandom random = new java.util.SplittableRandom(5);
+        for (int i = 0; i < 40; i++) {
+            lights.point(i, random.nextDouble(-3, 3), random.nextDouble(-0.9, 0.5), random.nextDouble(-7, -1),
+                (float) random.nextDouble(0.5, 2.5), (float) random.nextDouble(0.1, 1), (float) random.nextDouble(0.1,
+                    1), (float) random.nextDouble(0.1, 1));
+        }
+        lights.gpuLights(8);
+        lights.writtenBy(GPU_LIGHTS);
+        graph.add(new GpuLightWriter(lights, 8));
+        ReferencePathTracer reference = traced(40, Environment.uniform("night", 0, 0, 0)).worldLights(lights);
+        graph.settings().set(ReferencePathTracer.LIGHTS, lighting).set(WorldLights.MODE, mode)
+            .set(WorldLights.CELL, 0.5f).set(WorldLights.SLOTS, mode == WorldLights.Mode.LISTS ? 64 : 16);
+        return frames(frames);
+    }
+
+    @Test
+    void theWorldLightGridsListsLightHitsAsEveryLightDoes() {
+        float[] every = lightsOnTheFloor(ReferencePathTracer.Lighting.ALL, WorldLights.Mode.LISTS, 32);
+        float[] listed = lightsOnTheFloor(ReferencePathTracer.Lighting.GRID, WorldLights.Mode.LISTS, 32);
+        assertThat(graph.passes()).contains("world lights", "gpu lights");
+        double sum = 0;
+        double worst = 0;
+        for (int p = 0; p < size * size; p++) {
+            double a = luminance(every, p);
+            sum += a;
+            worst = Math.max(worst, Math.abs(luminance(listed, p) - a) / Math.max(a, 1.0e-3));
+        }
+        assertThat(sum / (size * size)).as("lit").isGreaterThan(0.05);
+        // The same paths, the same lights (those reaching the cell): the same image, but for the order of the sums.
+        assertThat(worst).as("the most a pixel differs").isLessThan(1.0e-3);
+    }
+
+    @Test
+    void theWorldLightGridsReservoirsConvergeToEveryLight() {
+        float[] every = lightsOnTheFloor(ReferencePathTracer.Lighting.ALL, WorldLights.Mode.LISTS, 256);
+        float[] sampled = lightsOnTheFloor(ReferencePathTracer.Lighting.GRID, WorldLights.Mode.RESERVOIRS, 256);
+        double a = 0;
+        double b = 0;
+        for (int p = 0; p < size * size; p++) {
+            a += luminance(every, p);
+            b += luminance(sampled, p);
+        }
+        // Unbiased: the mean the same, within what 256 samples of one light a point leave of noise.
+        assertThat(b).as("the image's mean, resampled").isCloseTo(a, within(a * 0.02));
     }
 
     /**

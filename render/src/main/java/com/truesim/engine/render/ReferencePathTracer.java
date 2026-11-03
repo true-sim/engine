@@ -66,8 +66,24 @@ public final class ReferencePathTracer implements Technique {
     public static final Setting<Integer> SAMPLES = Setting.integer("render.reference.samples", 65536, 1,
         Integer.MAX_VALUE, "samples per pixel the reference path tracer stops at");
 
+    /**
+     * How hits find their lights, where {@link #worldLights} names them: every light of the view's light list, or the
+     * world light grid ({@link WorldLights}, as {@link WorldLights#MODE} lays it out); the graph rebuilds when it
+     * changes.
+     */
+    public static final Setting<Lighting> LIGHTS = Setting.choice("render.reference.lights", Lighting.ALL,
+        "how reference paths find their lights: every light, or the world light grid");
+
     /** Its settings. */
-    public static final List<Setting<?>> ALL = List.of(BOUNCES, ROULETTE, SAMPLES);
+    public static final List<Setting<?>> ALL = List.of(BOUNCES, ROULETTE, SAMPLES, LIGHTS);
+
+    /** How hits find their lights ({@link #LIGHTS}). */
+    public enum Lighting {
+        /** Every light of the view's light list, each with a shadow ray: exact. */
+        ALL,
+        /** The world light grid of {@link #worldLights}: lists (exact) or reservoirs (unbiased, noisy). */
+        GRID
+    }
 
     /** Bytes of a path between bounces (paths.slang's PathState). */
     static final int PATH_BYTES = 80;
@@ -78,6 +94,7 @@ public final class ReferencePathTracer implements Technique {
     private final RayTracing rayTracing;
     private final SceneView view;
     private final int colorFormat;
+    private Lights worldLights; // or null: the light list's
     private final float[] lastMatrix = new float[16];
     private final double[] lastPosition = new double[3];
     private long lastVersion = Long.MIN_VALUE;
@@ -101,6 +118,16 @@ public final class ReferencePathTracer implements Technique {
         this.colorFormat = colorFormat;
     }
 
+    /**
+     * Lights hits through a world light grid of {@code lights} around the view's camera ({@link WorldLights}) where
+     * {@link #LIGHTS} says {@link Lighting#GRID}; null: the light list's lights always. Rebuilds the graph.
+     */
+    @AllowAllocation("set up rarely")
+    public ReferencePathTracer worldLights(Lights lights) {
+        this.worldLights = lights;
+        return this;
+    }
+
     /** Starts the samples anew from the next frame (lights moved, say). */
     public synchronized ReferencePathTracer restart() {
         restart = true;
@@ -122,7 +149,8 @@ public final class ReferencePathTracer implements Technique {
     public long buildVersion() {
         Materials materials = renderer.scene().materials();
         return ((long) System.identityHashCode(materials) << 32 | materials.binCount())
-            + 31 * (materials.graphBuffersVersion() + 31L * materials.drawnVersion());
+            + 31 * (materials.graphBuffersVersion() + 31L * materials.drawnVersion())
+            + (worldLights == null ? 0 : 7L * System.identityHashCode(worldLights));
     }
 
     @Override
@@ -143,6 +171,8 @@ public final class ReferencePathTracer implements Technique {
         Buffer topLevel = g.request(new TopLevel(rayTracing, renderer));
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         Buffer lights = g.optional(Keys.LIGHT_LIST);
+        Buffer world = worldLights != null && g.setting(LIGHTS) == Lighting.GRID
+            ? g.request(new WorldLights(worldLights, view.camera())) : null;
         IndirectInputs.Set indirect = IndirectInputs.of(g);
         Materials materials = renderer.scene().materials();
         int bins = materials.binCount();
@@ -237,6 +267,9 @@ public final class ReferencePathTracer implements Technique {
             if (lights != null) {
                 shadePass.read(lights, BufferAccess.STORAGE_READ);
             }
+            if (world != null) {
+                shadePass.read(world, BufferAccess.STORAGE_READ);
+            }
             if (indirect != null) {
                 indirect.readBy(shadePass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
             }
@@ -247,8 +280,8 @@ public final class ReferencePathTracer implements Technique {
                 for (int bin = 0; bin < shade.length; bin++) {
                     if (shade[bin] != null) {
                         ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, color, accumulation, current, next,
-                            binTables, counts, lights, indirect, table, tablesBytes, bounce, bins, bin, settings),
-                            binTables, table + 16L * bin);
+                            binTables, counts, lights, indirect, table, tablesBytes, bounce, bins, bin, settings)
+                            .world(world == null ? 0 : ctx.address(world)), binTables, table + 16L * bin);
                     }
                 }
             });
@@ -341,7 +374,7 @@ public final class ReferencePathTracer implements Technique {
             .view(view.view().address()).scene(scene.tableAddress())
             .rays(rayTracing.sceneAddress(scene))
             .lights(lights == null ? 0 : ctx.address(lights))
-            .indirect(indirect == null ? 0 : ctx.address(indirect.table()))
+            .indirect(indirect == null ? 0 : ctx.address(indirect.table())).world(0)
             .offset((float) (view.view().position(0) - rayTracing.origin(0)),
                 (float) (view.view().position(1) - rayTracing.origin(1)),
                 (float) (view.view().position(2) - rayTracing.origin(2)))
