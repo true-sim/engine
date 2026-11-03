@@ -357,6 +357,66 @@ class ListeningProofs {
     }
 
     @Test
+    void v8DrivingThroughTheGearsThenPassingBy() throws IOException, InterruptedException {
+        try (World w = new World()) {
+            w.renderer.commands().layout(com.truesim.scene.audio.BusLayout.builder()
+                .bus(com.truesim.scene.audio.Bus.SFX, b -> b.send(AudioSync.REVERB, -14))
+                .aux(AudioSync.REVERB, b -> b.effect(com.truesim.scene.audio.AudioEffect.named("reverb")
+                    .set("preset", 0))).build());
+            w.sync.patches().register(com.truesim.engine.audio.dsp.Vehicles.v8());
+            var rpm = com.truesim.engine.audio.dsp.Vehicles.RPM;
+            var load = com.truesim.engine.audio.dsp.Vehicles.LOAD;
+            var shift = com.truesim.engine.audio.dsp.Vehicles.SHIFT;
+            var patch = com.truesim.scene.audio.Patch.named("v8", rpm, load, shift);
+            // inside: idle, a blip, four gears pulled to 6,000 rpm, a lift-off on overrun, back to idle
+            var cabin = w.sounds.play(Sound.builder().root(patch).loop().build());
+            double r = 800;
+            int gear = 0;
+            double[] ratios = {1, 0.62, 0.45, 0.36};
+            for (int f = 0; f < 60 * 16; f++) {
+                double t = f / 60.0;
+                double l;
+                if (t < 2) {
+                    r = 800;
+                    l = 0.05;
+                } else if (t < 3) {
+                    double u = (t - 2) / 1;
+                    r = 800 + 3_200 * Math.sin(Math.PI * u);
+                    l = u < 0.4 ? 0.9 : -0.6;
+                } else if (t < 12) {
+                    l = 1;
+                    r += 42 * Math.pow(ratios[gear], 1.5); // pulls slower in the higher gears
+                    if (r > 6_000 && gear < 3) {
+                        gear++;
+                        r *= ratios[gear] / ratios[gear - 1];
+                        cabin.trigger(shift);
+                    }
+                    r = Math.min(r, 6_300);
+                } else {
+                    l = t < 14.5 ? -1 : 0.05;
+                    r = Math.max(800, r - (t < 14.5 ? 1_500 : 900) / 60.0);
+                }
+                cabin.set(rpm, (float) r, 0.03).set(load, (float) l, 0.08);
+                w.frame();
+            }
+            cabin.stop(0.2);
+            // outside: the car passes 6 m away at 110 km/h, in third at 4,500 rpm, lifting off as it goes
+            long car = w.scene.create();
+            var outside = w.sounds.play(Sound.builder().root(patch).attenuation(Attenuation.builder().distance(3, 400)
+                .reverbSend(0.3f, 1).build()).loop().build(), car);
+            double v = 110 / 3.6;
+            for (int f = 0; f < 60 * 12; f++) {
+                double t = f / 60.0;
+                w.scene.setTranslation(car, -6 * v + v * t, 0, -6);
+                outside.set(rpm, (float) (t < 6.5 ? 4_500 + 60 * t : 4_200 - 200 * (t - 6.5)), 0.05)
+                    .set(load, t < 6.5 ? 0.9f : -0.8f, 0.1);
+                w.frame();
+            }
+            w.write("au_step12_v8_gears_and_pass_by.wav");
+        }
+    }
+
+    @Test
     void carPassingWithDopplerAndPanning() throws IOException, InterruptedException {
         try (World w = new World()) {
             AssetRef<AudioClip> clip = AssetRef.generated(AudioAssets.CLIP, (hz, seed) -> engine(hz), 110.0, 0);

@@ -1,6 +1,7 @@
 package com.truesim.engine.audio;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.audio.dsp.PatchVoice;
 import com.truesim.scene.audio.Attenuation;
 import com.truesim.scene.audio.AudioClip;
 import com.truesim.scene.audio.Bus;
@@ -50,6 +51,8 @@ public final class AudioRenderer implements AutoCloseable {
     static final int ACCESS = 14;
     static final int SEND = 15;
     static final int REVERB = 16;
+    static final int PATCH = 17;
+    static final int PATCH_INPUT = 18;
 
     /** Receives events. */
     @FunctionalInterface
@@ -68,6 +71,7 @@ public final class AudioRenderer implements AutoCloseable {
     private final Commands producer;
     private final float[] block;
     private StreamRing pendingRing;
+    private PatchVoice pendingPatch;
     private BusGraph graph;
     private long frame;
     /** Frames of {@link #block} not handed out yet: renders of any length are cut from whole blocks. */
@@ -254,9 +258,13 @@ public final class AudioRenderer implements AutoCloseable {
                     Bus bus = (Bus) r.refs[c];
                     voices.play(slot, (AudioClip) r.refs2[c], Math.max(frame, r.frames[c] - latency), values[v + 2],
                         (float) values[v], (float) values[v + 1], bus, graph.index(bus), (int) values[v + 3],
-                        (float) values[v + 4], r.tags[c], pendingRing);
+                        (float) values[v + 4], r.tags[c], pendingRing, pendingPatch);
                     pendingRing = null;
+                    pendingPatch = null;
                 }
+                case PATCH -> pendingPatch = (PatchVoice) r.refs[c];
+                case PATCH_INPUT -> voices.patchInput(slot, (int) values[v], (float) values[v + 1], (int) values[v + 2],
+                    values[v + 3] != 0, r.frames[c] - latency, frame);
                 case STREAM -> pendingRing = (StreamRing) r.refs[c];
                 case BUS_FILTER -> graph.filters(slot, (float) values[v], (float) values[v + 1]);
                 case ACCESS -> access.set(values[v] != 0, (float) values[v + 1], (int) values[v + 2]);
@@ -330,6 +338,35 @@ public final class AudioRenderer implements AutoCloseable {
             commands.tags[c] = tag;
             commands.refs[c] = bus;
             commands.refs2[c] = clip;
+            commands.publish();
+            return true;
+        }
+
+        /** The next {@link #play} plays {@code patch} (its clip ignored, may be null): a procedural voice. */
+        public boolean patch(PatchVoice patch) {
+            int c = claim(PATCH, 0, 0);
+            if (c < 0) {
+                return false;
+            }
+            commands.refs[c] = patch;
+            commands.publish();
+            return true;
+        }
+
+        /**
+         * Sets input {@code input} of the patch voice in {@code slot} to {@code value} at output frame {@code frame},
+         * ramped over {@code seconds}; with {@code trigger}, fires it at that frame instead.
+         */
+        public boolean patchInput(int slot, int input, float value, double seconds, boolean trigger, long frame) {
+            int c = claim(PATCH_INPUT, slot, frame);
+            if (c < 0) {
+                return false;
+            }
+            int v = c * Ring.VALUES;
+            commands.values[v] = input;
+            commands.values[v + 1] = value;
+            commands.values[v + 2] = Math.round(seconds * format.rate());
+            commands.values[v + 3] = trigger ? 1 : 0;
             commands.publish();
             return true;
         }

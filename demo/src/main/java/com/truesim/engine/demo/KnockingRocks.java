@@ -23,7 +23,8 @@ import com.truesim.scene.core.SceneGraph;
  * The demo's sound (audio step 6): rocks dropped in front of the camera that knock when they land, heard from the
  * camera. Each rock falls, bounces with less each time and rests, then is dropped again; every landing faster than a
  * metre a second fires a knock at the landing place, louder for harder landings. The knock is made in code (a thump,
- * a body and a click from hashed noise), so the demo needs no sound files.
+ * a body and a click from hashed noise), so the demo needs no sound files. With them, the {@link CameraCar}: a
+ * procedural V8 following the camera's speed (step 12).
  */
 final class KnockingRocks implements AutoCloseable {
 
@@ -63,6 +64,7 @@ final class KnockingRocks implements AutoCloseable {
     private final double[] rest = new double[ROCKS];
     private final double[] spots = new double[2 * ROCKS];
     private int drops;
+    private final CameraCar car;
     private int knocks;
 
     KnockingRocks(Audio audio, DemoScene world, TaskScheduler tasks, double[] eye, double yaw) {
@@ -72,6 +74,7 @@ final class KnockingRocks implements AutoCloseable {
         sounds = audio.assets(cache).sounds(scene);
         listener = scene.create();
         sounds.listeners().device(listener);
+        car = new CameraCar(audio, sounds);
         AssetRef<AudioClip> clip = AssetRef.generated(AudioAssets.CLIP, KNOCK, 0, 17);
         knock = Sound.builder().root(Play.clip(clip)).attenuation(Attenuation.near(2, 80))
             .volume(Range.db(-3, 0)).pitch(Range.semitones(-3, 3))
@@ -104,6 +107,7 @@ final class KnockingRocks implements AutoCloseable {
         double half = (yaw + Math.PI) / 2; // the listener's -z ahead along the camera's yaw
         scene.setLocal(listener, eye[0], eye[1], eye[2], 0, Maths.sin(half), 0, Maths.cos(half), 1, 1, 1);
         scene.update();
+        car.update(dt, eye);
         for (int i = 0; i < ROCKS; i++) {
             if (rest[i] > 0) {
                 rest[i] -= dt;
@@ -142,6 +146,7 @@ final class KnockingRocks implements AutoCloseable {
 
     @Override
     public void close() {
+        car.stop();
         cache.close();
     }
 }

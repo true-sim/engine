@@ -1,6 +1,8 @@
 package com.truesim.engine.audio;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.audio.dsp.PatchVoice;
+import com.truesim.engine.audio.dsp.Patches;
 import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.AssetState;
@@ -8,6 +10,7 @@ import com.truesim.scene.audio.AudioClip;
 import com.truesim.scene.audio.Attenuation;
 import com.truesim.scene.audio.Bus;
 import com.truesim.scene.audio.Music;
+import com.truesim.scene.audio.Patch;
 import com.truesim.scene.audio.Decibels;
 import com.truesim.scene.audio.AudioEffect;
 import com.truesim.scene.audio.Listeners;
@@ -115,6 +118,7 @@ public final class AudioSync {
         slotTrack = new int[renderer.voices()];
         slotVoice = new int[renderer.voices()];
         slotMusicVoice = new long[renderer.voices()];
+        slotPatch = new PatchVoice[renderer.voices()];
         musicGain = new float[renderer.voices()];
         stingerSlot = new boolean[renderer.voices()];
         Arrays.fill(slotTrack, -1);
@@ -173,6 +177,19 @@ public final class AudioSync {
         return this;
     }
 
+    // Patches (step 12): the voice each slot plays, back to its pool when the slot ends.
+    private final PatchVoice[] slotPatch;
+    private Patches patches;
+
+    /** The patches sounds name ({@code Patch.named}), with their node types; made on first use at the mix's rate. */
+    @AllowAllocation("made once")
+    public Patches patches() {
+        if (patches == null) {
+            patches = new Patches(renderer.format().rate(), renderer.format().block());
+        }
+        return patches;
+    }
+
     /** Takes the renderer's events: ended voices free their slots; instances whose voices all ended end. */
     public void events() {
         renderer.poll(endings);
@@ -188,6 +205,10 @@ public final class AudioSync {
         }
         if (kind != AudioRenderer.ENDED || t < 0) {
             return;
+        }
+        if (slotPatch[slot] != null) {
+            patches.give(slotPatch[slot]);
+            slotPatch[slot] = null;
         }
         slotTrack[slot] = -1;
         slotsUsed--;
@@ -396,6 +417,9 @@ public final class AudioSync {
                         store.parameterRamp(id)));
                     commands.pitch(track.slots[v], pitch(track, v));
                     commands.pause(track.slots[v], store.holding(id));
+                    if (slotPatch[track.slots[v]] != null) {
+                        inputs(track, track.slots[v], schedulePoint, store.parameterRamp(id), false);
+                    }
                 }
             }
         }
@@ -425,7 +449,8 @@ public final class AudioSync {
             track.starts[v] = 0;
             track.rings[v] = null;
             AssetRef<AudioClip> clip = store.voiceClip(id, v);
-            track.state[v] = clip == null ? DONE : WAITING; // inputs, patches and scatters come with later steps
+            boolean patch = store.voiceNode(id, v) instanceof Patch;
+            track.state[v] = clip == null && !patch ? DONE : WAITING; // inputs and scatters come with later steps
             if (clip != null && !acquired(track, clip)) {
                 cache.acquire(clip);
                 track.acquired[track.acquiredCount++] = clip;
@@ -493,6 +518,11 @@ public final class AudioSync {
         for (int v = 0; v < track.voices; v++) {
             anyStarted |= track.starts[v] != 0;
             if (track.state[v] != WAITING || store.voiceOutro(id, v) || track.stopped) {
+                continue;
+            }
+            if (store.voiceNode(id, v) instanceof Patch patch) {
+                waiting |= !startPatch(t, v, patch);
+                anyStarted |= track.state[v] == PLAYING;
                 continue;
             }
             AssetRef<AudioClip> ref = store.voiceClip(id, v);
@@ -580,6 +610,55 @@ public final class AudioSync {
         return streams;
     }
 
+    /** Starts a patch voice: one from its pool; false while no slot is free (it waits); unregistered, it is done. */
+    private boolean startPatch(int t, int v, Patch patch) {
+        Track track = tracks[t];
+        PatchVoice voice = patches == null ? null : patches.take(patch.name());
+        if (voice == null) {
+            track.state[v] = DONE; // no such patch registered: silent, as a clip that failed to load
+            return true;
+        }
+        if (firstFree() < 0 || !commands.patch(voice)) {
+            patches.give(voice);
+            return false;
+        }
+        long at = schedulePoint + Math.round(stores[track.store].voiceDelay(track.id, v) * rate);
+        play(t, v, null, at);
+        if (track.state[v] != PLAYING) {
+            patches.give(voice); // the ring was full; tried again next frame
+            return false;
+        }
+        int slot = track.slots[v];
+        slotPatch[slot] = voice;
+        inputs(track, slot, at, 0, true);
+        return true;
+    }
+
+    /**
+     * Sends the patch in {@code slot} the inputs of its instance that changed since last sent, at {@code frame}, over
+     * {@code seconds} (at least the patch's 5 ms); a trigger whose count changed fires (at the start only recorded).
+     */
+    private void inputs(Track track, int slot, long frame, double seconds, boolean starting) {
+        PatchVoice voice = slotPatch[slot];
+        Sounds store = stores[track.store];
+        for (int i = 0; i < voice.patch().inputs().size(); i++) {
+            int index = track.sound.parameterIndex(voice.patch().inputs().get(i));
+            if (index < 0) {
+                continue;
+            }
+            float value = store.parameter(track.id, index);
+            if (value == voice.sent(i)) {
+                continue;
+            }
+            voice.sent(i, value);
+            boolean trigger = voice.patch().trigger(i);
+            if (!(trigger && starting)) {
+                commands.patchInput(slot, i, value, starting ? 0 : Math.max(PatchVoice.DEFAULT_RAMP, seconds), trigger,
+                    frame);
+            }
+        }
+    }
+
     private void play(int t, int v, AudioClip clip, long at) {
         Track track = tracks[t];
         int slot = firstFree();
@@ -592,7 +671,8 @@ public final class AudioSync {
             | track.sound.virtualization().ordinal() << Voices.VIRTUAL_SHIFT;
         Bus bus = store.isUi() ? Bus.UI : track.sound.bus();
         // the clip's gain to its target loudness (measured at import) rides on the voice's
-        if (!commands.play(slot, clip, at, 0, gain(track, v) * clip.gain(), pitch(track, v), bus, flags, 0, track.id)) {
+        float clipGain = clip == null ? 1 : clip.gain();
+        if (!commands.play(slot, clip, at, 0, gain(track, v) * clipGain, pitch(track, v), bus, flags, 0, track.id)) {
             return; // the ring is full: tried again next frame
         }
         if (store.holding(track.id)) {

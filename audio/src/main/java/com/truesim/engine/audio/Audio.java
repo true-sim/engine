@@ -261,6 +261,11 @@ public final class Audio implements Plugin {
         return music;
     }
 
+    /** The patches sounds name, and their node types: register a plugin's here (they warm as registered). */
+    public com.truesim.engine.audio.dsp.Patches patches() {
+        return sync().patches();
+    }
+
     /** The mixer: the layout, snapshots, player volumes. */
     public Mixer mixer() {
         renderer();

@@ -2,6 +2,7 @@ package com.truesim.engine.audio;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.math.Maths;
+import com.truesim.engine.audio.dsp.PatchVoice;
 import com.truesim.scene.audio.Attenuation;
 import com.truesim.scene.audio.AudioClip;
 import com.truesim.scene.audio.Bus;
@@ -108,6 +109,7 @@ final class Voices {
     private final float dopplerAlpha;
     private final int crossfadeBlocks;
     private final StreamRing[] rings;
+    private final PatchVoice[] patches;
     private final int[] auxIndex;
     private final float[] auxFrom;
     private final float[] auxTo;
@@ -177,6 +179,7 @@ final class Voices {
         audibility = new float[capacity];
         scratch = new float[capacity];
         rings = new StreamRing[capacity];
+        patches = new PatchVoice[capacity];
         auxIndex = new int[capacity];
         auxFrom = new float[capacity];
         auxTo = new float[capacity];
@@ -241,29 +244,42 @@ final class Voices {
      * offset fades in over 20 ms; one from the beginning plays its first sample as it is.
      */
     void play(int slot, AudioClip clip, long start, double offset, float gain, float pitch, Bus bus, int busIdx,
-            int flagBits, float pan, long tag, StreamRing ring) {
+            int flagBits, float pan, long tag, StreamRing ring, PatchVoice patch) {
         states[slot] = WAITING;
         tags[slot] = tag;
         flags[slot] = flagBits;
         clips[slot] = clip;
-        segments[slot] = clip.segment();
+        patches[slot] = patch;
         rings[slot] = ring;
         auxIndex[slot] = -1;
         auxFrom[slot] = 0;
         auxTo[slot] = 0;
         starving[slot] = false;
         dryGains[slot] = 1;
-        pcm16[slot] = clip.encoding() == AudioClip.Encoding.PCM16;
-        clipChannels[slot] = clip.channels();
-        clipFrames[slot] = ring != null ? ring.end() : clip.frames();
-        if (ring != null) {
-            flagBits &= ~LOOP; // the ring stitches the loop: the voice reads straight on
+        if (patch != null) { // a patch: mono at the mix rate, endless; its ring is filled as the voice reads
+            segments[slot] = null;
+            pcm16[slot] = false;
+            clipChannels[slot] = 1;
+            clipFrames[slot] = Long.MAX_VALUE;
+            loopStarts[slot] = 0;
+            loopEnds[slot] = 0;
+            baseRates[slot] = 1;
+            flagBits &= ~LOOP;
             flags[slot] = flagBits;
+        } else {
+            segments[slot] = clip.segment();
+            pcm16[slot] = clip.encoding() == AudioClip.Encoding.PCM16;
+            clipChannels[slot] = clip.channels();
+            clipFrames[slot] = ring != null ? ring.end() : clip.frames();
+            if (ring != null) {
+                flagBits &= ~LOOP; // the ring stitches the loop: the voice reads straight on
+                flags[slot] = flagBits;
+            }
+            loopStarts[slot] = clip.loopStart();
+            loopEnds[slot] = clip.loopEnd();
+            baseRates[slot] = (double) clip.rate() / rate;
         }
-        loopStarts[slot] = clip.loopStart();
-        loopEnds[slot] = clip.loopEnd();
         starts[slot] = start;
-        baseRates[slot] = (double) clip.rate() / rate;
         pitches[slot] = pitch;
         dopplers[slot] = 1;
         dopplerTargets[slot] = 1;
@@ -280,7 +296,7 @@ final class Voices {
         audibility[slot] = 1;
         rates[slot] = baseRates[slot] * pitch;
         rateTargets[slot] = rates[slot];
-        positions[slot] = offset * clip.rate();
+        positions[slot] = patch != null ? 0 : offset * clip.rate();
         gains[slot] = gain;
         gainTargets[slot] = gain;
         gainLeft[slot] = 0;
@@ -417,8 +433,27 @@ final class Voices {
         }
         clips[slot] = null;
         segments[slot] = null;
+        patches[slot] = null;
         buses[slot] = null;
         ended++;
+    }
+
+    /**
+     * Sets input {@code input} of {@code slot}'s patch to {@code value} at mix frame {@code frame} (now is
+     * {@code now}), ramped over {@code rampFrames}; or fires it, a trigger. Mapped to the patch's own frames through the
+     * voice's position and rate.
+     */
+    void patchInput(int slot, int input, float value, int rampFrames, boolean trigger, long frame, long now) {
+        PatchVoice patch = patches[slot];
+        if (patch == null) {
+            return;
+        }
+        long patchFrame = (long) (positions[slot] + Math.max(0, frame - Math.max(now, starts[slot])) * rates[slot]);
+        if (trigger) {
+            patch.trigger(input, patchFrame);
+        } else {
+            patch.set(input, value, patchFrame, rampFrames);
+        }
     }
 
     /** Ends {@code slot} and tells the game, so it may use the slot again. */
@@ -451,6 +486,9 @@ final class Voices {
 
     /** One tap of {@code slot}'s clip: frame {@code i} (wrapped into the loop, 0 past the end), {@code channel}. */
     private float tap(int slot, long i, int channel, boolean loop) {
+        if (patches[slot] != null) {
+            return patches[slot].sample(i);
+        }
         StreamRing ring = rings[slot];
         if (ring != null) {
             long frame = Math.max(0, i);
@@ -667,6 +705,9 @@ final class Voices {
         float sendStep = (auxTo[slot] - send) / frames;
         float dry = dryGains[slot];
         float dryStep = 1 / (0.005f * rate);
+        if (patches[slot] != null) { // what this block reads, with the resampler's taps
+            patches[slot].fill((long) (position + Math.max(rateFrom, rateTargets[slot]) * (frames - from)) + 4);
+        }
         for (int f = from; f < frames; f++) {
             if (ring != null) {
                 // playing: the next frames must be there; starved: 50 ms of them before it fades back in
