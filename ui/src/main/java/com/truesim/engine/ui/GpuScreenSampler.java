@@ -69,6 +69,12 @@ public final class GpuScreenSampler implements ScreenSampler, Technique {
     private long answers;       // answers taken, numbering them for ScreenSample
     private ViewPort view;
 
+    /** A sampler; add it to a view to start it. */
+    @AllowAllocation("made once")
+    public GpuScreenSampler() {
+        // fields only
+    }
+
     @Override
     public Id<? extends Technique> id() {
         return ID;
@@ -95,14 +101,16 @@ public final class GpuScreenSampler implements ScreenSampler, Technique {
         Pipeline pipeline = g.computeProgram("shaders/ui/sample.spv", "sampleMain", SamplePush.BYTES);
         Image scene = g.modify(Keys.SCENE_COLOR);
         Buffer block = g.persistentBuffer("screen sample", BYTES);
-        view = g.view();
+        ViewPort shown = g.view();
         g.pass("screen sample").read(scene, Access.SAMPLED_COMPUTE).write(block, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> record(ctx, pipeline, scene, block));
+            .record(ctx -> record(ctx, pipeline, scene, block, shown));
         g.readback("screen sample readback", block, 0, BYTES, receiver);
-        built = true;
     }
 
-    private void record(PassContext ctx, Pipeline pipeline, Image scene, Buffer block) {
+    /** The frame's copy of the block asked for; the first frame recorded makes requests possible. */
+    private void record(PassContext ctx, Pipeline pipeline, Image scene, Buffer block, ViewPort shown) {
+        view = shown;
+        built = true;
         if (!standing) {
             return;
         }
@@ -142,8 +150,8 @@ public final class GpuScreenSampler implements ScreenSampler, Technique {
     }
 
     /**
-     * Asks for the block around UI pixel {@code px, py} from the next frame on; false before the technique is built
-     * into a view, or when the point is outside the view.
+     * Asks for the block around UI pixel {@code px, py} from the next frame on; false before a frame of the view it
+     * was added to recorded, or when the point is outside the view.
      */
     @Override
     public boolean request(float px, float py, int blockSize) {
