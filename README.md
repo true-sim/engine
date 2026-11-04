@@ -295,6 +295,39 @@ Capture capture = input.capture(one, JUMP);   // the next input becomes a bindin
   white (the main window too; NaN follows `display.paperWhite` again), which the dock layout saves; a window
   following a drag is see-through by SDL's window opacity (`opacity(id, value)`, the theme's `drag-opacity`) where
   the system allows it, opaque elsewhere (Wayland, the offscreen driver).
+- **Scene bridge** (`UiPlugin.scene(graph, index)` → `UiScene`, ui-scene's `ScenePicking`): the UI runs through
+  scene picking; each frame starts with the scene and its `SpatialIndex` updated and the main `SceneView` set from the
+  engine's `Camera` (`UiScene.camera`: its position in doubles, the rotation, field of view and near plane `Camera`
+  now keeps), then the UI's input, so this frame's pointers pick what this frame's camera sees. `PickMeshes` makes a
+  `PickMesh` per mesh asset from its leaf meshlets; `ui.scene.far` is how far screen rays reach.
+- **Camera views** (`GpuCameraView`, a `CameraViewSource`): a second camera as a view of the same graph, rendered at
+  the control's pixel size, tone mapped by the display transform and copied into the top left of a graph `Texture`
+  that `GpuUiRenderer.bind(id, texture)` draws for the control's UI texture (no upload; the UI pass reads the texture
+  after the view's copy, so the UI shows this frame's image and the main view waits for nothing).
+- **World panels** (`WorldPanelRenderer`, per panel): `TEXTURE` renders the panel's UI at the frame's start into an
+  image with a bindless slot a material samples (lit and fogged like the scene), again only when its UI changed;
+  `DIRECT` draws its primitives after the opaque scene through a panel-to-clip matrix made in doubles relative to the
+  camera, depth tested, MTSDF coverage worked out in the panel's pixels. Multiview (VR) direct drawing is not built.
+- **Gizmo occlusion** (`DepthOcclusion`, ui-gizmo's `GizmoOcclusion`): one level of the scene depth's farthest-depth
+  pyramid read back with the camera that drew it (`ui.gizmo.depthLevel`); a gizmo point behind every surface over its
+  block is faded. A frame or more old, never waited for.
+- **GPU picking** (`GpuPicking`, opt-in): the visibility buffer's IDs (`Keys.VISIBILITY_IDS`) read under the
+  pointers by one dispatch and read back, a frame or more late; for skinned, morphed, displaced and alpha-tested
+  surfaces. At 100,489 instances, 1920 x 1080 (RX 9070 XT, 2026-11-04, with other builds running): the pick costs
+  0.007 ms of GPU; the IDs come free with the visibility buffer and would cost a forward view an ID pass (the
+  visibility buffer's: 0.50 ms). The CPU path (3.6 us median per pointer at 100,000 nodes, ui's
+  `ScenePickingBenchmarkTest`) stays the default: no latency, no GPU work.
+- **Developer console** (`UiPlugin.console()` → `UiConsole`): ui-console's `Console` over every engine setting as a
+  variable (`SettingVariables`: values through the constraint overlay; unavailable settings and values a constraint
+  would change are refused with the reason), permissions from `console.developer` and `console.cheats`, the history
+  in the user's settings folder (`FileHistoryStore`), scripts, assets and nodes from folders and names
+  (`FolderScripts`, `FolderAssets`, `NamedNodes`), the UI debugger's commands. Its log comes from SLF4J through
+  `ConsoleLogProvider` (choose it with `-Dslf4j.provider=com.truesim.engine.ui.console.ConsoleLogProvider`; it passes
+  every call on to the app's own binding): records at `ui.console.captureLevel` and above, with `File.java:line` from
+  `ui.console.sourceLevel`. 1,000 INFO records a frame through SLF4J into the inbox: 56 us median.
+- **Property sources** (ui-props): `SettingsSource` generates the settings screen from the registry (labels from
+  `settings.<name>` keys, ranges, groups, order, choices, tiers hidden) over `SettingsScreen` snapshots written back
+  on edit; `MaterialParametersSource` gives the Slang material records' properties (ranges, withers, `DEFAULTS`).
 
 ```java
 GpuUiRenderer renderer = new GpuUiRenderer(graph);
