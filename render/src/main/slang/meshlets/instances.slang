@@ -34,7 +34,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
         return;
     }
     Instance stored = push.instances[id.x];
-    if (!drawnIn(stored, view))
+    if (!drawnIn(stored, id.x, view))
     {
         return; // a hole, on other layers, or casting no shadow in a shadow view
     }

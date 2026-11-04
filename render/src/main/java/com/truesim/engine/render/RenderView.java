@@ -373,9 +373,32 @@ public final class RenderView implements AutoCloseable {
     public RenderView filter(int layers, boolean castersOnly) {
         checkOpen();
         putInt(ViewLayout.LAYERS, layers);
-        putInt(ViewLayout.FLAGS, castersOnly ? 1 : 0);
+        this.castersOnly = castersOnly;
+        putInt(ViewLayout.FLAGS, flags());
         return this;
     }
+
+    /**
+     * Draws only the instances highlighted in the flags at device address {@code flags} (two bits per instance id,
+     * sixteen ids a word, {@code count} ids: a {@link SelectionHighlights}' upload), or every instance (address 0):
+     * the selection outline's own ID draw for forward views, whose cost then follows the highlighted. The address names
+     * a frame slot's copy: set it in each frame it is read. Allocates nothing.
+     */
+    public RenderView highlightedOnly(long flags, int count) {
+        checkOpen();
+        putLong(ViewLayout.HIGHLIGHTS, flags);
+        putInt(ViewLayout.HIGHLIGHT_COUNT, flags == 0 ? 0 : count);
+        highlightedOnly = flags != 0;
+        putInt(ViewLayout.FLAGS, flags());
+        return this;
+    }
+
+    private int flags() {
+        return (castersOnly ? 1 : 0) | (highlightedOnly ? 2 : 0);
+    }
+
+    private boolean castersOnly;
+    private boolean highlightedOnly;
 
     /**
      * How many meshlets the view found visible in the last finished frame, every raster bin and both phases of

@@ -87,6 +87,7 @@ class SelectionOutlineTest {
             int w = 480;
             int h = 270;
             boolean ids = device.primitiveIds();
+            int[] tinted = new int[2];
             for (boolean visibility : ids ? new boolean[] {false, true} : new boolean[] {false}) {
                 String shading = visibility ? "visibility" : "forward";
                 Drawn outline = draw(device, w, h, visibility, SelectionOutline.OUTLINE, 3, 8);
@@ -103,6 +104,13 @@ class SelectionOutlineTest {
                     .isGreaterThan(100);
                 assertThat(differing(outline, off)).as("%s: only around the rocks", shading).isLessThan(w * h / 10);
                 assertThat(differing(tint, off)).as("%s: the tint covers the rocks", shading).isGreaterThan(500);
+                tinted[visibility ? 1 : 0] = differing(tint, off);
+            }
+            if (ids) {
+                // the forward view's IDs hold the highlighted alone, depth tested: the same pixels as the visibility
+                // buffer's, the part of the selected rock behind the front one left out in both
+                assertThat((double) tinted[0]).as("forward against visibility buffer").isCloseTo(tinted[1],
+                    org.assertj.core.data.Offset.offset(tinted[1] * 0.05));
             }
             if (BENCHMARK) {
                 benchmark(device);
@@ -110,16 +118,16 @@ class SelectionOutlineTest {
         }
     }
 
-    /** How many of the benchmark's rocks are highlighted: 0, 1 (selected) or 300 (299 selected, 1 hovered). */
+    /** How many of the benchmark's rocks are highlighted: 0, 1 (selected), 300 or 3,000 (one of them hovered). */
     private static int highlighted = 300;
 
     private static void benchmark(VulkanDevice device) throws InterruptedException {
         System.out.printf(Locale.ROOT, "Selection outline on %s, 30,000 rocks:%n", device.gpu().name());
         for (int[] size : new int[][] {{1920, 1080}, {3840, 2160}}) {
             for (boolean visibility : device.primitiveIds() ? new boolean[] {false, true} : new boolean[] {false}) {
-                for (int run = 0; run < 5; run++) {
-                    var kind = run == 0 ? null : run == 4 ? SelectionOutline.TINT : SelectionOutline.OUTLINE;
-                    highlighted = run == 0 || run == 1 ? 0 : run == 2 ? 1 : 300;
+                for (int run = 0; run < 6; run++) {
+                    var kind = run == 0 ? null : run == 5 ? SelectionOutline.TINT : SelectionOutline.OUTLINE;
+                    highlighted = run <= 1 ? 0 : run == 2 ? 1 : run == 3 ? 300 : 3000;
                     Drawn d = draw(device, size[0], size[1], visibility, kind, 30_000, 160);
                     System.out.printf(Locale.ROOT, "  %d x %d, %s, %s, %d highlighted: mask %.3f ms, outline %.3f ms, "
                         + "frame %.3f ms%n", size[0], size[1], visibility ? "visibility buffer" : "forward",
@@ -174,6 +182,10 @@ class SelectionOutlineTest {
                 }
                 scene.components().set(nodes[0], Selected.TYPE, Selected.YES);
                 scene.components().set(nodes[2], Hovered.TYPE, Hovered.YES);
+                long front = scene.create(); // hides part of the selected rock: only what shows is highlighted
+                scene.setTranslation(front, -5.5, -5, -17);
+                scene.setScale(front, 2, 2, 2);
+                renderables.set(front, SceneBenchmark.ROCK, List.of(SceneBenchmark.GRANITE));
             } else {
                 SplittableRandom random = new SplittableRandom(11);
                 double[] placed = new double[3 * rocks];
@@ -181,11 +193,12 @@ class SelectionOutlineTest {
                     nodes[i] = scene.create();
                     SceneBenchmark.place(scene, nodes[i], random, placed, i, 0);
                     renderables.set(nodes[i], SceneBenchmark.ROCK, List.of(SceneBenchmark.GRANITE));
-                    if (highlighted == 300 && i % 100 == 0 || highlighted == 1 && i == 0) {
+                    if (highlighted == 300 && i % 100 == 0 || highlighted == 3000 && i % 10 == 0
+                        || highlighted == 1 && i == 0) {
                         scene.components().set(nodes[i], Selected.TYPE, Selected.YES);
                     }
                 }
-                if (highlighted == 300) {
+                if (highlighted >= 300) {
                     scene.components().set(nodes[1], Hovered.TYPE, Hovered.YES);
                 }
             }

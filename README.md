@@ -315,18 +315,21 @@ Measured (2026-11-04, RX 9070 XT, Ryzen 9 9950X3D; `ScenePickingBenchmark`, `Sel
 | all pickable, boxes | 3.1 us (25.4) | 1.7 us (13.2) | 20 B on average (the hover store's log growing to its cap) |
 | all pickable, meshes | 3.5 us (59.8) | 1.5 us (39.7) | 20 B on average |
 
-| Outline, 30,000 rocks: GPU frame (passes) | 1920 x 1080 | 3840 x 2160 |
+| Outline, 30,000 rocks: GPU frame (mask + outline passes) | 1920 x 1080 | 3840 x 2160 |
 |---|---|---|
-| visibility buffer: slot off / outline with nothing highlighted | 0.890 / 0.887 ms (no work) | 2.203 / 2.197 ms (no work) |
-| visibility buffer, outline, 1 or 300 highlighted | 0.937 ms (mask 0.009 + outline 0.039) | 2.383 ms (0.027 + 0.144) |
-| visibility buffer, tint, 300 highlighted | 0.904 ms (0.009 + 0.006) | 2.256 ms (0.027 + 0.021) |
-| forward: slot off / outline with nothing highlighted | 1.165 / 1.166 ms (no ID draw) | 2.502 / 2.503 ms |
-| forward, outline, 1 highlighted (its own ID draw of the view) | 1.801 ms | 3.977 ms |
-| forward, outline, 300 highlighted | 1.778 ms | 3.975 ms |
+| forward: slot off / outline, nothing highlighted | 1.166 / 1.165 ms | 2.504 / 2.503 ms |
+| forward, outline, 1 highlighted | 1.227 ms (0.007 + 0.039) | 2.661 ms (0.023 + 0.145) |
+| forward, outline, 300 highlighted | 1.237 ms (0.008 + 0.039) | 2.684 ms (0.025 + 0.145) |
+| forward, outline, 3,000 highlighted | 1.276 ms (0.011 + 0.039) | 2.812 ms (0.033 + 0.144) |
+| forward, tint, 3,000 highlighted | 1.211 ms | 2.692 ms |
+| visibility buffer: slot off / outline, nothing highlighted | 0.889 / 0.890 ms | 2.202 / 2.202 ms |
+| visibility buffer, outline, 1 / 300 / 3,000 highlighted | 0.938 / 0.938 / 0.939 ms | 2.383 / 2.382 / 2.379 ms |
+| visibility buffer, tint, 3,000 highlighted | 0.907 ms | 2.256 ms |
 
-A forward view builds its ID draw only while something is highlighted (the graph rebuilds when highlighting starts or
-ends, in the frame it does); while it does, the draw covers the whole view, so it costs the same for 1 or 300
-highlighted. Drawing only the highlighted instances needs a per-instance filter in the GPU scene's culling: not built.
+A forward view's own ID draw draws the highlighted instances alone: its render view filters instances on the GPU by
+the highlight flags (`RenderView.highlightedOnly`, the culling's `VIEW_HIGHLIGHTED_ONLY`), and the mask keeps only
+the pixels where that draw's depth is the scene's (what the view shows), so its cost follows what is highlighted. It
+is built only while something is, and every view's passes do nothing in frames with nothing highlighted.
 
 ## UI
 

@@ -38,8 +38,9 @@ import java.util.Objects;
  * {@code Selected} and {@code Hovered} components).
  *
  * <p>It reads the view's IDs: the visibility buffer's ({@link Keys#VISIBILITY_IDS}) where the view is shaded so (nothing
- * drawn twice), else an ID draw of its own through a render view of its own while the slot is not off (about the cost
- * of a depth pre-pass, for forward views; set that view's camera as the main one's). A forward view builds that draw
+ * drawn twice), else an ID draw of its own through a render view of its own (forward views; set that view's camera as
+ * the main one's) that draws the highlighted instances alone ({@link RenderView#highlightedOnly}, culled on the GPU by
+ * the highlight flags), its depth tested against the scene's, so it costs what the highlighted cost to draw. A forward view builds that draw
  * only while something is highlighted, and every view skips its passes' work in frames with nothing highlighted: with
  * nothing selected or hovered (or the slot off) it costs nothing. Two compute passes over the render region: a mask of the highlighted pixels (one byte each), then the
  * outline or tint written into {@link Keys#SCENE_COLOR} in place. It runs at {@link Anchor#TRANSPARENT}, after
@@ -171,6 +172,12 @@ public final class SelectionOutline implements Technique {
         return List.of(Keys.SCENE_COLOR);
     }
 
+    /** The scene's depth, for a forward view's own ID draw of the highlighted alone. */
+    @Override
+    public List<Key<?>> reads() {
+        return List.of(Keys.SCENE_DEPTH);
+    }
+
     @Override
     public Order order() {
         return Order.at(Anchor.TRANSPARENT).after(Transparency.ID);
@@ -236,10 +243,16 @@ public final class SelectionOutline implements Technique {
             return; // a forward view with nothing highlighted: no ID draw, no passes
         }
         Image color = g.modify(Keys.SCENE_COLOR);
+        Image idDepth = null;
+        Image sceneDepth = null;
         if (shownIds == null) {
-            shownIds = g.request(new SceneDraw(geometry, ids, null, SurfaceOutput.ids(), depthFormat, width, height,
-                (occlusion != null ? occlusion : g.setting(RenderSettings.OCCLUSION)) && ids.options().occlusion()))
-                .color();
+            // the highlighted instances alone (the view's highlight filter), their depth tested against the scene's
+            SceneDraw.Targets drawn = g.request(new SceneDraw(geometry, ids, null, SurfaceOutput.ids(), depthFormat,
+                width, height, (occlusion != null ? occlusion : g.setting(RenderSettings.OCCLUSION))
+                    && ids.options().occlusion()));
+            shownIds = drawn.color();
+            idDepth = drawn.depth();
+            sceneDepth = g.read(Keys.SCENE_DEPTH);
         }
         int words = (int) Math.abs(buildVersion());
         if (flags == null || flagWords < words) {
@@ -258,13 +271,27 @@ public final class SelectionOutline implements Technique {
         OutlinePush maskPush = new OutlinePush();
         OutlinePush outlinePush = new OutlinePush();
         Image shown = shownIds;
-        g.pass("selection mask").read(shown, Access.STORAGE_READ).write(mask, Access.STORAGE_WRITE).record(ctx -> {
+        Image own = idDepth;
+        Image scene = sceneDepth;
+        GraphBuilder.PassBuilder masking = g.pass("selection mask").read(shown, Access.STORAGE_READ)
+            .write(mask, Access.STORAGE_WRITE);
+        if (own != null) {
+            masking.read(own, Access.SAMPLED_COMPUTE).read(scene, Access.SAMPLED_COMPUTE);
+        }
+        masking.record(ctx -> {
             upload();
+            if (own != null) {
+                ids.highlightedOnly(flags.deviceAddress(), flagWords * 16); // this frame slot's copy, read by its culling
+            }
             if (!highlights.any()) {
                 return; // nothing highlighted this frame: nothing to mask
             }
             int w = ctx.regionWidth(color);
             int h = ctx.regionHeight(color);
+            maskPush.depthTest(own != null ? 1 : 0);
+            if (own != null) {
+                maskPush.idDepth(ctx.sampled(own)).sceneDepth(ctx.sampled(scene));
+            }
             ctx.dispatch(maskProgram, maskPush.flags(flags.deviceAddress()).ids(ctx.storage(shown))
                 .mask(ctx.storage(mask)).size(w | h << 16).instances(flagWords * 16), (w + 7) / 8, (h + 7) / 8,
                 1);

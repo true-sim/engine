@@ -7,7 +7,9 @@
 //   within the width (selected over hovered), fading over its last pixel so the edge is smooth; TINT blends the colour
 //   over the highlighted pixels themselves. The scene's colour is written in place.
 //
-// Only what the view shows is outlined: a highlighted object behind another shows its visible part's outline.
+// Only what the view shows is outlined: a highlighted object behind another shows its visible part's outline. A
+// forward view's IDs hold the highlighted instances alone (drawn by themselves), so their depth is tested against the
+// scene's.
 import bindless;
 
 struct OutlinePush
@@ -20,6 +22,9 @@ struct OutlinePush
     uint instances;    // how many instances the flags hold
     uint width;        // the outline's width in pixels
     uint mode;         // 0: outline, 1: tint
+    uint idDepth;      // depthTest: sampled slot of the IDs' own depth (an ID draw of the highlighted alone)
+    uint sceneDepth;   // depthTest: sampled slot of the scene's depth
+    uint depthTest;    // 1: the IDs hold the highlighted alone: masked only where they are what the scene shows
     float selectedR;   // the selected colour, linear, and its opacity
     float selectedG;
     float selectedB;
@@ -60,6 +65,16 @@ void maskMain(uint3 id : SV_DispatchThreadID)
     }
     uint shown = uintImages[push.ids][id.xy].x & 0x7fffffff;
     uint flags = 0;
+    if (shown != 0 && push.depthTest != 0)
+    {
+        // reverse depth: nearer is larger; the same surface drawn twice lands on the same depth
+        float own = textures[push.idDepth].Load(int3(id.xy, 0)).r;
+        float scene = textures[push.sceneDepth].Load(int3(id.xy, 0)).r;
+        if (own < scene - max(1.0e-6, scene * 1.0e-4))
+        {
+            shown = 0; // hidden behind what the scene shows
+        }
+    }
     if (shown != 0 && shown - 1 < push.instances)
     {
         uint i = shown - 1;
