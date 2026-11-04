@@ -13,7 +13,6 @@ import static org.lwjgl.sdl.SDLMouse.SDL_WarpMouseInWindow;
 import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowFromID;
 
 import com.truesim.engine.app.Engine;
-import com.truesim.engine.app.StartupFailure;
 import com.truesim.engine.platform.Key;
 import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.PickHits;
@@ -54,7 +53,7 @@ class UiGalleryTest {
         app = new UiGallery(0, false);
         try {
             engine = Engine.create(app);
-        } catch (StartupFailure | UnsatisfiedLinkError | IllegalStateException e) {
+        } catch (RuntimeException | UnsatisfiedLinkError e) { // StartupFailure, no display or no presentation (CI)
             assumeThat(e).as("no window or GPU: " + e).isNull();
             throw e;
         }
