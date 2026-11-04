@@ -207,6 +207,24 @@ class ProbeVolumeTest {
         ProbeVolumeLighting.SLOT.choose(graph.settings(), ProbeVolumeLighting.PROBES);
     }
 
+    @Test
+    void theUpdateOnTheAsyncComputeQueueLightsTheSame() {
+        float rho = 0.5f;
+        float glow = 0.25f;
+        int furnace = materials.add(new Material(MR.withBaseColor(new Color(rho, rho, rho, 1))
+            .withEmissive(new Color(glow, glow, glow, 1))).feature(LAMBERT));
+        box(furnace);
+        lights.setCount(0);
+        graph.asyncCompute(true).settings().set(ProbeVolume.ASYNC, true);
+        lit("main", Environment.uniform("black", 0, 0, 0));
+        float[] image = frames(60);
+        double expected = glow / (1 - rho);
+        assertThat(mean(image, 0)).as("the mean radiance").isCloseTo(expected, within(expected * 0.03));
+        ProbeVolumeLighting.SLOT.choose(graph.settings(), ProbeVolumeLighting.CASCADES);
+        image = frames(30);
+        assertThat(mean(image, 0)).as("the cascades' mean radiance").isCloseTo(expected, within(expected * 0.03));
+    }
+
     /**
      * Frames until a light's change shows within 10 % of what the image settles at (design D3): the light inside the
      * box turns from red to green; the walls' light is mostly bounced (the camera faces away from where it shines).

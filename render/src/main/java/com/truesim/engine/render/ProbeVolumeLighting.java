@@ -30,8 +30,8 @@ import org.lwjgl.system.MemoryStack;
 
 /**
  * A view's surfaces lit by global illumination, as the kind chosen for {@link #SLOT} ({@code render.gi}) does it:
- * with {@link #PROBES} (the default), the
- * {@link ProbeVolume}'s diffuse light replaces the environment's spherical harmonics (every shading path reads the
+ * with {@link #PROBES} (the default), the {@link ProbeVolume}'s (with {@link #CASCADES}, the first of
+ * {@link RadianceCascades} made of its scene, lights, environment and anchor, sampled the same way) diffuse light replaces the environment's spherical harmonics (every shading path reads the
  * view's indirect-light table: opaque on both shading techniques, blended and transmissive surfaces) and its sky
  * visibility dims the environment's reflections, where the volume reaches; elsewhere the environment lights as before.
  * It modifies the view's {@link Keys#INDIRECT_LIGHT} (an {@link EnvironmentLighting} of the view provides it). Views
@@ -54,8 +54,9 @@ public final class ProbeVolumeLighting implements Technique {
 
     /** Where global illumination plugs in: {@code render.gi}, a kind's id; the graph rebuilds when it changes. */
     public static final TechniqueSlot<ProbeVolumeLighting, Technique> SLOT = TechniqueSlot.of("render.gi", "probes",
-        true, "global illumination: off, or the ray-traced probe volume",
-        techniques -> techniques.register(ProbeVolumeLighting.SLOT, ProbeVolumeLighting.PROBES));
+        true, "global illumination: off, the ray-traced probe volume or radiance cascades",
+        techniques -> techniques.register(ProbeVolumeLighting.SLOT, ProbeVolumeLighting.PROBES)
+            .register(ProbeVolumeLighting.SLOT, ProbeVolumeLighting.CASCADES));
 
     /**
      * The probe volume's tunables ({@link ProbeVolume}'s settings, each named there): those of the volume's layout and
@@ -116,7 +117,36 @@ public final class ProbeVolumeLighting implements Technique {
     public static final TechniqueKind<Probes, ProbeVolumeLighting, Technique> PROBES = TechniqueKind.of(SLOT, "probes",
         new Probes(3, 16, 8, 1f, 128, 32, 0.5f, 4, 0.25f, 0.25f, 0.2f, 1.5f, true, true, 30, true, 4f, 0.01f, true, 2f,
             2, 3f, 8, false),
-        "the ray-traced probe volume", (lighting, config) -> lighting.new Engine());
+        "the ray-traced probe volume", (lighting, config) -> lighting.new Engine(false));
+
+    /**
+     * Radiance cascades' tunables ({@link RadianceCascades}' settings, each named there): all but {@code visibility}
+     * and {@code classify} rebuild the graph when they change. The update's queue is the probes kind's {@code async}.
+     */
+    public record Cascades(
+        @Tunable(value = "radiance cascades", min = 2, max = 6) int count,
+        @Tunable(value = "probes along each horizontal axis of the first radiance cascade", min = 4, max = 32)
+        int probes,
+        @Tunable(value = "probes along the vertical axis of the first radiance cascade", min = 2, max = 32)
+        int probesUp,
+        @Tunable(value = "the spacing of the first radiance cascade's probes, in meters", min = 0.05, max = 1000)
+        float spacing,
+        @Tunable(value = "directions along each side of the first radiance cascade's octahedral tiles", min = 2,
+            max = 8) int directions,
+        @Tunable(value = "how long the first radiance cascade's intervals are, of its spacing", min = 0.25, max = 64)
+        float interval,
+        @Tunable(value = "radiance cascades merge only from intervals that continue a probe's") boolean visibility,
+        @Tunable(value = "radiance cascade probes inside geometry are not sampled") boolean classify)
+        implements TechniqueConfig {
+    }
+
+    /**
+     * Radiance cascades in world space ({@link RadianceCascades}, made of the probe volume's scene, lights, environment
+     * and anchor; no history: every probe's light found anew each frame; devices with ray tracing, elsewhere none).
+     */
+    public static final TechniqueKind<Cascades, ProbeVolumeLighting, Technique> CASCADES = TechniqueKind.of(SLOT,
+        "cascades", new Cascades(4, 32, 16, 0.5f, 8, 2f, true, true), "radiance cascades in world space",
+        (lighting, config) -> lighting.new Engine(true));
 
     private final SceneView view;
     private final ProbeVolume volume;
@@ -170,8 +200,14 @@ public final class ProbeVolumeLighting implements Technique {
         return kind.create(this, () -> kind.config(view.port().settings()));
     }
 
-    /** {@link #PROBES}' technique: this one's own pass. */
+    /** {@link #PROBES}' and {@link #CASCADES}' technique: this one's own pass, lit by the volume or the cascades. */
     private final class Engine implements Technique {
+
+        private final boolean cascades;
+
+        Engine(boolean cascades) {
+            this.cascades = cascades;
+        }
 
         @Override
         public List<Key<?>> provides() {
@@ -181,18 +217,18 @@ public final class ProbeVolumeLighting implements Technique {
         @Override
         @AllowAllocation("building the graph, when it changes")
         public void build(GraphBuilder g) {
-            buildProbes(g);
+            buildProbes(g, cascades);
         }
     }
 
     /** The probe volume's lighting, where the device traces rays. */
     @AllowAllocation("building the graph, when it changes")
-    private void buildProbes(GraphBuilder g) {
+    private void buildProbes(GraphBuilder g, boolean cascades) {
         if (!g.capabilities().rayTracing()) {
             return;
         }
         Buffer table = g.modify(Keys.INDIRECT_LIGHT);
-        ProbeVolume.Volume probes = g.request(volume);
+        ProbeVolume.Volume probes = cascades ? g.request(RadianceCascades.of(volume)) : g.request(volume);
         g.pass("probe volume lighting").write(table, BufferAccess.TRANSFER_DST)
             .read(probes.data, BufferAccess.STORAGE_READ).record(ctx -> write(ctx, table, probes));
         probes.readBy(g.request(new IndirectInputs(g.view())));

@@ -51,6 +51,17 @@ static const float PI = 3.14159265;
 public static const uint PATH_PROBES = 1u << 16;
 /** A probe ray's distance where it met nothing. */
 public static const float PROBE_MISSED = 10000;
+/**
+ * In the limits, with PATH_PROBES: the probe rays are radiance cascades' intervals (engine-render's RadianceCascades,
+ * probes/cascades.slang): a ray's cascade is in bits 16-23 of its flags, and one marked PATH_BOUNDED ends where its
+ * cascade's interval does (the first cascade's interval long, push.size as a float, four times longer each next);
+ * meeting nothing within it, it records no light and PROBE_MISSED: what lies beyond is the next cascade's to find.
+ */
+public static const uint PATH_INTERVALS = 1u << 17;
+/** A path's cascade: its flags' bits from here (PATH_INTERVALS). */
+public static const uint PATH_CASCADE_SHIFT = 16;
+/** A probe ray ending at its cascade's interval (PATH_INTERVALS); the last cascade's go on to the environment. */
+public static const uint PATH_BOUNDED = 1u << 24;
 
 /** Groups per row of the 2D dispatches over paths: (min(groups, this), rows). */
 public static const uint PATH_ROW = 1024;
@@ -69,7 +80,7 @@ public struct PathPush
     public WorldLightGrid* world;      // the lights by world grid (lights/world.slang); null: every light of the list
     public float3 offset;              // the camera's position less the top level's origin
     public uint accumulation;          // storage slot: the radiance added up (rgb)
-    public uint size;                  // the region: width, height in the high 16 bits
+    public uint size;                  // the region: width, height in the high 16 bits (PATH_INTERVALS: see there)
     public uint bounce;
     public uint binCount;              // shading bins: hits of a later one shade as bin 0
     public uint bin;                   // shading: the bin shaded; resolve: the output's storage slot
@@ -804,6 +815,24 @@ public void shadeHit<M : IMaterial>(uint index, uint features)
     continuePath(path, offsetRay(p, dot(l, side) >= 0 ? side : -side), l, throughput * weight, flags + 1);
 }
 
+/** How far probe ray `path` may still go: to its interval's end (PATH_INTERVALS, PATH_BOUNDED), else unbounded. */
+public float probeRayEnd(PathState path)
+{
+    if ((push.limits & PATH_INTERVALS) == 0 || (path.flags & PATH_BOUNDED) == 0)
+    {
+        return 1.0e30;
+    }
+    uint cascade = (path.flags >> PATH_CASCADE_SHIFT) & 0xff;
+    return asfloat(push.size) * float(1u << (2 * cascade)) - asfloat(path.pad);
+}
+
+/** Records probe ray `path` meeting nothing: the environment, or within a bounded interval no light. */
+public void recordProbeMiss(PathState path)
+{
+    bool bounded = (push.limits & PATH_INTERVALS) != 0 && (path.flags & PATH_BOUNDED) != 0;
+    recordProbeRay(path.pixel, bounded ? float3(0) : environment(path.direction), PROBE_MISSED);
+}
+
 /** Writes a probe ray's light and distance (negative: a back face) into its texel of the ray image. */
 public void recordProbeRay(uint pixel, float3 radiance, float distance)
 {
@@ -879,7 +908,7 @@ public void shadeProbeHit<M : IMaterial>(uint index, uint features)
         }
         else
         {
-            recordProbeRay(path.pixel, environment(path.direction), PROBE_MISSED);
+            recordProbeMiss(path);
         }
         return;
     }
