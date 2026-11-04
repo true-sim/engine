@@ -125,7 +125,7 @@ class DisplayTransformTest {
     private float[] shown(DisplayEncoding encoding, DisplayTransform.Curve curve, Ui ui,
         java.util.function.Consumer<com.truesim.engine.settings.EngineSettings> settings, float... rgb) {
         try (FrameGraph graph = new FrameGraph(device, 2)) {
-            graph.settings().set(DisplayTransform.CURVE, curve);
+            DisplayTransform.curve(graph.settings(), curve);
             settings.accept(graph.settings());
             ExternalImage out = new ExternalImage("shown", SIZE, SIZE, Format.R16G16B16A16_SFLOAT,
                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,

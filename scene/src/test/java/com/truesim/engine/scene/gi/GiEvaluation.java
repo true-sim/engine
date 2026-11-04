@@ -4,10 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assumptions.assumeThat;
 
 import com.truesim.engine.graph.FrameGraph;
+import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.AmbientOcclusion;
 import com.truesim.engine.render.Denoiser;
 import com.truesim.engine.render.ProbeVolume;
 import com.truesim.engine.render.ProbeVolumeLighting;
+import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanInstance;
 import java.io.IOException;
@@ -32,27 +34,29 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 class GiEvaluation {
 
     /** A technique: an ambient occlusion, global illumination, the denoiser of rays. */
-    record Variant(String name, AmbientOcclusion.Mode ao, ProbeVolumeLighting.Mode gi, Denoiser.Mode denoiser) {
+    record Variant(String name, TechniqueKind<?, AmbientOcclusion, Technique> ao,
+        TechniqueKind<?, ProbeVolumeLighting, Technique> gi, Denoiser.Mode denoiser) {
 
         void apply(FrameGraph graph) {
-            graph.settings().set(AmbientOcclusion.MODE, ao).set(ProbeVolumeLighting.MODE, gi)
-                .set(AmbientOcclusion.DENOISER, denoiser);
+            AmbientOcclusion.SLOT.choose(graph.settings(), ao);
+            ProbeVolumeLighting.SLOT.choose(graph.settings(), gi);
+            graph.settings().techniques().set(graph.settings(), AmbientOcclusion.SLOT, "denoiser", denoiser);
         }
     }
 
     static final List<Variant> VARIANTS = List.of(
-        new Variant("raster", AmbientOcclusion.Mode.OFF, ProbeVolumeLighting.Mode.OFF, Denoiser.Mode.SVGF),
-        new Variant("gtao", AmbientOcclusion.Mode.GTAO, ProbeVolumeLighting.Mode.OFF, Denoiser.Mode.SVGF),
-        new Variant("bitmask", AmbientOcclusion.Mode.BITMASK, ProbeVolumeLighting.Mode.OFF, Denoiser.Mode.SVGF),
-        new Variant("rays-svgf", AmbientOcclusion.Mode.RAYS, ProbeVolumeLighting.Mode.OFF, Denoiser.Mode.SVGF),
-        new Variant("rays-reblur", AmbientOcclusion.Mode.RAYS, ProbeVolumeLighting.Mode.OFF, Denoiser.Mode.REBLUR),
-        new Variant("probes", AmbientOcclusion.Mode.OFF, ProbeVolumeLighting.Mode.PROBES, Denoiser.Mode.SVGF),
-        new Variant("probes+gtao", AmbientOcclusion.Mode.GTAO, ProbeVolumeLighting.Mode.PROBES, Denoiser.Mode.SVGF),
-        new Variant("probes+bitmask", AmbientOcclusion.Mode.BITMASK, ProbeVolumeLighting.Mode.PROBES,
+        new Variant("raster", null, null, Denoiser.Mode.SVGF),
+        new Variant("gtao", AmbientOcclusion.GTAO, null, Denoiser.Mode.SVGF),
+        new Variant("bitmask", AmbientOcclusion.BITMASK, null, Denoiser.Mode.SVGF),
+        new Variant("rays-svgf", AmbientOcclusion.RAYS, null, Denoiser.Mode.SVGF),
+        new Variant("rays-reblur", AmbientOcclusion.RAYS, null, Denoiser.Mode.REBLUR),
+        new Variant("probes", null, ProbeVolumeLighting.PROBES, Denoiser.Mode.SVGF),
+        new Variant("probes+gtao", AmbientOcclusion.GTAO, ProbeVolumeLighting.PROBES, Denoiser.Mode.SVGF),
+        new Variant("probes+bitmask", AmbientOcclusion.BITMASK, ProbeVolumeLighting.PROBES,
             Denoiser.Mode.SVGF),
-        new Variant("probes+rays-svgf", AmbientOcclusion.Mode.RAYS, ProbeVolumeLighting.Mode.PROBES,
+        new Variant("probes+rays-svgf", AmbientOcclusion.RAYS, ProbeVolumeLighting.PROBES,
             Denoiser.Mode.SVGF),
-        new Variant("probes+rays-reblur", AmbientOcclusion.Mode.RAYS, ProbeVolumeLighting.Mode.PROBES,
+        new Variant("probes+rays-reblur", AmbientOcclusion.RAYS, ProbeVolumeLighting.PROBES,
             Denoiser.Mode.REBLUR));
 
     /** Runs of each dynamic scene's change whose frames are averaged for its lag. */
@@ -90,7 +94,7 @@ class GiEvaluation {
                             GiError.of(image, reference, width, height)));
                     }
                     occlusion.addAll(occlusion(harness, name, out));
-                    graph.settings().set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.OFF);
+                    AmbientOcclusion.SLOT.choose(graph.settings(), null);
                 });
                 for (String dynamic : GiScenes.DYNAMIC) {
                     if (selected(dynamic)) {
@@ -164,18 +168,18 @@ class GiEvaluation {
         FrameGraph graph = harness.graph();
         int width = harness.width();
         int height = harness.height();
-        graph.settings().set(ProbeVolumeLighting.MODE, ProbeVolumeLighting.Mode.OFF)
+        ProbeVolumeLighting.SLOT.choose(graph.settings(), null)
             .set(AmbientOcclusion.DEBUG, AmbientOcclusion.Show.OCCLUSION)
-            .set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.RAYS).set(AmbientOcclusion.RAYS, 512)
-            .set(Denoiser.PASSES, 0).set(Denoiser.MAX_FRAMES, 1);
+            .set(AmbientOcclusion.RAYS.setting("rays"), 512).set(Denoiser.PASSES, 0).set(Denoiser.MAX_FRAMES, 1);
+        AmbientOcclusion.SLOT.choose(graph.settings(), AmbientOcclusion.RAYS);
         float[] exact = harness.render(4);
-        graph.settings().set(AmbientOcclusion.RAYS, 1).set(Denoiser.PASSES, Denoiser.PASSES.defaultValue())
+        graph.settings().set(AmbientOcclusion.RAYS.setting("rays"), 1).set(Denoiser.PASSES, Denoiser.PASSES.defaultValue())
             .set(Denoiser.MAX_FRAMES, Denoiser.MAX_FRAMES.defaultValue());
         png(exact, width, height, 1, out.resolve(name + "-ao-exact.png"));
         List<String> rows = new ArrayList<>();
         for (Variant v : VARIANTS.subList(1, 5)) {
             v.apply(graph);
-            graph.settings().set(ProbeVolumeLighting.MODE, ProbeVolumeLighting.Mode.OFF);
+            ProbeVolumeLighting.SLOT.choose(graph.settings(), null);
             float[] ao = harness.render(SETTLE);
             png(ao, width, height, 1, out.resolve(name + "-ao-" + v.name() + ".png"));
             double[] differences = new double[width * height];
@@ -203,8 +207,8 @@ class GiEvaluation {
         List<String> rows = new ArrayList<>();
         String[] responses = {"told (invalidation)", "found (adaptive)", "history cap alone"};
         for (int r = 0; r < responses.length; r++) {
-            graph.settings().set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.OFF)
-                .set(ProbeVolumeLighting.MODE, ProbeVolumeLighting.Mode.PROBES)
+            AmbientOcclusion.SLOT.choose(graph.settings(), null);
+            ProbeVolumeLighting.SLOT.choose(graph.settings(), ProbeVolumeLighting.PROBES)
                 .set(ProbeVolume.INVALIDATE, r == 0).set(ProbeVolume.ADAPTIVE, r <= 1);
             // Each frame after the change as the mean of TRIALS runs (the rays turn differently in each): the light's
             // response, not one run's noise

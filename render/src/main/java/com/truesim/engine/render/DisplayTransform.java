@@ -13,6 +13,9 @@ import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.render.layout.EncodePush;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
+import com.truesim.engine.settings.TechniqueConfig;
+import com.truesim.engine.settings.TechniqueKind;
+import com.truesim.engine.settings.TechniqueSlot;
 import com.truesim.engine.vulkan.DisplayEncoding;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.HdrMetadata;
@@ -28,7 +31,8 @@ import java.util.Objects;
  * changing them takes effect at once, without a rebuild.
  *
  * <ul>
- *   <li>SDR: the {@link #CURVE tone curve} maps scene color into 0 to 1, shown at the display's white.</li>
+ *   <li>SDR: the {@link #SLOT tone curve} ({@code display.toneCurve}: {@code aces}, {@code reinhard} or
+ *       {@code off}) maps scene color into 0 to 1, shown at the display's white.</li>
  *   <li>HDR: scene color 1.0 shows at {@link #PAPER_WHITE paper white}; the curve rolls brighter colors off towards
  *       the display's {@link #PEAK peak brightness}.</li>
  * </ul>
@@ -56,7 +60,7 @@ public final class DisplayTransform implements OutputTransform {
     /** The UI slot when the view has no UI (encode.slang's NO_UI). */
     private static final int NO_UI = -1;
 
-    /** How scene color brighter than white is brought into what the display shows. */
+    /** How scene color brighter than white is brought into what the display shows: encode.slang's curves. */
     public enum Curve {
         /** Clipped at white (SDR) or at the peak (HDR). */
         NONE,
@@ -66,9 +70,27 @@ public final class DisplayTransform implements OutputTransform {
         ACES
     }
 
-    /** The tone curve. */
-    public static final Setting<Curve> CURVE = Setting.choice("display.toneCurve", Curve.ACES,
-        "how colors brighter than white are brought into what the display shows: NONE, REINHARD, ACES");
+    /**
+     * The tone curve, a kind's id ({@code off}: {@link Curve#NONE}); read as frames record. The curves are the
+     * shader's: a game's kind of this slot makes one of them.
+     */
+    public static final TechniqueSlot<Void, Curve> SLOT = TechniqueSlot.of("display.toneCurve", "aces", true,
+        "how colors brighter than white are brought into what the display shows: off, reinhard, aces",
+        techniques -> techniques.register(DisplayTransform.SLOT, DisplayTransform.REINHARD)
+            .register(DisplayTransform.SLOT, DisplayTransform.ACES));
+
+    /** A tone curve's tunables: none. */
+    public record Shape() implements TechniqueConfig {
+    }
+
+    /** {@code c / (1 + c)}: soft, never reaching white. */
+    public static final TechniqueKind<Shape, Void, Curve> REINHARD = TechniqueKind.of(SLOT, "reinhard", new Shape(),
+        "c / (1 + c): soft, never reaching white", (context, config) -> Curve.REINHARD);
+    /** A fit of the ACES film curve: contrast in the middle, a soft shoulder. The default. */
+    public static final TechniqueKind<Shape, Void, Curve> ACES = TechniqueKind.of(SLOT, "aces", new Shape(),
+        "a fit of the ACES film curve: contrast in the middle, a soft shoulder", (context, config) -> Curve.ACES);
+    /** The tone curve's setting: {@link #SLOT}'s. */
+    public static final Setting<String> CURVE = SLOT.setting();
     /** What scene color is multiplied by before the tone curve. */
     public static final Setting<Float> EXPOSURE = Setting.decimal("display.exposure", 1, 0.01f, 64,
         "what scene color is multiplied by before the tone curve");
@@ -83,6 +105,21 @@ public final class DisplayTransform implements OutputTransform {
         "how bright the UI's white shows on an HDR display, relative to paper white");
     /** Every display setting. */
     public static final List<Setting<?>> ALL = List.of(CURVE, EXPOSURE, PAPER_WHITE, PEAK, UI_BRIGHTNESS);
+
+    /** The tone curve {@code settings} choose. Allocates nothing. */
+    public static Curve curve(EngineSettings settings) {
+        TechniqueKind<?, Void, Curve> kind = SLOT.chosen(settings);
+        return kind == null ? Curve.NONE : kind.create(null, null);
+    }
+
+    /** Chooses {@code curve} as the player's tone curve in {@code settings}. */
+    public static EngineSettings curve(EngineSettings settings, Curve curve) {
+        return SLOT.choose(settings, switch (curve) {
+            case NONE -> null;
+            case REINHARD -> REINHARD;
+            case ACES -> ACES;
+        });
+    }
 
     @Override
     public Technique transform(Key<Image> source, Key<Image> target, DisplayEncoding encoding) {
@@ -153,7 +190,7 @@ public final class DisplayTransform implements OutputTransform {
         private static void encode(PassContext ctx, Pipeline pipeline, EncodePush push, EngineSettings settings,
             Image scene, Image ui, Image encoded) {
             push.source(ctx.sampled(scene)).target(ctx.storage(encoded)).sourceWidth(ctx.regionWidth(scene))
-                .sourceHeight(ctx.regionHeight(scene)).curve(settings.get(CURVE).ordinal())
+                .sourceHeight(ctx.regionHeight(scene)).curve(curve(settings).ordinal())
                 .exposure(settings.get(EXPOSURE)).paperWhite(settings.get(PAPER_WHITE)).peak(settings.get(PEAK))
                 .ui(ui == null ? NO_UI : ctx.sampled(ui)).uiBrightness(settings.get(UI_BRIGHTNESS));
             ctx.dispatch(pipeline, push, (encoded.width() + 7) / 8, (encoded.height() + 7) / 8, 1);

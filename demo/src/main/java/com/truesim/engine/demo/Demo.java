@@ -399,7 +399,7 @@ public final class Demo implements Application, PlatformListener {
             fps, gpu, visibility ? "visibility buffer" : "forward", main.regionWidth(), main.regionHeight(),
             main.outputWidth(), main.outputHeight(), main.renderScale(),
             main.dynamic() ? (automatic != null ? " dynamic, GPU-timed" : " dynamic") : "",
-            mainTarget.encoding(), mainTarget.settings().presentMode(), settings.get(DisplayTransform.CURVE),
+            mainTarget.encoding(), mainTarget.settings().presentMode(), DisplayTransform.curve(settings),
             headset == null ? "" : "  |  headset frames " + headset.frames());
     }
 
@@ -435,7 +435,10 @@ public final class Demo implements Application, PlatformListener {
             say("HDR", toggle(PresentSettings.HDR));
         }
         if (player.pressed(DemoActions.CURVE)) {
-            say("tone curve", next(DisplayTransform.CURVE, DisplayTransform.Curve.values()));
+            DisplayTransform.Curve[] curves = DisplayTransform.Curve.values();
+            DisplayTransform.Curve curve = curves[(DisplayTransform.curve(settings).ordinal() + 1) % curves.length];
+            DisplayTransform.curve(settings, curve);
+            say("tone curve", curve);
         }
         if (player.pressed(DemoActions.DARKER)) {
             say("exposure", scaleBy(DisplayTransform.EXPOSURE, 1 / 1.25f));

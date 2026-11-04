@@ -44,8 +44,8 @@ class GiBenchmark {
 
     private static Setup volume(String name, int rays, int cascades) {
         return new Setup(name, g -> {
-            g.settings().set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.OFF)
-                .set(ProbeVolumeLighting.MODE, ProbeVolumeLighting.Mode.PROBES).set(ProbeVolume.RAYS, rays)
+            AmbientOcclusion.SLOT.choose(g.settings(), null);
+            ProbeVolumeLighting.SLOT.choose(g.settings(), ProbeVolumeLighting.PROBES).set(ProbeVolume.RAYS, rays)
                 .set(ProbeVolume.CASCADES, cascades);
         });
     }
@@ -80,8 +80,9 @@ class GiBenchmark {
                     for (int round = -WARMUP; round < ROUNDS; round++) {
                         for (int c = 0; c < setups.size(); c++) {
                             sponza.graph.settings().set(ProbeVolume.RAYS, ProbeVolume.RAYS.defaultValue())
-                                .set(ProbeVolume.CASCADES, ProbeVolume.CASCADES.defaultValue())
-                                .set(AmbientOcclusion.DENOISER, Denoiser.Mode.SVGF);
+                                .set(ProbeVolume.CASCADES, ProbeVolume.CASCADES.defaultValue());
+                            sponza.graph.settings().techniques().set(sponza.graph.settings(), AmbientOcclusion.SLOT,
+                                "denoiser", Denoiser.Mode.SVGF);
                             setups.get(c).apply().accept(sponza.graph);
                             Sample sample = measure(sponza);
                             if (round >= 0) {

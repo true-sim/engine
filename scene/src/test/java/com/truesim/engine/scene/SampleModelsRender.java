@@ -181,8 +181,8 @@ class SampleModelsRender {
             closing.add(sync);
             FrameGraph graph = new FrameGraph(device, slots);
             closing.add(graph);
-            graph.settings().set(Transparency.MODE, Transparency.Mode.valueOf(System.getProperty(
-                "truesim.gltf.transparency", Transparency.Mode.SORTED.name())));
+            graph.settings().set(Transparency.SLOT.setting(), System.getProperty("truesim.gltf.transparency",
+                Transparency.SORTED.id()));
             MeshletRenderer renderer = new MeshletRenderer(device, gpu, VK_FORMAT_R16G16B16A16_SFLOAT,
                 VK_FORMAT_D32_SFLOAT, slots);
             closing.add(renderer);

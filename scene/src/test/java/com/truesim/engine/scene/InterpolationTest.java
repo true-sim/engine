@@ -441,7 +441,7 @@ class InterpolationTest {
             assertThat(world.drawnX()).isCloseTo(1.5, within(1e-3));
             // The player picks the CPU: the sync switches at its next update, drawn where the step left it, the record
             // gone; blended again on the CPU from the next step
-            settings.set(RenderSettings.INTERPOLATION, Interpolation.CPU);
+            RenderSettings.interpolation(settings, Interpolation.CPU);
             world.frame(engine, 300);
             world.frame(engine, 350);
             assertThat(world.sync.interpolation()).isEqualTo(Interpolation.CPU);
@@ -451,12 +451,12 @@ class InterpolationTest {
             world.frame(engine, 450);
             assertThat(world.drawnX()).isCloseTo(3.5, within(1e-3));
             // Off: drawn as each step leaves it
-            settings.set(RenderSettings.INTERPOLATION, Interpolation.OFF);
+            RenderSettings.interpolation(settings, Interpolation.OFF);
             world.frame(engine, 500);
             world.frame(engine, 550);
             assertThat(world.drawnX()).isCloseTo(5, within(1e-3));
             // Back to the GPU: from the step after the switch
-            settings.set(RenderSettings.INTERPOLATION, Interpolation.GPU);
+            RenderSettings.interpolation(settings, Interpolation.GPU);
             world.frame(engine, 600);
             world.frame(engine, 700);
             world.frame(engine, 750);
@@ -464,7 +464,7 @@ class InterpolationTest {
             assertThat(world.drawnX()).isCloseTo(6.5, within(1e-3));
             // Set by hand, the setting no longer applies to that sync
             world.sync.interpolation(Interpolation.OFF);
-            settings.set(RenderSettings.INTERPOLATION, Interpolation.CPU);
+            RenderSettings.interpolation(settings, Interpolation.CPU);
             world.frame(engine, 800);
             assertThat(world.sync.interpolation()).isEqualTo(Interpolation.OFF);
         } finally {

@@ -201,10 +201,10 @@ class ProbeVolumeTest {
         assertThat(mean(image, 0)).as("the mean radiance").isCloseTo(expected, within(expected * 0.03));
         assertThat(worst).as("each pixel").isLessThan(0.06);
         // Without the volume the walls show their glow and the black environment's nothing
-        graph.settings().set(ProbeVolumeLighting.MODE, ProbeVolumeLighting.Mode.OFF);
+        ProbeVolumeLighting.SLOT.choose(graph.settings(), null);
         image = frames(3);
         assertThat(mean(image, 0)).as("without global illumination").isCloseTo(glow, within(glow * 0.01));
-        graph.settings().set(ProbeVolumeLighting.MODE, ProbeVolumeLighting.Mode.PROBES);
+        ProbeVolumeLighting.SLOT.choose(graph.settings(), ProbeVolumeLighting.PROBES);
     }
 
     /**

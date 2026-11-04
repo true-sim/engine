@@ -1,7 +1,11 @@
 package com.truesim.engine.render;
 
 import com.truesim.engine.render.shadows.ShadowSettings;
+import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
+import com.truesim.engine.settings.TechniqueConfig;
+import com.truesim.engine.settings.TechniqueKind;
+import com.truesim.engine.settings.TechniqueSlot;
 import com.truesim.engine.vulkan.RecordBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,10 +21,33 @@ public final class RenderSettings {
         "two-phase occlusion culling, where a view was made with it");
 
     /**
-     * How instances moved in fixed steps are drawn between steps (D91): blended on the GPU, on the CPU, or not at all.
+     * How instances moved in fixed steps are drawn between steps (D91), a kind's id: blended on the GPU ({@code gpu},
+     * the default, or {@code gpu_precise}), on the CPU ({@code cpu}), or not at all ({@code off}). The ways are the
+     * sync's: a game's kind of this slot makes one of them ({@link #interpolation(EngineSettings)}).
      */
-    public static final Setting<Interpolation> INTERPOLATION = Setting.choice("render.interpolation", Interpolation.GPU,
-        "how instances and skinned joints moved in fixed steps are drawn between steps");
+    public static final TechniqueSlot<Void, Interpolation> INTERPOLATION_SLOT = TechniqueSlot.of("render.interpolation",
+        "gpu", true, "how instances and skinned joints moved in fixed steps are drawn between steps",
+        techniques -> techniques.register(RenderSettings.INTERPOLATION_SLOT, RenderSettings.ON_GPU)
+            .register(RenderSettings.INTERPOLATION_SLOT, RenderSettings.ON_GPU_PRECISE)
+            .register(RenderSettings.INTERPOLATION_SLOT, RenderSettings.ON_CPU));
+
+    /** An interpolation's tunables: none. */
+    public record Blend() implements TechniqueConfig {
+    }
+
+    /** {@link Interpolation#GPU}: poses packed, blended on the GPU. The default. */
+    public static final TechniqueKind<Blend, Void, Interpolation> ON_GPU = TechniqueKind.of(INTERPOLATION_SLOT, "gpu",
+        new Blend(), "blended on the GPU, poses packed", (context, config) -> Interpolation.GPU);
+    /** {@link Interpolation#GPU_PRECISE}: blended on the GPU, positions in two parts. */
+    public static final TechniqueKind<Blend, Void, Interpolation> ON_GPU_PRECISE = TechniqueKind.of(INTERPOLATION_SLOT,
+        "gpu_precise", new Blend(), "blended on the GPU, positions in two parts",
+        (context, config) -> Interpolation.GPU_PRECISE);
+    /** {@link Interpolation#CPU}: blended on the CPU into the instance table. */
+    public static final TechniqueKind<Blend, Void, Interpolation> ON_CPU = TechniqueKind.of(INTERPOLATION_SLOT, "cpu",
+        new Blend(), "blended on the CPU", (context, config) -> Interpolation.CPU);
+
+    /** The interpolation's setting: {@link #INTERPOLATION_SLOT}'s. */
+    public static final Setting<String> INTERPOLATION = INTERPOLATION_SLOT.setting();
 
     /**
      * Where the instances' changes are written before the GPU scatters them: into plain memory copied when the frame
@@ -54,6 +81,22 @@ public final class RenderSettings {
     private RenderSettings() {
     }
 
+    /** The interpolation {@code settings} choose ({@code off}: {@link Interpolation#OFF}). Allocates nothing. */
+    public static Interpolation interpolation(EngineSettings settings) {
+        TechniqueKind<?, Void, Interpolation> kind = INTERPOLATION_SLOT.chosen(settings);
+        return kind == null ? Interpolation.OFF : kind.create(null, null);
+    }
+
+    /** Chooses {@code interpolation} as the player's in {@code settings}. */
+    public static EngineSettings interpolation(EngineSettings settings, Interpolation interpolation) {
+        return INTERPOLATION_SLOT.choose(settings, switch (interpolation) {
+            case GPU -> ON_GPU;
+            case GPU_PRECISE -> ON_GPU_PRECISE;
+            case CPU -> ON_CPU;
+            case OFF -> null;
+        });
+    }
+
     private static List<Setting<?>> all() {
         List<Setting<?>> all = new ArrayList<>();
         all.add(OCCLUSION);
@@ -61,12 +104,12 @@ public final class RenderSettings {
         all.add(CHANGE_LIST);
         all.add(CHANGE_LIST_CHUNK);
         all.add(STREAM_BUDGET);
-        all.add(Transparency.MODE);
+        all.add(Transparency.SLOT.setting());
         all.add(Transparency.SORTED_RUNS);
         all.addAll(ScreenSpaceReflections.ALL);
         all.addAll(AmbientOcclusion.ALL);
         all.addAll(Denoiser.ALL);
-        all.add(ProbeVolumeLighting.MODE);
+        all.add(ProbeVolumeLighting.SLOT.setting());
         all.addAll(ProbeVolume.ALL);
         all.addAll(ClusteredLights.ALL);
         all.addAll(WorldLights.ALL);

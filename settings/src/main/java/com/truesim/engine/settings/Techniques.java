@@ -78,7 +78,8 @@ public final class Techniques {
     public <X, T> Techniques register(TechniqueSlot<X, T> slot, TechniqueKind<?, X, T> kind) {
         Objects.requireNonNull(kind, "kind");
         if (kind.slot() != slot) {
-            throw new IllegalArgumentException(kind + " is a kind of " + kind.slot().name() + ", not of " + slot.name());
+            throw new IllegalArgumentException(kind + " is a kind of " + kind.slot().name() + ", not of "
+                + slot.name());
         }
         Map<String, TechniqueKind<?, ?, ?>> kinds = kinds(slot);
         String id = kind.id().toLowerCase(Locale.ROOT);
@@ -147,6 +148,26 @@ public final class Techniques {
     }
 
     /**
+     * Sets the player's value of the tunable {@code field} to {@code value} in every kind of {@code slot} having one by
+     * that name ({@code radius}, whichever kind is chosen). Returns {@code settings}.
+     */
+    @SuppressWarnings("unchecked")
+    public <V> EngineSettings set(EngineSettings settings, TechniqueSlot<?, ?> slot, String field, V value) {
+        boolean found = false;
+        for (TechniqueKind<?, ?, ?> kind : kinds(slot).values()) {
+            Setting<?> setting = kind.find(kind.path(field));
+            if (setting != null) {
+                settings.set((Setting<V>) setting, value);
+                found = true;
+            }
+        }
+        if (!found) {
+            throw new IllegalArgumentException("No kind of " + slot.name() + " has a tunable '" + field + "'");
+        }
+        return settings;
+    }
+
+    /**
      * The kind chosen for {@code slot} in {@code settings}, or null when off: its setting's id, or the slot's default
      * where no kind has that id (reported). Allocates nothing until the choice or the kinds change.
      */
@@ -194,7 +215,8 @@ public final class Techniques {
         return kind;
     }
 
-    private static TechniqueKind<?, ?, ?> fallback(TechniqueSlot<?, ?> slot, Map<String, TechniqueKind<?, ?, ?>> kinds) {
+    private static TechniqueKind<?, ?, ?> fallback(TechniqueSlot<?, ?> slot,
+        Map<String, TechniqueKind<?, ?, ?>> kinds) {
         String id = slot.defaultKind().toLowerCase(Locale.ROOT);
         if (id.equals(TechniqueSlot.OFF)) {
             return null;

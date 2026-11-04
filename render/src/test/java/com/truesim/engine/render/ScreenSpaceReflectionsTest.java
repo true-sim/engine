@@ -24,6 +24,7 @@ import com.truesim.engine.graph.ResolutionSettings;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.render.materials.UnlitParameters;
+import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
@@ -296,8 +297,8 @@ class ScreenSpaceReflectionsTest {
         return shadings;
     }
 
-    private static final ScreenSpaceReflections.Mode[] TRACED = {ScreenSpaceReflections.Mode.LINEAR,
-        ScreenSpaceReflections.Mode.HIZ};
+    private static final List<TechniqueKind<?, ScreenSpaceReflections, Technique>> TRACED =
+        List.of(ScreenSpaceReflections.LINEAR, ScreenSpaceReflections.HIZ);
 
     @Test
     void aMirrorFloorReflectsARedWallWhereItsMirrorImageShows() {
@@ -321,13 +322,13 @@ class ScreenSpaceReflectionsTest {
                 } else {
                     main.port().replace(shading.make().apply(main));
                 }
-                graph.settings().set(ScreenSpaceReflections.MODE, ScreenSpaceReflections.Mode.OFF);
+                ScreenSpaceReflections.SLOT.choose(graph.settings(), null);
                 int[] off = frames();
                 assertThat(red(at(off, image[0], image[1]))).as("%s, off: the sky's reflection", shading.name())
                     .isLessThan(30);
                 assertThat(blue(at(off, image[0], image[1]))).isGreaterThan(60);
-                for (ScreenSpaceReflections.Mode mode : TRACED) {
-                    graph.settings().set(ScreenSpaceReflections.MODE, mode);
+                for (TechniqueKind<?, ScreenSpaceReflections, Technique> mode : TRACED) {
+                    ScreenSpaceReflections.SLOT.choose(graph.settings(), mode);
                     int[] on = frames();
                     String what = shading.name() + ", " + mode;
                     int p = at(on, image[0], image[1]);
@@ -361,10 +362,10 @@ class ScreenSpaceReflectionsTest {
                 Environment.uniform("grey", grey, grey, grey));
             for (float roughness : new float[] {0, 0.3f}) {
                 materials.set(mirror, metal(roughness));
-                graph.settings().set(ScreenSpaceReflections.MODE, ScreenSpaceReflections.Mode.OFF);
+                ScreenSpaceReflections.SLOT.choose(graph.settings(), null);
                 int[] off = frames();
-                for (ScreenSpaceReflections.Mode mode : TRACED) {
-                    graph.settings().set(ScreenSpaceReflections.MODE, mode);
+                for (TechniqueKind<?, ScreenSpaceReflections, Technique> mode : TRACED) {
+                    ScreenSpaceReflections.SLOT.choose(graph.settings(), mode);
                     int[] on = frames();
                     int worst = 0;
                     for (int row = SIZE / 2 + 4; row < SIZE; row++) { // the floor
@@ -382,7 +383,7 @@ class ScreenSpaceReflectionsTest {
             // Not trivially: a brighter wall shows in the floor, so the floor did reflect it
             materials.set(wallMaterial, unlit(0.9f, 0.9f, 0.9f));
             materials.set(mirror, metal(0));
-            graph.settings().set(ScreenSpaceReflections.MODE, ScreenSpaceReflections.Mode.HIZ);
+            ScreenSpaceReflections.SLOT.choose(graph.settings(), ScreenSpaceReflections.HIZ);
             int[] brighter = frames();
             int[] floorPixel = pixelOf(0, -2, 8);
             assertThat(green(at(brighter, floorPixel[0], floorPixel[1]))).as("the brighter wall reflected")
@@ -403,15 +404,15 @@ class ScreenSpaceReflectionsTest {
             // Looking down: the near floor's rays rise past the image's top, the far floor's meet the wall in it
             Camera camera = new Camera().set(0, -0.7, -1, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.1);
             main(camera, v -> MeshletBenchmark.forward(v).clearColor(0, 0, 0), Environment.uniform("blue", 0, 0, 0.4f));
-            graph.settings().set(ScreenSpaceReflections.MODE, ScreenSpaceReflections.Mode.OFF);
+            ScreenSpaceReflections.SLOT.choose(graph.settings(), null);
             int[] off = frames();
-            for (ScreenSpaceReflections.Mode mode : TRACED) {
-                graph.settings().set(ScreenSpaceReflections.MODE, mode);
-                graph.settings().set(ScreenSpaceReflections.EDGE_FADE, 0.001f);
+            for (TechniqueKind<?, ScreenSpaceReflections, Technique> mode : TRACED) {
+                ScreenSpaceReflections.SLOT.choose(graph.settings(), mode);
+                graph.settings().techniques().set(graph.settings(), ScreenSpaceReflections.SLOT, "edgeFade", 0.001f);
                 int[] unfaded = frames();
                 save("seam-" + mode + "-hard", unfaded, SIZE);
                 int hard = largestStep(unfaded);
-                graph.settings().set(ScreenSpaceReflections.EDGE_FADE, 0.15f);
+                graph.settings().techniques().set(graph.settings(), ScreenSpaceReflections.SLOT, "edgeFade", 0.15f);
                 int[] on = frames();
                 save("seam-" + mode + "-soft", on, SIZE);
                 int soft = largestStep(on);
@@ -424,7 +425,8 @@ class ScreenSpaceReflectionsTest {
                 assertThat(green(at(on, SIZE / 2, 30))).as("%s: the far floor reflects the wall", mode)
                     .isGreaterThan(green(at(off, SIZE / 2, 30)) + 100);
             }
-            graph.settings().reset(ScreenSpaceReflections.EDGE_FADE);
+            graph.settings().reset(ScreenSpaceReflections.LINEAR.setting("edgeFade")).reset(
+                ScreenSpaceReflections.HIZ.setting("edgeFade"));
             scene.setMaterials(null);
         }
     }
@@ -449,8 +451,8 @@ class ScreenSpaceReflectionsTest {
             scene.removeFrom(2);
             main(ahead(), v -> MeshletBenchmark.forward(v).clearColor(0, 0, 0), Environment.uniform("dark", 0, 0, 0.1f));
             int[] image = pixelOf(0, -2.5, 6);
-            for (ScreenSpaceReflections.Mode mode : TRACED) {
-                graph.settings().set(ScreenSpaceReflections.MODE, mode);
+            for (TechniqueKind<?, ScreenSpaceReflections, Technique> mode : TRACED) {
+                ScreenSpaceReflections.SLOT.choose(graph.settings(), mode);
                 materials.set(floorMaterial, metal(0));
                 int[] mirrored = frames();
                 save("rough-" + mode + "-0", mirrored, SIZE);
@@ -492,8 +494,8 @@ class ScreenSpaceReflectionsTest {
                 Environment.uniform("blue", 0, 0, 0.4f));
             graph.settings().set(ResolutionSettings.DYNAMIC, true).set(ResolutionSettings.HEADROOM, 1.5f);
             int[] image = pixelOf(0, -2, 6);
-            for (ScreenSpaceReflections.Mode mode : TRACED) {
-                graph.settings().set(ScreenSpaceReflections.MODE, mode);
+            for (TechniqueKind<?, ScreenSpaceReflections, Technique> mode : TRACED) {
+                ScreenSpaceReflections.SLOT.choose(graph.settings(), mode);
                 for (float scale : new float[] {1, 0.5f}) {
                     main.port().renderScale(scale);
                     int[] on = frames();
@@ -502,12 +504,13 @@ class ScreenSpaceReflectionsTest {
                         .isGreaterThan(170);
                     assertThat(blue(p)).isLessThan(30);
                 }
-                graph.settings().set(ScreenSpaceReflections.RESOLUTION_SCALE, 0.5f);
+                graph.settings().techniques().set(graph.settings(), ScreenSpaceReflections.SLOT, "resolutionScale", 0.5f);
                 int[] half = frames();
                 save("half-" + mode, half, SIZE);
                 int p = at(half, image[0], image[1]);
                 assertThat(red(p)).as("%s traced at half resolution", mode).isGreaterThan(170);
-                graph.settings().reset(ScreenSpaceReflections.RESOLUTION_SCALE);
+                graph.settings().reset(ScreenSpaceReflections.LINEAR.setting("resolutionScale")).reset(
+                ScreenSpaceReflections.HIZ.setting("resolutionScale"));
             }
             main.port().renderScale(1);
             graph.settings().set(ResolutionSettings.DYNAMIC, false);
@@ -545,9 +548,9 @@ class ScreenSpaceReflectionsTest {
                 .set(1, MeshletRenderer.MODE_LIT);
             main.port().add(MeshletBenchmark.forward(main).clearColor(0, 0, 0)).add(new ScreenSpaceReflections(main))
                 .output(Keys.SCENE_COLOR, output);
-            assertThat(graph.settings().get(ScreenSpaceReflections.MODE)).as("on by default")
-                .isEqualTo(ScreenSpaceReflections.Mode.HIZ);
-            graph.settings().set(ScreenSpaceReflections.MODE, ScreenSpaceReflections.Mode.OFF);
+            assertThat(ScreenSpaceReflections.SLOT.chosen(graph.settings())).as("on by default")
+                .isSameAs(ScreenSpaceReflections.HIZ);
+            ScreenSpaceReflections.SLOT.choose(graph.settings(), null);
             frames();
             assertThat(renderer.pipelineCount(ShadingPipelines.COLOR_SURFACES)).as("off: no surface pipelines").isZero();
             assertThat(graph.passes()).noneMatch(n -> n.startsWith("reflection"));
@@ -643,8 +646,8 @@ class ScreenSpaceReflectionsTest {
             wall(1, red, 0, 0, 6, 1, 1);
             scene.removeFrom(2);
             main(ahead(), v -> MeshletBenchmark.forward(v).clearColor(0, 0, 0), Environment.uniform("blue", 0, 0, 0.4f));
-            for (ScreenSpaceReflections.Mode mode : TRACED) {
-                graph.settings().set(ScreenSpaceReflections.MODE, mode);
+            for (TechniqueKind<?, ScreenSpaceReflections, Technique> mode : TRACED) {
+                ScreenSpaceReflections.SLOT.choose(graph.settings(), mode);
                 frames();
                 long builds = graph.builds();
                 for (int i = 0; i < 5; i++) {
@@ -690,12 +693,12 @@ class ScreenSpaceReflectionsTest {
                 } else {
                     main.port().replace(shading.make().apply(main));
                 }
-                graph.settings().set(ScreenSpaceReflections.MODE, ScreenSpaceReflections.Mode.OFF);
+                ScreenSpaceReflections.SLOT.choose(graph.settings(), null);
                 int[] off = frames();
                 String shape = round ? "rock" : "box";
                 save(shape + "-OFF-" + shading.name().replaceAll("[ ,]+", "-"), off, SIZE);
-                for (ScreenSpaceReflections.Mode mode : TRACED) {
-                    graph.settings().set(ScreenSpaceReflections.MODE, mode);
+                for (TechniqueKind<?, ScreenSpaceReflections, Technique> mode : TRACED) {
+                    ScreenSpaceReflections.SLOT.choose(graph.settings(), mode);
                     int[] on = frames();
                     String what = shape + ", " + shading.name() + ", " + mode;
                     save(shape + "-" + mode + "-" + shading.name().replaceAll("[ ,]+", "-"), on, SIZE);

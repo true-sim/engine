@@ -21,6 +21,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
+import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -193,9 +194,12 @@ class WorldLightsBenchmark {
             SceneView main = new SceneView(graph.addView("main").size(WIDTH, HEIGHT), view, camera);
             ReferencePathTracer reference = new ReferencePathTracer(SceneGeometry.meshlets(renderer), rayTracing, main,
                 VK_FORMAT_R32G32B32A32_SFLOAT).worldLights(lights);
-            graph.settings().set(ReferencePathTracer.BOUNCES, 2).set(ReferencePathTracer.LIGHTS, config.lighting())
-                .set(WorldLights.MODE, config.mode()).set(WorldLights.CELL, 8f).set(WorldLights.CELLS, 64)
-                .set(WorldLights.SLOTS, config.mode() == WorldLights.Mode.LISTS ? 64 : 16);
+            TechniqueKind<?, Void, WorldLights.Mode> layout = config.mode() == WorldLights.Mode.LISTS
+                ? WorldLights.LISTS : WorldLights.RESERVOIRS;
+            WorldLights.SLOT.choose(graph.settings(), layout).set(ReferencePathTracer.BOUNCES, 2)
+                .set(ReferencePathTracer.LIGHTS, config.lighting()).set(layout.setting("cell"), 8f)
+                .set(layout.setting("cells"), 64).set(layout.setting("slots"),
+                    config.mode() == WorldLights.Mode.LISTS ? 64 : 16);
             graph.add(new Writer(lights, GPU_LIGHTS));
             main.port().add(reference).add(new ClusteredLights(lights, main)).output(Keys.SCENE_COLOR, output);
             for (int i = 0; i < 8; i++) {
