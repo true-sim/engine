@@ -57,6 +57,19 @@ to 0.33 and 0.07 ms.
 - Proof: `SkinnedCrowdBenchmark` (engine-scene), run before and after the change in the same session (A5 branch).
 - Rule: in code run on many threads, a shared flag or counter is read before it is written, or kept per thread.
 
+**A stray 248-byte allocation in the scene benchmark is older than it looks.** The scene benchmark's "bytes
+allocated" maximum reads 248 now and then (median 0), in a different scenario each run ("still", "camera moving",
+"1,000 rocks moving", "30,000 rocks moving"), on the base commit as on the picking branch, so a before/after pair can
+show it on one side only. Measured per frame stage, the counted frames' 248 bytes were in `graph.submit`, with one
+writer thread as with all of them; the first frame of "1,000 rocks moving" also allocated 248 bytes in `sync.update`,
+where JFR showed C2 deoptimizing `SceneSync.sceneChanged`, `markMoved` and `reconcile` (`unstable_if`): that frame is a
+warm-up frame and not counted. Thirty warm-up frames per scenario instead of two did not remove the counted ones. Where
+in `submit` the bytes come from was not found.
+- Proof: same-session runs of the base (9084297) and the picking branch, then `SceneBenchmark` with per-stage
+  `getCurrentThreadAllocatedBytes` and a JFR recording of `jdk.Deoptimization` (true-sim/engine, picking).
+- Rule: an allocation maximum that moves between scenarios from run to run is compared with the base in the same
+  session before it is called a regression.
+
 ## Frame graph
 
 **A write is visible to nothing until a barrier.** The compiler once marked a write's own stage and access visible, so
@@ -441,6 +454,20 @@ shaders), then settled at 0.60-0.68 ms: the ranges of five rounds after one warm
   hooks); with four, the rounds of each configuration fell within 0.08 ms of each other.
 - Rule: a benchmark warms until its rounds agree (look at the per-round lines, not the ranges); short frames need more
   warm-up than long ones.
+
+**Two full benchmark runs hours apart differed by up to 43 % on unchanged code.** The before/after run of the picking
+branch showed `MeshletBenchmark`'s classic indexed draw ("without meshlets, full detail") at 3.49 / 10.71 / 35.64 /
+106.3 ms before and 5.14 / 15.25 / 50.65 / 151.8 ms after, `SkinnedCrowdBenchmark`'s GPU deformation at 0.397 against
+0.59-0.66 ms, culling rows 12-35 % slower. Run in one session, alternating the base commit and the branch, every one of
+them read the same on both: classic draw 5.140 / 15.241 / 50.615 / 151.616 (base) against 5.139 / 15.240 / 50.616 /
+151.613 ms, deformation 0.40-0.64 ms on both, mean culling 0.1794 against 0.1794 ms (forward) and 0.2351 against
+0.2359 ms (transparency). What changed between the two runs (clocks, power state, driver) was not found.
+- Also seen: `HitShadingBenchmark`'s "one shader switching" at 256 x 256 has one round in some runs at 0.32 ms against
+  0.25, on the base as on the branch (seven alternating runs each); its range's upper end is not a regression.
+- Proof: same-session A/B of the base (9084297) and the picking branch, logs in the picking work's scratch notes
+  (true-sim/engine, picking).
+- Rule: a regression found by comparing runs from different times is confirmed in one session, alternating the two
+  builds, before anyone looks for its cause.
 
 **Benchmark numbers in the README go stale.** The per-path table stayed from the first mesh shader benchmark while
 materials and lighting doubled the mesh path's time.
