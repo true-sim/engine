@@ -33,4 +33,6 @@ tasks.register<JavaExec>("uiBench") {
     jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xmx4g")
     args(rootProject.file("docs/benchmarks-ui.md").absolutePath)
     providers.gradleProperty("quick").orNull?.let { systemProperty("truesim.bench.quick", it) }
+    providers.gradleProperty("only").orNull?.let { systemProperty("truesim.bench.only", it) } // -Ponly=console
+    providers.gradleProperty("spikes").orNull?.let { systemProperty("truesim.bench.spikes", it) }
 }

@@ -71,10 +71,19 @@ public final class UiBench {
     public static void main(String[] args) throws IOException {
         Path out = Path.of(args.length > 0 ? args[0] : "docs/benchmarks-ui.md");
         UiBench bench = new UiBench();
-        bench.renderer();
-        bench.charts();
-        bench.idleGallery();
-        bench.console();
+        String only = System.getProperty("truesim.bench.only", ""); // e.g. console: one part, while looking into it
+        if (only.isEmpty() || only.contains("renderer")) {
+            bench.renderer();
+        }
+        if (only.isEmpty() || only.contains("charts")) {
+            bench.charts();
+        }
+        if (only.isEmpty() || only.contains("gallery")) {
+            bench.idleGallery();
+        }
+        if (only.isEmpty() || only.contains("console")) {
+            bench.console();
+        }
         String table = bench.markdown();
         System.out.println(table);
         Files.createDirectories(out.toAbsolutePath().getParent());
@@ -357,6 +366,9 @@ public final class UiBench {
             long t = System.nanoTime() - t0;
             if (f >= 0) {
                 ms[f] = t / 1e6;
+                if (Boolean.getBoolean("truesim.bench.spikes") && ms[f] > 0.25) {
+                    System.out.printf(Locale.ROOT, "spike frame %d: %.4f ms%n", f, ms[f]);
+                }
             }
         }
         add("Console flood (a changing UI): CPU", "≤ 0.3 ms",
