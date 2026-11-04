@@ -6,6 +6,7 @@ import static org.lwjgl.vulkan.VK10.VK_FORMAT_R16G16B16A16_SFLOAT;
 
 import com.truesim.common.math.color.Color;
 import com.truesim.engine.graph.FrameGraph;
+import com.truesim.engine.graph.Technique;
 import com.truesim.engine.graph.ViewPort;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.ClusteredForwardShading;
@@ -22,6 +23,7 @@ import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.VisibilityBufferShading;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
+import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanInstance;
 import java.lang.foreign.Arena;
@@ -29,6 +31,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
@@ -139,8 +142,9 @@ class ReflectionsScreenshots {
                         port.replace(new VisibilityBufferShading(world.geometry(), view,
                             VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT));
                     }
-                    for (ScreenSpaceReflections.Mode mode : ScreenSpaceReflections.Mode.values()) {
-                        graph.settings().set(ScreenSpaceReflections.MODE, mode);
+                    for (TechniqueKind<?, ScreenSpaceReflections, Technique> mode : Arrays.asList(null,
+                        ScreenSpaceReflections.LINEAR, ScreenSpaceReflections.HIZ)) {
+                        ScreenSpaceReflections.SLOT.choose(graph.settings(), mode);
                         for (int frame = 0; frame < 6; frame++) {
                             world.update(1.0);
                             camera.position(bestX + 2, y + 4.5, bestZ + 14).set(-0.12, -0.33, -1, 0, 1, 0,
@@ -150,7 +154,7 @@ class ReflectionsScreenshots {
                         }
                         device.waitIdle();
                         Path file = directory.resolve((visibility ? "visibility-" : "forward-")
-                            + mode.name().toLowerCase(java.util.Locale.ROOT) + ".png");
+                            + (mode == null ? "off" : mode.id()) + ".png");
                         capture.write(file);
                         System.out.println("wrote " + file.toAbsolutePath());
                     }

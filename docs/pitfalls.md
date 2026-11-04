@@ -505,6 +505,18 @@ that missed its beat because a bar rendered in milliseconds while its clip loade
   that thread works, or waits for it before the part it measures; never assume it finishes within N blocks rendered
   offline.
 
+**A test's stall sat inside the stream ring's first fill, and its sine's start was read one frame late.**
+`aStarvedStreamFadesIsCountedAndResumesWhereItShouldBe` failed twice on CI and passed here.
+- First failure: the start was taken as the first non-zero sample, but a sine's first sample is 0, so every expected
+  phase was one frame off. It failed whenever the checked sample was not near a peak (0.0127 off against 0.01).
+- Second failure: 0 starvations. The decoder stalled at frame 40,000, but the ring (1 s, 48,000 frames) fills at once
+  (`StreamRing.fill`). The stall could then begin before the voice read anything. Observation, not reproduced: a voice
+  starting more than 0.67 s after the stall began would play the 40,000 buffered frames past its end, and nothing
+  starves.
+- Proof: CI run 41751716422 (0.2627 against 0.2500), CI run 41771593506 (starvations 0, expected 1 to 2).
+- Rule: a test that makes a stream starve puts the stall past the ring's capacity, where the decoder only gets once
+  the voice reads. A test that finds where a signal starts accounts for samples that are 0 by design.
+
 **SDL's device thread takes a whole device buffer from the stream at once.** The audio queue was kept at the design's 2
 blocks (512 frames); SDL's dummy driver, and this machine's WASAPI device (which ignored
 `SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES`), pull 1,024 frames at a time, so the queue ran dry at every pull and the

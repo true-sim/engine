@@ -13,6 +13,10 @@ import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
 import com.truesim.engine.settings.SettingGroup;
 import com.truesim.engine.settings.SettingTier;
+import com.truesim.engine.settings.TechniqueConfig;
+import com.truesim.engine.settings.TechniqueConfig.Tunable;
+import com.truesim.engine.settings.TechniqueKind;
+import com.truesim.engine.settings.TechniqueSlot;
 import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.audio.Bus;
 import com.truesim.scene.audio.Music;
@@ -22,6 +26,7 @@ import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -104,10 +109,49 @@ public final class Audio implements Plugin {
 
     public static final Setting<Output> OUTPUT =
         Setting.choice("audio.output", Output.AUTO, "headphones play sounds around the head (HRTF)");
-    public static final Setting<String> HRTF_SET =
-        Setting.text("audio.hrtf.set", "", "the HRTF set, an .hrtf file; empty for the built-in one");
-    public static final Setting<Integer> HRTF_VOICES =
-        Setting.integer("audio.hrtf.voices", 16, 0, 64, "voices rendered through the HRTF at most");
+
+    /**
+     * How sounds marked HRTF are placed around the head on headphones (§2.9), a kind's id: {@code hrtf} (the default),
+     * a game's own {@link Spatializer}, or {@code off} (they pan). A kind's factory is given the output's format and
+     * runs on a background thread; its spatializer is handed to the renderer at the next frame.
+     */
+    public static final TechniqueSlot<AudioFormat, Spatializer> SPATIALIZER = TechniqueSlot.of("audio.spatializer",
+        "hrtf", true, "how sounds are placed around the head on headphones: the HRTF, or off (panned)",
+        techniques -> techniques.register(Audio.SPATIALIZER, Audio.HRTF));
+
+    /**
+     * The HRTF's tunables.
+     *
+     * @param set the HRTF set, an .hrtf file; empty for the built-in one
+     * @param voices voices rendered through the HRTF at most (0: none, they pan)
+     * @param updates voices whose filters may change in one block, at most (a new voice always does): the per-block
+     *     budget of filter updates
+     * @param ear half the distance between the ears, in metres: where a source near the head is heard from
+     * @param fields ambisonic fields (buses with voices past the cap) decoded at most
+     * @param moved how far a source's direction turns before its filter changes, in degrees
+     */
+    public record Binaural(
+        @Tunable(value = "the HRTF set, an .hrtf file; empty for the built-in one", formerly = "audio.hrtf.set")
+        String set,
+        @Tunable(value = "voices rendered through the HRTF at most", min = 0, max = 64, formerly = "audio.hrtf.voices")
+        int voices,
+        @Tunable(value = "voices whose HRTF filters may change in one block", min = 1, max = 64) int updates,
+        @Tunable(value = "half the distance between the ears, in metres", min = 0.05, max = 0.15) float ear,
+        @Tunable(value = "ambisonic fields of voices past the cap decoded at most", min = 1, max = 64) int fields,
+        @Tunable(value = "degrees a source turns before its HRTF filter changes", min = 0.05, max = 10) float moved)
+        implements TechniqueConfig {
+    }
+
+    /** Our HRTF ({@link HrtfSpatializer}), its set prepared for the output's rate. */
+    public static final TechniqueKind<Binaural, AudioFormat, Spatializer> HRTF = TechniqueKind.of(SPATIALIZER, "hrtf",
+        new Binaural("", 16, HrtfSpatializer.UPDATES, HrtfSpatializer.EAR, HrtfSpatializer.FIELDS,
+            HrtfSpatializer.MOVED_DEGREES), "the HRTF: binaural filters per direction",
+        (format, config) -> spatializer(format, config.get()));
+
+    /** The HRTF's set: {@code audio.spatializer.hrtf.set}. */
+    public static final Setting<String> HRTF_SET = HRTF.setting("set");
+    /** The HRTF's voices: {@code audio.spatializer.hrtf.voices}. */
+    public static final Setting<Integer> HRTF_VOICES = HRTF.setting("voices");
 
     private Engine engine;
     private Mixer mixer;
@@ -138,7 +182,7 @@ public final class Audio implements Plugin {
             settings = startup.settings();
             startup.registry().add(GROUP, MASTER_VOLUME, MUSIC_VOLUME, SFX_VOLUME, VOICE_VOLUME, UI_VOLUME, DEVICE,
                 BACKGROUND, MONO, BALANCE, DYNAMIC_RANGE, OUTPUT, HRTF_SET); // no tiers declared by default
-            startup.registry().addHidden(BLOCK, LOW_MARK, VOICES, DRIVER, HRTF_VOICES);
+            startup.registry().addHidden(BLOCK, LOW_MARK, VOICES, DRIVER, HRTF_VOICES, SPATIALIZER.setting());
         } else if (stage == Stage.INSTANCE) {
             Desktop desktop = startup.find(Desktop.KEY).orElse(null);
             output = open(desktop);
@@ -149,9 +193,14 @@ public final class Audio implements Plugin {
                 settings.onChange(access, this::accessibility);
             }
             accessibility();
-            for (Setting<?> binaural : List.of(OUTPUT, HRTF_SET, HRTF_VOICES, MONO)) {
+            for (Setting<?> binaural : List.of(OUTPUT, MONO, SPATIALIZER.setting())) {
                 settings.onChange(binaural, this::binaural);
             }
+            settings.onAnyChange(name -> { // any kind's tunables
+                if (name.startsWith(SPATIALIZER.name() + ".")) {
+                    binaural();
+                }
+            });
             binaural();
             for (Setting<Float> volume : List.of(MASTER_VOLUME, MUSIC_VOLUME, SFX_VOLUME, VOICE_VOLUME, UI_VOLUME)) {
                 settings.onChange(volume, this::volumes);
@@ -273,36 +322,54 @@ public final class Audio implements Plugin {
     // Binaural rendering (§2.9): the set prepared off the game thread, handed to the renderer from it.
     private volatile Spatializer preparedSpatializer;
     private volatile boolean binauralChanged;
+    private volatile int preparedVoices; // the renderer's cap of the prepared spatializer's voices
     private Spatializer spatializer;
     private int binauralWanted;
 
     /**
-     * Turns binaural rendering on with headphones (stereo, mono off) and off otherwise: the set (the built-in one, or
-     * {@link #HRTF_SET}'s file) is prepared for the output's rate on a background thread and handed to the renderer at
-     * the next frame.
+     * Turns binaural rendering on with headphones (stereo, mono off) and off otherwise: the chosen spatializer
+     * ({@link #SPATIALIZER}; the HRTF's set, the built-in one or {@link #HRTF_SET}'s file, prepared for the output's
+     * rate) is made on a background thread and handed to the renderer at the next frame.
      */
     @AllowAllocation("a setting changed")
     private void binaural() {
         Output output = settings.get(OUTPUT);
+        TechniqueKind<?, AudioFormat, Spatializer> kind = SPATIALIZER.chosen(settings);
+        int hrtfVoices = HRTF.config(settings).voices();
         boolean on = (output == Output.HEADPHONES || output == Output.AUTO && headPose != null) // VR: headphones
-            && renderer.format().channels() == 2 && !settings.get(MONO) && settings.get(HRTF_VOICES) > 0;
+            && renderer.format().channels() == 2 && !settings.get(MONO) && kind != null
+            && (kind != HRTF || hrtfVoices > 0);
         int wanted = ++binauralWanted;
         if (!on) {
             preparedSpatializer = null;
+            preparedVoices = hrtfVoices;
             binauralChanged = true;
             return;
         }
-        String file = settings.get(HRTF_SET);
-        int voices = settings.get(HRTF_VOICES);
-        AudioFormat format = renderer.format();
-        Thread.ofPlatform().daemon().name("audio-hrtf").start(() -> {
-            Hrtf hrtf = prepare(file, format.rate());
-            HrtfSpatializer next = new HrtfSpatializer(hrtf, format.block(), voices + 4);
+        Supplier<Spatializer> make = maker(kind, renderer.format()); // its config read here, on the game thread
+        Thread.ofPlatform().daemon().name("audio-spatializer").start(() -> {
+            Spatializer next = make.get();
             if (wanted == binauralWanted) {
+                preparedVoices = kind == HRTF ? hrtfVoices : next.capacity();
                 preparedSpatializer = next;
                 binauralChanged = true;
             }
         });
+    }
+
+    /** What makes {@code kind}'s spatializer for {@code format}, with its config as the settings hold it now. */
+    @AllowAllocation("a setting changed")
+    private <C extends Record & TechniqueConfig> Supplier<Spatializer> maker(
+        TechniqueKind<C, AudioFormat, Spatializer> kind, AudioFormat format) {
+        C config = kind.config(settings);
+        return () -> kind.create(format, () -> config);
+    }
+
+    /** The HRTF spatializer {@code config} describes, for {@code format}'s rate and block. */
+    @AllowAllocation("preparing a set")
+    static HrtfSpatializer spatializer(AudioFormat format, Binaural config) {
+        return new HrtfSpatializer(prepare(config.set(), format.rate()), format.block(), config.voices() + 4,
+            config.updates(), config.ear(), config.fields(), config.moved());
     }
 
     /** The set in {@code file} (empty: the built-in one) prepared for {@code rate}; the built-in one if it fails. */
@@ -419,7 +486,7 @@ public final class Audio implements Plugin {
         if (binauralChanged) {
             binauralChanged = false;
             spatializer = preparedSpatializer;
-            renderer.commands().spatializer(spatializer, settings.get(HRTF_VOICES));
+            renderer.commands().spatializer(spatializer, preparedVoices);
         }
         boolean away = !engine.focused() || !engine.visible();
         float wanted = !away ? 1 : switch (settings.get(BACKGROUND)) {

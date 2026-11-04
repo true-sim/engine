@@ -21,6 +21,7 @@ import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.vulkan.Commands;
 import java.util.List;
 import org.lwjgl.system.MemoryUtil;
@@ -461,8 +462,10 @@ class ReferencePathTracerTest {
         lights.writtenBy(GPU_LIGHTS);
         graph.add(new GpuLightWriter(lights, 8));
         ReferencePathTracer reference = traced(40, Environment.uniform("night", 0, 0, 0)).worldLights(lights);
-        graph.settings().set(ReferencePathTracer.LIGHTS, lighting).set(WorldLights.MODE, mode)
-            .set(WorldLights.CELL, 0.5f).set(WorldLights.SLOTS, mode == WorldLights.Mode.LISTS ? 64 : 16);
+        TechniqueKind<?, Void, WorldLights.Mode> layout = mode == WorldLights.Mode.LISTS ? WorldLights.LISTS
+            : WorldLights.RESERVOIRS;
+        WorldLights.SLOT.choose(graph.settings(), layout).set(ReferencePathTracer.LIGHTS, lighting)
+            .set(layout.setting("cell"), 0.5f).set(layout.setting("slots"), mode == WorldLights.Mode.LISTS ? 64 : 16);
         return frames(frames);
     }
 

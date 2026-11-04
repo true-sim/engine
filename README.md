@@ -158,6 +158,35 @@ tiles, slices, range, lights per cluster, and the irradiance where lights withou
 occlusion culling (`RenderSettings.OCCLUSION`), cascades and ray offsets (`ShadowSettings.ALL`), and the display
 transform (`DisplayTransform.ALL`); `RenderSettings.ALL` lists them all for an options screen.
 
+**Techniques and their tunables** (`TechniqueSlot`, `TechniqueKind`, `Techniques`): every switchable technique is a
+slot, a place a technique plugs into, whose one setting holds the chosen kind's id or `off` (`render.ao=bitmask`). A
+kind is an id, a record of its tunables (`TechniqueConfig`, each component annotated with `@Tunable`: description,
+range, former names) with its defaults, and a factory making the technique from what the slot's owner hands it and
+its live config. Each component is an ordinary setting named by its dotted path (`render.ao.bitmask.radius`): set,
+saved, loaded, given on the command line (`--set render.ao.bitmask.radius=1`) and read alone like any other, and read
+together as the record (`BITMASK.config(settings)`, the same record until a value changes: nothing allocated per
+frame). The kinds a store offers are its registry (`settings.techniques()`): a slot registers the engine's kinds when
+first used, and games and mods register theirs through the same `register(slot, kind)`, so a game's own ambient
+occlusion is chosen like the engine's (`docs/custom-techniques.md`). `variants(slot)` lists a slot's kinds for an
+options screen, `find(path)` a tunable for a console. A saved id no kind has (a mod removed) reads as the slot's default
+kind, logged once and listed in `problems()`; the id stays saved, so the kind is chosen again once its mod is back.
+Ids match ignoring case, so files saved with the enum-valued settings before (`render.ao=BITMASK`, `OFF`) load, and
+tunables read the flat names they had (`render.ao.radius`, `render.ssr.maxSteps`, `audio.hrtf.voices`) where their
+own name holds nothing. A frame graph build reads a slot with `g.technique(slot)` and rebuilds when the choice
+changes; a slot's owner builds the chosen kind's technique in its place, so swapping kinds is the rebuild it always
+was. The slots: `render.ao`, `render.ssr`, `render.gi`, `render.transparency` (never off), `render.gi.lights` (never
+off), `render.interpolation`, `display.toneCurve` and `audio.spatializer`. The first four and the spatializer take
+games' own techniques; the world light grid's layouts, the interpolations and the tone curves are the shaders' or the
+sync's, so a game's kind there makes one of the engine's with tunables of its own.
+
+```java
+AmbientOcclusion.SLOT.choose(settings, AmbientOcclusion.GTAO);                // render.ao=gtao
+settings.set(AmbientOcclusion.GTAO.setting("radius"), 1f);                     // render.ao.gtao.radius=1.0
+settings.techniques().set(settings, AmbientOcclusion.SLOT, "radius", 1f);      // in every kind having one
+settings.techniques().register(AmbientOcclusion.SLOT, AcmeAo.KIND);            // a game's own
+for (TechniqueKind<?, ?, ?> kind : settings.techniques().variants(AmbientOcclusion.SLOT)) { ... }
+```
+
 ```java
 EngineSettings settings = new EngineSettings().load(saved);
 graph.settings(settings);
@@ -930,15 +959,15 @@ Next (#46): light binning, shadows per light, buckets, transparency and post eff
 
 Blended materials (`Material.alphaBlend`, glTF's `BLEND`) and transmissive ones are drawn over a view's opaque scene by
 the view's transparency technique (`Transparency.ID`, one per view, at `Anchor.TRANSPARENT`). Two are correct and trade
-off, and `render.transparency` (`Transparency.MODE`, read by `ChosenTransparency`) picks one, the graph rebuilding when
-it changes:
+off, and `render.transparency` (`Transparency.SLOT`, read by `ChosenTransparency`; never off) picks a kind, the graph
+rebuilding when it changes:
 
 ```java
-view.port().add(new ChosenTransparency(geometry, view));                // render.transparency: SORTED by default
-graph.settings().set(Transparency.MODE, Transparency.Mode.WEIGHTED);    // or SortedTransparency, ... directly
+view.port().add(new ChosenTransparency(geometry, view));                // render.transparency: sorted by default
+Transparency.SLOT.choose(graph.settings(), Transparency.WEIGHTED);      // or SortedTransparency, ... directly
 ```
 
-- **`SORTED`** (`SortedTransparency`, the default): blended meshlets sorted back to front on the GPU and blended over
+- **`sorted`** (`SortedTransparency`, the default): blended meshlets sorted back to front on the GPU and blended over
   the scene's color ("over", by alpha), testing the opaque depth. Exact for surfaces apart: red glass in front of blue
   reads differently from blue in front of red, a nearly opaque layer hides what is behind it, and the far wall of a
   glass bowl draws before its near wall (CompareTransmission's bowl, doubled under weighted blending, is clean). After
@@ -946,8 +975,8 @@ graph.settings().set(Transparency.MODE, Transparency.Mode.WEIGHTED);    // or So
   `meshlets/sort.slang` keys each blended meshlet by the squared distance of its bounding sphere's center from the eye
   (24 bits, farthest first) and sorts with the particles' radix sort (`particles/sort.slang`, 6 passes); the sorted
   list is cut into runs of one shading bin, and each run is a (run slot, shading bin) entry of the split lists'
-  header, drawn by its type's pipeline, so the order holds across material types. `render.transparency.runs`
-  (`Transparency.SORTED_RUNS`, 16) run slots are drawn, each an indirect draw per shading bin drawing blended; a view
+  header, drawn by its type's pipeline, so the order holds across material types.
+  `render.transparency.sorted.runs` (`Transparency.SORTED_RUNS`, 16) run slots are drawn, each an indirect draw per shading bin drawing blended; a view
   with more runs (shading bins interleaving in depth) has its meshlets ordered by shading bin first (two more radix
   passes), each shading bin's back to front. Per view: each eye of a headset, each window sorts from its own eye.
   Forward and visibility buffer views, both meshlet paths. Classic LOD sorts each instance's draws by its mesh's
@@ -1018,9 +1047,10 @@ and fail a build that reads them). Post materials (decals, fog by normal, outlin
 technique implementing the consumer interface and requiring the keys. Blended and transmissive surfaces write none.
 
 **Screen-space reflections** (`ScreenSpaceReflections`, one per view under `ScreenSpaceReflections.ID`, at
-`Anchor.OPAQUE` after the background, before transparency), chosen by `render.ssr`:
+`Anchor.OPAQUE` after the background, before transparency), as the kind `render.ssr` (`ScreenSpaceReflections.SLOT`)
+names:
 
-- `OFF`: the environment's reflections alone; the surface outputs are not written for it.
+- `off`: the environment's reflections alone; the surface outputs are not written for it.
 - `LINEAR`: each pixel's mirror ray marched through the depth in screen space in equal steps (at least a pixel), where
   a straight line stays straight; the crossing refined by bisection; rays pass behind surfaces deeper than the
   thickness allows (below) and find what is behind them.
@@ -1055,9 +1085,10 @@ takes over smoothly. No history, no temporal accumulation: no added latency, no 
 window) has its own, within its render region under dynamic resolution. Blended and transmissive surfaces get none and
 are not seen in reflections (drawn after it).
 
-Settings: `render.ssr` (`OFF`, `LINEAR`, `HIZ`, default `HIZ`; rebuilds), `render.ssr.maxSteps` (64),
-`render.ssr.thickness` (0.25 m), `render.ssr.maxDistance` (100 m), `render.ssr.roughnessCutoff` (0.6),
-`render.ssr.edgeFade` (0.1 of the image), read as frames record, and `render.ssr.resolutionScale` (1; rebuilds).
+Settings: `render.ssr` (`off`, `linear`, `hiz`, default `hiz`; rebuilds), and each kind's tunables
+(`ScreenSpaceReflections.March`, under `render.ssr.linear.*` and `render.ssr.hiz.*`): `maxSteps` (64), `thickness`
+(0.25 m), `maxDistance` (100 m), `roughnessCutoff` (0.6), `edgeFade` (0.1 of the image), read as frames record, and
+`resolutionScale` (1; rebuilds).
 
 What it costs (`ReflectionsBenchmark`, RX 9070 XT, 2026-11-03, after the outline and contact fixes): 30,000 rocks of glossy metal (roughness 0.35) on a
 glossy terrain (0.2), so nearly every pixel traces a ray, under a uniform environment, half-float color, 64 steps;
@@ -1308,16 +1339,16 @@ The frame before's render region is not kept yet: with dynamic resolution changi
 region's pixels.
 
 **World lights for ray hits** (`WorldLights`, a shared request, design D2): light clusters serve a view's pixels; hits
-off the screen need lights by world position. A grid of `render.gi.lights.cells` cells along each axis of
-`render.gi.lights.cell` units, around an anchor camera, built once a frame from the scene's lights and those the GPU
-writes (particle lights); points outside it take every light, directional lights are summed directly. Two layouts
-trade off, `render.gi.lights`:
+off the screen need lights by world position. A grid of `cells` cells along each axis of `cell` units, around an
+anchor camera, built once a frame from the scene's lights and those the GPU writes (particle lights); points outside it
+take every light, directional lights are summed directly. Two layouts trade off, the kinds of `render.gi.lights`
+(`WorldLights.SLOT`), their tunables under `render.gi.lights.lists.*` and `render.gi.lights.reservoirs.*`:
 
-- `LISTS`: each cell lists the lights whose reach meets its box (`render.gi.lights.slots`, overflow noted), built a
+- `lists`: each cell lists the lights whose reach meets its box (`slots`, overflow noted), built a
   thread per light; a hit sums them all with a shadow ray each. Exact: the reference with it draws the same image as
   with every light (`theWorldLightGridsListsLightHitsAsEveryLightDoes`).
-- `RESERVOIRS` (ReGIR, Boksansky, Jukarainen and Wyman 2021): each cell keeps reservoirs, each a light resampled from
-  `render.gi.lights.candidates` drawn uniformly by what it could give the cell's box (never 0 where it reaches); a hit
+- `reservoirs` (ReGIR, Boksansky, Jukarainen and Wyman 2021): each cell keeps reservoirs, each a light resampled from
+  `candidates` drawn uniformly by what it could give the cell's box (never 0 where it reaches); a hit
   resamples its cell's reservoirs by what each gives it and traces one shadow ray. Unbiased
   (`theWorldLightGridsReservoirsConvergeToEveryLight`), constant cost, noisy.
 
@@ -1338,7 +1369,7 @@ rounds after a warm-up round, ranges of the medians; noise of 4 x 4 pixel means 
 | 4,096 | grid lists | 1.23 ms | 13.82-13.87 ms | 15.05-15.10 ms | 5.0 % |
 | 4,096 | grid reservoirs | 1.17-1.19 ms | 2.58-2.65 ms | 3.77-3.82 ms | 38-74 % |
 
-Reservoirs are built only for the cells hits used in the last `render.gi.lights.keep` frames (8; a cell's state
+Reservoirs are built only for the cells hits used in the last `render.gi.lights.reservoirs.keep` frames (8; a cell's state
 kept from frame to frame), and a hit in a cell not built sums every light exactly and marks it: built for every cell
 each frame, the same grid took 0.61, 2.25 and 3.73 ms to build and 1.66, 3.51 and 5.04 ms with the hits. The noise
 rises where hits find a cell built in one frame and not in another (exact there, sampled here), and grows with the
@@ -1371,53 +1402,56 @@ reference's tests are small (32 x 32 pixels) for a CPU's ray tracing.
 
 ### Global illumination: ambient occlusion and the probe volume
 
-The second and third stages (S1, S2): occlusion at small scale and diffuse light that bounces, each a setting with
-`OFF`, replacing exactly what shading added through the surface outputs or the indirect-light table.
+The second and third stages (S1, S2): occlusion at small scale and diffuse light that bounces, each a slot that can
+be `off`, replacing exactly what shading added through the surface outputs or the indirect-light table.
 
 **Ambient occlusion** (`AmbientOcclusion`, one per view at `Anchor.OPAQUE` after the background, before
-reflections; `render.ao`): the cosine-weighted share of the hemisphere open within `render.ao.radius` (0.5 m).
+reflections; `render.ao`, `AmbientOcclusion.SLOT`): the cosine-weighted share of the hemisphere open within the
+kind's `radius` (0.5 m). Each kind's tunables are its record (`AmbientOcclusion.Gtao`, `Bitmask`, `Rays`), under
+`render.ao.<kind>.*`; a game's own kind builds in its place (`docs/custom-techniques.md`).
 
-- `GTAO` (Jimenez et al. 2016, as XeGTAO): slices through the hemisphere, each side's highest horizon found along the
-  screen, the visible arc integrated in closed form; samples fade over the last `render.ao.falloff` of the radius;
-  surfaces infinitely thick.
-- `BITMASK` (the default; Therrien, Levesque and Gilet 2023): surfaces `render.ao.thickness` thick, each slice's
-  occlusion a mask of 32 sectors of equal cosine-weighted measure (the slice's measure from GTAO's closed form, so
-  every sector holds as much light), and one short-range bounce of the scene's color from the sectors each sample
-  covers (`render.ao.bounce`).
-- `RAYS` (#34): `render.ao.rays` cosine-distributed rays per pixel by ray queries, as long as the radius: exact,
-  off-screen occluders included, denoised. Devices without ray tracing take `BITMASK`.
+- `gtao` (Jimenez et al. 2016, as XeGTAO): slices through the hemisphere, each side's highest horizon found along the
+  screen, the visible arc integrated in closed form; samples fade over the last `falloff` of the radius; surfaces
+  infinitely thick.
+- `bitmask` (the default; Therrien, Levesque and Gilet 2023): surfaces `thickness` thick, each slice's occlusion a
+  mask of 32 sectors of equal cosine-weighted measure (the slice's measure from GTAO's closed form, so every sector
+  holds as much light), and one short-range bounce of the scene's color from the sectors each sample covers
+  (`bounce`).
+- `rays` (#34): `rays` cosine-distributed rays per pixel by ray queries, as long as the radius: exact, off-screen
+  occluders included, denoised. Devices without ray tracing take `bitmask`.
 
 Only the diffuse light from all around is darkened (design D12): color + diffuse weight x ((ao - 1) x the diffuse
 light + bounce), the diffuse light recomputed at the pixel from the view's table (the environment's harmonics, the
 constant sky, or the probe volume), so an unoccluded surface keeps its color exactly (tested on every technique), and
 direct light, emission and unlit surfaces are untouched (`anOccludedCornerDarkensOnlyTheDiffuseLight`). Reflections
-get a separate specular occlusion (`render.ao.specular`): the cone of the visible directions around the bent normal
+get a separate specular occlusion (each kind's `specular`): the cone of the visible directions around the bent normal
 against the GGX lobe's cone (Oat and Sander's cap intersection), relative to what the open hemisphere leaves of the
 lobe; it is provided as `Keys.SPECULAR_OCCLUSION`, so screen-space reflections replace the environment as it was
 dimmed. The cone's aperture from the occlusion is steep near 1: grazing reflections on open floors lose up to 12 %.
 The screen-space ones are single-frame by default (a noise pattern fixed in time, then
-`render.denoise.spatialPasses` of an edge-stopping filter); `render.ao.temporal` and rays accumulate over frames.
+`render.denoise.spatialPasses` of an edge-stopping filter); with `temporal`, and for rays, they accumulate over frames.
 `render.ao.debug` shows the occlusion, the specular occlusion or the bounce alone.
 
 **The denoiser** (`Denoiser`, design §9, D6), for any signal of two images: `SVGF` (temporal accumulation, then
 `render.denoise.passes` steps of an a-trous filter guided by the depth's plane, the normal and the variance) and
 `REBLUR` (a blur, the temporal accumulation, a blur whose radius shrinks with the history, the history holding the
-blurred result), chosen by `render.ao.denoiser`. Both find the history through `Keys.MOTION` (or the camera's
+blurred result), chosen by each kind's `denoiser` (`render.ao.rays.denoiser`). Both find the history through `Keys.MOTION` (or the camera's
 reprojection) and keep only taps of the same surface; the history holds `render.denoise.maxFrames` (30) at most, and a
 fast history of `render.denoise.fastFrames` (4) restarts it where the two disagree beyond the fast one's noise
 (`render.denoise.clamp` deviations): a change nothing announced shows within 15 frames
 (`tracedOcclusionFollowsAnUnannouncedChangeWithinFifteenFrames`, both families). Neither wins outright (below), so
 both stay.
 
-**The probe volume** (`ProbeVolume`, a frame-level request; `ProbeVolumeLighting`, per view, `render.gi` = `OFF` or
-`PROBES`; DDGI: Majercik et al. 2019 and 2021). `render.gi.volume.cascades` (3) grids of `probes` x `probesUp` x
+**The probe volume** (`ProbeVolume`, a frame-level request; `ProbeVolumeLighting`, per view, `render.gi` = `off` or
+`probes`, its tunables `ProbeVolumeLighting.Probes` under `render.gi.probes.*`; DDGI: Majercik et al. 2019 and 2021).
+`cascades` (3) grids of `probes` x `probesUp` x
 `probes` (16 x 8 x 16) probes, the first `spacing` (1 m) apart, each next twice as far, around the anchor view's
 camera; they scroll with it (a slot is a probe's world grid coordinate modulo the grid: only probes coming into the
 grid start anew), half a spacing off the grid's planes. Per probe, in octahedral atlases: irradiance (6 x 6 texels and
 a border, half floats) with its sky visibility (the share of its rays that met nothing), and the distance's mean and
 mean square (14 x 14 and a border), so a shaded point ignores probes that cannot see it (Chebyshev). Each frame:
 
-- **Rays shaded by type:** `render.gi.volume.rays` (128) rays per probe, turned anew each frame, plus a fixed set for
+- **Rays shaded by type:** `rays` (128) rays per probe, turned anew each frame, plus a fixed set for
   relocation and classification, run as paths of the reference path tracer's wavefront in its probe mode: hits binned
   and shaded by their material type's own hit entry point, with the BRDF shading uses, the world light grid
   (`WorldLights`: the sun, punctual lights, the GPU's particle lights) and a shadow ray each, emission, the
@@ -1429,13 +1463,12 @@ mean square (14 x 14 and a border), so a shaded point ignores probes that cannot
   visibility dims the environment's reflections (specular occlusion at the probes' scale), which is what keeps a
   closed room dark. One look-up gives both. Views given equal volumes share one update (a headset's eyes, D7:
   `twoViewsShareOneVolume`).
-- **Lag (design D3), no latency:** a probe's history holds `render.gi.response.maxFrames` (30) updates at most.
+- **Lag (design D3), no latency:** a probe's history holds `maxFrames` (30) updates at most.
   Probes within `instanceMargin` (3) times a changed instance's bounding sphere (moved, changed or skinned: D91's
   records compared on the GPU with the frame before's) or `lightMargin` (2) times a changed light's reach restart at
-  once (`render.gi.response.invalidate`), all of them for a directional light or the environment; a probe whose update
+  once (`invalidate`), all of them for a directional light or the environment; a probe whose update
   differs from its history beyond its noise (`sensitivity`), or drifts from it over a few updates (`drift`), restarts
-  too (`render.gi.response.adaptive`); probes that restarted update again within the frame
-  (`render.gi.response.iterations`, 2), a further bounce of the change each time.
+  too (`adaptive`); probes that restarted update again within the frame (`iterations`, 2), a further bounce of the change each time.
 
 Tested against closed forms (`ProbeVolumeTest`): the white furnace through the probes (E / (1 - rho) within 3 %, which
 only infinite bounces reach), a light changing color inside a box (90 % in 2 frames told, 2 found, more by the history
@@ -1592,7 +1625,7 @@ that declare how they use each image. The graph does the rest:
   maps and encodes it for the display that window is on, which its swapchain tells: SDR (sRGB), HDR10 (Rec. 2020,
   PQ) or scRGB (linear floats). `presenter.outputTransform(new DisplayTransform())` turns it on; `PresentSettings.HDR`
   asks for HDR where the display offers it, and a window moved to another display, or HDR toggled, is encoded again.
-  `DisplayTransform`'s settings change while running, without a rebuild: the tone curve (`NONE`, `REINHARD`, `ACES`),
+  `DisplayTransform`'s settings change while running, without a rebuild: the tone curve (`display.toneCurve`: `off`, `reinhard`, `aces`),
   exposure, paper white (how bright SDR white and UI show in HDR, 200 nits) and the display's peak brightness (1000
   nits). In SDR the curve maps into 0 to 1; in HDR scene color 1.0 shows at paper white and brighter colors roll off
   towards the peak. HDR windows tell their displays about the content (`VK_EXT_hdr_metadata`, where the GPU has it):
@@ -1773,7 +1806,7 @@ renderers above, following the scene's change logs and asset cache:
   `VisibilityBufferShading`, shadows, swapped with `port.replace`.
 - **Between fixed steps** (`sync.follow(clock)`): after each step of the world's clock the sync updates the scene's
   world transforms and captures the renderables the step moved; each frame draws them `clock.blend()` of the way from
-  their pose at the step before to the last step's, as `render.interpolation` says (GPU by default; syncs on resources
+  their pose at the step before to the last step's, as `render.interpolation` says (`gpu` by default, `gpu_precise`, `cpu`, `off`; syncs on resources
   given settings, as the assets plugin's are, follow it as it changes; `sync.interpolation(mode)` sets one by hand).
   On the GPU (`GpuScene.motion()`, an `InstanceMotion`) each moving instance has a pose in each of two buffers that turn
   over every frame with steps: a step uploads only its own pose (the step before's stays; both in a move's first step
@@ -2013,11 +2046,12 @@ audio.ui().play(CLICK);
 - **Outputs**: `SdlOutput` (the device's own format, a Java platform thread with MMCSS "Pro Audio" and a
   high-resolution timer on Windows, the queue kept at least a device buffer and a block deep, underruns counted and
   guarded), `NullOutput`, `OfflineOutput`.
-- **HRTF** (§2.9): with `audio.output` set to `HEADPHONES`, sounds marked `Spatial.HRTF` render binaurally, the 16
-  most audible (`audio.hrtf.voices`) through `HrtfSpatializer` (partitioned FFT convolution of minimum-phase filters
+- **HRTF** (§2.9): with `audio.output` set to `HEADPHONES`, sounds marked `Spatial.HRTF` render binaurally through
+  the spatializer `audio.spatializer` chooses (`Audio.SPATIALIZER`: `hrtf`, a game's own `Spatializer`, or `off`), the
+  16 most audible (`audio.spatializer.hrtf.voices`) through `HrtfSpatializer` (partitioned FFT convolution of minimum-phase filters
   interpolated between measured directions, cross-faded as sources move, a near field), the others panned. Sets are
   `.hrtf` files converted from SOFA at build time (`./gradlew :engine-audio:convertHrtf -Ptruesim.audio.sofa=...`);
-  `audio.hrtf.set` names one, else the built-in set plays: **SADIE II's KU100 (University of York, Apache License
+  `audio.spatializer.hrtf.set` names one, else the built-in set plays: **SADIE II's KU100 (University of York, Apache License
   2.0; Armstrong et al., Applied Sciences 8(11) 2029, 2018, doi:10.3390/app8112029)**, converted, with its licence
   and notice in `audio/src/main/resources/com/truesim/engine/audio/hrtf/`. Games crediting their audio middleware
   credit it there too (`Hrtf.credit()`).

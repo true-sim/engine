@@ -273,7 +273,7 @@ public final class SceneSync implements AutoCloseable {
         gpu.setMaterials(resources.materials()); // the resources' table: instances name its ids
         com.truesim.engine.settings.EngineSettings followed = resources.settings();
         if (followed != null) { // render.interpolation as the player sets it, switched at the next update
-            interpolation = followed.get(RenderSettings.INTERPOLATION);
+            interpolation = RenderSettings.interpolation(followed);
             layout();
             settingWatch = followed.onChange(RenderSettings.INTERPOLATION, () -> settingChanged = true);
             // render.changeList and its chunks as set, from the next update on
@@ -318,7 +318,7 @@ public final class SceneSync implements AutoCloseable {
         if (settingChanged) { // render.interpolation changed: the path switches at the frame boundary
             settingChanged = false;
             if (!byHand) {
-                switchTo(resources.settings().get(RenderSettings.INTERPOLATION));
+                switchTo(RenderSettings.interpolation(resources.settings()));
             }
         }
         long since = seen;

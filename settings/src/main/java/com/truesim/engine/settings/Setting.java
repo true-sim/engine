@@ -37,7 +37,12 @@ public final class Setting<T> {
         /** Free text. */
         TEXT,
         /** One of an enum's constants, or of named options. */
-        CHOICE
+        CHOICE,
+        /**
+         * The kind of technique chosen for a {@link TechniqueSlot}, by id, or {@code off}: the ids a store knows are
+         * its {@link Techniques#variants}.
+         */
+        TECHNIQUE
     }
 
     private final String name;
@@ -51,14 +56,15 @@ public final class Setting<T> {
     private final Number max;
     private final boolean live;
     private final List<String> options; // a choice among named options; null otherwise
+    private final List<String> formerly; // full names older settings files saved it under
 
     private Setting(String name, Kind kind, Class<?> type, T defaultValue, String description, Function<String, T> parse,
         Predicate<T> valid, Number min, Number max, boolean live) {
-        this(name, kind, type, defaultValue, description, parse, valid, min, max, live, null);
+        this(name, kind, type, defaultValue, description, parse, valid, min, max, live, null, List.of());
     }
 
     private Setting(String name, Kind kind, Class<?> type, T defaultValue, String description, Function<String, T> parse,
-        Predicate<T> valid, Number min, Number max, boolean live, List<String> options) {
+        Predicate<T> valid, Number min, Number max, boolean live, List<String> options, List<String> formerly) {
         if (name.isBlank() || !name.equals(name.strip()) || name.contains("=")) {
             throw new IllegalArgumentException("A setting's name is a word or dotted words: '" + name + "'");
         }
@@ -73,6 +79,7 @@ public final class Setting<T> {
         this.max = max;
         this.live = live;
         this.options = options;
+        this.formerly = formerly;
         if (!valid.test(defaultValue)) {
             throw new IllegalArgumentException(name + ": its default " + defaultValue + " is not allowed");
         }
@@ -116,7 +123,46 @@ public final class Setting<T> {
     public static Setting<String> choice(String name, String defaultValue, List<String> options, String description) {
         List<String> copy = List.copyOf(options);
         return new Setting<>(name, Kind.CHOICE, String.class, defaultValue, description, s -> option(copy, s),
-            copy::contains, null, null, true, copy);
+            copy::contains, null, null, true, copy, List.of());
+    }
+
+    /**
+     * The kind of technique chosen for a slot, by id ({@code "off"}: none): what {@link TechniqueSlot#setting()} holds.
+     * Any id of letters, digits, {@code _} and {@code -} is allowed; which name a kind is the store's
+     * {@link Techniques} decides when it is read, so an id no kind has any more (a mod removed) still loads, and is
+     * reported there.
+     */
+    public static Setting<String> technique(String name, String defaultValue, String description) {
+        return new Setting<>(name, Kind.TECHNIQUE, String.class, defaultValue, description, s -> s,
+            Setting::techniqueId, null, null, true);
+    }
+
+    /** Whether {@code id} is a technique's id or {@code off}: letters, digits, {@code _} and {@code -}. */
+    static boolean techniqueId(String id) {
+        if (id.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < id.length(); i++) {
+            char c = id.charAt(i);
+            if (!Character.isLetterOrDigit(c) && c != '_' && c != '-') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * This setting, reading the values older settings files saved under {@code names} (full names, under the same
+     * scope) where its own name holds none: a setting renamed keeps what players chose.
+     */
+    public Setting<T> formerly(String... names) {
+        return new Setting<>(name, kind, type, defaultValue, description, parse, valid, min, max, live, options,
+            List.of(names));
+    }
+
+    /** The names older settings files saved it under, read where its own holds nothing. */
+    public List<String> formerNames() {
+        return formerly;
     }
 
     private static String option(List<String> options, String text) {
@@ -130,7 +176,8 @@ public final class Setting<T> {
 
     /** This setting, taking effect only when what reads it is made again: not while running. */
     public Setting<T> restartNeeded() {
-        return new Setting<>(name, kind, type, defaultValue, description, parse, valid, min, max, false, options);
+        return new Setting<>(name, kind, type, defaultValue, description, parse, valid, min, max, false, options,
+            formerly);
     }
 
     public String name() {

@@ -16,12 +16,21 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
 import com.truesim.common.math.color.Color;
+import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
+import com.truesim.engine.graph.GraphBuilder;
+import com.truesim.engine.graph.Image;
+import com.truesim.engine.graph.ImageDesc;
+import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.render.materials.SpecularParameters;
 import com.truesim.engine.render.materials.UnlitParameters;
+import com.truesim.engine.settings.EngineSettings;
+import com.truesim.engine.settings.TechniqueConfig;
+import com.truesim.engine.settings.TechniqueConfig.Tunable;
+import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
@@ -30,7 +39,9 @@ import com.truesim.engine.vulkan.VulkanException;
 import com.truesim.engine.vulkan.VulkanInstance;
 import com.truesim.scene.assets.mesh.MeshData;
 import java.lang.foreign.ValueLayout;
+import java.util.List;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -96,7 +107,7 @@ class AmbientOcclusionTest {
         output = new ExternalImage("target", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
         pixels = GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-        graph.settings().set(AmbientOcclusion.RADIUS, RADIUS);
+        tune("radius", RADIUS);
     }
 
     @AfterEach
@@ -218,8 +229,8 @@ class AmbientOcclusionTest {
             floor(white);
             block(1, white, 0);
             main(above(), this::visibilityBuffer);
-            graph.settings().set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.RAYS)
-                .set(AmbientOcclusion.RAYS, 512).set(Denoiser.PASSES, 0).set(Denoiser.MAX_FRAMES, 1)
+            choose(AmbientOcclusion.RAYS).set(AmbientOcclusion.RAYS.setting("rays"), 512).set(Denoiser.PASSES, 0)
+                .set(Denoiser.MAX_FRAMES, 1)
                 .set(AmbientOcclusion.DEBUG, AmbientOcclusion.Show.OCCLUSION);
             float[] ao = frames(3);
             int row = SIZE / 2;
@@ -246,8 +257,8 @@ class AmbientOcclusionTest {
             scene.removeFrom(1);
             main(slanted(), this::visibilityBuffer);
             graph.settings().set(AmbientOcclusion.DEBUG, AmbientOcclusion.Show.OCCLUSION);
-            for (AmbientOcclusion.Mode mode : modes()) {
-                graph.settings().set(AmbientOcclusion.MODE, mode);
+            for (TechniqueKind<?, AmbientOcclusion, Technique> mode : modes()) {
+                choose(mode);
                 float[] ao = frames(4);
                 float least = 1;
                 for (int row = SIZE / 2 + 4; row < SIZE; row++) { // the floor, below the horizon
@@ -270,17 +281,17 @@ class AmbientOcclusionTest {
             floor(white);
             block(1, white, 0);
             main(slanted(), this::visibilityBuffer);
-            graph.settings().set(AmbientOcclusion.DEBUG, AmbientOcclusion.Show.OCCLUSION)
-                .set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.RAYS).set(AmbientOcclusion.RAYS, 512)
-                .set(Denoiser.PASSES, 0).set(Denoiser.MAX_FRAMES, 1);
+            graph.settings().set(AmbientOcclusion.DEBUG, AmbientOcclusion.Show.OCCLUSION);
+            choose(AmbientOcclusion.RAYS).set(AmbientOcclusion.RAYS.setting("rays"), 512).set(Denoiser.PASSES, 0)
+                .set(Denoiser.MAX_FRAMES, 1);
             float[] traced = frames(3);
             graph.settings().set(Denoiser.PASSES, 4).set(Denoiser.MAX_FRAMES, 30);
-            for (AmbientOcclusion.Mode mode : new AmbientOcclusion.Mode[] {AmbientOcclusion.Mode.GTAO,
-                AmbientOcclusion.Mode.BITMASK}) {
-                graph.settings().set(AmbientOcclusion.MODE, mode);
+            for (TechniqueKind<?, AmbientOcclusion, Technique> mode : List.of(AmbientOcclusion.GTAO,
+                AmbientOcclusion.BITMASK)) {
+                choose(mode);
                 float[] ao = frames(3);
                 save("traced", traced);
-                save(mode.name(), ao);
+                save(mode.id().toUpperCase(java.util.Locale.ROOT), ao);
                 double sum = 0;
                 int count = 0;
                 for (int i = 0; i < ao.length; i++) {
@@ -309,10 +320,11 @@ class AmbientOcclusionTest {
             floor(white);
             block(1, white, 0);
             main(slanted(), this::visibilityBuffer);
-            graph.settings().set(AmbientOcclusion.SPECULAR, false).set(AmbientOcclusion.BOUNCE, false);
-            graph.settings().set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.OFF);
+            tune("specular", false);
+            tune("bounce", false);
+            choose(null);
             float[] off = frames(3);
-            graph.settings().set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.BITMASK);
+            choose(AmbientOcclusion.BITMASK);
             float[] on = frames(3);
             int darker = 0;
             for (int i = 0; i < on.length; i++) {
@@ -322,9 +334,9 @@ class AmbientOcclusionTest {
             // Unlit surfaces take no light from around: their image stays as it was
             floor(unlit);
             block(1, unlit, 0);
-            graph.settings().set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.OFF);
+            choose(null);
             off = frames(3);
-            graph.settings().set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.BITMASK);
+            choose(AmbientOcclusion.BITMASK);
             on = frames(3);
             float most = 0;
             for (int i = 0; i < on.length; i++) {
@@ -334,10 +346,10 @@ class AmbientOcclusionTest {
             // Metal's reflections dim in the corner with specular occlusion
             floor(metal);
             block(1, metal, 0);
-            graph.settings().set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.OFF);
+            choose(null);
             off = frames(3);
-            graph.settings().set(AmbientOcclusion.SPECULAR, true).set(AmbientOcclusion.MODE,
-                AmbientOcclusion.Mode.BITMASK);
+            tune("specular", true);
+            choose(AmbientOcclusion.BITMASK);
             on = frames(3);
             darker = 0;
             for (int i = 0; i < on.length; i++) {
@@ -357,13 +369,14 @@ class AmbientOcclusionTest {
             floor(white);
             scene.removeFrom(1);
             main(slanted(), this::visibilityBuffer);
-            graph.settings().set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.OFF);
+            choose(null);
             float[] off = frames(3);
-            for (AmbientOcclusion.Mode mode : modes()) {
+            for (TechniqueKind<?, AmbientOcclusion, Technique> mode : modes()) {
                 // The diffuse light's replacement is exact; the specular occlusion's cone (its aperture from the
                 // occlusion, 90 degrees at 1) dims grazing reflections near the horizon a little
                 for (boolean specular : new boolean[] {false, true}) {
-                    graph.settings().set(AmbientOcclusion.MODE, mode).set(AmbientOcclusion.SPECULAR, specular);
+                    choose(mode);
+                    tune("specular", specular);
                     float[] on = frames(4);
                     float most = 0;
                     for (int i = 0; i < on.length; i++) {
@@ -385,8 +398,8 @@ class AmbientOcclusionTest {
             floor(white);
             block(1, white, 0);
             SceneView main = main(slanted(), this::visibilityBuffer);
-            graph.settings().set(AmbientOcclusion.DEBUG, AmbientOcclusion.Show.OCCLUSION)
-                .set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.BITMASK);
+            graph.settings().set(AmbientOcclusion.DEBUG, AmbientOcclusion.Show.OCCLUSION);
+            choose(AmbientOcclusion.BITMASK);
             float[] buffer = frames(3);
             main.port().replace(MeshletBenchmark.forward(main).clearColor(0, 0, 0));
             float[] forward = frames(3);
@@ -413,8 +426,8 @@ class AmbientOcclusionTest {
             floor(white);
             block(1, white, -50); // far away
             main(above(), this::visibilityBuffer);
-            graph.settings().set(AmbientOcclusion.DEBUG, AmbientOcclusion.Show.OCCLUSION)
-                .set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.RAYS).set(AmbientOcclusion.RAYS, 1);
+            graph.settings().set(AmbientOcclusion.DEBUG, AmbientOcclusion.Show.OCCLUSION);
+            choose(AmbientOcclusion.RAYS).set(AmbientOcclusion.RAYS.setting("rays"), 1);
             int row = SIZE / 2;
             int[] columns = new int[16];
             int found = 0;
@@ -425,7 +438,7 @@ class AmbientOcclusionTest {
                 }
             }
             for (Denoiser.Mode mode : Denoiser.Mode.values()) {
-                graph.settings().set(AmbientOcclusion.DENOISER, mode);
+                tune("denoiser", mode);
                 block(1, white, -50);
                 frames(40); // settled without it
                 block(1, white, 0);
@@ -457,10 +470,11 @@ class AmbientOcclusionTest {
             floor(white);
             block(1, white, 0);
             main(slanted(), this::visibilityBuffer);
-            for (AmbientOcclusion.Mode mode : modes()) {
+            for (TechniqueKind<?, AmbientOcclusion, Technique> mode : modes()) {
                 for (Denoiser.Mode denoiser : Denoiser.Mode.values()) {
-                    graph.settings().set(AmbientOcclusion.MODE, mode).set(AmbientOcclusion.DENOISER, denoiser)
-                        .set(AmbientOcclusion.TEMPORAL, true);
+                    choose(mode);
+                    tune("denoiser", denoiser);
+                    tune("temporal", true);
                     frames(3);
                     long builds = graph.builds();
                     for (int i = 0; i < 5; i++) {
@@ -479,6 +493,75 @@ class AmbientOcclusionTest {
         }
     }
 
+    /** A game's own kind of ambient occlusion's tunables: the grey it paints. */
+    record Grey(@Tunable(value = "the grey every pixel takes", min = 0, max = 1) float level)
+        implements TechniqueConfig {
+    }
+
+    /** A kind of ambient occlusion the engine does not have, registered as a game would. */
+    static final TechniqueKind<Grey, AmbientOcclusion, Technique> GREY = TechniqueKind.of(AmbientOcclusion.SLOT,
+        "test-grey", new Grey(0.5f), "every pixel grey", (ao, config) -> new GreyOcclusion(config));
+
+    /** {@link #GREY}'s technique: the scene's color cleared to its grey, read as frames record. */
+    record GreyOcclusion(Supplier<Grey> config) implements Technique {
+
+        @Override
+        public List<Key<?>> provides() {
+            return List.of(Keys.SPECULAR_OCCLUSION);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image color = g.modify(Keys.SCENE_COLOR);
+            Image specular = g.create("grey specular occlusion", ImageDesc.of(AmbientOcclusion.SPECULAR_FORMAT, 1, 1));
+            g.pass("grey").write(color, Access.TRANSFER_DST).write(specular, Access.TRANSFER_DST).record(ctx -> {
+                float grey = config.get().level();
+                ctx.clear(color.whole(), grey, grey, grey, 1);
+                ctx.clear(specular.whole(), 1, 1, 1, 1);
+            });
+            g.provide(Keys.SPECULAR_OCCLUSION, specular);
+        }
+    }
+
+    @Test
+    void aGamesOwnKindIsChosenThroughTheSettingsAsTheEnginesAre() {
+        try (Materials materials = new Materials(device, 8)) {
+            int white = materials.add(white());
+            scene.setMaterials(materials);
+            floor(white);
+            scene.removeFrom(1);
+            main(above(), this::visibilityBuffer);
+            float[] engine = frames(3);
+            EngineSettings settings = graph.settings();
+            settings.techniques().register(AmbientOcclusion.SLOT, GREY);
+            assertThat(settings.techniques().variants(AmbientOcclusion.SLOT)).contains(AmbientOcclusion.BITMASK, GREY);
+            settings.set(AmbientOcclusion.SLOT.setting(), "test-grey").set(GREY.setting("level"), 0.25f);
+            assertThat(farthest(frames(3), 0.25f)).as("the game's kind, at its level").isLessThanOrEqualTo(1 / 255f);
+            int builds = graph.builds();
+            settings.set(GREY.<Float>setting("level"), 0.75f); // read as frames record: no rebuild
+            assertThat(farthest(frames(2), 0.75f)).as("the level changed").isLessThanOrEqualTo(1 / 255f);
+            assertThat(graph.builds()).as("rebuilds for a tunable read as frames record").isEqualTo(builds);
+            // Saved and loaded again, as a settings file holds it
+            settings.load(settings.toMap());
+            assertThat(settings.toMap()).containsEntry("render.ao", "test-grey")
+                .containsEntry("render.ao.test-grey.level", "0.75");
+            assertThat(farthest(frames(2), 0.75f)).as("loaded").isLessThanOrEqualTo(1 / 255f);
+            // The engine's kind again: its image as before
+            AmbientOcclusion.SLOT.choose(settings, AmbientOcclusion.BITMASK);
+            assertThat(frames(3)).containsExactly(engine);
+            scene.setMaterials(null);
+        }
+    }
+
+    /** How far the pixel of {@code image} farthest from {@code value} is from it. */
+    private static float farthest(float[] image, float value) {
+        float most = 0;
+        for (float v : image) {
+            most = Math.max(most, Math.abs(v - value));
+        }
+        return most;
+    }
+
     /** The mean of {@code image} over {@code count} of {@code columns} in {@code row}. */
     private static double mean(float[] image, int row, int[] columns, int count) {
         double sum = 0;
@@ -488,11 +571,19 @@ class AmbientOcclusionTest {
         return sum / count;
     }
 
-    /** The modes the device runs: rays where it traces them. */
-    private AmbientOcclusion.Mode[] modes() {
-        return device.rayTracing()
-            ? new AmbientOcclusion.Mode[] {AmbientOcclusion.Mode.GTAO, AmbientOcclusion.Mode.BITMASK,
-                AmbientOcclusion.Mode.RAYS}
-            : new AmbientOcclusion.Mode[] {AmbientOcclusion.Mode.GTAO, AmbientOcclusion.Mode.BITMASK};
+    /** The engine's kinds the device runs: rays where it traces them. */
+    private List<TechniqueKind<?, AmbientOcclusion, Technique>> modes() {
+        return device.rayTracing() ? List.of(AmbientOcclusion.GTAO, AmbientOcclusion.BITMASK, AmbientOcclusion.RAYS)
+            : List.of(AmbientOcclusion.GTAO, AmbientOcclusion.BITMASK);
+    }
+
+    /** Chooses {@code kind} of ambient occlusion (null: off) in the graph's settings, which it returns. */
+    private EngineSettings choose(TechniqueKind<?, AmbientOcclusion, Technique> kind) {
+        return AmbientOcclusion.SLOT.choose(graph.settings(), kind);
+    }
+
+    /** Sets the tunable {@code field} to {@code value} in every kind of ambient occlusion having it. */
+    private void tune(String field, Object value) {
+        graph.settings().techniques().set(graph.settings(), AmbientOcclusion.SLOT, field, value);
     }
 }

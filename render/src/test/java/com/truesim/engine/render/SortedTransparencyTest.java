@@ -22,6 +22,7 @@ import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.materials.IorParameters;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
+import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
@@ -262,7 +263,7 @@ class SortedTransparencyTest {
                         String what = path + (s == 0 ? ", forward" : ", visibility buffer")
                             + (blueMaterial == blueApart ? ", blue in a shading bin apart" : "");
                         // Red in front, blue behind; then the other way round
-                        graph.settings().set(Transparency.MODE, Transparency.Mode.SORTED);
+                        Transparency.SLOT.choose(graph.settings(), Transparency.SORTED);
                         scene.set(0, quad, redGlass, 0, 0, -2, 0, 0, 0, 1, 2, 2, 2);
                         scene.set(1, quad, blueMaterial, 0, 0, -3, 0, 0, 0, 1, 3, 3, 3);
                         frames();
@@ -273,7 +274,7 @@ class SortedTransparencyTest {
                         assertThat(error(over(red, blue))).as("%s: blue over red", what).isLessThanOrEqualTo(3);
                         int[] sortedBlueOverRed = channels(pixels, CENTER);
                         // Weighted: the same either way (order-independent), off by about 46 of 255 from both
-                        graph.settings().set(Transparency.MODE, Transparency.Mode.WEIGHTED);
+                        Transparency.SLOT.choose(graph.settings(), Transparency.WEIGHTED);
                         frames();
                         int[] weighted = channels(pixels, CENTER);
                         double weightedError = error(over(red, blue));
@@ -482,8 +483,9 @@ class SortedTransparencyTest {
                 new SortedTransparency(meshlets, main), new WeightedBlendedTransparency(meshlets, main),
                 new ChosenTransparency(meshlets, main));
             for (Technique way : ways) {
-                for (Transparency.Mode mode : Transparency.Mode.values()) {
-                    graph.settings().set(Transparency.MODE, mode);
+                for (TechniqueKind<?, ChosenTransparency, Technique> mode : List.of(Transparency.SORTED,
+                    Transparency.WEIGHTED, Transparency.OPAQUE)) {
+                    Transparency.SLOT.choose(graph.settings(), mode);
                     main.port().remove(Transparency.ID).add(way);
                     frames();
                     String what = way.getClass().getSimpleName() + ", " + mode;
@@ -491,11 +493,11 @@ class SortedTransparencyTest {
                     assertThat(corner[0]).as("%s: the red sky", what).isGreaterThan(200);
                     int[] center = channels(pixels, CENTER);
                     boolean opaque = way instanceof OpaqueTransparency
-                        || way instanceof ChosenTransparency && mode == Transparency.Mode.OPAQUE;
+                        || way instanceof ChosenTransparency && mode == Transparency.OPAQUE;
                     if (opaque) {
                         assertThat(center[0]).as("%s: the glass covers the sky", what).isLessThan(30);
                     } else if (way instanceof SortedTransparency
-                        || way instanceof ChosenTransparency && mode == Transparency.Mode.SORTED) {
+                        || way instanceof ChosenTransparency && mode == Transparency.SORTED) {
                         double[] expected = over(new float[] {corner[0] / 255f, 0, 0, 1}, blue);
                         assertThat(error(expected)).as("%s: the glass over the sky", what).isLessThanOrEqualTo(6);
                     } else {
@@ -525,7 +527,7 @@ class SortedTransparencyTest {
             SceneView main = main(camera);
             main.port().add(shadings().get(shadings().size() - 1).apply(main))
                 .add(new ChosenTransparency(SceneGeometry.meshlets(renderer), main)).output(Keys.SCENE_COLOR, output);
-            graph.settings().set(Transparency.MODE, Transparency.Mode.SORTED);
+            Transparency.SLOT.choose(graph.settings(), Transparency.SORTED);
             frames();
             long builds = graph.builds();
             for (int i = 0; i < 5; i++) {

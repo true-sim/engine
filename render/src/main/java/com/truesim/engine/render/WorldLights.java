@@ -22,6 +22,10 @@ import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.layout.WorldBuildPush;
 import com.truesim.engine.render.layout.WorldLightGridLayout;
 import com.truesim.engine.settings.Setting;
+import com.truesim.engine.settings.TechniqueConfig;
+import com.truesim.engine.settings.TechniqueConfig.Tunable;
+import com.truesim.engine.settings.TechniqueKind;
+import com.truesim.engine.settings.TechniqueSlot;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Commands;
 import com.truesim.engine.vulkan.Pipeline;
@@ -34,22 +38,25 @@ import org.lwjgl.system.MemoryStack;
  * space around {@code anchor}'s camera, built once a frame (a shared request: every view and technique asking for the
  * same lights and anchor gets one build) from {@code lights} and the lights the GPU wrote (particle lights). Its
  * buffer is lights/world.slang's {@code WorldLightGrid}; a point finds its cell, and outside the grid every light.
- * Two layouts trade off, {@link #MODE}:
+ * Two layouts trade off, the kinds of {@link #SLOT} ({@code render.gi.lights}):
  *
  * <ul>
- *   <li>{@link Mode#LISTS}: each cell lists the lights whose reach meets its box ({@link #SLOTS} at most, overflow
+ *   <li>{@link #LISTS}: each cell lists the lights whose reach meets its box ({@code slots} at most, overflow
  *   noted); a point sums them all, each with a shadow ray: exact, its cost growing with the lights near it;
- *   <li>{@link Mode#RESERVOIRS} (ReGIR, Boksansky, Jukarainen and Wyman, Ray Tracing Gems II, 2021): each cell keeps
- *   {@link #SLOTS} reservoirs, each a light resampled from {@link #CANDIDATES} drawn uniformly among all the lights by
+ *   <li>{@link #RESERVOIRS} (ReGIR, Boksansky, Jukarainen and Wyman, Ray Tracing Gems II, 2021): each cell keeps
+ *   {@code slots} reservoirs, each a light resampled from {@code candidates} drawn uniformly among all the lights by
  *   what it could give the cell's box (never 0 where its reach meets it); a point resamples its cell's reservoirs by
  *   what each light gives it and traces one shadow ray: unbiased, its cost constant in the light count, noisy. Only
- *   the cells hits used in the last {@link #KEEP} frames are built (a cell's state kept from frame to frame); a hit in
+ *   the cells hits used in the last {@code keep} frames are built (a cell's state kept from frame to frame); a hit in
  *   another sums every light, exactly, and marks its cell for the next frame.
  * </ul>
  *
- * <p>Directional lights reach every point: points sum them directly in both. The cells are {@link #CELL} units
- * across, {@link #CELLS} along each axis, the grid's corner snapped to the cell size so still cells stay. Allocates
+ * <p>Directional lights reach every point: points sum them directly in both. The cells are {@code cell} units
+ * across, {@code cells} along each axis, the grid's corner snapped to the cell size so still cells stay. Allocates
  * nothing per frame.
+ *
+ * <p>The layouts are the shaders': a game's kind of this slot makes one of the {@link Mode}s, with the tunables of
+ * that mode's kind (components of the same names).
  *
  * @param lights the scene's lights
  * @param anchor the camera the grid is centered on (the first view's, or a headset's center)
@@ -80,55 +87,90 @@ public record WorldLights(Lights lights, Camera anchor) implements Request<World
         RESERVOIRS
     }
 
-    /** The layout; the graph rebuilds when it changes. */
-    public static final Setting<Mode> MODE = Setting.choice("render.gi.lights", Mode.LISTS,
-        "how ray hits find their lights: lists per world cell, or reservoirs per cell");
-
-    /** The cells' size, in world units. */
-    public static final Setting<Float> CELL = Setting.decimal("render.gi.lights.cell", 4, 0.25f, 1024,
-        "the size of a world light cell, in metres");
-
-    /** Cells along each axis. */
-    public static final Setting<Integer> CELLS = Setting.integer("render.gi.lights.cells", 32, 1, 256,
-        "world light cells along each axis");
-
-    /** Lights a cell lists, or reservoirs it keeps. */
-    public static final Setting<Integer> SLOTS = Setting.integer("render.gi.lights.slots", 32, 1, 1024,
-        "lights each world light cell lists, or reservoirs it keeps");
-
-    /** Lights drawn for each reservoir. */
-    public static final Setting<Integer> CANDIDATES = Setting.integer("render.gi.lights.candidates", 16, 1, 1024,
-        "candidate lights drawn for each world light reservoir");
+    /** The grid's layout, a kind's id; the graph rebuilds when it or its tunables change. */
+    public static final TechniqueSlot<Void, Mode> SLOT = TechniqueSlot.of("render.gi.lights", "lists", false,
+        "how ray hits find their lights: lists per world cell, or reservoirs per cell",
+        techniques -> techniques.register(WorldLights.SLOT, WorldLights.LISTS)
+            .register(WorldLights.SLOT, WorldLights.RESERVOIRS));
 
     /**
-     * Reservoirs: frames a cell is still built after hits last used it. Cells are built only where hits were; a hit
-     * in a cell not built sums every light (exact, slower), so a cell kept a while spares hits that come and go.
+     * The lists' tunables.
+     *
+     * @param cell the cells' size, in world units
+     * @param cells cells along each axis
+     * @param slots lights a cell lists
      */
-    public static final Setting<Integer> KEEP = Setting.integer("render.gi.lights.keep", 8, 1, 1 << 20,
-        "frames a world light cell keeps its reservoirs built after hits last used it");
+    public record Lists(
+        @Tunable(value = "the size of a world light cell, in metres", min = 0.25, max = 1024,
+            formerly = "render.gi.lights.cell") float cell,
+        @Tunable(value = "world light cells along each axis", min = 1, max = 256,
+            formerly = "render.gi.lights.cells") int cells,
+        @Tunable(value = "lights each world light cell lists", min = 1, max = 1024,
+            formerly = "render.gi.lights.slots") int slots) implements TechniqueConfig {
+    }
 
-    /** Its settings. */
-    public static final List<Setting<?>> ALL = List.of(MODE, CELL, CELLS, SLOTS, CANDIDATES, KEEP);
+    /**
+     * The reservoirs' tunables.
+     *
+     * @param cell the cells' size, in world units
+     * @param cells cells along each axis
+     * @param slots reservoirs a cell keeps
+     * @param candidates lights drawn for each reservoir
+     * @param keep frames a cell is still built after hits last used it. Cells are built only where hits were; a hit in
+     *     a cell not built sums every light (exact, slower), so a cell kept a while spares hits that come and go.
+     */
+    public record Reservoirs(
+        @Tunable(value = "the size of a world light cell, in metres", min = 0.25, max = 1024,
+            formerly = "render.gi.lights.cell") float cell,
+        @Tunable(value = "world light cells along each axis", min = 1, max = 256,
+            formerly = "render.gi.lights.cells") int cells,
+        @Tunable(value = "reservoirs each world light cell keeps", min = 1, max = 1024,
+            formerly = "render.gi.lights.slots") int slots,
+        @Tunable(value = "candidate lights drawn for each world light reservoir", min = 1, max = 1024,
+            formerly = "render.gi.lights.candidates") int candidates,
+        @Tunable(value = "frames a world light cell keeps its reservoirs built after hits last used it", min = 1,
+            max = 1 << 20, formerly = "render.gi.lights.keep") int keep) implements TechniqueConfig {
+    }
 
+    /** Each cell's lights listed, all summed: exact. The default. */
+    public static final TechniqueKind<Lists, Void, Mode> LISTS = TechniqueKind.of(SLOT, "lists", new Lists(4, 32, 32),
+        "each cell's lights listed, all summed: exact", (context, config) -> Mode.LISTS);
+    /** Reservoirs per cell resampled (ReGIR): unbiased, constant cost, noisy. */
+    public static final TechniqueKind<Reservoirs, Void, Mode> RESERVOIRS = TechniqueKind.of(SLOT, "reservoirs",
+        new Reservoirs(4, 32, 32, 16, 8), "reservoirs per cell resampled (ReGIR): unbiased, constant cost, noisy",
+        (context, config) -> Mode.RESERVOIRS);
+
+    /** Its settings: the choice and the kinds' tunables. */
+    public static final List<Setting<?>> ALL = all();
 
     static final int HEADER_BYTES = 128;
-    static final int LISTS = 1;      // world.slang's WORLD_LISTS
-    static final int RESERVOIRS = 2; // and WORLD_RESERVOIRS
+    static final int LAYOUT_LISTS = 1;      // world.slang's WORLD_LISTS
+    static final int LAYOUT_RESERVOIRS = 2; // and WORLD_RESERVOIRS
 
     public WorldLights {
         Objects.requireNonNull(lights, "lights");
         Objects.requireNonNull(anchor, "anchor");
     }
 
+    private static List<Setting<?>> all() {
+        List<Setting<?>> all = new java.util.ArrayList<>();
+        all.add(SLOT.setting());
+        all.addAll(LISTS.settings());
+        all.addAll(RESERVOIRS.settings());
+        return List.copyOf(all);
+    }
+
     @Override
     @AllowAllocation("building the graph, when it changes")
     public Grid build(GraphBuilder g) {
-        Mode mode = g.setting(MODE);
-        float cell = g.setting(CELL);
-        int cells = g.setting(CELLS);
-        int slots = g.setting(SLOTS);
-        int candidates = g.setting(CANDIDATES);
-        int keep = g.setting(KEEP);
+        TechniqueKind<?, Void, Mode> kind = g.technique(SLOT);
+        Mode mode = kind.create(null, null);
+        float cell = g.setting(kind.<Float>setting("cell"));
+        int cells = g.setting(kind.<Integer>setting("cells"));
+        int slots = g.setting(kind.<Integer>setting("slots"));
+        boolean lists = mode == Mode.LISTS; // lists draw no candidates and keep no cells
+        int candidates = lists ? RESERVOIRS.defaults().candidates() : g.setting(kind.<Integer>setting("candidates"));
+        int keep = lists ? RESERVOIRS.defaults().keep() : g.setting(kind.<Integer>setting("keep"));
         float cutoff = g.setting(ClusteredLights.CUTOFF);
         for (Key<?> key : List.copyOf(lights.writers())) {
             g.optional(key); // the lights the GPU writes: this frame's
@@ -169,7 +211,7 @@ public record WorldLights(Lights lights, Camera anchor) implements Request<World
         long header = ctx.address(grid);
         try (MemoryStack stack = stackPush()) {
             long data = stack.ncalloc(8, 1, HEADER_BYTES);
-            memPutInt(data + WorldLightGridLayout.LAYOUT, mode == Mode.LISTS ? LISTS : RESERVOIRS);
+            memPutInt(data + WorldLightGridLayout.LAYOUT, mode == Mode.LISTS ? LAYOUT_LISTS : LAYOUT_RESERVOIRS);
             memPutInt(data + WorldLightGridLayout.CELLS, cells);
             memPutInt(data + WorldLightGridLayout.SLOTS, slots);
             memPutInt(data + WorldLightGridLayout.CANDIDATES, candidates);

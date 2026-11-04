@@ -144,7 +144,7 @@ public final class GiHarness implements AutoCloseable {
     /**
      * Sets up scene {@code name} in {@code state} for the real-time image with global illumination: the visibility
      * buffer, the sun's shadows traced inline, the environment, ambient occlusion and the probe volume, each as the
-     * graph's settings choose ({@link AmbientOcclusion#MODE}, {@link ProbeVolumeLighting#MODE}); then
+     * graph's settings choose ({@link AmbientOcclusion#SLOT}, {@link ProbeVolumeLighting#SLOT}); then
      * {@link #render} draws frames of it and {@link #state} changes its state in place.
      */
     public void realtime(String name, int state) {

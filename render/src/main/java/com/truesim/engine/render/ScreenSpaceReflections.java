@@ -17,32 +17,44 @@ import com.truesim.engine.render.blocks.DepthPyramid;
 import com.truesim.engine.render.layout.ReflectPush;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
+import com.truesim.engine.settings.TechniqueConfig;
+import com.truesim.engine.settings.TechniqueConfig.Tunable;
+import com.truesim.engine.settings.TechniqueKind;
+import com.truesim.engine.settings.TechniqueSlot;
+import com.truesim.engine.settings.Techniques;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
+import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
- * Screen-space reflections of a view's opaque surfaces, as {@link #MODE} chooses: each pixel's mirror ray followed
+ * Screen-space reflections of a view's opaque surfaces, as the kind chosen for {@link #SLOT} ({@code render.ssr})
+ * finds them: each pixel's mirror ray followed
  * through the depth in screen space, the scene's color where it meets a surface replacing the environment's reflection
  * that shading added along the same direction ({@link SurfaceOutputs}: the normal, roughness and the reflectance that
  * term was weighed by), so energy stays as shading had it. Rough surfaces take the scene blurred by the footprint of
- * their GGX lobe's cone where it meets it (a level of a mip chain of the scene's color); above
- * {@link #ROUGHNESS_CUTOFF}, the environment alone. Where the ray leaves the image, passes the maximum distance, finds
- * nothing or only surfaces it passes behind ({@link #THICKNESS}), the environment's reflection stays, fading in
- * smoothly at the image's edges ({@link #EDGE_FADE}), the distance's end and the cutoff. No history: each frame's
+ * their GGX lobe's cone where it meets it (a level of a mip chain of the scene's color); above the
+ * {@code roughnessCutoff}, the environment alone. Where the ray leaves the image, passes the maximum distance, finds
+ * nothing or only surfaces it passes behind ({@code thickness}), the environment's reflection stays, fading in
+ * smoothly at the image's edges ({@code edgeFade}), the distance's end and the cutoff. No history: each frame's
  * reflections are its own (no latency, no ghosting).
  *
- * <p>It modifies {@link Keys#SCENE_COLOR} at {@link Anchor#OPAQUE}, after the background ({@link SkyBackground}), before
- * transparency: blended and transmissive surfaces get none, and are not seen in reflections. Per view (each eye, each
- * window), within the view's render region (dynamic resolution); one per view under {@link #ID}, as transparency is,
- * where ray-traced reflections will be another mode (#379). Needs a shading technique providing the surface outputs
- * ({@link ClusteredForwardShading}, {@link VisibilityBufferShading}), which writes them only while this asks
- * ({@link #MODE} not {@link Mode#OFF}).
+ * <p>It modifies {@link Keys#SCENE_COLOR} at {@link Anchor#OPAQUE}, after the background ({@link SkyBackground}),
+ * before transparency: blended and transmissive surfaces get none, and are not seen in reflections. Per view (each eye,
+ * each window), within the view's render region (dynamic resolution); one per view under {@link #ID}, as transparency
+ * is, where ray-traced reflections will be another kind (#379). Needs a shading technique providing the surface outputs
+ * ({@link ClusteredForwardShading}, {@link VisibilityBufferShading}), which writes them only while this asks (the slot
+ * not off).
+ *
+ * <p>A game's own kind ({@link Techniques#register}) makes a {@link Technique} built in this one's place, given this
+ * one ({@link #view()}): it modifies {@link Keys#SCENE_COLOR} and reads {@link Keys#SCENE_DEPTH} as this one does.
  *
  * <pre>{@code
  * view.port().add(new ScreenSpaceReflections(view));
- * graph.settings().set(ScreenSpaceReflections.MODE, ScreenSpaceReflections.Mode.HIZ);
+ * ScreenSpaceReflections.SLOT.choose(graph.settings(), ScreenSpaceReflections.LINEAR);   // render.ssr=linear
  * }</pre>
  */
 public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.Consumer {
@@ -50,13 +62,11 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
     /** The id of a view's reflections. */
     public static final Id<ScreenSpaceReflections> ID = Id.of("truesim.reflections", ScreenSpaceReflections.class);
 
-    /** How reflections are found ({@link #MODE}). */
-    public enum Mode {
-        /** None: the environment's reflections alone, and no surface outputs written for them. */
-        OFF,
+    /** How the engine's kinds march: the shader's variants. */
+    enum Mode {
         /**
          * A march in equal steps through the depth, the crossing refined by bisection: passes behind surfaces thicker
-         * than the thickness, finding what is behind them; its cost grows with {@link #MAX_STEPS}.
+         * than the thickness, finding what is behind them; its cost grows with the maximum of steps.
          */
         LINEAR,
         /**
@@ -67,40 +77,56 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
     }
 
     /**
-     * How reflections are found; the graph rebuilds when it changes. {@link Mode#HIZ} by default: under half of
-     * {@link Mode#LINEAR}'s time at the same maximum of steps (README, the reflections benchmark).
+     * Where screen-space reflections plug in: {@code render.ssr}, its kind chosen by id; the graph rebuilds when it
+     * changes. {@link #HIZ} by default: under half of {@link #LINEAR}'s time at the same maximum of steps (README, the
+     * reflections benchmark).
      */
-    public static final Setting<Mode> MODE = Setting.choice("render.ssr", Mode.HIZ,
-        "screen-space reflections: off, a linear march, or a hierarchical one over the depth pyramid");
-    /** Steps a ray takes at most (LINEAR: equal steps; HIZ: cells visited). Read as frames record. */
-    public static final Setting<Integer> MAX_STEPS = Setting.integer("render.ssr.maxSteps", 64, 4, 1024,
-        "steps a screen-space reflection ray takes at most");
-    /**
-     * How thick surfaces are taken to be, in meters along their normal (seen at a grazing angle, a ray behind one by up
-     * to four times this along the view still meets it): a ray within it of the surface it went behind meets that
-     * surface, fading out to twice it, past which the ray passes behind. Read as frames record.
-     */
-    public static final Setting<Float> THICKNESS = Setting.decimal("render.ssr.thickness", 0.25f, 0.001f, 1000,
-        "how thick surfaces are taken to be along their normal, in meters");
-    /** How far rays go, in meters; reflections fade over their last fifth. Read as frames record. */
-    public static final Setting<Float> MAX_DISTANCE = Setting.decimal("render.ssr.maxDistance", 100, 0.01f, 1_000_000,
-        "how far screen-space reflection rays go, in meters");
-    /**
-     * The perceptual roughness from which surfaces take the environment's reflection alone, fading from three quarters
-     * of it. Read as frames record.
-     */
-    public static final Setting<Float> ROUGHNESS_CUTOFF = Setting.decimal("render.ssr.roughnessCutoff", 0.6f, 0, 1,
-        "roughness from which surfaces reflect the environment alone");
-    /** Of the image's size, along each edge: hits there fade into the environment. Read as frames record. */
-    public static final Setting<Float> EDGE_FADE = Setting.decimal("render.ssr.edgeFade", 0.1f, 0.001f, 0.5f,
-        "how far in from the image's edges screen-space reflections fade, of its size");
-    /** The resolution rays are traced at, of the view's; the graph rebuilds when it changes. */
-    public static final Setting<Float> RESOLUTION_SCALE = Setting.decimal("render.ssr.resolutionScale", 1, 0.25f, 1,
-        "the resolution screen-space reflection rays are traced at, of the view's");
+    public static final TechniqueSlot<ScreenSpaceReflections, Technique> SLOT = TechniqueSlot.of("render.ssr", "hiz",
+        true, "screen-space reflections: off, a linear march, or a hierarchical one over the depth pyramid",
+        techniques -> techniques.register(ScreenSpaceReflections.SLOT, ScreenSpaceReflections.LINEAR)
+            .register(ScreenSpaceReflections.SLOT, ScreenSpaceReflections.HIZ));
 
-    /** Every setting of screen-space reflections. */
-    public static final List<Setting<?>> ALL = List.of(MODE, MAX_STEPS, THICKNESS, MAX_DISTANCE, ROUGHNESS_CUTOFF,
-        EDGE_FADE, RESOLUTION_SCALE);
+    /**
+     * The engine's kinds' tunables: {@code resolutionScale} is read when the graph builds (it rebuilds when it
+     * changes), the others as frames record.
+     *
+     * @param maxSteps steps a ray takes at most (linear: equal steps; hiz: cells visited)
+     * @param thickness how thick surfaces are taken to be, in meters along their normal (seen at a grazing angle, a ray
+     *     behind one by up to four times this along the view still meets it): a ray within it of the surface it went
+     *     behind meets that surface, fading out to twice it, past which the ray passes behind
+     * @param maxDistance how far rays go, in meters; reflections fade over their last fifth
+     * @param roughnessCutoff the perceptual roughness from which surfaces take the environment's reflection alone,
+     *     fading from three quarters of it
+     * @param edgeFade of the image's size, along each edge: hits there fade into the environment
+     * @param resolutionScale the resolution rays are traced at, of the view's
+     */
+    public record March(
+        @Tunable(value = "steps a screen-space reflection ray takes at most", min = 4, max = 1024,
+            formerly = "render.ssr.maxSteps") int maxSteps,
+        @Tunable(value = "how thick surfaces are taken to be along their normal, in meters", min = 0.001, max = 1000,
+            formerly = "render.ssr.thickness") float thickness,
+        @Tunable(value = "how far screen-space reflection rays go, in meters", min = 0.01, max = 1_000_000,
+            formerly = "render.ssr.maxDistance") float maxDistance,
+        @Tunable(value = "roughness from which surfaces reflect the environment alone", min = 0, max = 1,
+            formerly = "render.ssr.roughnessCutoff") float roughnessCutoff,
+        @Tunable(value = "how far in from the image's edges screen-space reflections fade, of its size", min = 0.001,
+            max = 0.5, formerly = "render.ssr.edgeFade") float edgeFade,
+        @Tunable(value = "the resolution screen-space reflection rays are traced at, of the view's", min = 0.25,
+            max = 1, formerly = "render.ssr.resolutionScale") float resolutionScale) implements TechniqueConfig {
+    }
+
+    /** The defaults of both engine kinds. */
+    private static final March MARCH = new March(64, 0.25f, 100, 0.6f, 0.1f, 1);
+
+    /** A march in equal steps through the depth, refined by bisection; finds what is behind thick surfaces. */
+    public static final TechniqueKind<March, ScreenSpaceReflections, Technique> LINEAR = TechniqueKind.of(SLOT,
+        "linear", MARCH, "a march in equal steps through the depth", (ssr, config) -> ssr.new Engine(Mode.LINEAR));
+    /** The hierarchical march over a nearest-depth pyramid: long rays in few steps. The default. */
+    public static final TechniqueKind<March, ScreenSpaceReflections, Technique> HIZ = TechniqueKind.of(SLOT, "hiz",
+        MARCH, "a hierarchical march over the depth pyramid", (ssr, config) -> ssr.new Engine(Mode.HIZ));
+
+    /** Every setting of screen-space reflections: the choice and the engine's kinds' tunables. */
+    public static final List<Setting<?>> ALL = all();
 
     /** The hit image's format: where (0 to 1 of the region), how far (of the maximum distance), how trusted. */
     static final Format HITS_FORMAT = Format.R16G16B16A16_UNORM;
@@ -108,10 +134,24 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
     private final SceneView view;
     private final ReflectPush tracePush = new ReflectPush(); // one per pass: passes may record at once
     private final ReflectPush compositePush = new ReflectPush();
+    private final Map<TechniqueKind<?, ?, ?>, Technique> made = new IdentityHashMap<>(); // per kind, once chosen
 
     /** Reflections in {@code view}; added to its port. */
     public ScreenSpaceReflections(SceneView view) {
         this.view = Objects.requireNonNull(view, "view");
+    }
+
+    private static List<Setting<?>> all() {
+        List<Setting<?>> all = new ArrayList<>();
+        all.add(SLOT.setting());
+        all.addAll(LINEAR.settings());
+        all.addAll(HIZ.settings());
+        return List.copyOf(all);
+    }
+
+    /** The view it works in. */
+    public SceneView view() {
+        return view;
     }
 
     @Override
@@ -141,21 +181,56 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
         return Order.at(Anchor.OPAQUE).after(SkyBackground.ID);
     }
 
-    /** While {@link #MODE} is not {@link Mode#OFF}. */
+    /** While the slot is not off. */
     @Override
     @AllowAllocation("building the graph, when it changes")
     public boolean wantsSurfaces(GraphBuilder g) {
-        return g.setting(MODE) != Mode.OFF;
+        return g.technique(SLOT) != null;
     }
 
+    /** The chosen kind's technique: built in this one's place. */
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
         view.checkBuilding(g, this);
-        Mode mode = g.setting(MODE);
-        if (mode == Mode.OFF) {
-            return;
+        TechniqueKind<?, ScreenSpaceReflections, Technique> kind = g.technique(SLOT);
+        if (kind != null) {
+            made.computeIfAbsent(kind, k -> make(kind)).build(g);
         }
+    }
+
+    /** {@code kind}'s technique, its config read from the view's graph's settings as they are when read. */
+    @AllowAllocation("building the graph, when it changes")
+    private <C extends Record & TechniqueConfig> Technique make(
+        TechniqueKind<C, ScreenSpaceReflections, Technique> kind) {
+        return kind.create(this, () -> kind.config(view.port().settings()));
+    }
+
+    /** One of the engine's kinds: this technique's own passes, marching as {@code mode} does. */
+    private final class Engine implements Technique {
+
+        private final Mode mode;
+
+        Engine(Mode mode) {
+            this.mode = mode;
+        }
+
+        @Override
+        public List<Key<?>> provides() {
+            return List.of();
+        }
+
+        @Override
+        @AllowAllocation("building the graph, when it changes")
+        public void build(GraphBuilder g) {
+            buildEngine(g, mode);
+        }
+    }
+
+    /** The engine's kinds' passes. */
+    @AllowAllocation("building the graph, when it changes")
+    private void buildEngine(GraphBuilder g, Mode mode) {
+        TechniqueKind<March, ScreenSpaceReflections, Technique> kind = mode == Mode.HIZ ? HIZ : LINEAR;
         Image color = g.modify(Keys.SCENE_COLOR);
         Image depth = g.read(Keys.SCENE_DEPTH);
         Image normal = g.require(Keys.SURFACE_NORMAL);
@@ -163,13 +238,12 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
         Image reflectance = g.require(Keys.SURFACE_REFLECTANCE);
         IndirectInputs.Set indirect = IndirectInputs.of(g);
         // Ambient occlusion's specular occlusion, where it dimmed the environment's reflection
-        Image occlusion = g.setting(AmbientOcclusion.MODE) != AmbientOcclusion.Mode.OFF
-            ? g.optional(Keys.SPECULAR_OCCLUSION) : null;
+        Image occlusion = g.technique(AmbientOcclusion.SLOT) != null ? g.optional(Keys.SPECULAR_OCCLUSION) : null;
         ViewPort region = g.view();
         boolean hierarchical = mode == Mode.HIZ;
         Image pyramid = hierarchical ? g.request(new DepthPyramid(depth, region, true)) : null;
         Image chain = SceneBehind.chain(g, color, region, "reflected scene");
-        float scale = g.setting(RESOLUTION_SCALE);
+        float scale = g.setting(kind.<Float>setting("resolutionScale"));
         Image hits = g.create("reflection hits", ImageDesc.of(HITS_FORMAT,
             Math.max(1, (int) Math.ceil(color.width() * scale)), Math.max(1, (int) Math.ceil(color.height() * scale))));
         int[] constants = {hierarchical ? 1 : 0, indirect != null ? 1 : 0, occlusion != null ? 1 : 0};
@@ -189,8 +263,8 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
             tracing.region(region);
         }
         tracing.record(ctx -> {
-            push(tracePush, ctx, settings, color, depth, normal, material, reflectance, null, pyramid, hits, scale,
-                null); // the scene and the environment are the composite's
+            push(tracePush, ctx, kind.config(settings), color, depth, normal, material, reflectance, null, pyramid,
+                hits, scale, null); // the scene and the environment are the composite's
             int width = ctx.regionWidth(hits);
             int height = ctx.regionHeight(hits);
             ctx.dispatch(trace, tracePush, (width + 7) / 8, (height + 7) / 8, 1);
@@ -210,8 +284,8 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
             compositing.region(region);
         }
         compositing.record(ctx -> {
-            push(compositePush, ctx, settings, color, depth, normal, material, reflectance, chain, null, hits,
-                scale, indirect).occlusion(occlusion == null ? 0 : ctx.storage(occlusion));
+            push(compositePush, ctx, kind.config(settings), color, depth, normal, material, reflectance, chain, null,
+                hits, scale, indirect).occlusion(occlusion == null ? 0 : ctx.storage(occlusion));
             int width = ctx.regionWidth(color);
             int height = ctx.regionHeight(color);
             ctx.dispatch(composite, compositePush, (width + 7) / 8, (height + 7) / 8, 1);
@@ -219,10 +293,10 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
     }
 
     /**
-     * reflect.slang's push block, into {@code push}, as the frame records: the scene's chain and color with
-     * {@code chain} (the composite), the pyramid where given (the trace). Allocates nothing.
+     * reflect.slang's push block, into {@code push}, as the frame records, with the kind's tunables: the scene's chain
+     * and color with {@code chain} (the composite), the pyramid where given (the trace). Allocates nothing.
      */
-    private ReflectPush push(ReflectPush push, PassContext ctx, EngineSettings settings, Image color, Image depth,
+    private ReflectPush push(ReflectPush push, PassContext ctx, March config, Image color, Image depth,
         Image normal, Image material, Image reflectance, Image chain, Image pyramid, Image hits, float scale,
         IndirectInputs.Set indirect) {
         int width = ctx.regionWidth(color);
@@ -242,11 +316,11 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
             .size(width | height << 16)
             .hitSize(ctx.regionWidth(hits) | ctx.regionHeight(hits) << 16)
             .imageSize(color.width() | color.height() << 16)
-            .maxSteps(settings.get(MAX_STEPS))
-            .thickness(settings.get(THICKNESS))
-            .maxDistance(settings.get(MAX_DISTANCE))
-            .cutoff(settings.get(ROUGHNESS_CUTOFF))
-            .edgeFade(settings.get(EDGE_FADE))
+            .maxSteps(config.maxSteps())
+            .thickness(config.thickness())
+            .maxDistance(config.maxDistance())
+            .cutoff(config.roughnessCutoff())
+            .edgeFade(config.edgeFade())
             .scale(scale);
     }
 }

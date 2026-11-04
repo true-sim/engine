@@ -82,86 +82,64 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
     EnvironmentMaps.Quality quality, SceneView anchor) implements Request<ProbeVolume.Volume> {
 
     /** Cascades, each twice as far apart as the one before; the graph rebuilds. */
-    public static final Setting<Integer> CASCADES = Setting.integer("render.gi.volume.cascades", 3, 1, 6,
-        "cascades of the probe volume");
+    public static final Setting<Integer> CASCADES = ProbeVolumeLighting.PROBES.setting("cascades");
     /** Probes along each horizontal axis of a cascade; the graph rebuilds. */
-    public static final Setting<Integer> PROBES = Setting.integer("render.gi.volume.probes", 16, 2, 32,
-        "probes along each horizontal axis of a probe volume cascade");
+    public static final Setting<Integer> PROBES = ProbeVolumeLighting.PROBES.setting("probes");
     /** Probes along the vertical axis of a cascade; the graph rebuilds. */
-    public static final Setting<Integer> PROBES_UP = Setting.integer("render.gi.volume.probesUp", 8, 2, 32,
-        "probes along the vertical axis of a probe volume cascade");
+    public static final Setting<Integer> PROBES_UP = ProbeVolumeLighting.PROBES.setting("probesUp");
     /** The first cascade's spacing, in meters; the graph rebuilds. */
-    public static final Setting<Float> SPACING = Setting.decimal("render.gi.volume.spacing", 1, 0.05f, 1000,
-        "the spacing of the probe volume's first cascade, in meters");
+    public static final Setting<Float> SPACING = ProbeVolumeLighting.PROBES.setting("spacing");
     /** Rays per probe and update; the graph rebuilds. */
-    public static final Setting<Integer> RAYS = Setting.integer("render.gi.volume.rays", 128, 32, 256,
-        "rays per probe and update");
+    public static final Setting<Integer> RAYS = ProbeVolumeLighting.PROBES.setting("rays");
     /** Of them, a fixed set never turned, for relocation and classification (at most half); the graph rebuilds. */
-    public static final Setting<Integer> FIXED_RAYS = Setting.integer("render.gi.volume.fixedRays", 32, 8, 128,
-        "rays per probe in a fixed set, for relocation and classification");
+    public static final Setting<Integer> FIXED_RAYS = ProbeVolumeLighting.PROBES.setting("fixedRays");
     /** The share of probes updated each frame, in turns (1: all; invalidated probes always). */
-    public static final Setting<Float> BUDGET = Setting.decimal("render.gi.volume.budget", 1, 0.01f, 1,
-        "the share of probes updated each frame, in turns");
+    public static final Setting<Float> BUDGET = ProbeVolumeLighting.PROBES.setting("budget");
     /** Surfaces a probe ray passes through at most (holes, what blended surfaces let pass); the graph rebuilds. */
-    public static final Setting<Integer> LAYERS = Setting.integer("render.gi.volume.layers", 4, 1, 16,
-        "surfaces a probe ray may pass through, plus one");
+    public static final Setting<Integer> LAYERS = ProbeVolumeLighting.PROBES.setting("layers");
     /** A shaded point moves this far along its normal before it looks up probes, of the spacing. */
-    public static final Setting<Float> NORMAL_BIAS = Setting.decimal("render.gi.volume.normalBias", 0.25f, 0, 2,
-        "how far a shaded point moves along its normal before sampling probes, of their spacing");
+    public static final Setting<Float> NORMAL_BIAS = ProbeVolumeLighting.PROBES.setting("normalBias");
     /** And this far towards the viewer, of the spacing. */
-    public static final Setting<Float> VIEW_BIAS = Setting.decimal("render.gi.volume.viewBias", 0.25f, 0, 2,
-        "how far a shaded point moves towards the viewer before sampling probes, of their spacing");
+    public static final Setting<Float> VIEW_BIAS = ProbeVolumeLighting.PROBES.setting("viewBias");
     /** Of a cascade's probes from its edge: where it blends into the next one. */
-    public static final Setting<Float> BLEND = Setting.decimal("render.gi.volume.blend", 0.2f, 0.01f, 0.5f,
-        "of a probe cascade from its edge, the part over which it blends into the next");
+    public static final Setting<Float> BLEND = ProbeVolumeLighting.PROBES.setting("blend");
     /** The longest distance a probe's moments hold, of its spacing. */
-    public static final Setting<Float> DEPTH_RANGE = Setting.decimal("render.gi.volume.depthRange", 1.5f, 0.5f, 100,
-        "the longest distance a probe's distance moments hold, of its spacing");
+    public static final Setting<Float> DEPTH_RANGE = ProbeVolumeLighting.PROBES.setting("depthRange");
     /** Probes move off surfaces near them. */
-    public static final Setting<Boolean> RELOCATE = Setting.bool("render.gi.volume.relocate", true,
-        "probes move off surfaces near them");
+    public static final Setting<Boolean> RELOCATE = ProbeVolumeLighting.PROBES.setting("relocate");
     /** Probes inside geometry are turned off. */
-    public static final Setting<Boolean> CLASSIFY = Setting.bool("render.gi.volume.classify", true,
-        "probes inside geometry are turned off");
+    public static final Setting<Boolean> CLASSIFY = ProbeVolumeLighting.PROBES.setting("classify");
     /** A probe's history holds at most this many updates: the lag of a still scene (design D3: 30). */
-    public static final Setting<Integer> MAX_FRAMES = Setting.integer("render.gi.response.maxFrames", 30, 1, 1024,
-        "updates a probe's history holds at most (the lag of a still scene)");
+    public static final Setting<Integer> MAX_FRAMES = ProbeVolumeLighting.PROBES.setting("maxFrames");
     /** A probe whose update disagrees with its history beyond its noise restarts it (changes nothing announced). */
-    public static final Setting<Boolean> ADAPTIVE = Setting.bool("render.gi.response.adaptive", true,
-        "a probe restarts its history where an update disagrees with it beyond its noise");
+    public static final Setting<Boolean> ADAPTIVE = ProbeVolumeLighting.PROBES.setting("adaptive");
     /** How many deviations of an update's noise a texel may differ by before its probe restarts. */
-    public static final Setting<Float> SENSITIVITY = Setting.decimal("render.gi.response.sensitivity", 4, 0.5f, 100,
-        "deviations of a probe update's noise beyond which its history restarts");
+    public static final Setting<Float> SENSITIVITY = ProbeVolumeLighting.PROBES.setting("sensitivity");
     /**
      * The least relative drift of a probe's updates from its history (averaged over a few updates, beyond
      * {@link #SENSITIVITY} deviations of that average's noise) that restarts it: changes nothing announced, too small
      * for one update's noise to show.
      */
-    public static final Setting<Float> DRIFT = Setting.decimal("render.gi.response.drift", 0.01f, 0.001f, 1,
-        "how far a probe's updates may drift from its history, relative, before it restarts");
+    public static final Setting<Float> DRIFT = ProbeVolumeLighting.PROBES.setting("drift");
     /** Probes near what the scene says changed (instances, lights, the environment) restart at once. */
-    public static final Setting<Boolean> INVALIDATE = Setting.bool("render.gi.response.invalidate", true,
-        "probes near changed instances and lights restart their histories at once");
+    public static final Setting<Boolean> INVALIDATE = ProbeVolumeLighting.PROBES.setting("invalidate");
     /** A changed light restarts the probes within this many times its reach (the surfaces it lit, seen from afar). */
-    public static final Setting<Float> LIGHT_MARGIN = Setting.decimal("render.gi.response.lightMargin", 2, 1, 100,
-        "how many times its reach a changed light restarts probes within");
+    public static final Setting<Float> LIGHT_MARGIN = ProbeVolumeLighting.PROBES.setting("lightMargin");
 
     /**
      * Updates a frame of the probes whose history restarted (a change told or found): each repeat reads the update
      * before, so a change's further bounces arrive in fewer frames; probes that did not restart are not updated again.
      * The graph rebuilds when it changes.
      */
-    public static final Setting<Integer> ITERATIONS = Setting.integer("render.gi.response.iterations", 2, 1, 4,
-        "updates a frame of the probes whose history restarted (bounces of a change per frame)");
+    public static final Setting<Integer> ITERATIONS = ProbeVolumeLighting.PROBES.setting("iterations");
 
     /**
      * A changed instance restarts the probes within this many times its bounding sphere (the light it blocks and bounces
      * reaches beyond it).
      */
-    public static final Setting<Float> INSTANCE_MARGIN = Setting.decimal("render.gi.response.instanceMargin", 3, 1,
-        100, "how many times its bounding sphere a changed instance restarts probes within");
+    public static final Setting<Float> INSTANCE_MARGIN = ProbeVolumeLighting.PROBES.setting("instanceMargin");
 
-    /** Its settings. */
+    /** Its settings: the probes kind's tunables ({@link ProbeVolumeLighting.Probes}). */
     public static final List<Setting<?>> ALL = List.of(ITERATIONS, CASCADES, PROBES, PROBES_UP, SPACING, RAYS,
         FIXED_RAYS, BUDGET,
         LAYERS, NORMAL_BIAS, VIEW_BIAS, BLEND, DEPTH_RANGE, RELOCATE, CLASSIFY, MAX_FRAMES, ADAPTIVE, SENSITIVITY,

@@ -64,6 +64,7 @@ public final class EngineSettings {
     private final String prefix; // of this view's names: "" for the store itself, "scope." for a scoped view
     private final EngineSettings parent; // read for settings this view holds nothing of (inheriting), or null
     private final Map<Setting<?>, String> keys = new IdentityHashMap<>(); // full names, made once (scoped views)
+    private final Map<Object, Object> techniqueCache = new IdentityHashMap<>(); // per slot and kind, in this view
 
     /** Settings with every value at its default. */
     public EngineSettings() {
@@ -97,12 +98,12 @@ public final class EngineSettings {
     }
 
     /** Whether this view takes {@code setting} from the view it inherits from: it holds nothing of it itself. */
-    private boolean inherits(String key) {
+    private boolean inherits(Setting<?> setting, String key) {
         if (parent == null || store.constraints.containsKey(key)) {
             return false;
         }
         for (Layer layer : TOP_DOWN) {
-            if (store.layer(layer).holds(key)) {
+            if (store.layer(layer).holds(setting, key, prefix)) {
                 return false;
             }
         }
@@ -115,7 +116,7 @@ public final class EngineSettings {
      */
     public <T> T get(Setting<T> setting) {
         String key = keyOf(setting);
-        if (inherits(key)) {
+        if (inherits(setting, key)) {
             return parent.get(setting);
         }
         Object cached = store.effective.get(key);
@@ -149,11 +150,11 @@ public final class EngineSettings {
     }
 
     private <T> T preferred(Setting<T> setting, String key) {
-        if (inherits(key)) {
+        if (inherits(setting, key)) {
             return parent.preferred(setting);
         }
         for (Layer layer : TOP_DOWN) {
-            T value = store.layer(layer).read(setting, key);
+            T value = store.layer(layer).read(setting, key, prefix);
             if (value != null) {
                 return value;
             }
@@ -165,7 +166,7 @@ public final class EngineSettings {
     public boolean isSet(Setting<?> setting) {
         String key = keyOf(setting);
         for (Layer layer : TOP_DOWN) {
-            if (store.layer(layer).holds(key)) {
+            if (store.layer(layer).holds(setting, key, prefix)) {
                 return true;
             }
         }
@@ -174,7 +175,7 @@ public final class EngineSettings {
 
     /** Whether {@code layer} holds a value for {@code setting}, set or loaded. */
     public boolean isSet(Layer layer, Setting<?> setting) {
-        return store.layer(layer).holds(keyOf(setting));
+        return store.layer(layer).holds(setting, keyOf(setting), prefix);
     }
 
     /** Whether a constraint keeps {@code setting} from its preferred value now. */
@@ -241,6 +242,7 @@ public final class EngineSettings {
         Object before = get(setting);
         Object preferredBefore = preferred(setting, key);
         change.run();
+        store.version++;
         store.effective.remove(key);
         store.availabilityDirty = true;
         Object after = get(setting);
@@ -408,6 +410,31 @@ public final class EngineSettings {
         return store.listen(Objects.requireNonNull(listener, "listener"));
     }
 
+    /**
+     * The kinds of technique this store knows, for every view of it: the engine's, declared as their slots are first
+     * used, and those games and mods register.
+     */
+    public Techniques techniques() {
+        if (store.techniques == null) {
+            store.techniques = new Techniques();
+        }
+        return store.techniques;
+    }
+
+    /** Counts changes to any value or constraint of the store: what this view read before is stale when it moved. */
+    long version() {
+        return store.version;
+    }
+
+    /** What {@link Techniques} and {@link TechniqueKind} keep in this view for {@code owner}, or null. */
+    Object cached(Object owner) {
+        return techniqueCache.get(owner);
+    }
+
+    void cache(Object owner, Object cached) {
+        techniqueCache.put(owner, cached);
+    }
+
     /** The full name {@code setting} has in this view: its name under the view's scope. */
     public String nameOf(Setting<?> setting) {
         return keyOf(setting);
@@ -457,6 +484,7 @@ public final class EngineSettings {
         replaced.loaded.clear();
         replaced.loaded.putAll(values);
         store.effective.clear();
+        store.version++;
         store.availabilityDirty = true;
         store.changedAll(keys);
         return this;
@@ -505,13 +533,16 @@ public final class EngineSettings {
         final Map<String, Object> values = new LinkedHashMap<>();
         final Map<String, String> loaded = new LinkedHashMap<>(); // read when their setting is first read
 
-        /** The value for {@code key} if this layer holds one {@code setting} allows, else null. */
-        <T> T read(Setting<T> setting, String key) {
+        /**
+         * The value for {@code key} if this layer holds one {@code setting} allows, else null; where it holds none, the
+         * value under one of the setting's former names (under {@code prefix}, the view's scope), taken as its own.
+         */
+        <T> T read(Setting<T> setting, String key, String prefix) {
             Object value = values.get(key);
             if (value == null) {
                 String text = loaded.get(key);
                 if (text == null) {
-                    return null;
+                    return former(setting, key, prefix);
                 }
                 T parsed = setting.parse(text);
                 loaded.remove(key);
@@ -524,8 +555,39 @@ public final class EngineSettings {
             return setting.allows(value) ? setting.cast(value) : null;
         }
 
+        /** The value under the first of {@code setting}'s former names this layer holds, taken as its own; or null. */
+        private <T> T former(Setting<T> setting, String key, String prefix) {
+            List<String> names = setting.formerNames();
+            for (int i = 0; i < names.size(); i++) {
+                String old = prefix.isEmpty() ? names.get(i) : prefix + names.get(i);
+                Object value = values.get(old);
+                String text = loaded.get(old);
+                T parsed = value != null ? (setting.allows(value) ? setting.cast(value) : null)
+                    : text != null ? setting.parse(text) : null;
+                if (parsed != null) {
+                    values.put(key, parsed); // the old name stays, for settings not read yet that share it
+                    return parsed;
+                }
+            }
+            return null;
+        }
+
         boolean holds(String key) {
             return values.containsKey(key) || loaded.containsKey(key);
+        }
+
+        /** Whether this layer holds a value for {@code key}, or under one of {@code setting}'s former names. */
+        boolean holds(Setting<?> setting, String key, String prefix) {
+            if (holds(key)) {
+                return true;
+            }
+            List<String> names = setting.formerNames();
+            for (int i = 0; i < names.size(); i++) {
+                if (holds(prefix.isEmpty() ? names.get(i) : prefix + names.get(i))) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         void put(String key, Object value) {
@@ -561,6 +623,8 @@ public final class EngineSettings {
         final Map<String, Availability> lastAvailability = new HashMap<>(); // as of the last refresh
         final List<Consumer<String>> availabilityListeners = new ArrayList<>();
         boolean availabilityDirty;
+        long version; // counts changes to any value or constraint: technique configs are read again when it moves
+        Techniques techniques; // made when first asked for
 
         Values layer(Layer layer) {
             return layers[layer.ordinal()];

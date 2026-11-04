@@ -3,6 +3,9 @@ package com.truesim.engine.graph;
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.graph.Id;
 import com.truesim.common.graph.Resolution;
+import com.truesim.engine.settings.TechniqueConfig;
+import com.truesim.engine.settings.TechniqueKind;
+import com.truesim.engine.settings.TechniqueSlot;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
@@ -374,6 +377,28 @@ public final class GraphBuilder {
     public <T> T setting(Setting<T> setting) {
         settingsRead.add(graph.settings().nameOf(setting));
         return graph.settings().get(setting);
+    }
+
+    /**
+     * The kind of technique chosen for {@code slot} in the graph's settings, or null when off
+     * ({@link com.truesim.engine.settings.Techniques#chosen}): the graph rebuilds when the choice changes.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public <X, T> TechniqueKind<?, X, T> technique(TechniqueSlot<X, T> slot) {
+        return graph.settings().techniques().chosen(graph.settings(), slot, setting(slot.setting()));
+    }
+
+    /**
+     * {@code kind}'s tunables in the graph's settings, for what the build makes: the graph rebuilds when any of them
+     * changes. Tunables read when frames record come from {@link TechniqueKind#config} with {@link #settings()}
+     * instead, without a rebuild.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public <C extends Record & TechniqueConfig> C config(TechniqueKind<C, ?, ?> kind) {
+        for (Setting<?> field : kind.settings()) {
+            settingsRead.add(graph.settings().nameOf(field));
+        }
+        return kind.config(graph.settings());
     }
 
     /** The graph's settings, to read when frames record (a pass body's exposure, say): no rebuild when they change. */

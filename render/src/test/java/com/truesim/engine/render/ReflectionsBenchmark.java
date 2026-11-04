@@ -27,6 +27,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
+import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -61,16 +62,17 @@ class ReflectionsBenchmark {
     private static final int COLOR = VK_FORMAT_R16G16B16A16_SFLOAT;
 
     /** What a configuration adds to the view. */
-    private record Setup(String name, ScreenSpaceReflections.Mode mode, float scale, boolean surfaces) {
+    private record Setup(String name, TechniqueKind<?, ScreenSpaceReflections, Technique> mode, float scale,
+        boolean surfaces) {
     }
 
     private static final List<Setup> SETUPS = List.of(
-        new Setup("off", ScreenSpaceReflections.Mode.OFF, 1, false),
-        new Setup("surface outputs only", ScreenSpaceReflections.Mode.OFF, 1, true),
-        new Setup("LINEAR", ScreenSpaceReflections.Mode.LINEAR, 1, false),
-        new Setup("HIZ", ScreenSpaceReflections.Mode.HIZ, 1, false),
-        new Setup("LINEAR, half", ScreenSpaceReflections.Mode.LINEAR, 0.5f, false),
-        new Setup("HIZ, half", ScreenSpaceReflections.Mode.HIZ, 0.5f, false));
+        new Setup("off", null, 1, false),
+        new Setup("surface outputs only", null, 1, true),
+        new Setup("LINEAR", ScreenSpaceReflections.LINEAR, 1, false),
+        new Setup("HIZ", ScreenSpaceReflections.HIZ, 1, false),
+        new Setup("LINEAR, half", ScreenSpaceReflections.LINEAR, 0.5f, false),
+        new Setup("HIZ, half", ScreenSpaceReflections.HIZ, 0.5f, false));
 
     /** A shading of the view. */
     private record Shading(String name, MeshletRenderer.Path path, boolean visibility) {
@@ -200,8 +202,9 @@ class ReflectionsBenchmark {
         ExternalImage target, long queries, double period, int width, int height, Environment environment, Setup setup,
         Shading shading) {
         try (FrameGraph graph = new FrameGraph(device, 2)) {
-            graph.settings().set(ScreenSpaceReflections.MODE, setup.mode())
-                .set(ScreenSpaceReflections.RESOLUTION_SCALE, setup.scale());
+            ScreenSpaceReflections.SLOT.choose(graph.settings(), setup.mode());
+            graph.settings().techniques().set(graph.settings(), ScreenSpaceReflections.SLOT, "resolutionScale",
+                setup.scale());
             SceneView main = new SceneView(graph.addView("main").size(width, height), view, camera);
             Function<SceneView, Technique> make = shading.visibility()
                 ? v -> new VisibilityBufferShading(SceneGeometry.meshlets(renderer), v, COLOR, VK_FORMAT_D32_SFLOAT)

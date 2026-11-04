@@ -28,8 +28,10 @@ import com.truesim.common.math.color.Color;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.GpuTimings;
+import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.materials.IorParameters;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
+import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanInstance;
@@ -144,8 +146,8 @@ class TransparencyBenchmark {
                     ? new MeshletRenderer.Path[] {MeshletRenderer.Path.MESH_SHADERS, MeshletRenderer.Path.INDEXED}
                     : new MeshletRenderer.Path[] {MeshletRenderer.Path.INDEXED};
                 // (mode, shading bins of the panes): weighted, sorted, sorted with panes of two shading bins mixed
-                Object[][] ways = {{Transparency.Mode.WEIGHTED, 1}, {Transparency.Mode.SORTED, 1},
-                    {Transparency.Mode.SORTED, 2}};
+                Object[][] ways = {{Transparency.WEIGHTED, 1}, {Transparency.SORTED, 1},
+                    {Transparency.SORTED, 2}};
                 System.out.printf(Locale.ROOT, "Transparency on %s, %d x %d, 5,000 rocks on the terrain, glass panes:%n",
                     device.gpu().name(), WIDTH, HEIGHT);
                 Sample[][][][] samples = new Sample[paths.length][PANES.length][ways.length][ROUNDS];
@@ -156,7 +158,7 @@ class TransparencyBenchmark {
                             for (int w = 0; w < ways.length; w++) {
                                 place(gpu, rock, ground, pane, 5_000, PANES[n], opaque, glass, (Integer) ways[w][1]);
                                 Sample sample = measure(device, renderer, view, camera, target, queries, period,
-                                    (Transparency.Mode) ways[w][0]);
+                                    (TechniqueKind<?, ChosenTransparency, Technique>) ways[w][0]);
                                 if (round >= 0) {
                                     samples[p][n][w][round] = sample;
                                 }
@@ -197,11 +199,11 @@ class TransparencyBenchmark {
      * timestamps), passes' GPU times (the graph's), CPU time of recording; medians.
      */
     private static Sample measure(VulkanDevice device, MeshletRenderer renderer, RenderView view, Camera camera,
-        ExternalImage target, long queries, double period, Transparency.Mode mode) {
+        ExternalImage target, long queries, double period, TechniqueKind<?, ChosenTransparency, Technique> mode) {
         try (FrameGraph graph = new FrameGraph(device, 2)) {
             SceneView main = new SceneView(graph.addView("main").size(WIDTH, HEIGHT), view, camera);
             main.port().add(MeshletBenchmark.forward(main)).output(Keys.SCENE_COLOR, target);
-            graph.settings().set(Transparency.MODE, mode);
+            Transparency.SLOT.choose(graph.settings(), mode);
             main.port().add(new ChosenTransparency(SceneGeometry.meshlets(renderer), main));
             for (int i = 0; i < 16; i++) {
                 device.submitAndWait(device.graphics(), graph::record);

@@ -1,6 +1,7 @@
 package com.truesim.engine.audio;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.annotations.AllowStrictMath;
 import com.truesim.common.math.Maths;
 import java.util.Arrays;
 
@@ -26,16 +27,20 @@ import java.util.Arrays;
  */
 public final class HrtfSpatializer implements Spatializer {
 
-    /** Channels that may change filter in one block, at most. */
+    /** Channels that may change filter in one block, at most, by default. */
     static final int UPDATES = 4;
-    /** Half the distance between the ears, metres. */
+    /** Half the distance between the ears, metres, by default. */
     static final float EAR = 0.0875f;
     /** Samples every ear's filter is delayed by on top of its own delay: the shifting sinc's half width. */
     static final int BASE_DELAY = 12;
-    private static final double MOVED = 0.999_961_923; // cos 0.5°
+    /** How far a source's direction turns before its filter changes, degrees, by default. */
+    static final float MOVED_DEGREES = 0.5f;
 
     private final Hrtf hrtf;
     private final int capacity;
+    private final int updatesPerBlock; // channels that may change filter in one block
+    private final float ear; // half the distance between the ears, metres
+    private final double moved; // the cosine of the turn that changes a filter
     private final int block;
     private final int length;
     private final int parts;
@@ -77,10 +82,24 @@ public final class HrtfSpatializer implements Spatializer {
     private final Ambisonics ambisonics;
 
     /** A spatializer of {@code capacity} channels for blocks of {@code block} frames at {@code hrtf}'s rate. */
-    @AllowAllocation("made on the game thread")
     public HrtfSpatializer(Hrtf hrtf, int block, int capacity) {
+        this(hrtf, block, capacity, UPDATES, EAR, FIELDS, MOVED_DEGREES);
+    }
+
+    /**
+     * A spatializer of {@code capacity} channels for blocks of {@code block} frames at {@code hrtf}'s rate, changing at
+     * most {@code updates} channels' filters a block, with ears {@code ear} metres either side of the head's centre,
+     * decoding {@code fields} ambisonic fields at most, and changing a filter once its direction turned by
+     * {@code movedDegrees}.
+     */
+    @AllowAllocation("made on the game thread")
+    public HrtfSpatializer(Hrtf hrtf, int block, int capacity, int updates, float ear, int fields,
+        float movedDegrees) {
         this.hrtf = hrtf;
         this.capacity = capacity;
+        this.updatesPerBlock = updates;
+        this.ear = ear;
+        this.moved = cosine(movedDegrees);
         this.block = block;
         length = hrtf.taps() + (int) Math.ceil(hrtf.maxDelay()) + 2 * BASE_DELAY + 1;
         parts = (length + block - 1) / block;
@@ -116,10 +135,16 @@ public final class HrtfSpatializer implements Spatializer {
         for (int c = 0; c < capacity; c++) {
             reset(c);
         }
-        ambisonics = new Ambisonics(hrtf, block, FIELDS);
+        ambisonics = new Ambisonics(hrtf, block, fields);
     }
 
-    /** Ambisonic fields (buses with voices past the cap) it decodes at most. */
+    /** The cosine of {@code degrees}, the same on every platform. */
+    @AllowStrictMath
+    private static double cosine(float degrees) {
+        return StrictMath.cos(StrictMath.toRadians(degrees));
+    }
+
+    /** Ambisonic fields (buses with voices past the cap) it decodes at most, by default. */
     static final int FIELDS = 16;
 
     @Override
@@ -170,7 +195,7 @@ public final class HrtfSpatializer implements Spatializer {
         // near the head: each ear its own direction and its distance's gain, faded in from 1 m to 25 cm
         float s = Math.max(0, Math.min(1, (1 - r) / 0.75f));
         s = s * s * (3 - 2 * s);
-        float e = EAR * s;
+        float e = ear * s;
         int o = 6 * channel;
         boolean moved = fresh[channel];
         for (int ear = 0; ear < 2; ear++) {
@@ -185,7 +210,7 @@ public final class HrtfSpatializer implements Spatializer {
             targetDirections[o + 3 * ear + 2] = dz;
             double dot = dx * filterDirections[o + 3 * ear] + dy * filterDirections[o + 3 * ear + 1]
                 + dz * filterDirections[o + 3 * ear + 2];
-            moved |= dot < MOVED;
+            moved |= dot < this.moved;
             gainTarget[2 * channel + ear] = Math.max(0.25f, Math.min(4, r / Math.max(1e-5f, distance)));
         }
         pending[channel] |= moved;
@@ -212,7 +237,7 @@ public final class HrtfSpatializer implements Spatializer {
         head[channel] = h;
         System.arraycopy(specRe, 0, fdlRe[channel], h * bins, bins);
         System.arraycopy(specIm, 0, fdlIm[channel], h * bins, bins);
-        if (pending[channel] && (fresh[channel] || updates < UPDATES)) {
+        if (pending[channel] && (fresh[channel] || updates < updatesPerBlock)) {
             if (!fresh[channel]) {
                 updates++;
             }
