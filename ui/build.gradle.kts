@@ -20,6 +20,7 @@ dependencies {
     testImplementation(testFixtures("com.truesim.ui:ui-props:0.3.0"))
     testImplementation(testFixtures("com.truesim.ui:ui-console:0.3.0"))
     testImplementation(testFixtures("com.truesim.ui:ui-gizmo:0.3.0"))
+    testImplementation(project(":engine-bench")) // the benchmark scenes (UiScenes) the batching benchmark compares
     testImplementation("com.truesim.ui:ui-text-native:0.3.0")
     testImplementation("com.truesim.ui:ui-fonts-cjk:0.3.0") // bundled fonts: the same text on every machine
     testImplementation("com.truesim.ui:ui-fonts-emoji:0.3.0") // colour emoji in the text field test

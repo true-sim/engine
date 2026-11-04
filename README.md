@@ -280,15 +280,29 @@ Capture capture = input.capture(one, JUMP);   // the next input becomes a bindin
   width, height)` copies only what changed: a draw list's dirty range and its clips, a texture's dirty region; an
   unchanged frame uploads 0 bytes (`uploadedBytes()`). One draw per layer, without vertex buffers, pulls six vertices per
   primitive (rounded boxes with borders and gradients, blurred shadows, MTSDF glyphs, images, nine-slices, lines,
-  clipped by rounded rectangles); long runs of one kind (text floods) get their kind's own shader (`Batching.ADAPTIVE`,
+  triangles, clipped by rounded rectangles; a triangle anti-aliases the edges its flags name and keeps the others hard
+  and half-open, so a shape's triangles share edges without seams); long runs of one kind (text floods) get their kind's own shader (`Batching.ADAPTIVE`,
   chosen by `UiBenchmark` over one draw per layer and a draw per run of a kind).
 - **Input** (`UiActions`, `UiCommands`, `MousePointer`): the `ui` action group of design section 10 with keyboard,
   mouse and gamepad defaults, bindings as settings (`input.ui.navigation.accept`); `UiCommands` (a
   `UiCommandSource`) adds each player's presses of the frame as `UiCommand`s, with repeats (`ui.repeatDelay`,
   `ui.repeatRate`), `EXTEND_SELECTION` while Shift is held, text commands while a field took the keyboard
   (`startText`/`stopText`), and the gamepad's confirm button as a setting (`ui.confirmButton`: the platform's, south
-  or east). `MousePointer` (a `PointerSource`) reads the mouse from the platform's events directly.
-- **Tunables** (`UiTunables`): ui-core's `Tunable`s as settings of the same name and range, written back each frame.
+  or east). The tabs', chart reset's, gizmo's, docking's (`ui.docking.windowMove` Alt+F7, `windowResize` Alt+F8) and
+  console's actions give their commands; tabs, windows and the console's toggle (grave, both sticks, an XR menu
+  button held) work while a field types, and the toggle's key types nothing; Tab, Up and Down complete and walk the
+  history only while the console's command line has the text (`commands.console(...)`). `MousePointer` (a
+  `PointerSource`) reads the mouse from the platform's events directly; `UiKeyboard` gives mnemonics (Alt with a
+  letter or digit) and pointers' modifiers (the gizmo's `ui.gizmo.snap` as `Pointer.GIZMO_SNAP`); `TouchPointers` (a
+  pointer per finger), `PenPointer`, `XrPointers` (aim poses as world rays, triggers as the primary button) and a
+  gamepad's `VirtualCursor` (`ui.virtualCursor`, off by default) are pointers too.
+- **Eyedropper** (`GpuScreenSampler`, ui-core's `ScreenSampler`): a block of up to 31 x 31 texels around the pointer
+  copied from the view's scene color (before the display transform, HDR kept) and read back without a wait; each
+  block names the copy it is, so the newest answer arrives frames in flight later and never a stale one
+  (`UiPlugin.screenSampler()`, for `Controls.screenSampler`).
+- **Tunables** (`UiTunables`): ui-core's `Tunable`s as settings of the same name and range, written back each frame:
+  `UiPlugin.tunables(ui)` lists the UI's (with the charts', scene bridge's and gizmos' through their `TunableSource`
+  services) and the console's.
 - **OS windows** (`UiOsWindows`, ui-controls' `OsWindows` for docking's `OsDockHost`): a window per dock area, each
   presenting a view of its own that draws its region of the one UI. Each window's target reads a view of the graph's
   settings of its own (`displaySettings(id)`, `EngineSettings.inheriting`): `paperWhite(id, nits)` gives it a paper
@@ -322,6 +336,10 @@ validation; RX 9070 XT, 2026-11-03; GPU time of the UI pass and the frame start 
 | HUD: 500 elements, 5,000 glyphs, about a quarter of the screen | 0.096-0.102 ms, 1 draw | 0.157-0.165 ms, 1,075 draws | 0.103 ms, 1 draw | 0.15 ms |
 | 100,000 glyphs | 0.28-0.30 ms | 0.27-0.29 ms | 0.29 ms | 0.4 ms |
 | 100,000 glyphs over a full-screen translucent backdrop | 0.40-0.45 ms | 0.39-0.43 ms | 0.44 ms | (0.4 ms) |
+
+Section 11's targets as one suite: `./gradlew :engine-bench:uiBench` (module `engine-bench`, a program: the GPU
+scenes above, a chart streaming 1,000,000 samples as a line and as a filled area, 10,000,000 samples zoomed, the
+controls gallery idle, the console flooded) writes [docs/benchmarks-ui.md](docs/benchmarks-ui.md) with p50 and p99.
 
 Submitting an unchanged HUD takes 0.1 us and uploads nothing; with 50 elements re-recorded a frame, 3 us (one dirty
 range spanning them: 400 KB). Numbers vary by a few percent between sessions sharing the GPU; compare within a run.

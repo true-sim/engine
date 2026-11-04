@@ -172,13 +172,15 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
     float2 at;
     if (kind == LINE)
     {
-        // A rectangle along the segment, its half width plus a pixel for the anti-aliased edges and ends.
+        // A rectangle along the segment, its half width and ends grown by half a pixel: coverage (0.5 minus the
+        // distance past the edge) is 0 from there on, so nothing further out is shaded.
         float2 d = b - a;
         float len = length(d);
         float2 along = len > 0 ? d / len : float2(1, 0);
         float2 normal = float2(-along.y, along.x);
-        float extent = max(word(p, WIDTH) * t.scale, 1) * 0.5 + 1;
-        at = ((corner & 1) != 0 ? b + along : a - along) + normal * ((corner & 2) != 0 ? extent : -extent);
+        float extent = max(word(p, WIDTH) * t.scale, 1) * 0.5 + 0.5;
+        at = ((corner & 1) != 0 ? b + along * 0.5 : a - along * 0.5)
+            + normal * ((corner & 2) != 0 ? extent : -extent);
     }
     else
     {
@@ -192,8 +194,8 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
         }
         else if (kind == BOX || kind == TRIANGLE)
         {
-            lo -= 1; // the anti-aliased edge's outer half (a triangle's quad is its bounding box)
-            hi += 1;
+            lo -= 0.5; // the anti-aliased edge's outer half pixel (a triangle's quad is its bounding box)
+            hi += 0.5;
         }
         uint clip = header >> 16;
         if (clip != 0)
