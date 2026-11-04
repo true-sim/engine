@@ -303,6 +303,7 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
     }
 
     /** {@code kind}'s technique, its config read from the view's graph's settings as they are when read. */
+    @AllowAllocation("building the graph, when it changes")
     private <C extends Record & TechniqueConfig> Technique make(TechniqueKind<C, AmbientOcclusion, Technique> kind) {
         return kind.create(this, () -> kind.config(view.port().settings()));
     }
@@ -331,6 +332,7 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
     }
 
     /** The engine's kinds' passes, as {@code mode} finds occlusion. */
+    @AllowAllocation("building the graph, when it changes")
     private void buildEngine(GraphBuilder g, Mode mode) {
         Image color = g.modify(Keys.SCENE_COLOR);
         Image depth = g.read(Keys.SCENE_DEPTH);

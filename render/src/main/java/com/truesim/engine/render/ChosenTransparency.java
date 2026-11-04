@@ -70,21 +70,25 @@ public final class ChosenTransparency implements Transparency {
     }
 
     /** {@code kind}'s technique, its config read from the view's graph's settings as they are when read. */
+    @AllowAllocation("building the graph, when it changes")
     private <C extends Record & TechniqueConfig> Technique make(TechniqueKind<C, ChosenTransparency, Technique> kind) {
         return kind.create(this, () -> kind.config(view.port().settings()));
     }
 
     /** {@link #SORTED}'s technique: sorted transparency, the scene's depth tested and left as it is. */
+    @AllowAllocation("building the graph, when it changes")
     Technique sorted() {
         return new Way(g -> sorted.build(g, g.modify(Keys.SCENE_DEPTH)));
     }
 
     /** {@link #WEIGHTED}'s technique. */
+    @AllowAllocation("building the graph, when it changes")
     Technique weighted() {
         return new Way(g -> weighted.build(g, g.modify(Keys.SCENE_DEPTH)));
     }
 
     /** {@link #OPAQUE}'s technique, which writes the depth. */
+    @AllowAllocation("building the graph, when it changes")
     Technique opaque() {
         return new Way(opaque::build);
     }

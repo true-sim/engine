@@ -11,10 +11,14 @@ import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.app.AppConfig;
 import com.truesim.engine.app.Application;
 import com.truesim.engine.app.Engine;
+import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.SettingRegistry;
+import com.truesim.engine.settings.TechniqueConfig;
+import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.audio.Sounds;
 import com.truesim.scene.core.SceneGraph;
+import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -75,7 +79,7 @@ class AudioPluginTest {
     void headphonesTurnTheHrtfOnAndOtherOutputsOff() throws InterruptedException {
         Audio audio = new Audio();
         try (Engine engine = engine(audio, "dummy")) {
-            assertThat(engine.registry().find("audio.hrtf.set")).isNotNull();
+            assertThat(engine.registry().find("audio.spatializer.hrtf.set")).isNotNull();
             assertThat(audio.spatializer()).isNull();
             engine.settings().set(Audio.HRTF_SET, "no/such/file.hrtf"); // falls back to the built-in set
             engine.settings().set(Audio.OUTPUT, Audio.Output.HEADPHONES);
@@ -93,6 +97,74 @@ class AudioPluginTest {
             engine.step();
             assertThat(audio.spatializer()).isNull();
         }
+    }
+
+    /** A game's own spatializer: no filters, both ears hear the voice as it is. */
+    record Flat(int capacity) implements Spatializer {
+
+        @Override
+        public void reset(int channel) {
+        }
+
+        @Override
+        public void place(int channel, float x, float y, float z) {
+        }
+
+        @Override
+        public int tailBlocks() {
+            return 0;
+        }
+
+        @Override
+        public void begin() {
+        }
+
+        @Override
+        public void process(int channel, float[] mono, float[] out, int frames) {
+            for (int f = 0; f < frames; f++) {
+                out[2 * f] += mono[f];
+                out[2 * f + 1] += mono[f];
+            }
+        }
+    }
+
+    /** {@link Flat}'s tunables. */
+    record Voices(@TechniqueConfig.Tunable(value = "voices", min = 1, max = 64) int voices)
+        implements TechniqueConfig {
+    }
+
+    static final TechniqueKind<Voices, AudioFormat, Spatializer> FLAT = TechniqueKind.of(Audio.SPATIALIZER,
+        "test-flat", new Voices(8), "both ears alike", (format, config) -> new Flat(config.get().voices()));
+
+    @Test
+    void aGamesOwnSpatializerIsChosenThroughTheSettings() throws InterruptedException {
+        Audio audio = new Audio();
+        try (Engine engine = engine(audio, "dummy")) {
+            engine.settings().techniques().register(Audio.SPATIALIZER, FLAT);
+            engine.settings().set(Audio.SPATIALIZER.setting(), "test-flat").set(FLAT.setting("voices"), 12)
+                .set(Audio.OUTPUT, Audio.Output.HEADPHONES);
+            for (int i = 0; i < 400 && audio.spatializer() == null; i++) {
+                engine.step();
+                Thread.sleep(5);
+            }
+            assertThat(audio.spatializer()).isEqualTo(new Flat(12));
+            Audio.SPATIALIZER.choose(engine.settings(), null); // off: panned
+            engine.step();
+            assertThat(audio.spatializer()).isNull();
+        }
+    }
+
+    @Test
+    void theHrtfsTunablesReadTheNamesTheyHadBefore() {
+        EngineSettings settings = new EngineSettings().load(Map.of("audio.hrtf.voices", "8", "audio.hrtf.set",
+            "a.hrtf"));
+        assertThat(Audio.HRTF.config(settings).voices()).isEqualTo(8);
+        assertThat(settings.get(Audio.HRTF_SET)).isEqualTo("a.hrtf");
+        assertThat(Audio.SPATIALIZER.chosen(settings)).isSameAs(Audio.HRTF);
+        HrtfSpatializer made = Audio.spatializer(AudioFormat.stereo(48_000).block(256),
+            new Audio.Binaural("", 8, 2, 0.08f, 4, 1));
+        assertThat(made.capacity()).isEqualTo(12);
+        assertThat(made.ambisonics().fields()).isEqualTo(4);
     }
 
     @Test

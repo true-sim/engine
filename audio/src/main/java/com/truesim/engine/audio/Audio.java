@@ -124,18 +124,29 @@ public final class Audio implements Plugin {
      *
      * @param set the HRTF set, an .hrtf file; empty for the built-in one
      * @param voices voices rendered through the HRTF at most (0: none, they pan)
+     * @param updates voices whose filters may change in one block, at most (a new voice always does): the per-block
+     *     budget of filter updates
+     * @param ear half the distance between the ears, in metres: where a source near the head is heard from
+     * @param fields ambisonic fields (buses with voices past the cap) decoded at most
+     * @param moved how far a source's direction turns before its filter changes, in degrees
      */
     public record Binaural(
         @Tunable(value = "the HRTF set, an .hrtf file; empty for the built-in one", formerly = "audio.hrtf.set")
         String set,
         @Tunable(value = "voices rendered through the HRTF at most", min = 0, max = 64, formerly = "audio.hrtf.voices")
-        int voices) implements TechniqueConfig {
+        int voices,
+        @Tunable(value = "voices whose HRTF filters may change in one block", min = 1, max = 64) int updates,
+        @Tunable(value = "half the distance between the ears, in metres", min = 0.05, max = 0.15) float ear,
+        @Tunable(value = "ambisonic fields of voices past the cap decoded at most", min = 1, max = 64) int fields,
+        @Tunable(value = "degrees a source turns before its HRTF filter changes", min = 0.05, max = 10) float moved)
+        implements TechniqueConfig {
     }
 
     /** Our HRTF ({@link HrtfSpatializer}), its set prepared for the output's rate. */
     public static final TechniqueKind<Binaural, AudioFormat, Spatializer> HRTF = TechniqueKind.of(SPATIALIZER, "hrtf",
-        new Binaural("", 16), "the HRTF: binaural filters per direction", (format, config) -> new HrtfSpatializer(
-            prepare(config.get().set(), format.rate()), format.block(), config.get().voices() + 4));
+        new Binaural("", 16, HrtfSpatializer.UPDATES, HrtfSpatializer.EAR, HrtfSpatializer.FIELDS,
+            HrtfSpatializer.MOVED_DEGREES), "the HRTF: binaural filters per direction",
+        (format, config) -> spatializer(format, config.get()));
 
     /** The HRTF's set: {@code audio.spatializer.hrtf.set}. */
     public static final Setting<String> HRTF_SET = HRTF.setting("set");
@@ -347,10 +358,18 @@ public final class Audio implements Plugin {
     }
 
     /** What makes {@code kind}'s spatializer for {@code format}, with its config as the settings hold it now. */
+    @AllowAllocation("a setting changed")
     private <C extends Record & TechniqueConfig> Supplier<Spatializer> maker(
         TechniqueKind<C, AudioFormat, Spatializer> kind, AudioFormat format) {
         C config = kind.config(settings);
         return () -> kind.create(format, () -> config);
+    }
+
+    /** The HRTF spatializer {@code config} describes, for {@code format}'s rate and block. */
+    @AllowAllocation("preparing a set")
+    static HrtfSpatializer spatializer(AudioFormat format, Binaural config) {
+        return new HrtfSpatializer(prepare(config.set(), format.rate()), format.block(), config.voices() + 4,
+            config.updates(), config.ear(), config.fields(), config.moved());
     }
 
     /** The set in {@code file} (empty: the built-in one) prepared for {@code rate}; the built-in one if it fails. */

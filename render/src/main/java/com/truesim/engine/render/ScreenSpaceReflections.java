@@ -200,6 +200,7 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
     }
 
     /** {@code kind}'s technique, its config read from the view's graph's settings as they are when read. */
+    @AllowAllocation("building the graph, when it changes")
     private <C extends Record & TechniqueConfig> Technique make(
         TechniqueKind<C, ScreenSpaceReflections, Technique> kind) {
         return kind.create(this, () -> kind.config(view.port().settings()));
@@ -227,6 +228,7 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
     }
 
     /** The engine's kinds' passes. */
+    @AllowAllocation("building the graph, when it changes")
     private void buildEngine(GraphBuilder g, Mode mode) {
         TechniqueKind<March, ScreenSpaceReflections, Technique> kind = mode == Mode.HIZ ? HIZ : LINEAR;
         Image color = g.modify(Keys.SCENE_COLOR);

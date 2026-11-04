@@ -16,13 +16,20 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
 import com.truesim.common.math.color.Color;
+import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
+import com.truesim.engine.graph.GraphBuilder;
+import com.truesim.engine.graph.Image;
+import com.truesim.engine.graph.ImageDesc;
+import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.render.materials.SpecularParameters;
 import com.truesim.engine.render.materials.UnlitParameters;
 import com.truesim.engine.settings.EngineSettings;
+import com.truesim.engine.settings.TechniqueConfig;
+import com.truesim.engine.settings.TechniqueConfig.Tunable;
 import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -34,6 +41,7 @@ import com.truesim.scene.assets.mesh.MeshData;
 import java.lang.foreign.ValueLayout;
 import java.util.List;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -483,6 +491,75 @@ class AmbientOcclusionTest {
             }
             scene.setMaterials(null);
         }
+    }
+
+    /** A game's own kind of ambient occlusion's tunables: the grey it paints. */
+    record Grey(@Tunable(value = "the grey every pixel takes", min = 0, max = 1) float level)
+        implements TechniqueConfig {
+    }
+
+    /** A kind of ambient occlusion the engine does not have, registered as a game would. */
+    static final TechniqueKind<Grey, AmbientOcclusion, Technique> GREY = TechniqueKind.of(AmbientOcclusion.SLOT,
+        "test-grey", new Grey(0.5f), "every pixel grey", (ao, config) -> new GreyOcclusion(config));
+
+    /** {@link #GREY}'s technique: the scene's color cleared to its grey, read as frames record. */
+    record GreyOcclusion(Supplier<Grey> config) implements Technique {
+
+        @Override
+        public List<Key<?>> provides() {
+            return List.of(Keys.SPECULAR_OCCLUSION);
+        }
+
+        @Override
+        public void build(GraphBuilder g) {
+            Image color = g.modify(Keys.SCENE_COLOR);
+            Image specular = g.create("grey specular occlusion", ImageDesc.of(AmbientOcclusion.SPECULAR_FORMAT, 1, 1));
+            g.pass("grey").write(color, Access.TRANSFER_DST).write(specular, Access.TRANSFER_DST).record(ctx -> {
+                float grey = config.get().level();
+                ctx.clear(color.whole(), grey, grey, grey, 1);
+                ctx.clear(specular.whole(), 1, 1, 1, 1);
+            });
+            g.provide(Keys.SPECULAR_OCCLUSION, specular);
+        }
+    }
+
+    @Test
+    void aGamesOwnKindIsChosenThroughTheSettingsAsTheEnginesAre() {
+        try (Materials materials = new Materials(device, 8)) {
+            int white = materials.add(white());
+            scene.setMaterials(materials);
+            floor(white);
+            scene.removeFrom(1);
+            main(above(), this::visibilityBuffer);
+            float[] engine = frames(3);
+            EngineSettings settings = graph.settings();
+            settings.techniques().register(AmbientOcclusion.SLOT, GREY);
+            assertThat(settings.techniques().variants(AmbientOcclusion.SLOT)).contains(AmbientOcclusion.BITMASK, GREY);
+            settings.set(AmbientOcclusion.SLOT.setting(), "test-grey").set(GREY.setting("level"), 0.25f);
+            assertThat(farthest(frames(3), 0.25f)).as("the game's kind, at its level").isLessThanOrEqualTo(1 / 255f);
+            int builds = graph.builds();
+            settings.set(GREY.<Float>setting("level"), 0.75f); // read as frames record: no rebuild
+            assertThat(farthest(frames(2), 0.75f)).as("the level changed").isLessThanOrEqualTo(1 / 255f);
+            assertThat(graph.builds()).as("rebuilds for a tunable read as frames record").isEqualTo(builds);
+            // Saved and loaded again, as a settings file holds it
+            settings.load(settings.toMap());
+            assertThat(settings.toMap()).containsEntry("render.ao", "test-grey")
+                .containsEntry("render.ao.test-grey.level", "0.75");
+            assertThat(farthest(frames(2), 0.75f)).as("loaded").isLessThanOrEqualTo(1 / 255f);
+            // The engine's kind again: its image as before
+            AmbientOcclusion.SLOT.choose(settings, AmbientOcclusion.BITMASK);
+            assertThat(frames(3)).containsExactly(engine);
+            scene.setMaterials(null);
+        }
+    }
+
+    /** How far the pixel of {@code image} farthest from {@code value} is from it. */
+    private static float farthest(float[] image, float value) {
+        float most = 0;
+        for (float v : image) {
+            most = Math.max(most, Math.abs(v - value));
+        }
+        return most;
     }
 
     /** The mean of {@code image} over {@code count} of {@code columns} in {@code row}. */

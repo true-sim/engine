@@ -162,6 +162,7 @@ public final class ProbeVolumeLighting implements Technique {
     }
 
     /** {@code kind}'s technique, its config read from the view's graph's settings as they are when read. */
+    @AllowAllocation("building the graph, when it changes")
     private <C extends Record & TechniqueConfig> Technique make(TechniqueKind<C, ProbeVolumeLighting, Technique> kind) {
         return kind.create(this, () -> kind.config(view.port().settings()));
     }
@@ -182,6 +183,7 @@ public final class ProbeVolumeLighting implements Technique {
     }
 
     /** The probe volume's lighting, where the device traces rays. */
+    @AllowAllocation("building the graph, when it changes")
     private void buildProbes(GraphBuilder g) {
         if (!g.capabilities().rayTracing()) {
             return;
