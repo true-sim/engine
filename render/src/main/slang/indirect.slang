@@ -379,12 +379,23 @@ public float3 indirectLightWeights(IndirectLight* t, Surface s, float3 toViewer,
     float3 fAvg = f0 + (1 - f0) / 21;
     float3 fmsEms = (1 - ess) * fssEss * fAvg / (1 - fAvg * (1 - ess));
     // Where a probe volume lights the view, its sky visibility dims the environment's reflections (specular
-    // occlusion at the probes' scale) and its irradiance replaces the environment's harmonics
-    float sky = environmentVisibility(t, r, position, n, toViewer);
+    // occlusion at the probes' scale) and its irradiance replaces the environment's harmonics: one look-up for both
+    float sky = 1;
+    float3 around = 0;
+    bool found = false;
+    if ((t[0].flags & INDIRECT_PROBES) != 0)
+    {
+        around = probeLight(t[0].volume, position + t[0].volumeOffset, n, toViewer, r, sky, found);
+    }
+    if (!found)
+    {
+        around = diffuseLight(t, n);
+        sky = 1;
+    }
     float3 specular = specularLight(t, r, s.roughness) * sky * fssEss;
     float3 diffuseColor = (1 - s.metallic) * (1 - s.transmission) * s.albedo;
     diffuseWeight = (fmsEms + diffuseColor * (1 - fssEss - fmsEms)) * (1 - s.diffuseTransmission) * s.occlusion;
-    float3 diffuse = (fmsEms + diffuseColor * (1 - fssEss - fmsEms)) * diffuseLightAt(t, n, position, toViewer);
+    float3 diffuse = (fmsEms + diffuseColor * (1 - fssEss - fmsEms)) * around;
     if (s.diffuseTransmission > 0)
     {
         // Light through the surface, from behind it, in its transmission color
