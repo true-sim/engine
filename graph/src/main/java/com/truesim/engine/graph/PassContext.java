@@ -26,6 +26,8 @@ import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkBlitImageInfo2;
 import org.lwjgl.vulkan.VkBufferCopy;
 import org.lwjgl.vulkan.VkBufferImageCopy2;
+import org.lwjgl.vulkan.VkClearAttachment;
+import org.lwjgl.vulkan.VkClearRect;
 import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkCopyBufferToImageInfo2;
 import org.lwjgl.vulkan.VkCopyImageToBufferInfo2;
@@ -446,6 +448,35 @@ public final class PassContext {
             memPutInt(range + VkImageSubresourceRange.LAYERCOUNT, part.layerCount());
             Commands.clearColorImage(commands, image(part.image()), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color, 1,
                 range);
+        }
+    }
+
+    /**
+     * Clears {@code width} by {@code height} pixels at ({@code x}, {@code y}) of the pass's color attachment
+     * {@code attachment} to ({@code r}, {@code g}, {@code b}, {@code a}), inside its rendering
+     * ({@code vkCmdClearAttachments}): the pixels an opaque rectangle drawn without blending would write, in the order
+     * of the draws around it.
+     */
+    public void clear(int attachment, int x, int y, int width, int height, float r, float g, float b, float a) {
+        if (x < 0 || y < 0 || width <= 0 || height <= 0) {
+            throw new IllegalArgumentException("Clearing " + width + " x " + height + " at " + x + ", " + y);
+        }
+        try (MemoryStack stack = stackPush()) {
+            long clear = stack.ncalloc(VkClearAttachment.ALIGNOF, 1, VkClearAttachment.SIZEOF);
+            memPutInt(clear + VkClearAttachment.ASPECTMASK, org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT);
+            memPutInt(clear + VkClearAttachment.COLORATTACHMENT, attachment);
+            long color = clear + VkClearAttachment.CLEARVALUE;
+            memPutFloat(color, r);
+            memPutFloat(color + 4, g);
+            memPutFloat(color + 8, b);
+            memPutFloat(color + 12, a);
+            long rect = stack.ncalloc(VkClearRect.ALIGNOF, 1, VkClearRect.SIZEOF);
+            memPutInt(rect + VkClearRect.RECT + VkRect2D.OFFSET, x);
+            memPutInt(rect + VkClearRect.RECT + VkRect2D.OFFSET + 4, y);
+            memPutInt(rect + VkClearRect.RECT + VkRect2D.EXTENT, width);
+            memPutInt(rect + VkClearRect.RECT + VkRect2D.EXTENT + 4, height);
+            memPutInt(rect + VkClearRect.LAYERCOUNT, 1);
+            Commands.clearAttachments(commands, 1, clear, 1, rect);
         }
     }
 

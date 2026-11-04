@@ -205,6 +205,15 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     private int foldedPrimitive = -1;
     private boolean foldedEdges; // its rounded corners or border drawn along its edges (frameVertexMain)
     private volatile boolean foldBackdrop = true;
+    // Square, borderless boxes drawn first (after the folded backdrop, in its layer; a plot's background over its
+    // panel), opaque or over nothing but the clear, cleared as rectangles to what drawing them would leave: their
+    // layer, primitives, rectangles, and the colours (premultiplied) they leave.
+    private static final int MAX_CLEARED = 8;
+    private int clearedLayer = -1;
+    private int clearedCount;
+    private final int[] clearedPrimitives = new int[MAX_CLEARED];
+    private final float[] clearedRects = new float[MAX_CLEARED * 4]; // x0 y0 x1 y1 in UI pixels
+    private final float[] clearedColors = new float[MAX_CLEARED * 4];
 
     // Textures: an image and a sampled slot per id, the table naming the slots.
     private UiTextures textures;
@@ -384,8 +393,12 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
      * first primitive drawn, unclipped, without a gradient, covering the region drawn) is cleared to instead of drawn
      * (true by default): the image is cleared to its fill, and a box with rounded corners or a border is drawn along its
      * edges alone, without blending (what it covers there is the clear's transparency): the same pixels, without
-     * blending every pixel of the image once more (at 4K, about 0.15 ms on an RX 9070 XT). Off draws it as any other
-     * box, for comparison.
+     * blending every pixel of the image once more (at 4K, about 0.15 ms on an RX 9070 XT). Boxes drawn next (right
+     * after it in its layer, or first of all without one: unclipped, square, borderless, without a gradient, their
+     * edges on whole pixels of the image; a chart's plot background over its panel) are cleared as rectangles
+     * ({@code vkCmdClearAttachments}) to what drawing them leaves, instead of drawn and blended: opaque ones, and
+     * translucent ones over nothing but the clear (inside the backdrop's corners and border, over no box cleared
+     * before). Off draws them all as any other box, for comparison.
      */
     public GpuUiRenderer foldBackdrop(boolean fold) {
         foldBackdrop = fold;
@@ -405,11 +418,25 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         return foldedLayer < 0 ? -1 : (long) foldedLayer << 32 | foldedPrimitive;
     }
 
+    /**
+     * The boxes {@link #foldBackdrop} clears as rectangles this frame (when their edges lie on whole pixels of the
+     * image drawn), as {@code layer << 32 | index} each.
+     */
+    public long[] clearedBoxes() {
+        long[] boxes = new long[clearedCount];
+        for (int i = 0; i < clearedCount; i++) {
+            boxes[i] = (long) clearedLayer << 32 | clearedPrimitives[i];
+        }
+        return boxes;
+    }
+
     /** Finds the backdrop to clear to among {@code data}'s layers (this renderer's region), or none. */
     private void fold(GpuUiRenderer data) {
         foldedLayer = -1;
         foldedPrimitive = -1;
         foldedEdges = false;
+        clearedLayer = -1;
+        clearedCount = 0;
         clearColor[0] = 0;
         clearColor[1] = 0;
         clearColor[2] = 0;
@@ -424,7 +451,9 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
                 if (Primitive.kind(header) == Primitive.EMPTY) {
                     continue;
                 }
+                int next = p;
                 if (covers(list, p, header)) {
+                    next = p + 1;
                     float opacity = list.drawnOpacity(p);
                     long color = list.colorAt(p, Primitive.COLOR_A);
                     float a = Math.clamp(Float.float16ToFloat((short) (color >>> 48)), 0f, 1f);
@@ -437,9 +466,116 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
                     foldedEdges = list.intAt(p, Primitive.RADII) != 0 || list.intAt(p, Primitive.RADII + 1) != 0
                         || list.floatAt(p, Primitive.WIDTH) != 0;
                 }
+                clearedBoxes(list, i, next, data.counts[i]);
                 return; // the first primitive drawn decides
             }
         }
+    }
+
+    /**
+     * Takes the boxes to clear from primitive {@code from} of layer {@code layer} on, up to the first other one:
+     * square, borderless, unclipped boxes without a gradient, opaque or over the clear's colour alone.
+     */
+    private void clearedBoxes(DrawList list, int layer, int from, int count) {
+        // where the clear's colour lies untouched: inside the folded backdrop's corners and border (edgesVertexMain)
+        float ux0 = Float.NEGATIVE_INFINITY;
+        float uy0 = Float.NEGATIVE_INFINITY;
+        float ux1 = Float.POSITIVE_INFINITY;
+        float uy1 = Float.POSITIVE_INFINITY;
+        if (foldedLayer >= 0 && foldedEdges) {
+            int f = foldedPrimitive;
+            float radius = Math.max(Math.max(halfAt(list, f, Primitive.RADII, 0), halfAt(list, f, Primitive.RADII, 16)),
+                Math.max(halfAt(list, f, Primitive.RADII + 1, 0), halfAt(list, f, Primitive.RADII + 1, 16)));
+            float reach = Math.max(radius, list.floatAt(f, Primitive.WIDTH)) * list.drawnScale(f) + 1.5f;
+            ux0 = Math.min(list.drawnX(f, Primitive.X0), list.drawnX(f, Primitive.X1)) - 0.5f + reach;
+            uy0 = Math.min(list.drawnY(f, Primitive.Y0), list.drawnY(f, Primitive.Y1)) - 0.5f + reach;
+            ux1 = Math.max(list.drawnX(f, Primitive.X0), list.drawnX(f, Primitive.X1)) + 0.5f - reach;
+            uy1 = Math.max(list.drawnY(f, Primitive.Y0), list.drawnY(f, Primitive.Y1)) + 0.5f - reach;
+        }
+        for (int p = from; p < count && clearedCount < MAX_CLEARED; p++) {
+            int header = list.header(p);
+            if (Primitive.kind(header) == Primitive.EMPTY) {
+                continue;
+            }
+            if (Primitive.kind(header) != Primitive.BOX || Primitive.flags(header) != 0
+                || Primitive.clip(header) != DrawList.NO_CLIP || list.intAt(p, Primitive.RADII) != 0
+                || list.intAt(p, Primitive.RADII + 1) != 0 || list.floatAt(p, Primitive.WIDTH) != 0) {
+                return;
+            }
+            float x0 = list.drawnX(p, Primitive.X0);
+            float y0 = list.drawnY(p, Primitive.Y0);
+            float x1 = list.drawnX(p, Primitive.X1);
+            float y1 = list.drawnY(p, Primitive.Y1);
+            if (!(x1 > x0 && y1 > y0)) {
+                return;
+            }
+            long color = list.colorAt(p, Primitive.COLOR_A);
+            float a = Math.clamp(Float.float16ToFloat((short) (color >>> 48)) * list.drawnOpacity(p), 0f, 1f);
+            if (a < 1 && (x0 < ux0 || y0 < uy0 || x1 > ux1 || y1 > uy1 || overlapsCleared(x0, y0, x1, y1))) {
+                return; // translucent over more than the clear
+            }
+            int o = clearedCount;
+            clearedLayer = layer;
+            clearedPrimitives[o] = p;
+            clearedRects[o * 4] = x0;
+            clearedRects[o * 4 + 1] = y0;
+            clearedRects[o * 4 + 2] = x1;
+            clearedRects[o * 4 + 3] = y1;
+            float under = 1 - a; // the box over the clear's colour (premultiplied), as blending it would leave
+            clearedColors[o * 4] = Float.float16ToFloat((short) color) * a + clearColor[0] * under;
+            clearedColors[o * 4 + 1] = Float.float16ToFloat((short) (color >>> 16)) * a + clearColor[1] * under;
+            clearedColors[o * 4 + 2] = Float.float16ToFloat((short) (color >>> 32)) * a + clearColor[2] * under;
+            clearedColors[o * 4 + 3] = a + clearColor[3] * under;
+            clearedCount++;
+        }
+    }
+
+    /** One of the two half floats of primitive {@code p}'s word {@code word} ({@code shift} 0 or 16). */
+    private static float halfAt(DrawList list, int p, int word, int shift) {
+        return Float.float16ToFloat((short) (list.intAt(p, word) >>> shift));
+    }
+
+    private boolean overlapsCleared(float x0, float y0, float x1, float y1) {
+        for (int i = 0; i < clearedCount; i++) {
+            if (x0 < clearedRects[i * 4 + 2] && x1 > clearedRects[i * 4] && y0 < clearedRects[i * 4 + 3]
+                && y1 > clearedRects[i * 4 + 1]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Clears the boxes whose edges lie on whole pixels of the {@code imageWidth x imageHeight} image, in order, up to
+     * the first that does not; the index after the last one cleared ({@code skip} when none).
+     */
+    private int clearBoxes(PassContext ctx, int imageWidth, int imageHeight, int skip) {
+        float sx = (float) imageWidth / width;
+        float sy = (float) imageHeight / height;
+        for (int i = 0; i < clearedCount; i++) {
+            float x0 = (clearedRects[i * 4] - originX) * sx;
+            float y0 = (clearedRects[i * 4 + 1] - originY) * sy;
+            float x1 = (clearedRects[i * 4 + 2] - originX) * sx;
+            float y1 = (clearedRects[i * 4 + 3] - originY) * sy;
+            if (!whole(x0) || !whole(y0) || !whole(x1) || !whole(y1)) {
+                return skip; // drawn, with the rest
+            }
+            int ax = (int) Math.max(0, Math.rint(x0));
+            int ay = (int) Math.max(0, Math.rint(y0));
+            int bx = (int) Math.min(imageWidth, Math.rint(x1));
+            int by = (int) Math.min(imageHeight, Math.rint(y1));
+            if (bx > ax && by > ay) {
+                ctx.clear(0, ax, ay, bx - ax, by - ay, clearedColors[i * 4], clearedColors[i * 4 + 1],
+                    clearedColors[i * 4 + 2], clearedColors[i * 4 + 3]);
+            }
+            skip = clearedPrimitives[i] + 1;
+        }
+        return skip;
+    }
+
+    /** Whether {@code v} lies on a whole pixel (within what float coordinates keep). */
+    private static boolean whole(float v) {
+        return Math.abs(v - Math.rint(v)) <= 1e-3f;
     }
 
     /** Whether box {@code p} of {@code list} covers this renderer's whole region, filled with one colour. */
@@ -957,6 +1093,9 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
                 .transforms(data.transforms[i].deviceAddress()).vertices(data.vertices[i].deviceAddress());
             if (i == foldedLayer && foldedEdges) { // its corners and border over the clear, written, not blended
                 ctx.draw(edges, push.first(foldedPrimitive), 24, 1);
+            }
+            if (i == clearedLayer) { // the boxes drawn next: cleared as rectangles
+                skip = clearBoxes(ctx, imageWidth, imageHeight, skip);
             }
             int[] planned = data.draws[i];
             for (int d = 0; d < data.drawCounts[i]; d++) {
