@@ -8,8 +8,8 @@ dependencies {
     implementation(project(":engine-xr"))
     implementation(project(":engine-scene"))
     implementation(project(":engine-audio"))
-    implementation("com.truesim.scene:scene-meshbuild:0.62.0")
-    implementation("com.truesim.scene:scene-gltf:0.62.0")
+    implementation("com.truesim.scene:scene-meshbuild:0.63.0")
+    implementation("com.truesim.scene:scene-gltf:0.63.0")
 }
 
 application {
