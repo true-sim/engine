@@ -78,13 +78,13 @@ class UiProfilerTest {
         return new Ui(Tss.defaultTheme(), text, textures);
     }
 
-    static Engine engine(UiPlugin plugin, boolean validation) {
+    static Engine engine(UiPlugin plugin, boolean validation, String... without) {
         try {
             return Engine.create(new Application() {
                 @Override
                 public void configure(AppConfig app) {
-                    app.use(new Rendering().headless(true).validation(validation), new Input(), new Views(),
-                        new Profiling(), plugin);
+                    app.use(new Rendering().headless(true).validation(validation).without(without), new Input(),
+                        new Views(), new Profiling(), plugin);
                 }
             });
         } catch (StartupFailure e) {
@@ -173,6 +173,36 @@ class UiProfilerTest {
             engine.step();
             assertThat(Profiler.zones()).isFalse();
             assertThat(Profiler.frames()).isFalse();
+        }
+    }
+
+    @Test
+    void onAGpuWithoutTheOptionalCapabilitiesPassesAreStillPlacedAndStatisticsLeftOut() throws Exception {
+        UiPlugin plugin = new UiPlugin(t -> ui()).view("main");
+        try (Engine engine = engine(plugin, true, com.truesim.engine.vulkan.VulkanDevice.MEMORY_BUDGET,
+            com.truesim.engine.vulkan.VulkanDevice.CALIBRATED_TIMESTAMPS,
+            com.truesim.engine.vulkan.VulkanDevice.PIPELINE_STATISTICS)) {
+            UiProfiler profiler = plugin.profiler();
+            engine.settings().set(ProfilerSettings.VIEW, true);
+            engine.settings().set(ProfilerSettings.PIPELINE_STATISTICS, true);
+            engine.settings().set(ProfilerSettings.COUNTER_INTERVAL, 20);
+            for (int i = 0; i < 60; i++) {
+                engine.step();
+            }
+            Thread.sleep(60);
+            for (int i = 0; i < 5; i++) {
+                engine.step();
+            }
+            Recording r = profiler.recording();
+            assertThat(engine.get(Profiling.KEY).clock().calibrated()).isFalse();
+            assertThat(lane(r, "GPU graphics", LaneKind.GPU)).as("placed by their submits").isNotNegative();
+            long f = r.endFrame() - 5;
+            assertThat(r.frameGpuStart(f)).isGreaterThanOrEqualTo(r.frameEnd(f) - 1_000_000);
+            for (int c = 0; c < r.counters(); c++) {
+                assertThat(r.counterName(c)).doesNotStartWith("gpu.pipeline.");
+            }
+            engine.settings().set(ProfilerSettings.VIEW, false);
+            engine.step();
         }
     }
 

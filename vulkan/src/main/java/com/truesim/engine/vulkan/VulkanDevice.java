@@ -153,7 +153,19 @@ public final class VulkanDevice implements AutoCloseable {
     private final Map<Object, Throwable> children;
     private volatile boolean closed;
 
+    /** The profiler's optional capabilities a device can be made without ({@link #without}). */
+    public static final String MEMORY_BUDGET = "memoryBudget";
+    /** Calibrated timestamps (either extension). */
+    public static final String CALIBRATED_TIMESTAMPS = "calibratedTimestamps";
+    /** Pipeline statistics queries. */
+    public static final String PIPELINE_STATISTICS = "pipelineStatistics";
+
     private VulkanDevice(Gpu gpu, boolean swapchains, java.util.Collection<String> extra) {
+        this(gpu, swapchains, extra, java.util.Set.of());
+    }
+
+    private VulkanDevice(Gpu gpu, boolean swapchains, java.util.Collection<String> extra,
+        java.util.Set<String> without) {
         for (String name : extra) {
             if (!gpu.supports(name)) {
                 throw new VulkanException(gpu.name() + " lacks the device extension " + name);
@@ -184,9 +196,10 @@ public final class VulkanDevice implements AutoCloseable {
             this.astcTextures = core.textureCompressionASTC_LDR();
             this.primitiveIds = core.geometryShader();
             // The profiler's: pipeline statistics queries, the heaps' budgets, the GPU's clock against the CPU's.
-            this.pipelineStatistics = core.pipelineStatisticsQuery();
-            this.memoryBudget = gpu.supports(org.lwjgl.vulkan.EXTMemoryBudget.VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
-            this.calibration = gpu.supports(org.lwjgl.vulkan.KHRCalibratedTimestamps
+            this.pipelineStatistics = core.pipelineStatisticsQuery() && !without.contains(PIPELINE_STATISTICS);
+            this.memoryBudget = gpu.supports(org.lwjgl.vulkan.EXTMemoryBudget.VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)
+                && !without.contains(MEMORY_BUDGET);
+            this.calibration = without.contains(CALIBRATED_TIMESTAMPS) ? null : gpu.supports(org.lwjgl.vulkan.KHRCalibratedTimestamps
                 .VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)
                 ? org.lwjgl.vulkan.KHRCalibratedTimestamps.VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME
                 : gpu.supports(org.lwjgl.vulkan.EXTCalibratedTimestamps.VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)
@@ -476,6 +489,17 @@ public final class VulkanDevice implements AutoCloseable {
     /** A device for offscreen rendering and compute only, without swapchains. */
     public static VulkanDevice createHeadless(Gpu gpu) {
         return new VulkanDevice(gpu, false, List.of());
+    }
+
+    /**
+     * A device as {@link #create(Gpu, java.util.Collection)} (presenting) or {@link #createHeadless} makes, without
+     * the optional capabilities named in {@code without} ({@link #MEMORY_BUDGET}, {@link #CALIBRATED_TIMESTAMPS},
+     * {@link #PIPELINE_STATISTICS}) though the GPU has them: to run the paths of GPUs without them (tests, fallbacks),
+     * as {@code VulkanInstance.builder().maxApiVersion} runs those of a 1.3 GPU.
+     */
+    public static VulkanDevice without(Gpu gpu, boolean presenting, java.util.Collection<String> extensions,
+        java.util.Set<String> without) {
+        return new VulkanDevice(gpu, presenting, extensions, java.util.Set.copyOf(without));
     }
 
     /** Throws unless the GPU has every feature the engine relies on. */

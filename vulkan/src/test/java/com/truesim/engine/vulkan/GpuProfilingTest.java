@@ -70,6 +70,186 @@ class GpuProfilingTest {
     }
 
     @Test
+    void aDeviceWithoutTheProfilersCapabilitiesTakesTheFallbacks() {
+        try (VulkanInstance instance = instance();
+             VulkanDevice device = VulkanDevice.without(instance.bestGpu(), false, java.util.List.of(),
+                 java.util.Set.of(VulkanDevice.MEMORY_BUDGET, VulkanDevice.CALIBRATED_TIMESTAMPS,
+                     VulkanDevice.PIPELINE_STATISTICS));
+             Counters counters = new Counters()) {
+            assertThat(device.memoryBudget()).isFalse();
+            assertThat(device.calibratedTimestamps()).isNull();
+            assertThat(device.pipelineStatistics()).isFalse();
+            GpuClock clock = new GpuClock(device);
+            assertThat(clock.calibrated()).isFalse();
+            assertThat(clock.why()).contains("no calibrated timestamps");
+            counters.add(new GpuCounters(device, clock));
+            counters.add(new GpuCounters(device, null));
+            counters.sampleNow();
+            assertThat(counters.unavailable()).anyMatch(u -> u.contains("VK_EXT_memory_budget"))
+                .anyMatch(u -> u.contains("calibrated timestamps"));
+        }
+    }
+
+    @Test
+    void theClocksDecisionsHoldForEverySystemsDomains() {
+        int device = org.lwjgl.vulkan.KHRCalibratedTimestamps.VK_TIME_DOMAIN_DEVICE_KHR;
+        int monotonic = org.lwjgl.vulkan.KHRCalibratedTimestamps.VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR;
+        int raw = org.lwjgl.vulkan.KHRCalibratedTimestamps.VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR;
+        int qpc = org.lwjgl.vulkan.KHRCalibratedTimestamps.VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
+        assertThat(GpuClock.hostDomain(new int[] {device, qpc}, true)).isEqualTo(qpc);
+        assertThat(GpuClock.hostDomain(new int[] {device, monotonic, raw}, false)).isEqualTo(monotonic);
+        assertThat(GpuClock.hostDomain(new int[] {device, raw}, false)).isEqualTo(-1);
+        assertThat(GpuClock.hostDomain(new int[] {monotonic}, false)).as("without the device's").isEqualTo(-1);
+        assertThat(GpuClock.hostDomain(new int[] {device, monotonic}, true)).isEqualTo(-1);
+        assertThat(GpuClock.hostNanos(5_000, 0, 4_000, 6_000)).isEqualTo(5_000); // nanoseconds already
+        assertThat(GpuClock.hostNanos(500, 10, 4_000, 6_000)).isEqualTo(5_000); // 100 MHz ticks
+        assertThat(GpuClock.hostNanos(99_000_000, 0, 4_000, 6_000)).as("another clock: the bracket")
+            .isEqualTo(5_000);
+        assertThat(GpuClock.hostNanos(0, 0, 4_000_000, 6_000_000)).isEqualTo(5_000_000);
+    }
+
+    @Test
+    void theProfilersExtensionsAreEnabledOnceWhenAskedForToo() {
+        try (VulkanInstance instance = instance()) {
+            Gpu gpu = instance.bestGpu();
+            java.util.List<String> asked = new java.util.ArrayList<>();
+            try (VulkanDevice plain = VulkanDevice.createHeadless(gpu)) {
+                if (plain.memoryBudget()) {
+                    asked.add(org.lwjgl.vulkan.EXTMemoryBudget.VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+                }
+                if (plain.calibratedTimestamps() != null) {
+                    asked.add(plain.calibratedTimestamps());
+                }
+            }
+            try (VulkanDevice device = VulkanDevice.without(gpu, false, asked, java.util.Set.of())) {
+                assertThat(device.memoryBudget()).isEqualTo(asked.contains(
+                    org.lwjgl.vulkan.EXTMemoryBudget.VK_EXT_MEMORY_BUDGET_EXTENSION_NAME));
+            }
+        }
+    }
+
+    @Test
+    void theClockTakesEachPathOfTheDomainsAndCallsItIsGiven() {
+        int device = org.lwjgl.vulkan.KHRCalibratedTimestamps.VK_TIME_DOMAIN_DEVICE_KHR;
+        int qpc = org.lwjgl.vulkan.KHRCalibratedTimestamps.VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
+        int monotonic = org.lwjgl.vulkan.KHRCalibratedTimestamps.VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR;
+        int[] result = {0};
+        GpuClock.Source windows = new GpuClock.Source() {
+            @Override
+            public int[] domains() {
+                return new int[] {device, qpc};
+            }
+
+            @Override
+            public int calibrate(int hostDomain, long[] stamps, long[] max) {
+                assertThat(hostDomain).isEqualTo(qpc);
+                stamps[0] = 1000; // GPU ticks of 2 ns
+                stamps[1] = Math.round(System.nanoTime() / 100.0); // 100 ns performance counter ticks
+                max[0] = 50;
+                return result[0];
+            }
+        };
+        GpuClock clock = new GpuClock(2, windows, true, () -> 100);
+        assertThat(clock.calibrated()).isTrue();
+        assertThat(clock.why()).isEmpty();
+        clock.observe(5, 10); // before a calibration, frames place it
+        assertThat(clock.toCpu(5)).isEqualTo(10);
+        result[0] = -1; // a failed call leaves it
+        clock.calibrate();
+        assertThat(clock.deviation()).isEqualTo(-1);
+        result[0] = 0;
+        long before = System.nanoTime();
+        clock.calibrate();
+        assertThat(clock.deviation()).isEqualTo(50);
+        assertThat(clock.toCpu(1000)).isBetween(before - 1000, System.nanoTime() + 1000);
+        long t = clock.toCpu(0);
+        clock.observe(5, 10); // calibrated: frames do not move it
+        assertThat(clock.toCpu(0)).isEqualTo(t);
+
+        GpuClock noCounter = new GpuClock(2, windows, true, () -> 0);
+        assertThat(noCounter.calibrated()).isFalse();
+        assertThat(noCounter.why()).contains("no device and host time domain");
+        GpuClock linux = new GpuClock(2, windows, false, () -> 100);
+        assertThat(linux.calibrated()).as("no CLOCK_MONOTONIC").isFalse();
+        GpuClock monotonicClock = new GpuClock(2, new GpuClock.Source() {
+            @Override
+            public int[] domains() {
+                return new int[] {monotonic, device};
+            }
+
+            @Override
+            public int calibrate(int hostDomain, long[] stamps, long[] max) {
+                stamps[0] = 0;
+                stamps[1] = System.nanoTime();
+                max[0] = 1;
+                return 0;
+            }
+        }, false, () -> {
+            throw new AssertionError("the performance counter is Windows'");
+        });
+        assertThat(monotonicClock.calibrated()).isTrue();
+        monotonicClock.calibrate();
+        assertThat(monotonicClock.deviation()).isEqualTo(1);
+        GpuClock none = new GpuClock(2, null, true, () -> 100);
+        assertThat(none.calibrated()).isFalse();
+        assertThat(none.why()).contains("no calibrated timestamps extension");
+        none.calibrate();
+        assertThat(none.ready()).isFalse();
+
+        assertThat(GpuClock.perTick(1, 10_000_000)).isEqualTo(100);
+        assertThat(GpuClock.perTick(0, 10_000_000)).isZero();
+        assertThat(GpuClock.perTick(1, 0)).isZero();
+    }
+
+    @Test
+    void theCountersReportTheCalibratedClockAndCalibrateIt() {
+        try (VulkanInstance instance = instance();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             Counters counters = new Counters()) {
+            long[] calls = {0};
+            GpuClock clock = new GpuClock(1, new GpuClock.Source() {
+                @Override
+                public int[] domains() {
+                    return new int[] {org.lwjgl.vulkan.KHRCalibratedTimestamps.VK_TIME_DOMAIN_DEVICE_KHR,
+                        org.lwjgl.vulkan.KHRCalibratedTimestamps.VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR};
+                }
+
+                @Override
+                public int calibrate(int hostDomain, long[] stamps, long[] max) {
+                    calls[0]++;
+                    stamps[1] = System.nanoTime();
+                    return 0;
+                }
+            }, false, () -> 0);
+            GpuCounters gpu = new GpuCounters(device, clock);
+            gpu.calibrateEvery(3600);
+            counters.add(gpu);
+            counters.sampleNow();
+            counters.sampleNow(); // within the interval: once
+            assertThat(calls[0]).isEqualTo(1);
+            assertThat(counters.unavailable()).noneMatch(u -> u.contains("calibrated timestamps"));
+        }
+    }
+
+    @Test
+    void memoryCategoriesFollowScopesThenUsages() {
+        int as = org.lwjgl.vulkan.KHRAccelerationStructure.VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+        assertThat(GpuMemory.buffer(as, false)).isEqualTo(GpuMemory.Category.ACCELERATION);
+        assertThat(GpuMemory.buffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true)).isEqualTo(GpuMemory.Category.STAGING);
+        assertThat(GpuMemory.buffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false)).isEqualTo(GpuMemory.Category.BUFFERS);
+        assertThat(GpuMemory.image(VK_IMAGE_USAGE_SAMPLED_BIT)).isEqualTo(GpuMemory.Category.TEXTURES);
+        assertThat(GpuMemory.image(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)).isEqualTo(GpuMemory.Category.RENDER_TARGETS);
+        GpuMemory.Category before = GpuMemory.enter(GpuMemory.Category.TRANSIENTS);
+        try {
+            assertThat(GpuMemory.buffer(as, true)).isEqualTo(GpuMemory.Category.TRANSIENTS);
+            assertThat(GpuMemory.image(VK_IMAGE_USAGE_SAMPLED_BIT)).isEqualTo(GpuMemory.Category.TRANSIENTS);
+        } finally {
+            GpuMemory.exit(before);
+        }
+        assertThat(GpuMemory.buffer(0, false)).isEqualTo(GpuMemory.Category.BUFFERS);
+    }
+
+    @Test
     void memoryIsCountedByCategoryAndHeapsHaveBudgets() {
         try (VulkanInstance instance = instance();
              VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());

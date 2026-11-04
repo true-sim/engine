@@ -45,6 +45,7 @@ public final class Rendering implements Plugin {
     private boolean validation;
     private boolean headless;
     private int framesInFlight = 2;
+    private java.util.Set<String> without = java.util.Set.of();
     private VulkanInstance instance;
     private Gpu gpu;
     private VulkanDevice device;
@@ -68,6 +69,17 @@ public final class Rendering implements Plugin {
      */
     public Rendering headless(boolean on) {
         headless = on;
+        return this;
+    }
+
+    /**
+     * Makes the device without these optional capabilities though the GPU has them ({@code VulkanDevice.MEMORY_BUDGET},
+     * {@code CALIBRATED_TIMESTAMPS}, {@code PIPELINE_STATISTICS}): the paths of GPUs without them, for tests. Before
+     * startup.
+     */
+    @AllowAllocation("starting up")
+    public Rendering without(String... capabilities) {
+        without = java.util.Set.of(capabilities);
         return this;
     }
 
@@ -124,7 +136,9 @@ public final class Rendering implements Plugin {
                     .validation(validation).surfaces(!headless).extensions(instanceExtensions).build();
                 case GPU -> gpu = gpuChoice != null ? gpuChoice.apply(instance) : instance.bestGpu();
                 case DEVICE -> {
-                    device = headless && deviceExtensions.isEmpty() ? VulkanDevice.createHeadless(gpu)
+                    device = !without.isEmpty() ? VulkanDevice.without(gpu, !headless || !deviceExtensions.isEmpty(),
+                        deviceExtensions, without)
+                        : headless && deviceExtensions.isEmpty() ? VulkanDevice.createHeadless(gpu)
                         : VulkanDevice.create(gpu, deviceExtensions);
                     graph = new FrameGraph(device, framesInFlight).settings(startup.settings());
                     presenter = new Presenter(graph, instance);

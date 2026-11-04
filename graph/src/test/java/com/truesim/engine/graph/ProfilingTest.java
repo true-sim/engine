@@ -15,7 +15,8 @@ import com.truesim.engine.app.profile.Profiler;
 import com.truesim.engine.app.profile.ProfilerSettings;
 import com.truesim.engine.vulkan.Format;
 import java.util.List;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * The Profiling plugin in a headless engine with validation: it follows the settings, puts the GPU's passes on the
@@ -50,14 +51,22 @@ class ProfilingTest {
         }
     }
 
-    @Test
-    void itFollowsTheSettingsAndPlacesGpuPassesAfterTheirSubmit() throws Exception {
+    /** On the GPU as it is, and as one without the profiler's optional capabilities (the fallbacks' paths). */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void itFollowsTheSettingsAndPlacesGpuPassesAfterTheirSubmit(boolean masked) throws Exception {
         Engine engine;
         try {
             engine = Engine.create(new Application() {
                 @Override
                 public void configure(AppConfig app) {
-                    app.use(new Rendering().headless(true).validation(true), new Frames(), new Profiling());
+                    Rendering rendering = new Rendering().headless(true).validation(true);
+                    if (masked) {
+                        rendering.without(com.truesim.engine.vulkan.VulkanDevice.MEMORY_BUDGET,
+                            com.truesim.engine.vulkan.VulkanDevice.CALIBRATED_TIMESTAMPS,
+                            com.truesim.engine.vulkan.VulkanDevice.PIPELINE_STATISTICS);
+                    }
+                    app.use(rendering, new Frames(), new Profiling());
                 }
             });
         } catch (StartupFailure e) {
@@ -112,6 +121,11 @@ class ProfilingTest {
             assertThat(p.runtime()).isNotNull();
             GpuTimings t = p.graph().timings();
             assertThat(t.statisticsOn()).isEqualTo(p.graph().device().pipelineStatistics());
+            if (masked) {
+                assertThat(t.statisticsOn()).isFalse();
+                assertThat(p.clock().calibrated()).isFalse();
+                assertThat(p.counters().unavailable()).anyMatch(u -> u.contains("VK_EXT_memory_budget"));
+            }
             assertThat(t.nanosPerTick()).isPositive();
             assertThat(GpuTimings.STATISTIC_NAMES).hasSize(GpuTimings.STATISTICS);
             Thread.sleep(50);
