@@ -297,7 +297,7 @@ final class StreamWindow implements Application, PlatformListener {
                 freeIds.push(id);
             }
             window = startup.get(Desktop.KEY).platform().createWindow(
-                WindowOptions.of("true-sim stream", 1600, 900), startup.settings().scoped("main"));
+                WindowOptions.of("stream test", 1600, 900), startup.settings().scoped("main"));
             rendering.presenter().outputTransform(new DisplayTransform()).present(port, Keys.SCENE_COLOR, window);
         }
 
