@@ -25,7 +25,7 @@ dependencies {
     testImplementation(testFixtures("com.truesim.ui:ui-profiler:0.5.1")) // the profiler gallery
     testImplementation(testFixtures("com.truesim.ui:ui-gizmo:0.5.1"))
     testImplementation(testFixtures("com.truesim.ui:ui-scene:0.5.1")) // the scene rig and fake camera source
-    testImplementation("com.truesim.scene:scene-meshbuild:0.63.0") // meshes for picking and panels
+    testImplementation("com.truesim.scene:scene-meshbuild:0.64.0") // meshes for picking and panels
     testImplementation(project(":engine-bench")) // the benchmark scenes (UiScenes) the batching benchmark compares
     testImplementation("com.truesim.ui:ui-text-native:0.5.1")
     testImplementation("com.truesim.ui:ui-fonts-cjk:0.5.1") // bundled fonts: the same text on every machine
