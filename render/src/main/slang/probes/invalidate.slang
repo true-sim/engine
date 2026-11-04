@@ -3,8 +3,9 @@
 // frame before's (a copy kept here, persistent), and the probes near what changed restart their histories this frame:
 //
 // - instancesMain, a thread per instance: moved, turned, scaled, shown, hidden or given another mesh (D91's records,
-//   as drawing has them), or skinned anew (its copy's bit in the skinned set): the probes within its bounding sphere,
-//   where it was and where it is, grown by the probes' spacing.
+//   as drawing has them), or skinned anew (its copy's bit in the skinned set): the probes within its bounding sphere
+//   times a margin (the surfaces it shades and lights beyond it), where it was and where it is, grown by the probes'
+//   spacing.
 // - lightsMain, a thread per light: switched, moved, recolored or reshaped: the probes within its reach (times a
 //   margin, for the surfaces it lights beyond it), where it was and where it is; a directional light: every probe.
 import indirect;
@@ -25,6 +26,7 @@ struct InvalidatePush
     float3 originLow;         // and the rest
     uint lightCount;
     float margin;             // a light's reach is grown by this factor
+    float instanceMargin;     // and an instance's bounding sphere
     float cutoff;             // where lights without a range end
     uint previousLightCount;  // the frame before's lights
 };
@@ -121,11 +123,11 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     float4 b = sphereOf(now);
     if (a.w > 0)
     {
-        invalidate(a.xyz, a.w);
+        invalidate(a.xyz, a.w * push.instanceMargin);
     }
     if (b.w > 0 && any(a != b))
     {
-        invalidate(b.xyz, b.w);
+        invalidate(b.xyz, b.w * push.instanceMargin);
     }
     push.previous[i] = now;
 }

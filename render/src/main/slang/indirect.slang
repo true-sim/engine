@@ -19,7 +19,7 @@ public static const uint PROBE_ACTIVE = 1;
 /** A probe holds light: updated at least once since its slot took it. */
 public static const uint PROBE_VALID = 2;
 
-/** One probe's state: 32 bytes. */
+/** One probe's state: 48 bytes. */
 [HostLayout]
 public struct ProbeState
 {
@@ -27,6 +27,10 @@ public struct ProbeState
     public uint flags;             // PROBE_*
     public int3 coordinates;       // the world grid coordinate its slot holds (scrolling: a new one resets it)
     public uint frames;            // updates its history holds (the adaptive hysteresis' count)
+    public float drift;            // the updates' mean relative difference from the history, averaged over a few
+    public uint pad0;              // (adaptive hysteresis: a change too small for one update to show); its square
+    public uint pad1;
+    public uint pad2;
 };
 
 /**

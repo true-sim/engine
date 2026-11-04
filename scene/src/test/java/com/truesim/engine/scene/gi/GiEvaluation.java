@@ -55,6 +55,9 @@ class GiEvaluation {
         new Variant("probes+rays-reblur", AmbientOcclusion.Mode.RAYS, ProbeVolumeLighting.Mode.PROBES,
             Denoiser.Mode.REBLUR));
 
+    /** Runs of each dynamic scene's change whose frames are averaged for its lag. */
+    static final int TRIALS = 4;
+
     /** Frames each image settles in: past the probes' and the denoiser's 30 frames of history. */
     static final int SETTLE = 72;
 
@@ -107,7 +110,7 @@ class GiEvaluation {
             occlusion.forEach(System.out::println);
             System.out.println();
             System.out.println("Lag of the dynamic scenes' changes: frames until within 10 % of the change, above the "
-                + "settled image's noise (D3); the change and the noise as mean absolute luminance:");
+                + "settled image's noise (D3); the change and the noise as mean absolute luminance of 16 x 16 blocks:");
             System.out.println("| Scene | Response | Frames | Change | Noise |");
             System.out.println("|---|---|---|---|---|");
             lags.forEach(System.out::println);
@@ -203,12 +206,24 @@ class GiEvaluation {
             graph.settings().set(AmbientOcclusion.MODE, AmbientOcclusion.Mode.OFF)
                 .set(ProbeVolumeLighting.MODE, ProbeVolumeLighting.Mode.PROBES)
                 .set(ProbeVolume.INVALIDATE, r == 0).set(ProbeVolume.ADAPTIVE, r <= 1);
-            harness.realtime(scene, 0);
-            float[] before = harness.render(SETTLE);
-            harness.state(scene, 1);
+            // Each frame after the change as the mean of TRIALS runs (the rays turn differently in each): the light's
+            // response, not one run's noise
+            float[] before = null;
             float[][] seen = new float[90][];
-            for (int f = 0; f < seen.length; f++) {
-                seen[f] = harness.render(1);
+            for (int trial = 0; trial < TRIALS; trial++) {
+                harness.realtime(scene, 0);
+                float[] settledBefore = harness.render(SETTLE);
+                before = before == null ? settledBefore : before;
+                harness.state(scene, 1);
+                for (int f = 0; f < seen.length; f++) {
+                    float[] image = harness.render(1);
+                    if (seen[f] == null) {
+                        seen[f] = new float[image.length];
+                    }
+                    for (int i = 0; i < image.length; i++) {
+                        seen[f][i] += image[i] / TRIALS;
+                    }
+                }
             }
             // What it settles at: the mean of the last 30 frames, and their noise about it
             int pixels = harness.width() * harness.height();
@@ -238,12 +253,29 @@ class GiEvaluation {
         return rows;
     }
 
-    /** The mean absolute luminance difference of two images. */
+    /**
+     * The mean absolute difference of two images' luminance over blocks of 16 x 16 pixels (GiReferences' size): the
+     * light's change, not single pixels' noise.
+     */
     static double difference(float[] a, float[] b, int pixels) {
+        int width = GiReferences.WIDTH;
+        int height = pixels / width;
+        int block = 16;
         double sum = 0;
-        for (int p = 0; p < pixels; p++) {
-            sum += Math.abs(GiError.luminance(a, p) - GiError.luminance(b, p));
+        int blocks = 0;
+        for (int by = 0; by + block <= height; by += block) {
+            for (int bx = 0; bx + block <= width; bx += block) {
+                double d = 0;
+                for (int y = by; y < by + block; y++) {
+                    for (int x = bx; x < bx + block; x++) {
+                        int p = y * width + x;
+                        d += GiError.luminance(a, p) - GiError.luminance(b, p);
+                    }
+                }
+                sum += Math.abs(d) / (block * block);
+                blocks++;
+            }
         }
-        return sum / pixels;
+        return sum / blocks;
     }
 }

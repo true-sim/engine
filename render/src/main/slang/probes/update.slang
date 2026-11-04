@@ -65,6 +65,7 @@ struct ProbePush
     uint maxFrames;           // the history's frames at most
     uint flags;               // PROBES_*
     float sensitivity;        // adaptive hysteresis: deviations of the update's noise a texel may differ by
+    float drift;              // and how far the updates' mean relative difference from the history may drift
     float4 rotation;          // this frame's rotation of the rays (a unit quaternion)
 };
 
@@ -152,6 +153,8 @@ void prepareMain(uint3 id : SV_DispatchThreadID)
     if (restart)
     {
         frames = 0;
+        states[index].drift = 0;
+        states[index].pad0 = 0;
     }
     bool update = restart || (index + push.frame) % max(push.period, 1u) == 0;
     flags &= ~(PROBE_INVALIDATED | PROBE_UPDATE | PROBE_RESTARTED);
@@ -264,6 +267,7 @@ groupshared float3 rayWay[MAX_RAYS];
 groupshared float4 newIrradiance[36];
 groupshared float2 newDepth[196];
 groupshared uint changed;
+groupshared float2 relative[36];
 groupshared uint stillActive;
 
 /** The octahedral direction of interior texel `t` of a tile of `n` interior texels a side. */
@@ -455,6 +459,9 @@ void blendMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         }
         float4 update = weights > 0 ? float4(sum / weights, sky / weights) : float4(0, 0, 0, 0);
         float4 history = images[push.irradiance][irradianceTile + 1 + texel];
+        float now = luminance3(update.rgb);
+        float was = luminance3(history.rgb);
+        relative[t] = weights > 0 && frames > 0 ? float2(now, was) : float2(0, 0);
         if (frames > 0 && weights > 0 && (push.flags & PROBES_ADAPTIVE) != 0)
         {
             float mean = lum / weights;
@@ -468,6 +475,31 @@ void blendMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
             }
         }
         newIrradiance[t] = update;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // A drift: the updates differing from the history the same way, frame after frame, by less than one update's
+    // noise shows (a small change nothing announced)
+    if (t == 0 && blend && frames > 0 && (push.flags & PROBES_ADAPTIVE) != 0)
+    {
+        float2 sum = 0;
+        for (uint k = 0; k < 36; k++)
+        {
+            sum += relative[k];
+        }
+        // The relative difference of the texels' sums (unbiased where the updates' noise is), averaged over a few
+        // updates with its square: a drift beyond the average's own noise (sensitivity deviations, at least the floor)
+        float d = (sum.x - sum.y) / max(sum.y, 1.0e-4);
+        float drift = lerp(states[index].drift, d, 0.25);
+        float square = lerp(asfloat(states[index].pad0), d * d, 0.25);
+        float noise = sqrt(max(square - drift * drift, 0.0) * 0.25 / 1.75);
+        if (frames >= 8 && abs(drift) > push.sensitivity * noise + push.drift)
+        {
+            changed = 1;
+            drift = 0;
+            square = 0;
+        }
+        states[index].drift = drift;
+        states[index].pad0 = asuint(square);
     }
     GroupMemoryBarrierWithGroupSync();
     if (changed != 0)

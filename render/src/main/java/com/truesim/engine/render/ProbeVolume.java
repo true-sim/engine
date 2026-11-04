@@ -132,6 +132,13 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
     /** How many deviations of an update's noise a texel may differ by before its probe restarts. */
     public static final Setting<Float> SENSITIVITY = Setting.decimal("render.gi.response.sensitivity", 4, 0.5f, 100,
         "deviations of a probe update's noise beyond which its history restarts");
+    /**
+     * The least relative drift of a probe's updates from its history (averaged over a few updates, beyond
+     * {@link #SENSITIVITY} deviations of that average's noise) that restarts it: changes nothing announced, too small
+     * for one update's noise to show.
+     */
+    public static final Setting<Float> DRIFT = Setting.decimal("render.gi.response.drift", 0.01f, 0.001f, 1,
+        "how far a probe's updates may drift from its history, relative, before it restarts");
     /** Probes near what the scene says changed (instances, lights, the environment) restart at once. */
     public static final Setting<Boolean> INVALIDATE = Setting.bool("render.gi.response.invalidate", true,
         "probes near changed instances and lights restart their histories at once");
@@ -147,18 +154,25 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
     public static final Setting<Integer> ITERATIONS = Setting.integer("render.gi.response.iterations", 2, 1, 4,
         "updates a frame of the probes whose history restarted (bounces of a change per frame)");
 
+    /**
+     * A changed instance restarts the probes within this many times its bounding sphere (the light it blocks and bounces
+     * reaches beyond it).
+     */
+    public static final Setting<Float> INSTANCE_MARGIN = Setting.decimal("render.gi.response.instanceMargin", 3, 1,
+        100, "how many times its bounding sphere a changed instance restarts probes within");
+
     /** Its settings. */
     public static final List<Setting<?>> ALL = List.of(ITERATIONS, CASCADES, PROBES, PROBES_UP, SPACING, RAYS,
         FIXED_RAYS, BUDGET,
         LAYERS, NORMAL_BIAS, VIEW_BIAS, BLEND, DEPTH_RANGE, RELOCATE, CLASSIFY, MAX_FRAMES, ADAPTIVE, SENSITIVITY,
-        INVALIDATE, LIGHT_MARGIN);
+        DRIFT, INVALIDATE, LIGHT_MARGIN, INSTANCE_MARGIN);
 
     static final Format IRRADIANCE_FORMAT = Format.R16G16B16A16_SFLOAT;
     static final Format DEPTH_FORMAT = Format.R16G16_SFLOAT;
     private static final Format RAY_FORMAT = Format.R16G16B16A16_SFLOAT;
     private static final int IRRADIANCE_TEXELS = 8;
     private static final int DEPTH_TEXELS = 16;
-    private static final int STATE_BYTES = 32;
+    private static final int STATE_BYTES = 48;
     private static final int RAY_ROW = 32;       // update.slang's
     private static final int ROW = 1024;         // paths.slang's PATH_ROW
     private static final int PATH_PROBES = 1 << 16;
@@ -598,7 +612,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                 .origin((float) x, (float) y, (float) z)
                 .originLow((float) (x - (float) x), (float) (y - (float) y), (float) (z - (float) z))
                 .lightCount(lights.count()).previousLightCount(lightsBefore)
-                .margin(settings.get(LIGHT_MARGIN)).cutoff(settings.get(ClusteredLights.CUTOFF));
+                .margin(settings.get(LIGHT_MARGIN)).instanceMargin(settings.get(INSTANCE_MARGIN)).cutoff(settings.get(ClusteredLights.CUTOFF));
         }
 
         /** update.slang's push block: the resources a pass does not declare null. */
@@ -620,7 +634,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                 .irradiance(irradiance == null ? 0 : ctx.storage(irradiance))
                 .depth(depth == null ? 0 : ctx.storage(depth))
                 .frame((int) now).period(Math.max(1, Math.round(1 / budget))).maxFrames(settings.get(MAX_FRAMES))
-                .flags(flags).sensitivity(settings.get(SENSITIVITY));
+                .flags(flags).sensitivity(settings.get(SENSITIVITY)).drift(settings.get(DRIFT));
             // This frame's turn of the rays: a random unit quaternion from the frame's number (Shoemake 1992)
             long h = mix(now * 0x9E3779B97F4A7C15L + 1);
             double u1 = (h >>> 11) * 0x1.0p-53;
