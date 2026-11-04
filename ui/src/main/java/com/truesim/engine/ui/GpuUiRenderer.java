@@ -34,7 +34,10 @@ import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.graph.ViewPort;
+import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.Keys;
+import com.truesim.engine.settings.EngineSettings;
+import com.truesim.engine.settings.Setting;
 import com.truesim.engine.ui.layout.UiPush;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.FrameBuffer;
@@ -47,6 +50,7 @@ import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.ShaderModule;
 import com.truesim.engine.vulkan.VulkanDevice;
+import com.truesim.ui.core.draw.DirtyRanges;
 import com.truesim.ui.core.draw.DrawList;
 import com.truesim.ui.core.draw.Primitive;
 import com.truesim.ui.core.draw.UiRenderer;
@@ -66,9 +70,11 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  * image: premultiplied alpha, linear, 1.0 meaning paper white, at the view's output size, cleared transparent each
  * frame, which the view's {@code DisplayTransform} composites after the tone curve (design UI13).
  *
- * <p><b>Data.</b> Each layer's primitives and clip table live in persistent buffers (one copy per frame in flight,
- * {@link FrameBuffer}); {@link #submit} copies only what changed since the last submit (the draw list's dirty range,
- * its clips when they changed), so a frame where nothing changed uploads nothing ({@link #uploadedBytes()}). UI
+ * <p><b>Data.</b> Each layer's primitives, clip table and transform table live in persistent buffers (one copy per
+ * frame in flight, {@link FrameBuffer}); {@link #submit} copies only what changed since the last submit (each of the
+ * draw list's dirty ranges of primitives and of transform entries, its clips when they changed), so a frame where
+ * nothing changed uploads nothing ({@link #uploadedBytes()}), and an animated opacity, scale or offset uploads its
+ * 32-byte transform entry, not the primitives it draws. UI
  * textures get a bindless slot each, named by a table the shader reads by texture id; a texture's dirty region is
  * uploaded when it changes, sampled as {@code RGBA8_UNORM} (MTSDF atlases) or {@code RGBA8_SRGB} (images).
  *
@@ -89,10 +95,25 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  * ui.submit(layers, layerCount, textures, width, height);
  * }</pre>
  *
+ * <p><b>Depth tested primitives</b> (ui-core's {@code Primitive.FLAG_DEPTH}: a gizmo's handles, {@code
+ * Gizmo.depthTest}) are faded per pixel where the view's scene depth ({@link Keys#SCENE_DEPTH}, read in the same frame
+ * after everything that writes it, where the view has one) is nearer than they are, their colour times their occluded
+ * opacity there: exact, with no frame of delay, also where an occluder moved this frame. The depth is turned into view
+ * depths by the projection of {@link #depthCamera}, the camera the view's scene is drawn through (the {@code UiPlugin}
+ * sets it from its scene bridge's); without one, or without a scene depth, they draw unfaded. Its render region maps
+ * onto the UI's image by its share of the view (dynamic resolution included); {@link #DEPTH_BIAS} keeps a handle lying
+ * on a surface visible.
+ *
  * <p><b>Several views of one UI.</b> A UI shown in several windows (docking's OS windows each show a region of it)
  * uploads once: {@link #share()} makes a renderer for another view that draws this one's buffers and textures (one
  * device, one upload, several presenter targets), at its own {@link #origin} (the UI pixel at its image's top left)
  * and region size ({@link #submit}'s width and height, its layers ignored: this renderer's are drawn).
+ *
+ * <p><b>Lines and envelopes.</b> The kinds over vertices ({@link Primitive#PATH}, {@link Primitive#COLUMNS}: a chart's
+ * polylines and min-max envelopes) read the layer's vertex table, uploaded as its dirty ranges like the primitives (a
+ * stream appending points uploads theirs), and are drawn by draws of their own between the runs around them, a quad
+ * per segment or column expanded in the vertex shader. A world panel drawn directly in the 3D view
+ * ({@link WorldPanelRenderer} without a texture) leaves them out; one drawn into its texture draws them.
  *
  * <p>One renderer per view (a technique belongs to one view). Use it on the thread that records frames. Submitting
  * allocates nothing once its buffers have grown, but for textures added or written (rare: an atlas page filled).
@@ -115,31 +136,49 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         ADAPTIVE
     }
 
+    /**
+     * How much farther than the scene (relative to its depth) a depth tested primitive must be to be faded: 1e-4 is
+     * 1 mm at 10 m, which keeps a handle lying on a surface from flickering.
+     */
+    public static final Setting<Float> DEPTH_BIAS = Setting.decimal("ui.gizmo.depthBias", 1e-4f, 0, 0.1f,
+        "how much farther than the scene (relative) a gizmo's part must be to be faded as hidden");
+
     /** The shortest run of one kind {@link Batching#ADAPTIVE} draws with its kind's own shader. */
     public static final int LONG_RUN = 256;
 
     /** The shader entry points of the kinds, by kind (Primitive's numbers); EMPTY has none. */
     private static final String[] KIND_ENTRIES = {null, "boxMain", "shadowMain", "glyphMain", "imageMain",
-        "nineSliceMain", "lineMain"};
+        "nineSliceMain", "lineMain", "triangleMain", "pathMain", "columnsMain"};
+    /** The vertex shader entry points of the kinds over vertices, which expand a quad per segment or column. */
+    private static final String[] KIND_VERTICES = {null, null, null, null, null, null, null, null, "pathVertexMain",
+        "columnsVertexMain"};
     private static final int BUFFER_USAGE = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     private static final int CLIP_BYTES = DrawList.CLIP_FLOATS * 4;
+    private static final int TRANSFORM_BYTES = DrawList.TRANSFORM_FLOATS * 4;
+    private static final int VERTEX_BYTES = DrawList.VERTEX_FLOATS * 4;
+    /** Columns of a filled envelope a quad covers: ui/draw.slang's FILL_GROUP. */
+    static final int FILL_GROUP = 4;
 
     private final VulkanDevice device;
     private final FrameSlots slots;
     private final FrameUploads uploads;
     private final Retiring retiring;
     private final Pipeline uber;
+    private final Pipeline edges; // a folded backdrop's corners and border, written over the clear
     private final Pipeline[] kinds;
     private final GpuUiRenderer source; // the renderer whose uploads this one draws, or null: its own
     private float originX;
     private float originY;
     private volatile Batching batching = Batching.ADAPTIVE;
+    private volatile Camera depthCamera;
 
     // Per layer: the list last submitted, its buffers, and what was drawn of it.
     private DrawList[] lists = new DrawList[0];
     private FrameBuffer[] primitives = new FrameBuffer[0];
     private FrameBuffer[] clips = new FrameBuffer[0];
+    private FrameBuffer[] transforms = new FrameBuffer[0];
+    private FrameBuffer[] vertices = new FrameBuffer[0];
     private int[] counts = new int[0];
     // The draws planned for each layer's list (first, count, pipeline: 0 the uber one, else a kind's), for the list's
     // version and the batching they were planned for.
@@ -152,14 +191,36 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     private MemorySegment[] wordSegments = new MemorySegment[0];
     private float[][] wrappedClips = new float[0][];
     private MemorySegment[] clipSegments = new MemorySegment[0];
+    private float[][] wrappedTransforms = new float[0][];
+    private MemorySegment[] transformSegments = new MemorySegment[0];
+    private float[][] wrappedVertices = new float[0][];
+    private MemorySegment[] vertexSegments = new MemorySegment[0];
     private int layerCount;
     private int width;
     private int height;
+    // A full-screen box at the bottom (a console's translucent backdrop) cleared to instead of drawn: its colour, the
+    // layer and primitive it is (-1: none), and the version of that layer's list it was found in.
+    private final float[] clearColor = new float[4];
+    private int foldedLayer = -1;
+    private int foldedPrimitive = -1;
+    private boolean foldedEdges; // its rounded corners or border drawn along its edges (frameVertexMain)
+    private volatile boolean foldBackdrop = true;
+    // Square, borderless boxes drawn first (after the folded backdrop, in its layer; a plot's background over its
+    // panel), opaque or over nothing but the clear, cleared as rectangles to what drawing them would leave: their
+    // layer, primitives, rectangles, and the colours (premultiplied) they leave.
+    private static final int MAX_CLEARED = 8;
+    private int clearedLayer = -1;
+    private int clearedCount;
+    private final int[] clearedPrimitives = new int[MAX_CLEARED];
+    private final float[] clearedRects = new float[MAX_CLEARED * 4]; // x0 y0 x1 y1 in UI pixels
+    private final float[] clearedColors = new float[MAX_CLEARED * 4];
 
     // Textures: an image and a sampled slot per id, the table naming the slots.
     private UiTextures textures;
     private GpuImage[] images = new GpuImage[1];
     private int[] slotOf = new int[1];
+    // UI textures drawn from a frame graph texture (a camera view's image), by id: no pixels uploaded, sampled in place
+    private com.truesim.engine.graph.Texture[] bound = new com.truesim.engine.graph.Texture[1];
     private FrameBuffer table;
     private final Arena stagingArena;
     private MemorySegment staging;
@@ -185,8 +246,13 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         this.stagingArena = Arena.ofShared();
         try (ShaderModule shaders = ShaderModule.load(device, "shaders/ui/draw.spv")) {
             uber = pipeline(shaders, "fragmentMain");
-            for (int kind = 1; kind < Primitive.KINDS; kind++) {
-                kinds[kind] = pipeline(shaders, KIND_ENTRIES[kind]);
+            edges = Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, "edgesVertexMain")
+                .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, "fragmentMain").color(VK_FORMAT_R16G16B16A16_SFLOAT)
+                .blend(0, Pipeline.Blend.NONE).pushConstants(UiPush.BYTES).doubleSided().build();
+            for (int kind = 1; kind < Primitive.KINDS; kind++) { // kinds with a shader
+                kinds[kind] = overVertices(kind)
+                    ? pipeline(shaders, KIND_VERTICES[kind], KIND_ENTRIES[kind])
+                    : pipeline(shaders, KIND_ENTRIES[kind]);
             }
         }
         table = FrameBuffer.create(device, 64L * 4, BUFFER_USAGE, slots);
@@ -202,6 +268,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         this.uploads = source.uploads;
         this.retiring = source.retiring;
         this.uber = source.uber;
+        this.edges = source.edges;
         this.kinds = source.kinds;
         this.stagingArena = source.stagingArena;
         this.table = source.table;
@@ -242,8 +309,26 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         return originY;
     }
 
+    /**
+     * The camera the view's scene depth is drawn through (null: none), whose projection turns that depth into the view
+     * depths depth tested primitives are compared with; read as each frame records. Returns this.
+     */
+    public GpuUiRenderer depthCamera(Camera camera) {
+        depthCamera = camera;
+        return this;
+    }
+
+    /** The camera the view's scene depth is drawn through, or null. */
+    public Camera depthCamera() {
+        return depthCamera;
+    }
+
     private Pipeline pipeline(ShaderModule shaders, String fragment) {
-        return Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, "vertexMain")
+        return pipeline(shaders, "vertexMain", fragment);
+    }
+
+    private Pipeline pipeline(ShaderModule shaders, String vertex, String fragment) {
+        return Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, vertex)
             .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, fragment).color(VK_FORMAT_R16G16B16A16_SFLOAT)
             .blend(0, Pipeline.Blend.PREMULTIPLIED).pushConstants(UiPush.BYTES).doubleSided().build();
     }
@@ -278,6 +363,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             this.width = uiWidth;
             this.height = uiHeight;
             uploaded = 0;
+            fold(source);
             return;
         }
         retiring.release();
@@ -299,6 +385,205 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         this.height = uiHeight;
         uploaded = bytes;
         totalUploaded += bytes;
+        fold(this);
+    }
+
+    /**
+     * Whether a full-screen box at the bottom of the UI (a console's translucent backdrop, a full-screen panel: the
+     * first primitive drawn, unclipped, without a gradient, covering the region drawn) is cleared to instead of drawn
+     * (true by default): the image is cleared to its fill, and a box with rounded corners or a border is drawn along its
+     * edges alone, without blending (what it covers there is the clear's transparency): the same pixels, without
+     * blending every pixel of the image once more (at 4K, about 0.15 ms on an RX 9070 XT). Boxes drawn next (right
+     * after it in its layer, or first of all without one: unclipped, square, borderless, without a gradient, their
+     * edges on whole pixels of the image; a chart's plot background over its panel) are cleared as rectangles
+     * ({@code vkCmdClearAttachments}) to what drawing them leaves, instead of drawn and blended: opaque ones, and
+     * translucent ones over nothing but the clear (inside the backdrop's corners and border, over no box cleared
+     * before). Off draws them all as any other box, for comparison.
+     */
+    public GpuUiRenderer foldBackdrop(boolean fold) {
+        foldBackdrop = fold;
+        return this;
+    }
+
+    /** Whether a full-screen backdrop is cleared to instead of drawn. */
+    public boolean foldsBackdrop() {
+        return foldBackdrop;
+    }
+
+    /**
+     * The primitive {@link #foldBackdrop} clears to instead of drawing this frame, as {@code layer << 32 | index}, or
+     * -1.
+     */
+    public long foldedBackdrop() {
+        return foldedLayer < 0 ? -1 : (long) foldedLayer << 32 | foldedPrimitive;
+    }
+
+    /**
+     * The boxes {@link #foldBackdrop} clears as rectangles this frame (when their edges lie on whole pixels of the
+     * image drawn), as {@code layer << 32 | index} each.
+     */
+    public long[] clearedBoxes() {
+        long[] boxes = new long[clearedCount];
+        for (int i = 0; i < clearedCount; i++) {
+            boxes[i] = (long) clearedLayer << 32 | clearedPrimitives[i];
+        }
+        return boxes;
+    }
+
+    /** Finds the backdrop to clear to among {@code data}'s layers (this renderer's region), or none. */
+    private void fold(GpuUiRenderer data) {
+        foldedLayer = -1;
+        foldedPrimitive = -1;
+        foldedEdges = false;
+        clearedLayer = -1;
+        clearedCount = 0;
+        clearColor[0] = 0;
+        clearColor[1] = 0;
+        clearColor[2] = 0;
+        clearColor[3] = 0;
+        if (!foldBackdrop || width <= 0 || height <= 0) {
+            return;
+        }
+        for (int i = 0; i < data.layerCount; i++) {
+            DrawList list = data.lists[i];
+            for (int p = 0; p < data.counts[i]; p++) {
+                int header = list.header(p);
+                if (Primitive.kind(header) == Primitive.EMPTY) {
+                    continue;
+                }
+                int next = p;
+                if (covers(list, p, header)) {
+                    next = p + 1;
+                    float opacity = list.drawnOpacity(p);
+                    long color = list.colorAt(p, Primitive.COLOR_A);
+                    float a = Math.clamp(Float.float16ToFloat((short) (color >>> 48)), 0f, 1f);
+                    clearColor[0] = Float.float16ToFloat((short) color) * a * opacity;
+                    clearColor[1] = Float.float16ToFloat((short) (color >>> 16)) * a * opacity;
+                    clearColor[2] = Float.float16ToFloat((short) (color >>> 32)) * a * opacity;
+                    clearColor[3] = a * opacity;
+                    foldedLayer = i;
+                    foldedPrimitive = p;
+                    foldedEdges = list.intAt(p, Primitive.RADII) != 0 || list.intAt(p, Primitive.RADII + 1) != 0
+                        || list.floatAt(p, Primitive.WIDTH) != 0;
+                }
+                clearedBoxes(list, i, next, data.counts[i]);
+                return; // the first primitive drawn decides
+            }
+        }
+    }
+
+    /**
+     * Takes the boxes to clear from primitive {@code from} of layer {@code layer} on, up to the first other one:
+     * square, borderless, unclipped boxes without a gradient, opaque or over the clear's colour alone.
+     */
+    private void clearedBoxes(DrawList list, int layer, int from, int count) {
+        // where the clear's colour lies untouched: inside the folded backdrop's corners and border (edgesVertexMain)
+        float ux0 = Float.NEGATIVE_INFINITY;
+        float uy0 = Float.NEGATIVE_INFINITY;
+        float ux1 = Float.POSITIVE_INFINITY;
+        float uy1 = Float.POSITIVE_INFINITY;
+        if (foldedLayer >= 0 && foldedEdges) {
+            int f = foldedPrimitive;
+            float radius = Math.max(Math.max(halfAt(list, f, Primitive.RADII, 0), halfAt(list, f, Primitive.RADII, 16)),
+                Math.max(halfAt(list, f, Primitive.RADII + 1, 0), halfAt(list, f, Primitive.RADII + 1, 16)));
+            float reach = Math.max(radius, list.floatAt(f, Primitive.WIDTH)) * list.drawnScale(f) + 1.5f;
+            ux0 = Math.min(list.drawnX(f, Primitive.X0), list.drawnX(f, Primitive.X1)) - 0.5f + reach;
+            uy0 = Math.min(list.drawnY(f, Primitive.Y0), list.drawnY(f, Primitive.Y1)) - 0.5f + reach;
+            ux1 = Math.max(list.drawnX(f, Primitive.X0), list.drawnX(f, Primitive.X1)) + 0.5f - reach;
+            uy1 = Math.max(list.drawnY(f, Primitive.Y0), list.drawnY(f, Primitive.Y1)) + 0.5f - reach;
+        }
+        for (int p = from; p < count && clearedCount < MAX_CLEARED; p++) {
+            int header = list.header(p);
+            if (Primitive.kind(header) == Primitive.EMPTY) {
+                continue;
+            }
+            if (Primitive.kind(header) != Primitive.BOX || Primitive.flags(header) != 0
+                || Primitive.clip(header) != DrawList.NO_CLIP || list.intAt(p, Primitive.RADII) != 0
+                || list.intAt(p, Primitive.RADII + 1) != 0 || list.floatAt(p, Primitive.WIDTH) != 0) {
+                return;
+            }
+            float x0 = list.drawnX(p, Primitive.X0);
+            float y0 = list.drawnY(p, Primitive.Y0);
+            float x1 = list.drawnX(p, Primitive.X1);
+            float y1 = list.drawnY(p, Primitive.Y1);
+            if (!(x1 > x0 && y1 > y0)) {
+                return;
+            }
+            long color = list.colorAt(p, Primitive.COLOR_A);
+            float a = Math.clamp(Float.float16ToFloat((short) (color >>> 48)) * list.drawnOpacity(p), 0f, 1f);
+            if (a < 1 && (x0 < ux0 || y0 < uy0 || x1 > ux1 || y1 > uy1 || overlapsCleared(x0, y0, x1, y1))) {
+                return; // translucent over more than the clear
+            }
+            int o = clearedCount;
+            clearedLayer = layer;
+            clearedPrimitives[o] = p;
+            clearedRects[o * 4] = x0;
+            clearedRects[o * 4 + 1] = y0;
+            clearedRects[o * 4 + 2] = x1;
+            clearedRects[o * 4 + 3] = y1;
+            float under = 1 - a; // the box over the clear's colour (premultiplied), as blending it would leave
+            clearedColors[o * 4] = Float.float16ToFloat((short) color) * a + clearColor[0] * under;
+            clearedColors[o * 4 + 1] = Float.float16ToFloat((short) (color >>> 16)) * a + clearColor[1] * under;
+            clearedColors[o * 4 + 2] = Float.float16ToFloat((short) (color >>> 32)) * a + clearColor[2] * under;
+            clearedColors[o * 4 + 3] = a + clearColor[3] * under;
+            clearedCount++;
+        }
+    }
+
+    /** One of the two half floats of primitive {@code p}'s word {@code word} ({@code shift} 0 or 16). */
+    private static float halfAt(DrawList list, int p, int word, int shift) {
+        return Float.float16ToFloat((short) (list.intAt(p, word) >>> shift));
+    }
+
+    private boolean overlapsCleared(float x0, float y0, float x1, float y1) {
+        for (int i = 0; i < clearedCount; i++) {
+            if (x0 < clearedRects[i * 4 + 2] && x1 > clearedRects[i * 4] && y0 < clearedRects[i * 4 + 3]
+                && y1 > clearedRects[i * 4 + 1]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Clears the boxes whose edges lie on whole pixels of the {@code imageWidth x imageHeight} image, in order, up to
+     * the first that does not; the index after the last one cleared ({@code skip} when none).
+     */
+    private int clearBoxes(PassContext ctx, int imageWidth, int imageHeight, int skip) {
+        float sx = (float) imageWidth / width;
+        float sy = (float) imageHeight / height;
+        for (int i = 0; i < clearedCount; i++) {
+            float x0 = (clearedRects[i * 4] - originX) * sx;
+            float y0 = (clearedRects[i * 4 + 1] - originY) * sy;
+            float x1 = (clearedRects[i * 4 + 2] - originX) * sx;
+            float y1 = (clearedRects[i * 4 + 3] - originY) * sy;
+            if (!whole(x0) || !whole(y0) || !whole(x1) || !whole(y1)) {
+                return skip; // drawn, with the rest
+            }
+            int ax = (int) Math.max(0, Math.rint(x0));
+            int ay = (int) Math.max(0, Math.rint(y0));
+            int bx = (int) Math.min(imageWidth, Math.rint(x1));
+            int by = (int) Math.min(imageHeight, Math.rint(y1));
+            if (bx > ax && by > ay) {
+                ctx.clear(0, ax, ay, bx - ax, by - ay, clearedColors[i * 4], clearedColors[i * 4 + 1],
+                    clearedColors[i * 4 + 2], clearedColors[i * 4 + 3]);
+            }
+            skip = clearedPrimitives[i] + 1;
+        }
+        return skip;
+    }
+
+    /** Whether {@code v} lies on a whole pixel (within what float coordinates keep). */
+    private static boolean whole(float v) {
+        return Math.abs(v - Math.rint(v)) <= 1e-3f;
+    }
+
+    /** Whether box {@code p} of {@code list} covers this renderer's whole region, filled with one colour. */
+    private boolean covers(DrawList list, int p, int header) {
+        return Primitive.kind(header) == Primitive.BOX && Primitive.flags(header) == 0
+            && Primitive.clip(header) == DrawList.NO_CLIP
+            && list.drawnX(p, Primitive.X0) <= originX && list.drawnY(p, Primitive.Y0) <= originY
+            && list.drawnX(p, Primitive.X1) >= originX + width && list.drawnY(p, Primitive.Y1) >= originY + height;
     }
 
     /** Uploads what changed of layer {@code i}, now {@code list}: its bytes. */
@@ -317,18 +602,51 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             clips[i] = grow(clips[i], clipBytes);
             clipsFresh = true;
         }
+        long transformBytes = (long) list.transformCount() * TRANSFORM_BYTES;
+        boolean transformsFresh = fresh;
+        if (transforms[i] == null || transforms[i].size() < transformBytes) {
+            transforms[i] = grow(transforms[i], transformBytes);
+            transformsFresh = true;
+        }
+        int vertexCount = list.vertexCount();
+        long vertexBytes = (long) Math.max(1, vertexCount) * VERTEX_BYTES;
+        boolean verticesFresh = fresh;
+        if (vertices[i] == null || vertices[i].size() < vertexBytes) {
+            vertices[i] = grow(vertices[i], vertexBytes);
+            verticesFresh = true;
+        }
         long bytes = 0;
-        int from = fresh ? 0 : Math.min(list.dirtyFrom(), size);
-        int to = fresh ? size : Math.min(list.dirtyTo(), size);
-        if (to > from) {
-            long offset = (long) from * Primitive.BYTES;
-            long length = (long) (to - from) * Primitive.BYTES;
-            primitives[i].put(offset, words(i, list.words()), offset, length);
-            bytes += length;
+        if (fresh) {
+            bytes += put(primitives[i], words(i, list.words()), 0, size, Primitive.BYTES);
+        } else {
+            DirtyRanges dirty = list.dirtyRanges(); // changes far apart upload apart
+            for (int r = 0; r < dirty.count(); r++) {
+                bytes += put(primitives[i], words(i, list.words()), dirty.from(r), Math.min(dirty.to(r), size),
+                    Primitive.BYTES);
+            }
         }
         if (clipsFresh || list.clipsDirty()) {
             clips[i].put(0, clips(i, list.clips()), 0, clipBytes);
             bytes += clipBytes;
+        }
+        int transformCount = list.transformCount();
+        if (transformsFresh) {
+            bytes += put(transforms[i], transforms(i, list.transforms()), 0, transformCount, TRANSFORM_BYTES);
+        } else {
+            DirtyRanges dirty = list.transformRanges(); // an animation: its entry alone
+            for (int r = 0; r < dirty.count(); r++) {
+                bytes += put(transforms[i], transforms(i, list.transforms()), dirty.from(r),
+                    Math.min(dirty.to(r), transformCount), TRANSFORM_BYTES);
+            }
+        }
+        if (verticesFresh) {
+            bytes += put(vertices[i], vertices(i, list.vertices()), 0, vertexCount, VERTEX_BYTES);
+        } else {
+            DirtyRanges dirty = list.vertexRanges(); // a stream: the points it appended
+            for (int r = 0; r < dirty.count(); r++) {
+                bytes += put(vertices[i], vertices(i, list.vertices()), dirty.from(r),
+                    Math.min(dirty.to(r), vertexCount), VERTEX_BYTES);
+            }
         }
         counts[i] = size;
         Batching mode = batching;
@@ -341,24 +659,72 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         return bytes;
     }
 
+    /** Copies records {@code [from, to)} of {@code record} bytes each from {@code source} into {@code buffer}: the bytes. */
+    private static long put(FrameBuffer buffer, MemorySegment source, int from, int to, int record) {
+        if (to <= from) {
+            return 0;
+        }
+        long offset = (long) from * record;
+        long length = (long) (to - from) * record;
+        buffer.put(offset, source, offset, length);
+        return length;
+    }
+
+    /** Whether primitives of {@code kind} are drawn over the vertex table, by draws of their own. */
+    private static boolean overVertices(int kind) {
+        return kind == Primitive.PATH || kind == Primitive.COLUMNS;
+    }
+
     /**
      * Plans layer {@code i}'s draws by {@code mode}: the whole list with the uber shader, or its runs of one kind (empty
-     * primitives join the run they fall in), short runs together with the uber shader where adaptive.
+     * primitives join the run they fall in), short runs together with the uber shader where adaptive; a primitive over
+     * vertices in every mode by a draw of its own (a quad per segment or column), between the draws of what is
+     * around it.
      */
     private void plan(int i, DrawList list, Batching mode) {
         drawCounts[i] = 0;
         int size = list.size();
-        if (size == 0) {
+        int from = 0;
+        int drawn = -1; // the last primitive since from that draws something, or -1
+        for (int p = 0; p < size; p++) {
+            int kind = Primitive.kind(list.header(p));
+            if (overVertices(kind)) {
+                if (drawn >= 0) {
+                    planRange(i, list, mode, from, drawn + 1);
+                }
+                int n = list.intAt(p, Primitive.VERTEX_COUNT);
+                // a path's segments; a filled envelope's groups of columns, a stroked one's three pieces a column
+                int quads = kind == Primitive.PATH ? n - 1
+                    : (list.intAt(p, Primitive.STROKE) & Primitive.COLUMNS_FILL) != 0 ? (n + FILL_GROUP - 1) / FILL_GROUP
+                    : n * 3;
+                if (quads > 0) {
+                    emit(i, p, quads, kind);
+                }
+                from = p + 1;
+                drawn = -1;
+            } else if (kind != Primitive.EMPTY) {
+                drawn = p;
+            }
+        }
+        if (drawn >= 0) {
+            planRange(i, list, mode, from, size); // trailing empties too: a run ends where it did before
+        }
+    }
+
+    /** Plans primitives {@code [start, end)} of layer {@code i} (none over vertices) by {@code mode}. */
+    private void planRange(int i, DrawList list, Batching mode, int start, int end) {
+        if (end <= start) {
             return;
         }
         if (mode == Batching.UBER) {
-            emit(i, 0, size, 0);
+            emit(i, start, end - start, 0);
             return;
         }
-        int runStart = 0;
+        int size = end;
+        int runStart = start;
         int runKind = -1;
         int span = -1; // the first primitive of the short runs waiting to be drawn together, or -1
-        for (int p = 0; p <= size; p++) {
+        for (int p = start; p <= size; p++) {
             int kind = p == size ? -2 : Primitive.kind(list.header(p));
             if (kind == runKind || kind == Primitive.EMPTY && runKind >= 0) {
                 continue;
@@ -428,11 +794,33 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         return clipSegments[i];
     }
 
+    @AllowAllocation("a list's vertices wrapped again after it grew them, rarely")
+    private MemorySegment vertices(int i, float[] array) {
+        if (wrappedVertices[i] != array) {
+            wrappedVertices[i] = array;
+            vertexSegments[i] = MemorySegment.ofArray(array);
+        }
+        return vertexSegments[i];
+    }
+
+    @AllowAllocation("a list's transforms wrapped again after it grew them, rarely")
+    private MemorySegment transforms(int i, float[] array) {
+        if (wrappedTransforms[i] != array) {
+            wrappedTransforms[i] = array;
+            transformSegments[i] = MemorySegment.ofArray(array);
+        }
+        return transformSegments[i];
+    }
+
     @AllowAllocation("more layers than ever before")
     private void growLayers(int count) {
         lists = Arrays.copyOf(lists, count);
         primitives = Arrays.copyOf(primitives, count);
         clips = Arrays.copyOf(clips, count);
+        transforms = Arrays.copyOf(transforms, count);
+        vertices = Arrays.copyOf(vertices, count);
+        wrappedVertices = Arrays.copyOf(wrappedVertices, count);
+        vertexSegments = Arrays.copyOf(vertexSegments, count);
         counts = Arrays.copyOf(counts, count);
         plannedVersion = Arrays.copyOf(plannedVersion, count);
         plannedFor = Arrays.copyOf(plannedFor, count);
@@ -441,6 +829,8 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         wordSegments = Arrays.copyOf(wordSegments, count);
         wrappedClips = Arrays.copyOf(wrappedClips, count);
         clipSegments = Arrays.copyOf(clipSegments, count);
+        wrappedTransforms = Arrays.copyOf(wrappedTransforms, count);
+        transformSegments = Arrays.copyOf(transformSegments, count);
         int before = draws.length;
         draws = Arrays.copyOf(draws, count);
         for (int i = before; i < count; i++) {
@@ -463,6 +853,10 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         long bytes = 0;
         for (int id = 1; id < count; id++) {
             UiTexture texture = uiTextures.get(id);
+            if (id < bound.length && bound[id] != null) {
+                texture.clean(); // its pixels are the graph texture's: never uploaded
+                continue;
+            }
             boolean fresh = images[id] == null;
             if (fresh) {
                 create(id, texture);
@@ -483,6 +877,12 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
         images[id] = image;
         slotOf[id] = device.bindless().addSampled(image.view());
+        tableSlot(id, slotOf[id]);
+    }
+
+    /** Names bindless slot {@code slot} for texture {@code id} in the table the shader reads. */
+    @AllowAllocation("the table grown, rarely")
+    private void tableSlot(int id, int slot) {
         if (table.size() < (id + 1) * 4L) {
             FrameBuffer bigger = FrameBuffer.create(device, Math.max((id + 1) * 4L, table.size() * 2), BUFFER_USAGE,
                 slots);
@@ -490,7 +890,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             retiring.add(table);
             table = bigger;
         }
-        table.putInt(id * 4L, slotOf[id]);
+        table.putInt(id * 4L, slot);
     }
 
     /**
@@ -545,6 +945,47 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     }
 
+    /**
+     * Draws UI texture {@code id} from {@code texture} (a frame graph texture a view renders into: a camera view)
+     * instead of uploading its pixels: the texture's bindless slot is the id's, and the UI's pass reads the texture
+     * after the view's copy into it in the same frame, so it shows that frame's image. Null unbinds it. The graph
+     * rebuilds when its views or outputs change; bind before the frame that first draws it.
+     */
+    @AllowAllocation("a texture bound, rarely")
+    public GpuUiRenderer bind(int id, com.truesim.engine.graph.Texture texture) {
+        if (source != null) {
+            source.bind(id, texture);
+            return this;
+        }
+        if (id < 1) {
+            throw new IllegalArgumentException("no texture " + id);
+        }
+        if (id >= bound.length) {
+            bound = Arrays.copyOf(bound, Math.max(id + 1, bound.length * 2));
+        }
+        if (id >= images.length) {
+            growTextures(id + 1);
+        }
+        if (images[id] != null) { // uploaded before: let its image go
+            GpuImage image = images[id];
+            int slot = slotOf[id];
+            retiring.add(() -> device.bindless().removeSampled(slot));
+            retiring.add(image);
+            images[id] = null;
+        }
+        bound[id] = texture;
+        if (texture != null) {
+            tableSlot(id, texture.slot());
+        }
+        return this;
+    }
+
+    /** The graph texture UI texture {@code id} is drawn from, or null. */
+    public com.truesim.engine.graph.Texture bound(int id) {
+        GpuUiRenderer data = source != null ? source : this;
+        return id > 0 && id < data.bound.length ? data.bound[id] : null;
+    }
+
     @AllowAllocation("more textures than ever before")
     private void growTextures(int count) {
         int length = Math.max(count, images.length * 2);
@@ -586,8 +1027,49 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         int imageHeight = view == null ? Math.max(1, height) : view.outputHeight();
         Image image = g.unscaled(g.create("ui", ImageDesc.of(Format.R16G16B16A16_SFLOAT, imageWidth, imageHeight)));
         UiPush push = new UiPush();
-        g.pass("ui").attach(image, Clear.color(0, 0, 0, 0)).record(ctx -> draw(ctx, push, imageWidth, imageHeight));
+        // transparent, or the backdrop folded into the clear (read as each frame records)
+        GraphBuilder.PassBuilder pass = g.pass("ui").attach(image, Clear.color(clearColor));
+        Image depth = view == null ? null : g.optional(Keys.SCENE_DEPTH); // as this frame's scene left it
+        if (depth != null) {
+            pass.read(depth, com.truesim.engine.graph.Access.SAMPLED_FRAGMENT);
+        }
+        EngineSettings settings = g.settings();
+        GpuUiRenderer data = source != null ? source : this;
+        for (com.truesim.engine.graph.Texture t : data.bound) {
+            if (t != null) {
+                pass.read(g.texture(t), com.truesim.engine.graph.Access.SAMPLED_FRAGMENT); // after its view's copy
+            }
+        }
+        pass.record(ctx -> {
+            depth(ctx, push, depth, settings, imageWidth, imageHeight);
+            draw(ctx, push, imageWidth, imageHeight);
+        });
         g.provide(Keys.UI, image);
+    }
+
+    /**
+     * Sets {@code push}'s scene depth: {@code depth}'s slot, its render region's share of the UI's image, the
+     * projection turning it into view depths; none without a depth or a camera.
+     */
+    private void depth(PassContext ctx, UiPush push, Image depth, EngineSettings settings, int imageWidth,
+        int imageHeight) {
+        Camera camera = depthCamera;
+        if (depth == null || camera == null) {
+            push.depth(0);
+            return;
+        }
+        int regionWidth = ctx.regionWidth(depth);
+        int regionHeight = ctx.regionHeight(depth);
+        float range = 0;
+        if (camera.orthographic()) {
+            // reverse depth 1 - distance / range: the depth row of the view-projection is back / range
+            float[] m = camera.viewProjection();
+            range = (float) (1 / Math.sqrt(m[2] * m[2] + m[6] * m[6] + m[10] * m[10]));
+        }
+        push.depth(ctx.sampled(depth) + 1).depthScaleX((float) regionWidth / imageWidth)
+            .depthScaleY((float) regionHeight / imageHeight).depthMaxX(Math.max(0, regionWidth - 1))
+            .depthMaxY(Math.max(0, regionHeight - 1)).depthNear((float) camera.near()).depthRange(range)
+            .depthBias(settings.get(DEPTH_BIAS));
     }
 
     /** Draws the layers submitted last, back to front. */
@@ -598,24 +1080,105 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         GpuUiRenderer data = source != null ? source : this;
         push.textures(data.table.deviceAddress()).scaleX((float) width / imageWidth)
             .scaleY((float) height / imageHeight).toClipX(2f / width).toClipY(2f / height)
-            .clipFloats(DrawList.CLIP_FLOATS).originX(originX).originY(originY);
+            .originX(originX).originY(originY);
         for (int i = 0; i < data.layerCount; i++) {
             if (data.counts[i] == 0) {
                 continue;
             }
-            push.primitives(data.primitives[i].deviceAddress()).clips(data.clips[i].deviceAddress());
+            if (i < foldedLayer) {
+                continue; // nothing drawn below the backdrop the image was cleared to
+            }
+            int skip = i == foldedLayer ? foldedPrimitive + 1 : 0; // the backdrop itself, and the empties before it
+            push.primitives(data.primitives[i].deviceAddress()).clips(data.clips[i].deviceAddress())
+                .transforms(data.transforms[i].deviceAddress()).vertices(data.vertices[i].deviceAddress());
+            if (i == foldedLayer && foldedEdges) { // its corners and border over the clear, written, not blended
+                ctx.draw(edges, push.first(foldedPrimitive), 24, 1);
+            }
+            if (i == clearedLayer) { // the boxes drawn next: cleared as rectangles
+                skip = clearBoxes(ctx, imageWidth, imageHeight, skip);
+            }
             int[] planned = data.draws[i];
             for (int d = 0; d < data.drawCounts[i]; d++) {
                 int pipeline = planned[d * 3 + 2];
-                ctx.draw(pipeline == 0 ? uber : kinds[pipeline], push.first(planned[d * 3]), 6 * planned[d * 3 + 1],
-                    1);
+                if (overVertices(pipeline)) { // a primitive's segments or columns
+                    if (planned[d * 3] >= skip) {
+                        ctx.draw(kinds[pipeline], push.first(planned[d * 3]), 6 * planned[d * 3 + 1], 1);
+                    }
+                    continue;
+                }
+                int first = Math.max(planned[d * 3], skip);
+                int count = planned[d * 3] + planned[d * 3 + 1] - first;
+                if (count > 0) {
+                    ctx.draw(pipeline == 0 ? uber : kinds[pipeline], push.first(first), 6 * count, 1);
+                }
             }
         }
     }
 
+    /**
+     * Records its layers into an open rendering of {@code width x height} pixels with {@code pipeline} (a world panel's
+     * shaders) and {@code push} (its world matrix set), one draw per layer: for {@link WorldPanelRenderer}. Primitives
+     * over vertices are left out (the world shaders draw a quad per primitive).
+     */
+    void drawLayers(PassContext ctx, Pipeline pipeline, UiPush push, int uiWidth, int uiHeight) {
+        GpuUiRenderer data = source != null ? source : this;
+        push.textures(data.table.deviceAddress()).scaleX(1).scaleY(1).toClipX(2f / uiWidth).toClipY(2f / uiHeight)
+            .originX(0).originY(0);
+        for (int i = 0; i < data.layerCount; i++) {
+            if (data.counts[i] == 0) {
+                continue;
+            }
+            push.primitives(data.primitives[i].deviceAddress()).clips(data.clips[i].deviceAddress())
+                .transforms(data.transforms[i].deviceAddress()).first(0);
+            ctx.draw(pipeline, push, 6 * data.counts[i], 1);
+        }
+    }
+
+    /**
+     * Records its layers into an open rendering of an image of {@code width x height} pixels outside a frame graph's
+     * passes (a world panel's texture, at the frame's start): the uber shader, one draw per layer, and a draw for each
+     * primitive over vertices.
+     */
+    void drawLayers(VkCommandBuffer commands, UiPush push, int imageWidth, int imageHeight) {
+        GpuUiRenderer data = source != null ? source : this;
+        if (width <= 0 || height <= 0) {
+            return;
+        }
+        push.textures(data.table.deviceAddress()).scaleX((float) width / imageWidth)
+            .scaleY((float) height / imageHeight).toClipX(2f / width).toClipY(2f / height).originX(0).originY(0);
+        Pipeline bound = null;
+        for (int i = 0; i < data.layerCount; i++) {
+            if (data.counts[i] == 0) {
+                continue;
+            }
+            push.primitives(data.primitives[i].deviceAddress()).clips(data.clips[i].deviceAddress())
+                .transforms(data.transforms[i].deviceAddress()).vertices(data.vertices[i].deviceAddress());
+            int[] planned = data.draws[i];
+            for (int d = 0; d < data.drawCounts[i]; d++) { // in the planned order: the uber shader for all but those
+                int kind = planned[d * 3 + 2];
+                Pipeline pipeline = overVertices(kind) ? kinds[kind] : uber;
+                if (pipeline != bound) {
+                    pipeline.bind(commands);
+                    bound = pipeline;
+                }
+                push.first(planned[d * 3]);
+                pipeline.push(commands, push);
+                com.truesim.engine.vulkan.Commands.draw(commands, 6 * planned[d * 3 + 1], 1, 0, 0);
+            }
+        }
+    }
+
+    /** The device it draws on. */
+    VulkanDevice device() {
+        return device;
+    }
+
     // ------------------------------------------------------------------------------------------------- statistics
 
-    /** The bytes the last {@link #submit} uploaded: primitives, clips and texture regions. 0 when nothing changed. */
+    /**
+     * The bytes the last {@link #submit} uploaded: primitives, clips, transform entries and texture regions. 0 when
+     * nothing changed.
+     */
     public long uploadedBytes() {
         return uploaded;
     }
@@ -639,6 +1202,9 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     public int slot(int id) {
         if (source != null) {
             return source.slot(id);
+        }
+        if (id > 0 && id < bound.length && bound[id] != null) {
+            return bound[id].slot();
         }
         return id > 0 && id < images.length && images[id] != null ? slotOf[id] : -1;
     }
@@ -664,9 +1230,16 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             if (clips[i] != null) {
                 clips[i].close();
             }
+            if (transforms[i] != null) {
+                transforms[i].close();
+            }
+            if (vertices[i] != null) {
+                vertices[i].close();
+            }
         }
         table.close();
         uber.close();
+        edges.close();
         for (Pipeline kind : kinds) {
             if (kind != null) {
                 kind.close();

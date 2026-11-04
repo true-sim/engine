@@ -93,8 +93,12 @@ public final class VisibilityBufferShading implements Technique {
 
     @Override
     public List<Key<?>> provides() {
-        return ClusteredForwardShading.PROVIDES;
+        return PROVIDES;
     }
+
+    /** Forward shading's keys and the IDs ({@link Keys#VISIBILITY_IDS}). */
+    private static final List<Key<?>> PROVIDES = java.util.stream.Stream.concat(
+        ClusteredForwardShading.PROVIDES.stream(), java.util.stream.Stream.of(Keys.VISIBILITY_IDS)).toList();
 
     /**
      * The scene's material table, its count of shading bins and the graph buffers its materials name: a shading pass
@@ -217,6 +221,7 @@ public final class VisibilityBufferShading implements Technique {
         });
         g.provide(Keys.SCENE_COLOR, color);
         g.provide(Keys.SCENE_DEPTH, targets.depth());
+        g.provide(Keys.VISIBILITY_IDS, ids);
         SurfaceOutputs.provide(g, surfaces, width, height);
     }
 

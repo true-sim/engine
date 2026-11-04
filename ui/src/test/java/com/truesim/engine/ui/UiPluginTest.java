@@ -68,13 +68,15 @@ class UiPluginTest {
             assertThat(ui).isSameAs(plugin);
             assertThat(ui.key()).isEqualTo(UiPlugin.KEY);
             Ui u = ui.ui();
-            for (Tunable t : u.tunables()) {
+            for (Tunable t : UiPlugin.tunables(u)) {
                 assertThat(engine.registry().find(t.name())).as("the setting of %s", t.name()).isNotNull();
             }
             assertThat(engine.registry().find("ui.confirmButton")).isNotNull();
+            assertThat(engine.registry().find("ui.virtualCursor")).isNotNull();
             assertThat(engine.get(Input.KEY).action("ui.navigation.up")).isNotNull();
             assertThat(ui.view().name()).isEqualTo("main");
             assertThat(ui.renderer()).isNotNull();
+            assertThat(ui.screenSampler()).as("the eyedropper's sampler, for the controls").isNotNull();
             assertThat(ui.commands()).isNotNull();
             Element box = u.panel("card");
             u.root().add(box);

@@ -1,10 +1,16 @@
 package com.truesim.engine.ui;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.engine.input.Binding;
+import com.truesim.engine.input.Control;
+import com.truesim.engine.input.DeviceClass;
 import com.truesim.engine.input.TextListener;
+import com.truesim.engine.platform.Key;
 import com.truesim.engine.platform.Window;
 import com.truesim.ui.core.input.TextInputHost;
+import com.truesim.ui.core.input.UiCommand;
 import com.truesim.ui.core.input.UiInput;
+import java.util.List;
 
 /**
  * The UI's text input through the engine (ui-core's {@link TextInputHost}): when a text field gains focus the UI calls
@@ -51,12 +57,26 @@ public final class UiTextInput implements TextInputHost, TextListener {
     private boolean compositionChanged;
     private boolean active;
     private int kind = -1;
+    private UiKeyboard keyboard;
+    private static final int SEGMENTS = 32;
+    private final int[] segmentStart = new int[SEGMENTS]; // where each text event of the frame starts in typed
+    private final Key[] segmentKey = new Key[SEGMENTS];    // the key pressed just before it (that typed it)
+    private int segments;
 
     /** Text input through {@code commands}' text context, started on {@code window} (null: none, for tests). */
     public UiTextInput(UiCommands commands, Window window) {
         this.commands = commands;
         this.home = window;
         this.window = window;
+    }
+
+    /**
+     * Knows which key typed what through {@code value}: the text a mnemonic's key or the console toggle's key types in
+     * the frame they act is not typed (a grave does not land in the field the console opens or closes over).
+     */
+    public UiTextInput keyboard(UiKeyboard value) {
+        keyboard = value;
+        return this;
     }
 
     /** Starts text input on the window holding the field, as {@code value} finds it (null: always its own). */
@@ -156,6 +176,11 @@ public final class UiTextInput implements TextInputHost, TextListener {
 
     @Override
     public void text(String text) {
+        if (segments < SEGMENTS) {
+            segmentStart[segments] = typed.length();
+            segmentKey[segments] = keyboard == null ? null : keyboard.lastDown();
+            segments++;
+        }
         typed.append(text);
     }
 
@@ -167,12 +192,48 @@ public final class UiTextInput implements TextInputHost, TextListener {
         compositionChanged = true;
     }
 
+    /** Drops the text typed by this frame's mnemonic key, and by the console toggle's key if it toggled. */
+    private void dropActingKeys(UiInput input) {
+        Key mnemonic = keyboard.mnemonicKey();
+        boolean toggled = input.has(UiCommand.CONSOLE_TOGGLE);
+        if (mnemonic == null && !toggled) {
+            return;
+        }
+        for (int i = segments - 1; i >= 0; i--) {
+            Key key = segmentKey[i];
+            if (key != null && (key == mnemonic || toggled && togglesConsole(key))) {
+                int end = i + 1 < segments ? segmentStart[i + 1] : typed.length();
+                typed.delete(segmentStart[i], end);
+                for (int j = i + 1; j < segments; j++) {
+                    segmentStart[j] -= end - segmentStart[i];
+                }
+            }
+        }
+    }
+
+    /** Whether {@code key} alone is a binding of the console's toggle. */
+    @AllowAllocation("the frame the console toggles")
+    private boolean togglesConsole(Key key) {
+        for (Binding binding : commands.input().bindings(commands.input().player(0), UiActions.TOGGLE_CONSOLE)) {
+            List<Control> inputs = binding.inputs();
+            if (inputs.size() == 1 && binding.modifiers().isEmpty() && inputs.get(0).type() == DeviceClass.KEYBOARD
+                && inputs.get(0).index() == key.ordinal()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Hands this frame's typed text and the composition, if it changed, to the UI's input; call at frame start. */
     public void poll(UiInput input) {
+        if (keyboard != null && !typed.isEmpty()) {
+            dropActingKeys(input);
+        }
         if (!typed.isEmpty()) {
             input.text(typed);
             typed.setLength(0);
         }
+        segments = 0;
         if (compositionChanged) {
             compositionChanged = false;
             input.composition(composition, compositionCursor);

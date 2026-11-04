@@ -280,21 +280,90 @@ Capture capture = input.capture(one, JUMP);   // the next input becomes a bindin
   width, height)` copies only what changed: a draw list's dirty range and its clips, a texture's dirty region; an
   unchanged frame uploads 0 bytes (`uploadedBytes()`). One draw per layer, without vertex buffers, pulls six vertices per
   primitive (rounded boxes with borders and gradients, blurred shadows, MTSDF glyphs, images, nine-slices, lines,
-  clipped by rounded rectangles); long runs of one kind (text floods) get their kind's own shader (`Batching.ADAPTIVE`,
-  chosen by `UiBenchmark` over one draw per layer and a draw per run of a kind).
+  triangles, clipped by rounded rectangles; a triangle anti-aliases the edges its flags name and keeps the others hard
+  and half-open, so a shape's triangles share edges without seams); long runs of one kind (text floods) get their kind's own shader (`Batching.ADAPTIVE`,
+  chosen by `UiBenchmark` over one draw per layer and a draw per run of a kind). A chart's polylines (`Primitive.PATH`:
+  miter, bevel or round joins, caps, dashes along the path, each pixel drawn once where segments overlap) and min-max
+  envelopes (`Primitive.COLUMNS`, stroked or filled) read the layer's vertex table, uploaded as its dirty ranges (a
+  stream uploads the points it appended), each a draw of its own expanding a quad per segment, column or piece in the
+  vertex shader. A box covering the image at the bottom of the UI (a console's backdrop, a full-screen panel) is
+  cleared to instead of blended over every pixel; its rounded corners and border are drawn along its edges without
+  blending (`foldBackdrop`). Square boxes drawn right after it on whole pixels (a chart's plot background over its
+  panel), opaque or over the clear alone, are cleared as rectangles to what drawing them leaves
+  (`vkCmdClearAttachments`, `clearedBoxes()`).
 - **Input** (`UiActions`, `UiCommands`, `MousePointer`): the `ui` action group of design section 10 with keyboard,
   mouse and gamepad defaults, bindings as settings (`input.ui.navigation.accept`); `UiCommands` (a
   `UiCommandSource`) adds each player's presses of the frame as `UiCommand`s, with repeats (`ui.repeatDelay`,
   `ui.repeatRate`), `EXTEND_SELECTION` while Shift is held, text commands while a field took the keyboard
   (`startText`/`stopText`), and the gamepad's confirm button as a setting (`ui.confirmButton`: the platform's, south
-  or east). `MousePointer` (a `PointerSource`) reads the mouse from the platform's events directly.
-- **Tunables** (`UiTunables`): ui-core's `Tunable`s as settings of the same name and range, written back each frame.
+  or east). The tabs', chart reset's, gizmo's, docking's (`ui.docking.windowMove` Alt+F7, `windowResize` Alt+F8) and
+  console's actions give their commands; tabs, windows and the console's toggle (grave, both sticks, an XR menu
+  button held) work while a field types, and the toggle's key types nothing; Tab, Up and Down complete and walk the
+  history only while the console's command line has the text (`commands.console(...)`). `MousePointer` (a
+  `PointerSource`) reads the mouse from the platform's events directly; `UiKeyboard` gives mnemonics (Alt with a
+  letter or digit) and pointers' modifiers (the gizmo's `ui.gizmo.snap` as `Pointer.GIZMO_SNAP`); `TouchPointers` (a
+  pointer per finger), `PenPointer`, `XrPointers` (aim poses as world rays, triggers as the primary button) and a
+  gamepad's `VirtualCursor` (`ui.virtualCursor`, off by default) are pointers too.
+- **Gizmo actions** (`ui.gizmo`): every gizmo operation is a rebindable action. Modes `translate` W, `rotate` E,
+  `scale` R, `bounds` B, `universal` T, `nextMode` (no key; XR right A); `toggleSpace` X (XR left X),
+  `previousSpace` Shift+X; `nextPivot` period (Blender's pivot key; XR left Y), `previousPivot` Shift+period; `snap`
+  Ctrl, LT, an XR thumbstick pressed (rays and grabs: `XrPointers` adds it to the rays' modifiers); `cancelDrag`
+  Escape, RMB, east. The keys give nothing while a field types. The d-pad switches modes (up translate, right rotate,
+  down scale, left universal) only while a gizmo is focused (`commands.gizmo(() -> focused)`), and then does not
+  move focus; otherwise it navigates. XR grabs: `grabLeft`/`grabRight` (the grips; both held: two-handed scale and
+  turn) from the poses `handLeft`/`handRight` (grip poses), driven by `XrGizmoGrab` (`plugin.gizmoGrab(grab)` updates
+  ui-gizmo's `GizmoGrab` each frame after the UI's input; `cancelDrag` cancels a grab, which waits for the grip to be
+  let go). The XR defaults come with `XrPointers.defaults`.
+- **Eyedropper** (`GpuScreenSampler`, ui-core's `ScreenSampler`): a block of up to 31 x 31 texels around the pointer
+  copied from the view's scene color (before the display transform, HDR kept) and read back without a wait; each
+  block names the copy it is, so the newest answer arrives frames in flight later and never a stale one
+  (`UiPlugin.screenSampler()`, for `Controls.screenSampler`).
+- **Tunables** (`UiTunables`): ui-core's `Tunable`s as settings of the same name and range, written back each frame:
+  `UiPlugin.tunables(ui)` lists the UI's (with the charts', scene bridge's and gizmos' through their `TunableSource`
+  services) and the console's.
 - **OS windows** (`UiOsWindows`, ui-controls' `OsWindows` for docking's `OsDockHost`): a window per dock area, each
   presenting a view of its own that draws its region of the one UI. Each window's target reads a view of the graph's
   settings of its own (`displaySettings(id)`, `EngineSettings.inheriting`): `paperWhite(id, nits)` gives it a paper
   white (the main window too; NaN follows `display.paperWhite` again), which the dock layout saves; a window
   following a drag is see-through by SDL's window opacity (`opacity(id, value)`, the theme's `drag-opacity`) where
   the system allows it, opaque elsewhere (Wayland, the offscreen driver).
+- **Scene bridge** (`UiPlugin.scene(graph, index)` → `UiScene`, ui-scene's `ScenePicking`): the UI runs through
+  scene picking; each frame starts with the scene and its `SpatialIndex` updated and the main `SceneView` set from the
+  engine's `Camera` (`UiScene.camera`: its position in doubles, the rotation, field of view and near plane `Camera`
+  now keeps), then the UI's input, so this frame's pointers pick what this frame's camera sees. `PickMeshes` makes a
+  `PickMesh` per mesh asset from its leaf meshlets; `ui.scene.far` is how far screen rays reach.
+- **Camera views** (`GpuCameraView`, a `CameraViewSource`): a second camera as a view of the same graph, rendered at
+  the control's pixel size, tone mapped by the display transform and copied into the top left of a graph `Texture`
+  that `GpuUiRenderer.bind(id, texture)` draws for the control's UI texture (no upload; the UI pass reads the texture
+  after the view's copy, so the UI shows this frame's image and the main view waits for nothing).
+- **World panels** (`WorldPanelRenderer`, per panel): `TEXTURE` renders the panel's UI at the frame's start into an
+  image with a bindless slot a material samples (lit and fogged like the scene), again only when its UI changed;
+  `DIRECT` draws its primitives after the opaque scene through a panel-to-clip matrix made in doubles relative to the
+  camera, depth tested, MTSDF coverage worked out in the panel's pixels. Multiview (VR) direct drawing is not built.
+- **Gizmo occlusion** (`Gizmo.depthTest(true)`, ui-core's `Primitive.FLAG_DEPTH`): a depth tested gizmo records its
+  handles' lines, triangles and dots with their view depths; the UI pass reads the view's `Keys.SCENE_DEPTH` of the
+  same frame (after transparency, its render region mapped onto the UI's image) and fades each pixel of a handle the
+  scene is nearer than (times the theme's `gizmo-occluded`), the depth made view depth by `GpuUiRenderer.depthCamera`
+  (the plugin sets the scene bridge's camera). Exact per pixel, no frame of delay, also where an occluder moved this
+  frame; `ui.gizmo.depthBias` (1e-4, relative) keeps a handle lying on a surface visible. Gizmos of a camera view use
+  ui-gizmo's CPU `GizmoOcclusion` (`RayOcclusion`, by boxes) instead.
+- **GPU picking** (`GpuPicking`, opt-in): the visibility buffer's IDs (`Keys.VISIBILITY_IDS`) read under the
+  pointers by one dispatch and read back, a frame or more late; for skinned, morphed, displaced and alpha-tested
+  surfaces. At 100,489 instances, 1920 x 1080 (RX 9070 XT, 2026-11-04, with other builds running): the pick costs
+  0.007 ms of GPU; the IDs come free with the visibility buffer and would cost a forward view an ID pass (the
+  visibility buffer's: 0.50 ms). The CPU path (3.6 us median per pointer at 100,000 nodes, ui's
+  `ScenePickingBenchmarkTest`) stays the default: no latency, no GPU work.
+- **Developer console** (`UiPlugin.console()` → `UiConsole`): ui-console's `Console` over every engine setting as a
+  variable (`SettingVariables`: values through the constraint overlay; unavailable settings and values a constraint
+  would change are refused with the reason), permissions from `console.developer` and `console.cheats`, the history
+  in the user's settings folder (`FileHistoryStore`), scripts, assets and nodes from folders and names
+  (`FolderScripts`, `FolderAssets`, `NamedNodes`), the UI debugger's commands. Its log comes from SLF4J through
+  `ConsoleLogProvider` (choose it with `-Dslf4j.provider=com.truesim.engine.ui.console.ConsoleLogProvider`; it passes
+  every call on to the app's own binding): records at `ui.console.captureLevel` and above, with `File.java:line` from
+  `ui.console.sourceLevel`. 1,000 INFO records a frame through SLF4J into the inbox: 56 us median.
+- **Property sources** (ui-props): `SettingsSource` generates the settings screen from the registry (labels from
+  `settings.<name>` keys, ranges, groups, order, choices, tiers hidden) over `SettingsScreen` snapshots written back
+  on edit; `MaterialParametersSource` gives the Slang material records' properties (ranges, withers, `DEFAULTS`).
 
 ```java
 GpuUiRenderer renderer = new GpuUiRenderer(graph);
@@ -322,6 +391,10 @@ validation; RX 9070 XT, 2026-11-03; GPU time of the UI pass and the frame start 
 | HUD: 500 elements, 5,000 glyphs, about a quarter of the screen | 0.096-0.102 ms, 1 draw | 0.157-0.165 ms, 1,075 draws | 0.103 ms, 1 draw | 0.15 ms |
 | 100,000 glyphs | 0.28-0.30 ms | 0.27-0.29 ms | 0.29 ms | 0.4 ms |
 | 100,000 glyphs over a full-screen translucent backdrop | 0.40-0.45 ms | 0.39-0.43 ms | 0.44 ms | (0.4 ms) |
+
+Section 11's targets as one suite: `./gradlew :engine-bench:uiBench` (module `engine-bench`, a program: the GPU
+scenes above, a chart streaming 1,000,000 samples as a line and as a filled area, 10,000,000 samples zoomed, the
+controls gallery idle, the console flooded) writes [docs/benchmarks-ui.md](docs/benchmarks-ui.md) with p50 and p99.
 
 Submitting an unchanged HUD takes 0.1 us and uploads nothing; with 50 elements re-recorded a frame, 3 us (one dirty
 range spanning them: 400 KB). Numbers vary by a few percent between sessions sharing the GPU; compare within a run.

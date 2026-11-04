@@ -78,4 +78,41 @@ class UiTunablesTest {
         });
         assertThat(mode.option()).isEqualTo("HINTED");
     }
+
+    /** The tunables of the UI's later modules and controls (group A3), each of which must reach the settings. */
+    static final List<String> A3_TUNABLES = List.of(
+        // charts (a TunableSource of ui-charts)
+        "ui.chart.zoomStep", "ui.chart.decimateAbove", "ui.chart.pyramidBlock", "ui.chart.lttbPerPixel",
+        "ui.chart.lttbMaxInput", "ui.chart.maxPoints", "ui.chart.gridPerCell", "ui.chart.hoverDistance",
+        "ui.chart.maxTicks", "ui.chart.followLead", "ui.chart.dragPixels", "ui.chart.grabPixels", "ui.chart.arcPixels",
+        "ui.chart.heatmapTexels",
+        // the scene bridge and gizmos (TunableSources of ui-scene and ui-gizmo)
+        "ui.pick.sceneHits", "ui.pick.rayLength", "ui.gizmo.pickTolerance", "ui.gizmo.xrPickAngle",
+        "ui.gizmo.xrAngularSize", "ui.gizmo.xrGrabRadius", "ui.gizmo.snapByDefault", "ui.gizmo.snapTranslate",
+        "ui.gizmo.snapRotate", "ui.gizmo.snapScale", "ui.viewCube.orbitSpeed",
+        // the console (ConsoleTunables, outside Ui.tunables())
+        "ui.console.logCapacity", "ui.console.maxLine", "ui.console.historyLimit", "ui.console.completions",
+        "ui.console.execDepth",
+        // controls, data, render, tools
+        "ui.button.repeatDelay", "ui.button.repeatRate", "ui.slider.pageFraction", "ui.input.numberDragPixels",
+        "ui.text.spellBudget", "ui.spell.ignoreUrls", "ui.spell.ignoreNumbers", "ui.spell.ignoreMixedCase",
+        "ui.spell.ignoreCapitals", "ui.spell.suggestions", "ui.list.boxScrollRate", "ui.list.boxScrollEdge",
+        "ui.files.recentLimit", "ui.draw.dirtyMergeGap", "ui.draw.dirtyRanges", "ui.l10n.pseudo",
+        "ui.l10n.pseudoExpansion", "ui.textScale", "ui.palette");
+
+    @Test
+    void everyTunableOfTheUisModulesIsListedForTheSettingsOnce() {
+        com.truesim.ui.controls.Ui ui = new com.truesim.ui.controls.Ui(com.truesim.ui.style.tss.Tss.defaultTheme(), null);
+        List<Tunable> all = UiPlugin.tunables(ui);
+        List<String> names = all.stream().map(Tunable::name).toList();
+        assertThat(names).containsAll(A3_TUNABLES);
+        assertThat(names).as("each once").doesNotHaveDuplicates();
+        assertThat(names).containsAll(ui.tunables().stream().map(Tunable::name).toList());
+        SettingRegistry registry = new SettingRegistry();
+        UiTunables tunables = new UiTunables(new EngineSettings()).add(registry, null, all.toArray(new Tunable[0]));
+        for (String name : A3_TUNABLES) {
+            assertThat(registry.find(name)).as("the setting %s", name).isNotNull();
+        }
+        assertThat(tunables.settings()).hasSize(all.size());
+    }
 }

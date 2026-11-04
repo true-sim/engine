@@ -25,6 +25,7 @@ class UiRendererTest {
     private static final long GREEN = Rgba.pack(0, 1, 0, 1);
     private static final long BLUE = Rgba.pack(0, 0, 1, 1);
     private static final Offset<Float> CLOSE = within(0.01f);
+    private static final long TRANSFORM_BYTES = DrawList.TRANSFORM_FLOATS * 4L;
 
     /** A list of one range holding what {@code record} records. */
     static DrawList list(int capacity, java.util.function.Consumer<DrawList> record) {
@@ -67,6 +68,8 @@ class UiRendererTest {
                 continue;
             }
             Object expected = constant.getName().equals("CLIP_FLOATS") ? DrawList.CLIP_FLOATS
+                : constant.getName().equals("TRANSFORM_FLOATS") ? DrawList.TRANSFORM_FLOATS
+                : constant.getName().equals("VERTEX_FLOATS") ? DrawList.VERTEX_FLOATS
                 : field(Primitive.class, constant.getName());
             assertThat(constant.get(null)).as(constant.getName()).isEqualTo(expected);
             checked++;
@@ -351,8 +354,8 @@ class UiRendererTest {
             list.glyph(60, 10, 92, 42, 0, 0, 1, 1, disc.id(), 4, Rgba.WHITE, 0, 0, 0);
             list.end();
             rig.frame(ui, textures, list);
-            assertThat(ui.uploadedBytes()).as("all of it once: 4 primitives, a clip, the texture")
-                .isEqualTo(4L * Primitive.BYTES + DrawList.CLIP_FLOATS * 4 + 32 * 32 * 4);
+            assertThat(ui.uploadedBytes()).as("all of it once: 4 primitives, a clip, a transform, the texture")
+                .isEqualTo(4L * Primitive.BYTES + DrawList.CLIP_FLOATS * 4 + TRANSFORM_BYTES + 32 * 32 * 4);
             rig.frame(ui, textures, list);
             assertThat(ui.uploadedBytes()).as("nothing changed").isZero();
             // The UI records the same again: still nothing.
@@ -373,13 +376,142 @@ class UiRendererTest {
             rig.frame(ui, textures, list);
             assertThat(ui.uploadedBytes()).isEqualTo(8 * 2 * 4);
             assertThat(ui.totalUploadedBytes()).isEqualTo(4L * Primitive.BYTES + DrawList.CLIP_FLOATS * 4
-                + 32 * 32 * 4 + Primitive.BYTES + 8 * 2 * 4);
+                + TRANSFORM_BYTES + 32 * 32 * 4 + Primitive.BYTES + 8 * 2 * 4);
             // A primitive removed (an empty slot): drawn as nothing.
             list.begin(second, 2);
             list.end();
             rig.frame(ui, textures, list);
             assertThat(rig.at(76, 26, 3)).isZero();
             assertThat(rig.at(30, 30, 3)).isEqualTo(1f, CLOSE);
+        }
+    }
+
+    @Test
+    void aScaledAndMovedSubtreeDrawsAndClipsWhereItsTransformEntryPutsIt() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            DrawList list = new DrawList();
+            int t = list.addTransform();
+            int clip = list.addClip(10, 10, 50, 50, 0); // a clipping panel drawn by the transform, as its content
+            list.setClipTransform(clip, t);
+            int start = list.allocate(4);
+            list.begin(start, 4);
+            list.box(4, 104, 12, 112, BLUE, 0, 0, 0, 0, 0, 0); // untransformed, for reference
+            list.useTransform(t);
+            list.box(10, 10, 50, 50, GREEN, 0, 0, 0, 0, 0, 0); // the panel
+            list.clip(clip);
+            list.box(30, 30, 80, 80, RED, 0, 0, 0, 0, 2, BLUE); // its content, passing its edge
+            assertThat(list.end()).isTrue();
+            rig.frame(ui, null, list);
+            assertThat(rig.at(20, 20)).as("identity: the panel").containsExactly(new float[] {0, 1, 0, 1}, CLOSE);
+            assertThat(rig.at(40, 40)).as("the content").containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            assertThat(rig.at(60, 60, 3)).as("cut by the clip").isZero();
+            list.setTransform(t, 2, 100, 0, 0.5f); // scaled twice about the origin, moved, half faded
+            rig.frame(ui, null, list);
+            assertThat(ui.uploadedBytes()).as("the entry alone").isEqualTo(TRANSFORM_BYTES);
+            assertThat(rig.at(20, 20, 3)).as("moved away").isZero();
+            assertThat(rig.at(130, 30)).as("the panel where it draws now, half faded")
+                .containsExactly(new float[] {0, 0.5f, 0, 0.5f}, CLOSE);
+            float[] over = {0.5f, 0.25f, 0, 0.75f}; // half red over half green
+            assertThat(rig.at(170, 70)).as("the content scaled with it").containsExactly(over, CLOSE);
+            assertThat(rig.at(190, 90)).as("still inside the clip, which scaled too").containsExactly(over, CLOSE);
+            assertThat(rig.at(205, 90, 3)).as("cut where the clip draws: x 200").isZero();
+            assertThat(rig.at(8, 108)).as("the untransformed box stays").containsExactly(new float[] {0, 0, 1, 1},
+                CLOSE);
+            rig.screenshot("transformed-clipped");
+        }
+    }
+
+    @Test
+    void trianglesAntiAliasTheirOutlineAndShareHardEdgesWithoutSeams() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            int all = Primitive.EDGE_AB | Primitive.EDGE_BC | Primitive.EDGE_CA;
+            long half = Rgba.pack(0, 1, 0, 0.5f);
+            DrawList list = list(3, l -> {
+                l.triangle(10, 10, 110, 10, 10, 110, RED, all);
+                // A translucent square of two triangles, wound opposite ways: the outline anti-aliased, the diagonal
+                // (through pixel centres) hard and shared.
+                l.triangle(130, 10, 230, 10, 230, 110, half, Primitive.EDGE_AB | Primitive.EDGE_BC);
+                l.triangle(130, 10, 130, 110, 230, 110, half, Primitive.EDGE_AB | Primitive.EDGE_BC);
+            });
+            ui.batching(GpuUiRenderer.Batching.UBER);
+            rig.frame(ui, null, list);
+            assertThat(rig.at(30, 30)).containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            assertThat(rig.at(80, 80, 3)).as("past the long edge").isZero();
+            assertThat(rig.at(5, 30, 3)).isZero();
+            // Pixel (59, 60)'s centre lies on the edge x + y = 120: half covered.
+            assertThat(rig.at(59, 60, 3)).as("on the anti-aliased edge").isCloseTo(0.5f, within(0.05f));
+            assertThat(rig.at(61, 60, 3)).isLessThan(0.02f);
+            assertThat(rig.at(57, 60, 3)).isGreaterThan(0.98f);
+            for (int y = 12; y < 108; y++) {
+                for (int x = 132; x < 228; x++) {
+                    assertThat(rig.at(x, y)).as("one coverage at (%d, %d), on the diagonal too", x, y)
+                        .containsExactly(new float[] {0, 0.5f, 0, 0.5f}, within(1e-3f));
+                }
+            }
+            assertThat(rig.at(129, 60, 3)).as("left of the square").isLessThan(0.01f);
+            float[] uber = rig.rgba.clone();
+            ui.batching(GpuUiRenderer.Batching.PER_KIND);
+            rig.frame(ui, null, list);
+            assertThat(rig.rgba).as("triangleMain draws as the uber path").containsExactly(uber, within(1e-3f));
+            rig.screenshot("triangles");
+        }
+    }
+
+    @Test
+    void aTrianglesCornersMoveByItsClipsOffsetAndTransformEntryAndItsClipCutsIt() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            DrawList list = new DrawList();
+            int t = list.addTransform();
+            int clip = list.addClip(10, 10, 30, 50, 0);
+            list.setClipTransform(clip, t);
+            list.setClipOffset(clip, 5, 0); // scrolled content: the corners move 5 right, the clip stays
+            int start = list.allocate(1);
+            list.begin(start, 1);
+            list.useTransform(t);
+            list.clip(clip);
+            list.triangle(10, 10, 50, 10, 10, 50, RED, Primitive.EDGE_AB | Primitive.EDGE_BC | Primitive.EDGE_CA);
+            assertThat(list.end()).isTrue();
+            list.setTransform(t, 2, 100, 0, 1); // drawn at (130, 20), (210, 20), (130, 100), cut at x 120 to 160
+            for (GpuUiRenderer.Batching batching : new GpuUiRenderer.Batching[] {GpuUiRenderer.Batching.UBER,
+                GpuUiRenderer.Batching.PER_KIND}) {
+                ui.batching(batching);
+                rig.frame(ui, null, list);
+                assertThat(rig.at(135, 30)).as(batching + ": inside").containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+                assertThat(rig.at(125, 30, 3)).as("left of the moved corner, inside the clip").isZero();
+                assertThat(rig.at(165, 30, 3)).as("inside the triangle, cut by the scaled clip").isZero();
+                // The long edge draws at x + y = 230: pixel (149, 80)'s centre is on it; distances in drawn pixels.
+                assertThat(rig.at(149, 80, 3)).as("on the edge").isCloseTo(0.5f, within(0.05f));
+                assertThat(rig.at(150, 80, 3)).as("0.7 drawn pixels out").isLessThan(0.02f);
+                assertThat(rig.at(148, 80, 3)).isGreaterThan(0.98f);
+            }
+            rig.screenshot("triangle-transformed-clipped");
+        }
+    }
+
+    @Test
+    void changesFarApartUploadApart() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            DrawList list = list(1000, l -> {
+                for (int i = 0; i < 1000; i++) {
+                    l.box(i % 50 * 5, i / 50 * 5, i % 50 * 5 + 4, i / 50 * 5 + 4, RED, 0, 0, 0, 0, 0, 0);
+                }
+            });
+            rig.frame(ui, null, list);
+            list.begin(10, 1);
+            list.box(50, 0, 54, 4, BLUE, 0, 0, 0, 0, 0, 0);
+            list.end();
+            list.begin(990, 1);
+            list.box(200, 95, 204, 99, BLUE, 0, 0, 0, 0, 0, 0);
+            list.end();
+            rig.frame(ui, null, list);
+            assertThat(ui.uploadedBytes()).as("two primitives, not the 981 between them")
+                .isEqualTo(2L * Primitive.BYTES);
+            assertThat(rig.at(52, 2)).containsExactly(new float[] {0, 0, 1, 1}, CLOSE);
+            assertThat(rig.at(202, 97)).containsExactly(new float[] {0, 0, 1, 1}, CLOSE);
         }
     }
 
@@ -398,8 +530,10 @@ class UiRendererTest {
             rig.frame(ui, textures, layers);
             ui.batching(GpuUiRenderer.Batching.PER_KIND);
             float[] x = {0};
+            int t = layers[1].addTransform();
             assertAllocationFree(() -> {
                 ui.submit(layers, 2, textures, W, H);
+                layers[1].setTransform(t, 1 + x[0], x[0], 0, 0.5f); // an animated entry
                 // one box moves: the dirty range and the runs found again
                 layers[0].begin(0, 200);
                 for (int i = 0; i < 100; i++) {
@@ -449,6 +583,153 @@ class UiRendererTest {
             assertThat(ui.uploadedBytes()).as("planning again uploads nothing").isZero();
             assertThat(rig.rgba).containsExactly(uber, within(1e-3f));
             rig.screenshot("batchings");
+        }
+    }
+
+    @Test
+    void aFullScreenBackdropIsClearedToInsteadOfDrawnWithTheSamePixels() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            long backdrop = Rgba.pack(0.2f, 0.4f, 0.6f, 0.6f);
+            DrawList empty = new DrawList();
+            DrawList list = list(4, l -> {
+                l.box(-5, -5, W + 5, H + 5, backdrop, 0, 0, 0, 0, 0, 0); // a console's translucent backdrop
+                l.box(20, 20, 60, 60, Rgba.pack(1, 0, 0, 0.5f), 4, 4, 4, 4, 0, 0);
+                l.line(10, 100, 200, 100, 2, GREEN);
+            });
+            ui.foldBackdrop(false);
+            rig.frame(ui, null, empty, list);
+            float[] drawn = rig.rgba.clone();
+            assertThat(ui.foldedBackdrop()).isEqualTo(-1);
+            ui.foldBackdrop(true);
+            rig.frame(ui, null, empty, list);
+            assertThat(ui.foldedBackdrop()).as("layer 1, its first primitive; the empty layer below skipped")
+                .isEqualTo(1L << 32);
+            assertThat(rig.rgba).containsExactly(drawn, within(1e-3f));
+            assertThat(rig.at(5, 5)).as("the backdrop, premultiplied").containsExactly(
+                new float[] {0.12f, 0.24f, 0.36f, 0.6f}, within(2e-3f));
+            // A panel with rounded corners and a border: cleared to its fill, its edges drawn over the clear.
+            DrawList panel = list(2, l -> {
+                l.box(0, 0, W, H, backdrop, 12, 4, 0, 20, 2, Rgba.pack(1, 1, 1, 0.8f));
+                l.box(30, 30, 90, 90, RED, 0, 0, 0, 0, 0, 0);
+            });
+            ui.foldBackdrop(false);
+            rig.frame(ui, null, panel);
+            float[] drawnPanel = rig.rgba.clone();
+            ui.foldBackdrop(true);
+            rig.frame(ui, null, panel);
+            assertThat(ui.foldedBackdrop()).isZero();
+            assertThat(rig.rgba).containsExactly(drawnPanel, within(1e-3f));
+            assertThat(rig.at(0, 0, 3)).as("outside the rounded corner").isZero();
+            assertThat(rig.at(W - 1, H / 2, 3)).as("the border").isCloseTo(0.8f, within(0.02f));
+            rig.screenshot("backdrop-panel-folded");
+            // Not a backdrop: it leaves a pixel out, has a gradient, or something is drawn before it.
+            DrawList narrow = list(1, l -> l.box(1, 0, W, H, backdrop, 0, 0, 0, 0, 0, 0));
+            rig.frame(ui, null, narrow);
+            assertThat(ui.foldedBackdrop()).isEqualTo(-1);
+            assertThat(rig.at(0, 5, 3)).isZero();
+            DrawList gradient = list(1, l -> l.gradientBox(0, 0, W, H, backdrop, RED, 0, 0, 0, 0, 0, 0, 0));
+            rig.frame(ui, null, gradient);
+            assertThat(ui.foldedBackdrop()).isEqualTo(-1);
+            DrawList under = list(2, l -> {
+                l.line(10, 10, 20, 20, 1, RED);
+                l.box(0, 0, W, H, backdrop, 0, 0, 0, 0, 0, 0);
+            });
+            rig.frame(ui, null, under);
+            assertThat(ui.foldedBackdrop()).isEqualTo(-1);
+            // Faded by its transform entry: the clear is faded alike.
+            DrawList faded = new DrawList();
+            int t = faded.addTransform();
+            faded.setTransform(t, 1, 0, 0, 0.5f);
+            int start = faded.allocate(1);
+            faded.begin(start, 1);
+            faded.useTransform(t);
+            faded.box(0, 0, W, H, backdrop, 0, 0, 0, 0, 0, 0);
+            faded.end();
+            rig.frame(ui, null, faded);
+            assertThat(ui.foldedBackdrop()).isZero();
+            assertThat(rig.at(100, 100)).containsExactly(new float[] {0.06f, 0.12f, 0.18f, 0.3f}, within(2e-3f));
+            rig.screenshot("backdrop-folded");
+        }
+    }
+
+    @Test
+    void boxesDrawnFirstOverAFoldedPanelAreClearedWithTheSamePixels() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            long panel = Rgba.pack(0.05f, 0.07f, 0.1f, 0.86f);
+            long plot = Rgba.pack(0.01f, 0.01f, 0.02f, 0.35f);
+            // A chart: its panel (folded), its plot's translucent background, an opaque box over it, then the grid.
+            DrawList chart = list(5, l -> {
+                l.box(0, 0, W, H, panel, 6, 6, 6, 6, 1, Rgba.pack(0.3f, 0.3f, 0.3f, 1));
+                l.box(20, 12, 240, 110, plot, 0, 0, 0, 0, 0, 0);
+                l.box(40, 30, 60, 50, RED, 0, 0, 0, 0, 0, 0);
+                l.line(20, 60.5f, 240, 60.5f, 1, Rgba.pack(0.5f, 0.5f, 0.5f, 0.2f));
+                l.box(100, 20, 120, 40, Rgba.pack(0, 0, 1, 0.5f), 0, 0, 0, 0, 0, 0); // after the line: drawn
+            });
+            ui.foldBackdrop(false);
+            rig.frame(ui, null, chart);
+            float[] drawn = rig.rgba.clone();
+            assertThat(ui.clearedBoxes()).isEmpty();
+            ui.foldBackdrop(true);
+            rig.frame(ui, null, chart);
+            assertThat(ui.foldedBackdrop()).isZero();
+            assertThat(ui.clearedBoxes()).as("the plot's background and the opaque box").containsExactly(1, 2);
+            assertThat(rig.rgba).containsExactly(drawn, within(1e-3f));
+            float under = 1 - 0.35f;
+            assertThat(rig.at(30, 80)).as("the plot over the panel, premultiplied").containsExactly(new float[] {
+                0.01f * 0.35f + 0.05f * 0.86f * under, 0.01f * 0.35f + 0.07f * 0.86f * under,
+                0.02f * 0.35f + 0.1f * 0.86f * under, 0.35f + 0.86f * under}, within(2e-3f));
+            rig.screenshot("backdrop-plot-cleared");
+            // Drawn instead: translucent over the panel's corner, over a box cleared before, off whole pixels, rounded.
+            DrawList corner = list(2, l -> {
+                l.box(0, 0, W, H, panel, 6, 6, 6, 6, 1, Rgba.pack(0.3f, 0.3f, 0.3f, 1));
+                l.box(2, 2, 40, 40, plot, 0, 0, 0, 0, 0, 0);
+            });
+            rig.frame(ui, null, corner);
+            assertThat(ui.clearedBoxes()).isEmpty();
+            DrawList stacked = list(3, l -> {
+                l.box(0, 0, W, H, panel, 6, 6, 6, 6, 1, Rgba.pack(0.3f, 0.3f, 0.3f, 1));
+                l.box(20, 20, 80, 80, plot, 0, 0, 0, 0, 0, 0);
+                l.box(60, 60, 100, 100, plot, 0, 0, 0, 0, 0, 0);
+            });
+            ui.foldBackdrop(false);
+            rig.frame(ui, null, stacked);
+            float[] stackedDrawn = rig.rgba.clone();
+            ui.foldBackdrop(true);
+            rig.frame(ui, null, stacked);
+            assertThat(ui.clearedBoxes()).as("the first; the second lies over it").containsExactly(1);
+            assertThat(rig.rgba).containsExactly(stackedDrawn, within(1e-3f));
+            DrawList fractional = list(2, l -> {
+                l.box(0, 0, W, H, panel, 0, 0, 0, 0, 0, 0);
+                l.box(20.5f, 20, 80, 80, RED, 0, 0, 0, 0, 0, 0);
+            });
+            ui.foldBackdrop(false);
+            rig.frame(ui, null, fractional);
+            float[] fractionalDrawn = rig.rgba.clone();
+            ui.foldBackdrop(true);
+            rig.frame(ui, null, fractional);
+            assertThat(ui.clearedBoxes()).as("found, then drawn: off whole pixels").containsExactly(1);
+            assertThat(rig.rgba).containsExactly(fractionalDrawn, within(1e-3f));
+            DrawList rounded = list(2, l -> {
+                l.box(0, 0, W, H, panel, 0, 0, 0, 0, 0, 0);
+                l.box(20, 20, 80, 80, RED, 3, 3, 3, 3, 0, 0);
+            });
+            rig.frame(ui, null, rounded);
+            assertThat(ui.clearedBoxes()).isEmpty();
+            // Without a backdrop: opaque or over the image's transparency, the first boxes are cleared too.
+            DrawList bare = list(2, l -> {
+                l.box(10, 10, 50, 50, plot, 0, 0, 0, 0, 0, 0);
+                l.box(30, 30, 70, 70, RED, 0, 0, 0, 0, 0, 0);
+            });
+            ui.foldBackdrop(false);
+            rig.frame(ui, null, bare);
+            float[] bareDrawn = rig.rgba.clone();
+            ui.foldBackdrop(true);
+            rig.frame(ui, null, bare);
+            assertThat(ui.foldedBackdrop()).isEqualTo(-1);
+            assertThat(ui.clearedBoxes()).containsExactly(0, 1);
+            assertThat(rig.rgba).containsExactly(bareDrawn, within(1e-3f));
         }
     }
 
