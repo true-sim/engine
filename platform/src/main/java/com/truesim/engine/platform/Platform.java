@@ -501,7 +501,7 @@ public final class Platform implements AutoCloseable {
     /**
      * Where the mouse cursor is on the desktop, in screen coordinates, into {@code out} (x, y), wherever it is (over a
      * window or not, during a drag too); false, {@code out} unchanged, where the system tells no global position
-     * (Wayland). Allocates nothing.
+     * (Wayland; the offscreen and dummy drivers, which have no cursor). Allocates nothing.
      */
     public boolean globalMouse(float[] out) {
         checkThread();
@@ -523,7 +523,10 @@ public final class Platform implements AutoCloseable {
 
     @AllowAllocation("asked once")
     private boolean globalMouseKnown() {
-        return !"wayland".equals(SDL_GetCurrentVideoDriver());
+        // Wayland tells no global position; the offscreen and dummy drivers have no system cursor at all (what SDL
+        // answers there is not where events put the mouse: docking's mapping then takes the events' own positions)
+        String driver = SDL_GetCurrentVideoDriver();
+        return !"wayland".equals(driver) && !"offscreen".equals(driver) && !"dummy".equals(driver);
     }
 
     public boolean isCursorVisible() {

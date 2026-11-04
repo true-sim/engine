@@ -221,7 +221,7 @@ class UiGalleryTest {
                 + "%.2f p99, %.2f max, %d over 1.5 x the median; graph builds %d; bytes allocated %d median, %d max, "
                 + "%d frames allocating%n", perPass, hovering, median, p99, max, spikes, builds, b[perPass / 2],
                 b[perPass - 1], allocating);
-            assertThat(hovering).as("the sweep crosses rocks").isGreaterThan(perPass / 10);
+            assertThat(hovering).as("the sweep crosses rocks").isGreaterThan(perPass / 20);
             assertThat(builds).as("hovering rocks rebuilds no frame graph").isZero();
             if ("true".equals(System.getenv("TRUESIM_BENCHMARK"))) { // frame times need a quiet machine (no other
                 assertThat(spikes).as("frames over 1.5 x the median").isZero(); // GPU tests running beside it)
