@@ -98,6 +98,12 @@ public final class UiPlugin implements Plugin {
     private SystemCursor shownCursor;
     private float shownScale = -1;
     private PointerSource[] sources = new PointerSource[0];
+    private com.truesim.engine.ui.scene.UiScene scene; // the scene bridge, or null: the UI alone
+    private com.truesim.engine.settings.EngineSettings settings;
+    private SettingRegistry registry;
+    private SettingGroup group;
+    private String appId = "app";
+    private com.truesim.engine.ui.console.UiConsole console; // the developer console, or null
 
     /**
      * The UI made by {@code factory} at startup, given the textures it should use (null: its own, or its text
@@ -148,6 +154,12 @@ public final class UiPlugin implements Plugin {
                 SettingGroup group = SettingGroup.root("ui", "settings.ui", 45);
                 registry.add(group, UiCommands.ALL.toArray(new Setting<?>[0]));
                 registry.add(group, VirtualCursor.ALL.toArray(new Setting<?>[0]));
+                registry.add(group, com.truesim.engine.ui.scene.UiScene.FAR,
+                    com.truesim.engine.ui.scene.DepthOcclusion.LEVEL);
+                settings = startup.settings();
+                this.registry = registry;
+                this.group = group;
+                appId = startup.engine().id();
                 tunables = new UiTunables(startup.settings()).add(registry, group,
                     tunables(ui).toArray(new Tunable[0]));
                 commands = new UiCommands(in, startup.settings());
@@ -245,6 +257,64 @@ public final class UiPlugin implements Plugin {
         return ui;
     }
 
+    /**
+     * Runs the UI through a scene bridge over the game's {@code graph} and its {@code index} (design 4.7): 3D nodes,
+     * world panels and gizmos take pointers by their rays, interactive nodes on {@code UiScene.INTERACTIVE}. Give it the
+     * camera the main view draws through ({@code UiScene.camera}). Call once, after the engine started.
+     */
+    @AllowAllocation("set up once")
+    public com.truesim.engine.ui.scene.UiScene scene(com.truesim.scene.core.SceneGraph graph,
+        com.truesim.scene.core.SpatialIndex index) {
+        return scene(graph, index, com.truesim.engine.ui.scene.UiScene.INTERACTIVE);
+    }
+
+    /** As {@link #scene(com.truesim.scene.core.SceneGraph, com.truesim.scene.core.SpatialIndex)}, on {@code layer}. */
+    @AllowAllocation("set up once")
+    public com.truesim.engine.ui.scene.UiScene scene(com.truesim.scene.core.SceneGraph graph,
+        com.truesim.scene.core.SpatialIndex index, com.truesim.scene.core.SceneLayer layer) {
+        if (scene != null) {
+            throw new IllegalStateException("The UI has a scene bridge already");
+        }
+        scene = new com.truesim.engine.ui.scene.UiScene(ui(), graph, index, layer);
+        return scene;
+    }
+
+    /**
+     * Adds the developer console (design 5.10): {@code Console.create(ui, appId, store)} over the engine's settings as
+     * variables, its permissions from settings, its log fed by SLF4J ({@code ConsoleLogProvider}); registers the
+     * console's tunables and settings. Call once, after the engine started.
+     */
+    @AllowAllocation("set up once")
+    public com.truesim.engine.ui.console.UiConsole console(String id, com.truesim.ui.console.HistoryStore store) {
+        if (console != null) {
+            throw new IllegalStateException("The UI has a console already");
+        }
+        Ui u = ui();
+        registry.add(group, com.truesim.engine.ui.console.UiConsole.SETTINGS.toArray(new Setting<?>[0]));
+        // the console's tunables are settings already (tunables(ui))
+        console = new com.truesim.engine.ui.console.UiConsole(u, id, store, registry, settings);
+        com.truesim.ui.controls.text.TextEditor line = console.console().field();
+        commands.console(() -> u.interaction().focusedSlot(0) == line.element().slot()); // completion and history
+        return console;
+    }
+
+    /** The console for the engine's app id, its history in the user's settings folder. */
+    @AllowAllocation("set up once")
+    public com.truesim.engine.ui.console.UiConsole console() {
+        return console(appId, new com.truesim.engine.ui.console.FileHistoryStore(
+            com.truesim.engine.app.SettingsFile.folder(appId)));
+    }
+
+    /** The developer console, or null. */
+    public com.truesim.engine.ui.console.UiConsole developerConsole() {
+        return console;
+    }
+
+    /** The scene bridge, or null. */
+    public com.truesim.engine.ui.scene.UiScene scene() {
+        return scene;
+    }
+
     /** The view it draws on; from {@link Stage#RUN}. */
     public ViewPort view() {
         return view;
@@ -303,7 +373,13 @@ public final class UiPlugin implements Plugin {
         for (PointerSource source : sources) {
             source.poll(input);
         }
-        ui.input(input, (long) (frame.realTime() * 1e9));
+        long nanos = (long) (frame.realTime() * 1e9);
+        if (scene != null) {
+            scene.far(settings.get(com.truesim.engine.ui.scene.UiScene.FAR));
+            scene.input(input, nanos, view.width(), view.height());
+        } else {
+            ui.input(input, nanos);
+        }
     }
 
     /**
@@ -317,7 +393,11 @@ public final class UiPlugin implements Plugin {
         }
         int width = view.width();
         int height = view.height();
-        ui.update(width, height);
+        if (scene != null) {
+            scene.update(width, height);
+        } else {
+            ui.update(width, height);
+        }
         renderer.submit(ui.layers(), ui.layerCount(), ui.textures(), width, height);
         if (osWindows != null) {
             osWindows.submit(ui);

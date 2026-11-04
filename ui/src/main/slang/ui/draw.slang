@@ -30,6 +30,7 @@ struct UiPush
     float toClipY;      // 2 / its height
     float originX;      // the UI pixel at the image's top left: 0, or a docking OS window's region
     float originY;
+    float* world;       // a world panel drawn in the 3D view: 16 floats, its pixels to clip space (column-major)
 };
 
 [[vk::push_constant]]
@@ -625,4 +626,79 @@ float4 triangleMain(VertexOut in) : SV_Target
     Transform t = transformAt(p[TRANSFORM]);
     float2 px = uiPixel(in.position);
     return triangle(p, header, ownCoordinates(px, header, t), t.scale) * (t.opacity * clipped(header, px));
+}
+
+// ------------------------------------------------------------------------------------------------------ world panels
+// A world panel's UI drawn directly in the 3D view (engine-ui's WorldPanelRenderer, design UI12): the primitives
+// placed as for the screen (in the panel's pixels: origin 0, toClip 2 / its size), then carried into the view by the
+// push's world matrix (panel pixel to clip space, made on the CPU relative to the camera); depth tested against the
+// scene. Coverage is worked out in the panel's pixels, the pixel's footprint there (fwidth) turning distances into
+// screen pixels, so text (MTSDF) stays sharp at any angle and distance.
+
+struct WorldOut
+{
+    float4 position : SV_Position;
+    nointerpolation uint primitive : PRIMITIVE;
+    float2 pixel : PIXEL; // the panel pixel
+};
+
+[shader("vertex")]
+WorldOut worldVertexMain(uint vertex : SV_VulkanVertexID)
+{
+    VertexOut flat = vertexMain(vertex);
+    WorldOut out;
+    out.primitive = flat.primitive;
+    if (flat.position.x == -2 && flat.position.y == -2)
+    {
+        out.position = float4(0, 0, -1, 1); // no area: behind the near plane
+        out.pixel = float2(0, 0);
+        return out;
+    }
+    float2 at = (flat.position.xy + 1) / float2(push.toClipX, push.toClipY);
+    float* m = push.world;
+    out.pixel = at;
+    out.position = float4(m[0] * at.x + m[4] * at.y + m[12], m[1] * at.x + m[5] * at.y + m[13],
+        m[2] * at.x + m[6] * at.y + m[14], m[3] * at.x + m[7] * at.y + m[15]);
+    return out;
+}
+
+[shader("fragment")]
+float4 worldFragmentMain(WorldOut in) : SV_Target
+{
+    uint* p = push.primitives + in.primitive * WORDS;
+    uint header = p[HEADER];
+    Transform t = transformAt(p[TRANSFORM]);
+    float2 px = in.pixel;
+    float2 local = ownCoordinates(px, header, t);
+    float2 footprint = fwidth(px); // panel pixels per screen pixel
+    float k = t.scale / max(max(footprint.x, footprint.y), 1e-4);
+    float4 c;
+    switch (header & 0xff)
+    {
+    case BOX:
+        c = box(p, header, local, k);
+        break;
+    case SHADOW:
+        c = shadow(p, local, k);
+        break;
+    case GLYPH:
+        c = glyph(p, local, k);
+        break;
+    case IMAGE:
+        c = image(p, local);
+        break;
+    case NINE_SLICE:
+        c = nineSlice(p, local);
+        break;
+    case LINE:
+        c = segment(p, local, k);
+        break;
+    case TRIANGLE:
+        c = triangle(p, header, local, k);
+        break;
+    default:
+        c = float4(0, 0, 0, 0);
+        break;
+    }
+    return c * (t.opacity * clipped(header, px));
 }

@@ -134,6 +134,16 @@ public final class MaterialField {
         return texture;
     }
 
+    /** The least value of its range ({@code [Range]}), or negative infinity without one. */
+    public float low() {
+        return low;
+    }
+
+    /** The greatest value of its range ({@code [Range]}), or positive infinity without one. */
+    public float high() {
+        return high;
+    }
+
     /** Whether {@code value} is in the field's range ({@code [Range]}); every value of fields without one. */
     public boolean accepts(float value) {
         return value >= low && value <= high;

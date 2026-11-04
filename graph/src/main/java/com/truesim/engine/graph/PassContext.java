@@ -380,6 +380,17 @@ public final class PassContext {
      * {@code to}, filtered if {@code linear}.
      */
     public void blit(Subresource from, int x, int y, int width, int height, Subresource to, boolean linear) {
+        blit(from, x, y, width, height, to, 0, 0, Math.max(1, to.image().width >> to.baseMip()),
+            Math.max(1, to.image().height >> to.baseMip()), linear);
+    }
+
+    /**
+     * Blits the {@code width} x {@code height} texels of {@code from} from ({@code x}, {@code y}) over the
+     * {@code toWidth} x {@code toHeight} texels of {@code to} from ({@code toX}, {@code toY}), scaled to fit, filtered if
+     * {@code linear}: the rest of {@code to} is left as it is (a region of a larger image, an atlas's cell).
+     */
+    public void blit(Subresource from, int x, int y, int width, int height, Subresource to, int toX, int toY,
+        int toWidth, int toHeight, boolean linear) {
         oneMip("Blitting from", from);
         oneMip("Blitting into", to);
         if (from.layerCount() != to.layerCount()) {
@@ -395,7 +406,11 @@ public final class PassContext {
             memPutInt(region + VkImageBlit2.SRCOFFSETS + 16, y + height);
             memPutInt(region + VkImageBlit2.SRCOFFSETS + 20, 1);
             layers(region + VkImageBlit2.DSTSUBRESOURCE, to);
-            corner(region + VkImageBlit2.DSTOFFSETS + 12, to);
+            memPutInt(region + VkImageBlit2.DSTOFFSETS, toX); // offsets[0]
+            memPutInt(region + VkImageBlit2.DSTOFFSETS + 4, toY);
+            memPutInt(region + VkImageBlit2.DSTOFFSETS + 12, toX + toWidth); // offsets[1]
+            memPutInt(region + VkImageBlit2.DSTOFFSETS + 16, toY + toHeight);
+            memPutInt(region + VkImageBlit2.DSTOFFSETS + 20, 1);
             long info = stack.ncalloc(VkBlitImageInfo2.ALIGNOF, 1, VkBlitImageInfo2.SIZEOF);
             memPutInt(info + VkBlitImageInfo2.STYPE, VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2);
             memPutLong(info + VkBlitImageInfo2.SRCIMAGE, image(from.image()));

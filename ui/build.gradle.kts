@@ -12,14 +12,18 @@ dependencies {
     implementation(project(":engine-xr")) // the headset's controls, for the XR rays' default bindings
     api("com.truesim.ui:ui-core:0.3.0")
     api("com.truesim.ui:ui-controls:0.3.0") // the Ui the plugin runs
-    implementation("com.truesim.ui:ui-console:0.3.0") // the console's tunables, as settings
+    api("com.truesim.ui:ui-scene:0.3.0") // the scene bridge: picking, world panels, camera views
+    api("com.truesim.ui:ui-gizmo:0.3.0") // gizmos, whose occlusion the view's depth answers (and their tunables)
+    api("com.truesim.ui:ui-console:0.3.0") // the developer console over the engine's settings and log
+    api("com.truesim.ui:ui-props:0.3.0") // property panels: the settings screen, material parameters
     runtimeOnly("com.truesim.ui:ui-charts:0.3.0") // charts' tunables (a TunableSource service) as settings
-    runtimeOnly("com.truesim.ui:ui-gizmo:0.3.0") // the scene bridge's and the gizmos' tunables, likewise
     testImplementation(testFixtures("com.truesim.ui:ui-controls:0.3.0")) // the galleries the screenshots show
     testImplementation(testFixtures("com.truesim.ui:ui-charts:0.3.0"))
     testImplementation(testFixtures("com.truesim.ui:ui-props:0.3.0"))
     testImplementation(testFixtures("com.truesim.ui:ui-console:0.3.0"))
     testImplementation(testFixtures("com.truesim.ui:ui-gizmo:0.3.0"))
+    testImplementation(testFixtures("com.truesim.ui:ui-scene:0.3.0")) // the scene rig and fake camera source
+    testImplementation("com.truesim.scene:scene-meshbuild:0.62.0") // meshes for picking and panels
     testImplementation(project(":engine-bench")) // the benchmark scenes (UiScenes) the batching benchmark compares
     testImplementation("com.truesim.ui:ui-text-native:0.3.0")
     testImplementation("com.truesim.ui:ui-fonts-cjk:0.3.0") // bundled fonts: the same text on every machine
