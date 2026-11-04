@@ -14,7 +14,8 @@ public static const uint GLYPH = 3;
 public static const uint IMAGE = 4;
 public static const uint NINE_SLICE = 5;
 public static const uint LINE = 6;
-public static const uint KINDS = 7;
+public static const uint TRIANGLE = 7;
+public static const uint KINDS = 8;
 
 /**
  * Flags (header bits 8-15): a box filled by a linear gradient; a glyph of hinted coverage, not an MTSDF; a glyph of
@@ -23,6 +24,14 @@ public static const uint KINDS = 7;
 public static const uint FLAG_GRADIENT = 1;
 public static const uint FLAG_RASTER = 2;
 public static const uint FLAG_COLOR = 4;
+
+/**
+ * Flags of a TRIANGLE (header bits 8-15): which of its edges are anti-aliased (a shape's outline); the others are hard,
+ * half-open, so triangles sharing them never cover a pixel twice.
+ */
+public static const uint EDGE_AB = 1;
+public static const uint EDGE_BC = 2;
+public static const uint EDGE_CA = 4;
 
 /** Word offsets. */
 public static const uint HEADER = 0;
@@ -44,6 +53,13 @@ public static const uint GRADIENT_ANGLE = 14;
 public static const uint WEIGHT = 14;
 public static const uint SOURCE_INSETS = 14;
 public static const uint TRANSFORM = 15;
+/** A TRIANGLE's corners a, b, c as floats, in the space of its bounding box (words 1-4). */
+public static const uint XA = 9;
+public static const uint YA = 10;
+public static const uint XB = 11;
+public static const uint YB = 12;
+public static const uint XC = 13;
+public static const uint YC = 14;
 
 /**
  * Floats per clip record (ui-core's DrawList.CLIP_FLOATS): x0, y0, x1, y1, corner radius (in the space of its

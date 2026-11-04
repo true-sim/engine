@@ -190,9 +190,9 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
             lo -= grow;
             hi += grow;
         }
-        else if (kind == BOX)
+        else if (kind == BOX || kind == TRIANGLE)
         {
-            lo -= 1; // the anti-aliased edge's outer half
+            lo -= 1; // the anti-aliased edge's outer half (a triangle's quad is its bounding box)
             hi += 1;
         }
         uint clip = header >> 16;
@@ -427,6 +427,61 @@ float4 segment(uint* p, float2 px, float k)
     return color(p, COLOR_A) * (saturate(0.5 - distance) * min(width, 1));
 }
 
+/**
+ * The signed edge function of `px` against the edge from `a` to `b`, worked out from the edge's end points in a
+ * canonical order (the lesser by x, then y, first) so two triangles sharing the edge compute the very same value;
+ * returned with the sign that makes `inside` positive, and `owner` true when this triangle owns pixels exactly on it.
+ * Divided by the edge's length: a distance in the primitive's units.
+ */
+float edgeDistance(float2 a, float2 b, float2 px, float winding, out bool owner)
+{
+    bool swap = b.x < a.x || (b.x == a.x && b.y < a.y);
+    float2 q0 = swap ? b : a;
+    float2 q1 = swap ? a : b;
+    float2 d = q1 - q0;
+    float e = d.x * (px.y - q0.y) - d.y * (px.x - q0.x);
+    float side = swap ? -winding : winding;
+    owner = side > 0; // of the two triangles sharing the edge, exactly one has side > 0: it owns pixels on it
+    return e * side / max(length(d), 1e-12);
+}
+
+/** One edge's coverage: its distance's for anti-aliased edges (`k` pixels a unit), half-open and hard for the others. */
+float edgeCoverage(float2 a, float2 b, float2 px, float winding, bool smooth, float k)
+{
+    bool owner;
+    float distance = edgeDistance(a, b, px, winding, owner);
+    if (smooth)
+    {
+        return saturate(distance * k + 0.5);
+    }
+    return distance > 0 || (distance == 0 && owner) ? 1 : 0;
+}
+
+/**
+ * A filled triangle (corners in words XA to YC): the product over its three edges of each edge's coverage, anti-aliased
+ * by the signed distance on the edges its flags name (a shape's outline) and a hard half-open test on the others, so
+ * triangles sharing an edge cover each pixel along it exactly once and translucent fills show no seam.
+ */
+float4 triangle(uint* p, uint header, float2 px, float k)
+{
+    float2 a = float2(word(p, XA), word(p, YA));
+    float2 b = float2(word(p, XB), word(p, YB));
+    float2 c = float2(word(p, XC), word(p, YC));
+    float2 ab = b - a;
+    float2 ac = c - a;
+    float area = ab.x * ac.y - ab.y * ac.x;
+    if (area == 0)
+    {
+        return float4(0, 0, 0, 0); // degenerate: no pixels
+    }
+    float winding = area > 0 ? 1 : -1;
+    uint flags = (header >> 8) & 0xff;
+    float coverage = edgeCoverage(a, b, px, winding, (flags & EDGE_AB) != 0, k)
+        * edgeCoverage(b, c, px, winding, (flags & EDGE_BC) != 0, k)
+        * edgeCoverage(c, a, px, winding, (flags & EDGE_CA) != 0, k);
+    return color(p, COLOR_A) * coverage;
+}
+
 /** How much of `px` (a UI pixel) the primitive's clip lets through: its rounded rectangle where it cuts, anti-aliased. */
 float clipped(uint header, float2 px)
 {
@@ -487,6 +542,9 @@ float4 fragmentMain(VertexOut in) : SV_Target
         break;
     case LINE:
         c = segment(p, local, k);
+        break;
+    case TRIANGLE:
+        c = triangle(p, header, local, k);
         break;
     default:
         c = float4(0, 0, 0, 0);
@@ -555,4 +613,14 @@ float4 lineMain(VertexOut in) : SV_Target
     Transform t = transformAt(p[TRANSFORM]);
     float2 px = uiPixel(in.position);
     return segment(p, ownCoordinates(px, header, t), t.scale) * (t.opacity * clipped(header, px));
+}
+
+[shader("fragment")]
+float4 triangleMain(VertexOut in) : SV_Target
+{
+    uint* p = push.primitives + in.primitive * WORDS;
+    uint header = p[HEADER];
+    Transform t = transformAt(p[TRANSFORM]);
+    float2 px = uiPixel(in.position);
+    return triangle(p, header, ownCoordinates(px, header, t), t.scale) * (t.opacity * clipped(header, px));
 }

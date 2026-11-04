@@ -123,7 +123,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
 
     /** The shader entry points of the kinds, by kind (Primitive's numbers); EMPTY has none. */
     private static final String[] KIND_ENTRIES = {null, "boxMain", "shadowMain", "glyphMain", "imageMain",
-        "nineSliceMain", "lineMain"};
+        "nineSliceMain", "lineMain", "triangleMain"};
     private static final int BUFFER_USAGE = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     private static final int CLIP_BYTES = DrawList.CLIP_FLOATS * 4;

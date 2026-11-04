@@ -422,6 +422,75 @@ class UiRendererTest {
     }
 
     @Test
+    void trianglesAntiAliasTheirOutlineAndShareHardEdgesWithoutSeams() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            int all = Primitive.EDGE_AB | Primitive.EDGE_BC | Primitive.EDGE_CA;
+            long half = Rgba.pack(0, 1, 0, 0.5f);
+            DrawList list = list(3, l -> {
+                l.triangle(10, 10, 110, 10, 10, 110, RED, all);
+                // A translucent square of two triangles, wound opposite ways: the outline anti-aliased, the diagonal
+                // (through pixel centres) hard and shared.
+                l.triangle(130, 10, 230, 10, 230, 110, half, Primitive.EDGE_AB | Primitive.EDGE_BC);
+                l.triangle(130, 10, 130, 110, 230, 110, half, Primitive.EDGE_AB | Primitive.EDGE_BC);
+            });
+            ui.batching(GpuUiRenderer.Batching.UBER);
+            rig.frame(ui, null, list);
+            assertThat(rig.at(30, 30)).containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            assertThat(rig.at(80, 80, 3)).as("past the long edge").isZero();
+            assertThat(rig.at(5, 30, 3)).isZero();
+            // Pixel (59, 60)'s centre lies on the edge x + y = 120: half covered.
+            assertThat(rig.at(59, 60, 3)).as("on the anti-aliased edge").isCloseTo(0.5f, within(0.05f));
+            assertThat(rig.at(61, 60, 3)).isLessThan(0.02f);
+            assertThat(rig.at(57, 60, 3)).isGreaterThan(0.98f);
+            for (int y = 12; y < 108; y++) {
+                for (int x = 132; x < 228; x++) {
+                    assertThat(rig.at(x, y)).as("one coverage at (%d, %d), on the diagonal too", x, y)
+                        .containsExactly(new float[] {0, 0.5f, 0, 0.5f}, within(1e-3f));
+                }
+            }
+            assertThat(rig.at(129, 60, 3)).as("left of the square").isLessThan(0.01f);
+            float[] uber = rig.rgba.clone();
+            ui.batching(GpuUiRenderer.Batching.PER_KIND);
+            rig.frame(ui, null, list);
+            assertThat(rig.rgba).as("triangleMain draws as the uber path").containsExactly(uber, within(1e-3f));
+            rig.screenshot("triangles");
+        }
+    }
+
+    @Test
+    void aTrianglesCornersMoveByItsClipsOffsetAndTransformEntryAndItsClipCutsIt() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            DrawList list = new DrawList();
+            int t = list.addTransform();
+            int clip = list.addClip(10, 10, 30, 50, 0);
+            list.setClipTransform(clip, t);
+            list.setClipOffset(clip, 5, 0); // scrolled content: the corners move 5 right, the clip stays
+            int start = list.allocate(1);
+            list.begin(start, 1);
+            list.useTransform(t);
+            list.clip(clip);
+            list.triangle(10, 10, 50, 10, 10, 50, RED, Primitive.EDGE_AB | Primitive.EDGE_BC | Primitive.EDGE_CA);
+            assertThat(list.end()).isTrue();
+            list.setTransform(t, 2, 100, 0, 1); // drawn at (130, 20), (210, 20), (130, 100), cut at x 120 to 160
+            for (GpuUiRenderer.Batching batching : new GpuUiRenderer.Batching[] {GpuUiRenderer.Batching.UBER,
+                GpuUiRenderer.Batching.PER_KIND}) {
+                ui.batching(batching);
+                rig.frame(ui, null, list);
+                assertThat(rig.at(135, 30)).as(batching + ": inside").containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+                assertThat(rig.at(125, 30, 3)).as("left of the moved corner, inside the clip").isZero();
+                assertThat(rig.at(165, 30, 3)).as("inside the triangle, cut by the scaled clip").isZero();
+                // The long edge draws at x + y = 230: pixel (149, 80)'s centre is on it; distances in drawn pixels.
+                assertThat(rig.at(149, 80, 3)).as("on the edge").isCloseTo(0.5f, within(0.05f));
+                assertThat(rig.at(150, 80, 3)).as("0.7 drawn pixels out").isLessThan(0.02f);
+                assertThat(rig.at(148, 80, 3)).isGreaterThan(0.98f);
+            }
+            rig.screenshot("triangle-transformed-clipped");
+        }
+    }
+
+    @Test
     void changesFarApartUploadApart() {
         try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
             rig.view.add(ui);
