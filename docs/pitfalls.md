@@ -395,6 +395,21 @@ work timed through the plugin's own `beforeUpdate` 88 us.
 - Proof: `InputBenchmarkTest`, both ways in one run (true-sim/engine, input actions).
 - Rule: time a plugin's own frame hook, or subtract an empty frame measured the same way.
 
+**A CPU time taken between waits for the GPU is not the CPU time of frames in flight.** The UI benchmark timed each
+chart frame's `Ui.update` with a frame recorded and waited for (`submitAndWait`) between them: the same code read 0.32
+ms p50 and 0.53 p99 so, against 0.30 and 0.35 back to back.
+- Proof: `UiProbe` (engine-bench, kept out of the tree) timing the streaming chart's frames back to back, with a GPU
+  frame waited for between, and with 0.3 ms spun between, in one run (true-sim/engine, UI performance branch).
+- Rule: a CPU benchmark of per-frame code runs the frames back to back, as the engine does while the GPU draws the
+  frames before; GPU times come from a run of their own.
+
+**A GPU benchmark's cost may not be where its name points.** The streaming chart's GPU time (0.27 ms against a budget
+of 0.2) was taken to be its line's 3,790 pixel-column strokes; the chart without its series took 0.20 ms: its panel
+and plot backgrounds, two translucent boxes over most of the 3840 x 1000 image, 0.15 ms of blending.
+- Proof: `UiProbe` timing the chart's draw list with kinds of primitives left out, one at a time (true-sim/engine, UI
+  performance branch).
+- Rule: before optimizing a part of a GPU frame, time the frame without it.
+
 **Benchmarks run as tests carry JaCoCo's probes.** The test task runs with the coverage agent: the same input
 benchmark read 63 to 92 us a frame with it and 41 to 57 us without (`JacocoTaskExtension` disabled for the run).
 - Proof: `InputBenchmarkTest`, three runs each way on the same machine (true-sim/engine, input actions).

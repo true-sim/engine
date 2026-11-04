@@ -282,7 +282,13 @@ Capture capture = input.capture(one, JUMP);   // the next input becomes a bindin
   primitive (rounded boxes with borders and gradients, blurred shadows, MTSDF glyphs, images, nine-slices, lines,
   triangles, clipped by rounded rectangles; a triangle anti-aliases the edges its flags name and keeps the others hard
   and half-open, so a shape's triangles share edges without seams); long runs of one kind (text floods) get their kind's own shader (`Batching.ADAPTIVE`,
-  chosen by `UiBenchmark` over one draw per layer and a draw per run of a kind).
+  chosen by `UiBenchmark` over one draw per layer and a draw per run of a kind). A chart's polylines (`Primitive.PATH`:
+  miter, bevel or round joins, caps, dashes along the path, each pixel drawn once where segments overlap) and min-max
+  envelopes (`Primitive.COLUMNS`, stroked or filled) read the layer's vertex table, uploaded as its dirty ranges (a
+  stream uploads the points it appended), each a draw of its own expanding a quad per segment, column or piece in the
+  vertex shader. A box covering the image at the bottom of the UI (a console's backdrop, a full-screen panel) is
+  cleared to instead of blended over every pixel; its rounded corners and border are drawn along its edges without
+  blending (`foldBackdrop`).
 - **Input** (`UiActions`, `UiCommands`, `MousePointer`): the `ui` action group of design section 10 with keyboard,
   mouse and gamepad defaults, bindings as settings (`input.ui.navigation.accept`); `UiCommands` (a
   `UiCommandSource`) adds each player's presses of the frame as `UiCommand`s, with repeats (`ui.repeatDelay`,
