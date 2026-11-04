@@ -608,13 +608,28 @@ class UiRendererTest {
             assertThat(rig.rgba).containsExactly(drawn, within(1e-3f));
             assertThat(rig.at(5, 5)).as("the backdrop, premultiplied").containsExactly(
                 new float[] {0.12f, 0.24f, 0.36f, 0.6f}, within(2e-3f));
-            // Not a backdrop: it leaves a pixel out, it is rounded, or something is drawn before it.
+            // A panel with rounded corners and a border: cleared to its fill, its edges drawn over the clear.
+            DrawList panel = list(2, l -> {
+                l.box(0, 0, W, H, backdrop, 12, 4, 0, 20, 2, Rgba.pack(1, 1, 1, 0.8f));
+                l.box(30, 30, 90, 90, RED, 0, 0, 0, 0, 0, 0);
+            });
+            ui.foldBackdrop(false);
+            rig.frame(ui, null, panel);
+            float[] drawnPanel = rig.rgba.clone();
+            ui.foldBackdrop(true);
+            rig.frame(ui, null, panel);
+            assertThat(ui.foldedBackdrop()).isZero();
+            assertThat(rig.rgba).containsExactly(drawnPanel, within(1e-3f));
+            assertThat(rig.at(0, 0, 3)).as("outside the rounded corner").isZero();
+            assertThat(rig.at(W - 1, H / 2, 3)).as("the border").isCloseTo(0.8f, within(0.02f));
+            rig.screenshot("backdrop-panel-folded");
+            // Not a backdrop: it leaves a pixel out, has a gradient, or something is drawn before it.
             DrawList narrow = list(1, l -> l.box(1, 0, W, H, backdrop, 0, 0, 0, 0, 0, 0));
             rig.frame(ui, null, narrow);
             assertThat(ui.foldedBackdrop()).isEqualTo(-1);
             assertThat(rig.at(0, 5, 3)).isZero();
-            DrawList rounded = list(1, l -> l.box(0, 0, W, H, backdrop, 8, 8, 8, 8, 0, 0));
-            rig.frame(ui, null, rounded);
+            DrawList gradient = list(1, l -> l.gradientBox(0, 0, W, H, backdrop, RED, 0, 0, 0, 0, 0, 0, 0));
+            rig.frame(ui, null, gradient);
             assertThat(ui.foldedBackdrop()).isEqualTo(-1);
             DrawList under = list(2, l -> {
                 l.line(10, 10, 20, 20, 1, RED);
