@@ -145,7 +145,8 @@ public final class UiPlugin implements Plugin {
                 SettingRegistry registry = startup.registry();
                 SettingGroup group = SettingGroup.root("ui", "settings.ui", 45);
                 registry.add(group, UiCommands.ALL.toArray(new Setting<?>[0]));
-                registry.add(group, com.truesim.engine.ui.scene.UiScene.FAR);
+                registry.add(group, com.truesim.engine.ui.scene.UiScene.FAR,
+                    com.truesim.engine.ui.scene.DepthOcclusion.LEVEL);
                 settings = startup.settings();
                 this.registry = registry;
                 this.group = group;
