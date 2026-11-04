@@ -71,6 +71,8 @@ class UiSceneInteractionTest {
             world.on(crate, SceneEventType.ALL_MASK, e -> seen.add("scene " + e.type()));
             scene.picking().add(crate, Interactive.of(EventType.CLICK, e -> seen.add("ui CLICK")));
             interaction.selection().enabled(true);
+            com.truesim.ui.gizmo.Gizmo gizmo = new com.truesim.ui.gizmo.Gizmo(scene.picking(), scene.mainView(), null);
+            scene.followSelection(gizmo);
             float[] at = UiSceneTest.screen(0, 0);
             mouse.mouse(at[0], at[1], 0);
             engine.step();
@@ -81,6 +83,9 @@ class UiSceneInteractionTest {
             engine.step();
             assertThat(seen).contains("scene ENTER", "scene PRESS", "scene CLICK", "ui CLICK");
             assertThat(graph.components().has(crate, Selected.TYPE)).as("selected by the click").isTrue();
+            assertThat(gizmo.active()).as("the gizmo follows the selection").isEqualTo(crate);
+            interaction.selection().selectNone(world);
+            assertThat(gizmo.count()).isZero();
             assertThat(world.picker().cacheHits()).as("the UI's and the scene's picks: one raycast").isPositive();
             assertThat(world.picker().raycasts() - raycasts).as("two frames, two casts per frame at most")
                 .isLessThanOrEqualTo(4);

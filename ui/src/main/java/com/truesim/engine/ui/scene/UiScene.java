@@ -233,6 +233,38 @@ public final class UiScene {
     }
 
     /**
+     * Makes {@code gizmo} follow the scene interaction's selection (application-api.md, selection): each change selects
+     * the selected nodes on the gizmo, the primary (the object selected last) active, or clears it. A property panel
+     * follows the same way, through {@code SceneSelection.listen}. Needs the scene interaction; returns this.
+     */
+    @AllowAllocation("set up once")
+    public UiScene followSelection(com.truesim.ui.gizmo.Gizmo gizmo) {
+        if (world == null) {
+            throw new IllegalStateException("No scene interaction to follow the selection of");
+        }
+        java.util.Objects.requireNonNull(gizmo, "gizmo");
+        com.truesim.scene.core.ComponentStore<com.truesim.scene.core.Selected> selected = graph.components()
+            .store(com.truesim.scene.core.Selected.TYPE);
+        world.interaction().selection().listen(s -> {
+            if (selected.size() == 0) {
+                gizmo.clear();
+                return;
+            }
+            if (selectedNodes.length < selected.size()) {
+                selectedNodes = new long[Math.max(selected.size(), selectedNodes.length * 2)];
+            }
+            for (int i = 0; i < selected.size(); i++) {
+                selectedNodes[i] = selected.node(i);
+            }
+            long primary = s.primary();
+            gizmo.select(selectedNodes, selected.size(), primary != 0 ? primary : selectedNodes[0]);
+        });
+        return this;
+    }
+
+    private long[] selectedNodes = new long[16];
+
+    /**
      * Draws the world panels through {@code renderer} (null: the game draws them): each frame's {@link #update} hands
      * it the panels' UIs after updating them. Returns this.
      */
