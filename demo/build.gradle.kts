@@ -8,18 +8,18 @@ dependencies {
     implementation(project(":engine-xr"))
     implementation(project(":engine-scene"))
     implementation(project(":engine-audio"))
-    implementation("com.truesim.scene:scene-meshbuild:0.64.0")
-    implementation("com.truesim.scene:scene-gltf:0.64.0")
+    implementation("com.truesim.scene:scene-meshbuild:0.64.1")
+    implementation("com.truesim.scene:scene-gltf:0.64.1")
     // The UI gallery (UiGallery): the engine's UI over the galleries of ui's test fixtures
     implementation(project(":engine-ui"))
-    implementation("com.truesim.ui:ui-charts:0.6.0")
-    implementation("com.truesim.ui:ui-text-native:0.6.0")
-    implementation("com.truesim.ui:ui-fonts-cjk:0.6.0")
-    implementation("com.truesim.ui:ui-fonts-emoji:0.6.0")
-    implementation(testFixtures("com.truesim.ui:ui-controls:0.6.0"))
-    implementation(testFixtures("com.truesim.ui:ui-charts:0.6.0"))
-    implementation(testFixtures("com.truesim.ui:ui-props:0.6.0"))
-    implementation(testFixtures("com.truesim.ui:ui-profiler:0.6.0"))
+    implementation("com.truesim.ui:ui-charts:0.7.0")
+    implementation("com.truesim.ui:ui-text-native:0.7.0")
+    implementation("com.truesim.ui:ui-fonts-cjk:0.7.0")
+    implementation("com.truesim.ui:ui-fonts-emoji:0.7.0")
+    implementation(testFixtures("com.truesim.ui:ui-controls:0.7.0"))
+    implementation(testFixtures("com.truesim.ui:ui-charts:0.7.0"))
+    implementation(testFixtures("com.truesim.ui:ui-props:0.7.0"))
+    implementation(testFixtures("com.truesim.ui:ui-profiler:0.7.0"))
 }
 
 application {

@@ -10,9 +10,9 @@ val lwjglNatives: List<String> by rootProject.extra
 
 dependencies {
     api(project(":engine-platform"))
-    api("com.truesim.scene:scene-audio:0.64.0")
-    api("com.truesim.scene:scene-animation:0.64.0") // AudioBindings: animation events and curves
-    api("com.truesim.scene:scene-effects:0.64.0") // AudioBindings: effects starting and bursting
+    api("com.truesim.scene:scene-audio:0.64.1")
+    api("com.truesim.scene:scene-animation:0.64.1") // AudioBindings: animation events and curves
+    api("com.truesim.scene:scene-effects:0.64.1") // AudioBindings: effects starting and bursting
     implementation("org.lwjgl:lwjgl-sdl")
     for (natives in lwjglNatives) {
         runtimeOnly("org.lwjgl:lwjgl-sdl::$natives")
