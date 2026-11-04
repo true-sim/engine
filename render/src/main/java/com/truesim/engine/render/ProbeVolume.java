@@ -93,7 +93,11 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
     public static final Setting<Integer> RAYS = ProbeVolumeLighting.PROBES.setting("rays");
     /** Of them, a fixed set never turned, for relocation and classification (at most half); the graph rebuilds. */
     public static final Setting<Integer> FIXED_RAYS = ProbeVolumeLighting.PROBES.setting("fixedRays");
-    /** The share of probes updated each frame, in turns (1: all; invalidated probes always). */
+    /**
+     * The share of probes updated each frame, in turns (1: all); probes restarting (a change told or found) update every
+     * frame until their histories hold {@link #FRESH} updates. Half by default: the lag targets hold (design D3) at
+     * about two thirds of every probe's cost (Sponza, RX 9070 XT).
+     */
     public static final Setting<Float> BUDGET = ProbeVolumeLighting.PROBES.setting("budget");
     /** Surfaces a probe ray passes through at most (holes, what blended surfaces let pass); the graph rebuilds. */
     public static final Setting<Integer> LAYERS = ProbeVolumeLighting.PROBES.setting("layers");
@@ -121,6 +125,11 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
      * for one update's noise to show.
      */
     public static final Setting<Float> DRIFT = ProbeVolumeLighting.PROBES.setting("drift");
+    /**
+     * Updates a probe's history holds before it takes its turns of {@link #BUDGET}: until then (after a restart, a
+     * change told or found) it updates every frame, so the budget spreads still probes' work, not a change's response.
+     */
+    public static final Setting<Integer> FRESH = ProbeVolumeLighting.PROBES.setting("fresh");
     /** Probes near what the scene says changed (instances, lights, the environment) restart at once. */
     public static final Setting<Boolean> INVALIDATE = ProbeVolumeLighting.PROBES.setting("invalidate");
     /** A changed light restarts the probes within this many times its reach (the surfaces it lit, seen from afar). */
@@ -139,11 +148,19 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
      */
     public static final Setting<Float> INSTANCE_MARGIN = ProbeVolumeLighting.PROBES.setting("instanceMargin");
 
+    /**
+     * The update runs on the async compute queue (where the device has one and the graph's async compute is on),
+     * beside the graphics work before shading, which waits for it within the frame: no added latency. Off by default:
+     * on Sponza (RX 9070 XT) the frame took 0.1 ms longer with it, at 1080p and 4K alike (little graphics work before
+     * shading to overlap). The graph rebuilds when it changes; {@link RadianceCascades} reads it too.
+     */
+    public static final Setting<Boolean> ASYNC = ProbeVolumeLighting.PROBES.setting("async");
+
     /** Its settings: the probes kind's tunables ({@link ProbeVolumeLighting.Probes}). */
-    public static final List<Setting<?>> ALL = List.of(ITERATIONS, CASCADES, PROBES, PROBES_UP, SPACING, RAYS,
+    public static final List<Setting<?>> ALL = List.of(ASYNC, ITERATIONS, CASCADES, PROBES, PROBES_UP, SPACING, RAYS,
         FIXED_RAYS, BUDGET,
         LAYERS, NORMAL_BIAS, VIEW_BIAS, BLEND, DEPTH_RANGE, RELOCATE, CLASSIFY, MAX_FRAMES, ADAPTIVE, SENSITIVITY,
-        DRIFT, INVALIDATE, LIGHT_MARGIN, INSTANCE_MARGIN);
+        DRIFT, INVALIDATE, LIGHT_MARGIN, INSTANCE_MARGIN, FRESH);
 
     static final Format IRRADIANCE_FORMAT = Format.R16G16B16A16_SFLOAT;
     static final Format DEPTH_FORMAT = Format.R16G16_SFLOAT;
@@ -323,7 +340,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             });
 
         ProbePush preparePush = new ProbePush();
-        g.pass("probe preparation").read(data, BufferAccess.STORAGE_READ).read(status, BufferAccess.STORAGE_READ)
+        pass(g, "probe preparation").read(data, BufferAccess.STORAGE_READ).read(status, BufferAccess.STORAGE_READ)
             .write(states, BufferAccess.STORAGE_WRITE)
             .record(ctx -> ctx.dispatch(prepare, frame.probePush(preparePush, ctx, settings, camera, coarsest, data,
                 status, null, null, null, null, null), (count + 63) / 64));
@@ -335,7 +352,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             String again = iteration == 0 ? "" : " (again " + iteration + ")";
             if (iteration > 0) {
                 ProbePush againPush = new ProbePush();
-                g.pass("probe repeat" + again).read(data, BufferAccess.STORAGE_READ)
+                pass(g, "probe repeat" + again).read(data, BufferAccess.STORAGE_READ)
                     .write(states, BufferAccess.STORAGE_WRITE).write(counts, BufferAccess.TRANSFER_DST)
                     .write(binTables, BufferAccess.TRANSFER_DST)
                     .record(ctx -> {
@@ -349,7 +366,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                     });
             }
             ProbePush generatePush = new ProbePush();
-            g.pass("probe rays" + again).read(data, BufferAccess.STORAGE_READ)
+            pass(g, "probe rays" + again).read(data, BufferAccess.STORAGE_READ)
                 .read(states, BufferAccess.STORAGE_READ)
                 .write(paths[0], BufferAccess.STORAGE_WRITE).write(counts, BufferAccess.STORAGE_WRITE)
                 .record(ctx -> ctx.dispatch(generate, frame.probePush(generatePush, ctx, settings, camera, coarsest,
@@ -371,23 +388,22 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                 PathPush layoutPush = push[4 * b + 1];
                 PathPush scatterPush = push[4 * b + 2];
                 PathPush shadePush = push[4 * b + 3];
-                scene.read(g.pass("probe trace " + b + again), BufferAccess.STORAGE_READ)
-                    .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ).read(table, BufferAccess.STORAGE_READ)
+                reading(g, scene, topLevel, pass(g, "probe trace " + b + again))
+                    .read(table, BufferAccess.STORAGE_READ)
                     .read(maps.specular(), Access.SAMPLED_COMPUTE)
                     .write(current, BufferAccess.STORAGE_WRITE).read(counts, BufferAccess.STORAGE_READ)
                     .write(binTables, BufferAccess.STORAGE_WRITE).write(rayImage, Access.STORAGE_WRITE)
                     .record(ctx -> ctx.dispatch(tracing, pathPush(tracePush, ctx, rayImage, current, null, binTables,
                         counts, table, null, binTable, tablesBytes, bounce, bins, 0, layers), ROW, groupRows, 1));
-                g.pass("probe bins " + b + again).write(binTables, BufferAccess.STORAGE_WRITE)
+                pass(g, "probe bins " + b + again).write(binTables, BufferAccess.STORAGE_WRITE)
                     .record(ctx -> ctx.dispatch(layout, pathPush(layoutPush, ctx, null, null, null, binTables, null,
                         null, null, binTable, tablesBytes, bounce, bins, 0, layers), 1));
-                g.pass("probe scatter " + b + again).read(current, BufferAccess.STORAGE_READ)
+                pass(g, "probe scatter " + b + again).read(current, BufferAccess.STORAGE_READ)
                     .read(counts, BufferAccess.STORAGE_READ).write(binTables, BufferAccess.STORAGE_WRITE)
                     .record(ctx -> ctx.dispatch(scatter, pathPush(scatterPush, ctx, null, current, null, binTables,
                         counts, null, null, binTable, tablesBytes, bounce, bins, 0, layers), ROW, groupRows, 1));
-                GraphBuilder.PassBuilder shadePass = scene.read(g.pass("probe shade " + b + again),
-                    BufferAccess.STORAGE_READ)
-                    .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ)
+                GraphBuilder.PassBuilder shadePass = reading(g, scene, topLevel,
+                    pass(g, "probe shade " + b + again))
                     .read(current, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
                     .write(counts, BufferAccess.STORAGE_WRITE).read(binTables, BufferAccess.INDIRECT)
                     .read(binTables, BufferAccess.STORAGE_READ).write(rayImage, Access.STORAGE_WRITE)
@@ -409,7 +425,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             }
 
             ProbePush blendPush = new ProbePush();
-            g.pass("probe blending" + again).read(data, BufferAccess.STORAGE_READ)
+            pass(g, "probe blending" + again).read(data, BufferAccess.STORAGE_READ)
                 .read(rayImage, Access.STORAGE_READ)
                 .write(irradiance, Access.STORAGE_WRITE).write(depth, Access.STORAGE_WRITE)
                 .write(states, BufferAccess.STORAGE_WRITE)
@@ -418,6 +434,26 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                     1));
         }
         return new Volume(data, states, irradiance, depth, camera, coarsest);
+    }
+
+    /**
+     * Declares that {@code pass} reads the scene's buffers and its top level. On the async compute queue the buffers
+     * cannot be declared (the graphics queue owns them): the pass is ordered after the top level, which is built from
+     * them (as the ray-traced shadows are), and reads them by address.
+     */
+    private static GraphBuilder.PassBuilder reading(GraphBuilder g, SceneData.Buffers scene, Buffer topLevel,
+        GraphBuilder.PassBuilder pass) {
+        return (g.setting(ASYNC) ? pass : scene.read(pass, BufferAccess.STORAGE_READ))
+            .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ);
+    }
+
+    /**
+     * A pass of the update: on the async compute queue with {@link #ASYNC} (but the setup and the invalidation, which
+     * reads the scene's instances: short, on the graphics queue, right after the scene's upload).
+     */
+    private static GraphBuilder.PassBuilder pass(GraphBuilder g, String name) {
+        GraphBuilder.PassBuilder pass = g.pass(name);
+        return g.setting(ASYNC) ? pass.async() : pass;
     }
 
     /** paths.slang's push block for the probes' rays (PATH_PROBES): the resources a pass does not declare 0. */
@@ -612,7 +648,8 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                 .irradiance(irradiance == null ? 0 : ctx.storage(irradiance))
                 .depth(depth == null ? 0 : ctx.storage(depth))
                 .frame((int) now).period(Math.max(1, Math.round(1 / budget))).maxFrames(settings.get(MAX_FRAMES))
-                .flags(flags).sensitivity(settings.get(SENSITIVITY)).drift(settings.get(DRIFT));
+                .flags(flags).sensitivity(settings.get(SENSITIVITY)).drift(settings.get(DRIFT))
+                .fresh(settings.get(FRESH));
             // This frame's turn of the rays: a random unit quaternion from the frame's number (Shoemake 1992)
             long h = mix(now * 0x9E3779B97F4A7C15L + 1);
             double u1 = (h >>> 11) * 0x1.0p-53;

@@ -66,6 +66,8 @@ struct ProbePush
     uint flags;               // PROBES_*
     float sensitivity;        // adaptive hysteresis: deviations of the update's noise a texel may differ by
     float drift;              // and how far the updates' mean relative difference from the history may drift
+    uint fresh;               // a probe whose history holds fewer updates updates every frame, budget or not
+    uint pad;
     float4 rotation;          // this frame's rotation of the rays (a unit quaternion)
 };
 
@@ -156,7 +158,9 @@ void prepareMain(uint3 id : SV_DispatchThreadID)
         states[index].drift = 0;
         states[index].pad0 = 0;
     }
-    bool update = restart || (index + push.frame) % max(push.period, 1u) == 0;
+    // A restarted probe (a change told or found) updates every frame until its history holds a few updates: the budget
+    // spreads still probes' updates, not a change's response
+    bool update = restart || frames < push.fresh || (index + push.frame) % max(push.period, 1u) == 0;
     flags &= ~(PROBE_INVALIDATED | PROBE_UPDATE | PROBE_RESTARTED);
     states[index].flags = flags | (update ? PROBE_UPDATE : 0);
     states[index].frames = frames;

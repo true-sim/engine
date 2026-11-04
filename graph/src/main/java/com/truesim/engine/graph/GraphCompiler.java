@@ -169,7 +169,9 @@ final class GraphCompiler {
                             + g.images.get(pass.images[a]).image.name + " as " + access
                             + ": async passes compute, sample, store and copy only");
                     }
-                    if (g.images.get(pass.images[a]).external != null) {
+                    ExternalImage external = g.images.get(pass.images[a]).external;
+                    // A persistent image rests in one layout: shared by both queues, or on one family, async may use it
+                    if (external != null && !(external.kept && (external.concurrent || !twoFamilies))) {
                         throw new IllegalStateException(pass.name + " is async but uses the external image "
                             + g.images.get(pass.images[a]).image.name);
                     }
