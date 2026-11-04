@@ -721,6 +721,52 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         }
     }
 
+    /**
+     * Records its layers into an open rendering of {@code width x height} pixels with {@code pipeline} (a world panel's
+     * shaders) and {@code push} (its world matrix set), one draw per layer: for {@link WorldPanelRenderer}.
+     */
+    void drawLayers(PassContext ctx, Pipeline pipeline, UiPush push, int uiWidth, int uiHeight) {
+        GpuUiRenderer data = source != null ? source : this;
+        push.textures(data.table.deviceAddress()).scaleX(1).scaleY(1).toClipX(2f / uiWidth).toClipY(2f / uiHeight)
+            .originX(0).originY(0);
+        for (int i = 0; i < data.layerCount; i++) {
+            if (data.counts[i] == 0) {
+                continue;
+            }
+            push.primitives(data.primitives[i].deviceAddress()).clips(data.clips[i].deviceAddress())
+                .transforms(data.transforms[i].deviceAddress()).first(0);
+            ctx.draw(pipeline, push, 6 * data.counts[i], 1);
+        }
+    }
+
+    /**
+     * Records its layers into an open rendering of an image of {@code width x height} pixels outside a frame graph's
+     * passes (a world panel's texture, at the frame's start): the uber shader, one draw per layer.
+     */
+    void drawLayers(VkCommandBuffer commands, UiPush push, int imageWidth, int imageHeight) {
+        GpuUiRenderer data = source != null ? source : this;
+        if (width <= 0 || height <= 0) {
+            return;
+        }
+        push.textures(data.table.deviceAddress()).scaleX((float) width / imageWidth)
+            .scaleY((float) height / imageHeight).toClipX(2f / width).toClipY(2f / height).originX(0).originY(0);
+        uber.bind(commands);
+        for (int i = 0; i < data.layerCount; i++) {
+            if (data.counts[i] == 0) {
+                continue;
+            }
+            push.primitives(data.primitives[i].deviceAddress()).clips(data.clips[i].deviceAddress())
+                .transforms(data.transforms[i].deviceAddress()).first(0);
+            uber.push(commands, push);
+            com.truesim.engine.vulkan.Commands.draw(commands, 6 * data.counts[i], 1, 0, 0);
+        }
+    }
+
+    /** The device it draws on. */
+    VulkanDevice device() {
+        return device;
+    }
+
     // ------------------------------------------------------------------------------------------------- statistics
 
     /**

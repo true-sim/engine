@@ -52,6 +52,7 @@ public final class UiScene {
     private CameraViews camera;
     private boolean updatesScene = true;
     private float far = 100_000;
+    private com.truesim.engine.ui.WorldPanelRenderer panels;
 
     /** The bridge of {@code ui} over {@code graph} and {@code index}, interactive nodes on {@code layer}. */
     @AllowAllocation("one per UI")
@@ -142,8 +143,28 @@ public final class UiScene {
         picking.input(input, nanos);
     }
 
-    /** The frame's second phase, in place of {@code ui.update}: the UI and its world panels updated. */
+    /**
+     * Draws the world panels through {@code renderer} (null: the game draws them): each frame's {@link #update} hands
+     * it the panels' UIs after updating them. Returns this.
+     */
+    public UiScene panels(com.truesim.engine.ui.WorldPanelRenderer renderer) {
+        panels = renderer;
+        return this;
+    }
+
+    /** The world panels' renderer, or null. */
+    public com.truesim.engine.ui.WorldPanelRenderer panels() {
+        return panels;
+    }
+
+    /**
+     * The frame's second phase, in place of {@code ui.update}: the UI and its world panels updated, the panels' draw
+     * lists handed to their renderer.
+     */
     public void update(float width, float height) {
         picking.update(width, height);
+        if (panels != null) {
+            panels.submit();
+        }
     }
 }
