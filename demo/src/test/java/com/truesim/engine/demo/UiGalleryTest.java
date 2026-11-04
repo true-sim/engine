@@ -8,6 +8,7 @@ import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_KEY_UP;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_MOUSE_BUTTON_DOWN;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_MOUSE_BUTTON_UP;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_MOUSE_MOTION;
+import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_MOUSE_WHEEL;
 import static org.lwjgl.sdl.SDLEvents.SDL_PushEvent;
 import static org.lwjgl.sdl.SDLMouse.SDL_WarpMouseInWindow;
 import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowFromID;
@@ -27,6 +28,7 @@ import org.lwjgl.sdl.SDL_Event;
 import org.lwjgl.sdl.SDL_KeyboardEvent;
 import org.lwjgl.sdl.SDL_MouseButtonEvent;
 import org.lwjgl.sdl.SDL_MouseMotionEvent;
+import org.lwjgl.sdl.SDL_MouseWheelEvent;
 
 /**
  * The UI gallery's 3D page driven as a user drives it: SDL mouse and key events pushed into the platform's queue, read
@@ -276,6 +278,112 @@ class UiGalleryTest {
         } finally {
             event.free();
         }
+    }
+
+    @Test
+    void theChartsPageScrollsToItsLastChartAndTheBarStillTakesItsClicks() {
+        app = new UiGallery(0, false);
+        try {
+            engine = Engine.create(app);
+        } catch (RuntimeException | UnsatisfiedLinkError e) { // StartupFailure, no display or no presentation (CI)
+            assumeThat(e).as("no window or GPU: " + e).isNull();
+            throw e;
+        }
+        try (Engine running = engine) {
+            window = app.world.window.id();
+            var ui = app.scene.ui();
+            int charts = 0;
+            while (!app.pages.get(charts).name.equals("Charts")) {
+                charts++;
+            }
+            app.show(charts);
+            frames(20);
+            UiGallery.Page page = app.pages.get(charts);
+            assertThat(page.pane).as("the page scrolls").isNotNull();
+            // the last chart: the lowest in the pane, below the area above the bar
+            var store = ui.store();
+            int last = com.truesim.ui.core.UiStore.NONE;
+            java.util.ArrayDeque<Integer> todo = new java.util.ArrayDeque<>();
+            todo.add(page.pane.content().slot());
+            while (!todo.isEmpty()) {
+                int at = todo.pop();
+                if ("chart".equals(store.type(at)) && (last == com.truesim.ui.core.UiStore.NONE
+                    || ui.layout().y(at) > ui.layout().y(last))) {
+                    last = at;
+                }
+                for (int c = store.firstChild(at); c != com.truesim.ui.core.UiStore.NONE; c = store.nextSibling(c)) {
+                    todo.add(c);
+                }
+            }
+            assertThat(last).as("charts").isNotEqualTo(com.truesim.ui.core.UiStore.NONE);
+            float area = app.world.window.height() - 44; // above the bar
+            assertThat(ui.layout().y(last) + ui.layout().height(last)).as("below the area at first").isGreaterThan(area);
+            // the wheel over the scrollbar, through SDL, until it shows whole
+            int bar = page.pane.verticalBar().slot();
+            float bx = ui.layout().x(bar) + ui.layout().width(bar) / 2;
+            float by = ui.layout().y(bar) + 40;
+            move(bx, by, false);
+            for (int i = 0; i < 200 && ui.layout().y(last) + ui.layout().height(last) > area; i++) {
+                wheel(bx, by, -2);
+            }
+            frames(5);
+            shotsOf("4-charts-scrolled");
+            float top = ui.layout().y(last);
+            float bottom = top + ui.layout().height(last);
+            assertThat(top).as("the last chart's top in view").isGreaterThanOrEqualTo(0);
+            assertThat(bottom).as("the last chart's bottom above the bar").isLessThanOrEqualTo(area);
+            // a press in it reaches it
+            float cx = ui.layout().x(last) + ui.layout().width(last) / 2;
+            float cy = top + ui.layout().height(last) / 2;
+            move(cx, cy, false);
+            frames(2);
+            press(cx, cy);
+            com.truesim.ui.core.Element captured = ui.interaction().captured(com.truesim.engine.ui.MousePointer.ID);
+            boolean inChart = false;
+            for (int at = captured == null ? com.truesim.ui.core.UiStore.NONE : captured.slot();
+                at != com.truesim.ui.core.UiStore.NONE && !inChart; at = store.parent(at)) {
+                inChart = at == last;
+            }
+            assertThat(inChart).as("the press went to the last chart, not to %s", captured).isTrue();
+            release(cx, cy);
+            frames(2);
+            // the bar's buttons still take their clicks
+            int to = (charts + 1) % app.pages.size();
+            com.truesim.ui.core.Element button = app.pages.get(to).button.element();
+            float x = ui.layout().x(button.slot()) + ui.layout().width(button.slot()) / 2;
+            float y = ui.layout().y(button.slot()) + ui.layout().height(button.slot()) / 2;
+            move(x, y, false);
+            frames(2);
+            press(x, y);
+            release(x, y);
+            frames(2);
+            assertThat(app.current).as("a click on the bar's %s", app.pages.get(to).name).isEqualTo(to);
+        } finally {
+            event.free();
+        }
+    }
+
+    /** Writes what the window shows now as {@code name}.png in build/gallery-shots. */
+    private void shotsOf(String name) {
+        if (shots == null) {
+            for (var target : engine.get(com.truesim.engine.graph.Rendering.KEY).presenter().targets()) {
+                if (target.view() == app.world.port) {
+                    shots = new GalleryShots(target.shownKey(), java.nio.file.Path.of("build", "gallery-shots"));
+                    app.world.port.add(shots);
+                }
+            }
+        }
+        shot(name);
+    }
+
+    private void wheel(float x, float y, float notches) {
+        push(SDL_EVENT_MOUSE_WHEEL);
+        long e = event.address();
+        SDL_MouseWheelEvent.nwindowID(e, window);
+        SDL_MouseWheelEvent.nx(e, 0);
+        SDL_MouseWheelEvent.ny(e, notches);
+        assertThat(SDL_PushEvent(event)).isTrue();
+        engine.step();
     }
 
     /** The mouse's path: rows across the view, over the rocks, 12 pixels a frame, clear of the UI. */
