@@ -549,6 +549,19 @@ that missed its beat because a bar rendered in milliseconds while its clip loade
   the voice reads. A test that finds where a signal starts accounts for samples that are 0 by design. Counts that
   depend on scheduling are bounded from below only.
 
+**A starved stream resumed inside its fade-out: a click.** A voice that runs dry holds its last frame, fades it out
+over 5 ms and asks the stream to start again 100 ms on. The streaming thread sees that request only when its next
+fill starts; if it was inside a decoder's read when the voice ran dry, it first writes on where it was, so the frames
+the voice needs are there again within the fade. The voice resumed at once, from the held frame (part faded) to the
+signal where time had moved on: a step of 0.11 on CI's busy runner (`aStarvedStreamFadesIsCountedAndResumesWhereItShouldBe`,
+three starvations), never seen here.
+- Proof: `StreamingTest.framesArrivingWithinTheFadeOutDoNotResumeBeforeItEnds` holds the streaming thread inside a
+  decoder's read while the voice runs dry, then lets it write on (blocks of 16 frames, so the frames land inside the
+  fade): a step of 0.0385 in every run before the fix, under 0.019 after; CI run 41822777587 (0.111805, true-sim/engine
+  profiler PR).
+- Rule: a starved voice comes back only once its fade-out reached silence (`Voices`: `dry == 0`); a timing test of the
+  audio thread's handover reproduces the race with a decoder the test holds, not with sleeps.
+
 **SDL's device thread takes a whole device buffer from the stream at once.** The audio queue was kept at the design's 2
 blocks (512 frames); SDL's dummy driver, and this machine's WASAPI device (which ignored
 `SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES`), pull 1,024 frames at a time, so the queue ran dry at every pull and the
