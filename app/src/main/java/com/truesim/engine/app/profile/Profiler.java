@@ -75,6 +75,9 @@ public final class Profiler {
 
     /** Turns the frame clock on or off. */
     public static void frames(boolean on) {
+        if (on && !framesOn) {
+            frameStart = 0; // the frame running began before: not measured
+        }
         framesOn = on;
         if (!on) {
             previousStart = Long.MIN_VALUE;
@@ -247,7 +250,7 @@ public final class Profiler {
 
     /** The frame ends (the engine calls it, after the frame driver's end): its values become the last frame's. */
     public static void frameEnd() {
-        if (!framesOn) {
+        if (!framesOn || frameStart == 0) {
             return;
         }
         long now = System.nanoTime();

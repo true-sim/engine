@@ -76,8 +76,10 @@ public final class JvmCounters implements Counters.Source {
     @Override
     @AllowAllocation("sampling off the frame (the beans' usage objects)")
     public void sample(Counters into) {
-        into.set(processCpu, os.getProcessCpuLoad() * 100);
-        into.set(systemCpu, os.getCpuLoad() * 100);
+        double process = os.getProcessCpuLoad(); // negative while not known yet
+        double system = os.getCpuLoad();
+        into.set(processCpu, process < 0 ? Double.NaN : process * 100);
+        into.set(systemCpu, system < 0 ? Double.NaN : system * 100);
         into.set(heapUsed, memory.getHeapMemoryUsage().getUsed());
         into.set(heapCommitted, memory.getHeapMemoryUsage().getCommitted());
         into.set(nonHeap, memory.getNonHeapMemoryUsage().getUsed());

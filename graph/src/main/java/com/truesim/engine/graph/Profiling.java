@@ -196,7 +196,8 @@ public final class Profiling implements Plugin {
             double ms = interval / 1e6;
             double factor = settings.get(ProfilerSettings.HITCH_FACTOR);
             double floor = settings.get(ProfilerSettings.HITCH_MILLIS);
-            boolean hitch = meanInterval == meanInterval && ms > factor * meanInterval || floor > 0 && ms >= floor;
+            boolean hitch = ms >= settings.get(ProfilerSettings.HITCH_MIN)
+                && (meanInterval == meanInterval && ms > factor * meanInterval || floor > 0 && ms >= floor);
             if (hitch) {
                 hitchFrame = n;
             } else {

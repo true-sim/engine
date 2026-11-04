@@ -22,6 +22,7 @@ dependencies {
     testImplementation(testFixtures("com.truesim.ui:ui-charts:0.5.0"))
     testImplementation(testFixtures("com.truesim.ui:ui-props:0.5.0"))
     testImplementation(testFixtures("com.truesim.ui:ui-console:0.5.0"))
+    testImplementation(testFixtures("com.truesim.ui:ui-profiler:0.5.0")) // the profiler gallery
     testImplementation(testFixtures("com.truesim.ui:ui-gizmo:0.5.0"))
     testImplementation(testFixtures("com.truesim.ui:ui-scene:0.5.0")) // the scene rig and fake camera source
     testImplementation("com.truesim.scene:scene-meshbuild:0.63.0") // meshes for picking and panels

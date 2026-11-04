@@ -55,6 +55,9 @@ public final class ProfilerSettings {
     /** A frame is a hitch when its interval is at least this many milliseconds (0: only the factor). */
     public static final Setting<Float> HITCH_MILLIS = Setting.decimal("profiler.hitch.millis", 0, 0, 10_000,
         "a frame is a hitch when it takes at least this many milliseconds (0: off)");
+    /** A frame shorter than this many milliseconds is never a hitch (a fast loop's noise). */
+    public static final Setting<Float> HITCH_MIN = Setting.decimal("profiler.hitch.minMillis", 4, 0, 10_000,
+        "a frame shorter than this many milliseconds is never a hitch");
     /** Freeze the recording after a hitch. */
     public static final Setting<Boolean> FREEZE_ON_HITCH = Setting.bool("profiler.hitch.freeze", false,
         "freezes the profiler shortly after a hitch");
@@ -74,7 +77,7 @@ public final class ProfilerSettings {
     /** Every profiler setting, for registries and options screens. */
     public static final List<Setting<?>> ALL = List.of(OVERLAY, VIEW, ZONES, GPU, COUNTERS, RUNTIME, OS,
         PIPELINE_STATISTICS, HISTORY, ZONES_PER_LANE, RING_EVENTS, OVERLAY_FRAMES, BUDGETS, HITCH_FACTOR, HITCH_MILLIS,
-        FREEZE_ON_HITCH, FREEZE_AFTER, COUNTER_INTERVAL, CALIBRATE_EVERY, EXPORT_FOLDER);
+        HITCH_MIN, FREEZE_ON_HITCH, FREEZE_AFTER, COUNTER_INTERVAL, CALIBRATE_EVERY, EXPORT_FOLDER);
 
     private ProfilerSettings() {
     }

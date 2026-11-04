@@ -36,3 +36,15 @@ tasks.register<JavaExec>("uiBench") {
     providers.gradleProperty("only").orNull?.let { systemProperty("truesim.bench.only", it) } // -Ponly=console
     providers.gradleProperty("spikes").orNull?.let { systemProperty("truesim.bench.spikes", it) }
 }
+
+// The profiler's overhead: ./gradlew :engine-bench:profilerBench [-Pquick=true]; writes docs/benchmarks-profiler.md.
+tasks.register<JavaExec>("profilerBench") {
+    group = "application"
+    description = "Measures the profiler's overhead (zones, the frame graph's data path, engine frames) and writes docs/benchmarks-profiler.md."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "com.truesim.engine.bench.ProfilerBench"
+    workingDir = rootProject.projectDir
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xmx4g")
+    args(rootProject.file("docs/benchmarks-profiler.md").absolutePath)
+    providers.gradleProperty("quick").orNull?.let { systemProperty("truesim.bench.quick", it) }
+}
