@@ -10,3 +10,11 @@ dependencies {
     api(project(":engine-xr")) // the renderer's cameras, input actions, the headset's controls for XR rays
     api("com.truesim.scene:scene-core:0.64.0") // components, Pickable, ScenePicker
 }
+
+// The picking benchmark (TRUESIM_BENCHMARK=true): measure the code, not its coverage probes.
+tasks.test {
+    if (providers.environmentVariable("TRUESIM_BENCHMARK").orNull == "true") {
+        maxHeapSize = "4g"
+        extensions.configure<JacocoTaskExtension> { isEnabled = false }
+    }
+}
