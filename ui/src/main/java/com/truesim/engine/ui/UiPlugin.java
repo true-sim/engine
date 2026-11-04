@@ -92,6 +92,10 @@ public final class UiPlugin implements Plugin {
     private PointerSource[] sources = new PointerSource[0];
     private com.truesim.engine.ui.scene.UiScene scene; // the scene bridge, or null: the UI alone
     private com.truesim.engine.settings.EngineSettings settings;
+    private SettingRegistry registry;
+    private SettingGroup group;
+    private String appId = "app";
+    private com.truesim.engine.ui.console.UiConsole console; // the developer console, or null
 
     /**
      * The UI made by {@code factory} at startup, given the textures it should use (null: its own, or its text
@@ -143,6 +147,9 @@ public final class UiPlugin implements Plugin {
                 registry.add(group, UiCommands.ALL.toArray(new Setting<?>[0]));
                 registry.add(group, com.truesim.engine.ui.scene.UiScene.FAR);
                 settings = startup.settings();
+                this.registry = registry;
+                this.group = group;
+                appId = startup.engine().id();
                 tunables = new UiTunables(startup.settings()).add(registry, group,
                     ui.tunables().toArray(new Tunable[0]));
                 commands = new UiCommands(in, startup.settings());
@@ -239,6 +246,35 @@ public final class UiPlugin implements Plugin {
         }
         scene = new com.truesim.engine.ui.scene.UiScene(ui(), graph, index, layer);
         return scene;
+    }
+
+    /**
+     * Adds the developer console (design 5.10): {@code Console.create(ui, appId, store)} over the engine's settings as
+     * variables, its permissions from settings, its log fed by SLF4J ({@code ConsoleLogProvider}); registers the
+     * console's tunables and settings. Call once, after the engine started.
+     */
+    @AllowAllocation("set up once")
+    public com.truesim.engine.ui.console.UiConsole console(String id, com.truesim.ui.console.HistoryStore store) {
+        if (console != null) {
+            throw new IllegalStateException("The UI has a console already");
+        }
+        Ui u = ui();
+        registry.add(group, com.truesim.engine.ui.console.UiConsole.SETTINGS.toArray(new Setting<?>[0]));
+        tunables.add(registry, group, com.truesim.ui.console.ConsoleTunables.all().toArray(new Tunable[0]));
+        console = new com.truesim.engine.ui.console.UiConsole(u, id, store, registry, settings);
+        return console;
+    }
+
+    /** The console for the engine's app id, its history in the user's settings folder. */
+    @AllowAllocation("set up once")
+    public com.truesim.engine.ui.console.UiConsole console() {
+        return console(appId, new com.truesim.engine.ui.console.FileHistoryStore(
+            com.truesim.engine.app.SettingsFile.folder(appId)));
+    }
+
+    /** The developer console, or null. */
+    public com.truesim.engine.ui.console.UiConsole developerConsole() {
+        return console;
     }
 
     /** The scene bridge, or null. */

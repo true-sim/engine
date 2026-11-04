@@ -40,10 +40,10 @@ import org.junit.jupiter.api.Test;
  * The scene bridge in a running engine: the mouse hovers, clicks and drags 3D nodes of a real scene through the
  * engine's camera, in the frame of the input, with mesh narrow phases from mesh assets.
  */
-class UiSceneTest {
+public class UiSceneTest {
 
-    static final int WIDTH = 320;
-    static final int HEIGHT = 200;
+    public static final int WIDTH = 320;
+    public static final int HEIGHT = 200;
 
     /** A view for the UI, as a game adds its views. */
     static final class Views implements Plugin {
@@ -68,7 +68,7 @@ class UiSceneTest {
     }
 
     /** An engine running {@code plugin} headless. */
-    static Engine engine(UiPlugin plugin, Application game) {
+    public static Engine engine(UiPlugin plugin, Application game) {
         try {
             return Engine.create(new Application() {
                 @Override
@@ -85,6 +85,14 @@ class UiSceneTest {
             assumeThat(e).as("no Vulkan available: " + e.reason()).isNull();
             throw e;
         }
+    }
+
+    /** A text system with the bundled fonts: the same text on every machine. */
+    public static com.truesim.ui.text.TextSystem text() {
+        com.truesim.ui.text.natives.NativeTextBackend backend = new com.truesim.ui.text.natives.NativeTextBackend();
+        return new com.truesim.ui.text.TextSystem(com.truesim.ui.fonts.cjk.BundledCjkFonts.registry(backend),
+            backend.newShaper(), new com.truesim.ui.text.GlyphAtlas(new com.truesim.ui.core.draw.UiTextures(),
+                backend.msdfGenerator(), backend.newRasterizer(), null, null, new com.truesim.ui.text.AtlasSettings()));
     }
 
     /** A triangle (the lower left half of a 2 x 2 square about the origin, facing +Z) as a mesh asset. */
