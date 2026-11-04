@@ -489,9 +489,13 @@ while "select all" worked: `SceneSync` drew the renderables but nothing bounded 
 (the picker's broad phase, the marquee's frustum query) never returned them and the triangle test never ran.
 `RenderableBounds` existed in scene-render; no engine path used it.
 - Proof: `UiGalleryTest` (engine-demo), SDL mouse events through the window path, failed on "drawn rocks are bounded";
-  `SceneSync` now bounds its renderables (`bounds(false)` for a game's own) (true-sim/engine, UI gallery).
+  `SceneSync` now bounds its pickable renderables by their meshes' boxes (`bounds(false)` for a game's own)
+  (true-sim/engine, UI gallery).
+- Then: bounding every drawn renderable cost 30,000 moving rocks +1 ms a frame (a world box per move, and a mesh held
+  per node), measured in a same-session A/B of `SceneBenchmark`; bounding only nodes with a `Pickable` brought it back.
 - Rule: a feature that reads scene state another system must keep (bounds for picking) is tested with that system
-  as an application wires it, not with the state set by hand in the test.
+  as an application wires it, not with the state set by hand in the test; and that state is kept only for what reads
+  it (pickable nodes), measured with and without.
 
 **A fixed array silently capped a selection.** The gizmo moved at most 64 selected nodes (its drivers array; the XR
 grab's likewise): with 400 rocks selected, the rest stayed.

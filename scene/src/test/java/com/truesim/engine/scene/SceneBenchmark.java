@@ -226,6 +226,22 @@ class SceneBenchmark {
                         placed[3 * r + 2]);
                 }
             });
+            // all of them pickable: the sync bounds them by their mesh, and every move then updates a world box
+            var pickable = scene.components().store(com.truesim.scene.core.Pickable.TYPE);
+            for (long rock : rocks) {
+                pickable.set(rock, com.truesim.scene.core.Pickable.mesh());
+            }
+            run("30,000 pickable rocks moving", graph, slots, tasks, scene, renderables, sync, cameraView, camera,
+                frame -> {
+                    for (int r = 0; r < ROCKS; r++) {
+                        scene.setTranslation(rocks[r], placed[3 * r], placed[3 * r + 1] + 0.01 * (frame % 7),
+                            placed[3 * r + 2]);
+                    }
+                });
+            for (long rock : rocks) {
+                pickable.remove(rock);
+                scene.clearBounds(rock);
+            }
             Effects effects = new Effects(scene);
             for (int i = 0; i < 100; i++) {
                 effects.play(EffectSyncTest.torch(), rocks[i]).offset(0, 1, 0);
