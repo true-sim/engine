@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.truesim.scene.core.NodeHandle;
 import com.truesim.scene.core.Pickable;
+import com.truesim.scene.core.SceneEventType;
 import com.truesim.scene.core.Selected;
 import org.junit.jupiter.api.Test;
 

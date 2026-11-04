@@ -7,6 +7,8 @@ import com.truesim.scene.core.ComponentType;
 import com.truesim.scene.core.Hovered;
 import com.truesim.scene.core.NodeHandle;
 import com.truesim.scene.core.Pickable;
+import com.truesim.scene.core.RoutedListener;
+import com.truesim.scene.core.SceneEventType;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.core.ScenePicker;
 import com.truesim.scene.core.SpatialIndex;
@@ -42,6 +44,7 @@ public final class InteractionWorld {
     private final SpatialIndex index;
     private final ScenePicker picker;
     final ComponentStore<NodeListeners> listeners;
+    final ComponentStore<RoutedListener> routed;
     private final ComponentStore<Pickable> pickables;
     private final ComponentStore<Hovered> hoveredStore;
     private int[] hoverCounts = new int[64]; // by node slot: pointers hovering the object there
@@ -56,6 +59,7 @@ public final class InteractionWorld {
         this.graph = picker.scene();
         this.index = picker.index();
         this.listeners = graph.components().store(LISTENERS);
+        this.routed = graph.components().store(RoutedListener.TYPE);
         this.pickables = graph.components().store(Pickable.TYPE);
         this.hoveredStore = graph.components().store(Hovered.TYPE);
     }

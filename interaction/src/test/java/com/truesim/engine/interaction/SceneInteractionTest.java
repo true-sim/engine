@@ -11,6 +11,8 @@ import com.truesim.scene.core.CameraLens;
 import com.truesim.scene.core.Hovered;
 import com.truesim.scene.core.NodeHandle;
 import com.truesim.scene.core.Pickable;
+import com.truesim.scene.core.RoutedListener;
+import com.truesim.scene.core.SceneEventType;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.core.Selected;
 import com.truesim.scene.core.SpatialIndex;
@@ -454,6 +456,80 @@ class SceneInteractionTest {
         assertThat(r.world.interaction()).isSameAs(r.interaction);
         assertThat(r.world.index()).isSameAs(r.index);
         assertThat(r.interaction.rayWorld(r.world)).isSameAs(r.interaction);
+    }
+
+    @Test
+    void frontEndsListenersShareTheRouteAndItsConsume() {
+        Rig r = new Rig();
+        long root = r.scene.create();
+        long node = r.box(root, 0, 0, -10, 1);
+        long behind = r.box(NodeHandle.NONE, 0, 0, -20, 4);
+        boolean[] uiTakes = {false};
+        boolean[] engineTakes = {false};
+        // the UI's listeners on the node, as its scene bridge registers them: one set in the same route
+        r.scene.components().set(node, RoutedListener.TYPE, RoutedListener.of(SceneEventType.PRESS.bit(),
+            SceneEventType.CLICK.bit(), e -> {
+                r.log.add("ui " + e.type() + " " + e.phase() + " " + e.hasPointer());
+                if (uiTakes[0]) {
+                    e.consume();
+                }
+            }));
+        r.world.on(node, SceneEventType.PRESS, e -> {
+            r.log.add("engine PRESS");
+            if (engineTakes[0]) {
+                e.consume();
+            }
+        });
+        r.world.on(root, SceneEventType.PRESS, e -> r.log.add("root PRESS"));
+        r.world.on(behind, SceneEventType.PRESS, e -> r.log.add("behind PRESS"));
+        r.frame().press();
+        assertThat(r.take()).as("one route: the node's own, then the UI's, bubbling, then passing on")
+            .containsExactly("engine PRESS", "ui PRESS TARGET true", "root PRESS", "behind PRESS");
+        r.release();
+        assertThat(r.take()).contains("ui CLICK TARGET true");
+        uiTakes[0] = true;
+        r.press();
+        assertThat(r.take()).as("the UI consumed: the engine's listeners further on hear nothing")
+            .containsExactly("engine PRESS", "ui PRESS TARGET true");
+        r.release();
+        r.take();
+        uiTakes[0] = false;
+        engineTakes[0] = true;
+        r.press();
+        assertThat(r.take()).as("the engine consumed: the UI's listener hears nothing").containsExactly("engine PRESS");
+        r.release();
+    }
+
+    @Test
+    void restingPointersAskForTooltipsAndFocusEventsHaveNoPointer() {
+        Rig r = new Rig();
+        long node = r.box(NodeHandle.NONE, 0, 0, -10, 1);
+        List<String> seen = new ArrayList<>();
+        r.world.on(node, SceneEventType.TOOLTIP, e -> seen.add("tooltip"));
+        r.world.on(node, SceneEventType.FOCUS_IN, e -> seen.add("focus " + e.hasPointer() + " " + e.pointer() + " "
+            + e.pointerId() + " " + e.pointerKind() + " " + e.player() + " " + e.x() + " " + e.y() + " " + e.buttons()
+            + " " + e.modifiers() + " " + e.scrollX() + " " + e.scrollY() + " " + e.pressX() + " " + e.pressY() + " "
+            + e.ray(new double[6]) + " " + e.dragPayload() + " " + (e.dragSource() == NodeHandle.NONE) + " " + e.hit()));
+        r.world.on(node, SceneEventType.FOCUS_IN, e -> {
+            e.capturePointer();
+            e.releasePointer();
+        });
+        r.frame();
+        for (int i = 0; i < 40; i++) {
+            r.frame();
+        }
+        assertThat(seen).containsExactly("tooltip");
+        r.click();
+        assertThat(seen).contains("focus false null -1 null -1 NaN NaN 0 0 0.0 0.0 NaN NaN false null true false");
+        // a press taken over by something in front: no click, no drag here
+        seen.clear();
+        r.world.on(node, SceneEventType.CLICK, e -> seen.add("click"));
+        r.press();
+        r.blocked = true;
+        r.frame();
+        r.blocked = false;
+        r.release();
+        assertThat(seen).doesNotContain("click");
     }
 
     @Test

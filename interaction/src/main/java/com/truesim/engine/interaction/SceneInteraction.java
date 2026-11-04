@@ -16,8 +16,11 @@ import com.truesim.engine.settings.Setting;
 import com.truesim.engine.settings.SettingGroup;
 import com.truesim.engine.xr.Xr;
 import com.truesim.engine.xr.XrControls;
+import com.truesim.scene.core.NodeEvent;
 import com.truesim.scene.core.NodeHandle;
 import com.truesim.scene.core.PickHits;
+import com.truesim.scene.core.RoutedListener;
+import com.truesim.scene.core.SceneEventType;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.core.ScenePicker;
 import com.truesim.scene.core.SpatialIndex;
@@ -42,10 +45,13 @@ import java.util.Objects;
  *   <li><b>Drag and drop</b>: drag start past the threshold, drag, drag end; a drag started with a payload
  *       ({@link SceneEvent#startDrag}) is offered to the nodes it passes over (drop over, passing along the ray until
  *       accepted), with drop enter, leave and drop on the one that accepted it.</li>
- *   <li><b>Focus</b>: a primary press focuses its node (focus out, focus in).</li>
+ *   <li><b>Focus</b>: a primary press focuses its node (focus out, focus in; no pointer).</li>
+ *   <li><b>Tooltips</b>: a pointer resting on a node asks for its tooltip.</li>
  *   <li><b>Routing</b>: capture (root to target), target, bubble (target to root) along the scene graph;
  *       {@link SceneEvent#consume} stops it and its pass-through; a press captures its pointer until released
- *       ({@link SceneEvent#capturePointer} for any node).</li>
+ *       ({@link SceneEvent#capturePointer} for any node). One route for every listener: at each node its own
+ *       listeners, then its front end's ({@link RoutedListener}: the UI's {@code Interactive} ones), so a
+ *       consume on either side stops both.</li>
  *   <li><b>Queries</b>: {@link InteractionWorld#hovered}, {@link InteractionWorld#pressed}, each pointer's hits, hit
  *       point, distance and part ({@link ScenePointer}).</li>
  * </ul>
@@ -99,12 +105,15 @@ public final class SceneInteraction implements Plugin {
     /** Pixels a second the virtual cursor moves at full tilt. */
     public static final Setting<Float> VIRTUAL_CURSOR_SPEED = Setting.decimal("scene.interaction.virtualCursorSpeed",
         1000, 50, 10_000, "pixels a second the gamepad's cursor over the scene moves at full tilt");
+    /** Seconds a pointer rests on a node before its tooltip event. */
+    public static final Setting<Float> TOOLTIP_DELAY = Setting.decimal("scene.interaction.tooltipDelay", 0.6f, 0, 10,
+        "seconds a pointer rests on a scene node before it asks for its tooltip");
     /** Whether a gamepad drives a virtual cursor over the scene. */
     public static final Setting<Boolean> VIRTUAL_CURSOR = Setting.bool("scene.interaction.virtualCursor", false,
         "a gamepad's right stick moves a cursor over the scene and its south button clicks");
     /** Its settings. */
     public static final List<Setting<?>> ALL = List.of(LONG_PRESS_DELAY, DOUBLE_CLICK_TIME, DOUBLE_CLICK_DISTANCE,
-        DRAG_THRESHOLD, TOUCH_DRAG_THRESHOLD, RAY_DRAG_ANGLE, HITS, RAY_LENGTH, FAR, VIRTUAL_CURSOR,
+        DRAG_THRESHOLD, TOUCH_DRAG_THRESHOLD, RAY_DRAG_ANGLE, HITS, RAY_LENGTH, FAR, TOOLTIP_DELAY, VIRTUAL_CURSOR,
         VIRTUAL_CURSOR_SPEED);
 
     /** The most pointers at once. */
@@ -141,6 +150,7 @@ public final class SceneInteraction implements Plugin {
     private float dragThreshold;
     private float touchDragThreshold;
     private double rayDragCos;
+    private long tooltipNanos;
     private int hits;
     private double rayLength;
     private double far;
@@ -440,6 +450,7 @@ public final class SceneInteraction implements Plugin {
         doubleClickDistance = setting(DOUBLE_CLICK_DISTANCE);
         dragThreshold = setting(DRAG_THRESHOLD);
         touchDragThreshold = setting(TOUCH_DRAG_THRESHOLD);
+        tooltipNanos = (long) (setting(TOOLTIP_DELAY) * 1e9);
         rayDragCos = com.truesim.common.math.Maths.cos(setting(RAY_DRAG_ANGLE) * Math.PI / 180);
         hits = setting(HITS);
         rayLength = setting(RAY_LENGTH);
@@ -521,8 +532,19 @@ public final class SceneInteraction implements Plugin {
 
     private void route(ScenePointer p) {
         long target = p.hits.count() > 0 ? p.hits.node(0) : NodeHandle.NONE;
+        if (p.blocked && p.pressing) {
+            cancelPress(p); // something in front took it (the UI's drag of a node's payload, say)
+        }
         hover(p, target);
         boolean moved = p.x != p.lastX || p.y != p.lastY || !sameRay(p);
+        if (moved || p.buttons != 0 || target != p.restNode) {
+            p.restNode = target;
+            p.restTime = now;
+            p.tooltipFired = p.buttons != 0; // a press shows no tooltip until the pointer moves on
+        } else if (!p.tooltipFired && target != NodeHandle.NONE && now - p.restTime >= tooltipNanos) {
+            p.tooltipFired = true;
+            dispatch(SceneEventType.TOOLTIP, target, p.world, p, 0);
+        }
         int down = p.buttons & ~p.lastButtons;
         int up = p.lastButtons & ~p.buttons;
         for (int bit = ScenePointer.PRIMARY; bit <= ScenePointer.MIDDLE; bit <<= 1) {
@@ -813,6 +835,17 @@ public final class SceneInteraction implements Plugin {
         }
     }
 
+    /** Ends a held press without a click: its drag cancelled, its capture released. */
+    private void cancelPress(ScenePointer p) {
+        if (p.dragging) {
+            endDrag(p, false);
+        }
+        p.pressing = false;
+        p.pressed = NodeHandle.NONE;
+        p.captured = NodeHandle.NONE;
+        p.lastButtons = p.buttons; // its release is not this interaction's
+    }
+
     /** A pointer gone: it leaves what it was over, its drag is cancelled, its press and capture end. */
     private void leave(ScenePointer p) {
         p.hits.clear();
@@ -909,41 +942,46 @@ public final class SceneInteraction implements Plugin {
         if (world == null || !world.graph().contains(e.target)) {
             return false;
         }
-        if (e.pointer == null) {
-            e.pointer = pointers[0]; // focus events of no pointer read an idle one
-        }
+        e.world = world;
         int bit = e.type.bit();
         if (!e.type.bubbles()) {
-            invoke(e, world, e.target, SceneEvent.Phase.TARGET, bit);
+            invoke(e, world, e.target, NodeEvent.Phase.TARGET, bit);
             return e.consumed;
         }
         long[] path = path(world, e.target, 2 + Math.min(depth - 1, 1));
         int n = pathDepth;
         for (int i = n - 1; i > 0 && !e.consumed; i--) {
-            invoke(e, world, path[i], SceneEvent.Phase.CAPTURE, bit);
+            invoke(e, world, path[i], NodeEvent.Phase.CAPTURE, bit);
         }
         if (!e.consumed) {
-            invoke(e, world, path[0], SceneEvent.Phase.TARGET, bit);
+            invoke(e, world, path[0], NodeEvent.Phase.TARGET, bit);
         }
         for (int i = 1; i < n && !e.consumed; i++) {
-            invoke(e, world, path[i], SceneEvent.Phase.BUBBLE, bit);
+            invoke(e, world, path[i], NodeEvent.Phase.BUBBLE, bit);
         }
         return e.consumed;
     }
 
-    private void invoke(SceneEvent e, InteractionWorld world, long node, SceneEvent.Phase phase, int bit) {
-        InteractionWorld.NodeListeners l = world.listeners.get(node);
-        if (l == null || (l.all & bit) == 0) {
-            return;
-        }
+    /** The node's own listeners for {@code phase}, then its front end's ({@link RoutedListener}: the UI's). */
+    private void invoke(SceneEvent e, InteractionWorld world, long node, NodeEvent.Phase phase, int bit) {
         e.phase = phase;
         e.current = node;
-        for (int i = 0; i < l.listeners.length && !e.consumed; i++) {
-            if ((l.masks[i] & bit) != 0 && (phase == SceneEvent.Phase.TARGET
-                || l.capture[i] == (phase == SceneEvent.Phase.CAPTURE))) {
-                dispatches++;
-                l.listeners[i].handle(e);
+        InteractionWorld.NodeListeners l = world.listeners.get(node);
+        if (l != null && (l.all & bit) != 0) {
+            for (int i = 0; i < l.listeners.length && !e.consumed; i++) {
+                if ((l.masks[i] & bit) != 0 && (phase == NodeEvent.Phase.TARGET
+                    || l.capture[i] == (phase == NodeEvent.Phase.CAPTURE))) {
+                    dispatches++;
+                    l.listeners[i].handle(e);
+                }
             }
+        }
+        RoutedListener routed = world.routed.get(node);
+        if (routed != null && !e.consumed && routed.hears(e.type, phase)) {
+            dispatches++;
+            e.phase = phase;
+            e.current = node;
+            routed.listener().handle(e);
         }
     }
 

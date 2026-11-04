@@ -74,6 +74,9 @@ public final class ScenePointer {
     InteractionView pressView;
     long pressTime;
     boolean longFired;
+    long restNode = NodeHandle.NONE; // what it rests on, since when, and whether its tooltip event went
+    long restTime;
+    boolean tooltipFired;
     boolean suppressClick;
     boolean dragging;
     long clickNode = NodeHandle.NONE;

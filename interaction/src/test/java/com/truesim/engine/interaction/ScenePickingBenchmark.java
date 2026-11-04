@@ -5,6 +5,7 @@ import com.truesim.engine.render.Camera;
 import com.truesim.scene.core.Mobility;
 import com.truesim.scene.core.PickMesh;
 import com.truesim.scene.core.Pickable;
+import com.truesim.scene.core.SceneEventType;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.core.SpatialIndex;
 import java.lang.management.ManagementFactory;
