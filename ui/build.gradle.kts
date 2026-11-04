@@ -16,6 +16,10 @@ dependencies {
     runtimeOnly("com.truesim.ui:ui-charts:0.3.0") // charts' tunables (a TunableSource service) as settings
     runtimeOnly("com.truesim.ui:ui-gizmo:0.3.0") // the scene bridge's and the gizmos' tunables, likewise
     testImplementation(testFixtures("com.truesim.ui:ui-controls:0.3.0")) // the galleries the screenshots show
+    testImplementation(testFixtures("com.truesim.ui:ui-charts:0.3.0"))
+    testImplementation(testFixtures("com.truesim.ui:ui-props:0.3.0"))
+    testImplementation(testFixtures("com.truesim.ui:ui-console:0.3.0"))
+    testImplementation(testFixtures("com.truesim.ui:ui-gizmo:0.3.0"))
     testImplementation("com.truesim.ui:ui-text-native:0.3.0")
     testImplementation("com.truesim.ui:ui-fonts-cjk:0.3.0") // bundled fonts: the same text on every machine
     testImplementation("com.truesim.ui:ui-fonts-emoji:0.3.0") // colour emoji in the text field test

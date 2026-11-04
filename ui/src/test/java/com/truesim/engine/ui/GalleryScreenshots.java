@@ -3,16 +3,24 @@ package com.truesim.engine.ui;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.truesim.engine.render.Keys;
+import com.truesim.ui.charts.ChartsGallery;
+import com.truesim.ui.console.ConsoleGallery;
 import com.truesim.ui.controls.Ui;
 import com.truesim.ui.controls.basic.Controls;
 import com.truesim.ui.controls.basic.ControlsGallery;
 import com.truesim.ui.controls.data.DataGallery;
+import com.truesim.ui.controls.debug.DebuggerGallery;
+import com.truesim.ui.controls.files.FilesGallery;
+import com.truesim.ui.controls.imm.ImmGallery;
 import com.truesim.ui.controls.text.TextGallery;
 import com.truesim.ui.controls.windows.WindowsScene;
 import com.truesim.ui.core.draw.UiTextures;
+import com.truesim.ui.core.input.UiCommand;
 import com.truesim.ui.core.input.UiInput;
 import com.truesim.ui.fonts.cjk.BundledCjkFonts;
 import com.truesim.ui.fonts.emoji.BundledEmojiFonts;
+import com.truesim.ui.gizmo.SceneGallery;
+import com.truesim.ui.props.PropsGallery;
 import com.truesim.ui.style.StyleSheet;
 import com.truesim.ui.style.tss.Tss;
 import com.truesim.ui.text.AtlasSettings;
@@ -26,9 +34,12 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 /**
  * GPU screenshots of ui-controls' galleries (its test fixtures), in the default and the garish test theme, to look at:
- * the windows scene, the controls gallery (and its pop-ups open), the data gallery and the text controls. With
- * {@code TRUESIM_SCREENSHOTS=true TRUESIM_SCREENSHOTS_DIR=<dir>}, into {@code <dir>/ui-windows}, {@code ui-controls},
- * {@code ui-data} and {@code ui-text}.
+ * the windows scene, the controls gallery (its pop-ups open; mnemonics shown with the eyedropper's loupe over an HDR
+ * pattern), the data gallery, the text controls (and the spelling menu), the file browser (and its save dialog asking
+ * to replace a file), the charts (plain and posed), the property panels, the immediate-mode tool, the UI debugger,
+ * the console and the gizmos' scene. With {@code TRUESIM_SCREENSHOTS=true TRUESIM_SCREENSHOTS_DIR=<dir>}, into
+ * {@code <dir>/ui-windows}, {@code ui-controls}, {@code ui-data}, {@code ui-text}, {@code ui-files}, {@code ui-charts},
+ * {@code ui-props}, {@code ui-tools} and {@code ui-scene}.
  */
 @EnabledIfEnvironmentVariable(named = "TRUESIM_SCREENSHOTS", matches = "true")
 class GalleryScreenshots {
@@ -76,10 +87,14 @@ class GalleryScreenshots {
 
     /** Frames until the atlas has every glyph and animations end. */
     private static void settle(Ui ui, int w, int h) {
-        UiInput input = new UiInput(4);
+        settle(ui, w, h, new UiInput(4));
+    }
+
+    /** As {@link #settle(Ui, int, int)}, with {@code input} (its commands the first frame's only). */
+    private static void settle(Ui ui, int w, int h, UiInput input) {
         for (int i = 0; i < 400; i++) {
-            input.beginFrame();
             ui.update(w, h, input, nanos += 16_000_000L);
+            input.beginFrame();
             if (i > 20 && ui.textSystem().atlas().pending() == 0 && ui.animator().running() == 0
                 && ui.recorded() == 0) {
                 return;
@@ -125,5 +140,85 @@ class GalleryScreenshots {
         shoot("ui-text", "text", 1280, 720, ui -> {
             TextGallery.build(ui, 1280, 720);
         });
+    }
+
+    @Test
+    void theControlsGalleryWithMnemonicsAndTheEyedropper() {
+        shoot("ui-controls", "controls-eyedropper", 1280, 800, ui -> {
+            ControlsGallery.registerIcons(ui);
+            ControlsGallery.Gallery g = ControlsGallery.build(new Controls(ui), ui.root());
+            UiInput input = new UiInput(4);
+            input.mnemonicsShown(true);
+            settle(ui, 1280, 800, input);
+            g.openEyedropper(560, 200);
+            settle(ui, 1280, 800, input);
+        });
+    }
+
+    @Test
+    void theTextGallerysSpellingMenu() {
+        shoot("ui-text", "text-spelling", 1280, 720, ui -> {
+            TextGallery tg = TextGallery.build(ui, 1280, 720);
+            tg.area.spelling(tg.area.spelling(), new Controls(ui));
+            tg.area.focus();
+            tg.area.editable().moveTo(tg.area.text().toString().indexOf("wrod") + 1, false);
+            settle(ui, 1280, 720);
+            UiInput input = new UiInput(4);
+            input.command(UiCommand.CONTEXT_MENU, 0, 0);
+            settle(ui, 1280, 720, input);
+        });
+    }
+
+    @Test
+    void theFilesGalleryAndItsDialogs() {
+        shoot("ui-files", "files", 1280, 720, ui -> {
+            FilesGallery.registerIcons(ui);
+            FilesGallery.build(ui);
+            settle(ui, 1280, 720);
+        });
+        shoot("ui-files", "files-dialogs", 1280, 720, ui -> {
+            FilesGallery.registerIcons(ui);
+            FilesGallery g = FilesGallery.build(ui);
+            settle(ui, 1280, 720);
+            g.openDialog();
+            settle(ui, 1280, 720);
+            g.confirmOverwrite();
+            settle(ui, 1280, 720);
+        });
+    }
+
+    @Test
+    void theChartsGalleryPlainAndPosed() {
+        int w = ChartsGallery.WIDTH;
+        int h = ChartsGallery.HEIGHT;
+        shoot("ui-charts", "charts", w, h, ui -> {
+            ChartsGallery.build(ui);
+            ChartsGallery.settle(ui, w, h);
+        });
+        shoot("ui-charts", "charts-posed", w, h, ui -> {
+            ChartsGallery g = ChartsGallery.build(ui);
+            ChartsGallery.settle(ui, w, h);
+            g.pose(ui, w, h);
+        });
+    }
+
+    @Test
+    void thePropsGallery() {
+        shoot("ui-props", "props", 1280, 1700, ui -> {
+            PropsGallery.build(new Controls(ui), ui.root());
+            settle(ui, 1280, 1700);
+        });
+    }
+
+    @Test
+    void theToolsGalleries() {
+        shoot("ui-tools", "imm", 1280, 720, ui -> ImmGallery.build(ui, 1280, 720));
+        shoot("ui-tools", "debugger", 1280, 800, ui -> DebuggerGallery.build(ui, 1280, 800));
+        shoot("ui-tools", "console", 1280, 720, ui -> ConsoleGallery.build(ui, 1280, 720));
+    }
+
+    @Test
+    void theSceneGallery() {
+        shoot("ui-scene", "scene", 1280, 720, ui -> SceneGallery.build(ui, 1280, 720));
     }
 }
