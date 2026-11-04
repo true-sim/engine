@@ -26,7 +26,7 @@ class UiSceneAllocationTest {
         SceneGraph graph = new SceneGraph(new ChangeClock());
         SpatialIndex index = new SpatialIndex(graph);
         Camera camera = new Camera().position(0, 0, 10).set(0, 0, -1, 0, 1, 0, Math.toRadians(60), 320, 200, 0.1);
-        UiScene scene = new UiScene(ui, graph, index, UiScene.INTERACTIVE).camera(camera);
+        UiScene scene = new UiScene(ui, graph, index).camera(camera);
         int[] clicks = {0};
         for (int i = 0; i < 50; i++) {
             long node = graph.create();

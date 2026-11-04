@@ -490,12 +490,19 @@ public final class SceneInteraction implements Plugin {
             reach = rayLength / Math.sqrt(r[3] * r[3] + r[4] * r[4] + r[5] * r[5]);
         } else {
             InteractionView view = viewAt(p.x, p.y);
-            if (view == null || !view.ray(p.x, p.y, p.pickedRay)) {
+            if (view == null) {
+                return;
+            }
+            if (p.hinted) {
+                System.arraycopy(p.hint, 0, p.pickedRay, 0, 6);
+                reach = p.hintReach;
+            } else if (view.ray(p.x, p.y, p.pickedRay)) {
+                reach = view.reachOr(far);
+            } else {
                 return;
             }
             p.view = view;
             p.world = view.world();
-            reach = view.reachOr(far);
         }
         if (p.world == null) {
             return;

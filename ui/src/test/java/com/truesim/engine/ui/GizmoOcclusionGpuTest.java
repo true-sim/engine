@@ -40,7 +40,7 @@ class GizmoOcclusionGpuTest {
             s.camera.position(0, 1, 6).set(0, 0, -1, 0, 1, 0, Math.toRadians(60), WIDTH, HEIGHT, 0.1);
             Ui ui = new Ui(Tss.defaultTheme(), UiSceneTest.text());
             SceneGraph graph = new SceneGraph(new ChangeClock());
-            UiScene scene = new UiScene(ui, graph, new SpatialIndex(graph), UiScene.INTERACTIVE).camera(s.camera);
+            UiScene scene = new UiScene(ui, graph, new SpatialIndex(graph)).camera(s.camera);
             long node = graph.create();
             graph.setTranslation(node, 0, 1, -2);
             graph.setLocalBounds(node, -0.2, -0.2, -0.2, 0.2, 0.2, 0.2);

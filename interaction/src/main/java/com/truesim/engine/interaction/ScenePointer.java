@@ -36,6 +36,9 @@ public final class ScenePointer {
     float y;
     boolean hasRay;
     final double[] ray = new double[6];
+    boolean hinted; // a view ray given with the point (the UI's), used as it is
+    final double[] hint = new double[6];
+    double hintReach;
     int buttons;
     float scrollX;
     float scrollY;
@@ -95,6 +98,24 @@ public final class ScenePointer {
         x = px;
         y = py;
         hasRay = false;
+        hinted = false;
+        return this;
+    }
+
+    /**
+     * Gives its point's ray through the view it is over, as another picker computed it (the UI's), with how far it
+     * reaches: the interaction picks with it as it is, so both answers come from one raycast (the picker keeps the
+     * frame's picks by ray). Call after {@link #moveTo}; returns it.
+     */
+    public ScenePointer viewRay(double ox, double oy, double oz, double dx, double dy, double dz, double reach) {
+        hint[0] = ox;
+        hint[1] = oy;
+        hint[2] = oz;
+        hint[3] = dx;
+        hint[4] = dy;
+        hint[5] = dz;
+        hintReach = reach;
+        hinted = true;
         return this;
     }
 
@@ -110,6 +131,7 @@ public final class ScenePointer {
         ray[4] = dy;
         ray[5] = dz;
         hasRay = true;
+        hinted = false;
         rayWorld = world;
         return this;
     }
