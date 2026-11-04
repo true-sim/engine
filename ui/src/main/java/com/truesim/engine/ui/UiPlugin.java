@@ -20,6 +20,7 @@ import com.truesim.engine.settings.SettingGroup;
 import com.truesim.engine.settings.SettingRegistry;
 import com.truesim.engine.xr.Xr;
 import com.truesim.engine.xr.XrControls;
+import com.truesim.ui.console.ConsoleTunables;
 import com.truesim.ui.controls.Ui;
 import com.truesim.ui.core.Tunable;
 import com.truesim.ui.core.input.Cursor;
@@ -36,8 +37,8 @@ import java.util.function.Function;
  * {@code engine.get(UiPlugin.KEY).ui()}.
  *
  * <ul>
- * <li><b>Settings</b> (design: tunables are settings): every tunable of the UI ({@link Ui#tunables()}) becomes a
- * setting through {@link UiTunables}, and {@link UiCommands#ALL} joins them, in the settings group {@code ui}
+ * <li><b>Settings</b> (design: tunables are settings): every tunable of the UI ({@link #tunables(Ui)}: the UI's,
+ * the charts', the scene bridge's, the gizmos' and the console's) becomes a setting through {@link UiTunables}, and {@link UiCommands#ALL} joins them, in the settings group {@code ui}
  * ({@code settings.ui}); changed settings reach the tunables at each frame's start.</li>
  * <li><b>Input</b>: the {@code ui} action group ({@link UiActions#UI}) is added to input; each frame starts with the
  * frame's {@link UiCommands}, the {@link MousePointer} and the typed text and IME composition of {@link UiTextInput}
@@ -88,6 +89,7 @@ public final class UiPlugin implements Plugin {
     private UiTextInput text;
     private UiKeyboard keyboard;
     private GpuUiRenderer renderer;
+    private GpuScreenSampler sampler;
     private ViewPort view;
     private Window window;
     private Platform platform;
@@ -147,7 +149,7 @@ public final class UiPlugin implements Plugin {
                 registry.add(group, UiCommands.ALL.toArray(new Setting<?>[0]));
                 registry.add(group, VirtualCursor.ALL.toArray(new Setting<?>[0]));
                 tunables = new UiTunables(startup.settings()).add(registry, group,
-                    ui.tunables().toArray(new Tunable[0]));
+                    tunables(ui).toArray(new Tunable[0]));
                 commands = new UiCommands(in, startup.settings());
                 desktop = startup.find(Desktop.KEY).orElse(null);
             }
@@ -188,6 +190,8 @@ public final class UiPlugin implements Plugin {
         }
         renderer = new GpuUiRenderer(graph);
         view.add(renderer);
+        sampler = new GpuScreenSampler();
+        view.add(sampler);
         Input in = startup.get(Input.KEY);
         ViewPort shown = view;
         VirtualCursor cursor = new VirtualCursor(in, startup.settings(), () -> System.nanoTime() / 1e9, shown::width,
@@ -249,6 +253,15 @@ public final class UiPlugin implements Plugin {
     /** Its renderer, a technique of {@link #view()}. */
     public GpuUiRenderer renderer() {
         return renderer;
+    }
+
+    /**
+     * The eyedropper's sampler over the view's scene color ({@link GpuScreenSampler}): give it to the controls,
+     * {@code controls.screenSampler(plugin.screenSampler())}, and colour pickers show their eyedropper. From
+     * {@link Stage#RUN}.
+     */
+    public GpuScreenSampler screenSampler() {
+        return sampler;
     }
 
     /** The UI's input of the frame (pointers, commands, text). */
@@ -339,6 +352,23 @@ public final class UiPlugin implements Plugin {
             renderer.close();
             renderer = null;
         }
+    }
+
+    /**
+     * Every tunable of {@code ui} the engine makes a setting: {@link Ui#tunables()} (with the modules found as
+     * {@code TunableSource} services: charts, the scene bridge, gizmos) and the console's ({@link ConsoleTunables}),
+     * each name once.
+     */
+    @AllowAllocation("starting up")
+    public static List<Tunable> tunables(Ui ui) {
+        java.util.Map<String, Tunable> all = new java.util.LinkedHashMap<>();
+        for (Tunable t : ui.tunables()) {
+            all.putIfAbsent(t.name(), t);
+        }
+        for (Tunable t : ConsoleTunables.all()) {
+            all.putIfAbsent(t.name(), t);
+        }
+        return List.copyOf(all.values());
     }
 
     /** The system cursor showing the UI's {@code cursor}. */
