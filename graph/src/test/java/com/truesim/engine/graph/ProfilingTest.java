@@ -124,13 +124,18 @@ class ProfilingTest {
             if (masked) {
                 assertThat(t.statisticsOn()).isFalse();
                 assertThat(p.clock().calibrated()).isFalse();
-                assertThat(p.counters().unavailable()).anyMatch(u -> u.contains("VK_EXT_memory_budget"));
             }
             assertThat(t.nanosPerTick()).isPositive();
             assertThat(GpuTimings.STATISTIC_NAMES).hasSize(GpuTimings.STATISTICS);
-            Thread.sleep(50);
             assertThat(p.counters().started()).isTrue();
+            long deadline = System.nanoTime() + 20_000_000_000L; // the counters thread declares on its first sample
+            while (p.counters().sampled() == 0 && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
             assertThat(p.counters().count()).isPositive();
+            if (masked) {
+                assertThat(p.counters().unavailable()).anyMatch(u -> u.contains("VK_EXT_memory_budget"));
+            }
             // the runtime's markers off again; the view off
             s.set(ProfilerSettings.RUNTIME, false);
             s.set(ProfilerSettings.VIEW, false);

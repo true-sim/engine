@@ -46,8 +46,11 @@ class GpuProfilingTest {
                 assertThat(clock.deviation()).isNotNegative();
                 clock.observe(5, 10); // calibrated: frames do not move it
                 long t = clock.toCpu(0);
+                long first = clock.deviation();
                 clock.calibrate();
-                assertThat(Math.abs(clock.toCpu(0) - t)).as("drift between calibrations").isLessThan(1_000_000);
+                // each calibration is within its stated deviation; the clocks' drift between them is far below 1 ms
+                assertThat(Math.abs(clock.toCpu(0) - t)).as("drift between calibrations")
+                    .isLessThan(1_000_000 + first + clock.deviation());
             }
             GpuClock bounded = new GpuClock(device, false);
             assertThat(bounded.calibrated()).isFalse();

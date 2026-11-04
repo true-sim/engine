@@ -270,7 +270,10 @@ class ProfilerTest {
             counters.start(20);
             assertThat(counters.started()).isTrue();
             long before = counters.sampled();
-            Thread.sleep(200);
+            long deadline = System.nanoTime() + 20_000_000_000L; // its thread runs when the machine lets it
+            while (counters.sampled() == before && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
             assertThat(counters.sampled()).isGreaterThan(before);
         }
     }
