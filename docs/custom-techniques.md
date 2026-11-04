@@ -7,7 +7,7 @@ engine registers its techniques through the same registry (`Techniques`) and the
 
 - **A slot** (`TechniqueSlot`) is a place a technique plugs into, such as `render.ao`. Its one setting holds the chosen
   kind's id, or `off` where the slot may be off. The engine's slots are `AmbientOcclusion.SLOT`,
-  `ScreenSpaceReflections.SLOT`, `ProbeVolumeLighting.SLOT`, `Transparency.SLOT`, `WorldLights.SLOT`,
+  `ScreenSpaceReflections.SLOT`, `SelectionOutline.SLOT`, `ProbeVolumeLighting.SLOT`, `Transparency.SLOT`, `WorldLights.SLOT`,
   `RenderSettings.INTERPOLATION_SLOT`, `DisplayTransform.SLOT` and `Audio.SPATIALIZER`. A game may declare slots of its
   own with `TechniqueSlot.of`.
 - **A kind** (`TechniqueKind`) is an id, a record of tunables with their defaults, and a factory. The factory is given
@@ -62,6 +62,7 @@ command line, `AmbientOcclusion.SLOT.choose(settings, AcmeAo.KIND)` in code, or 
 | `render.ao` | `AmbientOcclusion` | `Technique` | modifies `Keys.SCENE_COLOR`, provides `Keys.SPECULAR_OCCLUSION` (R8, 1: none) |
 | `render.ssr` | `ScreenSpaceReflections` | `Technique` | modifies `Keys.SCENE_COLOR`, may read `Keys.SCENE_DEPTH` with `g.read` |
 | `render.gi` | `ProbeVolumeLighting` | `Technique` | modifies `Keys.INDIRECT_LIGHT` |
+| `render.selection` | `SelectionOutline` | `Technique` | modifies `Keys.SCENE_COLOR`; reads `highlights()` and the view's IDs |
 | `render.transparency` | `ChosenTransparency` | `Technique` | modifies `Keys.SCENE_COLOR` and `Keys.SCENE_DEPTH` (`g.modify` both) |
 | `audio.spatializer` | the output's `AudioFormat` | `Spatializer` | made on a background thread; used on the audio thread |
 | `render.gi.lights`, `render.interpolation`, `display.toneCurve` | nothing | one of the engine's modes | the shaders' or the sync's: a kind picks one, with tunables of its components' names |
