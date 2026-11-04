@@ -28,6 +28,7 @@ public final class ExternalImage {
     int[] sampledMips; // with a desc: a sampled slot per mip level, or null
     long made = -1; // a persistent image's first frame: its contents are zeros until a pass of it writes them
     boolean kept; // its contents outlive the frame, read by the next (a persistent image): its writes are kept
+    boolean concurrent; // usable by the graphics and async compute queues at once (a persistent image of both)
     Texture texture; // the texture it is, or null
     volatile boolean held; // as set: untouched (not acquired), from the next frame
     boolean heldThisFrame; // as the frame recording took it: one value for its copies and barriers alike

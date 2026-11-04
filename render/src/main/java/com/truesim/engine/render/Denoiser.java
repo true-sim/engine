@@ -100,6 +100,16 @@ public final class Denoiser {
     @AllowAllocation("building the graph, when it changes")
     static Signal build(GraphBuilder g, String name, SceneView view, Image depth, Image normal, Image motion,
         Signal input, Mode mode, boolean temporal) {
+        return build(g, name, view, depth, normal, motion, input, mode, temporal, 0);
+    }
+
+    /**
+     * {@link #build} for a signal at a {@code shift}-th power of two below the view's resolution: {@code depth},
+     * {@code normal} and {@code motion} (in its texels) at the signal's resolution.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    static Signal build(GraphBuilder g, String name, SceneView view, Image depth, Image normal, Image motion,
+        Signal input, Mode mode, boolean temporal, int shift) {
         String shader = "shaders/denoise/denoise.spv";
         Pipeline atrous = g.computeProgram(shader, "atrousMain", DenoisePush.BYTES);
         Pipeline temporalPass = g.computeProgram(shader, "temporalMain", DenoisePush.BYTES);
@@ -114,7 +124,7 @@ public final class Denoiser {
         int passes = g.setting(PASSES);
         if (!temporal) {
             return atrous(g, name, view, atrous, depth, normal, input, scratch, g.setting(SPATIAL_PASSES), 0, settings,
-                region);
+                region, shift);
         }
         History historyA = g.history(name + " accumulated A", signal);
         History historyB = g.history(name + " accumulated B", signal);
@@ -123,7 +133,7 @@ public final class Denoiser {
         Signal into = input;
         if (mode == Mode.REBLUR) {
             Signal blurred = new Signal(scratch[0], scratch[1]);
-            blur(g, name + " blur", view, blur, depth, normal, input, blurred, null, false, settings, region);
+            blur(g, name + " blur", view, blur, depth, normal, input, blurred, null, false, settings, region, shift);
             into = blurred;
         }
         Signal accumulated = mode == Mode.REBLUR ? new Signal(scratch[2], scratch[3])
@@ -144,7 +154,7 @@ public final class Denoiser {
         }
         pass.record(ctx -> {
             boolean valid = ctx.historyValid(historyA) && ctx.historyValid(moments) && ctx.historyValid(geometry);
-            common(push, ctx, view, depth, normal, accumulated.a())
+            common(push, ctx, view, depth, normal, accumulated.a(), shift)
                 .motion(motion == null ? 0 : ctx.storage(motion))
                 .inputA(ctx.storage(from.a())).inputB(ctx.storage(from.b()))
                 .historyA(ctx.storage(historyA.previous())).historyB(ctx.storage(historyB.previous()))
@@ -159,18 +169,18 @@ public final class Denoiser {
         if (mode == Mode.REBLUR) {
             Signal recurrent = new Signal(historyA.current(), historyB.current());
             blur(g, name + " post-blur", view, blur, depth, normal, accumulated, recurrent, moments.current(), true,
-                settings, region);
+                settings, region, shift);
             return recurrent;
         }
         return atrous(g, name, view, atrous, depth, normal, accumulated, scratch, passes, settings.get(SIGMA),
-            settings, region);
+            settings, region, shift);
     }
 
     /** {@code passes} a-trous steps from {@code input}, ping-ponging through the scratch images. */
     @AllowAllocation("building the graph, when it changes")
     private static Signal atrous(GraphBuilder g, String name, SceneView view, Pipeline atrous, Image depth,
         Image normal, Signal input, Image[] scratch, int passes, float sigma, EngineSettings settings,
-        ViewPort region) {
+        ViewPort region, int shift) {
         Signal from = input;
         for (int i = 0; i < passes; i++) {
             Signal to = (i & 1) == 0 ? new Signal(scratch[0], scratch[1]) : new Signal(scratch[2], scratch[3]);
@@ -186,7 +196,7 @@ public final class Denoiser {
                 pass.region(region);
             }
             pass.record(ctx -> {
-                common(push, ctx, view, depth, normal, to.a()).inputA(ctx.storage(source.a()))
+                common(push, ctx, view, depth, normal, to.a(), shift).inputA(ctx.storage(source.a()))
                     .inputB(ctx.storage(source.b())).outputA(ctx.storage(to.a())).outputB(ctx.storage(to.b()))
                     .step(step).sigmaValue(guided ? settings.get(SIGMA) : 0).flags(0);
                 dispatch(ctx, atrous, push, to.a());
@@ -199,7 +209,8 @@ public final class Denoiser {
     /** A blur from {@code input} into {@code output}; shrinking with this frame's {@code moments}' frames. */
     @AllowAllocation("building the graph, when it changes")
     private static void blur(GraphBuilder g, String name, SceneView view, Pipeline blur, Image depth, Image normal,
-        Signal input, Signal output, Image moments, boolean shrink, EngineSettings settings, ViewPort region) {
+        Signal input, Signal output, Image moments, boolean shrink, EngineSettings settings, ViewPort region,
+        int shift) {
         DenoisePush push = new DenoisePush();
         GraphBuilder.PassBuilder pass = g.pass(name).read(depth, Access.SAMPLED_COMPUTE)
             .read(normal, Access.STORAGE_READ).read(input.a(), Access.STORAGE_READ)
@@ -212,7 +223,7 @@ public final class Denoiser {
             pass.region(region);
         }
         pass.record(ctx -> {
-            common(push, ctx, view, depth, normal, output.a()).inputA(ctx.storage(input.a()))
+            common(push, ctx, view, depth, normal, output.a(), shift).inputA(ctx.storage(input.a()))
                 .inputB(ctx.storage(input.b())).outputA(ctx.storage(output.a())).outputB(ctx.storage(output.b()))
                 .moments(moments == null ? 0 : ctx.storage(moments)).radius(settings.get(RADIUS))
                 .frame((int) ctx.frame()).flags(shrink ? SHRINK : 0);
@@ -221,10 +232,12 @@ public final class Denoiser {
     }
 
     private static DenoisePush common(DenoisePush push, PassContext ctx, SceneView view, Image depth, Image normal,
-        Image size) {
+        Image size, int shift) {
+        int round = (1 << shift) - 1;
         return push.view(view.view().address()).depth(ctx.sampled(depth)).normal(ctx.storage(normal))
             .size(ctx.regionWidth(size) | ctx.regionHeight(size) << 16)
-            .previousSize(view.port().previousRegionWidth() | view.port().previousRegionHeight() << 16);
+            .previousSize((view.port().previousRegionWidth() + round) >> shift
+                | ((view.port().previousRegionHeight() + round) >> shift) << 16);
     }
 
     private static void dispatch(PassContext ctx, Pipeline pipeline, DenoisePush push, Image size) {

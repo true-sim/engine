@@ -19,6 +19,13 @@ public static const uint PROBE_ACTIVE = 1;
 /** A probe holds light: updated at least once since its slot took it. */
 public static const uint PROBE_VALID = 2;
 
+/**
+ * In a volume's flags: a point beyond the last cascade takes the probes at its border nearest to it (their light as
+ * they see it, the bound of Chebyshev weighing them) rather than the environment's (radiance cascades, whose one
+ * cascade ends where the scene may go on).
+ */
+public static const uint PROBE_VOLUME_CLAMP = 1;
+
 /** One probe's state: 48 bytes. */
 [HostLayout]
 public struct ProbeState
@@ -45,7 +52,7 @@ public struct ProbeVolumeData
     public uint cascades;
     public uint irradiance;        // sampled slot: the irradiance atlas (rgb: irradiance / pi; a: sky visibility)
     public uint depth;             // sampled slot: the distance moments atlas (mean distance, mean squared)
-    public uint flags;
+    public uint flags;             // PROBE_VOLUME_*
     public uint3 probes;           // probes along each axis of a cascade
     public float normalBias;       // how far a shaded point is moved along its normal, of the probes' spacing
     public float viewBias;         // and towards the viewer
@@ -172,7 +179,11 @@ public float3 probeLight(ProbeVolumeData* volume, float3 p, float3 n, float3 toV
         float3 last = float3(probes - 1);
         if (any(local < 0) || any(local > last))
         {
-            continue;
+            if (c + 1 < cascades || (volume[0].flags & PROBE_VOLUME_CLAMP) == 0)
+            {
+                continue;
+            }
+            local = clamp(local, float3(0), last);
         }
         // Near its edge a cascade hands over to the next coarser one
         float3 edge = min(local, last - local);
