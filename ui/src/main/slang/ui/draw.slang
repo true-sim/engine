@@ -52,10 +52,18 @@ struct Transform
     float opacity;
 };
 
+/** Entry `index` of the transform table; entry 0, the identity of nearly every primitive, without a memory read. */
 Transform transformAt(uint index)
 {
-    float* t = push.transforms + index * TRANSFORM_FLOATS;
     Transform x;
+    if (index == 0)
+    {
+        x.scale = 1;
+        x.offset = float2(0, 0);
+        x.opacity = 1;
+        return x;
+    }
+    float* t = push.transforms + index * TRANSFORM_FLOATS;
     x.scale = t[0];
     x.offset = float2(t[1], t[2]);
     x.opacity = t[3];
