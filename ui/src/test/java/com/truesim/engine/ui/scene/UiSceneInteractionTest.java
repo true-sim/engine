@@ -89,6 +89,47 @@ class UiSceneInteractionTest {
             assertThat(world.picker().cacheHits()).as("the UI's and the scene's picks: one raycast").isPositive();
             assertThat(world.picker().raycasts() - raycasts).as("two frames, two casts per frame at most")
                 .isLessThanOrEqualTo(4);
+            // one route: a consume on either side stops the other (no selection: the gizmo would take the pointer)
+            interaction.selection().enabled(false);
+            boolean[] uiTakes = {false};
+            boolean[] sceneTakes = {false};
+            scene.picking().add(crate, Interactive.of(EventType.PRESS, e -> {
+                seen.add("ui PRESS");
+                if (uiTakes[0]) {
+                    e.consume();
+                }
+            }));
+            world.on(crate, SceneEventType.PRESS, e -> {
+                if (sceneTakes[0]) {
+                    e.consume();
+                }
+            });
+            long root = graph.create();
+            graph.setParent(crate, root);
+            world.on(root, SceneEventType.PRESS, e -> seen.add("root PRESS"));
+            seen.clear();
+            mouse.mouse(at[0], at[1], Pointer.PRIMARY);
+            engine.step();
+            mouse.mouse(at[0], at[1], 0);
+            engine.step();
+            assertThat(seen).as("both, once, in one route").containsSubsequence("scene PRESS", "ui PRESS", "root PRESS");
+            assertThat(seen.stream().filter("ui PRESS"::equals).count()).isOne();
+            uiTakes[0] = true;
+            seen.clear();
+            mouse.mouse(at[0], at[1], Pointer.PRIMARY);
+            engine.step();
+            mouse.mouse(at[0], at[1], 0);
+            engine.step();
+            assertThat(seen).as("the UI consumed").contains("ui PRESS").doesNotContain("root PRESS");
+            uiTakes[0] = false;
+            sceneTakes[0] = true;
+            seen.clear();
+            mouse.mouse(at[0], at[1], Pointer.PRIMARY);
+            engine.step();
+            mouse.mouse(at[0], at[1], 0);
+            engine.step();
+            assertThat(seen).as("the engine consumed").doesNotContain("ui PRESS", "root PRESS");
+            sceneTakes[0] = false;
             // a screen element over the crate takes the mouse: the scene sees it leave
             seen.clear();
             Element panel = plugin.ui().panel(null);

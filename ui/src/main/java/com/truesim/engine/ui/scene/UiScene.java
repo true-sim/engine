@@ -35,7 +35,9 @@ import java.util.Objects;
  *       nodes;</li>
  *   <li>with the engine's {@link SceneInteraction} (application-api.md, scene interaction), the UI's pointers handed
  *       on to it: those the UI took ({@link ScenePicking#claimed}) blocked for the scene, the others with the UI's
- *       own rays, so the picker answers both from one raycast; the scene's listeners and selection then run;</li>
+ *       own rays, so the picker answers both from one raycast. The interaction is then the one router of scene
+ *       nodes: the {@code Interactive} nodes' UI listeners take part in its route ({@link ScenePicking#routedByScene}),
+ *       so a consume on either side stops both;</li>
  *   <li>after the game's update, {@link ScenePicking#update} (world panels' UIs too) instead of {@code ui.update}.</li>
  * </ol>
  *
@@ -92,6 +94,7 @@ public final class UiScene {
         this.world = interaction;
         if (interaction != null) {
             interaction.interaction().driven(true);
+            picking.routedByScene(true); // one route for scene nodes: the interaction's, the UI's listeners in it
         }
     }
 
