@@ -58,6 +58,13 @@ public final class Keys {
      */
     public static final Key<Image> SPECULAR_OCCLUSION = Key.image("truesim.specularOcclusion");
 
+    /**
+     * What each pixel of the opaque scene shows, as a visibility buffer draws it ({@link VisibilityBufferShading}):
+     * {@code R32G32_UINT}, x the instance id plus 1 (0: nothing; the top bit tags classic LOD's), y the meshlet and
+     * triangle. For GPU picking: reading the texels under pointers names what they are over.
+     */
+    public static final Key<Image> VISIBILITY_IDS = Key.image("truesim.visibilityIds");
+
     /** Towards the sun, the scene's one light, unit length; the shaders' SUN. */
     public static final float SUN_X = 0.42399915f;
     public static final float SUN_Y = 0.84799830f;

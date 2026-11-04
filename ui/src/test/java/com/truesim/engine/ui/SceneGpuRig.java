@@ -49,19 +49,32 @@ final class SceneGpuRig implements AutoCloseable {
     final MeshData boxData;
     final MeshData quadData;
 
+    final boolean visibility;
+    final int instances;
+
     /** A rig of {@code width x height}, or null (the test skipped) without a GPU. */
     static SceneGpuRig open(int width, int height) {
-        return new SceneGpuRig(GpuRig.open(width, height));
+        return new SceneGpuRig(GpuRig.open(width, height), false, 1024);
     }
 
-    private SceneGpuRig(GpuRig rig) {
+    /**
+     * A rig of {@code width x height} with room for {@code instances}, shaded through a visibility buffer with
+     * {@code visibility} (its IDs then exist), with validation unless {@code benchmark}.
+     */
+    static SceneGpuRig open(int width, int height, boolean visibility, int instances, boolean benchmark) {
+        return new SceneGpuRig(GpuRig.open(width, height, !benchmark), visibility, instances);
+    }
+
+    private SceneGpuRig(GpuRig rig, boolean visibility, int instances) {
         this.rig = rig;
+        this.visibility = visibility;
+        this.instances = instances;
         pool = new GeometryPool(rig.device, GeometryPool.Capacity.of(1 << 14, 256, 8));
         boxData = box();
         box = pool.add(boxData);
         quadData = quad();
         quad = pool.add(quadData);
-        scene = new GpuScene(rig.device, pool, 1024);
+        scene = new GpuScene(rig.device, pool, instances);
         renderer = new MeshletRenderer(rig.device, scene, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT);
         materials = new Materials(rig.device, 32);
         scene.setMaterials(materials);
@@ -72,11 +85,16 @@ final class SceneGpuRig implements AutoCloseable {
 
     /** The scene seen through {@code through} in {@code port}, forward shaded, cleared to a dark blue. */
     SceneView view(com.truesim.engine.graph.ViewPort port, Camera through) {
-        RenderView view = renderer.createView(ViewOptions.of(4096, 1 << 16));
+        RenderView view = renderer.createView(ViewOptions.of(Math.max(4096, instances * 2), Math.max(1 << 16, instances * 16)));
         view.set(through, 1, MeshletRenderer.MODE_LIT);
         SceneView sceneView = new SceneView(port, view, through).set(1, MeshletRenderer.MODE_LIT);
-        port.add(new ClusteredForwardShading(SceneGeometry.meshlets(renderer), sceneView,
-            VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.03f, 0.06f));
+        if (visibility) {
+            port.add(new com.truesim.engine.render.VisibilityBufferShading(SceneGeometry.meshlets(renderer),
+                sceneView, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.03f, 0.06f));
+        } else {
+            port.add(new ClusteredForwardShading(SceneGeometry.meshlets(renderer), sceneView,
+                VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT).clearColor(0.02f, 0.03f, 0.06f));
+        }
         return sceneView;
     }
 
