@@ -127,6 +127,7 @@ class PresenterTest {
                     }
                 });
                 assertThat(made).as("one per window").hasSize(3);
+                assertThat(mainTarget.shownKey()).as("the transform's result").isNotSameAs(COLOR);
                 assertThat(mainTarget.metadata().maxLuminance()).isEqualTo(1000);
                 graph.settings().set(peak, 600f);
                 assertThat(mainTarget.metadata().maxLuminance()).as("following the settings").isEqualTo(600);
@@ -140,6 +141,7 @@ class PresenterTest {
                 assertThat(presenter.render()).isEqualTo(3);
                 presenter.outputTransform(null);
                 assertThat(presenter.render()).as("copied as they are again").isEqualTo(3);
+                assertThat(mainTarget.shownKey()).as("the presented key itself").isSameAs(COLOR);
                 assertThat(mainTarget.metadata()).as("nothing told without a transform").isNull();
                 // A window closed stops being presented to; so does a target closed.
                 third.close();

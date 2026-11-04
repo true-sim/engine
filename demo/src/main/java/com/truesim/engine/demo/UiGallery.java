@@ -98,6 +98,7 @@ public final class UiGallery implements Application {
     private final double seconds;
     private final boolean tour;
     private long frames;
+    private GalleryShots shots; // with -Pshots=dir: what the window shows, a PNG per page of the tour
     private final GalleryWorld world = new GalleryWorld();
     private final UiPlugin uiPlugin = new UiPlugin(this::makeUi).view("main");
     private StyleSheet defaultSheet;
@@ -227,6 +228,15 @@ public final class UiGallery implements Application {
         nav.add(c.button("Profiler").onClick(() -> toggle(ProfilerSettings.OVERLAY)).element());
         nav.add(c.button("Detailed").onClick(() -> toggle(ProfilerSettings.VIEW)).element());
         show(0);
+        String shotDir = System.getProperty("truesim.gallery.shots");
+        if (shotDir != null) {
+            for (var target : engine.get(Rendering.KEY).presenter().targets()) {
+                if (target.view() == world.port) {
+                    shots = new GalleryShots(target.shownKey(), java.nio.file.Path.of(shotDir));
+                    world.port.add(shots);
+                }
+            }
+        }
         this.started = System.nanoTime();
         System.out.println(HELP);
     }
@@ -256,7 +266,7 @@ public final class UiGallery implements Application {
         WorldPanelRenderer panels = new WorldPanelRenderer(world.frameGraph, world.camera);
         world.port.add(panels);
         scene.panels(panels);
-        Ui panelUi = new Ui(defaultSheet, text);
+        Ui panelUi = new Ui(defaultSheet, text); // shares the screen's text system and atlas pages
         Controls pc = new Controls(panelUi);
         Element body = panelUi.panel("gallery-page");
         panelUi.root().add(body);
@@ -498,6 +508,10 @@ public final class UiGallery implements Application {
             engine.quit();
         }
         frames++;
+        if (tour && shots != null && frames % 45 == 40 && frames < 90L * pages.size()) {
+            shots.take(String.format("%02d-%s%s", current, pages.get(current).name.replace(' ', '-'),
+                frames > 45L * pages.size() ? "-profiler" : ""));
+        }
         if (tour && frames % 45 == 0) { // a smoke run: every page, the profiler's views open half way
             show((current + 1) % pages.size());
             engine.settings().set(ProfilerSettings.OVERLAY, frames > 45L * pages.size());
@@ -573,7 +587,8 @@ public final class UiGallery implements Application {
     public void stop() {
         engine.get(Rendering.KEY).device().waitIdle();
         world.close();
-        System.out.printf("%d frames in %.1f s%n", frames, (System.nanoTime() - started) / 1e9);
+        System.out.printf("%d frames in %.1f s%s%n", frames, (System.nanoTime() - started) / 1e9,
+            shots == null ? "" : ", " + shots.written() + " shots");
     }
 
     // ---------------------------------------------------------------- placement

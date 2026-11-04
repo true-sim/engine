@@ -129,8 +129,9 @@ final class GalleryWorld implements Plugin {
         VulkanDevice device = rendering.device();
         frameGraph = rendering.graph();
         FrameSlots slots = frameGraph.frameSlots();
-        window = startup.get(Desktop.KEY).platform().createWindow(WindowOptions.of("true-sim UI gallery", 1600, 1000),
-            startup.settings().scoped("gallery"));
+        // the options' size: a settings scope would size it from its window settings (1280 x 720 by default)
+        window = startup.get(Desktop.KEY).platform().createWindow(WindowOptions.of("true-sim UI gallery", 1600,
+            1000));
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 100_000, 4), slots);
         materials = new Materials(device, 64, slots);
         textures = new Textures(device, slots);

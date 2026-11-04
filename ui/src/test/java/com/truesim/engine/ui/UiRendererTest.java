@@ -339,6 +339,41 @@ class UiRendererTest {
     }
 
     @Test
+    void aTextureAnotherRendererUploadedFirstIsStillUploadedHere() {
+        // UIs sharing a text system share its atlas pages: a world panel's renderer and the screen's upload the same
+        // textures. The UI gallery lost glyphs when the panel's renderer took the page's dirty region every frame.
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph);
+             GpuUiRenderer panel = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            UiTextures textures = new UiTextures();
+            UiTexture page = textures.create("atlas 0", 4, 4, UiTexture.Format.RGBA8_UNORM);
+            fill(page, 255, 0, 0);
+            DrawList list = list(1, l -> l.image(10, 10, 50, 50, 0, 0, 1, 1, page.id(), Rgba.WHITE));
+            rig.frame(ui, textures, list);
+            assertThat(rig.at(30, 30)).containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            fill(page, 0, 255, 0); // a glyph installed: the other renderer's submit comes first this frame
+            DrawList none = new DrawList();
+            panel.submit(new DrawList[] {none}, 1, textures, W, H);
+            rig.frame(ui, textures, list);
+            assertThat(ui.uploadedBytes()).as("its own upload of the change").isEqualTo(4 * 4 * 4);
+            assertThat(rig.at(30, 30)).as("the new pixels").containsExactly(new float[] {0, 1, 0, 1}, CLOSE);
+            rig.frame(ui, textures, list);
+            assertThat(ui.uploadedBytes()).as("then nothing").isZero();
+        }
+    }
+
+    private static void fill(UiTexture texture, int r, int g, int b) {
+        byte[] p = texture.pixels();
+        for (int i = 0; i < p.length; i += 4) {
+            p[i] = (byte) r;
+            p[i + 1] = (byte) g;
+            p[i + 2] = (byte) b;
+            p[i + 3] = (byte) 255;
+        }
+        texture.markDirty(0, 0, texture.width(), texture.height());
+    }
+
+    @Test
     void anUnchangedFrameUploadsNothingAndChangesUploadTheirRange() {
         try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
             rig.view.add(ui);
