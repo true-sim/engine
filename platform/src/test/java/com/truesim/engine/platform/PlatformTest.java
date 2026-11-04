@@ -98,7 +98,8 @@ class PlatformTest {
         }
         float[] at = {Float.NaN, Float.NaN};
         boolean known = platform.globalMouse(at);
-        assertThat(known).isEqualTo(!"wayland".equals(platform.videoDriver()));
+        // Wayland tells no global position; the offscreen and dummy drivers have no cursor
+        assertThat(known).isEqualTo(!"wayland".equals(driver) && !"offscreen".equals(driver) && !"dummy".equals(driver));
         if (known) {
             assertThat(at[0]).isFinite();
             assertThat(at[1]).isFinite();
