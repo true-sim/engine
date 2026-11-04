@@ -167,6 +167,8 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     private UiTextures textures;
     private GpuImage[] images = new GpuImage[1];
     private int[] slotOf = new int[1];
+    // UI textures drawn from a frame graph texture (a camera view's image), by id: no pixels uploaded, sampled in place
+    private com.truesim.engine.graph.Texture[] bound = new com.truesim.engine.graph.Texture[1];
     private FrameBuffer table;
     private final Arena stagingArena;
     private MemorySegment staging;
@@ -510,6 +512,10 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         long bytes = 0;
         for (int id = 1; id < count; id++) {
             UiTexture texture = uiTextures.get(id);
+            if (id < bound.length && bound[id] != null) {
+                texture.clean(); // its pixels are the graph texture's: never uploaded
+                continue;
+            }
             boolean fresh = images[id] == null;
             if (fresh) {
                 create(id, texture);
@@ -530,6 +536,12 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
         images[id] = image;
         slotOf[id] = device.bindless().addSampled(image.view());
+        tableSlot(id, slotOf[id]);
+    }
+
+    /** Names bindless slot {@code slot} for texture {@code id} in the table the shader reads. */
+    @AllowAllocation("the table grown, rarely")
+    private void tableSlot(int id, int slot) {
         if (table.size() < (id + 1) * 4L) {
             FrameBuffer bigger = FrameBuffer.create(device, Math.max((id + 1) * 4L, table.size() * 2), BUFFER_USAGE,
                 slots);
@@ -537,7 +549,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             retiring.add(table);
             table = bigger;
         }
-        table.putInt(id * 4L, slotOf[id]);
+        table.putInt(id * 4L, slot);
     }
 
     /**
@@ -592,6 +604,47 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     }
 
+    /**
+     * Draws UI texture {@code id} from {@code texture} (a frame graph texture a view renders into: a camera view)
+     * instead of uploading its pixels: the texture's bindless slot is the id's, and the UI's pass reads the texture
+     * after the view's copy into it in the same frame, so it shows that frame's image. Null unbinds it. The graph
+     * rebuilds when its views or outputs change; bind before the frame that first draws it.
+     */
+    @AllowAllocation("a texture bound, rarely")
+    public GpuUiRenderer bind(int id, com.truesim.engine.graph.Texture texture) {
+        if (source != null) {
+            source.bind(id, texture);
+            return this;
+        }
+        if (id < 1) {
+            throw new IllegalArgumentException("no texture " + id);
+        }
+        if (id >= bound.length) {
+            bound = Arrays.copyOf(bound, Math.max(id + 1, bound.length * 2));
+        }
+        if (id >= images.length) {
+            growTextures(id + 1);
+        }
+        if (images[id] != null) { // uploaded before: let its image go
+            GpuImage image = images[id];
+            int slot = slotOf[id];
+            retiring.add(() -> device.bindless().removeSampled(slot));
+            retiring.add(image);
+            images[id] = null;
+        }
+        bound[id] = texture;
+        if (texture != null) {
+            tableSlot(id, texture.slot());
+        }
+        return this;
+    }
+
+    /** The graph texture UI texture {@code id} is drawn from, or null. */
+    public com.truesim.engine.graph.Texture bound(int id) {
+        GpuUiRenderer data = source != null ? source : this;
+        return id > 0 && id < data.bound.length ? data.bound[id] : null;
+    }
+
     @AllowAllocation("more textures than ever before")
     private void growTextures(int count) {
         int length = Math.max(count, images.length * 2);
@@ -633,7 +686,14 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         int imageHeight = view == null ? Math.max(1, height) : view.outputHeight();
         Image image = g.unscaled(g.create("ui", ImageDesc.of(Format.R16G16B16A16_SFLOAT, imageWidth, imageHeight)));
         UiPush push = new UiPush();
-        g.pass("ui").attach(image, Clear.color(0, 0, 0, 0)).record(ctx -> draw(ctx, push, imageWidth, imageHeight));
+        GraphBuilder.PassBuilder pass = g.pass("ui").attach(image, Clear.color(0, 0, 0, 0));
+        GpuUiRenderer data = source != null ? source : this;
+        for (com.truesim.engine.graph.Texture t : data.bound) {
+            if (t != null) {
+                pass.read(g.texture(t), com.truesim.engine.graph.Access.SAMPLED_FRAGMENT); // after its view's copy
+            }
+        }
+        pass.record(ctx -> draw(ctx, push, imageWidth, imageHeight));
         g.provide(Keys.UI, image);
     }
 
@@ -690,6 +750,9 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     public int slot(int id) {
         if (source != null) {
             return source.slot(id);
+        }
+        if (id > 0 && id < bound.length && bound[id] != null) {
+            return bound[id].slot();
         }
         return id > 0 && id < images.length && images[id] != null ? slotOf[id] : -1;
     }
