@@ -107,6 +107,7 @@ public final class RenderSettings {
         all.add(Transparency.SLOT.setting());
         all.add(Transparency.SORTED_RUNS);
         all.addAll(ScreenSpaceReflections.ALL);
+        all.addAll(SelectionOutline.ALL);
         all.addAll(AmbientOcclusion.ALL);
         all.addAll(Denoiser.ALL);
         all.add(ProbeVolumeLighting.SLOT.setting());

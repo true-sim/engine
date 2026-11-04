@@ -116,6 +116,7 @@ public final class SceneSync implements AutoCloseable {
     private int[] fillItems = new int[64];
     private int[] fillEntries = new int[64];
     private int itemCount;
+    private long instanceVersion;
     // Skinned items: the deformed copy each draws (NONE: its mesh as it is), and those that have one, densely.
     private int[] itemCopy = filled(64);
     private boolean[] itemCopySkinned = new boolean[64]; // whether its copy was made with the skin's joints
@@ -417,6 +418,14 @@ public final class SceneSync implements AutoCloseable {
     /** How many renderables this scene has, drawn or waiting for their meshes. */
     public int renderableCount() {
         return itemCount;
+    }
+
+    /**
+     * A count that grows whenever a renderable starts or stops drawing (its instance id taken or freed): what keeps
+     * ids of nodes, such as the selection's highlights, follows it.
+     */
+    public long instanceVersion() {
+        return instanceVersion;
     }
 
     /** How many distinct meshes this scene's renderables use. */
@@ -909,6 +918,7 @@ public final class SceneSync implements AutoCloseable {
         }
         int slot = gpu.freeId(); // the table grows if it is full
         instanceCount++;
+        instanceVersion++;
         itemSlot[item] = slot;
         refreshCopy(item);
         write(gpu.claim(slot), item); // takes the id
@@ -937,6 +947,7 @@ public final class SceneSync implements AutoCloseable {
         if (slot != NONE) {
             gpu.remove(slot);
             instanceCount--;
+            instanceVersion++;
             itemSlot[item] = NONE;
         }
         if (itemSet[item] != null) { // drawn, or waiting for its assets
