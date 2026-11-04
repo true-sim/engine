@@ -101,7 +101,7 @@ final class DesktopSource implements PlatformListener, InputSource {
         if (platform != null) {
             for (Window window : platform.windows()) {
                 if (on) {
-                    window.startTextInput();
+                    window.startTextInput(input.textKind());
                 } else {
                     window.stopTextInput();
                 }

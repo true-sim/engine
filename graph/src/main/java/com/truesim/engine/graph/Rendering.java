@@ -137,6 +137,11 @@ public final class Rendering implements Plugin {
         }
     }
 
+    /** Whether it renders without windows ({@link #headless(boolean)}). */
+    public boolean headless() {
+        return headless;
+    }
+
     /** The Vulkan instance; from {@link Stage#INSTANCE}. */
     public VulkanInstance instance() {
         return made(instance, Stage.INSTANCE);

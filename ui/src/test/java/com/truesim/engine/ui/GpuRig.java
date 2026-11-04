@@ -140,6 +140,14 @@ final class GpuRig implements AutoCloseable {
      * {@code name}, with {@code TRUESIM_SCREENSHOTS=true}.
      */
     void screenshot(String name) {
+        screenshot(name, -1);
+    }
+
+    /**
+     * As {@link #screenshot(String)}, over an opaque backdrop of linear grey level {@code backdrop} (negative: the
+     * checkerboard), as a UI shows over a dark scene.
+     */
+    void screenshot(String name, float backdrop) {
         if (!"true".equals(System.getenv("TRUESIM_SCREENSHOTS"))) {
             return;
         }
@@ -148,7 +156,7 @@ final class GpuRig implements AutoCloseable {
             for (int x = 0; x < width; x++) {
                 int o = (y * width + x) * 4;
                 float a = Math.min(1, Math.max(0, rgba[o + 3]));
-                float back = ((x / 16 + y / 16) & 1) == 0 ? 0.18f : 0.26f;
+                float back = backdrop >= 0 ? backdrop : ((x / 16 + y / 16) & 1) == 0 ? 0.18f : 0.26f;
                 int rgb = 0;
                 for (int c = 0; c < 3; c++) {
                     float linear = rgba[o + c] + back * (1 - a);
@@ -158,8 +166,9 @@ final class GpuRig implements AutoCloseable {
             }
         }
         try {
-            Files.createDirectories(SCREENSHOTS);
-            ImageIO.write(image, "png", SCREENSHOTS.resolve(name + ".png").toFile());
+            Path file = SCREENSHOTS.resolve(name + ".png"); // a name may name a folder: "ui-data/data-default"
+            Files.createDirectories(file.getParent());
+            ImageIO.write(image, "png", file.toFile());
         } catch (IOException e) {
             throw new IllegalStateException(e);
         }

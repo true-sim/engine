@@ -126,6 +126,34 @@ class UiRendererTest {
     }
 
     @Test
+    void aClipsOffsetMovesItsPrimitivesButNotItsRectangle() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            DrawList list = new DrawList();
+            int clip = list.addClip(20, 20, 120, 120, 0);
+            int start = list.allocate(2);
+            list.begin(start, 2);
+            list.clip(clip);
+            list.box(10, 30, 50, 70, Rgba.pack(1, 0, 0, 1), 0, 0, 0, 0, 0, 0); // a scrolled region's content
+            list.line(10, 100, 200, 100, 2, Rgba.pack(0, 1, 0, 1));
+            list.end();
+            rig.frame(ui, null, list);
+            assertThat(rig.at(15, 50, 3)).as("left of the clip").isZero();
+            assertThat(rig.at(30, 50)).containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            list.setClipOffset(clip, 40, -10); // scrolled: nothing else re-recorded
+            rig.frame(ui, null, list);
+            assertThat(ui.uploadedBytes()).as("only the clip table").isEqualTo(2L * DrawList.CLIP_FLOATS * 4);
+            assertThat(rig.at(30, 50, 3)).as("moved away").isZero();
+            assertThat(rig.at(70, 40)).as("drawn 40 right, 10 up").containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            assertThat(rig.at(91, 40, 3)).as("its right edge moved too: 50 + 40").isZero();
+            assertThat(rig.at(88, 40, 3)).isEqualTo(1f, CLOSE);
+            assertThat(rig.at(100, 90, 1)).as("the line moved up into the clip").isEqualTo(1f, CLOSE);
+            assertThat(rig.at(130, 90, 1)).as("still cut by the clip's own rectangle").isZero();
+            rig.screenshot("clip-offset");
+        }
+    }
+
+    @Test
     void shadowsBlurByTheirSigma() {
         try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
             rig.view.add(ui);

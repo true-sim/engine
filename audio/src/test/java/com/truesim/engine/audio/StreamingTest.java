@@ -196,7 +196,7 @@ class StreamingTest {
         // no click: the last frame held and faded over 5 ms, then faded back in
         assertThat(maxStep(out, 0, 4 * RATE)).isLessThan(0.019f);
         // it kept time: where it plays again, it is the sine at the right phase (whole periods: phase 0 every 120)
-        int start = firstNonZero(out);
+        int start = firstNonZero(out) - 1; // the sine's first frame is 0: the first non-zero one is its second
         int late = 4 * RATE - 2_000;
         double phase = 2 * Math.PI * 400 * (late - start) / RATE;
         assertThat((double) out[2 * late]).isCloseTo(0.5 * CENTRE * Math.sin(phase), within(0.01));

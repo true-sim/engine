@@ -882,6 +882,11 @@ public final class Input implements Plugin {
         }
     }
 
+    /** The kind of text the context taking text takes (0, plain text, when none does). */
+    int textKind() {
+        return textContext == null ? 0 : textContext.textKind();
+    }
+
     void editing(String typed, int start, int length) {
         if (textContext != null && textContext.textListener() != null) {
             textContext.textListener().editing(typed, start, length);

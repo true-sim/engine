@@ -16,9 +16,13 @@ public static const uint NINE_SLICE = 5;
 public static const uint LINE = 6;
 public static const uint KINDS = 7;
 
-/** Flags (header bits 8-15): a box filled by a linear gradient; a glyph of hinted coverage, not an MTSDF. */
+/**
+ * Flags (header bits 8-15): a box filled by a linear gradient; a glyph of hinted coverage, not an MTSDF; a glyph of
+ * colour texels (an emoji bitmap on an sRGB page, straight alpha).
+ */
 public static const uint FLAG_GRADIENT = 1;
 public static const uint FLAG_RASTER = 2;
+public static const uint FLAG_COLOR = 4;
 
 /** Word offsets. */
 public static const uint HEADER = 0;
@@ -41,5 +45,5 @@ public static const uint WEIGHT = 14;
 public static const uint SOURCE_INSETS = 14;
 public static const uint RESERVED = 15;
 
-/** Floats per clip rectangle: x0, y0, x1, y1, corner radius (ui-core's DrawList.CLIP_FLOATS). */
-public static const uint CLIP_FLOATS = 5;
+// A clip record (ui-core's DrawList.CLIP_FLOATS floats, handed over in the push constants as clipFloats): x0, y0, x1,
+// y1, corner radius, then the offset x, y added to its primitives' coordinates (a scrolled region's scroll).

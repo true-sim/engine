@@ -95,7 +95,11 @@ import static org.lwjgl.sdl.SDLInit.SDL_INIT_SENSOR;
 import static org.lwjgl.sdl.SDLInit.SDL_INIT_VIDEO;
 import static org.lwjgl.sdl.SDLInit.SDL_Init;
 import static org.lwjgl.sdl.SDLInit.SDL_WasInit;
+import static org.lwjgl.sdl.SDLMouse.SDL_CreateSystemCursor;
 import static org.lwjgl.sdl.SDLMouse.SDL_CursorVisible;
+import static org.lwjgl.sdl.SDLMouse.SDL_GetGlobalMouseState;
+import static org.lwjgl.sdl.SDLMouse.SDL_DestroyCursor;
+import static org.lwjgl.sdl.SDLMouse.SDL_SetCursor;
 import static org.lwjgl.sdl.SDLMouse.SDL_HideCursor;
 import static org.lwjgl.sdl.SDLMouse.SDL_ShowCursor;
 import static org.lwjgl.sdl.SDLVideo.SDL_DisableScreenSaver;
@@ -142,6 +146,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.lwjgl.PointerBuffer;
+import org.lwjgl.sdl.SDLClipboard;
+import org.lwjgl.sdl.SDLStdinc;
 import org.lwjgl.sdl.SDL_AudioDeviceEvent;
 import org.lwjgl.sdl.SDL_CommonEvent;
 import org.lwjgl.sdl.SDL_DisplayMode;
@@ -175,6 +181,7 @@ import org.lwjgl.sdl.SDL_TextInputEvent;
 import org.lwjgl.sdl.SDL_TouchFingerEvent;
 import org.lwjgl.sdl.SDL_WindowEvent;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.system.MemoryUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -206,10 +213,12 @@ public final class Platform implements AutoCloseable {
     private final Thread owner = Thread.currentThread();
     private final SDL_Event event = SDL_Event.calloc();
     private final List<Window> windows = new ArrayList<>();
+    private int globalMouse; // whether the system tells the cursor's global position: 0 unknown yet, 1 yes, -1 no
     private final List<Gamepad> gamepads = new ArrayList<>();
     private final List<Joystick> joysticks = new ArrayList<>();
     private final List<Haptic> openHaptics = new ArrayList<>();
     private final List<Sensor> openSensors = new ArrayList<>();
+    private final long[] cursors = new long[SystemCursor.values().length]; // made by setCursor, 0 until then
     private boolean closed;
 
     @AllowAllocation("starting up")
@@ -315,6 +324,26 @@ public final class Platform implements AutoCloseable {
         Window window = createWindow(options.withHidden(true));
         try {
             window.follow(settings);
+            if (!options.hidden()) {
+                window.show();
+            }
+        } catch (RuntimeException e) {
+            window.close();
+            throw e;
+        }
+        return window;
+    }
+
+    /**
+     * Opens a window as {@code options} say with its top left at {@code x, y} on the desktop (screen coordinates):
+     * placed while hidden, then shown (unless {@code options} hide it). Systems that do not let windows place
+     * themselves (Wayland) put it where they like.
+     */
+    @AllowAllocation("opening a window")
+    public Window createWindow(WindowOptions options, int x, int y) {
+        Window window = createWindow(options.withHidden(true));
+        try {
+            window.setPosition(x, y);
             if (!options.hidden()) {
                 window.show();
             }
@@ -449,12 +478,89 @@ public final class Platform implements AutoCloseable {
         }
     }
 
+    /**
+     * Shows {@code cursor} over every window (created once per kind, kept until the platform closes); {@code HIDDEN}
+     * hides it, any other shows it again.
+     */
+    public void setCursor(SystemCursor cursor) {
+        checkThread();
+        if (cursor == SystemCursor.HIDDEN) {
+            SDL_HideCursor();
+            return;
+        }
+        long handle = cursors[cursor.ordinal()];
+        if (handle == 0) {
+            handle = SDL_CreateSystemCursor(cursor.sdl);
+            cursors[cursor.ordinal()] = handle;
+        }
+        if (handle != 0) {
+            SDL_SetCursor(handle);
+        }
+        SDL_ShowCursor();
+    }
+
+    /**
+     * Where the mouse cursor is on the desktop, in screen coordinates, into {@code out} (x, y), wherever it is (over a
+     * window or not, during a drag too); false, {@code out} unchanged, where the system tells no global position
+     * (Wayland). Allocates nothing.
+     */
+    public boolean globalMouse(float[] out) {
+        checkThread();
+        if (globalMouse == 0) {
+            globalMouse = globalMouseKnown() ? 1 : -1;
+        }
+        if (globalMouse < 0) {
+            return false;
+        }
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            java.nio.FloatBuffer x = stack.mallocFloat(1);
+            java.nio.FloatBuffer y = stack.mallocFloat(1);
+            SDL_GetGlobalMouseState(x, y);
+            out[0] = x.get(0);
+            out[1] = y.get(0);
+        }
+        return true;
+    }
+
+    @AllowAllocation("asked once")
+    private boolean globalMouseKnown() {
+        return !"wayland".equals(SDL_GetCurrentVideoDriver());
+    }
+
     public boolean isCursorVisible() {
         checkThread();
         return SDL_CursorVisible();
     }
 
     /** Keeps the screen saver and display sleep off while the platform runs (SDL's default), or lets them be. */
+    /**
+     * The system clipboard's text, or an empty string (none, or not text). SDL's copy is freed here: the string is
+     * the caller's.
+     */
+    @AllowAllocation("the clipboard is read when the user pastes")
+    public String clipboardText() {
+        long text = SDLClipboard.nSDL_GetClipboardText();
+        if (text == 0) {
+            return "";
+        }
+        try {
+            return MemoryUtil.memUTF8(text);
+        } finally {
+            SDLStdinc.nSDL_free(text);
+        }
+    }
+
+    /** Puts {@code text} on the system clipboard; false if SDL refused it. */
+    @AllowAllocation("the clipboard is written when the user copies")
+    public boolean clipboardText(String text) {
+        return SDLClipboard.SDL_SetClipboardText(text);
+    }
+
+    /** Whether the system clipboard holds text. */
+    public boolean hasClipboardText() {
+        return SDLClipboard.SDL_HasClipboardText();
+    }
+
     public void setKeepScreenOn(boolean on) {
         checkThread();
         if (on) {
@@ -1023,6 +1129,12 @@ public final class Platform implements AutoCloseable {
             return;
         }
         checkThread();
+        for (int i = 0; i < cursors.length; i++) {
+            if (cursors[i] != 0) {
+                SDL_DestroyCursor(cursors[i]);
+                cursors[i] = 0;
+            }
+        }
         for (Window window : List.copyOf(windows)) {
             window.close();
         }
