@@ -302,6 +302,16 @@ Capture capture = input.capture(one, JUMP);   // the next input becomes a bindin
   letter or digit) and pointers' modifiers (the gizmo's `ui.gizmo.snap` as `Pointer.GIZMO_SNAP`); `TouchPointers` (a
   pointer per finger), `PenPointer`, `XrPointers` (aim poses as world rays, triggers as the primary button) and a
   gamepad's `VirtualCursor` (`ui.virtualCursor`, off by default) are pointers too.
+- **Gizmo actions** (`ui.gizmo`): every gizmo operation is a rebindable action. Modes `translate` W, `rotate` E,
+  `scale` R, `bounds` B, `universal` T, `nextMode` (no key; XR right A); `toggleSpace` X (XR left X),
+  `previousSpace` Shift+X; `nextPivot` period (Blender's pivot key; XR left Y), `previousPivot` Shift+period; `snap`
+  Ctrl, LT, an XR thumbstick pressed (rays and grabs: `XrPointers` adds it to the rays' modifiers); `cancelDrag`
+  Escape, RMB, east. The keys give nothing while a field types. The d-pad switches modes (up translate, right rotate,
+  down scale, left universal) only while a gizmo is focused (`commands.gizmo(() -> focused)`), and then does not
+  move focus; otherwise it navigates. XR grabs: `grabLeft`/`grabRight` (the grips; both held: two-handed scale and
+  turn) from the poses `handLeft`/`handRight` (grip poses), driven by `XrGizmoGrab` (`plugin.gizmoGrab(grab)` updates
+  ui-gizmo's `GizmoGrab` each frame after the UI's input; `cancelDrag` cancels a grab, which waits for the grip to be
+  let go). The XR defaults come with `XrPointers.defaults`.
 - **Eyedropper** (`GpuScreenSampler`, ui-core's `ScreenSampler`): a block of up to 31 x 31 texels around the pointer
   copied from the view's scene color (before the display transform, HDR kept) and read back without a wait; each
   block names the copy it is, so the newest answer arrives frames in flight later and never a stale one

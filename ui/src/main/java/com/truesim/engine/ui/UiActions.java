@@ -29,7 +29,8 @@ import java.util.Locale;
  * <p>Touch and pens have no device kind in the action system: fingers and pens reach the UI as pointers
  * ({@link TouchPointers}, {@link PenPointer}). XR controllers' defaults come with engine-xr's device class, set as the
  * game's defaults when a headset's input is there ({@link XrPointers#defaults}): the aim poses and triggers of
- * {@link #AIM_LEFT} and the others, and the left menu button held for {@link #TOGGLE_CONSOLE}. The mouse's position is
+ * {@link #AIM_LEFT} and the others, the left menu button held for {@link #TOGGLE_CONSOLE}, and the gizmo's grips,
+ * grip poses, thumbstick snap and face-button switches ({@link #GRAB_LEFT} and the others). The mouse's position is
  * read by {@link MousePointer} directly (UI22), so {@link #POSITION} is unbound by default; a gamepad's virtual cursor
  * ({@link VirtualCursor}, off unless its setting is on) reads {@link #CURSOR} and {@link #CURSOR_CLICK}. Text
  * shortcuts use Cmd on macOS, word moves Option there; Ctrl elsewhere.
@@ -168,15 +169,57 @@ public final class UiActions {
     public static final BinaryAction RESET_VIEW = CHARTS.binary("resetView", Binding.key(Key.HOME),
         Binding.pad(GamepadButton.NORTH));
 
-    public static final BinaryAction TRANSLATE = GIZMO.binary("translate", Binding.key(Key.W));
-    public static final BinaryAction ROTATE = GIZMO.binary("rotate", Binding.key(Key.E));
-    public static final BinaryAction SCALE = GIZMO.binary("scale", Binding.key(Key.R));
-    public static final BinaryAction UNIVERSAL = GIZMO.binary("universal", Binding.key(Key.T));
+    // The gizmo's mode, space and pivot switches: keys (not while typing), the d-pad while a gizmo is focused
+    // (UiCommands.gizmo; otherwise the d-pad navigates), XR buttons (XrPointers.defaults).
+
+    /** Translate: W; the d-pad's up while a gizmo is focused. */
+    public static final BinaryAction TRANSLATE = GIZMO.binary("translate", Binding.key(Key.W),
+        Binding.pad(GamepadButton.DPAD_UP));
+    /** Rotate: E; the d-pad's right while a gizmo is focused. */
+    public static final BinaryAction ROTATE = GIZMO.binary("rotate", Binding.key(Key.E),
+        Binding.pad(GamepadButton.DPAD_RIGHT));
+    /** Scale: R; the d-pad's down while a gizmo is focused. */
+    public static final BinaryAction SCALE = GIZMO.binary("scale", Binding.key(Key.R),
+        Binding.pad(GamepadButton.DPAD_DOWN));
+    /** Translate, rotate and scale at once: T; the d-pad's left while a gizmo is focused. */
+    public static final BinaryAction UNIVERSAL = GIZMO.binary("universal", Binding.key(Key.T),
+        Binding.pad(GamepadButton.DPAD_LEFT));
+    /** The space cycles (local, world, parent, view): X; with a headset, the left controller's X too. */
     public static final BinaryAction TOGGLE_SPACE = GIZMO.binary("toggleSpace", Binding.key(Key.X));
+    /** Snaps while held: Ctrl, the left trigger; with a headset, either thumbstick pressed. */
     public static final BinaryAction SNAP = GIZMO.binary("snap", Binding.of(Controls.CONTROL),
         Binding.pad(GamepadAxis.LEFT_TRIGGER));
     public static final BinaryAction CANCEL_DRAG = GIZMO.binary("cancelDrag", Binding.key(Key.ESCAPE),
         Binding.mouse(MouseButton.RIGHT), Binding.pad(GamepadButton.EAST));
+    /** The bounds mode (the selection's box, its faces and corners scaling it): B, for bounds (free in every group). */
+    public static final BinaryAction BOUNDS = GIZMO.binary("bounds", Binding.key(Key.B));
+    /**
+     * The next mode (translate, rotate, scale, bounds, universal): with a headset, the right controller's A; no key
+     * (W, E, R, B, T choose directly).
+     */
+    public static final BinaryAction NEXT_MODE = GIZMO.binary("nextMode");
+    /** The space cycles backwards: Shift+X. */
+    public static final BinaryAction PREVIOUS_SPACE = GIZMO.binary("previousSpace",
+        Binding.chord(Controls.SHIFT, Controls.key(Key.X)));
+    /**
+     * The pivot cycles (median, individual origins, active, cursor, bounds centre): period, the key of Blender's pivot
+     * menu; with a headset, the left controller's Y.
+     */
+    public static final BinaryAction NEXT_PIVOT = GIZMO.binary("nextPivot", Binding.key(Key.PERIOD));
+    /** The pivot cycles backwards: Shift+period. */
+    public static final BinaryAction PREVIOUS_PIVOT = GIZMO.binary("previousPivot",
+        Binding.chord(Controls.SHIFT, Controls.key(Key.PERIOD)));
+    /**
+     * The left hand grabs a gizmo's selection directly while held ({@link XrGizmoGrab}): the left grip with a
+     * headset. Both hands grabbing scale and turn it (two-handed).
+     */
+    public static final BinaryAction GRAB_LEFT = GIZMO.binary("grabLeft");
+    /** The right hand grabs while held: the right grip with a headset. */
+    public static final BinaryAction GRAB_RIGHT = GIZMO.binary("grabRight");
+    /** Where the left hand grabs from: the left controller's grip pose with a headset. */
+    public static final PoseAction HAND_LEFT = GIZMO.pose("handLeft");
+    /** Where the right hand grabs from: the right controller's grip pose. */
+    public static final PoseAction HAND_RIGHT = GIZMO.pose("handRight");
 
     public static final BinaryAction DOCK_MODIFIER = DOCKING.binary("dockModifier", Binding.of(Controls.SHIFT));
     public static final BinaryAction NEXT_WINDOW = DOCKING.binary("nextWindow",

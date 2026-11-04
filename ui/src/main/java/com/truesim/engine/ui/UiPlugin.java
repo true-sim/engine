@@ -45,8 +45,8 @@ import java.util.function.Function;
  * written into one {@link UiInput}, with any other {@link PointerSource}s added ({@link #pointers}: a virtual
  * cursor, touch, tests). With a window, the {@link UiKeyboard} gives mnemonics and pointers' modifiers, and fingers
  * ({@link TouchPointers}) and a pen ({@link PenPointer}) are pointers of their own; a gamepad's {@link VirtualCursor}
- * is one when its setting is on, and with a headset ({@code Xr}) the controllers' rays are ({@link XrPointers}). The
- * window's clipboard ({@link SdlClipboard}) is the UI's.</li>
+ * is one when its setting is on, and with a headset ({@code Xr}) the controllers' rays are ({@link XrPointers}); a
+ * gizmo's XR grabs come from the {@code ui.gizmo} actions too ({@link #gizmoGrab}). The window's clipboard ({@link SdlClipboard}) is the UI's.</li>
  * <li><b>The frame, in two phases</b> (no frame of latency either way): at its start ({@link #beforeUpdate}), after
  * input sampled the devices, the UI processes that input ({@code ui.input(input, nanos)}, the frame's real time):
  * picking, events, focus, commands and text, so the game's update sees this frame's clicks. After the game's update
@@ -98,6 +98,7 @@ public final class UiPlugin implements Plugin {
     private SystemCursor shownCursor;
     private float shownScale = -1;
     private PointerSource[] sources = new PointerSource[0];
+    private XrGizmoGrab[] grabs = new XrGizmoGrab[0];
     private com.truesim.engine.ui.scene.UiScene scene; // the scene bridge, or null: the UI alone
     private com.truesim.engine.settings.EngineSettings settings;
     private SettingRegistry registry;
@@ -119,6 +120,19 @@ public final class UiPlugin implements Plugin {
         sources = java.util.Arrays.copyOf(sources, sources.length + 1);
         sources[sources.length - 1] = Objects.requireNonNull(source, "source");
         return this;
+    }
+
+    /**
+     * Drives {@code grab} from the {@code ui.gizmo} actions ({@link XrGizmoGrab}: the hands' poses and grabs, snap,
+     * cancel; the grips by default with a headset), updated at each frame's start after the UI's input; returns the
+     * driver. Call after the engine started.
+     */
+    @AllowAllocation("grabs are added when the game is set up")
+    public XrGizmoGrab gizmoGrab(com.truesim.ui.gizmo.GizmoGrab grab) {
+        XrGizmoGrab driver = new XrGizmoGrab(commands.input(), grab);
+        grabs = java.util.Arrays.copyOf(grabs, grabs.length + 1);
+        grabs[grabs.length - 1] = driver;
+        return driver;
     }
 
     /** Draws on the view named {@code name} (default: the view the first window presents, else the first view). */
@@ -378,6 +392,9 @@ public final class UiPlugin implements Plugin {
             scene.input(input, nanos, view.width(), view.height());
         } else {
             ui.input(input, nanos);
+        }
+        for (XrGizmoGrab grab : grabs) {
+            grab.update(); // after the input: a handle dragged by a ray this frame is not grabbed
         }
     }
 

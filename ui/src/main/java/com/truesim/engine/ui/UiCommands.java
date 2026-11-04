@@ -35,10 +35,12 @@ import java.util.function.DoubleSupplier;
  *
  * <p><b>The other groups.</b> Tabs ({@code NEXT_TAB}, {@code PREVIOUS_TAB} repeating, {@code CLOSE_TAB}), docking's
  * window keys ({@code NEXT_WINDOW}, {@code WINDOW_MOVE}, {@code WINDOW_RESIZE}) and the console's toggle work while
- * typing too (the toggle's key types nothing: {@link UiTextInput}); the chart reset and the gizmo's mode keys only
- * while not ({@code W} types). {@code COMPLETE}, {@code HISTORY_UP} and {@code HISTORY_DOWN} come only while the
- * console's command line has the text ({@link #console}), in place of {@code NEXT}, {@code UP} and {@code DOWN} from
- * the same keys. Mnemonics and pointers' modifiers come from {@link UiKeyboard}.
+ * typing too (the toggle's key types nothing: {@link UiTextInput}); the chart reset and the gizmo's switches (modes,
+ * spaces, pivots) only while not ({@code W} types). The gizmo's switches share the d-pad with the focus moves: a
+ * focused gizmo ({@link #gizmo}) takes it, else navigation does. {@code COMPLETE}, {@code HISTORY_UP} and
+ * {@code HISTORY_DOWN} come only while the console's command line has the text ({@link #console}), in place of
+ * {@code NEXT}, {@code UP} and {@code DOWN} from the same keys. Mnemonics and pointers' modifiers come from
+ * {@link UiKeyboard}.
  *
  * <p><b>Confirm button</b> (UI29): {@link #CONFIRM} says which gamepad button accepts, south or east, or what the
  * platform does ({@link Confirm#PLATFORM}: south on Windows, Linux and macOS); cancel is the other. It sets the
@@ -87,6 +89,8 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
     private static final int NOT_TEXT = 4;    // not while text is taken (its text twin is given instead)
     private static final int MOVE = 8;        // moves a caret or a selection: extends with Shift
     private static final int CONSOLE_LINE = 16; // only while the console's command line takes the text
+    private static final int NAV_MOVE = 32;   // a focus move: none while a focused gizmo's switch is held (the d-pad)
+    private static final int GIZMO_SWITCH = 64; // a gizmo's switch: none with a focus move pressed, unless focused
 
     // The mapping: action, command, flags.
     private static final BinaryAction[] ACTIONS = {
@@ -99,7 +103,8 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
         UiActions.DOC_END, UiActions.SUBMIT, UiActions.NEWLINE,
         UiActions.NEXT_TAB, UiActions.PREVIOUS_TAB, UiActions.CLOSE_TAB, UiActions.RESET_VIEW,
         UiActions.TRANSLATE, UiActions.ROTATE, UiActions.SCALE, UiActions.UNIVERSAL, UiActions.TOGGLE_SPACE,
-        UiActions.CANCEL_DRAG, UiActions.NEXT_WINDOW, UiActions.WINDOW_MOVE, UiActions.WINDOW_RESIZE,
+        UiActions.CANCEL_DRAG, UiActions.BOUNDS, UiActions.NEXT_MODE, UiActions.PREVIOUS_SPACE, UiActions.NEXT_PIVOT,
+        UiActions.PREVIOUS_PIVOT, UiActions.NEXT_WINDOW, UiActions.WINDOW_MOVE, UiActions.WINDOW_RESIZE,
         UiActions.TOGGLE_CONSOLE, UiActions.COMPLETE, UiActions.HISTORY_UP, UiActions.HISTORY_DOWN,
     };
     private static final UiCommand[] COMMANDS = {
@@ -112,21 +117,24 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
         UiCommand.DOC_END, UiCommand.SUBMIT, UiCommand.NEWLINE,
         UiCommand.NEXT_TAB, UiCommand.PREVIOUS_TAB, UiCommand.CLOSE_TAB, UiCommand.CHART_RESET,
         UiCommand.GIZMO_TRANSLATE, UiCommand.GIZMO_ROTATE, UiCommand.GIZMO_SCALE, UiCommand.GIZMO_UNIVERSAL,
-        UiCommand.GIZMO_TOGGLE_SPACE, UiCommand.GIZMO_CANCEL, UiCommand.NEXT_WINDOW, UiCommand.WINDOW_MOVE,
-        UiCommand.WINDOW_RESIZE, UiCommand.CONSOLE_TOGGLE, UiCommand.COMPLETE, UiCommand.HISTORY_UP,
-        UiCommand.HISTORY_DOWN,
+        UiCommand.GIZMO_TOGGLE_SPACE, UiCommand.GIZMO_CANCEL, UiCommand.GIZMO_BOUNDS, UiCommand.GIZMO_NEXT_MODE,
+        UiCommand.GIZMO_PREVIOUS_SPACE, UiCommand.GIZMO_NEXT_PIVOT, UiCommand.GIZMO_PREVIOUS_PIVOT,
+        UiCommand.NEXT_WINDOW, UiCommand.WINDOW_MOVE, UiCommand.WINDOW_RESIZE, UiCommand.CONSOLE_TOGGLE,
+        UiCommand.COMPLETE, UiCommand.HISTORY_UP, UiCommand.HISTORY_DOWN,
     };
     private static final int R = REPEATS;
+    private static final int D = NAV_MOVE;
+    private static final int G = NOT_TEXT | GIZMO_SWITCH;
     private static final int[] FLAGS = {
-        R | MOVE, R | MOVE, R | MOVE, R | MOVE, R, R, R | MOVE, R | MOVE, MOVE | NOT_TEXT, MOVE | NOT_TEXT, NOT_TEXT, 0,
-        0, 0,
+        R | MOVE | D, R | MOVE | D, R | MOVE | D, R | MOVE | D, R, R, R | MOVE, R | MOVE, MOVE | NOT_TEXT,
+        MOVE | NOT_TEXT, NOT_TEXT, 0, 0, 0,
         TEXT_ONLY, TEXT_ONLY, TEXT_ONLY, TEXT_ONLY, TEXT_ONLY | R, TEXT_ONLY | R,
         TEXT_ONLY | R, TEXT_ONLY | R, TEXT_ONLY | R, TEXT_ONLY | R,
         TEXT_ONLY | R | MOVE, TEXT_ONLY | R | MOVE, TEXT_ONLY | MOVE, TEXT_ONLY | MOVE, TEXT_ONLY | MOVE,
         TEXT_ONLY | MOVE, TEXT_ONLY, TEXT_ONLY | R,
         R, R, 0, NOT_TEXT,
-        NOT_TEXT, NOT_TEXT, NOT_TEXT, NOT_TEXT, NOT_TEXT,
-        0, 0, 0, 0,
+        G, G, G, G, G,
+        0, G, G, G, G, G, 0, 0, 0,
         0, CONSOLE_LINE, CONSOLE_LINE | R, CONSOLE_LINE | R,
     };
     /** When a mapping's twin, held, takes its place: in the console's command line, or with the virtual cursor on. */
@@ -168,6 +176,7 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
     private long dropped;
     private BooleanSupplier consoleLine = () -> false;
     private BooleanSupplier cursorOn = () -> false;
+    private BooleanSupplier gizmoFocused = () -> false;
 
     /**
      * Commands from {@code input}'s players, its {@link UiActions} added if they were not; {@code settings} the
@@ -269,6 +278,17 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
         return this;
     }
 
+    /**
+     * Says when a gizmo is focused (e.g. {@code () -> sceneViewFocused}): only then do the gizmo's switches bound to
+     * the same controls as focus moves (by default the d-pad: translate up, rotate right, scale down, universal left)
+     * switch it, and those moves are not made; otherwise the moves are made and the switches give nothing (the d-pad
+     * navigates). Switches on controls of their own (the keys) work either way. Asked each frame; must not allocate.
+     */
+    public UiCommands gizmo(BooleanSupplier focused) {
+        gizmoFocused = Objects.requireNonNull(focused, "focused");
+        return this;
+    }
+
     /** The input it reads. */
     Input input() {
         return input;
@@ -293,9 +313,21 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
         boolean typing = input.textContext() == text;
         boolean console = typing && consoleLine.getAsBoolean();
         boolean cursor = cursorOn.getAsBoolean();
+        boolean gizmo = gizmoFocused.getAsBoolean();
         for (int p = 0; p < players; p++) {
             Player player = input.player(p);
             boolean extend = typing && player.down(UiActions.EXTEND_SELECTION);
+            // A focused gizmo's switch held takes the focus moves of its controls; else a move pressed takes the
+            // switches pressed with it (the same d-pad press).
+            boolean switching = false;
+            boolean moving = false;
+            for (int m = 0; m < mappings; m++) {
+                if ((FLAGS[m] & GIZMO_SWITCH) != 0 && gizmo) {
+                    switching |= player.down(ACTIONS[m]);
+                } else if ((FLAGS[m] & NAV_MOVE) != 0 && !gizmo) {
+                    moving |= player.presses(ACTIONS[m]) > 0;
+                }
+            }
             for (int m = 0; m < mappings; m++) {
                 int flags = FLAGS[m];
                 BinaryAction action = ACTIONS[m];
@@ -303,7 +335,8 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
                 int when = TWIN_WHEN[m];
                 if ((flags & TEXT_ONLY) != 0 && !typing || (flags & NOT_TEXT) != 0 && typing
                     || (flags & CONSOLE_LINE) != 0 && !console
-                    || when != 0 && (when == IN_CONSOLE ? console : cursor) && player.down(TWINS[m])) {
+                    || when != 0 && (when == IN_CONSOLE ? console : cursor) && player.down(TWINS[m])
+                    || (flags & NAV_MOVE) != 0 && switching || (flags & GIZMO_SWITCH) != 0 && moving) {
                     nextRepeat[at] = Double.NaN;
                     continue;
                 }

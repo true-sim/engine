@@ -51,6 +51,68 @@ class UiCommandsTest {
     }
 
     @Test
+    void everyGizmoSwitchIsAnActionWithItsKeysNotWhileTyping() {
+        try (InputRig rig = new InputRig()) {
+            rig.frame();
+            assertThat(rig.press(Key.B)).containsExactly("GIZMO_BOUNDS");
+            assertThat(rig.press(Key.LEFT_SHIFT, Key.X)).as("the chord, not the next space")
+                .containsExactly("GIZMO_PREVIOUS_SPACE");
+            assertThat(rig.press(Key.PERIOD)).containsExactly("GIZMO_NEXT_PIVOT");
+            assertThat(rig.press(Key.LEFT_SHIFT, Key.PERIOD)).containsExactly("GIZMO_PREVIOUS_PIVOT");
+            assertThat(rig.input.bindings(rig.input.player(0), UiActions.NEXT_MODE)).as("no key: W, E, R, B, T")
+                .isEmpty();
+            rig.input.bind(rig.input.player(0), UiActions.NEXT_MODE, Binding.key(Key.M));
+            assertThat(rig.press(Key.M)).as("rebound").containsExactly("GIZMO_NEXT_MODE");
+            assertThat(rig.input.bindingSetting(UiActions.NEXT_PIVOT).name()).isEqualTo("input.ui.gizmo.nextPivot");
+            for (var action : new com.truesim.engine.input.BinaryAction[] {UiActions.BOUNDS, UiActions.NEXT_MODE,
+                UiActions.PREVIOUS_SPACE, UiActions.NEXT_PIVOT, UiActions.PREVIOUS_PIVOT}) {
+                assertThat(UiCommands.commandOf(action)).as(action.toString()).isNotNull();
+            }
+            rig.commands.startText(null);
+            rig.frame();
+            for (Key key : new Key[] {Key.B, Key.PERIOD, Key.M, Key.W}) {
+                assertThat(rig.press(key)).as("%s types", key).isEmpty();
+            }
+            assertThat(rig.press(Key.LEFT_SHIFT, Key.X)).as("types an X").isEmpty();
+            assertThat(rig.press(Key.LEFT_SHIFT, Key.PERIOD)).isEmpty();
+            rig.commands.stopText();
+            rig.frame();
+            assertThat(rig.press(Key.PERIOD)).containsExactly("GIZMO_NEXT_PIVOT");
+        }
+    }
+
+    @Test
+    void theDpadSwitchesTheModeOnlyWhileAGizmoIsFocusedAndNavigatesOtherwise() {
+        try (InputRig rig = new InputRig()) {
+            boolean[] focused = {false};
+            rig.commands.gizmo(() -> focused[0]);
+            rig.plug(1).frame();
+            GamepadButton[] dpad = {GamepadButton.DPAD_UP, GamepadButton.DPAD_RIGHT, GamepadButton.DPAD_DOWN,
+                GamepadButton.DPAD_LEFT};
+            String[] moves = {"UP", "RIGHT", "DOWN", "LEFT"};
+            String[] modes = {"GIZMO_TRANSLATE", "GIZMO_ROTATE", "GIZMO_SCALE", "GIZMO_UNIVERSAL"};
+            for (int i = 0; i < 4; i++) {
+                rig.pad(1, dpad[i], true).frame();
+                assertThat(rig.commands()).as("no gizmo focused: it navigates").containsExactly(moves[i]);
+                rig.pad(1, dpad[i], false).frame();
+            }
+            focused[0] = true;
+            for (int i = 0; i < 4; i++) {
+                rig.pad(1, dpad[i], true).frame();
+                assertThat(rig.commands()).as("a focused gizmo takes it").containsExactly(modes[i]);
+                rig.frame(1000);
+                rig.frame();
+                assertThat(rig.commands()).as("held: no navigation repeats").isEmpty();
+                rig.pad(1, dpad[i], false).frame();
+            }
+            assertThat(rig.press(Key.UP)).as("the arrows still move focus").containsExactly("UP");
+            assertThat(rig.press(Key.W)).containsExactly("GIZMO_TRANSLATE");
+            focused[0] = false;
+            assertThat(rig.press(Key.W)).as("the keys switch it either way").containsExactly("GIZMO_TRANSLATE");
+        }
+    }
+
+    @Test
     void rebindingAcceptThroughItsSettingChangesTheKey() {
         try (InputRig rig = new InputRig()) {
             rig.frame();
