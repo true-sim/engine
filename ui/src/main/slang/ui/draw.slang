@@ -13,7 +13,8 @@
 // entry (its owner's: a scaled or moved subtree is cut where it draws) and tested at the pixel itself.
 //
 // One draw per layer runs fragmentMain, which branches on the kind (the "uber" path); the per-kind path draws runs of
-// one kind with that kind's own fragment entry point (boxMain, glyphMain, ...), in list order.
+// one kind with that kind's own fragment entry point (boxMain, glyphMain, ...), in list order. The kinds over vertices
+// (PATH, COLUMNS: chart lines and envelopes) are drawn by draws of their own, a quad per segment or column (below).
 //
 // Depth tested primitives (FLAG_DEPTH: a gizmo's handles, projections of 3D shapes) are faded per pixel where the
 // scene drawn under the UI in this frame is nearer (design UI26): their view depth at the pixel (interpolated from
@@ -45,6 +46,7 @@ struct UiPush
     float depthNear;    // under perspective: the near plane (reverse depth, infinite far: view depth = near / depth)
     float depthRange;   // under an orthographic view: its depth range (view depth = (1 - depth) * range); else 0
     float depthBias;    // how much farther than the scene (relative) a primitive must be to be hidden
+    float4* vertices;   // the layer's vertex table (VERTEX_FLOATS floats each): paths' points, envelopes' columns
 };
 
 [[vk::push_constant]]
@@ -175,7 +177,7 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
     uint kind = header & 0xff;
     VertexOut out;
     out.primitive = index;
-    if (kind == EMPTY || kind >= KINDS)
+    if (kind == EMPTY || kind >= KINDS || kind == PATH || kind == COLUMNS) // those over vertices: draws of their own
     {
         out.position = float4(-2, -2, 0, 1); // every corner at one point: no area, no pixels
         return out;
@@ -714,6 +716,588 @@ float4 triangleMain(VertexOut in) : SV_Target
     float2 local = ownCoordinates(px, header, t);
     return triangle(p, header, local, t.scale) * (t.opacity * clipped(header, px) * depthTest(p, header, local,
         in.position.xy));
+}
+
+// ------------------------------------------------------------------------------------------------- a folded backdrop
+// A box covering the whole image at its bottom is cleared to (GpuUiRenderer.foldBackdrop); if it has rounded corners or
+// a border, its four edges, as deep as they reach, are drawn by fragmentMain over the clear without blending (what the
+// box covers there is transparent): the box's own pixels, its middle the clear's.
+
+[shader("vertex")]
+VertexOut edgesVertexMain(uint vertex : SV_VulkanVertexID)
+{
+    uint index = push.first;
+    uint* p = push.primitives + index * WORDS;
+    uint header = p[HEADER];
+    Transform t = transformAt(p[TRANSFORM]);
+    float2 offset = clipOffset(header);
+    float2 a = (float2(word(p, X0), word(p, Y0)) + offset) * t.scale + t.offset;
+    float2 b = (float2(word(p, X1), word(p, Y1)) + offset) * t.scale + t.offset;
+    float2 lo = min(a, b) - 0.5;
+    float2 hi = max(a, b) + 0.5;
+    float2 top = halves(p[RADII]);
+    float2 bottom = halves(p[RADII + 1]);
+    float reach = max(max(max(top.x, top.y), max(bottom.x, bottom.y)), word(p, WIDTH)) * t.scale + 1.5;
+    uint side = vertex / 6;
+    uint corner = CORNERS[vertex % 6];
+    float2 s0;
+    float2 s1;
+    if (side == 0)
+    {
+        s0 = lo;
+        s1 = float2(hi.x, lo.y + reach);
+    }
+    else if (side == 1)
+    {
+        s0 = float2(lo.x, hi.y - reach);
+        s1 = hi;
+    }
+    else
+    {
+        float x = side == 2 ? lo.x : hi.x - reach;
+        s0 = float2(x, lo.y + reach);
+        s1 = float2(x + reach, max(lo.y + reach, hi.y - reach)); // nothing between the top and bottom edges: no area
+    }
+    float2 at = float2((corner & 1) != 0 ? s1.x : s0.x, (corner & 2) != 0 ? s1.y : s0.y);
+    VertexOut out;
+    out.primitive = index;
+    out.position = float4((at.x - push.originX) * push.toClipX - 1, (at.y - push.originY) * push.toClipY - 1, 0, 1);
+    return out;
+}
+
+// ------------------------------------------------------------------------------------------------ kinds over vertices
+// PATH and COLUMNS draw points of the layer's vertex table (push.vertices), one draw each: SV_VertexID / 6 is the
+// segment or column, the primitive is push.first. Their geometry is worked out in UI pixels (each point moved by the
+// primitive's clip offset and transform entry), so widths and anti-aliasing are in pixels.
+//
+// A path: each segment's quad covers its body (butt ends), its caps where the path starts or ends, and the join at its
+// end (the wedge on the outer side of the bend: miter, bevel past the miter limit, or round). Segments next to each
+// other overlap at their joins; each pixel is drawn by the segment covering it most among its neighbours (the others
+// discard it), with that coverage, so a path is the union of its segments: no seam, no doubled translucency at a join.
+// Dashes run along the length stored with each point.
+//
+// Columns (a min-max envelope): filled, a quad a pixel column, the column's span from the baseline to its farthest
+// sample, anti-aliased at its ends; stroked, a quad a piece: each column's vertical stroke over its span (grown by half
+// the width), and from the column before a connector (its last sample to this one's first, or stairs: level, then up
+// or down) where their spans do not touch, each drawn as a LINE would be, blending where they overlap as lines do.
+
+struct ItemOut
+{
+    float4 position : SV_Position;
+    nointerpolation uint primitive : PRIMITIVE;
+    nointerpolation uint item : ITEM; // the segment or column
+};
+
+/** Neighbouring segments either side a path's pixel may be shared with. */
+static const int PATH_REACH = 2;
+
+/** Vertex `j` of primitive `p`'s vertices. */
+float4 vertexAt(uint* p, int j)
+{
+    return push.vertices[p[FIRST_VERTEX] + uint(j)]; // VERTEX_FLOATS: one float4
+}
+
+/** Not NaN, not infinite (NaN fails every comparison). */
+bool present(float v)
+{
+    return abs(v) < 1e30;
+}
+
+ItemOut noItem(uint index, uint item)
+{
+    ItemOut out;
+    out.position = float4(-2, -2, 0, 1); // no area, no pixels
+    out.primitive = index;
+    out.item = item;
+    return out;
+}
+
+ItemOut itemAt(float2 at, uint index, uint item)
+{
+    ItemOut out;
+    out.position = float4((at.x - push.originX) * push.toClipX - 1, (at.y - push.originY) * push.toClipY - 1, 0, 1);
+    out.primitive = index;
+    out.item = item;
+    return out;
+}
+
+/** A segment from `a` to `b` `width` pixels wide with butt ends, as the LINE kind draws it (at least a pixel wide). */
+float lineCover(float2 a, float2 b, float width, float2 px)
+{
+    float2 d = b - a;
+    float len = length(d);
+    if (!(len > 0))
+    {
+        return 0;
+    }
+    d /= len;
+    float2 q = px - a;
+    float along = dot(q, d);
+    float across = abs(dot(q, float2(-d.y, d.x)));
+    return saturate(max(width, 1) * 0.5 + 0.5 - across) * saturate(min(along, len - along) + 0.5) * min(width, 1);
+}
+
+// ------------------------------------------------------------------------------------------------------------ paths
+
+struct Path
+{
+    uint* p;
+    Transform t;
+    float2 offset;
+    int count;
+    float hw;      // half the width, at least half a pixel
+    float fade;    // lines thinner than a pixel are a pixel wide, fainter
+    uint join;
+    uint cap;
+    float limit;
+    float4 dashes; // dash, gap, dash, gap (pixels)
+    float phase;
+};
+
+Path pathOf(uint* p, uint header)
+{
+    Path q;
+    q.p = p;
+    q.t = transformAt(p[TRANSFORM]);
+    q.offset = clipOffset(header);
+    q.count = int(p[VERTEX_COUNT]);
+    float w = word(p, WIDTH) * q.t.scale;
+    q.hw = max(w, 1) * 0.5;
+    q.fade = min(w, 1);
+    q.join = p[STROKE] & 3;
+    q.cap = p[STROKE] & 12;
+    q.limit = word(p, MITER_LIMIT);
+    q.dashes = float4(halves(p[DASHES]), halves(p[DASHES + 1])) * q.t.scale;
+    q.phase = word(p, DASH_PHASE) * q.t.scale;
+    return q;
+}
+
+/** Point `j` of the path in UI pixels, with its length along the path; false if there is none or it is a break. */
+bool pathPoint(Path q, int j, out float2 at, out float s)
+{
+    at = float2(0, 0);
+    s = 0;
+    if (j < 0 || j >= q.count)
+    {
+        return false;
+    }
+    float4 v = vertexAt(q.p, j);
+    at = (v.xy + q.offset) * q.t.scale + q.t.offset;
+    s = v.z * q.t.scale;
+    return present(v.x) && present(v.y);
+}
+
+/** Segment `j` (points j, j + 1): false if either is missing or they coincide. */
+bool pathSegment(Path q, int j, out float2 a, out float2 b, out float sa, out float sb)
+{
+    bool first = pathPoint(q, j, a, sa);
+    bool second = pathPoint(q, j + 1, b, sb);
+    return first && second && any(a != b);
+}
+
+bool hasSegment(Path q, int j)
+{
+    float2 a;
+    float2 b;
+    float sa;
+    float sb;
+    return pathSegment(q, j, a, b, sa, sb);
+}
+
+/** How much of the dash pattern covers the point `s` pixels along the path (1 when solid). */
+float dashCover(Path q, float s)
+{
+    float4 d = q.dashes;
+    float total = d.x + d.y + d.z + d.w;
+    if (!(total > 0) || d.y + d.w <= 0)
+    {
+        return 1;
+    }
+    float x = s + q.phase;
+    x -= floor(x / total) * total;
+    float best = -1e30;
+    for (int k = -1; k <= 1; k++)
+    {
+        float o = k * total;
+        best = max(best, min(x - o, o + d.x - x));
+        float second = o + d.x + d.y;
+        best = max(best, min(x - second, second + d.z - x));
+    }
+    return saturate(best + 0.5);
+}
+
+/** The join at `b`, the end of the segment along `d`, on the outer side of the bend towards `c`. */
+float joinCover(Path q, float2 b, float2 d, float2 c, float2 px)
+{
+    float2 e = normalize(c - b);
+    float turn = d.x * e.y - d.y * e.x;
+    float2 r = px - b;
+    if (abs(turn) < 1e-6 || dot(r, d) < 0 || dot(r, e) > 0)
+    {
+        return 0; // straight on, or outside the wedge between the two segments' ends
+    }
+    if (q.join == JOIN_ROUND)
+    {
+        return saturate(q.hw + 0.5 - length(r));
+    }
+    float side = turn > 0 ? -1 : 1; // the outer side: away from the turn
+    float2 o1 = float2(-d.y, d.x) * side;
+    float2 o2 = float2(-e.y, e.x) * side;
+    float cover = min(saturate(q.hw + 0.5 - dot(r, o1)), saturate(q.hw + 0.5 - dot(r, o2)));
+    float cosHalf = sqrt(max(0, (1 + dot(d, e)) * 0.5));
+    if (q.join == JOIN_BEVEL || cosHalf * q.limit < 1) // a miter longer than the limit: beveled
+    {
+        float2 m = normalize(o1 + o2);
+        cover = min(cover, saturate(q.hw * dot(m, o1) + 0.5 - dot(r, m)));
+    }
+    return cover;
+}
+
+/** Coverage of `px` by segment `j`: its body, its caps, and the join at its end. */
+float segmentCover(Path q, int j, float2 px)
+{
+    float2 a;
+    float2 b;
+    float sa;
+    float sb;
+    if (!pathSegment(q, j, a, b, sa, sb))
+    {
+        return 0;
+    }
+    float len = length(b - a);
+    float2 d = (b - a) / len;
+    float2 r = px - a;
+    float t = dot(r, d);
+    float u = dot(r, float2(-d.y, d.x));
+    bool starts = !hasSegment(q, j - 1); // a cap at a, else a join the segment before owns
+    bool ends = !hasSegment(q, j + 1);
+    float e0 = starts && q.cap == CAP_SQUARE ? q.hw : 0;
+    float e1 = ends && q.cap == CAP_SQUARE ? q.hw : 0;
+    float from = saturate(t + e0 + 0.5);
+    float to = saturate(len + e1 - t + 0.5);
+    // Where a segment meets the next, the two ends are not edges: each body is whole up to its end, and past it only
+    // where no other body is either (the outer side of the bend), so a join or a notch shows, anti-aliased there.
+    if (!starts)
+    {
+        float2 before;
+        float sbefore;
+        pathPoint(q, j - 1, before, sbefore);
+        from = t >= 0 ? 1 : dot(r, a - before) > 0 ? from : 0;
+    }
+    if (!ends)
+    {
+        float2 after;
+        float safter;
+        pathPoint(q, j + 2, after, safter);
+        to = t <= len ? 1 : dot(px - b, after - b) < 0 ? to : 0;
+    }
+    float body = saturate(q.hw + 0.5 - abs(u)) * min(from, to);
+    if (starts && q.cap == CAP_ROUND && t < 0)
+    {
+        body = saturate(q.hw + 0.5 - length(r));
+    }
+    if (ends && q.cap == CAP_ROUND && t > len)
+    {
+        body = saturate(q.hw + 0.5 - length(px - b));
+    }
+    float cover = body * dashCover(q, sa + clamp(t, 0, len));
+    if (!ends && q.join != JOIN_NONE)
+    {
+        float2 c;
+        float sc;
+        pathPoint(q, j + 2, c, sc);
+        cover = max(cover, joinCover(q, b, d, c, px) * dashCover(q, sb));
+    }
+    return cover * q.fade;
+}
+
+[shader("vertex")]
+ItemOut pathVertexMain(uint vertex : SV_VulkanVertexID)
+{
+    int j = int(vertex / 6);
+    uint corner = CORNERS[vertex % 6];
+    uint index = push.first;
+    uint* p = push.primitives + index * WORDS;
+    Path q = pathOf(p, p[HEADER]);
+    float2 a;
+    float2 b;
+    float sa;
+    float sb;
+    if (!pathSegment(q, j, a, b, sa, sb))
+    {
+        return noItem(index, uint(j));
+    }
+    float2 d = normalize(b - a);
+    float2 n = float2(-d.y, d.x);
+    bool starts = !hasSegment(q, j - 1);
+    bool ends = !hasSegment(q, j + 1);
+    float cap = q.cap != CAP_BUTT ? q.hw : 0;
+    float reach = q.hw + 1; // the body's half width and its anti-aliased edge
+    float join = 1;
+    if (!ends && q.join != JOIN_NONE)
+    {
+        join = q.hw + 1;
+        if (q.join == JOIN_MITER)
+        {
+            float2 c;
+            float sc;
+            pathPoint(q, j + 2, c, sc);
+            float cosHalf = sqrt(max(0, (1 + dot(d, normalize(c - b))) * 0.5));
+            if (cosHalf * q.limit >= 1)
+            {
+                join = q.hw / max(cosHalf, 1e-3) + 1; // the miter's tip
+            }
+        }
+    }
+    float ext0 = (starts ? cap : 0) + 1;
+    float ext1 = ends ? cap + 1 : join;
+    float across = max(reach, join);
+    float2 at = ((corner & 1) != 0 ? b + d * ext1 : a - d * ext0) + n * ((corner & 2) != 0 ? across : -across);
+    return itemAt(at, index, uint(j));
+}
+
+[shader("fragment")]
+float4 pathMain(ItemOut in) : SV_Target
+{
+    uint* p = push.primitives + in.primitive * WORDS;
+    uint header = p[HEADER];
+    Path q = pathOf(p, header);
+    float2 px = uiPixel(in.position);
+    int j = int(in.item);
+    float cover = segmentCover(q, j, px);
+    if (!(cover > 0))
+    {
+        discard;
+    }
+    for (int k = j - PATH_REACH; k <= j + PATH_REACH; k++)
+    {
+        if (k == j)
+        {
+            continue;
+        }
+        float other = segmentCover(q, k, px);
+        if (other > cover || other == cover && k < j)
+        {
+            discard; // a neighbour covers it more: it draws it
+        }
+    }
+    return color(p, COLOR_A) * (cover * q.t.opacity * clipped(header, px));
+}
+
+// ---------------------------------------------------------------------------------------------------------- columns
+
+struct Columns
+{
+    uint* p;
+    Transform t;
+    float2 offset;
+    int count;
+    float x;     // the first column's centre, UI pixels
+    float step;  // pixels to the next column (negative: leftwards)
+    float width; // the stroke's width, pixels (0: filled)
+    bool fill;
+    bool steps;
+    float base;
+};
+
+Columns columnsOf(uint* p, uint header)
+{
+    Columns c;
+    c.p = p;
+    c.t = transformAt(p[TRANSFORM]);
+    c.offset = clipOffset(header);
+    c.count = int(p[VERTEX_COUNT]);
+    c.x = (word(p, COLUMN_X) + c.offset.x) * c.t.scale + c.t.offset.x;
+    c.step = word(p, COLUMN_STEP) * c.t.scale;
+    c.width = word(p, WIDTH) * c.t.scale;
+    c.fill = (p[STROKE] & COLUMNS_FILL) != 0;
+    c.steps = (p[STROKE] & COLUMNS_STEPS) != 0;
+    c.base = (word(p, BASELINE) + c.offset.y) * c.t.scale + c.t.offset.y;
+    return c;
+}
+
+/** Column `k`'s first, last, lowest and highest sample in UI pixels; x not present when there is none. */
+float4 columnAt(Columns c, int k)
+{
+    if (k < 0 || k >= c.count)
+    {
+        return float4(asfloat(0x7fc00000u), 0, 0, 0);
+    }
+    return (vertexAt(c.p, k) + c.offset.y) * c.t.scale + c.t.offset.y;
+}
+
+/** Columns of a fill a quad covers (GpuUiRenderer.FILL_GROUP): quads a pixel wide rasterize slowly. */
+static const int FILL_GROUP = 4;
+
+struct PieceOut
+{
+    float4 position : SV_Position;
+    nointerpolation uint primitive : PRIMITIVE;
+    nointerpolation float4 piece : PIECE; // a stroked piece's ends a (xy) and b (zw), UI pixels; a column's span
+};
+
+PieceOut noPiece(uint index)
+{
+    PieceOut out;
+    out.position = float4(-2, -2, 0, 1); // no area, no pixels
+    out.primitive = index;
+    out.piece = float4(0, 0, 0, 0);
+    return out;
+}
+
+PieceOut pieceAt(float2 at, uint index, float4 piece)
+{
+    PieceOut out;
+    out.position = float4((at.x - push.originX) * push.toClipX - 1, (at.y - push.originY) * push.toClipY - 1, 0, 1);
+    out.primitive = index;
+    out.piece = piece;
+    return out;
+}
+
+/**
+ * Stroked columns: three quads a column, each a piece drawn as a LINE would draw it (butt ends, at least a pixel wide):
+ * its vertical stroke over its span grown by half the width (when it spans half a pixel), then the connector from the
+ * column before (its last sample to this one's first) where their spans do not touch, as one segment or as stairs
+ * (level, then up or down: two). Pieces overlap and blend as segments did. Filled columns: a quad a column, from the
+ * baseline to the farthest sample.
+ */
+[shader("vertex")]
+PieceOut columnsVertexMain(uint vertex : SV_VulkanVertexID)
+{
+    uint index = push.first;
+    uint* p = push.primitives + index * WORDS;
+    uint header = p[HEADER];
+    Columns c = columnsOf(p, header);
+    uint corner = CORNERS[vertex % 6];
+    if (c.fill)
+    {
+        int k0 = int(vertex / 6) * FILL_GROUP;
+        int k1 = min(k0 + FILL_GROUP, c.count) - 1;
+        float top = c.base;
+        float bottom = c.base;
+        bool found = false;
+        for (int k = k0; k <= k1; k++)
+        {
+            float4 v = columnAt(c, k);
+            if (present(v.x))
+            {
+                top = min(top, v.z);
+                bottom = max(bottom, v.w);
+                found = true;
+            }
+        }
+        if (!found)
+        {
+            return noPiece(index);
+        }
+        float half = abs(c.step) * 0.5;
+        float a = c.x + c.step * k0;
+        float b = c.x + c.step * k1;
+        float2 lo = float2(min(a, b) - half, top - 1);
+        float2 hi = float2(max(a, b) + half, bottom + 1);
+        uint clip = header >> 16;
+        if (clip != 0)
+        {
+            float radius;
+            float4 bounds = clipBounds(clip, radius);
+            lo = max(lo, bounds.xy);
+            hi = min(hi, bounds.zw);
+            if (any(lo >= hi))
+            {
+                return noPiece(index);
+            }
+        }
+        return pieceAt(float2((corner & 1) != 0 ? hi.x : lo.x, (corner & 2) != 0 ? hi.y : lo.y), index,
+            float4(0, 0, 0, 0));
+    }
+    int k = int(vertex / 18);
+    int piece = int(vertex % 18) / 6;
+    float4 v = columnAt(c, k);
+    if (!present(v.x))
+    {
+        return noPiece(index);
+    }
+    float cx = c.x + c.step * k;
+    bool tall = v.w - v.z >= 0.5;
+    float2 a;
+    float2 b;
+    if (piece == 0)
+    {
+        if (!tall)
+        {
+            return noPiece(index);
+        }
+        a = float2(cx, v.z - c.width * 0.5);
+        b = float2(cx, v.w + c.width * 0.5);
+    }
+    else
+    {
+        float4 before = columnAt(c, k - 1);
+        bool touching = tall && before.w - before.z >= 0.5 && before.z <= v.w + c.width && v.z <= before.w + c.width
+            && abs(c.step) <= 1.5;
+        if (!present(before.x) || touching || piece == 2 && !c.steps)
+        {
+            return noPiece(index);
+        }
+        float px0 = cx - c.step;
+        if (!c.steps)
+        {
+            a = float2(px0, before.y);
+            b = float2(cx, v.x);
+        }
+        else if (piece == 1)
+        {
+            a = float2(px0, before.y);
+            b = float2(cx, before.y);
+        }
+        else
+        {
+            a = float2(cx, before.y);
+            b = float2(cx, v.x);
+        }
+    }
+    float2 d = b - a;
+    float len = length(d);
+    if (!(len > 0))
+    {
+        return noPiece(index);
+    }
+    float2 along = d / len;
+    float2 normal = float2(-along.y, along.x);
+    float extent = max(c.width, 1) * 0.5 + 0.5; // coverage is 0 from half a pixel past the edge on
+    float2 at = ((corner & 1) != 0 ? b + along * 0.5 : a - along * 0.5)
+        + normal * ((corner & 2) != 0 ? extent : -extent);
+    return pieceAt(at, index, float4(a, b));
+}
+
+[shader("fragment")]
+float4 columnsMain(PieceOut in) : SV_Target
+{
+    uint* p = push.primitives + in.primitive * WORDS;
+    uint header = p[HEADER];
+    Transform t = transformAt(p[TRANSFORM]);
+    float2 px = uiPixel(in.position);
+    float cover;
+    if ((p[STROKE] & COLUMNS_FILL) != 0)
+    {
+        // the fill of the column the pixel lies in, from the baseline to its farthest sample, anti-aliased there
+        Columns c = columnsOf(p, header);
+        float4 v = columnAt(c, int(round((px.x - c.x) / c.step)));
+        if (!present(v.x))
+        {
+            discard;
+        }
+        cover = saturate(px.y - min(c.base, v.z) + 0.5) * saturate(max(c.base, v.w) - px.y + 0.5);
+        if (!(cover > 0))
+        {
+            discard; // outside its column's fill, within the quad of its neighbours'
+        }
+    }
+    else
+    {
+        cover = lineCover(in.piece.xy, in.piece.zw, word(p, WIDTH) * t.scale, px);
+    }
+    return color(p, COLOR_A) * (cover * t.opacity * clipped(header, px));
 }
 
 // ------------------------------------------------------------------------------------------------------ world panels
