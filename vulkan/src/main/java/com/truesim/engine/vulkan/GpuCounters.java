@@ -28,6 +28,7 @@ public final class GpuCounters implements Counters.Source {
     private int total;
     private volatile long calibrateNanos = 2_000_000_000L;
     private long calibratedAt;
+    private boolean calibratedOnce; // nanoTime may be younger than the interval (a freshly booted machine)
 
     /** The counters of {@code device}, calibrating {@code clock} (null: none). */
     public GpuCounters(VulkanDevice device, GpuClock clock) {
@@ -85,7 +86,8 @@ public final class GpuCounters implements Counters.Source {
         }
         into.set(total, GpuMemory.total());
         long now = System.nanoTime();
-        if (clock != null && now - calibratedAt >= calibrateNanos) {
+        if (clock != null && (!calibratedOnce || now - calibratedAt >= calibrateNanos)) {
+            calibratedOnce = true;
             calibratedAt = now;
             clock.calibrate();
         }

@@ -225,8 +225,11 @@ class GpuProfilingTest {
             gpu.calibrateEvery(3600);
             counters.add(gpu);
             counters.sampleNow();
-            counters.sampleNow(); // within the interval: once
+            counters.sampleNow(); // within the interval: once, however young nanoTime is (an hour on CI's VM)
             assertThat(calls[0]).isEqualTo(1);
+            gpu.calibrateEvery(0);
+            counters.sampleNow();
+            assertThat(calls[0]).isEqualTo(2);
             assertThat(counters.unavailable()).noneMatch(u -> u.contains("calibrated timestamps"));
         }
     }
