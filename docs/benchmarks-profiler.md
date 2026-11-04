@@ -8,15 +8,15 @@
 |---|---|
 | empty loop | 0.18 |
 | profiler off | 0.34 (0.16 over the loop) |
-| profiler on | 38.59 (38.41 over the loop: two `nanoTime` calls and two ring writes) |
+| profiler on | 38.43 (38.25 over the loop: two `nanoTime` calls and two ring writes) |
 
 ## The frame graph's data path
 
-The frame clock (start, two waits, submit, end) and the overlay's rings (a CPU frame and a GPU frame appended): **0.144 us per frame** (budget 10 us).
+The frame clock (start, two waits, submit, end) and the overlay's rings (a CPU frame and a GPU frame appended): **0.145 us per frame** (budget 10 us).
 
 ## The frame graph view
 
-A UI (the controls gallery, idle) updated with a frame appended each time, with and without the frame graph (statistics every 0.5 s): 0.0044 ms against 0.0492 ms p50, so the view costs **44.8 us a frame** on the CPU (its chart's plot recorded again each frame).
+A UI (the controls gallery, idle) updated with a frame appended each time, with and without the frame graph (statistics every 0.5 s): 0.0043 ms against 0.0122 ms p50, so the view costs **7.9 us a frame** on the CPU (its lines appended to and scrolled by an offset, the rest of the chart recording nothing).
 
 ## Engine frames
 
@@ -24,9 +24,9 @@ Headless, the controls gallery idle at 1920 x 1080 drawn into a texture; CPU tim
 
 | Profiler | CPU mean | CPU p50 | CPU p99 | over off (p50) | GPU p50 |
 |---|---|---|---|---|---|
-| off | 0.084 ms | 0.080 ms | 0.179 ms | - | - |
-| overlay, no GPU timings | 0.112 ms | 0.106 ms | 0.207 ms | +0.025 ms | - |
-| overlay | 0.127 ms | 0.116 ms | 0.217 ms | +0.036 ms | 0.089 ms |
-| detailed (zones, GPU, counters) | 0.256 ms | 0.245 ms | 0.394 ms | +0.165 ms | 0.192 ms |
-| detailed + OS + JFR + statistics | 0.240 ms | 0.220 ms | 0.369 ms | +0.140 ms | 0.176 ms |
+| off | 0.087 ms | 0.082 ms | 0.194 ms | - | - |
+| overlay, no GPU timings | 0.095 ms | 0.090 ms | 0.194 ms | +0.008 ms | - |
+| overlay | 0.097 ms | 0.093 ms | 0.178 ms | +0.011 ms | 0.068 ms |
+| detailed (zones, GPU, counters) | 0.211 ms | 0.198 ms | 0.322 ms | +0.117 ms | 0.162 ms |
+| detailed + OS + JFR + statistics | 0.227 ms | 0.216 ms | 0.335 ms | +0.134 ms | 0.166 ms |
 

@@ -6,11 +6,15 @@ package com.truesim.engine.app.profile;
  *
  * <pre>{@code
  * static final Zone PHYSICS = Profiler.zone("game.physics");
- * Profiler.begin(PHYSICS);
- * try { step(); } finally { Profiler.end(PHYSICS); }
+ * try (Zone z = PHYSICS.begin()) {      // ends however the block is left, an exception too; allocates nothing
+ *     step();
+ * }
  * }</pre>
+ *
+ * <p>A zone left without its end (an exception past a bare {@link Profiler#begin}) is closed when an enclosing zone
+ * of the same thread ends: the drain matches each end to its zone, so the zones after it keep their depths.
  */
-public final class Zone {
+public final class Zone implements AutoCloseable {
 
     private final int id;
     private final String name;
@@ -28,6 +32,18 @@ public final class Zone {
     /** Its name. */
     public String name() {
         return name;
+    }
+
+    /** Begins it on the calling thread ({@link Profiler#begin}); returns it, for try-with-resources. */
+    public Zone begin() {
+        Profiler.begin(this);
+        return this;
+    }
+
+    /** Ends it on the calling thread ({@link Profiler#end}). */
+    @Override
+    public void close() {
+        Profiler.end(this);
     }
 
     @Override

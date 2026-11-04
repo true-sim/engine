@@ -175,8 +175,8 @@ public final class ProfilerBench {
         out.append("## The frame graph view\n\nA UI (the controls gallery, idle) updated with a frame appended each "
             + "time, with and without the frame graph (statistics every 0.5 s): ").append(f(p50[0], 4))
             .append(" ms against ").append(f(p50[1], 4)).append(" ms p50, so the view costs **")
-            .append(f((p50[1] - p50[0]) * 1000, 1)).append(" us a frame** on the CPU (its chart's plot recorded "
-            + "again each frame).\n\n");
+            .append(f((p50[1] - p50[0]) * 1000, 1)).append(" us a frame** on the CPU (its lines appended to and "
+            + "scrolled by an offset, the rest of the chart recording nothing).\n\n");
     }
 
     /** A view drawing the UI into a texture, so frames have passes. */

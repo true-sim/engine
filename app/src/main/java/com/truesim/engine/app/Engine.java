@@ -414,6 +414,15 @@ public final class Engine implements AutoCloseable {
         }
         Profiler.frameStart(nanos);
         Profiler.begin(FRAME);
+        try {
+            frame(nanos);
+        } finally {
+            Profiler.end(FRAME); // closes the zones a throwing frame left open, too
+        }
+        Profiler.frameEnd();
+    }
+
+    private void frame(long nanos) {
         frame.next(nanos, (long) (settings.get(MAX_FRAME_DELTA) * 1e9));
         Profiler.begin(DRIVER_BEGIN);
         driver.beginFrame(frame);
@@ -461,8 +470,6 @@ public final class Engine implements AutoCloseable {
         Profiler.begin(END_FRAME);
         driver.endFrame(frame);
         Profiler.end(END_FRAME);
-        Profiler.end(FRAME);
-        Profiler.frameEnd();
     }
 
     /**

@@ -89,6 +89,76 @@ class ProfilerTest {
     }
 
     @Test
+    void anExceptionInsideAZoneLeavesTheDepthsBalanced() {
+        Profiler.zones(true);
+        Profiler.discard();
+        Profiler.thread("test-throwing");
+        // a bare begin left by an exception: closed by the enclosing zone's end
+        Profiler.begin(OUTER);
+        try {
+            Profiler.begin(INNER);
+            throw new IllegalStateException("thrown inside the inner zone");
+        } catch (IllegalStateException expected) {
+            // the inner zone's end was never written
+        } finally {
+            Profiler.end(OUTER);
+        }
+        // try-with-resources ends the zone on the way out
+        try (Zone z = OUTER.begin()) {
+            throw new IllegalStateException("thrown inside a scoped zone");
+        } catch (IllegalStateException expected) {
+            // ended by close()
+        }
+        Profiler.begin(INNER);
+        Profiler.end(INNER);
+        Log log = new Log();
+        Profiler.drain(log);
+        assertThat(log.of("test-throwing")).containsExactly("test-throwing begin test.outer 0",
+            "test-throwing begin test.inner 1", "test-throwing end 1", "test-throwing end 0",
+            "test-throwing begin test.outer 0", "test-throwing end 0",
+            "test-throwing begin test.inner 0", "test-throwing end 0");
+    }
+
+    @Test
+    void aThrowingFrameClosesItsZonesAndTheNextStartsAtTheTop() {
+        Profiler.zones(true);
+        Profiler.frames(true);
+        boolean[] fail = {true};
+        try (Engine engine = Engine.create(new Application() {
+            @Override
+            public void configure(AppConfig app) {
+                app.id("profiler-test-throws");
+            }
+
+            @Override
+            public void update(com.truesim.engine.app.Frame frame) {
+                if (fail[0]) {
+                    fail[0] = false;
+                    throw new IllegalStateException("a game's bug");
+                }
+            }
+        })) {
+            Profiler.thread("engine-throws");
+            Profiler.discard();
+            try {
+                engine.step();
+            } catch (IllegalStateException expected) {
+                // the frame threw from UPDATE
+            }
+            engine.step();
+            Log log = new Log();
+            Profiler.drain(log);
+            List<String> mine = log.of("engine-throws");
+            assertThat(mine).containsSubsequence("engine-throws begin UPDATE 1", "engine-throws end 1",
+                "engine-throws end 0", "engine-throws begin frame 0");
+            assertThat(mine.getLast()).isEqualTo("engine-throws end 0");
+            long begins = mine.stream().filter(e -> e.startsWith("engine-throws begin ")).count();
+            long ends = mine.stream().filter(e -> e.startsWith("engine-throws end ")).count();
+            assertThat(ends).as(String.join(" | ", mine)).isEqualTo(begins);
+        }
+    }
+
+    @Test
     void offRecordsNothing() {
         Profiler.zones(false);
         Profiler.begin(OUTER);

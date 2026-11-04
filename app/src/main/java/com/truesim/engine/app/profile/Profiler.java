@@ -299,6 +299,7 @@ public final class Profiler {
         long head; // written by the thread (release), read by the drain (acquire)
         long tail; // the drain's
         int depth; // the drain's
+        int[] open = new int[32]; // the drain's: the zone open at each depth
         long lost;
 
         ThreadZones(int index, String name, int events, Thread thread) {
@@ -331,12 +332,30 @@ public final class Profiler {
                 int s = (int) i & mask;
                 int id = ids[s];
                 if (id >= 0) {
+                    if (depth == open.length) {
+                        open = grow(open);
+                    }
+                    open[depth] = id;
                     sink.begin(index, times[s], id, depth++);
-                } else if (depth > 0) {
-                    sink.end(index, times[s], --depth);
+                } else {
+                    // the end of the innermost open zone of this id: zones above it were left without their ends
+                    // (an exception) and close with it; an end matching no open zone is dropped
+                    int zone = ~id;
+                    int at = depth - 1;
+                    while (at >= 0 && open[at] != zone) {
+                        at--;
+                    }
+                    while (at >= 0 && depth > at) {
+                        sink.end(index, times[s], --depth);
+                    }
                 }
             }
             tail = h;
+        }
+
+        @AllowAllocation("zones nested deeper than ever before")
+        private static int[] grow(int[] a) {
+            return Arrays.copyOf(a, a.length * 2);
         }
     }
 }

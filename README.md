@@ -424,7 +424,9 @@ Profiler.begin(PHYSICS); try { step(); } finally { Profiler.end(PHYSICS); }
   line over the frames kept (`profiler.overlay.frames`).
 - **CPU zones** (`Profiler`, engine-app): declared once, timed anywhere; each thread writes into a ring of its own
   (`profiler.ringEvents`), drained by the main thread once a frame. Off, a begin or an end is one read of a volatile
-  flag (0.16 ns, below). The engine's own: the loop's phases (`BEFORE_UPDATE`, `FIXED` and each `fixed step`,
+  flag (0.16 ns, below). `try (Zone z = PHYSICS.begin()) { ... }` ends a zone however its block is left; a zone left
+  open by an exception past a bare `begin` is closed when an enclosing zone ends (the drain matches each end to its
+  zone), and the engine's `frame` zone ends in a `finally`, so a throwing frame leaves the depths balanced. The engine's own: the loop's phases (`BEFORE_UPDATE`, `FIXED` and each `fixed step`,
   `UPDATE`, `ANIMATE`, `LATE`, `AFTER_UPDATE`, `end frame`), `render.record`, `render.submit`, `render.chunk` (on
   job threads when recording in parallel), `wait for frame slot`, `acquire`, `present`, `audio.block` (the audio
   thread), `audio.streams fill`, `stream.upload`, `asset.mesh prepare`, `asset.texture prepare`.
@@ -455,8 +457,9 @@ Profiler.begin(PHYSICS); try { step(); } finally { Profiler.end(PHYSICS); }
 
 Overhead (`./gradlew :engine-bench:profilerBench`, [docs/benchmarks-profiler.md](docs/benchmarks-profiler.md); Ryzen 9
 9950X3D, RX 9070 XT, 2026-11-04, no JaCoCo): a zone off 0.16 ns, on 38 ns; the frame graph's data path 0.14 us a
-frame; the frame graph view's chart 25 to 45 us a frame of CPU; engine frames (headless, an idle UI) +0.025 to
-+0.036 ms p50 with the overlay, +0.14 to +0.17 ms with the detailed view live. Frames with the profiler on allocate
+frame; the frame graph view 7.9 us a frame of CPU (its lines stream: appended and scrolled by a drawn offset,
+ui-charts' streaming); engine frames (headless, an idle UI) +0.008 to +0.011 ms p50 with the overlay, +0.12 to
++0.16 ms with the detailed view live. Frames with the profiler on allocate
 nothing (`UiProfilerTest`, counting allocating frames as pitfalls.md says).
 
 ## Vulkan
