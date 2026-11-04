@@ -65,8 +65,10 @@ public final class Commands {
     private static final int PRESENT = 34;
     private static final int BUILD_STRUCTURES = 35;
     private static final int CLEAR_ATTACHMENTS = 36;
+    private static final int BEGIN_QUERY = 37;
+    private static final int END_QUERY = 38;
     // Immutable entries: a thread seeing an older one only wraps the address again.
-    private static final Fn[] FUNCTIONS = new Fn[37];
+    private static final Fn[] FUNCTIONS = new Fn[39];
 
     static {
         java.util.Arrays.fill(FUNCTIONS, NONE);
@@ -107,6 +109,9 @@ public final class Commands {
         JAVA_LONG, JAVA_INT, JAVA_LONG));
     private static final MethodHandle H_TIMESTAMP =
         handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle H_BEGIN_QUERY =
+        handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT));
+    private static final MethodHandle H_END_QUERY = handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, JAVA_INT));
     private static final MethodHandle H_RESET_QUERIES =
         handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT));
     private static final MethodHandle H_QUERY_RESULTS = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG,
@@ -447,6 +452,25 @@ public final class Commands {
         try {
             H_TIMESTAMP.invokeExact(function(TIMESTAMP, of(commands).vkCmdWriteTimestamp2), commands.address(), stage,
                 pool, query);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkCmdBeginQuery}. */
+    public static void beginQuery(VkCommandBuffer commands, long pool, int query, int flags) {
+        try {
+            H_BEGIN_QUERY.invokeExact(function(BEGIN_QUERY, of(commands).vkCmdBeginQuery), commands.address(), pool,
+                query, flags);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkCmdEndQuery}. */
+    public static void endQuery(VkCommandBuffer commands, long pool, int query) {
+        try {
+            H_END_QUERY.invokeExact(function(END_QUERY, of(commands).vkCmdEndQuery), commands.address(), pool, query);
         } catch (Throwable e) {
             throw failed(e);
         }

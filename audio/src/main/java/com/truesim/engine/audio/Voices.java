@@ -1242,7 +1242,9 @@ final class Voices {
                 } else if (!there && position > resumes[slot] + rate / 10) {
                     resumes[slot] = (long) position + rate / 10; // passed where it asked before the ring got there
                     ring.resume(resumes[slot]);
-                } else if (there && starving[slot]) {
+                } else if (there && starving[slot] && dry == 0) {
+                    // back only from silence: frames that arrive within the fade-out (the streaming thread writing on
+                    // where it was before it saw the resume) would switch from the held frame to where time is now
                     starving[slot] = false;
                 }
                 dry = starving[slot] ? Math.max(0, dry - dryStep) : Math.min(1, dry + dryStep);

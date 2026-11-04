@@ -517,6 +517,17 @@ public final class FrameGraph implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Counts pipeline statistics per pass with the timings (where the device has them:
+     * {@code VulkanDevice.pipelineStatistics()}); read them from {@link GpuTimings#statistic}. Rebuilds the graph.
+     */
+    public FrameGraph pipelineStatistics(boolean on) {
+        if (tooling.statistics(on)) {
+            dirty = true;
+        }
+        return this;
+    }
+
     /** The passes' GPU timings of the last finished frame, with {@link #timings(boolean)} on; null otherwise. */
     public GpuTimings timings() {
         return tooling.timings();
@@ -554,6 +565,7 @@ public final class FrameGraph implements AutoCloseable {
             throw new IllegalStateException("Begin the frame first: beginFrame()");
         }
         boolean submitted = false;
+        com.truesim.engine.app.profile.Profiler.begin(Profiled.RECORD);
         try {
             prepare();
             recordSlot = execution.slot();
@@ -579,8 +591,12 @@ public final class FrameGraph implements AutoCloseable {
                 frameStart = null;
                 recordChunks(0, batches.chunkBatch().length, 0);
             }
+            com.truesim.engine.app.profile.Profiler.end(Profiled.RECORD);
+            com.truesim.engine.app.profile.Profiler.begin(Profiled.SUBMIT);
             execution.submit(batches, frameStart, chunkCommands, acquired, acquiredCount, renderFinished,
                 finishedCount, prologue, frameSlots.waits());
+            com.truesim.engine.app.profile.Profiler.end(Profiled.SUBMIT);
+            com.truesim.engine.app.profile.Profiler.submitted(frame);
             submitted = true;
         } finally {
             // A build or a pass that threw leaves the graph usable: the frame is dropped, the next one begins (a graph
@@ -694,6 +710,7 @@ public final class FrameGraph implements AutoCloseable {
     /** Records chunks {@code from} to {@code to}, on worker {@code worker}: its own command buffers. */
     private void recordChunks(int from, int to, int worker) {
         for (int c = from; c < to; c++) {
+            com.truesim.engine.app.profile.Profiler.begin(Profiled.CHUNK);
             int batch = batches.chunkBatch()[c];
             boolean graphics = batches.queue()[batch] == GRAPHICS;
             VkCommandBuffer commands = execution.commandBuffer(worker, batches.queue()[batch]);
@@ -708,6 +725,7 @@ public final class FrameGraph implements AutoCloseable {
             recordPasses(commands, batches.chunkFirstPass()[c], batches.chunkEndPass()[c], last, contexts[worker]);
             Vulkan.check(Commands.endCommandBuffer(commands), "Could not finish recording");
             chunkCommands[c] = commands;
+            com.truesim.engine.app.profile.Profiler.end(Profiled.CHUNK);
         }
     }
 

@@ -32,6 +32,10 @@ public final class Desktop implements Plugin {
     /** Its key. */
     public static final PluginKey<Desktop> KEY = PluginKey.of("desktop", Desktop.class);
 
+    static {
+        NativeMemory.install(); // before LWJGL first allocates: its native memory is counted
+    }
+
     private static final int NONE = Integer.MIN_VALUE;
 
     private final Events events = new Events();

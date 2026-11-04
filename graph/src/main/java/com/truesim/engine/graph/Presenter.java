@@ -51,6 +51,11 @@ import org.lwjgl.vulkan.VkSemaphoreCreateInfo;
  */
 public final class Presenter implements AutoCloseable {
 
+    private static final com.truesim.engine.app.profile.Zone ACQUIRE =
+        com.truesim.engine.app.profile.Profiler.zone("acquire");
+    private static final com.truesim.engine.app.profile.Zone PRESENT =
+        com.truesim.engine.app.profile.Profiler.zone("present");
+
     private final FrameGraph graph;
     private final VulkanInstance instance;
     private final VulkanDevice device;
@@ -170,11 +175,15 @@ public final class Presenter implements AutoCloseable {
             }
         }
         graph.submit(acquired, count, finished, count);
+        com.truesim.engine.app.profile.Profiler.waitBegin();
+        com.truesim.engine.app.profile.Profiler.begin(PRESENT);
         for (int i = 0; i < count; i++) {
             presenting[i].swapchain.present(device.graphics(), images[i]);
             presenting[i].presented++;
             presenting[i] = null;
         }
+        com.truesim.engine.app.profile.Profiler.end(PRESENT);
+        com.truesim.engine.app.profile.Profiler.waitEnd();
         return count;
     }
 
@@ -308,7 +317,11 @@ public final class Presenter implements AutoCloseable {
                 image.hold(true);
                 return -1;
             }
+            com.truesim.engine.app.profile.Profiler.waitBegin();
+            com.truesim.engine.app.profile.Profiler.begin(ACQUIRE);
             int index = swapchain.acquire(available[slot]);
+            com.truesim.engine.app.profile.Profiler.end(ACQUIRE);
+            com.truesim.engine.app.profile.Profiler.waitEnd();
             if (index < 0) {
                 image.hold(true); // out of date: rebuilt next frame
                 return -1;

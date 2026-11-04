@@ -18,7 +18,7 @@ and tools can use them without the engine. Shaders are written in [Slang](https:
 | `engine-scene`    | `com.truesim.engine.scene`    | Draws scenes: scene's renderables and assets onto renderers, one view per scene and camera |
 | `engine-audio`    | `com.truesim.engine.audio`    | Sound: the mixer on an allocation-free audio thread, SDL3 output, offline rendering |
 | `engine-xr`       | `com.truesim.engine.xr`       | VR headsets through OpenXR: their eyes as frame graph views, a desktop mirror |
-| `engine-ui`       | `com.truesim.engine.ui`       | The ui toolkit's engine side: its renderer (`Keys.UI`), the `ui` actions as UI commands, the mouse pointer |
+| `engine-ui`       | `com.truesim.engine.ui`       | The ui toolkit's engine side: its renderer (`Keys.UI`), the `ui` actions as UI commands, the mouse pointer, the profiler's views |
 
 ## Application
 
@@ -400,6 +400,67 @@ Submitting an unchanged HUD takes 0.1 us and uploads nothing; with 50 elements r
 range spanning them: 400 KB). Numbers vary by a few percent between sessions sharing the GPU; compare within a run.
 `UiScreenshots` (`TRUESIM_SCREENSHOTS=true`, `TRUESIM_SCREENSHOTS_DIR=<dir>`) writes a gallery of every primitive at
 three scales.
+
+## Profiler
+
+An in-game profiler in two parts, every part a setting (`profiler.*`, group `profiler`) and so a console variable:
+the **frame graph** (`profiler.overlay`, F3), shippable and cheap, and the **detailed profiler** (`profiler.view`,
+Shift+F3). Install `app.use(new Profiling())` (engine-graph) and call `engine.get(UiPlugin.KEY).profiler()` once; both
+views are ui-profiler's controls, on a layer of their own (`profiler`, under the console), styled by the theme.
+
+```java
+app.use(new Rendering(), new Input(), new Profiling(), new UiPlugin(...));
+UiProfiler profiler = engine.get(UiPlugin.KEY).profiler();         // console commands join the console
+engine.settings().set(ProfilerSettings.OVERLAY, true);              // or `profiler.overlay 1`, or F3
+static final Zone PHYSICS = Profiler.zone("game.physics");          // a game's own zone
+Profiler.begin(PHYSICS); try { step(); } finally { Profiler.end(PHYSICS); }
+```
+
+- **Frame graph** (ui-profiler's `FrameGraphView` on a streaming chart): per frame its CPU time (start to submit), what
+  of it the CPU waited for the GPU or the swapchain (the frame slot's fence, acquire, present), the frame interval,
+  and the GPU's span of the frame, drawn at that frame once the GPU finished it (frames later; nothing waits for it);
+  budget lines (`profiler.overlay.budgets`: `60,120,144,display`), hitch lines (`profiler.hitch.factor` times the
+  recent mean, at least `profiler.hitch.minMillis`, or over `profiler.hitch.millis`), and min / mean / p99 of each
+  line over the frames kept (`profiler.overlay.frames`).
+- **CPU zones** (`Profiler`, engine-app): declared once, timed anywhere; each thread writes into a ring of its own
+  (`profiler.ringEvents`), drained by the main thread once a frame. Off, a begin or an end is one read of a volatile
+  flag (0.16 ns, below). `try (Zone z = PHYSICS.begin()) { ... }` ends a zone however its block is left; a zone left
+  open by an exception past a bare `begin` is closed when an enclosing zone ends (the drain matches each end to its
+  zone), and the engine's `frame` zone ends in a `finally`, so a throwing frame leaves the depths balanced. The engine's own: the loop's phases (`BEFORE_UPDATE`, `FIXED` and each `fixed step`,
+  `UPDATE`, `ANIMATE`, `LATE`, `AFTER_UPDATE`, `end frame`), `render.record`, `render.submit`, `render.chunk` (on
+  job threads when recording in parallel), `wait for frame slot`, `acquire`, `present`, `audio.block` (the audio
+  thread), `audio.streams fill`, `stream.upload`, `asset.mesh prepare`, `asset.texture prepare`.
+- **GPU passes per queue** on the CPU's clock: the frame graph's timestamps (its GPU timings, on while a view shows
+  and `profiler.gpu`) placed by `GpuClock`: `VK_KHR_calibrated_timestamps` (or the EXT one) against the host's clock
+  that `System.nanoTime` reads (Windows' performance counter, Linux's `CLOCK_MONOTONIC`), calibrated every
+  `profiler.gpu.calibrateEvery` seconds on the counters thread; without it, the offset is bounded by the submits (a
+  frame's first timestamp is never before its submit; the latest bound of each window wins).
+- **Detailed profiler** (`ProfilerView`): a timeline of every thread, GPU queue and the runtime's markers, zoomable
+  to microseconds (wheel; drag pans; Shift-drag selects a span; a click on the ruler selects a frame; double click
+  goes live), a flame graph and a zone table (calls, total, self, mean, p99, max) of the selected span, counters as
+  charts; freeze (F4), step a frame (Shift+F4), freeze after a hitch (`profiler.hitch.freeze`,
+  `profiler.hitch.freezeAfter`), keep `profiler.history` seconds, export (Ctrl+F4, `profiler.export`): the own format
+  (`.tsprof`, opens again in the view) and Chrome trace JSON (Perfetto, `chrome://tracing`) into
+  `profiler.exportFolder`.
+- **Counters**, sampled on a thread of their own (`profiler.counters.interval`), never on the frame's: cheap
+  (`profiler.counters`): process and system CPU load, heap used and committed, non-heap, direct and mapped buffers,
+  GC count and time, live threads, the process's resident memory (FFM: `K32GetProcessMemoryInfo`, `/proc/self/statm`,
+  `task_info`), per profiler thread its CPU load and allocation rate (`ThreadMXBean`), LWJGL's native memory as the
+  engine counts it (`NativeMemory`, installed before LWJGL first allocates), each heap's usage and budget
+  (`VK_EXT_memory_budget` through VMA, VMA's estimate without), GPU memory by category (`GpuMemory`: textures, render
+  targets, meshes, acceleration structures, graph transients, staging, buffers), the GPU's busy share. Detailed:
+  pipeline statistics per graphics pass (`profiler.pipelineStatistics`), the operating system's per-core and GPU
+  engine load (`profiler.os`: PDH on Windows, `/proc/stat`, `gpu_busy_percent` and DRM fdinfo on Linux), garbage
+  collections, safepoints and compilations as timeline markers (`profiler.runtime`: a JFR `RecordingStream`).
+  What a machine lacks is reported once (`profiler.counters` in the console) instead of assumed.
+  `VK_KHR_performance_query` is detected (`VulkanDevice.performanceQuery()`) but not collected.
+
+Overhead (`./gradlew :engine-bench:profilerBench`, [docs/benchmarks-profiler.md](docs/benchmarks-profiler.md); Ryzen 9
+9950X3D, RX 9070 XT, 2026-11-04, no JaCoCo): a zone off 0.16 ns, on 38 ns; the frame graph's data path 0.14 us a
+frame; the frame graph view 7.9 us a frame of CPU (its lines stream: appended and scrolled by a drawn offset,
+ui-charts' streaming); engine frames (headless, an idle UI) +0.008 to +0.011 ms p50 with the overlay, +0.12 to
++0.16 ms with the detailed view live. Frames with the profiler on allocate
+nothing (`UiProfilerTest`, counting allocating frames as pitfalls.md says).
 
 ## Vulkan
 

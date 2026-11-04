@@ -206,6 +206,19 @@ public final class Textures implements AutoCloseable {
 
     private Upload upload(TextureFormat format, int width, int height, int mips, MemorySegment texels,
         TextureSampler sampler) {
+        com.truesim.engine.app.profile.Profiler.begin(UPLOAD_ZONE);
+        try {
+            return uploadNow(format, width, height, mips, texels, sampler);
+        } finally {
+            com.truesim.engine.app.profile.Profiler.end(UPLOAD_ZONE);
+        }
+    }
+
+    private static final com.truesim.engine.app.profile.Zone UPLOAD_ZONE =
+        com.truesim.engine.app.profile.Profiler.zone("asset.texture prepare");
+
+    private Upload uploadNow(TextureFormat format, int width, int height, int mips, MemorySegment texels,
+        TextureSampler sampler) {
         java.util.Objects.requireNonNull(sampler, "sampler");
         if (!supports(format)) {
             throw new IllegalArgumentException("This GPU does not sample " + format + " textures");

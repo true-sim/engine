@@ -30,6 +30,7 @@ final class FrameTooling {
     private ReadbackPlan[] retiredReadbacks = new ReadbackPlan[0]; // an earlier build's, pending in frames in flight
     private int retiredCount;
     private boolean timingsOn;
+    private boolean statisticsOn;
     private GpuTimings timings;
     private Arena labelArena;
     private long[] passLabels = new long[0];
@@ -47,6 +48,13 @@ final class FrameTooling {
             timings = new GpuTimings(device, framesInFlight); // its queries come with the build
         }
         return changed;
+    }
+
+    /** Asks for pipeline statistics with the timings; whether that changed, so the graph rebuilds. */
+    boolean statistics(boolean on) {
+        boolean changed = on != statisticsOn;
+        statisticsOn = on;
+        return changed && timingsOn;
     }
 
     /** The last finished frame's timings while on; null otherwise. */
@@ -119,6 +127,7 @@ final class FrameTooling {
                 int family = batches.queue()[batches.chunkBatch()[c]] == GRAPHICS ? graphicsFamily : computeFamily;
                 Arrays.fill(families, batches.chunkFirstPass()[c], batches.chunkEndPass()[c], family);
             }
+            timings.statisticsWanted(statisticsOn);
             timings.build(order, families, graphicsFamily);
         } else if (timings != null) {
             timings.close();
@@ -146,6 +155,7 @@ final class FrameTooling {
         boolean labelled = passLabels.length > 0 && Commands.beginLabel(commands, passLabels[pass]);
         if (timingsOn && timings != null) {
             timings.write(commands, slot, pass, false);
+            timings.statistics(commands, slot, pass, false);
         }
         return labelled;
     }
@@ -160,6 +170,7 @@ final class FrameTooling {
     /** After pass {@code pass}: its end timed and, if {@code labelled}, its label closed. Allocates nothing. */
     void endPass(VkCommandBuffer commands, int slot, int pass, boolean labelled) {
         if (timingsOn && timings != null) {
+            timings.statistics(commands, slot, pass, true);
             timings.write(commands, slot, pass, true);
         }
         if (labelled) {

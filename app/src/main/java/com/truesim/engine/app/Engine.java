@@ -2,6 +2,8 @@ package com.truesim.engine.app;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.jobs.TaskScheduler;
+import com.truesim.engine.app.profile.Profiler;
+import com.truesim.engine.app.profile.Zone;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
 import com.truesim.engine.settings.SettingRegistry;
@@ -65,6 +67,18 @@ public final class Engine implements AutoCloseable {
      */
     public static final Setting<Integer> FIXED_STEP_BUDGET =
         Setting.integer("app.fixedStepBudget", 8, 1, 1_000, "the most fixed steps a frame runs, all worlds together");
+
+    private static final Zone FRAME = Profiler.zone("frame");
+    private static final Zone DRIVER_BEGIN = Profiler.zone("frame driver");
+    private static final Zone JOBS_DELIVERED = Profiler.zone("jobs delivered");
+    private static final Zone BEFORE_UPDATE = Profiler.zone("BEFORE_UPDATE");
+    private static final Zone FIXED = Profiler.zone("FIXED");
+    private static final Zone FIXED_STEP = Profiler.zone("fixed step");
+    private static final Zone UPDATE = Profiler.zone("UPDATE");
+    private static final Zone ANIMATE = Profiler.zone("ANIMATE");
+    private static final Zone LATE = Profiler.zone("LATE");
+    private static final Zone AFTER_UPDATE = Profiler.zone("AFTER_UPDATE");
+    private static final Zone END_FRAME = Profiler.zone("end frame");
 
     /** Two quit requests within this time force the quit. */
     static final long FORCE_WITHIN_NANOS = TimeUnit.SECONDS.toNanos(3);
@@ -398,35 +412,64 @@ public final class Engine implements AutoCloseable {
         if (!live) {
             return;
         }
+        Profiler.frameStart(nanos);
+        Profiler.begin(FRAME);
+        try {
+            frame(nanos);
+        } finally {
+            Profiler.end(FRAME); // closes the zones a throwing frame left open, too
+        }
+        Profiler.frameEnd();
+    }
+
+    private void frame(long nanos) {
         frame.next(nanos, (long) (settings.get(MAX_FRAME_DELTA) * 1e9));
+        Profiler.begin(DRIVER_BEGIN);
         driver.beginFrame(frame);
+        Profiler.end(DRIVER_BEGIN);
+        Profiler.begin(JOBS_DELIVERED);
         tasks.drainCompleted();
+        Profiler.end(JOBS_DELIVERED);
         Plugin[] plugins = running;
+        Profiler.begin(BEFORE_UPDATE);
         for (Plugin plugin : plugins) {
             plugin.beforeUpdate(frame);
         }
+        Profiler.end(BEFORE_UPDATE);
         phase = Phase.FIXED;
         try {
+            Profiler.begin(FIXED);
             fixedSteps(plugins);
+            Profiler.end(FIXED);
             phase = Phase.UPDATE;
+            Profiler.begin(UPDATE);
             app.update(frame);
+            Profiler.end(UPDATE);
             phase = Phase.ANIMATE;
+            Profiler.begin(ANIMATE);
             for (Plugin plugin : plugins) {
                 plugin.animate(frame);
             }
+            Profiler.end(ANIMATE);
             phase = Phase.LATE;
+            Profiler.begin(LATE);
             app.lateUpdate(frame);
             for (Plugin plugin : plugins) {
                 plugin.lateUpdate(frame);
             }
+            Profiler.end(LATE);
         } finally {
             phase = Phase.NONE;
         }
+        Profiler.begin(AFTER_UPDATE);
         for (Plugin plugin : plugins) {
             plugin.afterUpdate(frame);
         }
+        Profiler.end(AFTER_UPDATE);
         settings.refreshAvailability();
+        Profiler.begin(END_FRAME);
         driver.endFrame(frame);
+        Profiler.end(END_FRAME);
     }
 
     /**
@@ -447,6 +490,7 @@ public final class Engine implements AutoCloseable {
             long owed = clock.owe(frame.deltaNanos());
             long run = Math.min(owed, budget - taken);
             for (long s = 0; s < run; s++) {
+                Profiler.begin(FIXED_STEP);
                 clock.stepped();
                 fixedStep.set(clock, frame);
                 for (Plugin plugin : plugins) {
@@ -457,6 +501,7 @@ public final class Engine implements AutoCloseable {
                     plugin.fixedUpdate(fixedStep);
                 }
                 clock.afterStepped();
+                Profiler.end(FIXED_STEP);
             }
             taken += (int) run;
             dropped += owed - run;

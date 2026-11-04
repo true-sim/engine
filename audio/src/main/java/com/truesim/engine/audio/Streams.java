@@ -14,6 +14,8 @@ import java.util.concurrent.locks.LockSupport;
 @AllowAllocation("the streaming thread: not the audio thread")
 public final class Streams implements AutoCloseable {
 
+    private static final com.truesim.engine.app.profile.Zone FILL_ZONE = com.truesim.engine.app.profile.Profiler.zone("audio.streams fill");
+
     /** Frames decoded at a time. */
     static final int CHUNK = 1_024;
 
@@ -42,11 +44,13 @@ public final class Streams implements AutoCloseable {
             for (StreamRing ring = added.poll(); ring != null; ring = added.poll()) {
                 rings.add(ring);
             }
+            com.truesim.engine.app.profile.Profiler.begin(FILL_ZONE);
             for (int i = rings.size() - 1; i >= 0; i--) {
                 if (!rings.get(i).fill(CHUNK)) {
                     rings.remove(i);
                 }
             }
+            com.truesim.engine.app.profile.Profiler.end(FILL_ZONE);
             LockSupport.parkNanos(2_000_000);
         }
         for (StreamRing ring : rings) {

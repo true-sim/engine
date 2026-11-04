@@ -20,7 +20,8 @@ jobs:
           distribution: temurin
           java-version: 27
       - uses: gradle/actions/setup-gradle@v6
-      - run: ./gradlew publish -Pversion=${GITHUB_REF_NAME#v}
+      # one module at a time: parallel uploads of a new version can race to create it on GitHub Packages (409 Conflict)
+      - run: ./gradlew publish --no-parallel -Pversion=${GITHUB_REF_NAME#v}
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -6,11 +6,11 @@ description = "The engine's benchmark suites, run as programs: the UI's (design 
 
 dependencies {
     implementation(project(":engine-ui"))
-    implementation("com.truesim.ui:ui-charts:0.4.0")
-    implementation("com.truesim.ui:ui-text-native:0.4.0")
-    implementation("com.truesim.ui:ui-fonts-cjk:0.4.0") // bundled fonts: the same text on every machine
-    implementation(testFixtures("com.truesim.ui:ui-controls:0.4.0")) // the controls gallery, an idle UI
-    implementation(testFixtures("com.truesim.ui:ui-console:0.4.0")) // the console, flooded
+    implementation("com.truesim.ui:ui-charts:0.5.1")
+    implementation("com.truesim.ui:ui-text-native:0.5.1")
+    implementation("com.truesim.ui:ui-fonts-cjk:0.5.1") // bundled fonts: the same text on every machine
+    implementation(testFixtures("com.truesim.ui:ui-controls:0.5.1")) // the controls gallery, an idle UI
+    implementation(testFixtures("com.truesim.ui:ui-console:0.5.1")) // the console, flooded
 }
 
 application {
@@ -35,4 +35,16 @@ tasks.register<JavaExec>("uiBench") {
     providers.gradleProperty("quick").orNull?.let { systemProperty("truesim.bench.quick", it) }
     providers.gradleProperty("only").orNull?.let { systemProperty("truesim.bench.only", it) } // -Ponly=console
     providers.gradleProperty("spikes").orNull?.let { systemProperty("truesim.bench.spikes", it) }
+}
+
+// The profiler's overhead: ./gradlew :engine-bench:profilerBench [-Pquick=true]; writes docs/benchmarks-profiler.md.
+tasks.register<JavaExec>("profilerBench") {
+    group = "application"
+    description = "Measures the profiler's overhead (zones, the frame graph's data path, engine frames) and writes docs/benchmarks-profiler.md."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "com.truesim.engine.bench.ProfilerBench"
+    workingDir = rootProject.projectDir
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xmx4g")
+    args(rootProject.file("docs/benchmarks-profiler.md").absolutePath)
+    providers.gradleProperty("quick").orNull?.let { systemProperty("truesim.bench.quick", it) }
 }

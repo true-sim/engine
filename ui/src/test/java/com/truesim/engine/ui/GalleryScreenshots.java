@@ -203,6 +203,70 @@ class GalleryScreenshots {
     }
 
     @Test
+    void theProfilerGalleryPlainAndPosed() {
+        int w = com.truesim.ui.profiler.ProfilerGallery.WIDTH;
+        int h = com.truesim.ui.profiler.ProfilerGallery.HEIGHT;
+        shoot("ui-profiler", "profiler", w, h, ui -> {
+            com.truesim.ui.profiler.ProfilerGallery.build(ui);
+            com.truesim.ui.profiler.ProfilerGallery.settle(ui, w, h);
+        });
+        shoot("ui-profiler", "profiler-posed", w, h, ui -> {
+            com.truesim.ui.profiler.ProfilerGallery g = com.truesim.ui.profiler.ProfilerGallery.build(ui);
+            com.truesim.ui.profiler.ProfilerGallery.settle(ui, w, h);
+            g.pose(ui);
+            g.profiler.tabs().select(1);
+            com.truesim.ui.profiler.ProfilerGallery.settle(ui, w, h);
+        });
+        shoot("ui-profiler", "profiler-counters", w, h, ui -> {
+            com.truesim.ui.profiler.ProfilerGallery g = com.truesim.ui.profiler.ProfilerGallery.build(ui);
+            g.profiler.tabs().select(2);
+            com.truesim.ui.profiler.ProfilerGallery.settle(ui, w, h);
+        });
+    }
+
+    /** The profiler of a running engine (headless, the UI drawn into a texture): live data, both views. */
+    @Test
+    void theProfilerOfARunningEngine() {
+        UiPlugin plugin = new UiPlugin(t -> {
+            UiTextures textures = new UiTextures();
+            liveTextures = textures;
+            return new Ui(Tss.defaultTheme(), text(textures), textures);
+        }).view("main");
+        try (com.truesim.engine.app.Engine engine = UiProfilerTest.engine(plugin, false)) {
+            plugin.profiler();
+            var s = engine.settings();
+            s.set(com.truesim.engine.app.profile.ProfilerSettings.OVERLAY, true);
+            s.set(com.truesim.engine.app.profile.ProfilerSettings.VIEW, true);
+            s.set(com.truesim.engine.app.profile.ProfilerSettings.RUNTIME, true);
+            s.set(com.truesim.engine.app.profile.ProfilerSettings.OS, true);
+            s.set(com.truesim.engine.app.profile.ProfilerSettings.PIPELINE_STATISTICS, true);
+            s.set(com.truesim.engine.app.Engine.FRAME_RATE, 120);
+            for (int i = 0; i < 600; i++) {
+                engine.step();
+                if (i == 300) {
+                    System.gc(); // a collection on the timeline
+                }
+            }
+            Ui ui = plugin.ui();
+            for (int i = 0; i < 400 && (ui.textSystem().atlas().pending() > 0 || i < 30); i++) {
+                engine.step(); // glyphs into the atlas, on the engine's clock
+            }
+            render(ui, liveTextures, 1280, 720, "ui-profiler/profiler-live");
+            plugin.profilerViews().view().tabs().select(2);
+            for (int i = 0; i < 60; i++) {
+                engine.step();
+            }
+            plugin.profilerViews().view().frozen().set(true);
+            for (int i = 0; i < 400 && (ui.textSystem().atlas().pending() > 0 || i < 30); i++) {
+                engine.step();
+            }
+            render(ui, liveTextures, 1280, 720, "ui-profiler/profiler-live-counters");
+        }
+    }
+
+    private static UiTextures liveTextures;
+
+    @Test
     void thePropsGallery() {
         shoot("ui-props", "props", 1280, 1700, ui -> {
             PropsGallery.build(new Controls(ui), ui.root());

@@ -205,6 +205,117 @@ class StreamingTest {
         assertThat((double) out[2 * late]).isCloseTo(0.5 * CENTRE * Math.sin(phase), within(0.01));
     }
 
+    /** A decoder held at a gate: its read waits while it is there; the test moves the gate. */
+    static final class Gate {
+        final Object lock = new Object();
+        long gate;
+        volatile long at;
+        volatile boolean waiting;
+        volatile boolean armed; // at the gate: read nothing (the ring primes), or once armed wait inside the read
+
+        Gate(long gate) {
+            this.gate = gate;
+        }
+
+        void open(long to) {
+            synchronized (lock) {
+                gate = to;
+                lock.notifyAll();
+            }
+        }
+
+        AudioClip over(AudioClip source) {
+            return AudioClip.builder(source.rate(), source.channels()).streamed(source.frames(), () -> {
+                ClipDecoder inner = source.open();
+                return new ClipDecoder() {
+                    @Override
+                    public int read(float[] out, int offset, int frames) {
+                        synchronized (lock) {
+                            if (at >= gate && !armed) {
+                                return 0;
+                            }
+                            while (at >= gate) {
+                                waiting = true;
+                                try {
+                                    lock.wait(5_000);
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                    return 0;
+                                }
+                            }
+                            waiting = false;
+                        }
+                        int n = inner.read(out, offset, (int) Math.min(frames, gate - at));
+                        at += n;
+                        return n;
+                    }
+
+                    @Override
+                    public void seek(long frame) {
+                        at = frame;
+                        inner.seek(frame);
+                    }
+
+                    @Override
+                    public void close() {
+                        inner.close();
+                    }
+                };
+            }, 0).build();
+        }
+    }
+
+    /**
+     * The race behind a click CI caught: the voice runs dry and asks the stream to start again further on, but the
+     * streaming thread, inside a read when it ran dry, writes on where it was first, so the frames the voice needs are
+     * there again within the 5 ms fade-out. Resuming then would switch from the held frame (faded part way) to the
+     * signal where time has moved on: a step. Rendered in blocks of 16 frames so the decoder's catching up lands inside
+     * the fade, every run.
+     */
+    @Test
+    void framesArrivingWithinTheFadeOutDoNotResumeBeforeItEnds() throws InterruptedException {
+        Gate gate = new Gate(30_000); // past the ring's priming (half its second)
+        AudioClip source = Clips.sine(RATE, 400, 0.5f, 120 * 1_200); // 3 s of whole periods
+        sounds.play(Sound.builder().root(Play.clip(ref(() -> gate.over(source), "gated"))).spatial(Spatial.TWO_D)
+            .build());
+        float[] out = new float[2 * 3 * RATE];
+        int done = 0;
+        int block = 16;
+        while (done < 2 * RATE && renderer.starvations() == 0) {
+            if (done % 1_024 == 0) {
+                tasks.drainCompleted();
+                sync.events();
+                sounds.advance(1_024L * Sounds.TICKS_PER_SECOND / RATE);
+                sync.update();
+            }
+            renderer.render(out, done, block);
+            done += block;
+            Thread.sleep(0, 300_000); // about a device's pace: the stream opens and primes
+            if (!gate.armed && out[2 * (done - 1)] != 0) {
+                gate.armed = true; // playing: the streaming thread's next read waits at the gate
+            }
+        }
+        assertThat(renderer.starvations()).as("ran dry at the gate (first sound at %d, done %d, decoded %d)",
+            firstNonZero(out), done, gate.at).isEqualTo(1);
+        // the streaming thread waits inside its read: let it write on where it was, well past the voice
+        for (int i = 0; i < 500 && !gate.waiting; i++) {
+            Thread.sleep(1);
+        }
+        gate.open(70_000);
+        for (int i = 0; i < 500 && gate.at < 70_000; i++) {
+            Thread.sleep(1);
+        }
+        Thread.sleep(20); // the ring took them
+        int resumedFrom = done;
+        while (done < resumedFrom + 9_600) { // 200 ms: the fade out, the restart where it asked, the fade in
+            renderer.render(out, done, block);
+            done += block;
+            Thread.sleep(0, 300_000);
+        }
+        // no click: held and faded out over 5 ms, back in only from silence
+        assertThat(maxStep(out, 0, done)).isLessThan(0.019f);
+    }
+
     @Test
     void aLoopEndsAtItsPassEndThenTheOutroFollows() throws InterruptedException {
         AssetRef<AudioClip> loop = ref(() -> Clips.constant(RATE, 0.25f, 4_800), "level loop");

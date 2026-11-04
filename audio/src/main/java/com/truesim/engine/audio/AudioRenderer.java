@@ -29,6 +29,8 @@ import java.util.Objects;
  */
 public final class AudioRenderer implements AutoCloseable {
 
+    private static final com.truesim.engine.app.profile.Zone BLOCK_ZONE = com.truesim.engine.app.profile.Profiler.zone("audio.block");
+
     /** Event: voice {@code slot} ended (its clip played out, or it was stopped or killed); its tag says whose it was. */
     public static final int ENDED = 1;
 
@@ -229,6 +231,7 @@ public final class AudioRenderer implements AutoCloseable {
 
     /** Renders one block into {@link #block()}: commands, voices, buses, limiter, clock. */
     void renderBlock() {
+        com.truesim.engine.app.profile.Profiler.begin(BLOCK_ZONE);
         drain();
         graph.clear();
         voices.render(graph, frame, format.block(), events);
@@ -238,6 +241,7 @@ public final class AudioRenderer implements AutoCloseable {
         limiter.process(block, format.block());
         frame += format.block();
         clock.publish(frame, System.nanoTime(), 0);
+        com.truesim.engine.app.profile.Profiler.end(BLOCK_ZONE);
     }
 
     /**

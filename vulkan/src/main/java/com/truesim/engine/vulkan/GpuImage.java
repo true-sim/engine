@@ -45,6 +45,8 @@ public final class GpuImage implements AutoCloseable {
     private final VulkanDevice device;
     private final long handle;
     private final long allocation;
+    private final GpuMemory.Category memoryCategory;
+    private final long memoryBytes;
     private final long view;
     private final long[] mipViews;
     private final long[] layerViews; // a 2D view of each layer's first level, for rendering into one layer
@@ -151,11 +153,15 @@ public final class GpuImage implements AutoCloseable {
             info.extent().set(width, height, depth);
             LongBuffer image = stack.mallocLong(1);
             PointerBuffer allocated = stack.mallocPointer(1);
+            org.lwjgl.util.vma.VmaAllocationInfo result = org.lwjgl.util.vma.VmaAllocationInfo.calloc(stack);
             Vulkan.check(vmaCreateImage(device.allocator(), info,
-                VmaAllocationCreateInfo.calloc(stack).usage(VMA_MEMORY_USAGE_AUTO), image, allocated, null),
+                VmaAllocationCreateInfo.calloc(stack).usage(VMA_MEMORY_USAGE_AUTO), image, allocated, result),
                 "Could not allocate a " + width + " x " + height + " image");
             this.handle = image.get(0);
             this.allocation = allocated.get(0);
+            this.memoryCategory = GpuMemory.image(usage);
+            this.memoryBytes = result.size();
+            GpuMemory.allocated(memoryCategory, memoryBytes);
             // Views are for shaders and attachments; an image only copied to and from has none.
             int levelUsages = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
             int attachments = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
@@ -176,6 +182,7 @@ public final class GpuImage implements AutoCloseable {
                 }
             } catch (RuntimeException e) {
                 destroy(device, whole, mipViews, layerViews, handle, allocation); // nothing made leaks
+                GpuMemory.freed(memoryCategory, memoryBytes);
                 throw e;
             }
             this.view = whole;
@@ -241,6 +248,7 @@ public final class GpuImage implements AutoCloseable {
         if (!closed) {
             closed = true;
             destroy(device, view, mipViews, layerViews, handle, allocation);
+            GpuMemory.freed(memoryCategory, memoryBytes);
             device.untrack(this);
         }
     }
