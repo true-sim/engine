@@ -10,16 +10,21 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.nio.file.Path;
 import java.util.Locale;
 
 /**
  * The process's resident memory (what the operating system holds in RAM for it: its working set) through FFM: Windows'
  * {@code K32GetProcessMemoryInfo}, Linux's {@code /proc/self/statm}, macOS's {@code task_info}. Read on the counters
- * thread; a platform without it says why ({@link #why()}).
+ * thread; a platform without it says why ({@link #why()}). What each system's call answers is read by a function of
+ * its own ({@link #workingSet}, {@link #statmPages}, {@link #taskResident}), tested on every system.
  */
 @AllowAllocation("runs on the counters thread, off the frame")
 @SuppressWarnings("restricted") // FFM calls into the operating system
 public abstract class ProcessMemory {
+
+    /** {@code sizeof(PROCESS_MEMORY_COUNTERS)} on 64-bit Windows. */
+    static final int COUNTERS_BYTES = 72;
 
     /** Resident bytes, or NaN. */
     public abstract double resident();
@@ -34,13 +39,18 @@ public abstract class ProcessMemory {
 
     /** The reader for this operating system. */
     public static ProcessMemory create() {
-        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        return create(System.getProperty("os.name", ""), Path.of("/proc/self/statm"));
+    }
+
+    /** The reader for system {@code osName} ({@code os.name}'s value), Linux's file being {@code statm}. */
+    static ProcessMemory create(String osName, Path statm) {
+        String os = osName.toLowerCase(Locale.ROOT);
         try {
             if (os.startsWith("windows")) {
                 return new Windows();
             }
             if (os.startsWith("linux")) {
-                return new Linux();
+                return new Linux(statm);
             }
             if (os.startsWith("mac")) {
                 return new Mac();
@@ -83,11 +93,21 @@ public abstract class ProcessMemory {
         return pages;
     }
 
+    /** {@code K32GetProcessMemoryInfo}'s answer: {@code WorkingSetSize} when it succeeded ({@code ok} not 0). */
+    static double workingSet(int ok, MemorySegment counters) {
+        return ok != 0 ? counters.get(ValueLayout.JAVA_LONG, 16) : Double.NaN;
+    }
+
+    /** {@code task_info}'s answer: {@code resident_size} (after {@code virtual_size}) when it succeeded ({@code 0}). */
+    static double taskResident(int result, MemorySegment info) {
+        return result == 0 ? info.get(ValueLayout.JAVA_LONG, 8) : Double.NaN;
+    }
+
     /** {@code K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, 72)}: the working set. */
     private static final class Windows extends ProcessMemory {
         private final MethodHandle info;
         private final MethodHandle process;
-        private final MemorySegment counters = Arena.global().allocate(72, 8);
+        private final MemorySegment counters = Arena.global().allocate(COUNTERS_BYTES, 8);
 
         Windows() {
             Linker linker = Linker.nativeLinker();
@@ -102,9 +122,9 @@ public abstract class ProcessMemory {
         @Override
         public double resident() {
             try {
-                counters.set(ValueLayout.JAVA_INT, 0, 72);
-                int ok = (int) info.invokeExact((MemorySegment) process.invokeExact(), counters, 72);
-                return ok != 0 ? counters.get(ValueLayout.JAVA_LONG, 16) : Double.NaN; // WorkingSetSize
+                counters.set(ValueLayout.JAVA_INT, 0, COUNTERS_BYTES);
+                return workingSet((int) info.invokeExact((MemorySegment) process.invokeExact(), counters,
+                    COUNTERS_BYTES), counters);
             } catch (Throwable e) {
                 return Double.NaN;
             }
@@ -122,26 +142,16 @@ public abstract class ProcessMemory {
         private final byte[] buffer = new byte[256];
         private final long pageSize;
 
-        Linux() throws IOException {
-            statm = new RandomAccessFile("/proc/self/statm", "r");
-            long size = 4096;
-            try {
-                MethodHandle getpagesize = Linker.nativeLinker().downcallHandle(
-                    Linker.nativeLinker().defaultLookup().find("getpagesize").orElseThrow(),
-                    FunctionDescriptor.of(ValueLayout.JAVA_INT));
-                size = (int) getpagesize.invokeExact();
-            } catch (Throwable e) {
-                // 4 KiB, Linux's usual page
-            }
-            pageSize = size;
+        Linux(Path file) throws IOException {
+            statm = new RandomAccessFile(file.toFile(), "r");
+            pageSize = pageSize();
         }
 
         @Override
         public double resident() {
             try {
                 statm.seek(0);
-                int n = statm.read(buffer);
-                return statmPages(buffer, n) * (double) pageSize;
+                return statmPages(buffer, statm.read(buffer)) * (double) pageSize;
             } catch (IOException e) {
                 return Double.NaN;
             }
@@ -150,6 +160,18 @@ public abstract class ProcessMemory {
         @Override
         public boolean available() {
             return true;
+        }
+    }
+
+    /** {@code getpagesize()} where the C library has it, else 4 KiB (Linux's usual page). */
+    static long pageSize() {
+        try {
+            MethodHandle getpagesize = Linker.nativeLinker().downcallHandle(
+                Linker.nativeLinker().defaultLookup().find("getpagesize").orElseThrow(),
+                FunctionDescriptor.of(ValueLayout.JAVA_INT));
+            return (int) getpagesize.invokeExact();
+        } catch (Throwable e) {
+            return 4096;
         }
     }
 
@@ -175,8 +197,7 @@ public abstract class ProcessMemory {
         public double resident() {
             try {
                 count.set(ValueLayout.JAVA_INT, 0, COUNT);
-                int r = (int) taskInfo.invokeExact(task, MACH_TASK_BASIC_INFO, out, count);
-                return r == 0 ? out.get(ValueLayout.JAVA_LONG, 8) : Double.NaN; // after virtual_size
+                return taskResident((int) taskInfo.invokeExact(task, MACH_TASK_BASIC_INFO, out, count), out);
             } catch (Throwable e) {
                 return Double.NaN;
             }
