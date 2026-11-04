@@ -292,4 +292,82 @@ class UiConsoleTest {
         assertThat(nodes.node("gate")).isEqualTo(gate);
         assertThat(NOPLogger.NOP_LOGGER.getName()).isNotNull();
     }
+
+    @Test
+    void loggersAreEnabledForWhatTheConsoleCapturesOrTheOtherBindingWants() {
+        ConsoleLogProvider provider = new ConsoleLogProvider();
+        provider.initialize(null);
+        Logger logger = provider.getLoggerFactory().getLogger("levels");
+        int captured = ConsoleLog.captureLevel();
+        int source = ConsoleLog.sourceLevel();
+        try {
+            ConsoleLog.captureLevel(LogLevel.TRACE);
+            assertThat(logger.isTraceEnabled()).isTrue();
+            assertThat(logger.isDebugEnabled()).isTrue();
+            ConsoleLog.captureLevel(LogLevel.ERROR + 1); // nothing captured, no other binding: nothing enabled
+            assertThat(logger.isTraceEnabled()).isFalse();
+            assertThat(logger.isDebugEnabled()).isFalse();
+            assertThat(logger.isInfoEnabled()).isFalse();
+            assertThat(logger.isWarnEnabled()).isFalse();
+            assertThat(logger.isErrorEnabled()).isFalse();
+            ConsoleLog.captureLevel(LogLevel.WARN);
+            assertThat(logger.isWarnEnabled()).isTrue();
+            assertThat(logger.isErrorEnabled()).isTrue();
+            assertThat(logger.isInfoEnabled()).isFalse();
+            ConsoleLog.sourceLevel(LogLevel.ERROR);
+            assertThat(ConsoleLog.sourceLevel()).isEqualTo(LogLevel.ERROR);
+            LogRing ring = new LogRing(16);
+            ConsoleLog.inbox().drainTo(new LogRing(4096));
+            logger.error("with a marker", new IllegalStateException("x"));
+            logger.atLevel(Level.WARN).addMarker(provider.getMarkerFactory().getMarker("m")).log("marked {}", 1);
+            ConsoleLog.inbox().drainTo(ring);
+            assertThat(ring.size()).isEqualTo(2);
+            assertThat(ring.get(0).source().toString()).startsWith("UiConsoleTest.java:");
+            assertThat(ring.get(1).source()).as("warnings below the source level").isNull();
+            assertThat(ConsoleLogProvider.level(Level.TRACE)).isEqualTo(LogLevel.TRACE);
+            assertThat(ConsoleLogProvider.level(Level.DEBUG)).isEqualTo(LogLevel.DEBUG);
+            assertThat(ConsoleLogProvider.level(Level.INFO)).isEqualTo(LogLevel.INFO);
+            assertThat(ConsoleLogProvider.level(Level.ERROR)).isEqualTo(LogLevel.ERROR);
+        } finally {
+            ConsoleLog.captureLevel(captured);
+            ConsoleLog.sourceLevel(source);
+        }
+        // the provider found by service discovery: another one when the classpath has one (tests: logback)
+        ConsoleLogProvider discovered = new ConsoleLogProvider();
+        discovered.initialize();
+        assertThat(discovered.delegate()).isNotInstanceOf(ConsoleLogProvider.class);
+        assertThat(discovered.getLoggerFactory().getLogger("x")).isNotNull();
+    }
+
+    @Test
+    void everyKindOfUnavailabilityIsDescribed() {
+        com.truesim.engine.settings.SettingRegistry registry = new com.truesim.engine.settings.SettingRegistry();
+        EngineSettings settings = new EngineSettings();
+        Setting<Boolean> shadows = Setting.bool("render.shadows", true, "shadows");
+        Setting<Integer> soft = Setting.integer("render.softness", 2, 0, 8, "");
+        Setting<Integer> restart = Setting.integer("render.msaa", 1, 1, 8, "samples").restartNeeded();
+        registry.add(SettingGroup.root("render", "settings.render", 10), shadows, soft, restart, GAMMA);
+        SettingVariables variables = new SettingVariables(registry, settings);
+        settings.dependsOn(soft, shadows, on -> on, "needs shadows");
+        settings.set(shadows, false);
+        assertThat(variables.find("render.softness").availability()).isEqualTo("depends on another setting: "
+            + "needs shadows");
+        assertThat(variables.find("render.softness").description()).isEmpty();
+        settings.applied(restart);
+        settings.set(restart, 4);
+        assertThat(variables.find("render.msaa").availability()).as("changeable, pending a restart").isNull();
+        settings.lock(GAMMA, 2.2f, "");
+        assertThat(variables.find("render.gamma").set("2.0")).isEqualTo("locked");
+        assertThat(variables.find("render.gamma").kind()).isEqualTo(com.truesim.ui.console.ConsoleVariable.Kind.DECIMAL);
+        assertThat(variables.find("render.shadows").kind()).isEqualTo(com.truesim.ui.console.ConsoleVariable.Kind.BOOLEAN);
+        assertThat(variables.find("render.shadows").min()).isNaN();
+        settings.constrain(soft, Constraint.range(0, 4, ""));
+        settings.set(shadows, true);
+        assertThat(variables.find("render.softness").set("6")).startsWith("refused, constrained");
+        assertThat(variables.find("render.softness").set("3")).isNull();
+        com.truesim.engine.settings.SettingRegistry texts = new com.truesim.engine.settings.SettingRegistry();
+        texts.add(SettingGroup.root("game", "settings.game", 1), Setting.text("game.name", "x", "a name"));
+        assertThat(new SettingVariables(texts, settings).find("game.name").kind())
+            .isEqualTo(com.truesim.ui.console.ConsoleVariable.Kind.TEXT);
+    }
 }

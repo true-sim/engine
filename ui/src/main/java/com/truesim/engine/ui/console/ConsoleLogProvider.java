@@ -53,6 +53,7 @@ public final class ConsoleLogProvider implements SLF4JServiceProvider {
     }
 
     /** Initializes over {@code other} (initialized here), or alone with null. */
+    @com.truesim.annotations.AllowAllocation("once, when logging starts")
     void initialize(SLF4JServiceProvider other) {
         delegate = other;
         ILoggerFactory next;
@@ -153,6 +154,7 @@ public final class ConsoleLogProvider implements SLF4JServiceProvider {
         }
 
         @Override
+        @com.truesim.annotations.AllowAllocation("a record formatted (SLF4J formats too); never per frame unless logged")
         protected void handleNormalizedLoggingCall(Level level, Marker marker, String pattern, Object[] arguments,
             Throwable throwable) {
             int console = level(level);

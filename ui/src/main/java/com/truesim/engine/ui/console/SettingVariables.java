@@ -114,6 +114,7 @@ public final class SettingVariables implements ConsoleVariables {
         }
 
         @Override
+        @AllowAllocation("a command run")
         public String set(String text) {
             T value = setting.parse(text);
             if (value == null) {
@@ -139,6 +140,7 @@ public final class SettingVariables implements ConsoleVariables {
             return null;
         }
 
+        @AllowAllocation("a command run")
         private static String describe(Availability availability) {
             String state = switch (availability.state()) {
                 case UNSUPPORTED -> "unsupported";

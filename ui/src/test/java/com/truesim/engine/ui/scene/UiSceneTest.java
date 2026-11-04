@@ -245,4 +245,38 @@ public class UiSceneTest {
         views.follow(0, 0, 640, 480, 5000);
         assertThat(view.version()).isEqualTo(version);
     }
+
+    @Test
+    void theBridgeWithoutACameraOrSceneUpdatesPicksNothingOnTheScreenAndKeepsItsParts() {
+        Ui ui = new Ui(Tss.defaultTheme(), null);
+        SceneGraph graph = new SceneGraph(new ChangeClock());
+        SpatialIndex index = new SpatialIndex(graph);
+        UiScene scene = new UiScene(ui, graph, index, UiScene.INTERACTIVE);
+        assertThat(scene.ui()).isSameAs(ui);
+        assertThat(scene.graph()).isSameAs(graph);
+        assertThat(scene.index()).isSameAs(index);
+        assertThat(scene.camera()).isNull();
+        assertThat(scene.updatesScene()).isTrue();
+        assertThat(scene.updatesScene(false).updatesScene()).isFalse();
+        assertThat(scene.panels()).isNull();
+        Camera camera = new Camera().position(0, 0, 10).set(0, 0, -1, 0, 1, 0, 1.0, 320, 200, 0.1);
+        assertThat(scene.camera(camera).camera()).isSameAs(camera);
+        assertThat(scene.picking().mainView()).isSameAs(scene.mainView());
+        scene.far(50);
+        com.truesim.ui.core.input.UiInput input = new com.truesim.ui.core.input.UiInput(4);
+        input.beginFrame();
+        scene.input(input, 1, 0, 0); // no size yet: the viewport is kept
+        scene.input(input, 2, 320, 200);
+        scene.update(320, 200);
+        assertThat(scene.mainView().far()).isEqualTo(50);
+        assertThat(scene.camera(null).camera()).isNull();
+        assertThat(scene.picking().mainView()).isNull();
+        scene.input(input, 3, 320, 200);
+        assertThat(scene.pickMeshes().count()).isZero();
+        MeshData mesh = halfSquare();
+        scene.pickMeshes().of(mesh);
+        assertThat(scene.pickMeshes().count()).isEqualTo(1);
+        scene.pickMeshes().forget(mesh);
+        assertThat(scene.pickMeshes().count()).isZero();
+    }
 }

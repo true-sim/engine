@@ -28,6 +28,7 @@ public final class FileHistoryStore implements HistoryStore {
     }
 
     /** The file of {@code appId}. */
+    @AllowAllocation("on a command run")
     public Path file(String appId) {
         return folder.resolve("console-history-" + appId.replaceAll("[^A-Za-z0-9._-]", "_") + ".txt");
     }

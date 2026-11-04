@@ -205,6 +205,7 @@ public final class SettingsSource implements PropertySource {
     }
 
     /** The group's label, its parents' first: "Graphics / Shadows". */
+    @AllowAllocation("made when the screen is built")
     private String groupLabel(SettingGroup group) {
         String own = labels.apply(group.label());
         return group.parent() == null ? own : groupLabel(group.parent()) + " / " + own;
@@ -249,6 +250,7 @@ public final class SettingsSource implements PropertySource {
     }
 
     /** A drop-down of a setting's named options. */
+    @AllowAllocation("editors are made when the screen is built")
     private EditorFactory choiceEditor() {
         return row -> {
             Setting<?> setting = byProperty.get(row.property().name());

@@ -238,4 +238,35 @@ class SettingsScreenTest {
             }
         }
     }
+
+    @Test
+    void withoutTiersEverySettingShowsAndNewSettingsRemakeTheModel() {
+        SettingRegistry registry = new SettingRegistry();
+        registry.add(GRAPHICS, VSYNC, FILTER);
+        SettingsSource source = new SettingsSource(registry);
+        PropertyModel<SettingsScreen.Values> model = source.model();
+        assertThat(model.properties()).hasSize(2);
+        assertThat(model.property("render.vsync").annotation(Hidden.class)).isNull();
+        assertThat(model.property("render.vsync").annotation(Range.class)).isNull();
+        assertThat(source.model()).as("cached").isSameAs(model);
+        registry.add(AUDIO, VOLUME);
+        assertThat(source.model().properties()).as("made again").hasSize(3);
+        assertThat(source.setting("nothing")).isNull();
+        assertThat(source.upTo(SettingTier.BASIC).labels(key -> "L").model().property("audio.volume")
+            .annotation(Label.class).value()).isEqualTo("L");
+        assertThat(SettingsSource.defaultLabel("settings.render.shadowSize")).isEqualTo("Shadow size");
+        EngineSettings settings = new EngineSettings();
+        try (SettingsScreen screen = new SettingsScreen(registry, settings)) {
+            assertThat(screen.settings()).isSameAs(settings);
+            SettingsScreen.Values values = screen.get();
+            assertThat(screen.get()).as("one snapshot while nothing changed").isSameAs(values);
+            assertThat(screen.set(values.with("audio.volume", 5f))).as("out of range: not set").isFalse();
+            assertThat(screen.set(values.with("unknown", 1))).isFalse();
+            assertThat(screen.set(values.with("render.shadowFilter", "hard"))).isTrue();
+            assertThat(settings.get(FILTER)).isEqualTo("hard");
+            long version = screen.version();
+            screen.touch();
+            assertThat(screen.version()).isGreaterThan(version);
+        }
+    }
 }

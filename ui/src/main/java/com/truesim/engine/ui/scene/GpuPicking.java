@@ -144,19 +144,27 @@ public final class GpuPicking implements Technique {
         PickPush push = new PickPush();
         g.pass("gpu picking").read(ids, Access.STORAGE_READ).write(out, BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
-                int n = count;
-                int r = (int) (ctx.frame() % RING);
-                System.arraycopy(asked, 0, recordedPixels[r], 0, n * 2);
-                recordedCount[r] = n;
-                recordedFrame[r] = ctx.frame();
+                int n = recordPointers(ctx.frame());
                 if (n > 0) {
-                    pixels.put(0, staging, 0, n * 8L);
                     ctx.dispatch(pipeline, push.ids(ctx.storage(ids)).count(n).width(ctx.regionWidth(ids))
                         .height(ctx.regionHeight(ids)).pixels(pixels.deviceAddress()).picked(ctx.address(out)),
                         (n + 63) / 64);
                 }
             });
         g.readback("gpu picking result", out, 0, capacity * 4L, receiver);
+    }
+
+    /** Keeps the pointers frame {@code frame} reads (for its answer) and uploads them: how many. */
+    private synchronized int recordPointers(long frame) {
+        int n = count;
+        int r = (int) (frame % RING);
+        System.arraycopy(asked, 0, recordedPixels[r], 0, n * 2);
+        recordedCount[r] = n;
+        recordedFrame[r] = frame;
+        if (n > 0) {
+            pixels.put(0, staging, 0, n * 8L);
+        }
+        return n;
     }
 
     private synchronized void receive(MemorySegment data, long frame) {

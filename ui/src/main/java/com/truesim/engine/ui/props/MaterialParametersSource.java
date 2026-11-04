@@ -99,6 +99,7 @@ public final class MaterialParametersSource implements PropertySource {
     }
 
     /** The record's {@code with<Name>} method, or null. */
+    @AllowAllocation("made once per type")
     private static Method wither(Class<?> type, RecordComponent component) {
         String name = component.getName();
         try {
