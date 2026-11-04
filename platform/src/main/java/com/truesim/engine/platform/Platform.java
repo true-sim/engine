@@ -66,12 +66,10 @@ import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_RESIZED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_RESTORED;
 import static org.lwjgl.sdl.SDLEvents.SDL_EVENT_WINDOW_SHOWN;
-import static org.lwjgl.sdl.SDLEvents.SDL_PollEvent;
 import static org.lwjgl.sdl.SDLGamepad.SDL_AddGamepadMapping;
 import static org.lwjgl.sdl.SDLGamepad.SDL_GetGamepadJoystick;
 import static org.lwjgl.sdl.SDLGamepad.SDL_GetGamepadNameForID;
 import static org.lwjgl.sdl.SDLGamepad.SDL_GetGamepads;
-import static org.lwjgl.sdl.SDLGamepad.SDL_IsGamepad;
 import static org.lwjgl.sdl.SDLGamepad.SDL_OpenGamepad;
 import static org.lwjgl.sdl.SDLHaptic.SDL_GetHapticNameForID;
 import static org.lwjgl.sdl.SDLHaptic.SDL_GetHaptics;
@@ -649,7 +647,7 @@ public final class Platform implements AutoCloseable {
     private static IntBuffer filterJoysticks(IntBuffer joysticks) {
         IntBuffer plain = IntBuffer.allocate(joysticks.remaining());
         for (int i = 0; i < joysticks.remaining(); i++) {
-            if (!SDL_IsGamepad(joysticks.get(i))) {
+            if (!SdlCalls.isGamepad(joysticks.get(i))) {
                 plain.put(joysticks.get(i));
             }
         }
@@ -901,7 +899,7 @@ public final class Platform implements AutoCloseable {
             windows.get(i).applyPendingSettings(); // window settings changed on other threads
         }
         int count = 0;
-        while (SDL_PollEvent(event)) {
+        while (SdlCalls.pollEvent(event.address())) { // every frame: allocates nothing
             count++;
             dispatch(event.address(), listener);
         }
@@ -1055,7 +1053,7 @@ public final class Platform implements AutoCloseable {
     /** Joysticks that are gamepads report through the gamepad events instead. */
     private static void joystickAxis(long e, PlatformListener listener) {
         int joystick = SDL_JoyAxisEvent.nwhich(e);
-        if (!SDL_IsGamepad(joystick)) {
+        if (!SdlCalls.isGamepad(joystick)) {
             listener.joystickAxis(SDL_JoyAxisEvent.ntimestamp(e), joystick, SDL_JoyAxisEvent.naxis(e) & 0xff,
                 axis(SDL_JoyAxisEvent.nvalue(e)));
         }
@@ -1063,7 +1061,7 @@ public final class Platform implements AutoCloseable {
 
     private static void joystickButton(long e, PlatformListener listener) {
         int joystick = SDL_JoyButtonEvent.nwhich(e);
-        if (!SDL_IsGamepad(joystick)) {
+        if (!SdlCalls.isGamepad(joystick)) {
             listener.joystickButton(SDL_JoyButtonEvent.ntimestamp(e), joystick, SDL_JoyButtonEvent.nbutton(e) & 0xff,
                 SDL_JoyButtonEvent.ndown(e));
         }
@@ -1071,7 +1069,7 @@ public final class Platform implements AutoCloseable {
 
     private static void joystickHat(long e, PlatformListener listener) {
         int joystick = SDL_JoyHatEvent.nwhich(e);
-        if (!SDL_IsGamepad(joystick)) {
+        if (!SdlCalls.isGamepad(joystick)) {
             listener.joystickHat(SDL_JoyHatEvent.ntimestamp(e), joystick, SDL_JoyHatEvent.nhat(e) & 0xff,
                 Sdl.hat(SDL_JoyHatEvent.nvalue(e) & 0xff));
         }
@@ -1087,7 +1085,7 @@ public final class Platform implements AutoCloseable {
     @AllowAllocation("devices change rarely")
     private void addedJoystick(long e, PlatformListener listener) {
         int id = SDL_KeyboardDeviceEvent.nwhich(e);
-        if (!SDL_IsGamepad(id)) {
+        if (!SdlCalls.isGamepad(id)) {
             added(InputDevice.Kind.JOYSTICK, e, listener);
         }
     }
