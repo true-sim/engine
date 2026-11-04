@@ -29,14 +29,15 @@ import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
 
 /**
- * A view's surfaces lit by global illumination, as the kind chosen for {@link #SLOT} ({@code render.gi}) does it:
- * with {@link #PROBES} (the default), the {@link ProbeVolume}'s (with {@link #CASCADES}, the first of
- * {@link RadianceCascades} made of its scene, lights, environment and anchor, sampled the same way) diffuse light replaces the environment's spherical harmonics (every shading path reads the
- * view's indirect-light table: opaque on both shading techniques, blended and transmissive surfaces) and its sky
- * visibility dims the environment's reflections, where the volume reaches; elsewhere the environment lights as before.
- * It modifies the view's {@link Keys#INDIRECT_LIGHT} (an {@link EnvironmentLighting} of the view provides it). Views
- * given equal volumes (a headset's eyes, design D7) share one: the volume is updated once a frame. Its tunables are
- * the probes kind's ({@link Probes}, {@code render.gi.probes.*}), which the volume reads.
+ * A view's surfaces lit by global illumination, as the kind chosen for {@link #SLOT} ({@code render.gi}) does it: with
+ * {@link #PROBES} (the default), the {@link ProbeVolume}'s (with {@link #CASCADES}, the first of {@link
+ * RadianceCascades} made of its scene, lights, environment and anchor, sampled the same way) diffuse light replaces the
+ * environment's spherical harmonics (every shading path reads the view's indirect-light table: opaque on both shading
+ * techniques, blended and transmissive surfaces) and its sky visibility dims the environment's reflections, where the
+ * volume reaches; elsewhere the environment lights as before. It modifies the view's {@link Keys#INDIRECT_LIGHT} (an
+ * {@link EnvironmentLighting} of the view provides it). Views given equal volumes (a headset's eyes, design D7) share
+ * one: the volume is updated once a frame. Its tunables are the probes kind's ({@link Probes}, {@code
+ * render.gi.probes.*}), which the volume reads.
  *
  * <p>A game's own kind ({@link Techniques#register}) makes a {@link Technique} built in this one's place, given this
  * one ({@link #view()}, {@link #volume()}): it modifies {@link Keys#INDIRECT_LIGHT}.

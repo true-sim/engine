@@ -83,6 +83,7 @@ public final class GiHarness implements AutoCloseable {
         this.width = width;
         this.height = height;
         graph = new FrameGraph(device, 2);
+        settings(graph);
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 16, 1 << 10, 64), graph.frameSlots());
         scene = new GpuScene(device, pool, 256, graph.frameSlots());
         materials = new Materials(device, 256, graph.frameSlots());
@@ -102,6 +103,23 @@ public final class GiHarness implements AutoCloseable {
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
         stage = new GiScenes.Stage(pool, scene, materials, lights, rayTracing, camera, width, height);
         main.port().output(Keys.SCENE_COLOR, output);
+    }
+
+    /**
+     * Settings given as {@code -PgiSettings=name=value,name=value} (a sweep of a technique's tunables), on the
+     * command line's layer.
+     */
+    static void settings(FrameGraph graph) {
+        String given = System.getProperty("truesim.gi.settings");
+        if (given == null || given.isBlank()) {
+            return;
+        }
+        List<String> args = new ArrayList<>();
+        for (String pair : given.split(",")) {
+            args.add("--set");
+            args.add(pair);
+        }
+        graph.settings().commandLine(args.toArray(String[]::new));
     }
 
     public int width() {

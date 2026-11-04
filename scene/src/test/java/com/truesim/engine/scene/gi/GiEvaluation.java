@@ -57,10 +57,24 @@ class GiEvaluation {
         new Variant("probes+rays-svgf", AmbientOcclusion.RAYS, ProbeVolumeLighting.PROBES,
             Denoiser.Mode.SVGF),
         new Variant("probes+rays-reblur", AmbientOcclusion.RAYS, ProbeVolumeLighting.PROBES,
-            Denoiser.Mode.REBLUR));
+            Denoiser.Mode.REBLUR),
+        new Variant("cascades", null, ProbeVolumeLighting.CASCADES, Denoiser.Mode.SVGF),
+        new Variant("cascades+gtao", AmbientOcclusion.GTAO, ProbeVolumeLighting.CASCADES, Denoiser.Mode.SVGF),
+        new Variant("cascades+bitmask", AmbientOcclusion.BITMASK, ProbeVolumeLighting.CASCADES,
+            Denoiser.Mode.SVGF));
+
+    /** The variants {@code -PgiVariants=a,b} names, or all of them. */
+    static List<Variant> variants() {
+        String names = System.getProperty("truesim.gi.variants");
+        if (names == null || names.isBlank()) {
+            return VARIANTS;
+        }
+        List<String> wanted = List.of(names.split(","));
+        return VARIANTS.stream().filter(v -> wanted.contains(v.name())).toList();
+    }
 
     /** Runs of each dynamic scene's change whose frames are averaged for its lag. */
-    static final int TRIALS = 4;
+    static final int TRIALS = Integer.getInteger("truesim.gi.trials", 4);
 
     /** Frames each image settles in: past the probes' and the denoiser's 30 frames of history. */
     static final int SETTLE = 72;
@@ -86,18 +100,20 @@ class GiEvaluation {
                     float[] reference = reference(harness, references, name, scene[0], state, samples);
                     float exposure = exposure(reference, width, height);
                     harness.realtime(scene[0], state);
-                    for (Variant v : VARIANTS) {
+                    for (Variant v : variants()) {
                         v.apply(graph);
                         float[] image = harness.render(SETTLE);
                         png(image, width, height, exposure, out.resolve(name + "-" + v.name() + ".png"));
                         errors.add(String.format(Locale.ROOT, "| %s | %s | %s |", name, v.name(),
                             GiError.of(image, reference, width, height)));
                     }
-                    occlusion.addAll(occlusion(harness, name, out));
+                    if (part("ao")) {
+                        occlusion.addAll(occlusion(harness, name, out));
+                    }
                     AmbientOcclusion.SLOT.choose(graph.settings(), null);
                 });
                 for (String dynamic : GiScenes.DYNAMIC) {
-                    if (selected(dynamic)) {
+                    if (selected(dynamic) && part("lag")) {
                         lags.addAll(lags(harness, dynamic));
                     }
                 }
@@ -120,6 +136,12 @@ class GiEvaluation {
             lags.forEach(System.out::println);
             assertThat(instance.validationErrors()).isZero();
         }
+    }
+
+    /** Whether {@code -PgiParts=errors,ao,lag} names {@code part} (all without it). */
+    private static boolean part(String part) {
+        String parts = System.getProperty("truesim.gi.parts");
+        return parts == null || parts.isBlank() || List.of(parts.split(",")).contains(part);
     }
 
     private static boolean selected(String scene) {
@@ -207,54 +229,77 @@ class GiEvaluation {
         List<String> rows = new ArrayList<>();
         String[] responses = {"told (invalidation)", "found (adaptive)", "history cap alone"};
         for (int r = 0; r < responses.length; r++) {
-            AmbientOcclusion.SLOT.choose(graph.settings(), null);
-            ProbeVolumeLighting.SLOT.choose(graph.settings(), ProbeVolumeLighting.PROBES)
-                .set(ProbeVolume.INVALIDATE, r == 0).set(ProbeVolume.ADAPTIVE, r <= 1);
-            // Each frame after the change as the mean of TRIALS runs (the rays turn differently in each): the light's
-            // response, not one run's noise
-            float[] before = null;
-            float[][] seen = new float[90][];
-            for (int trial = 0; trial < TRIALS; trial++) {
-                harness.realtime(scene, 0);
-                float[] settledBefore = harness.render(SETTLE);
-                before = before == null ? settledBefore : before;
-                harness.state(scene, 1);
-                for (int f = 0; f < seen.length; f++) {
-                    float[] image = harness.render(1);
-                    if (seen[f] == null) {
-                        seen[f] = new float[image.length];
-                    }
-                    for (int i = 0; i < image.length; i++) {
-                        seen[f][i] += image[i] / TRIALS;
-                    }
-                }
-            }
-            // What it settles at: the mean of the last 30 frames, and their noise about it
-            int pixels = harness.width() * harness.height();
-            float[] after = new float[seen[0].length];
-            int settled = 30;
-            for (int f = seen.length - settled; f < seen.length; f++) {
-                for (int i = 0; i < after.length; i++) {
-                    after[i] += seen[f][i] / settled;
-                }
-            }
-            double noise = 0;
-            for (int f = seen.length - settled; f < seen.length; f++) {
-                noise += difference(seen[f], after, pixels) / settled;
-            }
-            double change = difference(before, after, pixels);
-            int lag = seen.length + 1;
-            for (int f = 0; f < seen.length; f++) {
-                if (difference(seen[f], after, pixels) <= 0.1 * change + noise) {
-                    lag = f + 1;
-                    break;
-                }
-            }
-            rows.add(String.format(Locale.ROOT, "| %s | %s | %d | %.5f | %.5f |", scene, responses[r], lag, change,
-                noise));
+            int response = r;
+            rows.add(lag(harness, scene, responses[r], g -> {
+                AmbientOcclusion.SLOT.choose(g.settings(), null);
+                ProbeVolumeLighting.SLOT.choose(g.settings(), ProbeVolumeLighting.PROBES)
+                    .set(ProbeVolume.INVALIDATE, response == 0).set(ProbeVolume.ADAPTIVE, response <= 1);
+            }));
         }
         graph.settings().set(ProbeVolume.INVALIDATE, true).set(ProbeVolume.ADAPTIVE, true);
+        rows.add(lag(harness, scene, "radiance cascades (no history)", g -> {
+            AmbientOcclusion.SLOT.choose(g.settings(), null);
+            ProbeVolumeLighting.SLOT.choose(g.settings(), ProbeVolumeLighting.CASCADES);
+        }));
+        ProbeVolumeLighting.SLOT.choose(graph.settings(), ProbeVolumeLighting.PROBES);
         return rows;
+    }
+
+    /** The lag of dynamic scene {@code scene} by the response {@code setup} sets up: a row of the table. */
+    private static String lag(GiHarness harness, String scene, String response,
+        java.util.function.Consumer<FrameGraph> setup) {
+        setup.accept(harness.graph());
+        // Each frame after the change as the mean of TRIALS runs (the rays turn differently in each): the light's
+        // response, not one run's noise
+        float[] before = null;
+        float[][] seen = new float[90][];
+        for (int trial = 0; trial < TRIALS; trial++) {
+            harness.realtime(scene, 0);
+            float[] settledBefore = harness.render(SETTLE);
+            before = before == null ? settledBefore : before;
+            harness.state(scene, 1);
+            for (int f = 0; f < seen.length; f++) {
+                float[] image = harness.render(1);
+                if (seen[f] == null) {
+                    seen[f] = new float[image.length];
+                }
+                for (int i = 0; i < image.length; i++) {
+                    seen[f][i] += image[i] / TRIALS;
+                }
+            }
+        }
+        // What it settles at: the mean of the last 30 frames, and their noise about it
+        int pixels = harness.width() * harness.height();
+        float[] after = new float[seen[0].length];
+        int settled = 30;
+        for (int f = seen.length - settled; f < seen.length; f++) {
+            for (int i = 0; i < after.length; i++) {
+                after[i] += seen[f][i] / settled;
+            }
+        }
+        double noise = 0;
+        for (int f = seen.length - settled; f < seen.length; f++) {
+            noise += difference(seen[f], after, pixels) / settled;
+        }
+        double change = difference(before, after, pixels);
+        int lag = seen.length + 1;
+        for (int f = 0; f < seen.length; f++) {
+            if (difference(seen[f], after, pixels) <= 0.1 * change + noise) {
+                lag = f + 1;
+                break;
+            }
+        }
+        if (Boolean.getBoolean("truesim.gi.curves")) {
+            // Each frame's difference from what it settles at, of the change (above the noise: the lag's measure)
+            StringBuilder curve = new StringBuilder("curve " + scene + ", " + response + ":");
+            for (int f = 0; f < 40; f++) {
+                curve.append(String.format(Locale.ROOT, " %.3f", (difference(seen[f], after, pixels) - noise)
+                    / change));
+            }
+            System.out.println(curve);
+        }
+        return String.format(Locale.ROOT, "| %s | %s | %d | %.5f | %.5f |", scene, response, lag, change,
+            noise);
     }
 
     /**

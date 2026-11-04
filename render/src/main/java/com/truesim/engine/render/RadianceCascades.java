@@ -40,14 +40,15 @@ import org.lwjgl.system.MemoryStack;
  * <p>No history: every frame traces every interval anew (fixed directions, so a still scene's light is still), and
  * merges the cascades from the last to the first: a direction whose ray met nothing within its interval takes what the
  * next cascade's probes around it found beyond, in the four directions refining it, weighed trilinearly over those not
- * inside geometry whose intervals continue this one ({@link #VISIBILITY}: nothing between where it ends and where theirs
- * start, nor between their coarser and finer directions' starts: no light from the far side of a wall). Beyond its
- * grid, shading takes the probes at the grid's border nearest to the point (their light weighed by what they see), not
- * the environment. Changes show in the frame they happen; only the further bounces (hits lit by the first cascade's
+ * inside geometry whose intervals continue this one ({@link #VISIBILITY}: nothing between where it ends and where
+ * theirs start, nor between their coarser and finer directions' starts: no light from the far side of a wall). Beyond
+ * its grid, shading takes the probes at the grid's border nearest to the point (their light weighed by what they see),
+ * not the environment. Changes show in the frame they happen; only the further bounces (hits lit by the first cascade's
  * probes of the frame before) take a frame per bounce. Hits shading many lights by the world grid's reservoirs pick a
- * light at random, the one noise left (a scene of few lights lists them all). The first cascade's merged light becomes a probe volume of one cascade (irradiance / pi with the
- * sky's visibility, distance moments from its rays), which shading samples as it samples {@link ProbeVolume}'s, through
- * {@link ProbeVolumeLighting} ({@link ProbeVolumeLighting#CASCADES}): the same {@link ProbeVolume.Volume}.
+ * light at random, the one noise left (a scene of few lights lists them all). The first cascade's merged light becomes
+ * a probe volume of one cascade (irradiance / pi with the sky's visibility, distance moments from its rays), which
+ * shading samples as it samples {@link ProbeVolume}'s, through {@link ProbeVolumeLighting} ({@link
+ * ProbeVolumeLighting#CASCADES}): the same {@link ProbeVolume.Volume}.
  *
  * <p>Rays are paths of the reference path tracer's wavefront in its probe mode with intervals
  * ({@link ReferencePathTracer}): hits shaded by their material type, their lights through the world light grid with

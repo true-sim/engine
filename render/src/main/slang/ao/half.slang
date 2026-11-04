@@ -1,4 +1,4 @@
-// Ambient occlusion at half resolution (engine-render's AmbientOcclusion, render.ao.resolution): the pixel each texel
+// Ambient occlusion at half resolution (engine-render's AmbientOcclusion, each kind's resolution): the pixel each texel
 // of the half resolution traces (one of its 2 x 2, ao.slang's halfOffset), its depth, normal and motion (halved, in
 // the half resolution's texels), for the denoiser at that resolution and the composite's upsampling.
 import bindless;

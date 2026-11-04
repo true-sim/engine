@@ -1548,8 +1548,111 @@ resolution is the expensive part: 1.6-2.6 ms at 1080p, 6.8-11 ms at 4K (each tec
 GTAO is the cheapest, rays the dearest, the two denoisers within 0.15 ms at 1080p.
 
 Not yet: the baked volume (`BAKED`, the same format filled offline by the path tracer and shipped as a scene asset;
-it needs the scene repo's asset type, design S4); ambient occlusion at a lower resolution (its cost above is at full
-resolution); the probe volume's update on the async queue and a budget below every probe each frame (S3).
+it needs the scene repo's asset type, design S4). Ambient occlusion at a lower resolution, the update's budget and
+the async queue: below.
+
+### Global illumination: radiance cascades, occlusion at half resolution, the update's budget
+
+**Radiance cascades** (`RadianceCascades`, design D9; Sannikov 2023 carried to 3D; `render.gi` = `cascades`): no
+history. `render.gi.cascades.count` (4) grids around the anchor camera, the first `probes` x `probesUp` x `probes`
+(32 x 16 x 32) probes `spacing` (0.5 m) apart, each next twice as far apart (as many as enclose the one before) with
+four times the directions (`directions`: 8 x 8 octahedral texels for the first, 16 x 16 for the next, ...), each
+direction a ray along an interval four times as long as the one before's (`interval`: 2 spacings for the first),
+starting where it ended; the last cascade's go on to the environment. The rays are the probe volume's wavefront with
+intervals (`PATH_INTERVALS`: a ray ends at its interval; meeting nothing there, it records no light), so hits shade as
+everywhere else. Every frame the cascades merge from the last to the first: a direction that met nothing takes the
+next cascade's light around the probe in the four directions refining it, trilinearly over the probes not inside
+geometry whose intervals continue this one (`visibility`: nothing between where it ends and where theirs start, nor
+between a coarser and a finer direction's starts; without that, light came through walls: `docs/pitfalls.md`). The
+first cascade becomes a probe volume of one cascade (irradiance with sky visibility, distance moments), sampled by
+every shading path exactly as the probe volume is; beyond its grid, the probes at the border nearest to the point
+light it (`PROBE_VOLUME_CLAMP`), not the environment. Fixed directions and no history: a still scene's light does not
+move, changes show in the frame they happen, further bounces a frame each (the first cascade of the frame before
+lights the hits). Tested (`RadianceCascadesTest`): the white furnace within 2.1 % (3 % allowed), a light changing
+color in 3 frames, two views one update, no allocation.
+
+Against the references (as above; RX 9070 XT, 2026-11-04; the probe volume at its new default budget of one half):
+
+| Scene | Probes | Probes + BITMASK | Cascades | Cascades + BITMASK |
+|---|---|---|---|---|
+| sun-room | 7.3 %, 29.0 %, +1.0 % | 6.7 %, 26.0 %, -0.4 % | 7.3 %, 32.3 %, +3.0 % | 6.8 %, 27.0 %, +2.0 % |
+| leak-5cm (absolute) | 0.0001 | 0.0001 | 0.0000 | 0.0000 |
+| leak-25cm, leak-50cm (absolute) | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| bleeding | 22.5 %, 96.0 %, +17.4 % | 20.5 %, 74.3 %, +15.8 % | 22.8 %, 142 %, +19.9 % | 21.2 %, 124 %, +17.1 % |
+| screens | 17.4 %, 68.6 %, -14.4 % | 16.2 %, 66.9 %, -13.7 % | 14.1 %, 70.3 %, -6.4 % | 12.7 %, 60.8 %, -6.3 % |
+| toggle (light on) | 8.2 %, 18.8 %, -6.8 % | 7.5 %, 17.7 %, -6.0 % | 6.7 %, 15.0 %, -5.9 % | 6.8 %, 15.2 %, -6.2 % |
+| door (shut, absolute) | 0.0000 | 0.0000 | 0.0000 | 0.0000 |
+| door (open) | 8.1 %, 31.5 %, -1.5 % | 7.3 %, 27.5 %, -1.5 % | 6.4 %, 23.3 %, -2.3 % | 6.2 %, 21.1 %, -3.2 % |
+| mover (moved) | 5.6 %, 16.7 %, -4.5 % | 4.4 %, 12.9 %, -2.3 % | 4.9 %, 13.6 %, -0.3 % | 4.9 %, 13.7 %, -1.2 % |
+| cornell | 35.3 %, 200 %, +19.6 % | 22.7 %, 109 %, +4.2 % | 18.2 %, 82.1 %, -9.5 % | 17.5 %, 82.3 %, -11.8 % |
+| Sponza, view 1 | 18.0 %, 119 %, -2.0 % | 18.5 %, 87.6 %, -5.4 % | 18.7 %, 123 %, -2.0 % | 18.3 %, 93.5 %, -4.0 % |
+| Sponza, view 2 | 25.9 %, 145 %, -3.0 % | 26.2 %, 122 %, -6.3 % | 22.6 %, 114 %, -0.0 % | 22.1 %, 98.7 %, +1.1 % |
+| Sponza, view 3 | 79.5 %, 293 %, +32.5 % | 78.4 %, 224 %, +25.2 % | 60.2 %, 114 %, +7.0 % | 58.5 %, 99.9 %, +0.4 % |
+
+Closer than the probe volume in most views and as close in the rest, with a lag of the bounces alone (frames to
+90 %: toggle 5, door 5, mover 3; no noise at all; the probe volume's below). It costs about 4 times as much (6.7 ms at
+any resolution, against 1.6 ms for every probe), and its first grid spans 16 x 8 x 16 m (sampled past it from its
+border): a trade-off, so both stay, and `probes` remains the default. Tuning, measured on these scenes: 4 x 4 or
+6 x 6 first directions alias small bright emitters (the Cornell box's lamp: 25 % and 48 %), a 1 m spacing loses the
+small rooms (sun-room 17 %), other first intervals leak or blur more. Many lights shaded through the world grid's
+reservoirs pick one at random: the only noise it can have.
+
+**Ambient occlusion at half resolution** (each AO kind's `resolution` = `FULL` or `HALF`, e.g. `render.ao.gtao.resolution`): one pixel of
+each 2 x 2 traced (its depth, normal and halved motion copied into images of that size), denoised at that size
+(`Denoiser` takes the resolution's shift), and brought back by the composite from the four texels around each pixel,
+bilinear, by how near each lies to the pixel's plane and how alike their normals are. Against 512 rays a pixel, mean
+over the GI scenes (`GiEvaluation`'s occlusion table, `-PgiSettings=render.ao.bitmask.resolution=HALF`, and the other kinds'): GTAO 0.0235 full,
+0.0244 half; BITMASK 0.0186, 0.0198; rays with ReBLUR 0.0348, 0.0356; rays with SVGF 0.0073, 0.0128 (one ray a pixel
+loses the most). At 4K it costs a third: GTAO 6.8 to 2.3 ms, BITMASK 8.0 to 2.6, rays 10.5-11.1 to 3.0-3.1 (1080p: 1.6-2.6 to 0.5-0.8 ms). A
+trade-off: both stay, `FULL` the default (`halfResolutionComesCloseToFullResolutionAndKeepsEdges`: every technique
+within 0.02 of full resolution, the open floor at a block's edge kept open).
+
+**The update's budget and queue.** `render.gi.probes.budget` now defaults to one half: still probes update in turns,
+every other frame; a probe that restarts (a change told or found) updates every frame until its history holds
+`render.gi.probes.fresh` (8) updates, so the budget spreads still probes' work, not a change's response. Lag at
+budgets 1, 0.5 and 0.25 (frames to 90 %, told / found): toggle 3/3, 3/3, 3/5; door 2/3, 2/5, 2/9; mover 21/30, 7/39,
+5/36. The update's passes: 1.56, 0.98, 0.71 ms (not depending on the resolution); errors within the runs' spread.
+`render.gi.probes.async` runs the update of either technique (but the setup and the invalidation, which read the scene's
+instances) on the async compute queue; persistent images now live on both queue families so async passes may use them
+(`Persistent`, `GraphCompiler`). On Sponza that was 0.1 ms slower at 1080p and 4K alike (frame span 2.86 against
+2.72 ms, 6.39 against 6.27): little graphics work comes before the shading that waits for it. Off by default
+(`theUpdateOnTheAsyncComputeQueueLightsTheSame`).
+
+**The mover's lag** (told 6 to 26 frames over the evaluations, found 26 to 39; the targets are 4 and 15) is not light
+arriving late. Averaging 16 runs a frame instead of 4 halves the noise and leaves the told curve as it was: within 13 %
+of the change at frame 3, then a plateau at 8 to 9 % for about 25 frames that fades as the restarted probes'
+histories fill. It follows the history's length (`maxFrames` 4: 3 frames, with 4.5 times the noise), not which probes
+restart (`instanceMargin` 3 and 100 alike: every probe of the room restarts). Restarting each probe once more after
+the bounces settle (3, 4 or 6 frames later: lag 23 to 33) and bounding the history by a fast one (2 or 3 of its
+deviations: lag 9, noise up 13 to 44 %) did not help; neither was kept. Cause not found. Radiance cascades reach 90 %
+in 3 frames there.
+
+What it costs (as above, with the frame's GPU span over every queue; 2026-11-04):
+
+| Size | Technique | Frame (passes) | Frame (GPU span) | AO passes | GI passes | Shading pass |
+|---|---|---|---|---|---|---|
+| 1920 x 1080 | probes (budget 1) | 2.713-2.729 ms | 2.856-2.872 ms | 0 | 1.557-1.567 ms | 0.914-0.917 ms |
+| 1920 x 1080 | probes, budget 0.5 | 2.132-2.174 ms | 2.264-2.274 ms | 0 | 0.973-1.003 ms | 0.901-0.915 ms |
+| 1920 x 1080 | probes, budget 0.25 | 1.863-1.892 ms | 1.969-2.015 ms | 0 | 0.711-0.723 ms | 0.906-0.910 ms |
+| 1920 x 1080 | probes, graphics queue | 2.625-2.669 ms | 2.689-2.746 ms | 0 | 1.433-1.449 ms | 0.944-0.964 ms |
+| 1920 x 1080 | cascades | 7.955-7.959 ms | 8.225-8.231 ms | 0 | 6.869-6.872 ms | 0.862-0.863 ms |
+| 1920 x 1080 | cascades, 4 x 4 directions | 3.222-3.227 ms | 3.383-3.427 ms | 0 | 2.128-2.131 ms | 0.855-0.859 ms |
+| 1920 x 1080 | cascades, 6 x 6 directions | 5.255-5.268 ms | 5.462-5.524 ms | 0 | 4.179-4.191 ms | 0.847-0.852 ms |
+| 1920 x 1080 | gtao, half | 1.525-1.534 ms | 1.581-1.590 ms | 0.541-0.543 ms | 0 | 0.746-0.749 ms |
+| 1920 x 1080 | bitmask, half | 1.567-1.629 ms | 1.622-1.657 ms | 0.626-0.628 ms | 0 | 0.709-0.751 ms |
+| 1920 x 1080 | rays-svgf, half | 1.741-1.824 ms | 1.801-1.855 ms | 0.809-0.824 ms | 0 | 0.712-0.754 ms |
+| 1920 x 1080 | rays-reblur, half | 1.611-1.646 ms | 1.665-1.702 ms | 0.682-0.695 ms | 0 | 0.705-0.725 ms |
+| 3840 x 2160 | probes (budget 1) | 6.426-6.440 ms | 6.383-6.399 ms | 0 | 1.765-1.770 ms | 3.688-3.697 ms |
+| 3840 x 2160 | probes, budget 0.5 | 5.878-5.891 ms | 5.812-5.839 ms | 0 | 1.201-1.213 ms | 3.697-3.701 ms |
+| 3840 x 2160 | cascades | 11.115-11.119 ms | 11.276-11.340 ms | 0 | 6.928-6.936 ms | 3.286-3.291 ms |
+| 3840 x 2160 | gtao, half | 5.862-6.047 ms | 5.913-6.104 ms | 2.312-2.317 ms | 0 | 2.699-2.844 ms |
+| 3840 x 2160 | bitmask, half | 6.313-6.330 ms | 6.364-6.378 ms | 2.554-2.560 ms | 0 | 2.876-2.885 ms |
+| 3840 x 2160 | rays-svgf, half | 6.875-6.883 ms | 6.934-6.944 ms | 3.098-3.106 ms | 0 | 2.888-2.892 ms |
+| 3840 x 2160 | rays-reblur, half | 6.643-6.655 ms | 6.697-6.718 ms | 3.016-3.024 ms | 0 | 2.760-2.763 ms |
+
+The cascades' 6.7 ms: merges 3.3 (a ray per continuation), tracing 1.4, hit shading 0.8, binning 0.7, rays 0.4.
+`GiBenchmark` takes `-PgiSetups=a;b` and `-PgiPasses=true` (each pass's median); `GiEvaluation` takes `-PgiVariants`,
+`-PgiParts=errors,ao,lag`, `-PgiSettings=name=value,...`, `-PgiTrials` and `-PgiCurves=true`.
 
 ## Frame graph
 
