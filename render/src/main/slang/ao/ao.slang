@@ -37,8 +37,10 @@ struct AoPush
     uint occlusion;           // compositeMain: storage slot of the specular occlusion written for reflections
     uint size;                // the render region: width, height in the high 16 bits
     uint frame;               // the noise's frame (0 for a pattern fixed in time)
-    uint slices;              // GTAO, BITMASK: slices per pixel
-    uint steps;               // GTAO, BITMASK: samples per side of a slice; RAYS: rays per pixel
+    uint slices;              // GTAO, BITMASK: slices per pixel; compositeMain with AO_HALF: storage slot of the half
+                              // resolution's depth (half.slang)
+    uint steps;               // GTAO, BITMASK: samples per side of a slice; RAYS: rays per pixel; compositeMain with
+                              // AO_HALF: storage slot of the half resolution's normals
     float radius;             // in meters
     float thickness;          // BITMASK: surfaces' thickness along the view, in meters
     float falloff;            // GTAO: the part of the radius over which samples fade out
@@ -64,6 +66,7 @@ static const uint AO_SHOW_AO = 8;        // debug: the image is the occlusion
 static const uint AO_SHOW_SPECULAR = 16; // debug: the image is the specular occlusion
 static const uint AO_SHOW_BOUNCE = 32;   // debug: the image is the bounce
 static const uint AO_SKY = 64;           // a pixel showing nothing (written by the passes for the denoiser)
+static const uint AO_HALF = 128;         // traced at half resolution: a pixel of each 2 x 2, upsampled by the composite
 
 static const float PI = 3.14159265;
 static const float HALF_PI = 1.57079633;
@@ -166,6 +169,29 @@ float pixelsPerUnit(float2 size, float3x3 axes)
     return 0.5 * size.y * length(row - dot(row, axes[2]) * axes[2]);
 }
 
+/** Which pixel of its 2 x 2 a texel traced at half resolution takes: the same each frame unless the noise moves. */
+uint2 halfOffset(uint frame)
+{
+    return uint2(frame & 1, (frame >> 1) & 1);
+}
+
+/** Whether texel `t` of the traced image (half resolution with AO_HALF) lies in the region of `size` pixels. */
+bool inRegion(uint2 t, float2 size)
+{
+    float2 at = (push.flags & AO_HALF) != 0 ? float2(t * 2) : float2(t);
+    return all(at < size);
+}
+
+/** The region's pixel texel `t` of the traced image traces. */
+uint2 tracedPixel(uint2 t, float2 size)
+{
+    if ((push.flags & AO_HALF) == 0)
+    {
+        return t;
+    }
+    return min(t * 2 + halfOffset(push.frame), uint2(size) - 1);
+}
+
 void writeNone(uint2 p)
 {
     images[push.ao][p] = float4(0, 0, -1, 1);
@@ -175,18 +201,20 @@ void writeNone(uint2 p)
 /** GTAO or the visibility bitmask (MODE) at each pixel: occlusion, bent normal and (BITMASK) the bounce. */
 [shader("compute")]
 [numthreads(8, 8, 1)]
-void screenMain(uint3 id : SV_DispatchThreadID)
+void screenMain(uint3 thread : SV_DispatchThreadID)
 {
     float2 size = float2(unpackSize(push.size));
-    if (any(float2(id.xy) >= size))
+    if (!inRegion(thread.xy, size))
     {
         return;
     }
+    uint2 traced = thread.xy;
+    uint3 id = uint3(tracedPixel(traced, size), 0);
     float3x3 axes = viewAxes(push.view[0].viewProjection);
     float3 p = viewPosition(int2(id.xy), size, axes);
     if (p.z <= 0)
     {
-        writeNone(id.xy);
+        writeNone(traced);
         return;
     }
     float3 normal = unpackNormal(uintImages[push.normal][id.xy].x);
@@ -194,8 +222,8 @@ void screenMain(uint3 id : SV_DispatchThreadID)
     float radiusPixels = push.radius * pixelsPerUnit(size, axes) / p.z;
     if (radiusPixels < 1)
     {
-        images[push.ao][id.xy] = float4(normal, 1);
-        images[push.bounce][id.xy] = 0;
+        images[push.ao][traced] = float4(normal, 1);
+        images[push.bounce][traced] = 0;
         return;
     }
     float falloffRange = max(push.falloff * push.radius, 1.0e-4);
@@ -315,8 +343,8 @@ void screenMain(uint3 id : SV_DispatchThreadID)
     }
     float ao = whole > 0 ? saturate(visible / whole) : 1;
     float3 bentNormal = dot(bent, bent) > 1.0e-12 ? normalize(bent) : normal;
-    images[push.ao][id.xy] = float4(bentNormal, ao);
-    images[push.bounce][id.xy] = float4(whole > 0 ? light / whole : 0, 0);
+    images[push.ao][traced] = float4(bentNormal, ao);
+    images[push.bounce][traced] = float4(whole > 0 ? light / whole : 0, 0);
 }
 
 /** A hash of `x`: 32 well-mixed bits (Jarzynski and Olano's PCG). */
@@ -340,17 +368,19 @@ void basisAround(float3 n, out float3 t, out float3 b)
 /** Ray-traced occlusion (RAYS): cosine-distributed rays of the radius's length from each pixel's surface. */
 [shader("compute")]
 [numthreads(8, 8, 1)]
-void raysMain(uint3 id : SV_DispatchThreadID)
+void raysMain(uint3 thread : SV_DispatchThreadID)
 {
     float2 size = float2(unpackSize(push.size));
-    if (any(float2(id.xy) >= size))
+    if (!inRegion(thread.xy, size))
     {
         return;
     }
+    uint2 traced = thread.xy;
+    uint3 id = uint3(tracedPixel(traced, size), 0);
     float z = sceneDepth(int2(id.xy));
     if (z <= 0)
     {
-        writeNone(id.xy);
+        writeNone(traced);
         return;
     }
     float3x3 axes = viewAxes(push.view[0].viewProjection);
@@ -393,8 +423,8 @@ void raysMain(uint3 id : SV_DispatchThreadID)
     }
     float ao = visible / float(rays);
     float3 bentNormal = dot(bent, bent) > 1.0e-12 ? normalize(toView(axes, bent)) : viewNormal;
-    images[push.ao][id.xy] = float4(bentNormal, ao);
-    images[push.bounce][id.xy] = float4(hits > 0 ? hitDistance / float(hits) : push.radius, 0, 0, 0);
+    images[push.ao][traced] = float4(bentNormal, ao);
+    images[push.bounce][traced] = float4(hits > 0 ? hitDistance / float(hits) : push.radius, 0, 0, 0);
 }
 
 /** The solid angle where two cones (half angles' cosines, the cosine between their axes) meet (Oat, Sander 2007). */
@@ -426,6 +456,59 @@ float lobeCosine(float roughness)
 }
 
 /**
+ * AO_HALF: the half resolution's signal at the region's pixel `p` (at camera-relative `position`, facing world `n`):
+ * the 2 x 2 texels around it, bilinear, each by how near its surface lies to the pixel's plane and how alike their
+ * normals are (pitfalls.md: the plane, not the depth); none alike, the nearest to the plane.
+ */
+void upsample(int2 p, float3 position, float3 n, float2 size, float3x3 axes, out float4 signal, out float4 bounce)
+{
+    uint2 o = halfOffset(push.frame);
+    float2 h = (float2(p) - float2(o)) * 0.5;
+    int2 base = int2(floor(h));
+    float2 f = h - float2(base);
+    int2 last = int2((uint2(size) + 1) / 2) - 1;
+    float scale = 0.01 * length(position) + 1.0e-4;
+    float4 sumA = 0;
+    float4 sumB = 0;
+    float total = 0;
+    float closest = 1.0e30;
+    int2 nearest = clamp(int2(round(h)), int2(0), last);
+    for (uint k = 0; k < 4; k++)
+    {
+        int2 q = clamp(base + int2(k & 1, k >> 1), int2(0), last);
+        float z = images[push.slices][q].r;
+        if (z <= 0)
+        {
+            continue;
+        }
+        float2 at = float2(min(uint2(q) * 2 + o, uint2(size) - 1)) + 0.5;
+        float plane = abs(dot(n, unproject(at, z, size) - position));
+        if (plane < closest)
+        {
+            closest = plane;
+            nearest = q;
+        }
+        float3 nq = fromView(axes, unpackNormal(uintImages[push.steps][q].x));
+        float alike = saturate(dot(n, nq));
+        alike *= alike;
+        alike *= alike;
+        float bilinear = ((k & 1) != 0 ? f.x : 1 - f.x) * ((k >> 1) != 0 ? f.y : 1 - f.y);
+        float w = bilinear * exp(-plane / scale) * alike * alike;
+        sumA += w * images[push.ao][q];
+        sumB += w * images[push.bounce][q];
+        total += w;
+    }
+    if (total > 1.0e-4)
+    {
+        signal = sumA / total;
+        bounce = sumB / total;
+        return;
+    }
+    signal = images[push.ao][nearest];
+    bounce = images[push.bounce][nearest];
+}
+
+/**
  * The occlusion replacing what shading added: the diffuse light around the normal darkened (and BITMASK's bounce
  * added) by the diffuse weight, the environment's reflection dimmed by the specular occlusion by the reflectance.
  */
@@ -449,9 +532,19 @@ void compositeMain(uint3 id : SV_DispatchThreadID)
     float3 position = unproject(float2(id.xy) + 0.5, z, size);
     float3 toViewer = normalize(-position);
     float3 n = fromView(axes, unpackNormal(uintImages[push.normal][id.xy].x));
-    float4 signal = images[push.ao][id.xy];
+    float4 signal;
+    float4 bounced;
+    if ((push.flags & AO_HALF) != 0)
+    {
+        upsample(int2(id.xy), position, n, size, axes, signal, bounced);
+    }
+    else
+    {
+        signal = images[push.ao][id.xy];
+        bounced = images[push.bounce][id.xy];
+    }
     float ao = saturate(signal.a);
-    float3 bounce = (push.flags & AO_BOUNCE) != 0 ? max(images[push.bounce][id.xy].rgb, 0.0) : float3(0);
+    float3 bounce = (push.flags & AO_BOUNCE) != 0 ? max(bounced.rgb, 0.0) : float3(0);
     float3 occlusion = ao;
     if ((push.flags & AO_MULTI_BOUNCE) != 0)
     {
