@@ -38,6 +38,10 @@ import java.util.Objects;
  * {@code toneMapped * (1 - a) + ui}, HDR {@code curveNits * (1 - a) + ui * paperWhite * uiBrightness} (UI brighter
  * than white, a glow, clipped at the peak), then encodes.
  *
+ * <p>Each window reads the settings its presenter target gives it ({@code Presenter.Target#displaySettings}): the
+ * graph's by default, or a view of them holding the window's own values, such as a paper white for a window on
+ * another display ({@code EngineSettings#inheriting}: unset, it follows the graph's).
+ *
  * <pre>{@code
  * presenter.outputTransform(new DisplayTransform());
  * graph.settings().set(DisplayTransform.EXPOSURE, 1.5f).set(PresentSettings.HDR, true);
@@ -82,7 +86,13 @@ public final class DisplayTransform implements OutputTransform {
 
     @Override
     public Technique transform(Key<Image> source, Key<Image> target, DisplayEncoding encoding) {
-        return new Encode(source, target, encoding);
+        return new Encode(source, target, encoding, null);
+    }
+
+    @Override
+    public Technique transform(Key<Image> source, Key<Image> target, DisplayEncoding encoding,
+        EngineSettings settings) {
+        return new Encode(source, target, encoding, settings);
     }
 
     /**
@@ -96,8 +106,12 @@ public final class DisplayTransform implements OutputTransform {
         return new HdrMetadata(peak, 0.0001f, peak, Math.min(peak, settings.get(PAPER_WHITE)));
     }
 
-    /** One window's transform: {@code source} encoded for {@code encoding} as {@code target}. */
-    record Encode(Key<Image> source, Key<Image> target, DisplayEncoding encoding) implements Technique {
+    /**
+     * One window's transform: {@code source} encoded for {@code encoding} as {@code target}, reading {@code settings}
+     * (null: the graph's).
+     */
+    record Encode(Key<Image> source, Key<Image> target, DisplayEncoding encoding, EngineSettings settings)
+        implements Technique {
 
         Encode {
             Objects.requireNonNull(source, "source");
@@ -126,7 +140,7 @@ public final class DisplayTransform implements OutputTransform {
                     case HDR10_PQ -> ENCODE_HDR10;
                     case SCRGB_LINEAR -> ENCODE_SCRGB;
                 });
-            EngineSettings settings = g.settings();
+            EngineSettings settings = this.settings == null ? g.settings() : this.settings;
             GraphBuilder.PassBuilder pass = g.pass("display transform, " + encoding).read(scene, Access.SAMPLED_COMPUTE)
                 .write(encoded, Access.STORAGE_WRITE);
             if (ui != null) {

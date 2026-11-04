@@ -10,6 +10,7 @@ import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.DisplayTransform;
+import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.vulkan.DisplayEncoding;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.ui.core.draw.DrawList;
@@ -61,10 +62,49 @@ class UiCompositionTest {
     }
 
     private static GpuRig rig(DisplayEncoding encoding, GpuUiRenderer[] made) {
+        return rig(encoding, made, null);
+    }
+
+    /** A rig whose transform reads {@code window}'s view of the graph's settings (null: the graph's). */
+    private static GpuRig rig(DisplayEncoding encoding, GpuUiRenderer[] made, String window) {
         GpuRig rig = GpuRig.open(W, H).show(SHOWN);
         made[0] = new GpuUiRenderer(rig.graph);
-        rig.view.add(new Scene()).add(made[0]).add(new DisplayTransform().transform(SCENE, SHOWN, encoding));
+        EngineSettings settings = window == null ? rig.graph.settings() : rig.graph.settings().inheriting(window);
+        rig.view.add(new Scene()).add(made[0])
+            .add(new DisplayTransform().transform(SCENE, SHOWN, encoding, settings));
         return rig;
+    }
+
+    /** The white panel's nits after a frame. */
+    private static double whiteNits(GpuRig rig, GpuUiRenderer ui, UiTextures textures) {
+        rig.frame(ui, textures, hud(textures));
+        return nits(rig.at(60, 56, 1));
+    }
+
+    @Test
+    void aWindowWithItsOwnPaperWhiteShowsTheUiAtItWhileOthersFollowTheGlobalOne() {
+        GpuUiRenderer[] ui = new GpuUiRenderer[1];
+        try (GpuRig rig = rig(DisplayEncoding.HDR10_PQ, ui, "ui.window7")) {
+            EngineSettings global = rig.graph.settings();
+            EngineSettings window = global.inheriting("ui.window7");
+            EngineSettings other = global.inheriting("ui.window8");
+            UiTextures textures = new UiTextures();
+            global.set(DisplayTransform.PAPER_WHITE, 203f);
+            assertThat(whiteNits(rig, ui[0], textures)).as("no value of its own: the global one")
+                .isCloseTo(203, within(2.03));
+            window.set(EngineSettings.Layer.GAME, DisplayTransform.PAPER_WHITE, 480f);
+            assertThat(whiteNits(rig, ui[0], textures)).as("its own").isCloseTo(480, within(4.8));
+            global.set(DisplayTransform.PAPER_WHITE, 120f);
+            assertThat(whiteNits(rig, ui[0], textures)).as("the global one changed: it keeps its own")
+                .isCloseTo(480, within(4.8));
+            assertThat(other.get(DisplayTransform.PAPER_WHITE)).as("another window follows").isEqualTo(120f);
+            window.clear(EngineSettings.Layer.GAME, DisplayTransform.PAPER_WHITE);
+            assertThat(whiteNits(rig, ui[0], textures)).as("cleared: the global one again")
+                .isCloseTo(120, within(1.2));
+            assertThat(global.toMap()).as("the player's file never holds a window's value")
+                .containsOnlyKeys(DisplayTransform.PAPER_WHITE.name());
+            ui[0].close();
+        }
     }
 
     /** Nits of a PQ-encoded value: SMPTE ST 2084's inverse. */
@@ -111,7 +151,7 @@ class UiCompositionTest {
             }
         }
         GpuUiRenderer[] ui = new GpuUiRenderer[1];
-        try (GpuRig rig = rig(DisplayEncoding.SCRGB_LINEAR, ui)) {
+        try (GpuRig rig = rig(DisplayEncoding.SCRGB_LINEAR, ui, null)) {
             rig.graph.settings().set(DisplayTransform.PAPER_WHITE, 240f);
             UiTextures textures = new UiTextures();
             rig.frame(ui[0], textures, hud(textures));

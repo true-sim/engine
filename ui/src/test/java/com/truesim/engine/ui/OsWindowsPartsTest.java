@@ -7,6 +7,8 @@ import com.truesim.engine.platform.MouseButton;
 import com.truesim.engine.platform.Platform;
 import com.truesim.engine.platform.Window;
 import com.truesim.engine.platform.WindowOptions;
+import com.truesim.engine.render.DisplayTransform;
+import com.truesim.engine.settings.EngineSettings;
 import com.truesim.ui.controls.Ui;
 import com.truesim.ui.controls.overlay.Overlays;
 import com.truesim.ui.controls.windows.DockSpace;
@@ -154,12 +156,39 @@ class OsWindowsPartsTest {
             assertThat(os.bounds(id, rect)).isTrue();
             os.windowFocusChanged(id, false);
             os.windowFocusChanged(id, true);
+            // a paper white of its own, in a view of the graph's settings following them while unset
+            EngineSettings global = rig.graph.settings();
+            assertThat(os.displaySettings(id)).isNotSameAs(global);
+            assertThat(os.displaySettings(12345)).isNull();
+            global.set(DisplayTransform.PAPER_WHITE, 220f);
+            assertThat(os.displaySettings(id).get(DisplayTransform.PAPER_WHITE)).isEqualTo(220f);
+            assertThat(os.paperWhite(id, 300)).isTrue();
+            assertThat(os.paperWhite(12345, 300)).isFalse();
+            assertThat(os.displaySettings(id).get(DisplayTransform.PAPER_WHITE)).isEqualTo(300f);
+            assertThat(os.paperWhite(OsWindows.MAIN, 10)).as("no presenter: a view of its own all the same").isTrue();
+            assertThat(os.displaySettings(OsWindows.MAIN).get(DisplayTransform.PAPER_WHITE)).as("clamped")
+                .isEqualTo(40f);
+            assertThat(os.displaySettings(main.id())).isSameAs(os.displaySettings(OsWindows.MAIN));
+            assertThat(global.get(DisplayTransform.PAPER_WHITE)).isEqualTo(220f);
+            os.paperWhite(id, Float.NaN);
+            assertThat(os.displaySettings(id).get(DisplayTransform.PAPER_WHITE)).isEqualTo(220f);
+            os.paperWhite(id, 300);
+            // see-through where the system can: SDL says whether it did (not Wayland, nor the offscreen driver)
+            assertThat(os.opacity(12345, 0.5f)).isFalse();
+            if (os.opacity(id, 0.5f)) {
+                assertThat(w.opacity()).isCloseTo(0.5f, org.assertj.core.api.Assertions.within(0.01f));
+                assertThat(os.opacity(id, 1)).isTrue();
+            } else {
+                assertThat(w.opacity()).as(platform.videoDriver() + " refuses: opaque").isEqualTo(1);
+            }
             os.windowCloseRequested(id); // not one of the host's windows: nothing
             assertThat(os.count()).isEqualTo(1);
             os.submit(ui); // the host has no window of this id: nothing drawn
             os.closeAll();
             assertThat(os.count()).isZero();
             assertThat(w.isClosed()).isTrue();
+            assertThat(global.inheriting("ui.window" + id).isSet(DisplayTransform.PAPER_WHITE))
+                .as("a closed window's value is gone").isFalse();
             assertThat(os.monitors()).isNotEmpty();
             assertThat(os.toString()).contains("0 windows");
 

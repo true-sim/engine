@@ -10,7 +10,9 @@ import com.truesim.engine.platform.Platform;
 import com.truesim.engine.platform.PlatformListener;
 import com.truesim.engine.platform.Window;
 import com.truesim.engine.platform.WindowOptions;
+import com.truesim.engine.render.DisplayTransform;
 import com.truesim.engine.render.Keys;
+import com.truesim.engine.settings.EngineSettings;
 import com.truesim.ui.controls.Ui;
 import com.truesim.ui.controls.windows.OsDockHost;
 import com.truesim.ui.controls.windows.OsWindows;
@@ -24,8 +26,17 @@ import java.util.Objects;
  * the platform, each presenting a view of its own ({@code ui.window<id>}: a {@link UiBackdrop} and a renderer
  * {@linkplain GpuUiRenderer#share() sharing} the main window's uploads) that draws its region of the one UI. So one
  * device, one upload of the draw lists and one atlas serve every window; each window's presenter target encodes for
- * its own display (SDR, HDR10 or scRGB as the display takes it, paper white from the graph's settings), and the
- * UI's scale follows each window's display ({@link #contentScale}).
+ * its own display (SDR, HDR10 or scRGB as the display takes it), and the UI's scale follows each window's display
+ * ({@link #contentScale}).
+ *
+ * <p>Paper white: each window (the main one too) reads its display settings from a view of the graph's settings of
+ * its own ({@link #displaySettings}: {@link EngineSettings#inheriting}), so a window given a paper white
+ * ({@link #paperWhite}, which the dock layout saves) shows its UI at it while the others follow the graph's
+ * {@link DisplayTransform#PAPER_WHITE}. The window's value is held in the view's game layer: the player's saved
+ * settings never hold it, the layout does.
+ *
+ * <p>Opacity: a window following a drag is drawn translucent by the system ({@link #opacity}, SDL's window opacity)
+ * where the system can; elsewhere (Wayland, the offscreen driver) it stays opaque.
  *
  * <p>Input: the mouse of every window maps into the UI through the host ({@link #map}: the desktop's global cursor
  * where the system tells it, else the window's position plus the event's), the window's close button closes its
@@ -49,12 +60,14 @@ public final class UiOsWindows implements OsWindows, PlatformListener, MousePoin
         final Window window;
         final ViewPort view;
         final GpuUiRenderer renderer;
+        final EngineSettings display;
         Presenter.Target target;
 
-        Entry(Window window, ViewPort view, GpuUiRenderer renderer) {
+        Entry(Window window, ViewPort view, GpuUiRenderer renderer, EngineSettings display) {
             this.window = window;
             this.view = view;
             this.renderer = renderer;
+            this.display = display;
         }
     }
 
@@ -66,6 +79,7 @@ public final class UiOsWindows implements OsWindows, PlatformListener, MousePoin
     private final PresentSettings settings;
     private Entry[] entries = new Entry[0];
     private OsDockHost host;
+    private EngineSettings mainDisplay; // the main window's display settings once it got a paper white, or null
     private final float[] cursor = new float[2];
 
     /**
@@ -125,6 +139,19 @@ public final class UiOsWindows implements OsWindows, PlatformListener, MousePoin
     public Presenter.Target target(int id) {
         Entry e = entry(id);
         return e == null ? null : e.target;
+    }
+
+    /**
+     * The settings OS window {@code id}'s output transform reads ({@link #MAIN}: the main window's): its own view of
+     * the graph's settings, following them where it holds no value; the graph's for the main window until it got a
+     * paper white of its own. Null for an unknown window.
+     */
+    public EngineSettings displaySettings(int id) {
+        if (id == MAIN || id == main.id()) {
+            return mainDisplay != null ? mainDisplay : graph.settings();
+        }
+        Entry e = entry(id);
+        return e == null ? null : e.display;
     }
 
     /** How many OS windows are open. */
@@ -221,9 +248,9 @@ public final class UiOsWindows implements OsWindows, PlatformListener, MousePoin
             Math.max(1, window.pixelHeight()));
         GpuUiRenderer renderer = mainRenderer.share();
         view.add(new UiBackdrop()).add(renderer);
-        Entry e = new Entry(window, view, renderer);
+        Entry e = new Entry(window, view, renderer, graph.settings().inheriting("ui.window" + window.id()));
         if (presenter != null) {
-            e.target = presenter.present(view, Keys.SCENE_COLOR, window, settings);
+            e.target = presenter.present(view, Keys.SCENE_COLOR, window, settings).displaySettings(e.display);
         }
         entries = Arrays.copyOf(entries, entries.length + 1);
         entries[entries.length - 1] = e;
@@ -245,6 +272,7 @@ public final class UiOsWindows implements OsWindows, PlatformListener, MousePoin
             }
         }
         entries = left;
+        e.display.clear(EngineSettings.Layer.GAME, DisplayTransform.PAPER_WHITE);
         if (e.target != null) {
             e.target.close(); // waits for the GPU
         }
@@ -319,6 +347,64 @@ public final class UiOsWindows implements OsWindows, PlatformListener, MousePoin
         Window w = window(window);
         float s = w == null ? 1 : w.displayScale();
         return s > 0 ? s : 1;
+    }
+
+    /**
+     * Shows window {@code window}'s UI (and scene) at {@code nits} paper white on an HDR display, clamped into
+     * {@link DisplayTransform#PAPER_WHITE}'s range; NaN: the graph's again. The main window's presenter target reads
+     * a view of its own from the first call on.
+     */
+    @Override
+    @AllowAllocation("set on user action")
+    public boolean paperWhite(int window, float nits) {
+        EngineSettings display;
+        if (window == MAIN || window == main.id()) {
+            if (mainDisplay == null) {
+                Presenter.Target target = mainTarget();
+                EngineSettings base = target == null ? graph.settings() : target.displaySettings();
+                mainDisplay = base.inheriting("ui.window.main");
+                if (target != null) {
+                    target.displaySettings(mainDisplay);
+                }
+            }
+            display = mainDisplay;
+        } else {
+            Entry e = entry(window);
+            if (e == null) {
+                return false;
+            }
+            display = e.display;
+        }
+        if (Float.isNaN(nits)) {
+            display.clear(EngineSettings.Layer.GAME, DisplayTransform.PAPER_WHITE);
+        } else {
+            float min = DisplayTransform.PAPER_WHITE.min().floatValue();
+            float max = DisplayTransform.PAPER_WHITE.max().floatValue();
+            display.set(EngineSettings.Layer.GAME, DisplayTransform.PAPER_WHITE, Math.min(Math.max(nits, min), max));
+        }
+        return true;
+    }
+
+    @AllowAllocation("set on user action")
+    private Presenter.Target mainTarget() {
+        if (presenter != null) {
+            for (Presenter.Target t : presenter.targets()) {
+                if (t.window() == main) {
+                    return t;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Draws window {@code window} at {@code opacity} (1: opaque) through SDL's window opacity; false where the system
+     * refuses (Wayland without the protocol, the offscreen driver): it stays opaque.
+     */
+    @Override
+    public boolean opacity(int window, float opacity) {
+        Window w = window(window);
+        return w != null && w.setOpacity(opacity);
     }
 
     /** Closes every OS window (the engine stops). */

@@ -110,6 +110,9 @@ class DisplayTransformTest {
         }
     }
 
+    /** The scope of the settings view the transform reads ({@code inheriting}), or null: the graph's settings. */
+    private String window;
+
     /** The first pixel's red, green and blue after transforming scene color {@code rgb} for {@code encoding}. */
     private float[] shown(DisplayEncoding encoding, DisplayTransform.Curve curve, float... rgb) {
         return shown(encoding, curve, null, settings -> { }, rgb);
@@ -132,7 +135,9 @@ class DisplayTransformTest {
             if (ui != null) {
                 view.add(ui);
             }
-            view.add(new DisplayTransform().transform(SCENE, SHOWN, encoding)).output(SHOWN, out);
+            view.add(window == null ? new DisplayTransform().transform(SCENE, SHOWN, encoding)
+                : new DisplayTransform().transform(SCENE, SHOWN, encoding, graph.settings().inheriting(window)))
+                .output(SHOWN, out);
             device.submitAndWait(device.graphics(), commands -> {
                 graph.record(commands);
                 try (MemoryStack stack = stackPush()) {
@@ -209,6 +214,22 @@ class DisplayTransformTest {
         float[] glow = shown(DisplayEncoding.HDR10_PQ, DisplayTransform.Curve.NONE, new Ui(20, 20, 20, 1),
             s -> { }, 0, 0, 0);
         assertThat(nits(glow[0])).as("HDR-intense UI clipped at the peak").isCloseTo(1000, within(10.0));
+    }
+
+    @Test
+    void aWindowsOwnSettingsViewOverridesThePaperWhiteItOtherwiseFollows() {
+        window = "window.second";
+        try {
+            float[] follows = shown(DisplayEncoding.HDR10_PQ, DisplayTransform.Curve.NONE, new Ui(1, 1, 1, 1),
+                s -> s.set(DisplayTransform.PAPER_WHITE, 150f), 0, 0, 0);
+            assertThat(nits(follows[0])).as("nothing of its own: the graph's").isCloseTo(150, within(1.5));
+            float[] own = shown(DisplayEncoding.HDR10_PQ, DisplayTransform.Curve.NONE, new Ui(1, 1, 1, 1),
+                s -> s.set(DisplayTransform.PAPER_WHITE, 150f).inheriting(window)
+                    .set(DisplayTransform.PAPER_WHITE, 450f), 0, 0, 0);
+            assertThat(nits(own[0])).as("its own").isCloseTo(450, within(4.5));
+        } finally {
+            window = null;
+        }
     }
 
     @Test
