@@ -527,9 +527,12 @@ that missed its beat because a bar rendered in milliseconds while its clip loade
   (`StreamRing.fill`). The stall could then begin before the voice read anything. Observation, not reproduced: a voice
   starting more than 0.67 s after the stall began would play the 40,000 buffered frames past its end, and nothing
   starves.
-- Proof: CI run 41751716422 (0.2627 against 0.2500), CI run 41771593506 (starvations 0, expected 1 to 2).
+- Third failure: 3 starvations where the test allowed 1 to 2. After the stall the reader can overtake the restarting
+  ring more than once on a busy runner; how often is scheduling, not the engine.
+- Proof: CI run 41751716422 (0.2627 against 0.2500), CI run 41771593506 (starvations 0, expected 1 to 2), CI run 41783096193 (starvations 3).
 - Rule: a test that makes a stream starve puts the stall past the ring's capacity, where the decoder only gets once
-  the voice reads. A test that finds where a signal starts accounts for samples that are 0 by design.
+  the voice reads. A test that finds where a signal starts accounts for samples that are 0 by design. Counts that
+  depend on scheduling are bounded from below only.
 
 **SDL's device thread takes a whole device buffer from the stream at once.** The audio queue was kept at the design's 2
 blocks (512 frames); SDL's dummy driver, and this machine's WASAPI device (which ignored
