@@ -187,17 +187,19 @@ class StreamingTest {
     @Test
     void aStarvedStreamFadesIsCountedAndResumesWhereItShouldBe() throws InterruptedException {
         AudioClip source = Clips.sine(RATE, 400, 0.5f, 120 * 2_400); // a 6 s one-shot of whole periods
-        stallFrom = 40_000; // past the priming: the decoder stalls 1.5 s once it reaches frame 40,000
+        // past the ring's second (48,000 frames): the decoder only gets there once the voice reads, so the 1.5 s stall
+        // always drains the ring, however late the voice starts
+        stallFrom = 72_000;
         sounds.play(Sound.builder().root(Play.clip(ref(() -> streamed(source), "slow"))).spatial(Spatial.TWO_D)
             .build());
-        float[] out = play(4 * RATE, 3_000_000); // near real time, as a device would ask
+        float[] out = play(5 * RATE, 3_000_000); // near real time, as a device would ask
         // one stall; a second count only when the reader overtakes the restarted ring (timing of this machine)
         assertThat(renderer.starvations()).isBetween(1, 2);
         // no click: the last frame held and faded over 5 ms, then faded back in
-        assertThat(maxStep(out, 0, 4 * RATE)).isLessThan(0.019f);
+        assertThat(maxStep(out, 0, 5 * RATE)).isLessThan(0.019f);
         // it kept time: where it plays again, it is the sine at the right phase (whole periods: phase 0 every 120)
         int start = firstNonZero(out) - 1; // the sine's first frame is 0: the first non-zero one is its second
-        int late = 4 * RATE - 2_000;
+        int late = 5 * RATE - 2_000;
         double phase = 2 * Math.PI * 400 * (late - start) / RATE;
         assertThat((double) out[2 * late]).isCloseTo(0.5 * CENTRE * Math.sin(phase), within(0.01));
     }
