@@ -17,7 +17,9 @@ import com.truesim.scene.audio.Music;
 import com.truesim.scene.audio.Patch;
 import com.truesim.scene.audio.Decibels;
 import com.truesim.scene.audio.AudioEffect;
+import com.truesim.scene.audio.AudioListener;
 import com.truesim.scene.audio.ListenerMix;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.audio.Listeners;
 import com.truesim.scene.audio.Play;
 import com.truesim.scene.audio.ReverbZones;
@@ -1355,7 +1357,6 @@ public final class AudioSync {
     private long[][] deviceIds = new long[0][];
     private double[][] devices = new double[0][];
     private int[] deviceCounts = new int[0];
-    private final Listeners.Visitor collect = this::collect;
 
     private float sentDecay = Float.NaN;
     private float sentDamping = Float.NaN;
@@ -1694,14 +1695,20 @@ public final class AudioSync {
         }
     }
 
-    /** Collects store {@code s}'s device listeners and where they are, as of its last advance. */
+    /**
+     * Collects store {@code s}'s device listeners and where they are, as of its last advance: the scene's
+     * {@link AudioListener} components (application-api.md D46), read from their store.
+     */
     private void listeners(int s) {
         if (deviceIds.length <= s) {
             growListeners(s + 1);
         }
         deviceCounts[s] = 0;
         if (!stores[s].isUi()) {
-            stores[s].listeners().forEach(collect);
+            ComponentStore<AudioListener> components = stores[s].scene().components().store(AudioListener.TYPE);
+            for (int i = 0; i < components.size(); i++) {
+                collect(s, components.node(i), components.value(i));
+            }
         }
     }
 
@@ -1723,11 +1730,9 @@ public final class AudioSync {
         devices[s] = Arrays.copyOf(devices[s], 2 * devices[s].length);
     }
 
-    private void collect(long listener) {
-        int s = storeNow;
-        Listeners listeners = stores[s].listeners();
-        if (listeners.rendering(listener)) {
-            rendering(s, listener, listeners);
+    private void collect(int s, long listener, AudioListener value) {
+        if (value.rendering()) {
+            rendering(s, listener, stores[s].listeners());
             return;
         }
         int n = deviceCounts[s];
@@ -1737,10 +1742,10 @@ public final class AudioSync {
         deviceIds[s][n] = listener;
         double[] d = devices[s];
         for (int i = 0; i < 3; i++) {
-            d[7 * n + i] = listeners.position(listener, i);
+            d[7 * n + i] = value.position(i);
         }
         for (int i = 0; i < 4; i++) {
-            d[7 * n + 3 + i] = listeners.rotation(listener, i);
+            d[7 * n + 3 + i] = value.rotation(i);
         }
         deviceCounts[s] = n + 1;
     }
