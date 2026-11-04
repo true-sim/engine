@@ -317,19 +317,20 @@ Measured (2026-11-04, RX 9070 XT, Ryzen 9 9950X3D; `ScenePickingBenchmark`, `Sel
 
 | Outline, 30,000 rocks: GPU frame (mask + outline passes) | 1920 x 1080 | 3840 x 2160 |
 |---|---|---|
-| forward: slot off / outline, nothing highlighted | 1.166 / 1.165 ms | 2.504 / 2.503 ms |
-| forward, outline, 1 highlighted | 1.227 ms (0.007 + 0.039) | 2.661 ms (0.023 + 0.145) |
-| forward, outline, 300 highlighted | 1.237 ms (0.008 + 0.039) | 2.684 ms (0.025 + 0.145) |
-| forward, outline, 3,000 highlighted | 1.276 ms (0.011 + 0.039) | 2.812 ms (0.033 + 0.144) |
-| forward, tint, 3,000 highlighted | 1.211 ms | 2.692 ms |
-| visibility buffer: slot off / outline, nothing highlighted | 0.889 / 0.890 ms | 2.202 / 2.202 ms |
-| visibility buffer, outline, 1 / 300 / 3,000 highlighted | 0.938 / 0.938 / 0.939 ms | 2.383 / 2.382 / 2.379 ms |
-| visibility buffer, tint, 3,000 highlighted | 0.907 ms | 2.256 ms |
+| forward: slot off / outline, nothing highlighted | 1.127 / 1.136 ms | 2.505 / 2.497 ms |
+| forward, outline, 1 highlighted | 1.182 ms (0.007 + 0.038) | 2.666 ms (0.023 + 0.145) |
+| forward, outline, 300 highlighted | 1.194 ms (0.007 + 0.038) | 2.690 ms (0.025 + 0.145) |
+| forward, outline, 3,000 highlighted | 1.245 ms (0.009 + 0.038) | 2.824 ms (0.034 + 0.144) |
+| forward, tint, 3,000 highlighted | 1.213 ms | 2.702 ms |
+| visibility buffer: slot off / outline, nothing highlighted | 0.890 / 0.891 ms | 2.195 / 2.194 ms |
+| visibility buffer, outline, 1 / 300 / 3,000 highlighted | 0.936 / 0.937 / 0.937 ms | 2.380 / 2.377 / 2.373 ms |
+| visibility buffer, tint, 3,000 highlighted | 0.905 ms | 2.252 ms |
 
 A forward view's own ID draw draws the highlighted instances alone: its render view filters instances on the GPU by
 the highlight flags (`RenderView.highlightedOnly`, the culling's `VIEW_HIGHLIGHTED_ONLY`), and the mask keeps only
-the pixels where that draw's depth is the scene's (what the view shows), so its cost follows what is highlighted. It
-is built only while something is, and every view's passes do nothing in frames with nothing highlighted.
+the pixels where that draw's depth is the scene's (what the view shows), so its cost follows what is highlighted. The
+passes stay built while the slot is on (a hover starting and ending must not rebuild the frame graph); with nothing
+highlighted the ID draw finds nothing to draw and the mask and outline do nothing (forward: +0.009 ms at 1080p).
 
 ## UI
 

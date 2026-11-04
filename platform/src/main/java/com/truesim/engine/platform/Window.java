@@ -65,14 +65,8 @@ import static org.lwjgl.sdl.SDLKeyboard.SDL_StopTextInput;
 import static org.lwjgl.sdl.SDLVideo.SDL_CreateWindow;
 import static org.lwjgl.sdl.SDLVideo.SDL_DestroyWindow;
 import static org.lwjgl.sdl.SDLVideo.SDL_GetClosestFullscreenDisplayMode;
-import static org.lwjgl.sdl.SDLVideo.SDL_GetDisplayForWindow;
-import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowDisplayScale;
-import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowFlags;
 import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowFullscreenMode;
 import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowID;
-import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowPosition;
-import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowSize;
-import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowSizeInPixels;
 import static org.lwjgl.sdl.SDLVideo.SDL_GetWindowTitle;
 import static org.lwjgl.sdl.SDLVideo.SDL_HideWindow;
 import static org.lwjgl.sdl.SDLVideo.SDL_RaiseWindow;
@@ -181,14 +175,13 @@ public final class Window implements AutoCloseable {
 
     private int size(boolean pixels, boolean width) {
         check();
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            IntBuffer w = stack.mallocInt(1);
-            IntBuffer h = stack.mallocInt(1);
-            boolean ok = pixels ? SDL_GetWindowSizeInPixels(handle, w, h) : SDL_GetWindowSize(handle, w, h);
-            if (!ok) {
+        try (MemoryStack stack = MemoryStack.stackPush()) { // addresses, not buffers: read every frame
+            long w = stack.nmalloc(4, 4);
+            long h = stack.nmalloc(4, 4);
+            if (!SdlCalls.windowSize(handle, pixels, w, h)) {
                 throw new PlatformException("Could not read the window size: " + SDL_GetError());
             }
-            return width ? w.get(0) : h.get(0);
+            return org.lwjgl.system.MemoryUtil.memGetInt(width ? w : h);
         }
     }
 
@@ -210,11 +203,11 @@ public final class Window implements AutoCloseable {
 
     private int position(boolean x) {
         check();
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            IntBuffer px = stack.mallocInt(1);
-            IntBuffer py = stack.mallocInt(1);
-            SDL_GetWindowPosition(handle, px, py);
-            return x ? px.get(0) : py.get(0);
+        try (MemoryStack stack = MemoryStack.stackPush()) { // addresses, not buffers: read every frame (docking)
+            long px = stack.nmalloc(4, 4);
+            long py = stack.nmalloc(4, 4);
+            SdlCalls.windowPosition(handle, px, py);
+            return org.lwjgl.system.MemoryUtil.memGetInt(x ? px : py);
         }
     }
 
@@ -231,20 +224,20 @@ public final class Window implements AutoCloseable {
     /** The id of the display the window is mostly on. */
     public int display() {
         check();
-        return SDL_GetDisplayForWindow(handle);
+        return SdlCalls.displayForWindow(handle); // every frame (the profiler's budgets): allocates nothing
     }
 
     /** Pixels per screen coordinate times the display's content scale: how much to scale UI by. */
     public float displayScale() {
         check();
-        return SDL_GetWindowDisplayScale(handle);
+        return SdlCalls.windowDisplayScale(handle); // every frame (the UI's scale): allocates nothing
     }
 
     // ---------------------------------------------------------------- mode
 
     public WindowMode mode() {
         check();
-        if ((SDL_GetWindowFlags(handle) & SDL_WINDOW_FULLSCREEN) == 0) {
+        if ((SdlCalls.windowFlags(handle) & SDL_WINDOW_FULLSCREEN) == 0) {
             return WindowMode.WINDOWED;
         }
         return SDL_GetWindowFullscreenMode(handle) == null ? WindowMode.BORDERLESS_FULLSCREEN
@@ -297,7 +290,7 @@ public final class Window implements AutoCloseable {
 
     public boolean isResizable() {
         check();
-        return (SDL_GetWindowFlags(handle) & SDL_WINDOW_RESIZABLE) != 0;
+        return (SdlCalls.windowFlags(handle) & SDL_WINDOW_RESIZABLE) != 0;
     }
 
     public void show() {
@@ -312,7 +305,7 @@ public final class Window implements AutoCloseable {
 
     public boolean isVisible() {
         check();
-        return (SDL_GetWindowFlags(handle) & SDL_WINDOW_HIDDEN) == 0;
+        return (SdlCalls.windowFlags(handle) & SDL_WINDOW_HIDDEN) == 0;
     }
 
     /** Brings the window to the front and asks for input focus. */
@@ -608,7 +601,7 @@ public final class Window implements AutoCloseable {
 
     private boolean flag(long flag) {
         check();
-        return (SDL_GetWindowFlags(handle) & flag) != 0;
+        return (SdlCalls.windowFlags(handle) & flag) != 0;
     }
 
     // ---------------------------------------------------------------- settings

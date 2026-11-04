@@ -117,11 +117,12 @@ public final class UiGallery implements Application {
     private Layer backdropLayer;
     private Layer sceneLayer;
     private Element nav;
+    private Element content; // the pages' area, above the bar
     private Element backdrop;
     private Element marquee;
     private final float[] rect = new float[4];
-    private final List<Page> pages = new ArrayList<>();
-    private int current = -1;
+    final List<Page> pages = new ArrayList<>();
+    int current = -1;
     private ImmGallery imm;
     private long started;
     // the orbit camera
@@ -133,7 +134,7 @@ public final class UiGallery implements Application {
     private double distance;
 
     /** A page: what it added to the UI's layers (detached while another shows), and what it does when shown. */
-    private static final class Page {
+    static final class Page {
         final String name;
         final List<Element> parents = new ArrayList<>();
         final List<Element> children = new ArrayList<>();
@@ -212,6 +213,7 @@ public final class UiGallery implements Application {
         ui.on(backdrop, EventType.PRESS, e -> { }); // takes the pointer: the scene behind picks nothing
         sceneWorld();
         buildPages();
+        ui.root().add(content);
         nav = ui.panel("gallery-nav");
         navLayer.root().add(nav);
         Controls c = new Controls(ui);
@@ -351,6 +353,13 @@ public final class UiGallery implements Application {
     // ---------------------------------------------------------------- the pages
 
     private void buildPages() {
+        // the pages' area: the screen above the bar, laid out as the screen's root is, clipping what runs past it
+        content = ui.panel(null);
+        var rootStyle = ui.styles().styleOf(ui.store().rootSlot());
+        ui.styles().inline(content.slot(), com.truesim.ui.style.InlineStyle.builder()
+            .set(com.truesim.ui.style.Styles.LAYOUT, rootStyle.get(com.truesim.ui.style.Styles.LAYOUT))
+            .set(com.truesim.ui.style.Styles.DIRECTION, rootStyle.get(com.truesim.ui.style.Styles.DIRECTION))
+            .set(com.truesim.ui.style.Styles.CLIP, true).build());
         ControlsGallery.registerIcons(ui);
         FilesGallery.registerIcons(ui);
         page("Controls", () -> ControlsGallery.build(new Controls(ui), ui.root()));
@@ -404,7 +413,7 @@ public final class UiGallery implements Application {
         Element root = dock.root();
         ui.root().add(root);
         ui.codeLayout(root, Ui.CODE_WIDTH | Ui.CODE_HEIGHT);
-        ui.layout().width(root.slot(), 100, Unit.PERCENT).height(root.slot(), 92, Unit.PERCENT);
+        ui.layout().width(root.slot(), 100, Unit.PERCENT).height(root.slot(), 100, Unit.PERCENT);
         for (String[] p : new String[][] {{"scene", "Scene"}, {"game", "Game"}, {"hierarchy", "Hierarchy"},
             {"inspector", "Inspector"}, {"console", "Console"}, {"profiler", "Profiler"}}) {
             DockPanel panel = dock.panel(p[0], p[1]);
@@ -446,7 +455,8 @@ public final class UiGallery implements Application {
             int root = layer.rootSlot();
             for (int c = store.firstChild(root); c != UiStore.NONE; c = store.nextSibling(c)) {
                 if (!before.contains(c)) {
-                    page.parents.add(layer.root());
+                    // what a gallery put on the screen's root goes in the content area, which ends above the bar
+                    page.parents.add(root == store.rootSlot() ? content : layer.root());
                     page.children.add(store.element(c));
                 }
             }
@@ -532,6 +542,8 @@ public final class UiGallery implements Application {
         place(nav, 0, h - NAV_HEIGHT, w, NAV_HEIGHT);
         none(backdropLayer.root());
         place(backdrop, 0, 0, w, h);
+        none(ui.root());
+        place(content, 0, 0, w, h - NAV_HEIGHT);
         sized.run();
         if (current == 0) {
             orbit();

@@ -67,8 +67,9 @@ public final class Commands {
     private static final int CLEAR_ATTACHMENTS = 36;
     private static final int BEGIN_QUERY = 37;
     private static final int END_QUERY = 38;
+    private static final int ACQUIRE = 39;
     // Immutable entries: a thread seeing an older one only wraps the address again.
-    private static final Fn[] FUNCTIONS = new Fn[39];
+    private static final Fn[] FUNCTIONS = new Fn[40];
 
     static {
         java.util.Arrays.fill(FUNCTIONS, NONE);
@@ -126,6 +127,8 @@ public final class Commands {
     private static final MethodHandle H_BUILD_STRUCTURES =
         handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_LONG));
     private static final MethodHandle H_PRESENT = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle H_ACQUIRE = handle(FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_LONG,
+        JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG));
     private static final MethodHandle H_SUBMIT = LINKER.downcallHandle(
         FunctionDescriptor.of(JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG, JAVA_LONG));
 
@@ -553,6 +556,20 @@ public final class Commands {
         try {
             return (int) H_PRESENT.invokeExact(function(PRESENT, queue.getCapabilities().vkQueuePresentKHR),
                 queue.address(), info);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /**
+     * {@code vkAcquireNextImageKHR} of {@code swapchain} on {@code device}, signalling {@code semaphore} and {@code fence}
+     * (0: none), the image's index written at {@code index}; returns the result.
+     */
+    public static int acquireNextImage(VkDevice device, long swapchain, long timeout, long semaphore, long fence,
+        long index) {
+        try {
+            return (int) H_ACQUIRE.invokeExact(function(ACQUIRE, device.getCapabilities().vkAcquireNextImageKHR),
+                device.address(), swapchain, timeout, semaphore, fence, index);
         } catch (Throwable e) {
             throw failed(e);
         }

@@ -455,6 +455,35 @@ shaders), then settled at 0.60-0.68 ms: the ranges of five rounds after one warm
 - Rule: a benchmark warms until its rounds agree (look at the per-round lines, not the ranges); short frames need more
   warm-up than long ones.
 
+**A press passed through a button into the layer below.** On the UI gallery's charts page the bar's buttons, drawn
+over the charts, did not react to clicks: the hit test found the button, but a press nobody consumes passes on to the
+next hit (ui's pass-through), and a chart in the layer below consumed it to pan and took the pointer.
+- Proof: `UiGalleryTest.theNavBarTakesItsClicksOnEveryPage` (engine-demo) failed on the charts page; ui's
+  `RoutingTest.theFrontMostElementTakingPressesKeepsThePressFromAConsumerBelowItInAnotherLayer`; `PickingSanity` over
+  every gallery (true-sim/ui, picking; true-sim/engine, UI gallery).
+- Rule: what is drawn on top gets the pointer: a press taken by an element listening to presses or clicks does not
+  pass into a screen layer below. A test of "the right element was hit" checks the delivery too (who captured).
+
+**A hover rebuilt the frame graph.** Sweeping the mouse over the UI gallery's rocks made frames miss the display's
+refresh (16.3 ms against 8.25 median): the selection outline's build version followed whether anything was highlighted
+(its forward ID draw built only then) and the room its flags needed for the highest instance highlighted, so every
+hover starting or ending rebuilt the graph: 103 builds in 1,352 frames, 290 KB allocated each.
+- Proof: `UiGalleryTest.sweepingTheMouseOverTheRocksKeepsFramesEven` (engine-demo), SDL motion events through the
+  window path, before and after: 0 builds, max 8.95 ms against 8.25 median (true-sim/engine, UI gallery).
+- Rule: a technique's build version changes with structure (a kind chosen, room outgrown, never shrunk), never with
+  per-frame state; per-frame state skips work at record time.
+
+**Per-frame SDL calls and stack buffers allocated, depending on the JIT.** The gallery's frames allocated 128 bytes
+(LWJGL's per-call `MemorySegment` around SDL's window flags, display and scale, and `vkAcquireNextImageKHR`) and,
+in a third of them, 224 more (`MemoryStack.mallocInt`/`mallocFloat` buffers of the window's position and the global
+mouse, read every frame by docking's OS windows); which of them showed changed from run to run with what the JIT
+inlined.
+- Proof: JFR with 4 KB TLABs (`-XX:TLABSize=4096 -XX:-ResizeTLAB`, `jdk.ObjectAllocationInNewTLAB`): turning TLABs off
+  hid them, the JIT compiling differently; after `SdlCalls` (addresses bound once, out-parameters by address) and
+  `Commands.acquireNextImage`, 0 bytes in the median frame (true-sim/engine, UI gallery).
+- Rule: per-frame native calls bind their function once (`Commands`, `SdlCalls`) and pass out-parameters by address
+  (`nmalloc`), never LWJGL's buffer-taking overloads.
+
 **Drawn renderables had no bounds, so nothing picked them.** In the UI gallery a click on a rock selected nothing,
 while "select all" worked: `SceneSync` drew the renderables but nothing bounded their nodes, so the spatial index
 (the picker's broad phase, the marquee's frustum query) never returned them and the triangle test never ran.

@@ -97,7 +97,6 @@ import static org.lwjgl.sdl.SDLInit.SDL_Init;
 import static org.lwjgl.sdl.SDLInit.SDL_WasInit;
 import static org.lwjgl.sdl.SDLMouse.SDL_CreateSystemCursor;
 import static org.lwjgl.sdl.SDLMouse.SDL_CursorVisible;
-import static org.lwjgl.sdl.SDLMouse.SDL_GetGlobalMouseState;
 import static org.lwjgl.sdl.SDLMouse.SDL_DestroyCursor;
 import static org.lwjgl.sdl.SDLMouse.SDL_SetCursor;
 import static org.lwjgl.sdl.SDLMouse.SDL_HideCursor;
@@ -512,12 +511,12 @@ public final class Platform implements AutoCloseable {
         if (globalMouse < 0) {
             return false;
         }
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            java.nio.FloatBuffer x = stack.mallocFloat(1);
-            java.nio.FloatBuffer y = stack.mallocFloat(1);
-            SDL_GetGlobalMouseState(x, y);
-            out[0] = x.get(0);
-            out[1] = y.get(0);
+        try (MemoryStack stack = MemoryStack.stackPush()) { // addresses, not buffers: read on every mouse move (docking)
+            long x = stack.nmalloc(4, 4);
+            long y = stack.nmalloc(4, 4);
+            SdlCalls.globalMouseState(x, y);
+            out[0] = org.lwjgl.system.MemoryUtil.memGetFloat(x);
+            out[1] = org.lwjgl.system.MemoryUtil.memGetFloat(y);
         }
         return true;
     }

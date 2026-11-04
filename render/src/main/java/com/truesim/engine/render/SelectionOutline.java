@@ -110,7 +110,6 @@ public final class SelectionOutline implements Technique {
     private final SelectionHighlights highlights;
     private final Map<TechniqueKind<?, ?, ?>, Technique> made = new IdentityHashMap<>();
     private Boolean occlusion;
-    private boolean ownIds; // the last build drew IDs of its own: a forward view
     private FrameBuffer flags;
     private final List<FrameBuffer> outgrown = new ArrayList<>(); // freed with it: frames in flight may read them
     private int flagWords;
@@ -184,15 +183,22 @@ public final class SelectionOutline implements Technique {
     }
 
     /**
-     * The flags' room (it rebuilds when the marks outgrow it) and, on a forward view, whether anything is highlighted:
-     * its own ID draw is built only while something is, so a view with nothing highlighted costs nothing. The graph
-     * builds when the frame is submitted, after the highlights of the frame are marked: no frame of delay.
+     * The flags' room: it rebuilds when the marks outgrow it (it never shrinks), never as highlights come and go. A hover starting and
+     * ending must not rebuild the graph (a rebuild per rock the mouse crossed made frames miss the display's refresh):
+     * the passes stay built while a kind is chosen, and skip their work in frames with nothing highlighted.
      */
     @Override
     public long buildVersion() {
-        long room = Math.max(1, Integer.highestOneBit(Math.max(1, highlights.words())) * 2);
-        return ownIds && highlights.any() ? -room : room;
+        // the room only grows: sized by the marks now, it shrank when a hover ended and grew on the next (a rebuild
+        // each time the mouse crossed a rock)
+        int needed = Math.max(1, Integer.highestOneBit(Math.max(1, highlights.words())) * 2);
+        if (needed > room) {
+            room = needed;
+        }
+        return room;
     }
+
+    private int room = 1;
 
     /** The chosen kind's technique, built in this one's place. */
     @Override
@@ -238,10 +244,6 @@ public final class SelectionOutline implements Technique {
         int width = view.width();
         int height = view.height();
         Image shownIds = g.optional(Keys.VISIBILITY_IDS);
-        ownIds = shownIds == null;
-        if (ownIds && !highlights.any()) {
-            return; // a forward view with nothing highlighted: no ID draw, no passes
-        }
         Image color = g.modify(Keys.SCENE_COLOR);
         Image idDepth = null;
         Image sceneDepth = null;
@@ -254,7 +256,7 @@ public final class SelectionOutline implements Technique {
             idDepth = drawn.depth();
             sceneDepth = g.read(Keys.SCENE_DEPTH);
         }
-        int words = (int) Math.abs(buildVersion());
+        int words = (int) buildVersion();
         if (flags == null || flagWords < words) {
             if (flags != null) {
                 outgrown.add(flags);

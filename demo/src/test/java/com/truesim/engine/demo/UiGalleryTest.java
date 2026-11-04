@@ -155,6 +155,142 @@ class UiGalleryTest {
         }
     }
 
+    @Test
+    void sweepingTheMouseOverTheRocksKeepsFramesEven() {
+        app = new UiGallery(0, false);
+        try {
+            engine = Engine.create(app);
+        } catch (RuntimeException | UnsatisfiedLinkError e) { // StartupFailure, no display or no presentation (CI)
+            assumeThat(e).as("no window or GPU: " + e).isNull();
+            throw e;
+        }
+        try (Engine running = engine) {
+            window = app.world.window.id();
+            for (int i = 0; i < 2000 && app.world.assets.get(GalleryWorld.ROCK) == null; i++) {
+                engine.step();
+            }
+            frames(30);
+            var threads = (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
+            var hovered = app.world.graph.components().store(com.truesim.scene.core.Hovered.TYPE);
+            int perPass = 0;
+            long[] cpu = null;
+            long[] bytes = null;
+            int builds = 0;
+            int hovering = 0;
+            for (int pass = 0; pass < 3; pass++) { // two to warm up (the JIT, each mesh's pick BVH), one measured
+                List<float[]> path = sweep();
+                perPass = path.size();
+                cpu = new long[perPass];
+                bytes = new long[perPass];
+                int builtBefore = app.world.frameGraph.builds();
+                hovering = 0;
+                for (int i = 0; i < perPass; i++) {
+                    float[] at = path.get(i);
+                    SDL_WarpMouseInWindow(SDL_GetWindowFromID(window), at[0], at[1]);
+                    push(SDL_EVENT_MOUSE_MOTION);
+                    long e = event.address();
+                    SDL_MouseMotionEvent.nwindowID(e, window);
+                    SDL_MouseMotionEvent.nx(e, at[0]);
+                    SDL_MouseMotionEvent.ny(e, at[1]);
+                    SDL_PushEvent(event);
+                    long a0 = threads.getCurrentThreadAllocatedBytes();
+                    long t0 = System.nanoTime();
+                    engine.step();
+                    cpu[i] = System.nanoTime() - t0;
+                    bytes[i] = threads.getCurrentThreadAllocatedBytes() - a0;
+                    hovering += hovered.size() > 0 ? 1 : 0;
+                }
+                builds = app.world.frameGraph.builds() - builtBefore;
+            }
+            long[] sorted = cpu.clone();
+            java.util.Arrays.sort(sorted);
+            double median = sorted[perPass / 2] / 1e6;
+            double p99 = sorted[perPass * 99 / 100] / 1e6;
+            double max = sorted[perPass - 1] / 1e6;
+            long[] b = bytes.clone();
+            java.util.Arrays.sort(b);
+            int spikes = 0;
+            for (long c : cpu) {
+                spikes += c / 1e6 > 1.5 * median ? 1 : 0; // a frame missing the display's refresh takes twice as long
+            }
+            int allocating = 0;
+            for (long x : bytes) {
+                allocating += x > 0 ? 1 : 0;
+            }
+            System.out.printf(java.util.Locale.ROOT, "Sweep over %d frames (%d over a rock): frame %.2f ms median, "
+                + "%.2f p99, %.2f max, %d over 1.5 x the median; graph builds %d; bytes allocated %d median, %d max, "
+                + "%d frames allocating%n", perPass, hovering, median, p99, max, spikes, builds, b[perPass / 2],
+                b[perPass - 1], allocating);
+            assertThat(hovering).as("the sweep crosses rocks").isGreaterThan(perPass / 10);
+            assertThat(builds).as("hovering rocks rebuilds no frame graph").isZero();
+            assertThat(spikes).as("frames over 1.5 x the median").isZero();
+            assertThat(b[perPass / 2]).as("bytes allocated in a frame, median").isZero();
+            assertThat(allocating).as("frames allocating (a log line now and then)").isLessThan(perPass / 100);
+        } finally {
+            event.free();
+        }
+    }
+
+    @Test
+    void theNavBarTakesItsClicksOnEveryPage() {
+        app = new UiGallery(0, false);
+        try {
+            engine = Engine.create(app);
+        } catch (RuntimeException | UnsatisfiedLinkError e) { // StartupFailure, no display or no presentation (CI)
+            assumeThat(e).as("no window or GPU: " + e).isNull();
+            throw e;
+        }
+        try (Engine running = engine) {
+            window = app.world.window.id();
+            frames(20);
+            var ui = app.scene.ui();
+            int pages = app.pages.size();
+            for (int from = 0; from < pages; from++) {
+                app.show(from);
+                frames(20);
+                int to = (from + 1) % pages;
+                com.truesim.ui.core.Element button = app.pages.get(to).button.element();
+                float x = ui.layout().x(button.slot()) + ui.layout().width(button.slot()) / 2;
+                float y = ui.layout().y(button.slot()) + ui.layout().height(button.slot()) / 2;
+                int top = ui.interaction().picking().pickTop(x, y);
+                boolean under = false;
+                for (int at = top; at != com.truesim.ui.core.UiStore.NONE && !under;
+                    at = ui.store().parent(at)) {
+                    under = at == button.slot();
+                }
+                assertThat(under)
+                    .as("page %s: the nav button %s is what the pointer hits at (%s, %s), not %s",
+                        app.pages.get(from).name, app.pages.get(to).name, x, y,
+                        top == com.truesim.ui.core.UiStore.NONE ? "nothing" : ui.store().element(top))
+                    .isTrue();
+                move(x, y, false);
+                frames(2);
+                press(x, y);
+                release(x, y);
+                frames(2);
+                assertThat(app.current).as("page %s: a click on %s", app.pages.get(from).name,
+                    app.pages.get(to).name).isEqualTo(to);
+            }
+        } finally {
+            event.free();
+        }
+    }
+
+    /** The mouse's path: rows across the view, over the rocks, 12 pixels a frame, clear of the UI. */
+    private List<float[]> sweep() {
+        List<float[]> path = new ArrayList<>();
+        float w = app.world.window.width();
+        float h = app.world.window.height();
+        boolean right = true;
+        for (float y = 160; y < h - 90; y += 60) {
+            for (float x = 40; x < w - 320; x += 12) {
+                path.add(new float[] {right ? x : w - 320 - (x - 40), y});
+            }
+            right = !right;
+        }
+        return path;
+    }
+
     /** Rocks whose middle is on screen, clear of the UI, under the pointer first: nearest the camera first. */
     private List<long[]> visibleRocks() {
         SceneView view = app.scene.mainView();
