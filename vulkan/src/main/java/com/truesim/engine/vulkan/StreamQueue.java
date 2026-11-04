@@ -65,6 +65,8 @@ import org.lwjgl.vulkan.VkSubmitInfo2;
 @AllowAllocation("uploads are rare next to frames")
 public final class StreamQueue implements AutoCloseable, FrameSlots.FrameWait {
 
+    private static final com.truesim.engine.app.profile.Zone UPLOAD_ZONE = com.truesim.engine.app.profile.Profiler.zone("stream.upload");
+
     /** A command buffer and what it holds until the transfer queue reaches its value. */
     private static final class Submitted {
         final VkCommandBuffer commands;
@@ -196,7 +198,9 @@ public final class StreamQueue implements AutoCloseable, FrameSlots.FrameWait {
             bytesRefused += bytes;
             return false;
         }
+        com.truesim.engine.app.profile.Profiler.begin(UPLOAD_ZONE);
         record(bytes, record, held);
+        com.truesim.engine.app.profile.Profiler.end(UPLOAD_ZONE);
         return true;
     }
 

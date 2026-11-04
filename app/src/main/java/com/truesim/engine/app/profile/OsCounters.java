@@ -78,25 +78,46 @@ public final class OsCounters implements Counters.Source {
 
     private void linuxCores(Counters into) {
         try {
-            for (String line : Files.readAllLines(Path.of("/proc/stat"))) {
-                if (!line.startsWith("cpu") || line.startsWith("cpu ")) {
-                    continue;
-                }
-                String[] f = line.trim().split("\\s+");
-                long total = 0;
-                for (int i = 1; i < f.length; i++) {
-                    total += Long.parseLong(f[i]);
-                }
-                long idle = Long.parseLong(f[4]) + (f.length > 5 ? Long.parseLong(f[5]) : 0);
-                long[] last = lastStat.get(f[0]);
-                if (last != null && total > last[0]) {
-                    double busy = 100.0 * (1 - (double) (idle - last[1]) / (total - last[0]));
-                    into.set(id(into, "cpu.core." + f[0].substring(3), "%"), busy);
-                }
-                lastStat.put(f[0], new long[] {total, idle});
-            }
+            cores(Files.readAllLines(Path.of("/proc/stat")), lastStat,
+                (core, busy) -> into.set(id(into, "cpu.core." + core, "%"), busy));
         } catch (IOException | RuntimeException e) {
             into.unavailable("per-core load: /proc/stat not readable: " + e);
+        }
+    }
+
+    /**
+     * Each core's load from {@code /proc/stat}'s {@code cpuN} lines against the totals of the call before
+     * ({@code last}, updated): {@code out.accept(core, percent)}.
+     */
+    static void cores(java.util.List<String> lines, Map<String, long[]> last,
+        java.util.function.ObjDoubleConsumer<String> out) {
+        for (String line : lines) {
+            if (!line.startsWith("cpu") || line.startsWith("cpu ")) {
+                continue;
+            }
+            String[] f = line.trim().split("\\s+");
+            long total = 0;
+            for (int i = 1; i < f.length; i++) {
+                total += Long.parseLong(f[i]);
+            }
+            long idle = Long.parseLong(f[4]) + (f.length > 5 ? Long.parseLong(f[5]) : 0);
+            long[] before = last.get(f[0]);
+            if (before != null && total > before[0]) {
+                out.accept(f[0].substring(3), 100.0 * (1 - (double) (idle - before[1]) / (total - before[0])));
+            }
+            last.put(f[0], new long[] {total, idle});
+        }
+    }
+
+    /** Adds the {@code drm-engine-<name>: <n> ns} lines of one DRM file descriptor's fdinfo to {@code engines}. */
+    static void fdinfo(String text, Map<String, Long> engines) {
+        for (String line : text.split("\n")) {
+            if (line.startsWith("drm-engine-") && line.endsWith(" ns")) {
+                int colon = line.indexOf(':');
+                String engine = line.substring("drm-engine-".length(), colon);
+                long ns = Long.parseLong(line.substring(colon + 1, line.length() - 3).trim());
+                engines.merge(engine, ns, Math::max); // one client's descriptors share its time
+            }
         }
     }
 
@@ -126,16 +147,8 @@ public final class OsCounters implements Counters.Source {
                 } catch (IOException e) {
                     continue;
                 }
-                if (!text.contains("drm-engine-")) {
-                    continue;
-                }
-                for (String line : text.split("\n")) {
-                    if (line.startsWith("drm-engine-") && line.endsWith(" ns")) {
-                        int colon = line.indexOf(':');
-                        String engine = line.substring("drm-engine-".length(), colon);
-                        long ns = Long.parseLong(line.substring(colon + 1, line.length() - 3).trim());
-                        engines.merge(engine, ns, Math::max); // one client's fds share its time
-                    }
+                if (text.contains("drm-engine-")) {
+                    fdinfo(text, engines);
                 }
             }
         } catch (IOException | RuntimeException e) {
@@ -278,27 +291,9 @@ public final class OsCounters implements Counters.Source {
             }
             values.clear();
             if (read(engines, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, values) && !values.isEmpty()) {
-                Map<String, Double> perEngine = new HashMap<>(); // all processes, per engine
-                Map<String, Double> mine = new HashMap<>(); // ours, per type
-                for (Map.Entry<String, Double> e : values.entrySet()) {
-                    String instance = e.getKey(); // pid_123_luid_0x.._0x.._phys_0_eng_0_engtype_3D
-                    int t = instance.indexOf("_engtype_");
-                    int l = instance.indexOf("_luid_");
-                    if (t < 0 || l < 0) {
-                        continue;
-                    }
-                    String type = instance.substring(t + "_engtype_".length());
-                    String engine = instance.substring(l, t) + "|" + type;
-                    perEngine.merge(engine, e.getValue(), Double::sum);
-                    if (instance.startsWith(self)) {
-                        mine.merge(type, e.getValue(), Double::sum);
-                    }
-                }
                 Map<String, Double> perType = new HashMap<>();
-                for (Map.Entry<String, Double> e : perEngine.entrySet()) {
-                    String type = e.getKey().substring(e.getKey().indexOf('|') + 1);
-                    perType.merge(type, e.getValue(), Math::max);
-                }
+                Map<String, Double> mine = new HashMap<>();
+                gpuEngines(values, self, perType, mine);
                 for (Map.Entry<String, Double> e : perType.entrySet()) {
                     into.set(owner.id(into, "gpu.engine." + clean(e.getKey()), "%"), e.getValue());
                 }
@@ -311,7 +306,37 @@ public final class OsCounters implements Counters.Source {
         }
 
         private static String clean(String type) {
-            return type.replace(' ', '_');
+            return OsCounters.clean(type);
         }
+    }
+
+    /**
+     * PDH's {@code GPU Engine} instances ({@code pid_<p>_luid_<l>_phys_<n>_eng_<e>_engtype_<type>}) and their
+     * utilization summed per engine over the processes, then the busiest engine of each type ({@code perType}), and
+     * the process {@code self} ({@code pid_<p>_}) per type ({@code mine}).
+     */
+    static void gpuEngines(Map<String, Double> values, String self, Map<String, Double> perType,
+        Map<String, Double> mine) {
+        Map<String, Double> perEngine = new HashMap<>();
+        for (Map.Entry<String, Double> e : values.entrySet()) {
+            String instance = e.getKey();
+            int t = instance.indexOf("_engtype_");
+            int l = instance.indexOf("_luid_");
+            if (t < 0 || l < 0) {
+                continue;
+            }
+            String type = instance.substring(t + "_engtype_".length());
+            perEngine.merge(instance.substring(l, t) + "|" + type, e.getValue(), Double::sum);
+            if (instance.startsWith(self)) {
+                mine.merge(type, e.getValue(), Double::sum);
+            }
+        }
+        for (Map.Entry<String, Double> e : perEngine.entrySet()) {
+            perType.merge(e.getKey().substring(e.getKey().indexOf('|') + 1), e.getValue(), Math::max);
+        }
+    }
+
+    static String clean(String type) {
+        return type.replace(' ', '_');
     }
 }

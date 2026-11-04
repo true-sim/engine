@@ -306,6 +306,18 @@ public final class GeometryPool implements AutoCloseable {
      * so the frame's thread only places it and records its copies.
      */
     public Prepared prepare(MeshData mesh) {
+        com.truesim.engine.app.profile.Profiler.begin(PREPARE_ZONE);
+        try {
+            return prepareNow(mesh);
+        } finally {
+            com.truesim.engine.app.profile.Profiler.end(PREPARE_ZONE);
+        }
+    }
+
+    private static final com.truesim.engine.app.profile.Zone PREPARE_ZONE =
+        com.truesim.engine.app.profile.Profiler.zone("asset.mesh prepare");
+
+    private Prepared prepareNow(MeshData mesh) {
         long positionBytes = mesh.positions().byteSize();
         long attributes = align(positionBytes);
         long meshletVertices = align(attributes + mesh.attributes().byteSize());

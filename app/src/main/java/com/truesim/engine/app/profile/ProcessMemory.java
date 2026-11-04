@@ -70,6 +70,19 @@ public abstract class ProcessMemory {
         };
     }
 
+    /** {@code /proc/self/statm}'s second field (resident pages) of its first {@code n} bytes. */
+    static long statmPages(byte[] text, int n) {
+        int i = 0;
+        while (i < n && text[i] != ' ') {
+            i++;
+        }
+        long pages = 0;
+        for (i++; i < n && text[i] >= '0' && text[i] <= '9'; i++) {
+            pages = pages * 10 + text[i] - '0';
+        }
+        return pages;
+    }
+
     /** {@code K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, 72)}: the working set. */
     private static final class Windows extends ProcessMemory {
         private final MethodHandle info;
@@ -128,15 +141,7 @@ public abstract class ProcessMemory {
             try {
                 statm.seek(0);
                 int n = statm.read(buffer);
-                int i = 0;
-                while (i < n && buffer[i] != ' ') {
-                    i++;
-                }
-                long pages = 0;
-                for (i++; i < n && buffer[i] >= '0' && buffer[i] <= '9'; i++) {
-                    pages = pages * 10 + buffer[i] - '0';
-                }
-                return pages * (double) pageSize;
+                return statmPages(buffer, n) * (double) pageSize;
             } catch (IOException e) {
                 return Double.NaN;
             }
