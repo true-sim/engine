@@ -148,18 +148,18 @@ class UiProfilerTest {
             profiler.view().frozen().set(true);
             engine.step();
             long frozenAt = r.endFrame();
-            int frames = count(r, main, "frame");
+            long zonesAt = r.endZone(main); // counted from here: older zones may age out of the kept span meanwhile
             for (int i = 0; i < 5; i++) {
                 engine.step();
             }
             assertThat(r.endFrame()).isEqualTo(frozenAt);
-            assertThat(count(r, main, "frame")).isEqualTo(frames);
+            assertThat(r.endZone(main)).isEqualTo(zonesAt);
             assertThat(profiler.times().latest()).as("the overlay keeps running").isGreaterThan(frozenAt);
             profiler.view().stepButton().click();
             engine.step();
             engine.step();
             assertThat(r.endFrame()).isGreaterThan(frozenAt);
-            assertThat(count(r, main, "frame")).as("one frame taken").isEqualTo(frames + 1);
+            assertThat(countSince(r, main, "frame", zonesAt)).as("one frame taken").isEqualTo(1);
             profiler.view().frozen().set(false);
             // exports
             String files = profiler.export("tsprof", "json");
@@ -337,8 +337,13 @@ class UiProfilerTest {
     }
 
     private static int count(Recording r, int lane, String name) {
+        return countSince(r, lane, name, r.firstZone(lane));
+    }
+
+    /** The zones named {@code name} on {@code lane} from absolute zone {@code from} on (or the oldest kept). */
+    private static int countSince(Recording r, int lane, String name, long from) {
         int n = 0;
-        for (long z = r.firstZone(lane); z < r.endZone(lane); z++) {
+        for (long z = Math.max(from, r.firstZone(lane)); z < r.endZone(lane); z++) {
             n += r.nameOf(r.zoneName(lane, z)).equals(name) ? 1 : 0;
         }
         return n;
