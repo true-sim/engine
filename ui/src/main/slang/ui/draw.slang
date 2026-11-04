@@ -5,9 +5,12 @@
 // position by the primitive's kind (a signed distance for boxes, lines and glyphs), clipped by the clip's rounded
 // rectangle. EMPTY primitives (padding of an element's range) are degenerate: no pixels.
 //
-// A clip also carries an offset added to its primitives' coordinates (a scrolled region records its content once,
-// unscrolled, and scrolling moves the offset): the vertices move by it, and the kinds' coverage is worked out at the
-// pixel minus it (in the primitive's own coordinates), while the clip's rectangle is tested at the pixel itself.
+// Where a primitive draws: its coordinates plus its clip's offset (a scrolled region records its content once,
+// unscrolled, and scrolling moves the offset), then its transform table entry's scale and offset (an element's
+// animated scale or drawn offset: the animation rewrites the entry, not the primitives). The vertices are placed so;
+// the kinds' coverage is worked out at the pixel mapped back into the primitive's own coordinates, distances scaled to
+// pixels by the entry's scale, and the colour times the entry's opacity. A clip's rectangle is drawn by its own
+// entry (its owner's: a scaled or moved subtree is cut where it draws) and tested at the pixel itself.
 //
 // One draw per layer runs fragmentMain, which branches on the kind (the "uber" path); the per-kind path draws runs of
 // one kind with that kind's own fragment entry point (boxMain, glyphMain, ...), in list order.
@@ -17,14 +20,14 @@ import ui.primitive;
 struct UiPush
 {
     uint* primitives;   // the layer's primitives, WORDS words each
-    float* clips;       // its clips, clipFloats floats each (rectangle, radius, offset); 0 clips nothing
+    float* clips;       // its clips, CLIP_FLOATS floats each (rectangle, radius, offset, transform); 0 clips nothing
     uint* textures;     // the sampled slot of each UI texture id
+    float* transforms;  // its transform table, TRANSFORM_FLOATS floats each (scale, offset, opacity); 0 the identity
     uint first;         // the first primitive drawn: 0 for a whole layer, a run's first for per-kind draws
     float scaleX;       // UI pixels per pixel of the image
     float scaleY;
     float toClipX;      // 2 / the UI's width in pixels
     float toClipY;      // 2 / its height
-    uint clipFloats;    // floats per clip record: ui-core's DrawList.CLIP_FLOATS
     float originX;      // the UI pixel at the image's top left: 0, or a docking OS window's region
     float originY;
 };
@@ -40,6 +43,24 @@ struct VertexOut
 
 /** Two triangles: corners top left, top right, bottom left, then bottom left, top right, bottom right. */
 static const uint CORNERS[6] = { 0, 1, 2, 2, 1, 3 };
+
+/** A transform table entry: points map to scale * p + offset, colours times opacity. */
+struct Transform
+{
+    float scale;
+    float2 offset;
+    float opacity;
+};
+
+Transform transformAt(uint index)
+{
+    float* t = push.transforms + index * TRANSFORM_FLOATS;
+    Transform x;
+    x.scale = t[0];
+    x.offset = float2(t[1], t[2]);
+    x.opacity = t[3];
+    return x;
+}
 
 float word(uint* p, uint at)
 {
@@ -98,11 +119,13 @@ float median(float r, float g, float b)
     return max(min(r, g), min(max(r, g), b));
 }
 
-/** The clip rectangle `clip`'s bounds: x0, y0, x1, y1. */
-float4 clipBounds(uint clip)
+/** Clip `clip`'s rectangle where it cuts (its transform applied): x0, y0, x1, y1; its radius into `radius`. */
+float4 clipBounds(uint clip, out float radius)
 {
-    float* c = push.clips + clip * push.clipFloats;
-    return float4(c[0], c[1], c[2], c[3]);
+    float* c = push.clips + clip * CLIP_FLOATS;
+    Transform t = transformAt(uint(c[7]));
+    radius = c[4] * t.scale;
+    return float4(float2(c[0], c[1]) * t.scale + t.offset, float2(c[2], c[3]) * t.scale + t.offset);
 }
 
 /** The offset clip `clip` adds to its primitives' coordinates (0 for the clip that clips nothing). */
@@ -113,7 +136,7 @@ float2 clipOffset(uint header)
     {
         return float2(0, 0);
     }
-    float* c = push.clips + clip * push.clipFloats;
+    float* c = push.clips + clip * CLIP_FLOATS;
     return float2(c[5], c[6]);
 }
 
@@ -129,15 +152,16 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
     uint kind = header & 0xff;
     VertexOut out;
     out.primitive = index;
-    float2 offset = clipOffset(header);
-    float2 a = float2(word(p, X0), word(p, Y0)) + offset;
-    float2 b = float2(word(p, X1), word(p, Y1)) + offset;
-    float2 at;
     if (kind == EMPTY || kind >= KINDS)
     {
         out.position = float4(-2, -2, 0, 1); // every corner at one point: no area, no pixels
         return out;
     }
+    Transform t = transformAt(p[TRANSFORM]);
+    float2 offset = clipOffset(header);
+    float2 a = (float2(word(p, X0), word(p, Y0)) + offset) * t.scale + t.offset;
+    float2 b = (float2(word(p, X1), word(p, Y1)) + offset) * t.scale + t.offset;
+    float2 at;
     if (kind == LINE)
     {
         // A rectangle along the segment, its half width plus a pixel for the anti-aliased edges and ends.
@@ -145,7 +169,7 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
         float len = length(d);
         float2 along = len > 0 ? d / len : float2(1, 0);
         float2 normal = float2(-along.y, along.x);
-        float extent = max(word(p, WIDTH), 1) * 0.5 + 1;
+        float extent = max(word(p, WIDTH) * t.scale, 1) * 0.5 + 1;
         at = ((corner & 1) != 0 ? b + along : a - along) + normal * ((corner & 2) != 0 ? extent : -extent);
     }
     else
@@ -154,7 +178,7 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
         float2 hi = max(a, b);
         if (kind == SHADOW)
         {
-            float grow = 3 * max(word(p, WIDTH), 0); // the blur's reach
+            float grow = 3 * max(word(p, WIDTH) * t.scale, 0); // the blur's reach
             lo -= grow;
             hi += grow;
         }
@@ -166,7 +190,8 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
         uint clip = header >> 16;
         if (clip != 0)
         {
-            float4 bounds = clipBounds(clip);
+            float radius;
+            float4 bounds = clipBounds(clip, radius);
             lo = max(lo, bounds.xy);
             hi = min(hi, bounds.zw);
             if (any(lo >= hi))
@@ -182,22 +207,24 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
 }
 
 // ------------------------------------------------------------------------------------------------------------- kinds
+// Each kind works at `px`, the pixel in the primitive's own coordinates; `k` is the pixels one of its units draws at
+// (its transform's scale), by which distances become pixels for anti-aliasing.
 
 /** A rounded box: fill (solid or a linear gradient) and border, anti-aliased by its signed distance. */
-float4 box(uint* p, uint header, float2 px)
+float4 box(uint* p, uint header, float2 px, float k)
 {
     float2 lo = float2(word(p, X0), word(p, Y0));
     float2 hi = float2(word(p, X1), word(p, Y1));
     float2 extent = (hi - lo) * 0.5;
     float2 at = px - (lo + hi) * 0.5;
     float r = clamp(radiusAt(p, at), 0, min(extent.x, extent.y));
-    float outer = saturate(0.5 - roundedBox(at, extent, r));
+    float outer = saturate(0.5 - roundedBox(at, extent, r) * k);
     float border = word(p, WIDTH);
     float inner = outer;
     if (border > 0)
     {
         float2 innerHalf = extent - border;
-        inner = all(innerHalf > 0) ? saturate(0.5 - roundedBox(at, innerHalf, max(r - border, 0))) : 0;
+        inner = all(innerHalf > 0) ? saturate(0.5 - roundedBox(at, innerHalf, max(r - border, 0)) * k) : 0;
     }
     float4 fill = color(p, COLOR_A);
     if (((header >> 8) & FLAG_GRADIENT) != 0)
@@ -236,9 +263,10 @@ float shadowRow(float x, float y, float sigma, float r, float2 extent)
 
 /**
  * A rounded box blurred by a Gaussian of sigma pixels: Evan Wallace's fast rounded rectangle shadows, closed form
- * along x, four samples along y. Its corner's radius is the one nearest the pixel.
+ * along x, four samples along y. Its corner's radius is the one nearest the pixel. The blur's coverage does not depend
+ * on the scale: it is worked out in the primitive's own units.
  */
-float4 shadow(uint* p, float2 px)
+float4 shadow(uint* p, float2 px, float k)
 {
     float2 lo = float2(word(p, X0), word(p, Y0));
     float2 hi = float2(word(p, X1), word(p, Y1));
@@ -246,9 +274,9 @@ float4 shadow(uint* p, float2 px)
     float2 at = px - (lo + hi) * 0.5;
     float r = clamp(radiusAt(p, at), 0, min(extent.x, extent.y));
     float sigma = word(p, WIDTH);
-    if (sigma < 0.25)
+    if (sigma * k < 0.25)
     {
-        return color(p, COLOR_A) * saturate(0.5 - roundedBox(at, extent, r)); // no blur: the box itself
+        return color(p, COLOR_A) * saturate(0.5 - roundedBox(at, extent, r) * k); // no blur: the box itself
     }
     float low = at.y - extent.y;
     float high = at.y + extent.y;
@@ -286,13 +314,14 @@ Texture2D<float4> sampled(uint* p)
 
 /**
  * A glyph of an MTSDF atlas: the median of the three channels is the multi-channel distance (0.5 on the edge), alpha
- * the true distance, which the outline reads; PIXEL_RANGE is the atlas's range in screen pixels at this size. With
- * FLAG_RASTER it is hinted coverage instead (small text): its quad lies on whole pixels, a texel per pixel, and the
- * texel's alpha times the colour's is the glyph. With FLAG_COLOR it is a colour bitmap (an emoji): the page is
- * RGBA8_SRGB (the view decodes to linear before filtering), straight alpha with its colours bled into transparent
- * texels, drawn as an image is: premultiplied, times colour A (white with the text's opacity).
+ * the true distance, which the outline reads; PIXEL_RANGE is the atlas's range in pixels at this size (times the
+ * scale it draws at), as are the weight and the outline width. With FLAG_RASTER it is hinted coverage instead (small
+ * text): its quad lies on whole pixels, a texel per pixel, and the texel's alpha times the colour's is the glyph. With
+ * FLAG_COLOR it is a colour bitmap (an emoji): the page is RGBA8_SRGB (the view decodes to linear before filtering),
+ * straight alpha with its colours bled into transparent texels, drawn as an image is: premultiplied, times colour A
+ * (white with the text's opacity).
  */
-float4 glyph(uint* p, float2 px)
+float4 glyph(uint* p, float2 px, float k)
 {
     float2 uv = lerp(unorms(p[UV]), unorms(p[UV + 1]), across(p, px));
     float4 m = sampled(p).SampleLevel(samplers[LINEAR_CLAMP], uv, 0);
@@ -305,15 +334,15 @@ float4 glyph(uint* p, float2 px)
     {
         return color(p, COLOR_A) * m.a;
     }
-    float range = word(p, PIXEL_RANGE);
+    float range = word(p, PIXEL_RANGE) * k;
     // The atlas encodes distances up to half its range either side of the edge; an edge moved (bold) or an outline
     // reaching further would find only the clamped encoding there and fill the whole quad: both are kept within it.
     float reach = max(range * 0.5 - 1, 0);
-    float weight = clamp(word(p, WEIGHT), -reach, reach);
+    float weight = clamp(word(p, WEIGHT) * k, -reach, reach);
     float distance = range * (median(m.r, m.g, m.b) - 0.5) + weight;
     float fill = saturate(distance + 0.5);
     float4 c = color(p, COLOR_A) * fill;
-    float outline = min(word(p, OUTLINE), reach - abs(weight));
+    float outline = min(word(p, OUTLINE) * k, reach - abs(weight));
     if (outline > 0)
     {
         float outer = saturate(range * (m.a - 0.5) + weight + outline + 0.5);
@@ -374,8 +403,8 @@ float4 nineSlice(uint* p, float2 px)
     return tinted(t.SampleLevel(samplers[LINEAR_CLAMP], uv, 0), p);
 }
 
-/** An anti-aliased segment with butt ends; lines thinner than a pixel are a pixel wide, fainter. */
-float4 segment(uint* p, float2 px)
+/** An anti-aliased segment with butt ends; lines thinner than a pixel (as drawn) are a pixel wide, fainter. */
+float4 segment(uint* p, float2 px, float k)
 {
     float2 a = float2(word(p, X0), word(p, Y0));
     float2 b = float2(word(p, X1), word(p, Y1));
@@ -383,14 +412,14 @@ float4 segment(uint* p, float2 px)
     float len = length(d);
     float2 along = len > 0 ? d / len : float2(1, 0);
     float2 local = px - a;
-    float width = word(p, WIDTH);
+    float width = word(p, WIDTH) * k; // in pixels
     float extent = max(width, 1) * 0.5;
-    float distance = max(abs(dot(local, along) - len * 0.5) - len * 0.5,
-        abs(dot(local, float2(-along.y, along.x))) - extent);
+    float distance = max((abs(dot(local, along) - len * 0.5) - len * 0.5) * k,
+        abs(dot(local, float2(-along.y, along.x))) * k - extent);
     return color(p, COLOR_A) * (saturate(0.5 - distance) * min(width, 1));
 }
 
-/** How much of `px` the primitive's clip lets through: its rounded rectangle, anti-aliased. */
+/** How much of `px` (a UI pixel) the primitive's clip lets through: its rounded rectangle where it cuts, anti-aliased. */
 float clipped(uint header, float2 px)
 {
     uint clip = header >> 16;
@@ -398,11 +427,12 @@ float clipped(uint header, float2 px)
     {
         return 1;
     }
-    float* c = push.clips + clip * push.clipFloats;
-    float2 lo = float2(c[0], c[1]);
-    float2 hi = float2(c[2], c[3]);
+    float radius;
+    float4 bounds = clipBounds(clip, radius);
+    float2 lo = bounds.xy;
+    float2 hi = bounds.zw;
     float2 extent = (hi - lo) * 0.5;
-    float r = clamp(c[4], 0, min(extent.x, extent.y));
+    float r = clamp(radius, 0, min(extent.x, extent.y));
     return saturate(0.5 - roundedBox(px - (lo + hi) * 0.5, extent, r));
 }
 
@@ -412,6 +442,12 @@ float2 uiPixel(float4 position)
     return position.xy * float2(push.scaleX, push.scaleY) + float2(push.originX, push.originY);
 }
 
+/** UI pixel `px` in the coordinates primitive `p` (header `header`, transform `t`) was recorded in. */
+float2 ownCoordinates(float2 px, uint header, Transform t)
+{
+    return (px - t.offset) / t.scale - clipOffset(header);
+}
+
 // ----------------------------------------------------------------------------------------------- fragments, uber path
 
 [shader("fragment")]
@@ -419,19 +455,21 @@ float4 fragmentMain(VertexOut in) : SV_Target
 {
     uint* p = push.primitives + in.primitive * WORDS;
     uint header = p[HEADER];
+    Transform t = transformAt(p[TRANSFORM]);
     float2 px = uiPixel(in.position);
-    float2 local = px - clipOffset(header); // the primitive's own coordinates
+    float2 local = ownCoordinates(px, header, t);
+    float k = t.scale;
     float4 c;
     switch (header & 0xff)
     {
     case BOX:
-        c = box(p, header, local);
+        c = box(p, header, local, k);
         break;
     case SHADOW:
-        c = shadow(p, local);
+        c = shadow(p, local, k);
         break;
     case GLYPH:
-        c = glyph(p, local);
+        c = glyph(p, local, k);
         break;
     case IMAGE:
         c = image(p, local);
@@ -440,13 +478,13 @@ float4 fragmentMain(VertexOut in) : SV_Target
         c = nineSlice(p, local);
         break;
     case LINE:
-        c = segment(p, local);
+        c = segment(p, local, k);
         break;
     default:
         c = float4(0, 0, 0, 0);
         break;
     }
-    return c * clipped(header, px);
+    return c * (t.opacity * clipped(header, px));
 }
 
 // ------------------------------------------------------------------------------------------ fragments, per-kind path
@@ -456,46 +494,57 @@ float4 boxMain(VertexOut in) : SV_Target
 {
     uint* p = push.primitives + in.primitive * WORDS;
     uint header = p[HEADER];
+    Transform t = transformAt(p[TRANSFORM]);
     float2 px = uiPixel(in.position);
-    return box(p, header, px - clipOffset(header)) * clipped(header, px);
+    return box(p, header, ownCoordinates(px, header, t), t.scale) * (t.opacity * clipped(header, px));
 }
 
 [shader("fragment")]
 float4 shadowMain(VertexOut in) : SV_Target
 {
     uint* p = push.primitives + in.primitive * WORDS;
+    uint header = p[HEADER];
+    Transform t = transformAt(p[TRANSFORM]);
     float2 px = uiPixel(in.position);
-    return shadow(p, px - clipOffset(p[HEADER])) * clipped(p[HEADER], px);
+    return shadow(p, ownCoordinates(px, header, t), t.scale) * (t.opacity * clipped(header, px));
 }
 
 [shader("fragment")]
 float4 glyphMain(VertexOut in) : SV_Target
 {
     uint* p = push.primitives + in.primitive * WORDS;
+    uint header = p[HEADER];
+    Transform t = transformAt(p[TRANSFORM]);
     float2 px = uiPixel(in.position);
-    return glyph(p, px - clipOffset(p[HEADER])) * clipped(p[HEADER], px);
+    return glyph(p, ownCoordinates(px, header, t), t.scale) * (t.opacity * clipped(header, px));
 }
 
 [shader("fragment")]
 float4 imageMain(VertexOut in) : SV_Target
 {
     uint* p = push.primitives + in.primitive * WORDS;
+    uint header = p[HEADER];
+    Transform t = transformAt(p[TRANSFORM]);
     float2 px = uiPixel(in.position);
-    return image(p, px - clipOffset(p[HEADER])) * clipped(p[HEADER], px);
+    return image(p, ownCoordinates(px, header, t)) * (t.opacity * clipped(header, px));
 }
 
 [shader("fragment")]
 float4 nineSliceMain(VertexOut in) : SV_Target
 {
     uint* p = push.primitives + in.primitive * WORDS;
+    uint header = p[HEADER];
+    Transform t = transformAt(p[TRANSFORM]);
     float2 px = uiPixel(in.position);
-    return nineSlice(p, px - clipOffset(p[HEADER])) * clipped(p[HEADER], px);
+    return nineSlice(p, ownCoordinates(px, header, t)) * (t.opacity * clipped(header, px));
 }
 
 [shader("fragment")]
 float4 lineMain(VertexOut in) : SV_Target
 {
     uint* p = push.primitives + in.primitive * WORDS;
+    uint header = p[HEADER];
+    Transform t = transformAt(p[TRANSFORM]);
     float2 px = uiPixel(in.position);
-    return segment(p, px - clipOffset(p[HEADER])) * clipped(p[HEADER], px);
+    return segment(p, ownCoordinates(px, header, t), t.scale) * (t.opacity * clipped(header, px));
 }

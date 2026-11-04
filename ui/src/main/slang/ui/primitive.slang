@@ -43,7 +43,18 @@ public static const uint INSETS = 12;
 public static const uint GRADIENT_ANGLE = 14;
 public static const uint WEIGHT = 14;
 public static const uint SOURCE_INSETS = 14;
-public static const uint RESERVED = 15;
+public static const uint TRANSFORM = 15;
 
-// A clip record (ui-core's DrawList.CLIP_FLOATS floats, handed over in the push constants as clipFloats): x0, y0, x1,
-// y1, corner radius, then the offset x, y added to its primitives' coordinates (a scrolled region's scroll).
+/**
+ * Floats per clip record (ui-core's DrawList.CLIP_FLOATS): x0, y0, x1, y1, corner radius (in the space of its
+ * transform), the offset x, y added to its primitives' coordinates (a scrolled region's scroll), the index of the
+ * transform its rectangle is drawn by.
+ */
+public static const uint CLIP_FLOATS = 8;
+
+/**
+ * Floats per transform table entry (ui-core's DrawList.TRANSFORM_FLOATS, 32 bytes): scale, offset x, offset y, opacity,
+ * four reserved. A primitive draws at scale * (p + its clip's offset) + offset, its sizes times the scale, its colour
+ * times the opacity; entry 0 is the identity.
+ */
+public static const uint TRANSFORM_FLOATS = 8;

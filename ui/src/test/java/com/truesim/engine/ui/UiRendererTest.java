@@ -25,6 +25,7 @@ class UiRendererTest {
     private static final long GREEN = Rgba.pack(0, 1, 0, 1);
     private static final long BLUE = Rgba.pack(0, 0, 1, 1);
     private static final Offset<Float> CLOSE = within(0.01f);
+    private static final long TRANSFORM_BYTES = DrawList.TRANSFORM_FLOATS * 4L;
 
     /** A list of one range holding what {@code record} records. */
     static DrawList list(int capacity, java.util.function.Consumer<DrawList> record) {
@@ -67,6 +68,7 @@ class UiRendererTest {
                 continue;
             }
             Object expected = constant.getName().equals("CLIP_FLOATS") ? DrawList.CLIP_FLOATS
+                : constant.getName().equals("TRANSFORM_FLOATS") ? DrawList.TRANSFORM_FLOATS
                 : field(Primitive.class, constant.getName());
             assertThat(constant.get(null)).as(constant.getName()).isEqualTo(expected);
             checked++;
@@ -351,8 +353,8 @@ class UiRendererTest {
             list.glyph(60, 10, 92, 42, 0, 0, 1, 1, disc.id(), 4, Rgba.WHITE, 0, 0, 0);
             list.end();
             rig.frame(ui, textures, list);
-            assertThat(ui.uploadedBytes()).as("all of it once: 4 primitives, a clip, the texture")
-                .isEqualTo(4L * Primitive.BYTES + DrawList.CLIP_FLOATS * 4 + 32 * 32 * 4);
+            assertThat(ui.uploadedBytes()).as("all of it once: 4 primitives, a clip, a transform, the texture")
+                .isEqualTo(4L * Primitive.BYTES + DrawList.CLIP_FLOATS * 4 + TRANSFORM_BYTES + 32 * 32 * 4);
             rig.frame(ui, textures, list);
             assertThat(ui.uploadedBytes()).as("nothing changed").isZero();
             // The UI records the same again: still nothing.
@@ -373,13 +375,73 @@ class UiRendererTest {
             rig.frame(ui, textures, list);
             assertThat(ui.uploadedBytes()).isEqualTo(8 * 2 * 4);
             assertThat(ui.totalUploadedBytes()).isEqualTo(4L * Primitive.BYTES + DrawList.CLIP_FLOATS * 4
-                + 32 * 32 * 4 + Primitive.BYTES + 8 * 2 * 4);
+                + TRANSFORM_BYTES + 32 * 32 * 4 + Primitive.BYTES + 8 * 2 * 4);
             // A primitive removed (an empty slot): drawn as nothing.
             list.begin(second, 2);
             list.end();
             rig.frame(ui, textures, list);
             assertThat(rig.at(76, 26, 3)).isZero();
             assertThat(rig.at(30, 30, 3)).isEqualTo(1f, CLOSE);
+        }
+    }
+
+    @Test
+    void aScaledAndMovedSubtreeDrawsAndClipsWhereItsTransformEntryPutsIt() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            DrawList list = new DrawList();
+            int t = list.addTransform();
+            int clip = list.addClip(10, 10, 50, 50, 0); // a clipping panel drawn by the transform, as its content
+            list.setClipTransform(clip, t);
+            int start = list.allocate(4);
+            list.begin(start, 4);
+            list.box(4, 104, 12, 112, BLUE, 0, 0, 0, 0, 0, 0); // untransformed, for reference
+            list.useTransform(t);
+            list.box(10, 10, 50, 50, GREEN, 0, 0, 0, 0, 0, 0); // the panel
+            list.clip(clip);
+            list.box(30, 30, 80, 80, RED, 0, 0, 0, 0, 2, BLUE); // its content, passing its edge
+            assertThat(list.end()).isTrue();
+            rig.frame(ui, null, list);
+            assertThat(rig.at(20, 20)).as("identity: the panel").containsExactly(new float[] {0, 1, 0, 1}, CLOSE);
+            assertThat(rig.at(40, 40)).as("the content").containsExactly(new float[] {1, 0, 0, 1}, CLOSE);
+            assertThat(rig.at(60, 60, 3)).as("cut by the clip").isZero();
+            list.setTransform(t, 2, 100, 0, 0.5f); // scaled twice about the origin, moved, half faded
+            rig.frame(ui, null, list);
+            assertThat(ui.uploadedBytes()).as("the entry alone").isEqualTo(TRANSFORM_BYTES);
+            assertThat(rig.at(20, 20, 3)).as("moved away").isZero();
+            assertThat(rig.at(130, 30)).as("the panel where it draws now, half faded")
+                .containsExactly(new float[] {0, 0.5f, 0, 0.5f}, CLOSE);
+            float[] over = {0.5f, 0.25f, 0, 0.75f}; // half red over half green
+            assertThat(rig.at(170, 70)).as("the content scaled with it").containsExactly(over, CLOSE);
+            assertThat(rig.at(190, 90)).as("still inside the clip, which scaled too").containsExactly(over, CLOSE);
+            assertThat(rig.at(205, 90, 3)).as("cut where the clip draws: x 200").isZero();
+            assertThat(rig.at(8, 108)).as("the untransformed box stays").containsExactly(new float[] {0, 0, 1, 1},
+                CLOSE);
+            rig.screenshot("transformed-clipped");
+        }
+    }
+
+    @Test
+    void changesFarApartUploadApart() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            DrawList list = list(1000, l -> {
+                for (int i = 0; i < 1000; i++) {
+                    l.box(i % 50 * 5, i / 50 * 5, i % 50 * 5 + 4, i / 50 * 5 + 4, RED, 0, 0, 0, 0, 0, 0);
+                }
+            });
+            rig.frame(ui, null, list);
+            list.begin(10, 1);
+            list.box(50, 0, 54, 4, BLUE, 0, 0, 0, 0, 0, 0);
+            list.end();
+            list.begin(990, 1);
+            list.box(200, 95, 204, 99, BLUE, 0, 0, 0, 0, 0, 0);
+            list.end();
+            rig.frame(ui, null, list);
+            assertThat(ui.uploadedBytes()).as("two primitives, not the 981 between them")
+                .isEqualTo(2L * Primitive.BYTES);
+            assertThat(rig.at(52, 2)).containsExactly(new float[] {0, 0, 1, 1}, CLOSE);
+            assertThat(rig.at(202, 97)).containsExactly(new float[] {0, 0, 1, 1}, CLOSE);
         }
     }
 
@@ -398,8 +460,10 @@ class UiRendererTest {
             rig.frame(ui, textures, layers);
             ui.batching(GpuUiRenderer.Batching.PER_KIND);
             float[] x = {0};
+            int t = layers[1].addTransform();
             assertAllocationFree(() -> {
                 ui.submit(layers, 2, textures, W, H);
+                layers[1].setTransform(t, 1 + x[0], x[0], 0, 0.5f); // an animated entry
                 // one box moves: the dirty range and the runs found again
                 layers[0].begin(0, 200);
                 for (int i = 0; i < 100; i++) {

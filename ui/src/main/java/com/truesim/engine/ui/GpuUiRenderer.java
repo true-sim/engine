@@ -47,6 +47,7 @@ import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.ShaderModule;
 import com.truesim.engine.vulkan.VulkanDevice;
+import com.truesim.ui.core.draw.DirtyRanges;
 import com.truesim.ui.core.draw.DrawList;
 import com.truesim.ui.core.draw.Primitive;
 import com.truesim.ui.core.draw.UiRenderer;
@@ -66,9 +67,11 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  * image: premultiplied alpha, linear, 1.0 meaning paper white, at the view's output size, cleared transparent each
  * frame, which the view's {@code DisplayTransform} composites after the tone curve (design UI13).
  *
- * <p><b>Data.</b> Each layer's primitives and clip table live in persistent buffers (one copy per frame in flight,
- * {@link FrameBuffer}); {@link #submit} copies only what changed since the last submit (the draw list's dirty range,
- * its clips when they changed), so a frame where nothing changed uploads nothing ({@link #uploadedBytes()}). UI
+ * <p><b>Data.</b> Each layer's primitives, clip table and transform table live in persistent buffers (one copy per
+ * frame in flight, {@link FrameBuffer}); {@link #submit} copies only what changed since the last submit (each of the
+ * draw list's dirty ranges of primitives and of transform entries, its clips when they changed), so a frame where
+ * nothing changed uploads nothing ({@link #uploadedBytes()}), and an animated opacity, scale or offset uploads its
+ * 32-byte transform entry, not the primitives it draws. UI
  * textures get a bindless slot each, named by a table the shader reads by texture id; a texture's dirty region is
  * uploaded when it changes, sampled as {@code RGBA8_UNORM} (MTSDF atlases) or {@code RGBA8_SRGB} (images).
  *
@@ -124,6 +127,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     private static final int BUFFER_USAGE = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     private static final int CLIP_BYTES = DrawList.CLIP_FLOATS * 4;
+    private static final int TRANSFORM_BYTES = DrawList.TRANSFORM_FLOATS * 4;
 
     private final VulkanDevice device;
     private final FrameSlots slots;
@@ -140,6 +144,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     private DrawList[] lists = new DrawList[0];
     private FrameBuffer[] primitives = new FrameBuffer[0];
     private FrameBuffer[] clips = new FrameBuffer[0];
+    private FrameBuffer[] transforms = new FrameBuffer[0];
     private int[] counts = new int[0];
     // The draws planned for each layer's list (first, count, pipeline: 0 the uber one, else a kind's), for the list's
     // version and the batching they were planned for.
@@ -152,6 +157,8 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     private MemorySegment[] wordSegments = new MemorySegment[0];
     private float[][] wrappedClips = new float[0][];
     private MemorySegment[] clipSegments = new MemorySegment[0];
+    private float[][] wrappedTransforms = new float[0][];
+    private MemorySegment[] transformSegments = new MemorySegment[0];
     private int layerCount;
     private int width;
     private int height;
@@ -317,18 +324,35 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             clips[i] = grow(clips[i], clipBytes);
             clipsFresh = true;
         }
+        long transformBytes = (long) list.transformCount() * TRANSFORM_BYTES;
+        boolean transformsFresh = fresh;
+        if (transforms[i] == null || transforms[i].size() < transformBytes) {
+            transforms[i] = grow(transforms[i], transformBytes);
+            transformsFresh = true;
+        }
         long bytes = 0;
-        int from = fresh ? 0 : Math.min(list.dirtyFrom(), size);
-        int to = fresh ? size : Math.min(list.dirtyTo(), size);
-        if (to > from) {
-            long offset = (long) from * Primitive.BYTES;
-            long length = (long) (to - from) * Primitive.BYTES;
-            primitives[i].put(offset, words(i, list.words()), offset, length);
-            bytes += length;
+        if (fresh) {
+            bytes += put(primitives[i], words(i, list.words()), 0, size, Primitive.BYTES);
+        } else {
+            DirtyRanges dirty = list.dirtyRanges(); // changes far apart upload apart
+            for (int r = 0; r < dirty.count(); r++) {
+                bytes += put(primitives[i], words(i, list.words()), dirty.from(r), Math.min(dirty.to(r), size),
+                    Primitive.BYTES);
+            }
         }
         if (clipsFresh || list.clipsDirty()) {
             clips[i].put(0, clips(i, list.clips()), 0, clipBytes);
             bytes += clipBytes;
+        }
+        int transformCount = list.transformCount();
+        if (transformsFresh) {
+            bytes += put(transforms[i], transforms(i, list.transforms()), 0, transformCount, TRANSFORM_BYTES);
+        } else {
+            DirtyRanges dirty = list.transformRanges(); // an animation: its entry alone
+            for (int r = 0; r < dirty.count(); r++) {
+                bytes += put(transforms[i], transforms(i, list.transforms()), dirty.from(r),
+                    Math.min(dirty.to(r), transformCount), TRANSFORM_BYTES);
+            }
         }
         counts[i] = size;
         Batching mode = batching;
@@ -339,6 +363,17 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         }
         list.clean();
         return bytes;
+    }
+
+    /** Copies records {@code [from, to)} of {@code record} bytes each from {@code source} into {@code buffer}: the bytes. */
+    private static long put(FrameBuffer buffer, MemorySegment source, int from, int to, int record) {
+        if (to <= from) {
+            return 0;
+        }
+        long offset = (long) from * record;
+        long length = (long) (to - from) * record;
+        buffer.put(offset, source, offset, length);
+        return length;
     }
 
     /**
@@ -428,11 +463,21 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         return clipSegments[i];
     }
 
+    @AllowAllocation("a list's transforms wrapped again after it grew them, rarely")
+    private MemorySegment transforms(int i, float[] array) {
+        if (wrappedTransforms[i] != array) {
+            wrappedTransforms[i] = array;
+            transformSegments[i] = MemorySegment.ofArray(array);
+        }
+        return transformSegments[i];
+    }
+
     @AllowAllocation("more layers than ever before")
     private void growLayers(int count) {
         lists = Arrays.copyOf(lists, count);
         primitives = Arrays.copyOf(primitives, count);
         clips = Arrays.copyOf(clips, count);
+        transforms = Arrays.copyOf(transforms, count);
         counts = Arrays.copyOf(counts, count);
         plannedVersion = Arrays.copyOf(plannedVersion, count);
         plannedFor = Arrays.copyOf(plannedFor, count);
@@ -441,6 +486,8 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         wordSegments = Arrays.copyOf(wordSegments, count);
         wrappedClips = Arrays.copyOf(wrappedClips, count);
         clipSegments = Arrays.copyOf(clipSegments, count);
+        wrappedTransforms = Arrays.copyOf(wrappedTransforms, count);
+        transformSegments = Arrays.copyOf(transformSegments, count);
         int before = draws.length;
         draws = Arrays.copyOf(draws, count);
         for (int i = before; i < count; i++) {
@@ -598,12 +645,13 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         GpuUiRenderer data = source != null ? source : this;
         push.textures(data.table.deviceAddress()).scaleX((float) width / imageWidth)
             .scaleY((float) height / imageHeight).toClipX(2f / width).toClipY(2f / height)
-            .clipFloats(DrawList.CLIP_FLOATS).originX(originX).originY(originY);
+            .originX(originX).originY(originY);
         for (int i = 0; i < data.layerCount; i++) {
             if (data.counts[i] == 0) {
                 continue;
             }
-            push.primitives(data.primitives[i].deviceAddress()).clips(data.clips[i].deviceAddress());
+            push.primitives(data.primitives[i].deviceAddress()).clips(data.clips[i].deviceAddress())
+                .transforms(data.transforms[i].deviceAddress());
             int[] planned = data.draws[i];
             for (int d = 0; d < data.drawCounts[i]; d++) {
                 int pipeline = planned[d * 3 + 2];
@@ -615,7 +663,10 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
 
     // ------------------------------------------------------------------------------------------------- statistics
 
-    /** The bytes the last {@link #submit} uploaded: primitives, clips and texture regions. 0 when nothing changed. */
+    /**
+     * The bytes the last {@link #submit} uploaded: primitives, clips, transform entries and texture regions. 0 when
+     * nothing changed.
+     */
     public long uploadedBytes() {
         return uploaded;
     }
@@ -663,6 +714,9 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             }
             if (clips[i] != null) {
                 clips[i].close();
+            }
+            if (transforms[i] != null) {
+                transforms[i].close();
             }
         }
         table.close();
