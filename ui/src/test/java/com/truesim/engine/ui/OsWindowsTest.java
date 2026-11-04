@@ -373,7 +373,8 @@ class OsWindowsTest {
         second.sync();
         int[] placed = new int[4];
         os.bounds(w.id(), placed);
-        if (!"wayland".equals(platform.videoDriver())) {
+        String driver = platform.videoDriver();
+        if (!"wayland".equals(driver) && !"offscreen".equals(driver)) { // neither places windows where asked
             assertThat(placed[0]).as("the window follows the cursor").isEqualTo(w.x());
         }
         cursor(endX + 40, from[1], 0);
