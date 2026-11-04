@@ -19,7 +19,7 @@ plugins {
 
 rootProject.name = "engine"
 
-include("engine-settings", "engine-app", "engine-platform", "engine-input", "engine-vulkan", "engine-graph", "engine-render", "engine-scene", "engine-audio", "engine-xr", "engine-ui", "engine-demo", "engine-bench")
+include("engine-settings", "engine-app", "engine-platform", "engine-input", "engine-vulkan", "engine-graph", "engine-render", "engine-scene", "engine-audio", "engine-xr", "engine-interaction", "engine-ui", "engine-demo", "engine-bench")
 project(":engine-settings").projectDir = file("settings")
 project(":engine-app").projectDir = file("app")
 project(":engine-platform").projectDir = file("platform")
@@ -30,6 +30,7 @@ project(":engine-render").projectDir = file("render")
 project(":engine-scene").projectDir = file("scene")
 project(":engine-audio").projectDir = file("audio")
 project(":engine-xr").projectDir = file("xr")
+project(":engine-interaction").projectDir = file("interaction")
 project(":engine-ui").projectDir = file("ui")
 project(":engine-demo").projectDir = file("demo")
 project(":engine-bench").projectDir = file("bench")

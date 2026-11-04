@@ -269,6 +269,69 @@ Capture capture = input.capture(one, JUMP);   // the next input becomes a bindin
   from other work, without JaCoCo (`InputBenchmarkTest`, 2026-11-03), 0 bytes allocated; a fixed step readying its
   edges, well under a microsecond.
 
+## Scene interaction and selection
+
+Scene nodes take pointers as UI elements do, without the UI toolkit (application-api.md, "Scene interaction and
+selection"). Picking is scene data (scene-core's `Pickable`, `Selected`, `Hovered` and `ScenePicker`); the
+`SceneInteraction` plugin (engine-interaction) runs it each frame, at the frame's start, for every pointer (mouse,
+fingers, pen, XR rays, a gamepad's virtual cursor) through this frame's camera, and routes the events:
+
+```java
+SceneInteraction interaction = engine.get(SceneInteraction.KEY);
+InteractionWorld world = interaction.world(scene, index);
+world.view(camera).port(mainView);                                    // or world.view(cameraNode): D129
+world.picker().resolver(new RenderablePicking(renderables, cache::get)); // Pickable.mesh(): the renderable's triangles
+long[] car = model.spawn(scene, renderables, scene.create());         // glTF "truesim.pickable": pickable on spawn
+world.on(car[0], SceneEventType.CLICK, e -> honk(e.currentNode()));   // the parts' clicks bubble to the root
+interaction.selection().enabled(true);                                // click, Shift, Ctrl, marquee, Ctrl+A, Escape
+port.add(new SelectionOutline(graph, geometry, view.view(), view, depthFormat, highlights));
+```
+
+- **Events:** enter, exit, move, press, release, click with counts, long press, context, wheel, drag start, drag,
+  drag end, drop enter, over, leave and drop (payloads between nodes), focus in and out; capture, target and bubble
+  phases along the scene graph, `consume()`, pass-through along the ray (press, wheel, drop over), pointer capture.
+  Queries: `world.hovered(node)`, `world.pressed(node)`, each pointer's hits, hit point, distance and triangle.
+- **Input:** buttons and the selection's modifiers and commands are the `scene` actions (`SceneActions`), rebound and
+  saved like any; positions come from the platform's events. Tunables are settings (`scene.interaction.*`: long press
+  delay, double click time and distance, drag thresholds in pixels and for rays in degrees, pass-through depth, ray
+  lengths, the virtual cursor).
+- **With the UI:** the UI plugin runs first (screen layers, gizmo handles, world panels: `ScenePicking.claimed`) and
+  hands the scene the pointers it did not take, with its own rays, so each ray is cast once a frame (the picker keeps
+  a frame's picks by ray). Tooltips, context menus and drag and drop between the UI and the world stay the UI's
+  (`Interactive`); the gizmo follows the selection (`UiScene.followSelection`).
+- **Highlight:** `render.selection` chooses `outline` (default), `tint` or `off`; engine-scene's `SceneHighlights`
+  marks the selected and hovered objects' instances (subtrees included) for `SelectionOutline`, which masks them from
+  the visibility buffer's IDs (forward views draw IDs of their own while the slot is on).
+- **Cameras and lights as components:** `CameraSync` sets a renderer camera from a camera node's world transform and
+  `CameraLens`; `LightSync` places `LightSource` components in `Lights`, following moves and changes.
+
+Measured (2026-11-04, RX 9070 XT, Ryzen 9 9950X3D; `ScenePickingBenchmark`, `SelectionOutlineTest` with
+`TRUESIM_BENCHMARK=true`):
+
+| Picking, 100,000 nodes (half moving every frame), one pointer | interaction's frame, median (p99) | raycast alone | allocated |
+|---|---|---|---|
+| 1% pickable, boxes | 2.1 us (27.5) | 0.7 us (4.5) | 0 B |
+| 1% pickable, meshes of 960 triangles | 2.4 us (17.1) | 0.7 us (3.8) | 0 B |
+| all pickable, boxes | 3.1 us (25.4) | 1.7 us (13.2) | 20 B on average (the hover store's log growing to its cap) |
+| all pickable, meshes | 3.5 us (59.8) | 1.5 us (39.7) | 20 B on average |
+
+| Outline, 30,000 rocks: GPU frame (mask + outline passes) | 1920 x 1080 | 3840 x 2160 |
+|---|---|---|
+| forward: slot off / outline, nothing highlighted | 1.127 / 1.136 ms | 2.505 / 2.497 ms |
+| forward, outline, 1 highlighted | 1.182 ms (0.007 + 0.038) | 2.666 ms (0.023 + 0.145) |
+| forward, outline, 300 highlighted | 1.194 ms (0.007 + 0.038) | 2.690 ms (0.025 + 0.145) |
+| forward, outline, 3,000 highlighted | 1.245 ms (0.009 + 0.038) | 2.824 ms (0.034 + 0.144) |
+| forward, tint, 3,000 highlighted | 1.213 ms | 2.702 ms |
+| visibility buffer: slot off / outline, nothing highlighted | 0.890 / 0.891 ms | 2.195 / 2.194 ms |
+| visibility buffer, outline, 1 / 300 / 3,000 highlighted | 0.936 / 0.937 / 0.937 ms | 2.380 / 2.377 / 2.373 ms |
+| visibility buffer, tint, 3,000 highlighted | 0.905 ms | 2.252 ms |
+
+A forward view's own ID draw draws the highlighted instances alone: its render view filters instances on the GPU by
+the highlight flags (`RenderView.highlightedOnly`, the culling's `VIEW_HIGHLIGHTED_ONLY`), and the mask keeps only
+the pixels where that draw's depth is the scene's (what the view shows), so its cost follows what is highlighted. The
+passes stay built while the slot is on (a hover starting and ending must not rebuild the frame graph); with nothing
+highlighted the ID draw finds nothing to draw and the mask and outline do nothing (forward: +0.009 ms at 1080p).
+
 ## UI
 
 `engine-ui` is the engine's side of the [ui](https://github.com/true-sim/ui) toolkit (its design: ui's

@@ -436,6 +436,28 @@ class SceneSyncTest {
         assertThat(resources.uploadedMeshCount()).isEqualTo(1);
         assertThat(resources.materialSetCount()).isEqualTo(1);
         assertThat(resources.materialCount()).isEqualTo(1);
+        // a pickable node is bounded by its mesh (the scene interaction's picking finds what is drawn); others are not:
+        // bounds cost every move a world box
+        assertThat(sync.bounds()).isTrue();
+        assertThat(scene.hasBounds(node)).as("not pickable: no bounds").isFalse();
+        scene.components().set(node, com.truesim.scene.core.Pickable.TYPE, com.truesim.scene.core.Pickable.mesh());
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(scene.hasBounds(node)).as("pickable: bounded by its mesh").isTrue();
+        com.truesim.scene.assets.mesh.MeshData square = assets.get(SQUARE);
+        assertThat(scene.localBounds(node).min().x()).isEqualTo(square.boxMin(0));
+        assertThat(sync.bounds(false).bounds()).isFalse();
+        assertThat(scene.hasBounds(node)).as("kept").isTrue();
+        long own = facing(scene, 1e7 - 1, 0, -3); // a game's own bounds stay
+        scene.setLocalBounds(own, -5, -5, -5, 5, 5, 5);
+        scene.components().set(own, com.truesim.scene.core.Pickable.TYPE, com.truesim.scene.core.Pickable.mesh());
+        renderables.set(own, SQUARE, List.of(RED));
+        assertThat(sync.bounds(false).bounds(true).bounds(true).bounds()).isTrue();
+        for (int frame = 0; frame < 2; frame++) {
+            frame(List.of(graph), List.of(sync), camera);
+        }
+        assertThat(scene.localBounds(own).min().x()).as("the game's").isEqualTo(-5);
+        renderables.remove(own);
+        frame(List.of(graph), List.of(sync), camera);
         assertThat(litColumn(readbacks[0], 0)).as("red, left of the camera").isLessThan(SIZE / 2.0 - 4);
         assertThat(litColumn(readbacks[0], 8)).as("no green").isNaN();
         // Moving the node moves its instance; moving the camera moves every instance.

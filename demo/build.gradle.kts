@@ -8,8 +8,19 @@ dependencies {
     implementation(project(":engine-xr"))
     implementation(project(":engine-scene"))
     implementation(project(":engine-audio"))
-    implementation("com.truesim.scene:scene-meshbuild:0.63.0")
-    implementation("com.truesim.scene:scene-gltf:0.63.0")
+    implementation("com.truesim.scene:scene-meshbuild:0.64.1")
+    implementation("com.truesim.scene:scene-gltf:0.64.1")
+    // The UI gallery (UiGallery): the engine's UI over the galleries of ui's test fixtures
+    implementation(project(":engine-ui"))
+    implementation("com.truesim.ui:ui-charts:0.8.0")
+    implementation("com.truesim.ui:ui-text-native:0.8.0")
+    implementation("com.truesim.ui:ui-fonts-cjk:0.8.0")
+    implementation("com.truesim.ui:ui-fonts-emoji:0.8.0")
+    implementation(testFixtures("com.truesim.ui:ui-controls:0.8.0"))
+    implementation(testFixtures("com.truesim.ui:ui-charts:0.8.0"))
+    implementation(testFixtures("com.truesim.ui:ui-props:0.8.0"))
+    implementation(testFixtures("com.truesim.ui:ui-profiler:0.8.0"))
+    testImplementation("org.lwjgl:lwjgl-sdl") // the gallery's test pushes mouse and key events through SDL
 }
 
 application {
@@ -76,4 +87,21 @@ tasks.register<JavaExec>("showcase") {
         "stills", "exposure", "torches", "sparks", "glass", "async")) {
         providers.gradleProperty(name).orNull?.let { systemProperty("truesim.demo.$name", it) }
     }
+}
+
+// The UI gallery (UiGallery): ./gradlew :engine-demo:uiGallery -- every gallery of the UI in a window, a 3D scene with
+// picking, selection and gizmos, and the live profiler (F3, Shift+F3) over the app's own frames
+tasks.register<JavaExec>("uiGallery") {
+    group = "application"
+    description = "Opens the UI gallery: every control gallery, docking, the console, the profiler and a 3D scene."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass = "com.truesim.engine.demo.UiGallery"
+    workingDir = rootProject.projectDir
+    jvmArgs("--enable-native-access=ALL-UNNAMED", "-XX:+UseZGC", "-Xmx2g")
+    systemProperty("slf4j.provider", "com.truesim.engine.ui.console.ConsoleLogProvider") // the log in the console
+    // -Pseconds=n quits after n seconds; -Ptour=true visits every page and opens the profiler's views (a smoke run)
+    providers.gradleProperty("seconds").orNull?.let { args("--seconds=$it") }
+    providers.gradleProperty("tour").orNull?.let { if (it == "true") args("--tour") }
+    // -Pshots=<dir>: during a tour, what the window shows of each page as PNGs
+    providers.gradleProperty("shots").orNull?.let { systemProperty("truesim.gallery.shots", it) }
 }

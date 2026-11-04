@@ -29,7 +29,7 @@ import com.truesim.ui.controls.Ui;
 import com.truesim.ui.core.event.EventType;
 import com.truesim.ui.core.input.Pointer;
 import com.truesim.ui.scene.Interactive;
-import com.truesim.ui.scene.PickMesh;
+import com.truesim.scene.core.PickMesh;
 import com.truesim.ui.style.tss.Tss;
 import com.truesim.ui.testkit.SyntheticInput;
 import java.util.ArrayList;
@@ -251,7 +251,7 @@ public class UiSceneTest {
         Ui ui = new Ui(Tss.defaultTheme(), null);
         SceneGraph graph = new SceneGraph(new ChangeClock());
         SpatialIndex index = new SpatialIndex(graph);
-        UiScene scene = new UiScene(ui, graph, index, UiScene.INTERACTIVE);
+        UiScene scene = new UiScene(ui, graph, index);
         assertThat(scene.ui()).isSameAs(ui);
         assertThat(scene.graph()).isSameAs(graph);
         assertThat(scene.index()).isSameAs(index);

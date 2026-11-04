@@ -345,6 +345,11 @@ public final class SceneResources implements AutoCloseable {
         assets.addListener(listener);
     }
 
+    /** The asset cache the meshes, materials and textures are loaded through. */
+    public AssetCache assets() {
+        return assets;
+    }
+
     public GeometryPool pool() {
         return pool;
     }

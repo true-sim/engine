@@ -87,12 +87,18 @@ public static const uint INSTANCE_MESH = 0xffffffu;
 
 /** View flags. */
 public static const uint VIEW_CASTERS_ONLY = 1;             // shadow views: instances casting shadows only
+public static const uint VIEW_HIGHLIGHTED_ONLY = 2;         // instances with a highlight flag (View.highlights) only
 
-/** Whether stored instance `instance` (as stored, before relative()) is drawn in `view`: live, on its layers. */
-public bool drawnIn(Instance instance, View view)
+/**
+ * Whether stored instance `instance` of id `id` (as stored, before relative()) is drawn in `view`: live, on its layers,
+ * casting shadows in a shadow view, highlighted in a highlight view (two bits per id, sixteen ids a word).
+ */
+public bool drawnIn(Instance instance, uint id, View view)
 {
     return (instance.mesh & INSTANCE_LIVE) != 0 && (instance.layers & view.layers) != 0
-        && ((view.flags & VIEW_CASTERS_ONLY) == 0 || (instance.mesh & INSTANCE_CASTS_SHADOWS) != 0);
+        && ((view.flags & VIEW_CASTERS_ONLY) == 0 || (instance.mesh & INSTANCE_CASTS_SHADOWS) != 0)
+        && ((view.flags & VIEW_HIGHLIGHTED_ONLY) == 0
+            || id < view.highlightCount && ((view.highlights[id >> 4] >> ((id & 15) * 2)) & 3) != 0);
 }
 
 /**
@@ -123,12 +129,13 @@ public struct View
     public ViewLists lists;        // where culling lists what the view draws
     public uint* visibility;       // per instance: 1 if the view saw it the last time its late phase looked; or null
     public uint binIndices;        // the indexed path's room in each raster bin but the first, after maxIndices
-    public uint pad3;
+    public uint highlightCount;    // VIEW_HIGHLIGHTED_ONLY: how many instance ids the flags hold
     public float4x4 previousViewProjection; // the frame before's, from positions relative to this frame's camera
     public float2 jitter;          // the projection's subpixel offset, in pixels (temporal antialiasing)
     public float2 previousJitter;  // the frame before's
     public uint2 outputSize;       // the pixels it renders to
-    public uint2 pad4;             // 448 bytes in all: views lie in one array, one after another
+    public uint* highlights;       // VIEW_HIGHLIGHTED_ONLY: the highlight flags (2 bits per instance id); 448 bytes
+                                   // in all: views lie in one array, one after another
 };
 
 /**

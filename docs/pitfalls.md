@@ -57,6 +57,19 @@ to 0.33 and 0.07 ms.
 - Proof: `SkinnedCrowdBenchmark` (engine-scene), run before and after the change in the same session (A5 branch).
 - Rule: in code run on many threads, a shared flag or counter is read before it is written, or kept per thread.
 
+**A stray 248-byte allocation in the scene benchmark is older than it looks.** The scene benchmark's "bytes
+allocated" maximum reads 248 now and then (median 0), in a different scenario each run ("still", "camera moving",
+"1,000 rocks moving", "30,000 rocks moving"), on the base commit as on the picking branch, so a before/after pair can
+show it on one side only. Measured per frame stage, the counted frames' 248 bytes were in `graph.submit`, with one
+writer thread as with all of them; the first frame of "1,000 rocks moving" also allocated 248 bytes in `sync.update`,
+where JFR showed C2 deoptimizing `SceneSync.sceneChanged`, `markMoved` and `reconcile` (`unstable_if`): that frame is a
+warm-up frame and not counted. Thirty warm-up frames per scenario instead of two did not remove the counted ones. Where
+in `submit` the bytes come from was not found.
+- Proof: same-session runs of the base (9084297) and the picking branch, then `SceneBenchmark` with per-stage
+  `getCurrentThreadAllocatedBytes` and a JFR recording of `jdk.Deoptimization` (true-sim/engine, picking).
+- Rule: an allocation maximum that moves between scenarios from run to run is compared with the base in the same
+  session before it is called a regression.
+
 ## Frame graph
 
 **A write is visible to nothing until a barrier.** The compiler once marked a write's own stage and access visible, so
@@ -441,6 +454,79 @@ shaders), then settled at 0.60-0.68 ms: the ranges of five rounds after one warm
   hooks); with four, the rounds of each configuration fell within 0.08 ms of each other.
 - Rule: a benchmark warms until its rounds agree (look at the per-round lines, not the ranges); short frames need more
   warm-up than long ones.
+
+**A press passed through a button into the layer below.** On the UI gallery's charts page the bar's buttons, drawn
+over the charts, did not react to clicks: the hit test found the button, but a press nobody consumes passes on to the
+next hit (ui's pass-through), and a chart in the layer below consumed it to pan and took the pointer.
+- Proof: `UiGalleryTest.theNavBarTakesItsClicksOnEveryPage` (engine-demo) failed on the charts page; ui's
+  `RoutingTest.theFrontMostElementTakingPressesKeepsThePressFromAConsumerBelowItInAnotherLayer`; `PickingSanity` over
+  every gallery (true-sim/ui, picking; true-sim/engine, UI gallery).
+- Rule: what is drawn on top gets the pointer: a press taken by an element listening to presses or clicks does not
+  pass into a screen layer below. A test of "the right element was hit" checks the delivery too (who captured).
+
+**A hover rebuilt the frame graph.** Sweeping the mouse over the UI gallery's rocks made frames miss the display's
+refresh (16.3 ms against 8.25 median): the selection outline's build version followed whether anything was highlighted
+(its forward ID draw built only then) and the room its flags needed for the highest instance highlighted, so every
+hover starting or ending rebuilt the graph: 103 builds in 1,352 frames, 290 KB allocated each.
+- Proof: `UiGalleryTest.sweepingTheMouseOverTheRocksKeepsFramesEven` (engine-demo), SDL motion events through the
+  window path, before and after: 0 builds, max 8.95 ms against 8.25 median (true-sim/engine, UI gallery).
+- Rule: a technique's build version changes with structure (a kind chosen, room outgrown, never shrunk), never with
+  per-frame state; per-frame state skips work at record time.
+
+**Per-frame SDL calls and stack buffers allocated, depending on the JIT.** The gallery's frames allocated 128 bytes
+(LWJGL's per-call `MemorySegment` around SDL's window flags, display and scale, and `vkAcquireNextImageKHR`) and,
+in a third of them, 224 more (`MemoryStack.mallocInt`/`mallocFloat` buffers of the window's position and the global
+mouse, read every frame by docking's OS windows); which of them showed changed from run to run with what the JIT
+inlined.
+- Proof: JFR with 4 KB TLABs (`-XX:TLABSize=4096 -XX:-ResizeTLAB`, `jdk.ObjectAllocationInNewTLAB`): turning TLABs off
+  hid them, the JIT compiling differently; after `SdlCalls` (addresses bound once, out-parameters by address) and
+  `Commands.acquireNextImage`, 0 bytes in the median frame (true-sim/engine, UI gallery).
+- Rule: per-frame native calls bind their function once (`Commands`, `SdlCalls`) and pass out-parameters by address
+  (`nmalloc`), never LWJGL's buffer-taking overloads.
+
+**Drawn renderables had no bounds, so nothing picked them.** In the UI gallery a click on a rock selected nothing,
+while "select all" worked: `SceneSync` drew the renderables but nothing bounded their nodes, so the spatial index
+(the picker's broad phase, the marquee's frustum query) never returned them and the triangle test never ran.
+`RenderableBounds` existed in scene-render; no engine path used it.
+- Proof: `UiGalleryTest` (engine-demo), SDL mouse events through the window path, failed on "drawn rocks are bounded";
+  `SceneSync` now bounds its pickable renderables by their meshes' boxes (`bounds(false)` for a game's own)
+  (true-sim/engine, UI gallery).
+- Then: bounding every drawn renderable cost 30,000 moving rocks +1 ms a frame (a world box per move, and a mesh held
+  per node), measured in a same-session A/B of `SceneBenchmark`; bounding only nodes with a `Pickable` brought it back.
+- Rule: a feature that reads scene state another system must keep (bounds for picking) is tested with that system
+  as an application wires it, not with the state set by hand in the test; and that state is kept only for what reads
+  it (pickable nodes), measured with and without.
+
+**A fixed array silently capped a selection.** The gizmo moved at most 64 selected nodes (its drivers array; the XR
+grab's likewise): with 400 rocks selected, the rest stayed.
+- Proof: `GizmoTest.aDragMovesEveryNodeOfABigSelection` (ui-gizmo) fails without the fix; `UiGalleryTest` checks
+  every rock moved by the same delta (true-sim/ui, true-sim/engine, UI gallery).
+- Rule: per-item arrays grow with what they hold (allocating when the selection grows is fine); a cap that drops items
+  is a bug unless it is a setting and says so.
+
+**Two renderers cleaned one texture's dirty region.** The UI gallery's labels lost letters on most pages in the
+window, while the galleries' offscreen screenshots were whole: its world panel's UI shares the screen's text system, so
+two `GpuUiRenderer`s uploaded the same atlas page, and the one submitting first cleared the page's dirty region each
+frame. The screen's renderer kept the page as first uploaded: 54 glyphs in the atlas, all READY, a third of them blank.
+- Proof: the gallery's shots of the presented image (`-Pshots`), before and after; the panel on a text system of its
+  own drew every glyph; `UiRendererTest.aTextureAnotherRendererUploadedFirstIsStillUploadedHere` fails without the fix
+  (0 bytes uploaded) (true-sim/engine, UI gallery).
+- Rule: state that several consumers read (a texture's changes) is tracked per consumer (`UiTexture.regionSince` from
+  the version each uploaded), never as one flag a consumer clears; check UI changes in the real window path too.
+
+**Two full benchmark runs hours apart differed by up to 43 % on unchanged code.** The before/after run of the picking
+branch showed `MeshletBenchmark`'s classic indexed draw ("without meshlets, full detail") at 3.49 / 10.71 / 35.64 /
+106.3 ms before and 5.14 / 15.25 / 50.65 / 151.8 ms after, `SkinnedCrowdBenchmark`'s GPU deformation at 0.397 against
+0.59-0.66 ms, culling rows 12-35 % slower. Run in one session, alternating the base commit and the branch, every one of
+them read the same on both: classic draw 5.140 / 15.241 / 50.615 / 151.616 (base) against 5.139 / 15.240 / 50.616 /
+151.613 ms, deformation 0.40-0.64 ms on both, mean culling 0.1794 against 0.1794 ms (forward) and 0.2351 against
+0.2359 ms (transparency). What changed between the two runs (clocks, power state, driver) was not found.
+- Also seen: `HitShadingBenchmark`'s "one shader switching" at 256 x 256 has one round in some runs at 0.32 ms against
+  0.25, on the base as on the branch (seven alternating runs each); its range's upper end is not a regression.
+- Proof: same-session A/B of the base (9084297) and the picking branch, logs in the picking work's scratch notes
+  (true-sim/engine, picking).
+- Rule: a regression found by comparing runs from different times is confirmed in one session, alternating the two
+  builds, before anyone looks for its cause.
 
 **Benchmark numbers in the README go stale.** The per-path table stayed from the first mesh shader benchmark while
 materials and lighting doubled the mesh path's time.

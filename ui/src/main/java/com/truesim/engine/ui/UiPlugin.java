@@ -108,6 +108,7 @@ public final class UiPlugin implements Plugin {
     private UiProfiler profiler; // the profiler's views, or null
     private com.truesim.engine.app.Engine engine;
     private Input in;
+    private com.truesim.engine.interaction.SceneInteraction interaction; // the scene interaction, or null
 
     /**
      * The UI made by {@code factory} at startup, given the textures it should use (null: its own, or its text
@@ -156,7 +157,8 @@ public final class UiPlugin implements Plugin {
 
     @Override
     public List<PluginKey<?>> after() {
-        return List.of(Desktop.KEY, Xr.KEY, com.truesim.engine.graph.Profiling.KEY); // the profiler measured first
+        return List.of(Desktop.KEY, Xr.KEY, com.truesim.engine.graph.Profiling.KEY, // the profiler measured first
+            com.truesim.engine.interaction.SceneInteraction.KEY);
     }
 
     @Override
@@ -183,6 +185,7 @@ public final class UiPlugin implements Plugin {
                     tunables(ui).toArray(new Tunable[0]));
                 commands = new UiCommands(in, startup.settings());
                 desktop = startup.find(Desktop.KEY).orElse(null);
+                interaction = startup.find(com.truesim.engine.interaction.SceneInteraction.KEY).orElse(null);
             }
             case RUN -> wire(startup);
             default -> {
@@ -277,24 +280,26 @@ public final class UiPlugin implements Plugin {
     }
 
     /**
-     * Runs the UI through a scene bridge over the game's {@code graph} and its {@code index} (design 4.7): 3D nodes,
-     * world panels and gizmos take pointers by their rays, interactive nodes on {@code UiScene.INTERACTIVE}. Give it the
+     * Runs the UI through a scene bridge over the game's {@code graph} and its {@code index} (design 4.7): world panels,
+     * gizmos and pickable 3D nodes take pointers by their rays. With the engine's scene interaction installed, the
+     * bridge shares its world's picker and hands it the pointers the UI did not take, running its frame. Give it the
      * camera the main view draws through ({@code UiScene.camera}). Call once, after the engine started.
      */
     @AllowAllocation("set up once")
     public com.truesim.engine.ui.scene.UiScene scene(com.truesim.scene.core.SceneGraph graph,
         com.truesim.scene.core.SpatialIndex index) {
-        return scene(graph, index, com.truesim.engine.ui.scene.UiScene.INTERACTIVE);
-    }
-
-    /** As {@link #scene(com.truesim.scene.core.SceneGraph, com.truesim.scene.core.SpatialIndex)}, on {@code layer}. */
-    @AllowAllocation("set up once")
-    public com.truesim.engine.ui.scene.UiScene scene(com.truesim.scene.core.SceneGraph graph,
-        com.truesim.scene.core.SpatialIndex index, com.truesim.scene.core.SceneLayer layer) {
         if (scene != null) {
             throw new IllegalStateException("The UI has a scene bridge already");
         }
-        scene = new com.truesim.engine.ui.scene.UiScene(ui(), graph, index, layer);
+        if (interaction != null) {
+            com.truesim.engine.interaction.InteractionWorld world = interaction.worldOf(graph);
+            if (world == null) {
+                world = interaction.world(graph, index);
+            }
+            scene = new com.truesim.engine.ui.scene.UiScene(ui(), world.picker(), world);
+        } else {
+            scene = new com.truesim.engine.ui.scene.UiScene(ui(), graph, index);
+        }
         return scene;
     }
 

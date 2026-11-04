@@ -116,6 +116,14 @@ public final class SceneSync implements AutoCloseable {
     private int[] fillItems = new int[64];
     private int[] fillEntries = new int[64];
     private int itemCount;
+    private long instanceVersion;
+    // Pickable nodes bounded by their meshes' boxes (bounds(true), the default): the Pickable store, when it was read,
+    // and per item whether the bounds the node has are the ones set here
+    private boolean bounds = true;
+    private com.truesim.scene.core.ComponentStore<com.truesim.scene.core.Pickable> pickables;
+    private long pickablesSeen;
+    private boolean[] itemBounded = new boolean[64];
+    private final com.truesim.scene.core.ComponentStore.Visitor onPickable = (node, changes) -> pickableChanged(node);
     // Skinned items: the deformed copy each draws (NONE: its mesh as it is), and those that have one, densely.
     private int[] itemCopy = filled(64);
     private boolean[] itemCopySkinned = new boolean[64]; // whether its copy was made with the skin's joints
@@ -270,6 +278,7 @@ public final class SceneSync implements AutoCloseable {
         }
         this.scene = renderables.scene();
         this.clock = scene.clock();
+        pickables = scene.components().store(com.truesim.scene.core.Pickable.TYPE);
         gpu.setMaterials(resources.materials()); // the resources' table: instances name its ids
         com.truesim.engine.settings.EngineSettings followed = resources.settings();
         if (followed != null) { // render.interpolation as the player sets it, switched at the next update
@@ -287,6 +296,62 @@ public final class SceneSync implements AutoCloseable {
         int[] array = new int[length];
         Arrays.fill(array, NONE);
         return array;
+    }
+
+    /**
+     * Whether pickable renderables (nodes with a {@code Pickable} component) are bounded by their meshes' boxes
+     * (default on): the spatial index finds them, so the scene interaction picks what is drawn without anyone setting
+     * bounds. Only pickable nodes: bounds cost every move a world box, and nothing else here queries the index. A
+     * node's bounds are set once its mesh draws (and again if its mesh changes), unless the game set its own first.
+     * Off for a game bounding its pickables itself; nodes keep the bounds they have. Returns this.
+     */
+    public SceneSync bounds(boolean on) {
+        checkOpen();
+        if (on && !bounds) {
+            pickablesSeen = -1; // every pickable drawn now is bounded at the next update
+        }
+        bounds = on;
+        return this;
+    }
+
+    /** Whether pickable renderables are bounded by their meshes ({@link #bounds(boolean)}). */
+    public boolean bounds() {
+        return bounds;
+    }
+
+    /** Bounds {@code item}'s node by its mesh's box if it is pickable, drawn, and not bounded by the game. */
+    private void bound(int item) {
+        long node = itemNode[item];
+        if (!bounds || itemSlot[item] == NONE || !pickables.has(node) || !scene.contains(node)
+            || scene.hasBounds(node) && !itemBounded[item]) {
+            return;
+        }
+        MeshData mesh = itemMesh[item].mesh.data; // its asset's box: the same for every node drawing it
+        scene.setLocalBounds(node, mesh.boxMin(0), mesh.boxMin(1), mesh.boxMin(2), mesh.boxMin(0) + mesh.boxExtent(0),
+            mesh.boxMin(1) + mesh.boxExtent(1), mesh.boxMin(2) + mesh.boxExtent(2));
+        itemBounded[item] = true;
+    }
+
+    /** A node's Pickable came, changed or went: a drawn renderable there is bounded. */
+    private void pickableChanged(long node) {
+        int item = NodeHandle.index(node);
+        if (item < itemNode.length && itemNode[item] == node) {
+            bound(item);
+        }
+    }
+
+    /** Follows the Pickable components added since the last update (all of them after falling behind). */
+    private void followPickables() {
+        if (!bounds || pickables.version() <= pickablesSeen) {
+            return; // nothing new: no work
+        }
+        long since = pickablesSeen;
+        pickablesSeen = clock.now();
+        if (since < 0 || !pickables.changesSince(since, onPickable)) {
+            for (int i = 0; i < pickables.size(); i++) {
+                pickableChanged(pickables.node(i));
+            }
+        }
     }
 
     /** The instances this scene is kept as. */
@@ -310,6 +375,7 @@ public final class SceneSync implements AutoCloseable {
      */
     public void update() {
         checkOpen();
+        followPickables(); // pickables bounded by their meshes: from the next scene.update() on, picking finds them
         if (listChanged) {
             listChanged = false;
             gpu.changeList(resources.settings().get(RenderSettings.CHANGE_LIST),
@@ -417,6 +483,14 @@ public final class SceneSync implements AutoCloseable {
     /** How many renderables this scene has, drawn or waiting for their meshes. */
     public int renderableCount() {
         return itemCount;
+    }
+
+    /**
+     * A count that grows whenever a renderable starts or stops drawing (its instance id taken or freed): what keeps
+     * ids of nodes, such as the selection's highlights, follows it.
+     */
+    public long instanceVersion() {
+        return instanceVersion;
     }
 
     /** How many distinct meshes this scene's renderables use. */
@@ -815,6 +889,7 @@ public final class SceneSync implements AutoCloseable {
         unlink(entry, item);
         itemMesh[item] = null;
         itemNode[item] = NodeHandle.NONE;
+        itemBounded[item] = false; // the node keeps its bounds; a node made in its place is not ours
         itemCount--;
         releaseMesh(entry);
     }
@@ -849,6 +924,7 @@ public final class SceneSync implements AutoCloseable {
         itemSet = Arrays.copyOf(itemSet, length);
         itemSlot = Arrays.copyOf(itemSlot, length);
         itemNext = Arrays.copyOf(itemNext, length);
+        itemBounded = Arrays.copyOf(itemBounded, length);
         itemPrevious = Arrays.copyOf(itemPrevious, length);
         moved = Arrays.copyOf(moved, length);
         isWaiting = Arrays.copyOf(isWaiting, length);
@@ -909,9 +985,11 @@ public final class SceneSync implements AutoCloseable {
         }
         int slot = gpu.freeId(); // the table grows if it is full
         instanceCount++;
+        instanceVersion++;
         itemSlot[item] = slot;
         refreshCopy(item);
         write(gpu.claim(slot), item); // takes the id
+        bound(item);
         return true;
     }
 
@@ -937,6 +1015,7 @@ public final class SceneSync implements AutoCloseable {
         if (slot != NONE) {
             gpu.remove(slot);
             instanceCount--;
+            instanceVersion++;
             itemSlot[item] = NONE;
         }
         if (itemSet[item] != null) { // drawn, or waiting for its assets

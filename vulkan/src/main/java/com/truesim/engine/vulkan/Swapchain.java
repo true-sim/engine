@@ -17,7 +17,6 @@ import static org.lwjgl.vulkan.KHRSwapchain.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_SUBOPTIMAL_KHR;
 import static org.lwjgl.vulkan.EXTHdrMetadata.vkSetHdrMetadataEXT;
-import static org.lwjgl.vulkan.KHRSwapchain.nvkAcquireNextImageKHR;
 import static org.lwjgl.vulkan.KHRSwapchain.vkCreateSwapchainKHR;
 import static org.lwjgl.vulkan.KHRSwapchain.vkDestroySwapchainKHR;
 import static org.lwjgl.vulkan.KHRSwapchain.vkGetSwapchainImagesKHR;
@@ -360,7 +359,7 @@ public final class Swapchain implements AutoCloseable {
     public int acquire(long imageAvailable) {
         try (MemoryStack stack = stackPush()) {
             long index = stack.nmalloc(Integer.BYTES, Integer.BYTES);
-            int result = nvkAcquireNextImageKHR(device.handle(), handle, TIMEOUT, imageAvailable, 0, index);
+            int result = Commands.acquireNextImage(device.handle(), handle, TIMEOUT, imageAvailable, 0, index);
             if (result == VK_ERROR_OUT_OF_DATE_KHR) {
                 outOfDate = true;
                 return -1;

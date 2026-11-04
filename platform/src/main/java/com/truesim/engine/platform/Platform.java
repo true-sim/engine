@@ -97,7 +97,6 @@ import static org.lwjgl.sdl.SDLInit.SDL_Init;
 import static org.lwjgl.sdl.SDLInit.SDL_WasInit;
 import static org.lwjgl.sdl.SDLMouse.SDL_CreateSystemCursor;
 import static org.lwjgl.sdl.SDLMouse.SDL_CursorVisible;
-import static org.lwjgl.sdl.SDLMouse.SDL_GetGlobalMouseState;
 import static org.lwjgl.sdl.SDLMouse.SDL_DestroyCursor;
 import static org.lwjgl.sdl.SDLMouse.SDL_SetCursor;
 import static org.lwjgl.sdl.SDLMouse.SDL_HideCursor;
@@ -502,7 +501,7 @@ public final class Platform implements AutoCloseable {
     /**
      * Where the mouse cursor is on the desktop, in screen coordinates, into {@code out} (x, y), wherever it is (over a
      * window or not, during a drag too); false, {@code out} unchanged, where the system tells no global position
-     * (Wayland). Allocates nothing.
+     * (Wayland; the offscreen and dummy drivers, which have no cursor). Allocates nothing.
      */
     public boolean globalMouse(float[] out) {
         checkThread();
@@ -512,19 +511,22 @@ public final class Platform implements AutoCloseable {
         if (globalMouse < 0) {
             return false;
         }
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            java.nio.FloatBuffer x = stack.mallocFloat(1);
-            java.nio.FloatBuffer y = stack.mallocFloat(1);
-            SDL_GetGlobalMouseState(x, y);
-            out[0] = x.get(0);
-            out[1] = y.get(0);
+        try (MemoryStack stack = MemoryStack.stackPush()) { // addresses, not buffers: read on every mouse move (docking)
+            long x = stack.nmalloc(4, 4);
+            long y = stack.nmalloc(4, 4);
+            SdlCalls.globalMouseState(x, y);
+            out[0] = org.lwjgl.system.MemoryUtil.memGetFloat(x);
+            out[1] = org.lwjgl.system.MemoryUtil.memGetFloat(y);
         }
         return true;
     }
 
     @AllowAllocation("asked once")
     private boolean globalMouseKnown() {
-        return !"wayland".equals(SDL_GetCurrentVideoDriver());
+        // Wayland tells no global position; the offscreen and dummy drivers have no system cursor at all (what SDL
+        // answers there is not where events put the mouse: docking's mapping then takes the events' own positions)
+        String driver = SDL_GetCurrentVideoDriver();
+        return !"wayland".equals(driver) && !"offscreen".equals(driver) && !"dummy".equals(driver);
     }
 
     public boolean isCursorVisible() {

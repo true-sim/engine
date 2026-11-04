@@ -41,7 +41,7 @@ void selectMain(uint3 id : SV_DispatchThreadID)
     }
     View view = push.view[0];
     Instance stored = push.instances[id.x];
-    if (!drawnIn(stored, view))
+    if (!drawnIn(stored, id.x, view))
     {
         return;
     }

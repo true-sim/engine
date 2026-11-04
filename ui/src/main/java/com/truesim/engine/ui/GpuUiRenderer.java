@@ -219,6 +219,11 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     private UiTextures textures;
     private GpuImage[] images = new GpuImage[1];
     private int[] slotOf = new int[1];
+    // per texture id: the version of its pixels uploaded. A texture may have other renderers uploading it (UIs sharing
+    // a text system share its atlas pages), so each asks what changed since its own upload, not the dirty region one
+    // clean() of theirs would take
+    private long[] uploadedVersion = new long[1];
+    private final int[] region = new int[4];
     // UI textures drawn from a frame graph texture (a camera view's image), by id: no pixels uploaded, sampled in place
     private com.truesim.engine.graph.Texture[] bound = new com.truesim.engine.graph.Texture[1];
     private FrameBuffer table;
@@ -861,8 +866,17 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             if (fresh) {
                 create(id, texture);
             }
-            if (fresh || texture.dirty()) {
+            long version = texture.version();
+            if (fresh || version != uploadedVersion[id]) {
+                int changed = fresh ? -1 : texture.regionSince(uploadedVersion[id], region);
+                if (changed < 0) { // all of it: new, or changed too often since
+                    region[0] = 0;
+                    region[1] = 0;
+                    region[2] = texture.width();
+                    region[3] = texture.height();
+                }
                 bytes += uploadRegion(id, texture, fresh);
+                uploadedVersion[id] = version;
                 texture.clean();
             }
         }
@@ -894,15 +908,15 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     }
 
     /**
-     * Uploads {@code texture}'s dirty region (all of it when {@code fresh}) into its image, in the next frame's first
-     * commands: the bytes.
+     * Uploads {@code texture}'s changed {@link #region} (x, y, width, height) into its image ({@code fresh}: made this
+     * frame, its contents undefined till then), in the next frame's first commands: the bytes.
      */
     @AllowAllocation("a texture written, rarely: an atlas page filled")
     private long uploadRegion(int id, UiTexture texture, boolean fresh) {
-        int x = fresh ? 0 : texture.dirtyX();
-        int y = fresh ? 0 : texture.dirtyY();
-        int w = fresh ? texture.width() : texture.dirtyWidth();
-        int h = fresh ? texture.height() : texture.dirtyHeight();
+        int x = region[0];
+        int y = region[1];
+        int w = region[2];
+        int h = region[3];
         long bytes = (long) w * h * 4;
         if (staging.byteSize() < bytes) {
             staging = stagingArena.allocate(Math.max(bytes, staging.byteSize() * 2), 16);
@@ -991,6 +1005,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         int length = Math.max(count, images.length * 2);
         images = Arrays.copyOf(images, length);
         slotOf = Arrays.copyOf(slotOf, length);
+        uploadedVersion = Arrays.copyOf(uploadedVersion, length);
     }
 
     /** Lets go of every texture's image and slot, once no frame in flight samples them. */

@@ -288,6 +288,15 @@ public final class Presenter implements AutoCloseable {
             }
         }
 
+        /**
+         * The key of the image the window's swapchain image is copied from this frame: the output transform's result
+         * (encoded for the display, the UI composited), or the presented key as it is without a transform. A technique
+         * added to the view after presenting can read it (a capture of what the window shows).
+         */
+        public Key<Image> shownKey() {
+            return transform != null ? shown : key;
+        }
+
         /** How the window's images reach its display now: SDR, HDR10 or scRGB. */
         public DisplayEncoding encoding() {
             return swapchain.encoding();

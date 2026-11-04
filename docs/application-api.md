@@ -121,6 +121,14 @@ sugar, settings files per app id (D7), plugins registering their lists (D8).
 - **D46** (refined) Games and plugins may add component types (typed keys with stable names, so they can be saved).
   Components live in per-type stores (sparse sets) in scene-core, not in per-node maps. Engine systems ignore unknown
   types. Camera and light components, with their sync to the engine's `Camera` and `Lights`, are part of this work.
+  **Built (2026-11-04):** scene-core's `ComponentType` (stable names, `byName`, saved or `transientOf`),
+  `ComponentStore` (packed sparse set, change log on the scene's clock, owner-thread checks, allocation-free reads),
+  `scene.components()`; a removed node loses its components. `CameraLens` and `LightSource` (versions counted in
+  place), followed by engine-scene's `CameraSync` and `LightSync`; `ModelData.spawn` gives models' nodes their
+  cameras, lights and pickables. Per-node stores migrated: scene-audio's listeners and reverb zones
+  (`AudioListener`, `ReverbZone`, read by `AudioSync` from the store) and sound emitters (`SoundEmitter`),
+  scene-effects' colliders and emitters (`EffectCollider`, `EffectEmitter`). `Renderables` stays a store of its own
+  (its change flags feed `SceneSync`; not migrated in this work).
 
 ## 4. Assets
 
@@ -447,7 +455,8 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   edges (D60); `UPDATE`, UI and other worlds keep running. `BaseGame.pauseOnFocusLoss(true)` opts in to pausing the
   game's worlds on focus loss and suspend.
 - **D129** (new) A camera is a component on a node (D46): it moves and animates with the scene graph. In XR the tracked
-  head is the camera node.
+  head is the camera node. **Built (2026-11-04):** `CameraLens` (scene-core), `CameraSync` (engine-scene); the scene
+  interaction picks through a camera node too (`InteractionWorld.view(cameraNode)`).
 - **D130** (new) A `View` is one world seen through one camera node into one target, at a rectangle of it:
   `app.views().add(world, cameraNode, target, rect)`. Targets: a window, a headset (both eyes), a texture (a material
   samples it: minimaps, security cameras, mirrors). Each view has its own settings scope (`view.<name>`, as the frame
@@ -539,6 +548,27 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   with `nearest`); ray-traced reflections (#379) join as another value, writing the same hit image.
 - **D137** (new) Checked against the Khronos glTF sample models: an optional sweep (`-PgltfSamples=...`) imports every
   model with all its parts.
+
+## Scene interaction and selection (built 2026-11-04)
+
+Decided with the user (2026-11-04): data in scene, management in the engine, the UI one consumer.
+- **Picking as data:** `Pickable` (bounds, mesh, custom; pick layers; enabled), `Selected` (saved) and `Hovered`
+  (transient) components; scene-core's `ScenePicker` (spatial index raycast with each pickable's narrow phase, nearest
+  first for pass-through, a frame's picks kept per ray); `PickMesh` triangle BVHs; scene-render's `RenderablePicking`
+  (renderables' meshes, skinned ones posed on the CPU against the current pose); models and glTF's
+  `"truesim.pickable"` node extra make spawned nodes pickable.
+- **Scene interaction** (engine-interaction's `SceneInteraction` plugin): every pointer (mouse, touch, pen, XR rays,
+  virtual cursor) picked once per frame at its start through this frame's camera; the UI's full event set on nodes
+  (enter, exit, move, press, release, click with counts, long press, context, wheel, drag start, drag, drag end, drop
+  enter, over, leave, drop, focus in and out) with capture, target and bubble along the scene graph, consume,
+  pass-through along the ray, pointer capture, hover and pressed queries. Buttons and selection modifiers are
+  rebindable actions (`SceneActions`); positions come from the platform. With the UI, the UI picks first (screen
+  layers, gizmo handles, world panels) and hands the scene the pointers it did not take, with its own rays: one
+  raycast per pointer per frame.
+- **Selection:** `SceneSelection` (click, Shift adds, Ctrl toggles, marquee in the 3D view, all, none), selecting
+  objects (a model's root for its parts); the gizmo follows it (`UiScene.followSelection`).
+- **Outline:** the `render.selection` technique slot (`outline` by default, `tint`, `off`), from the view's IDs.
+- GPU ID picking (`GpuPicking`, a frame late) stays an opt-in, never the default.
 
 ## Open questions
 
