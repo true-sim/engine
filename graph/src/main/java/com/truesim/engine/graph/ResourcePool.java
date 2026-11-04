@@ -13,6 +13,7 @@ import com.truesim.engine.vulkan.Bindless;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
+import com.truesim.engine.vulkan.GpuMemory;
 import com.truesim.engine.vulkan.Queue;
 import com.truesim.engine.vulkan.VulkanDevice;
 import java.util.ArrayList;
@@ -226,8 +227,13 @@ final class ResourcePool {
             usage = slot.usage;
             shared = slot.shared;
             int all = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-            buffer = shared ? GpuBuffer.deviceLocal(device, size, all, graphicsQueue.family(), computeQueue.family())
-                : GpuBuffer.deviceLocal(device, size, all);
+            GpuMemory.Category before = GpuMemory.enter(GpuMemory.Category.TRANSIENTS);
+            try {
+                buffer = shared ? GpuBuffer.deviceLocal(device, size, all, graphicsQueue.family(),
+                    computeQueue.family()) : GpuBuffer.deviceLocal(device, size, all);
+            } finally {
+                GpuMemory.exit(before);
+            }
         }
     }
 
@@ -252,8 +258,13 @@ final class ResourcePool {
             shared = slot.shared;
             mips = desc.mips();
             int[] families = shared ? new int[] {graphicsQueue.family(), computeQueue.family()} : new int[0];
-            image = GpuImage.create(device, format, desc.width(), desc.height(), desc.depth(), desc.layers(),
-                desc.cubeMap(), desc.samples(), mips, usage, families);
+            GpuMemory.Category before = GpuMemory.enter(GpuMemory.Category.TRANSIENTS);
+            try {
+                image = GpuImage.create(device, format, desc.width(), desc.height(), desc.depth(), desc.layers(),
+                    desc.cubeMap(), desc.samples(), mips, usage, families);
+            } finally {
+                GpuMemory.exit(before);
+            }
             sampled = (usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0 ? bindless.addSampled(image.view()) : -1;
             storage = new int[(usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 ? mips : 0];
             for (int mip = 0; mip < storage.length; mip++) {

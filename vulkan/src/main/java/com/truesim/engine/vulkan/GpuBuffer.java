@@ -53,6 +53,9 @@ public final class GpuBuffer implements AutoCloseable, DeviceBuffer {
         this(device, size, usage, hostVisible ? VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT : 0, families);
     }
 
+    private final GpuMemory.Category memoryCategory;
+    private final long memoryBytes;
+
     @SuppressWarnings("restricted") // wraps the mapped memory VMA returned, of exactly this size
     private GpuBuffer(VulkanDevice device, long size, int usage, int hostAccess, int... families) {
         boolean hostVisible = hostAccess != 0;
@@ -83,6 +86,9 @@ public final class GpuBuffer implements AutoCloseable, DeviceBuffer {
                 "Could not allocate a buffer of " + size + " bytes");
             this.handle = buffer.get(0);
             this.allocation = allocated.get(0);
+            this.memoryCategory = GpuMemory.buffer(usage, hostVisible);
+            this.memoryBytes = result.size();
+            GpuMemory.allocated(memoryCategory, memoryBytes);
             this.mapping = hostVisible ? Arena.ofShared() : null;
             this.memory = hostVisible ? MemorySegment.ofAddress(result.pMappedData()).reinterpret(size, mapping, null)
                 : null;
@@ -243,6 +249,7 @@ public final class GpuBuffer implements AutoCloseable, DeviceBuffer {
                 mapping.close(); // segments over the mapping throw from now on
             }
             vmaDestroyBuffer(device.allocator(), handle, allocation);
+            GpuMemory.freed(memoryCategory, memoryBytes);
             device.untrack(this);
         }
     }

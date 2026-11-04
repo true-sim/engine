@@ -6,11 +6,11 @@ description = "The engine's benchmark suites, run as programs: the UI's (design 
 
 dependencies {
     implementation(project(":engine-ui"))
-    implementation("com.truesim.ui:ui-charts:0.4.0")
-    implementation("com.truesim.ui:ui-text-native:0.4.0")
-    implementation("com.truesim.ui:ui-fonts-cjk:0.4.0") // bundled fonts: the same text on every machine
-    implementation(testFixtures("com.truesim.ui:ui-controls:0.4.0")) // the controls gallery, an idle UI
-    implementation(testFixtures("com.truesim.ui:ui-console:0.4.0")) // the console, flooded
+    implementation("com.truesim.ui:ui-charts:0.5.0")
+    implementation("com.truesim.ui:ui-text-native:0.5.0")
+    implementation("com.truesim.ui:ui-fonts-cjk:0.5.0") // bundled fonts: the same text on every machine
+    implementation(testFixtures("com.truesim.ui:ui-controls:0.5.0")) // the controls gallery, an idle UI
+    implementation(testFixtures("com.truesim.ui:ui-console:0.5.0")) // the console, flooded
 }
 
 application {

@@ -105,6 +105,9 @@ public final class UiPlugin implements Plugin {
     private SettingGroup group;
     private String appId = "app";
     private com.truesim.engine.ui.console.UiConsole console; // the developer console, or null
+    private UiProfiler profiler; // the profiler's views, or null
+    private com.truesim.engine.app.Engine engine;
+    private Input in;
 
     /**
      * The UI made by {@code factory} at startup, given the textures it should use (null: its own, or its text
@@ -153,7 +156,7 @@ public final class UiPlugin implements Plugin {
 
     @Override
     public List<PluginKey<?>> after() {
-        return List.of(Desktop.KEY, Xr.KEY);
+        return List.of(Desktop.KEY, Xr.KEY, com.truesim.engine.graph.Profiling.KEY); // the profiler measured first
     }
 
     @Override
@@ -164,6 +167,9 @@ public final class UiPlugin implements Plugin {
                 ui = Objects.requireNonNull(factory.apply(null), "the factory made no UI");
                 Input in = startup.get(Input.KEY);
                 in.add(UiActions.UI);
+                in.add(ProfilerActions.PROFILER);
+                this.in = in;
+                engine = startup.engine();
                 SettingRegistry registry = startup.registry();
                 SettingGroup group = SettingGroup.root("ui", "settings.ui", 45);
                 registry.add(group, UiCommands.ALL.toArray(new Setting<?>[0]));
@@ -306,6 +312,9 @@ public final class UiPlugin implements Plugin {
         registry.add(group, com.truesim.engine.ui.console.UiConsole.SETTINGS.toArray(new Setting<?>[0]));
         // the console's tunables are settings already (tunables(ui))
         console = new com.truesim.engine.ui.console.UiConsole(u, id, store, registry, settings);
+        if (profiler != null) {
+            profiler.commands(console.shell());
+        }
         com.truesim.ui.controls.text.TextEditor line = console.console().field();
         commands.console(() -> u.interaction().focusedSlot(0) == line.element().slot()); // completion and history
         return console;
@@ -316,6 +325,33 @@ public final class UiPlugin implements Plugin {
     public com.truesim.engine.ui.console.UiConsole console() {
         return console(appId, new com.truesim.engine.ui.console.FileHistoryStore(
             com.truesim.engine.app.SettingsFile.folder(appId)));
+    }
+
+    /**
+     * Adds the profiler's views ({@link UiProfiler}: the frame graph overlay and the detailed profiler, shown by the
+     * {@code profiler.overlay} and {@code profiler.view} settings and the {@link ProfilerActions}), fed by the
+     * {@code Profiling} plugin, which must be installed ({@code app.use(new Profiling())}); its console commands join
+     * the console's. Call once, after the engine started.
+     */
+    @AllowAllocation("set up once")
+    public UiProfiler profiler() {
+        if (profiler != null) {
+            return profiler;
+        }
+        com.truesim.engine.graph.Profiling profiling = engine.find(com.truesim.engine.graph.Profiling.KEY)
+            .orElseThrow(() -> new IllegalStateException("The profiler needs the Profiling plugin: app.use(new "
+                + "Profiling())"));
+        profiler = new UiProfiler(ui(), new com.truesim.ui.controls.basic.Controls(ui()), settings, profiling, in,
+            platform, window, com.truesim.engine.app.SettingsFile.folder(appId).resolve("profiles"));
+        if (console != null) {
+            profiler.commands(console.shell());
+        }
+        return profiler;
+    }
+
+    /** The profiler's views, or null. */
+    public UiProfiler profilerViews() {
+        return profiler;
     }
 
     /** The developer console, or null. */
@@ -364,6 +400,9 @@ public final class UiPlugin implements Plugin {
             return;
         }
         tunables.update();
+        if (profiler != null) {
+            profiler.update(); // what the engine measured, before the UI's input and layout of this frame
+        }
         float scale = window != null ? window.displayScale() : 1;
         if (scale > 0 && scale != shownScale) {
             shownScale = scale;

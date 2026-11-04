@@ -19,6 +19,7 @@ import com.truesim.engine.vulkan.VulkanDevice;
 import java.util.Arrays;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
+import org.lwjgl.vulkan.VK10;
 import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkPhysicalDeviceProperties;
 import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
@@ -41,6 +42,20 @@ import org.lwjgl.vulkan.VkQueueFamilyProperties;
 public final class GpuTimings implements AutoCloseable {
 
     private static final int RESULT_BYTES = 16; // the timestamp, then its availability
+    /** How many pipeline statistics each pass counts ({@link #statistic}). */
+    public static final int STATISTICS = 7;
+    private static final int STAT_BYTES = 8 * (STATISTICS + 1); // the values, then the availability
+    private static final int STATISTIC_BITS = VK10.VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT
+        | VK10.VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT
+        | VK10.VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT
+        | VK10.VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT
+        | VK10.VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT
+        | VK10.VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT
+        | VK10.VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT;
+    /** The names of the statistics, in the order of {@link #statistic}. */
+    public static final java.util.List<String> STATISTIC_NAMES = java.util.List.of("input vertices",
+        "input primitives", "vertex shader invocations", "clipping invocations", "clipped primitives",
+        "fragment shader invocations", "compute shader invocations");
 
     private final VulkanDevice device;
     private final int slots;
@@ -51,6 +66,16 @@ public final class GpuTimings implements AutoCloseable {
     private String[] names = new String[0];
     private int[] family = new int[0]; // per pass: the queue family it runs on
     private double[] millis = new double[0];
+    private long[] startTicks = new long[0]; // per pass, the raw timestamps of the last finished frame
+    private long[] endTicks = new long[0];
+    private long frameStartTicks;
+    // pipeline statistics per pass (graphics queue passes), when on and the device has them
+    private boolean statisticsWanted;
+    private long statisticsPool;
+    private long statisticsResults; // STAT_BYTES per pass of one slot
+    private final long[] statisticsTotals = new long[STATISTICS];
+    private boolean statisticsValid;
+    private long frameStartEndTicks;
     private long results; // native, RESULT_BYTES per query of one slot
     private long frame = -1;
     private double span = Double.NaN; // the first timed pass's start to the last one's end
@@ -94,6 +119,8 @@ public final class GpuTimings implements AutoCloseable {
         family = families.clone();
         millis = new double[passes];
         Arrays.fill(millis, Double.NaN);
+        startTicks = new long[passes];
+        endTicks = new long[passes];
         frame = -1;
         span = Double.NaN;
         if (passes == 0) {
@@ -111,6 +138,20 @@ public final class GpuTimings implements AutoCloseable {
         }
         Commands.resetQueryPool(device.handle(), pool, 0, queries);
         results = MemoryUtil.nmemCalloc(2L * (passes + 1), RESULT_BYTES);
+        if (statisticsWanted && device.pipelineStatistics()) {
+            try (MemoryStack stack = stackPush()) {
+                VkQueryPoolCreateInfo info = VkQueryPoolCreateInfo.calloc(stack)
+                    .sType(VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO)
+                    .queryType(VK10.VK_QUERY_TYPE_PIPELINE_STATISTICS)
+                    .queryCount(passes * slots)
+                    .pipelineStatistics(STATISTIC_BITS);
+                var handle = stack.mallocLong(1);
+                Vulkan.check(vkCreateQueryPool(device.handle(), info, null, handle), "Could not create a query pool");
+                statisticsPool = handle.get(0);
+            }
+            Commands.resetQueryPool(device.handle(), statisticsPool, 0, passes * slots);
+            statisticsResults = MemoryUtil.nmemCalloc(passes, STAT_BYTES);
+        }
     }
 
     /** Writes pass {@code pass}'s start (or with {@code end}, its end) timestamp of frame slot {@code slot}. */
@@ -119,6 +160,35 @@ public final class GpuTimings implements AutoCloseable {
             Commands.writeTimestamp2(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pool,
                 2 * (slot * passes + pass) + (end ? 1 : 0));
         }
+    }
+
+    /** Counts pass {@code pass}'s pipeline statistics from here ({@code end} false) or stops counting them. */
+    void statistics(VkCommandBuffer commands, int slot, int pass, boolean end) {
+        if (statisticsPool != 0 && family[pass] == startFamily) {
+            if (end) {
+                Commands.endQuery(commands, statisticsPool, slot * passes + pass);
+            } else {
+                Commands.beginQuery(commands, statisticsPool, slot * passes + pass, 0);
+            }
+        }
+    }
+
+    /** Asks for pipeline statistics from the next build (the device must have them; {@link #statisticsOn}). */
+    void statisticsWanted(boolean on) {
+        statisticsWanted = on;
+    }
+
+    /** Whether passes count pipeline statistics now. */
+    public boolean statisticsOn() {
+        return statisticsPool != 0;
+    }
+
+    /**
+     * Statistic {@code k} ({@link #STATISTIC_NAMES}) of the last finished frame, all graphics queue passes together,
+     * or -1 while none came.
+     */
+    public long statistic(int k) {
+        return statisticsValid ? statisticsTotals[k] : -1;
     }
 
     /** Writes the frame start's start (or with {@code end}, its end) timestamp of frame slot {@code slot}. */
@@ -154,6 +224,8 @@ public final class GpuTimings implements AutoCloseable {
             if (memGetLong(start + 8) != 0 && memGetLong(end + 8) != 0) {
                 long ticks = (memGetLong(end) - memGetLong(start)) & validMask[family[i]];
                 millis[i] = ticks * nanosPerTick / 1e6;
+                startTicks[i] = memGetLong(start);
+                endTicks[i] = memGetLong(end);
                 if (!any) {
                     earliest = memGetLong(start);
                     latest = memGetLong(end);
@@ -181,10 +253,32 @@ public final class GpuTimings implements AutoCloseable {
         if (memGetLong(results + 8) != 0 && memGetLong(results + RESULT_BYTES + 8) != 0) {
             start = ((memGetLong(results + RESULT_BYTES) - memGetLong(results)) & validMask[startFamily])
                 * nanosPerTick / 1e6;
+            frameStartTicks = memGetLong(results);
+            frameStartEndTicks = memGetLong(results + RESULT_BYTES);
         } else {
             start = Double.NaN;
         }
         Commands.resetQueryPool(device.handle(), pool, startQuery, 2);
+        if (statisticsPool != 0) {
+            result = Commands.getQueryPoolResults(device.handle(), statisticsPool, slot * passes, passes,
+                (long) passes * STAT_BYTES, statisticsResults, STAT_BYTES, VK_QUERY_RESULT_64_BIT
+                    | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+            if (result >= 0) {
+                java.util.Arrays.fill(statisticsTotals, 0);
+                boolean anyStat = false;
+                for (int i = 0; i < passes; i++) {
+                    long base = statisticsResults + (long) i * STAT_BYTES;
+                    if (family[i] == startFamily && memGetLong(base + 8L * STATISTICS) != 0) {
+                        for (int k = 0; k < STATISTICS; k++) {
+                            statisticsTotals[k] += memGetLong(base + 8L * k);
+                        }
+                        anyStat = true;
+                    }
+                }
+                statisticsValid = anyStat;
+            }
+            Commands.resetQueryPool(device.handle(), statisticsPool, slot * passes, passes);
+        }
     }
 
     /**
@@ -231,6 +325,41 @@ public final class GpuTimings implements AutoCloseable {
         return span;
     }
 
+    /** Pass {@code i}'s start timestamp (raw ticks of its queue's clock; valid where {@link #millis} is not NaN). */
+    public long startTicks(int i) {
+        return startTicks[i];
+    }
+
+    /** Pass {@code i}'s end timestamp (raw ticks). */
+    public long endTicks(int i) {
+        return endTicks[i];
+    }
+
+    /** The queue family pass {@code i} runs on. */
+    public int family(int i) {
+        return family[i];
+    }
+
+    /** The graphics queue's family (the frame start's). */
+    public int graphicsFamily() {
+        return startFamily;
+    }
+
+    /** The frame start's first timestamp (raw ticks; valid where {@link #frameStartMillis} is not NaN). */
+    public long frameStartTicks() {
+        return frameStartTicks;
+    }
+
+    /** The frame start's last timestamp (raw ticks). */
+    public long frameStartEndTicks() {
+        return frameStartEndTicks;
+    }
+
+    /** Nanoseconds per timestamp tick. */
+    public double nanosPerTick() {
+        return nanosPerTick;
+    }
+
     /** The frame the timings are of (counted by the graph from 1), or -1 before the first finished. */
     public long frame() {
         return frame;
@@ -240,6 +369,13 @@ public final class GpuTimings implements AutoCloseable {
         if (pool != 0) {
             vkDestroyQueryPool(device.handle(), pool, null);
             pool = 0;
+        }
+        if (statisticsPool != 0) {
+            vkDestroyQueryPool(device.handle(), statisticsPool, null);
+            statisticsPool = 0;
+            MemoryUtil.nmemFree(statisticsResults);
+            statisticsResults = 0;
+            statisticsValid = false;
         }
         if (results != 0) {
             MemoryUtil.nmemFree(results);

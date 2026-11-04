@@ -17,6 +17,7 @@ import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.FrameUploads;
 import com.truesim.engine.vulkan.GpuBuffer;
+import com.truesim.engine.vulkan.GpuMemory;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.assets.mesh.MeshData;
@@ -198,6 +199,7 @@ public final class GeometryPool implements AutoCloseable {
         tableUsage = usage;
         dataUsage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         positionUsage = dataUsage | buildInput;
+        GpuMemory.Category memory = GpuMemory.enter(GpuMemory.Category.MESHES);
         positions = GpuBuffer.deviceLocal(device, (long) MeshData.POSITION_BYTES * capacity.vertices(), positionUsage, families);
         positionsOnGpu = positions;
         attributes = GpuBuffer.deviceLocal(device, 28L * capacity.vertices(), dataUsage, families);
@@ -207,6 +209,7 @@ public final class GeometryPool implements AutoCloseable {
         clusterLod = GpuBuffer.deviceLocal(device, (long) MeshData.CLUSTER_LOD_BYTES * capacity.meshlets(), dataUsage, families);
         meshTable = GpuBuffer.hostVisible(device, (long) MESH_ENTRY_BYTES * capacity.meshes(), usage);
         levels = GpuBuffer.hostVisible(device, 8L * MAX_LEVELS * capacity.meshes(), usage);
+        GpuMemory.exit(memory);
         graphBuffers = new ExternalBuffer[] {new ExternalBuffer("positions", positions),
             new ExternalBuffer("attributes", attributes), new ExternalBuffer("meshlets", meshlets),
             new ExternalBuffer("meshlet vertices", meshletVertices),
@@ -719,7 +722,13 @@ public final class GeometryPool implements AutoCloseable {
      * no frame reads it.
      */
     private GpuBuffer grown(GpuBuffer old, long bytes, int usage) {
-        GpuBuffer grown = GpuBuffer.deviceLocal(device, bytes, usage, families);
+        GpuMemory.Category memory = GpuMemory.enter(GpuMemory.Category.MESHES);
+        GpuBuffer grown;
+        try {
+            grown = GpuBuffer.deviceLocal(device, bytes, usage, families);
+        } finally {
+            GpuMemory.exit(memory);
+        }
         streamAfter = Long.MAX_VALUE; // until the frame copying it is recorded, then until it finishes
         synchronized (replaced) {
             replaced.add(old);
@@ -771,7 +780,13 @@ public final class GeometryPool implements AutoCloseable {
     }
 
     private GpuBuffer grownTable(GpuBuffer old, long bytes) {
-        GpuBuffer grown = GpuBuffer.hostVisible(device, bytes, tableUsage);
+        GpuMemory.Category memory = GpuMemory.enter(GpuMemory.Category.MESHES);
+        GpuBuffer grown;
+        try {
+            grown = GpuBuffer.hostVisible(device, bytes, tableUsage);
+        } finally {
+            GpuMemory.exit(memory);
+        }
         MemorySegment.copy(old.memory(), 0, grown.memory(), 0, old.size());
         grown.memory().asSlice(old.size()).fill((byte) 0);
         oldBuffers.add(old); // frames in flight read it; those recorded from now on read the new one

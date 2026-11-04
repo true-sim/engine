@@ -35,6 +35,10 @@ public final class Rendering implements Plugin {
     /** Its key. */
     public static final PluginKey<Rendering> KEY = PluginKey.of("rendering", Rendering.class);
 
+    static {
+        com.truesim.engine.platform.NativeMemory.install(); // before LWJGL first allocates: its native memory is counted
+    }
+
     private final Set<String> instanceExtensions = new LinkedHashSet<>();
     private final Set<String> deviceExtensions = new LinkedHashSet<>();
     private Function<VulkanInstance, Gpu> gpuChoice;

@@ -139,6 +139,10 @@ public final class VulkanDevice implements AutoCloseable {
     /** Whether the driver can say what went wrong when the device is lost (VK_EXT_device_fault). */
     private final boolean faults;
     private final boolean hdrMetadata;
+    private final boolean memoryBudget;
+    private final String calibration; // the calibrated timestamps extension enabled, or null
+    private final boolean pipelineStatistics;
+    private final boolean performanceQuery;
     private final java.util.concurrent.atomic.AtomicInteger waits = new java.util.concurrent.atomic.AtomicInteger();
     // submitAndWait's command pools and fences, per queue: idle ones, and all ever made (destroyed on close).
     private final Map<Queue, java.util.ArrayDeque<OneOff>> oneOffs = new java.util.IdentityHashMap<>();
@@ -179,6 +183,16 @@ public final class VulkanDevice implements AutoCloseable {
             this.bcTextures = core.textureCompressionBC();
             this.astcTextures = core.textureCompressionASTC_LDR();
             this.primitiveIds = core.geometryShader();
+            // The profiler's: pipeline statistics queries, the heaps' budgets, the GPU's clock against the CPU's.
+            this.pipelineStatistics = core.pipelineStatisticsQuery();
+            this.memoryBudget = gpu.supports(org.lwjgl.vulkan.EXTMemoryBudget.VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+            this.calibration = gpu.supports(org.lwjgl.vulkan.KHRCalibratedTimestamps
+                .VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)
+                ? org.lwjgl.vulkan.KHRCalibratedTimestamps.VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME
+                : gpu.supports(org.lwjgl.vulkan.EXTCalibratedTimestamps.VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)
+                    ? org.lwjgl.vulkan.EXTCalibratedTimestamps.VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME : null;
+            this.performanceQuery = gpu.supports(
+                org.lwjgl.vulkan.KHRPerformanceQuery.VK_KHR_PERFORMANCE_QUERY_EXTENSION_NAME);
             this.maxAnisotropy = Math.min(16, properties.limits().maxSamplerAnisotropy());
             // Every 1.4 feature the GPU supports is enabled: the queried struct goes into the create chain as it is.
             VkPhysicalDeviceVulkan14Features supported14 = null;
@@ -312,13 +326,14 @@ public final class VulkanDevice implements AutoCloseable {
                 .drawIndirectFirstInstance(true).shaderStorageImageReadWithoutFormat(true)
                 .shaderStorageImageWriteWithoutFormat(true).samplerAnisotropy(anisotropic).imageCubeArray(cubeArrays)
                 .independentBlend(true)
-                .geometryShader(primitiveIds).textureCompressionBC(bcTextures).textureCompressionASTC_LDR(astcTextures);
+                .geometryShader(primitiveIds).textureCompressionBC(bcTextures).textureCompressionASTC_LDR(astcTextures)
+                .pipelineStatisticsQuery(pipelineStatistics);
             VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack)
                 .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
                 .pNext(features.address())
                 .pQueueCreateInfos(queues.flip())
                 .ppEnabledExtensionNames(extensions(stack, swapchains, meshShaders, barycentrics, rayTracing, faults,
-                    hdrMetadata, extra));
+                    hdrMetadata, profilerExtensions(extra)));
             PointerBuffer device = stack.mallocPointer(1);
             Vulkan.check(vkCreateDevice(gpu.handle(), info, null, device), "Could not create a device on " + gpu.name());
             this.handle = new VkDevice(device.get(0), gpu.handle(), info, apiVersion);
@@ -333,7 +348,8 @@ public final class VulkanDevice implements AutoCloseable {
             this.transfer = byFamily.get(transferFamily.index());
 
             VmaAllocatorCreateInfo allocatorInfo = VmaAllocatorCreateInfo.calloc(stack)
-                .flags(VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT)
+                .flags(VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT
+                    | (memoryBudget ? org.lwjgl.util.vma.Vma.VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0))
                 .physicalDevice(gpu.handle())
                 .device(handle)
                 .instance(gpu.instance().handle())
@@ -391,10 +407,22 @@ public final class VulkanDevice implements AutoCloseable {
         return new QueueFamily[] {graphics, compute, transfer == null ? compute : transfer};
     }
 
+    /** {@code extra} and the profiler's extensions this GPU has (memory budget, calibrated timestamps). */
+    private java.util.Collection<String> profilerExtensions(java.util.Collection<String> extra) {
+        List<String> all = new ArrayList<>(extra);
+        if (memoryBudget && !all.contains(org.lwjgl.vulkan.EXTMemoryBudget.VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
+            all.add(org.lwjgl.vulkan.EXTMemoryBudget.VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+        }
+        if (calibration != null && !all.contains(calibration)) {
+            all.add(calibration);
+        }
+        return all;
+    }
+
     private static PointerBuffer extensions(MemoryStack stack, boolean swapchains, boolean meshShaders,
         boolean barycentrics, boolean rayTracing, boolean faults, boolean hdrMetadata,
         java.util.Collection<String> extra) {
-        PointerBuffer names = stack.mallocPointer(8 + extra.size());
+        PointerBuffer names = stack.mallocPointer(10 + extra.size());
         List<String> engine = new ArrayList<>();
         if (hdrMetadata) {
             names.put(stack.UTF8(VK_EXT_HDR_METADATA_EXTENSION_NAME));
@@ -645,6 +673,29 @@ public final class VulkanDevice implements AutoCloseable {
     }
 
     /** The Vulkan 1.4 features enabled on this device; {@link Vulkan14Features#NONE} on a 1.3 device. */
+    /** Whether the heaps' budgets come from {@code VK_EXT_memory_budget} (else VMA estimates them). */
+    public boolean memoryBudget() {
+        return memoryBudget;
+    }
+
+    /**
+     * The calibrated timestamps extension enabled ({@code VK_KHR_calibrated_timestamps}, else the EXT one), for
+     * putting GPU timestamps on the CPU's clock; null where the GPU has neither.
+     */
+    public String calibratedTimestamps() {
+        return calibration;
+    }
+
+    /** Whether pipeline statistics queries are enabled (the core feature {@code pipelineStatisticsQuery}). */
+    public boolean pipelineStatistics() {
+        return pipelineStatistics;
+    }
+
+    /** Whether the GPU offers {@code VK_KHR_performance_query} (not enabled: the profiler only lists it). */
+    public boolean performanceQuery() {
+        return performanceQuery;
+    }
+
     /** Whether HDR swapchains can tell displays about their content (VK_EXT_hdr_metadata): a presenting GPU has it. */
     public boolean hdrMetadata() {
         return hdrMetadata;

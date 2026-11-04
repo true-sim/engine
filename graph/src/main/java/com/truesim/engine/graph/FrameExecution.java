@@ -138,12 +138,19 @@ final class FrameExecution implements AutoCloseable {
      * Begins the next frame slot: waits until the GPU finished the frame that last used it, and resets its command
      * pools. Allocates nothing.
      */
+    private static final com.truesim.engine.app.profile.Zone WAIT =
+        com.truesim.engine.app.profile.Profiler.zone("wait for frame slot");
+
     int begin() {
         if (begun) {
             throw new IllegalStateException("The frame was begun already: submit() it first");
         }
         slot = (slot + 1) % framesInFlight;
+        com.truesim.engine.app.profile.Profiler.waitBegin();
+        com.truesim.engine.app.profile.Profiler.begin(WAIT);
         waitFor(slotGraphicsValue[slot], slotComputeValue[slot]);
+        com.truesim.engine.app.profile.Profiler.end(WAIT);
+        com.truesim.engine.app.profile.Profiler.waitEnd();
         for (int i = 0; i < used.length; i++) {
             Vulkan.check(Commands.resetCommandPool(device.handle(), pools[slot][i], 0), "Could not reset a command pool");
             used[i] = 0;
