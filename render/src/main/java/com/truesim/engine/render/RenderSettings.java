@@ -111,6 +111,7 @@ public final class RenderSettings {
         all.addAll(Denoiser.ALL);
         all.add(ProbeVolumeLighting.SLOT.setting());
         all.addAll(ProbeVolume.ALL);
+        all.addAll(RadianceCascades.ALL);
         all.addAll(ClusteredLights.ALL);
         all.addAll(WorldLights.ALL);
         all.addAll(ReferencePathTracer.ALL);
