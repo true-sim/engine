@@ -223,6 +223,16 @@ class OsWindowsTest {
         public float contentScale(int window) {
             return os.contentScale(window);
         }
+
+        @Override
+        public boolean paperWhite(int window, float nits) {
+            return os.paperWhite(window, nits);
+        }
+
+        @Override
+        public boolean opacity(int window, float opacity) {
+            return os.opacity(window, opacity);
+        }
     }
 
     private static TextSystem text(UiTextures textures) {
@@ -368,6 +378,12 @@ class OsWindowsTest {
         assertThat(w).isNotNull();
         assertThat(dock.areaOf(console)).isSameAs(w.area());
         Window second = os.window(w.id());
+        // see-through while it follows, where the system can (not Wayland, not the offscreen driver)
+        assertThat(w.opacity()).as("asked for the theme's drag-opacity").isEqualTo(0.6f);
+        boolean translucent = second.opacity() < 1;
+        if (translucent) {
+            assertThat(second.opacity()).isCloseTo(0.6f, org.assertj.core.api.Assertions.within(0.01f));
+        }
         assertThat(second.title()).isEqualTo("Console");
         cursor(endX + 40, from[1], Pointer.PRIMARY);
         second.sync();
@@ -379,12 +395,36 @@ class OsWindowsTest {
         }
         cursor(endX + 40, from[1], 0);
         assertThat(host.followingWindow()).isNull();
+        assertThat(second.opacity()).as("opaque once dropped").isEqualTo(1);
         for (int i = 0; i < 30; i++) {
             frame();
         }
         assertThat(presenter.targets()).hasSize(2);
         assertThat(frame()).as("both windows render").isEqualTo(2);
         assertThat(os.target(w.id())).isNotNull();
+        // paper white per window: the window's target reads a view of its own, following the graph's until set
+        com.truesim.engine.settings.EngineSettings global = graph.settings();
+        assertThat(os.target(w.id()).displaySettings()).isSameAs(os.displaySettings(w.id()));
+        assertThat(os.displaySettings(OsWindows.MAIN)).as("the main window: the graph's until set").isSameAs(global);
+        global.set(DisplayTransform.PAPER_WHITE, 250f);
+        host.paperWhite(w.id(), 400);
+        assertThat(os.displaySettings(w.id()).get(DisplayTransform.PAPER_WHITE)).isEqualTo(400f);
+        assertThat(frame()).as("both still render").isEqualTo(2);
+        host.paperWhite(OsWindows.MAIN, 5000); // clamped into the setting's range
+        Presenter.Target mainTarget = presenter.targets().get(0);
+        assertThat(mainTarget.displaySettings()).isSameAs(os.displaySettings(OsWindows.MAIN)).isNotSameAs(global);
+        assertThat(os.displaySettings(OsWindows.MAIN).get(DisplayTransform.PAPER_WHITE)).isEqualTo(1000f);
+        global.set(DisplayTransform.PAPER_WHITE, 180f);
+        assertThat(os.displaySettings(w.id()).get(DisplayTransform.PAPER_WHITE)).isEqualTo(400f);
+        assertThat(os.displaySettings(OsWindows.MAIN).get(DisplayTransform.PAPER_WHITE)).isEqualTo(1000f);
+        host.paperWhite(OsWindows.MAIN, Float.NaN);
+        assertThat(os.displaySettings(OsWindows.MAIN).get(DisplayTransform.PAPER_WHITE)).as("follows again")
+            .isEqualTo(180f);
+        assertThat(dock.layout().toText()).contains(" paper-white 400 tabs(0; console)");
+        assertThat(global.toMap()).as("the player's settings hold no window's value")
+            .containsOnlyKeys(DisplayTransform.PAPER_WHITE.name());
+        assertThat(os.paperWhite(12345, 300)).isFalse();
+        assertThat(frame()).isEqualTo(2);
         assertThat(os.renderer(w.id()).source()).isSameAs(renderer);
         assertThat(os.pixelRatio(w.id())).isPositive();
         assertThat(os.contentScale(w.id())).isPositive();

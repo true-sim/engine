@@ -132,6 +132,44 @@ class EngineSettingsTest {
     }
 
     @Test
+    void anInheritingViewFollowsItsParentUntilItHoldsAValueOfItsOwn() {
+        EngineSettings settings = new EngineSettings();
+        EngineSettings first = settings.inheriting("window.first");
+        EngineSettings second = settings.inheriting("window.second");
+        List<String> heard = new ArrayList<>();
+        first.onChange(EXPOSURE, () -> heard.add("first"));
+        assertThat(first.get(EXPOSURE)).as("the default, through the parent").isEqualTo(1f);
+        settings.set(EXPOSURE, 2f);
+        assertThat(first.get(EXPOSURE)).as("follows the parent").isEqualTo(2f);
+        assertThat(heard).as("hears the parent's change").containsExactly("first");
+        first.set(EXPOSURE, 3f);
+        assertThat(first.get(EXPOSURE)).isEqualTo(3f);
+        assertThat(first.preferred(EXPOSURE)).isEqualTo(3f);
+        assertThat(second.get(EXPOSURE)).isEqualTo(2f);
+        settings.set(EXPOSURE, 4f);
+        assertThat(first.get(EXPOSURE)).as("its own stays").isEqualTo(3f);
+        assertThat(second.get(EXPOSURE)).as("the other follows").isEqualTo(4f);
+        assertThat(second.preferred(EXPOSURE)).isEqualTo(4f);
+        assertThat(first.isSet(EXPOSURE)).isTrue();
+        assertThat(second.isSet(EXPOSURE)).isFalse();
+        first.reset(EXPOSURE);
+        assertThat(first.get(EXPOSURE)).as("cleared: the parent's again").isEqualTo(4f);
+        // A game layer value of its own overrides too, and is not saved with the player's.
+        first.set(EngineSettings.Layer.GAME, EXPOSURE, 5f);
+        assertThat(first.get(EXPOSURE)).isEqualTo(5f);
+        assertThat(settings.toMap()).containsExactly(Map.entry("tonemap.exposure", "4.0"));
+        // A constraint of its own makes it its own too.
+        EngineSettings.Subscription lock = second.lock(EXPOSURE, 0.5f, "locked here");
+        assertThat(second.get(EXPOSURE)).isEqualTo(0.5f);
+        lock.close();
+        assertThat(second.get(EXPOSURE)).isEqualTo(4f);
+        assertThat(second.inheriting("deeper").get(EXPOSURE)).as("nested").isEqualTo(4f);
+        assertThat(first.nameOf(EXPOSURE)).isEqualTo("window.first.tonemap.exposure");
+        assertThatIllegalArgumentException().isThrownBy(() -> settings.inheriting(" "));
+        assertThatIllegalArgumentException().isThrownBy(() -> settings.inheriting("a."));
+    }
+
+    @Test
     void savedSettingsLoadToleratingOtherVersions() {
         EngineSettings settings = new EngineSettings().set(HDR, false).set(CURVE, Curve.REINHARD);
         settings.scoped("window.left").set(EXPOSURE, 2f);

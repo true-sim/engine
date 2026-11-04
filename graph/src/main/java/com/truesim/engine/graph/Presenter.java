@@ -203,6 +203,7 @@ public final class Presenter implements AutoCloseable {
         private final ExternalImage image;
         private final long[] available; // per frame slot: signaled when the acquired image may be written
         private PresentSettings settings;
+        private EngineSettings display = graph.settings(); // what the output transform reads
         private EngineSettings.Subscription watch; // of the settings it follows, or null
         private final Key<Image> shown; // the transformed result the window shows, with an output transform
         private Technique transform; // the output transform's technique in the view, or null
@@ -246,7 +247,7 @@ public final class Presenter implements AutoCloseable {
         @AllowAllocation("when settings change")
         void tellMetadata() {
             com.truesim.engine.vulkan.HdrMetadata told = outputTransform == null ? null
-                : outputTransform.metadata(graph.settings());
+                : outputTransform.metadata(display);
             if (!java.util.Objects.equals(told, swapchain.metadata())) {
                 swapchain.metadata(told);
             }
@@ -271,7 +272,7 @@ public final class Presenter implements AutoCloseable {
             }
             if (outputTransform != null && transform == null) {
                 transformed = swapchain.encoding();
-                transform = outputTransform.transform(key, shown, transformed);
+                transform = outputTransform.transform(key, shown, transformed, display);
                 view.removeOutput(key, image).add(transform).output(shown, image);
             } else if (outputTransform == null) {
                 view.output(key, image);
@@ -326,6 +327,32 @@ public final class Presenter implements AutoCloseable {
 
         public PresentSettings settings() {
             return settings;
+        }
+
+        /**
+         * The settings the output transform reads for this window (tone curve, paper white...): the graph's unless
+         * {@link #displaySettings(EngineSettings)} gave it others.
+         */
+        public EngineSettings displaySettings() {
+            return display;
+        }
+
+        /**
+         * Has the output transform read {@code value} for this window from now on: a view of the graph's settings
+         * holding the window's own values ({@link EngineSettings#inheriting}, say). Rebuilds its transform.
+         */
+        @AllowAllocation("changing settings, rarely")
+        public Target displaySettings(EngineSettings value) {
+            Objects.requireNonNull(value, "value");
+            if (value != display) {
+                display = value;
+                if (transform != null) {
+                    view.remove(transform).removeOutput(shown, image);
+                    transform = null;
+                }
+                sync();
+            }
+            return this;
         }
 
         /** What the window's display is told about the content while HDR (the output transform's), or null. */

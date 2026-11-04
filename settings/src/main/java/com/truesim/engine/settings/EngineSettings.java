@@ -4,6 +4,7 @@ import com.truesim.annotations.AllowAllocation;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -26,6 +27,7 @@ import java.util.function.Predicate;
  * settings.constrain(Presenter.HDR, Constraint.lock(false, "no HDR display")); // get() false, preferred() kept
  * store(settings.toMap());                                           // the player's values, as text
  * EngineSettings left = settings.scoped("window.left");             // one window's own settings, in the same store
+ * EngineSettings right = settings.inheriting("window.right");       // its own where set, else the settings' values
  * }</pre>
  *
  * <p>A setting's <em>preferred</em> value ({@link #preferred}) is the highest {@link Layer} holding one: the command
@@ -60,15 +62,18 @@ public final class EngineSettings {
 
     private final Store store;
     private final String prefix; // of this view's names: "" for the store itself, "scope." for a scoped view
+    private final EngineSettings parent; // read for settings this view holds nothing of (inheriting), or null
+    private final Map<Setting<?>, String> keys = new IdentityHashMap<>(); // full names, made once (scoped views)
 
     /** Settings with every value at its default. */
     public EngineSettings() {
-        this(new Store(), "");
+        this(new Store(), "", null);
     }
 
-    private EngineSettings(Store store, String prefix) {
+    private EngineSettings(Store store, String prefix, EngineSettings parent) {
         this.store = store;
         this.prefix = prefix;
+        this.parent = parent;
     }
 
     /** A view of these settings whose names are under {@code scope} ({@code "window.left"}): one part's own values. */
@@ -76,7 +81,32 @@ public final class EngineSettings {
         if (scope.isBlank() || scope.endsWith(".")) {
             throw new IllegalArgumentException("A scope is a word or dotted words: '" + scope + "'");
         }
-        return new EngineSettings(store, prefix + scope + ".");
+        return new EngineSettings(store, prefix + scope + ".", null);
+    }
+
+    /**
+     * A view like {@link #scoped} that reads this view's value of every setting it holds nothing of itself (no layer's
+     * value and no constraint under its scope): one window's own value of a setting where it has one, else the value
+     * every window follows, which it then follows as it changes. Its {@link #onChange} listeners hear of both.
+     */
+    public EngineSettings inheriting(String scope) {
+        if (scope.isBlank() || scope.endsWith(".")) {
+            throw new IllegalArgumentException("A scope is a word or dotted words: '" + scope + "'");
+        }
+        return new EngineSettings(store, prefix + scope + ".", this);
+    }
+
+    /** Whether this view takes {@code setting} from the view it inherits from: it holds nothing of it itself. */
+    private boolean inherits(String key) {
+        if (parent == null || store.constraints.containsKey(key)) {
+            return false;
+        }
+        for (Layer layer : TOP_DOWN) {
+            if (store.layer(layer).holds(key)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -85,6 +115,9 @@ public final class EngineSettings {
      */
     public <T> T get(Setting<T> setting) {
         String key = keyOf(setting);
+        if (inherits(key)) {
+            return parent.get(setting);
+        }
         Object cached = store.effective.get(key);
         if (cached != null && setting.allows(cached)) {
             return setting.cast(cached);
@@ -116,6 +149,9 @@ public final class EngineSettings {
     }
 
     private <T> T preferred(Setting<T> setting, String key) {
+        if (inherits(key)) {
+            return parent.preferred(setting);
+        }
         for (Layer layer : TOP_DOWN) {
             T value = store.layer(layer).read(setting, key);
             if (value != null) {
@@ -356,9 +392,12 @@ public final class EngineSettings {
      */
     public Subscription onChange(Setting<?> setting, Runnable listener) {
         Objects.requireNonNull(listener, "listener");
-        String key = keyOf(setting);
+        Set<String> names = new HashSet<>();
+        for (EngineSettings view = this; view != null; view = view.parent) {
+            names.add(view.keyOf(setting));
+        }
         return store.listen(changed -> {
-            if (changed.equals(key)) {
+            if (names.contains(changed)) {
                 listener.run();
             }
         });
@@ -375,7 +414,15 @@ public final class EngineSettings {
     }
 
     private String keyOf(Setting<?> setting) {
-        return prefix.isEmpty() ? setting.name() : prefix + setting.name();
+        if (prefix.isEmpty()) {
+            return setting.name();
+        }
+        String key = keys.get(setting);
+        if (key == null) {
+            key = prefix + setting.name();
+            keys.put(setting, key);
+        }
+        return key;
     }
 
     /**

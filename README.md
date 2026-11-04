@@ -137,8 +137,9 @@ holds the values in layers, lowest first: the setting's default, the game's (`se
 (`set`), the command line (`commandLine(args)`, `--set name=value`). `preferred` is the highest layer's value; `get`,
 what the engine uses, is that value through the `Constraint`s on it (`constrain(setting, Constraint.lock(false, "no
 HDR display"))`, `range`, `choices`), so hardware and game limits never overwrite the player's choice. Change
-listeners, scoped views (one window's own values), and saving and loading as text (`toMap`/`load`: only the player's
-layer is saved; unknown keys are kept, unreadable ones fall through, values are parsed when first read). A `SettingRegistry`
+listeners, scoped views (one window's own values; `inheriting(scope)`: a scoped view reading its parent's value of
+every setting it holds none of, so a window's own value overrides one it otherwise follows), and saving and loading
+as text (`toMap`/`load`: only the player's layer is saved; unknown keys are kept, unreadable ones fall through, values are parsed when first read). A `SettingRegistry`
 lists the settings an app has, each registered once by the part owning it, with a `SettingGroup` (a tree of groups
 with translation-key labels and an order, apart from saved names) and optionally a `SettingTier`. Options screens ask
 it for groups and their settings up to a tier; hidden tiers show only when revealed; `check()` at startup fails on a
@@ -150,8 +151,9 @@ listeners hear of changes when the app calls `refreshAvailability()` at a frame 
 value, rule or lock changed or `invalidateAvailability()` was called (a device or display came or went). The frame graph has settings
 (`graph.settings()`): a build reads them with `g.setting(key)` and rebuilds when one it read changes; pass bodies read
 `g.settings()` when they record. Windows follow theirs (`platform.createWindow(options, settings.scoped("window.main"))`),
-and so does the `Presenter` (the graph's present settings, or a window's own). The core's tuning values are settings
-too, read from the graph's settings unless a technique is given its own: light clusters (`ClusteredLights.ALL`:
+and so does the `Presenter` (the graph's present settings, or a window's own); a target's output transform reads the
+graph's settings or a view it is given (`Target.displaySettings(view)`: a window's own paper white, say). The core's
+tuning values are settings too, read from the graph's settings unless a technique is given its own: light clusters (`ClusteredLights.ALL`:
 tiles, slices, range, lights per cluster, and the irradiance where lights without a range end, `Lights.NO_RANGE`),
 occlusion culling (`RenderSettings.OCCLUSION`), cascades and ray offsets (`ShadowSettings.ALL`), and the display
 transform (`DisplayTransform.ALL`); `RenderSettings.ALL` lists them all for an options screen.
@@ -258,6 +260,12 @@ Capture capture = input.capture(one, JUMP);   // the next input becomes a bindin
   (`startText`/`stopText`), and the gamepad's confirm button as a setting (`ui.confirmButton`: the platform's, south
   or east). `MousePointer` (a `PointerSource`) reads the mouse from the platform's events directly.
 - **Tunables** (`UiTunables`): ui-core's `Tunable`s as settings of the same name and range, written back each frame.
+- **OS windows** (`UiOsWindows`, ui-controls' `OsWindows` for docking's `OsDockHost`): a window per dock area, each
+  presenting a view of its own that draws its region of the one UI. Each window's target reads a view of the graph's
+  settings of its own (`displaySettings(id)`, `EngineSettings.inheriting`): `paperWhite(id, nits)` gives it a paper
+  white (the main window too; NaN follows `display.paperWhite` again), which the dock layout saves; a window
+  following a drag is see-through by SDL's window opacity (`opacity(id, value)`, the theme's `drag-opacity`) where
+  the system allows it, opaque elsewhere (Wayland, the offscreen driver).
 
 ```java
 GpuUiRenderer renderer = new GpuUiRenderer(graph);

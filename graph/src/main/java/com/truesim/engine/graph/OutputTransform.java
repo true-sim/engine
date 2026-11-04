@@ -18,7 +18,17 @@ public interface OutputTransform {
     Technique transform(Key<Image> source, Key<Image> target, DisplayEncoding encoding);
 
     /**
-     * What HDR windows tell their displays about the content, as {@code settings} (the graph's) say now: read again
+     * {@link #transform(Key, Key, DisplayEncoding)} reading {@code settings} where it reads settings: the window's own
+     * ({@link Presenter.Target#displaySettings}), the graph's by default. The default ignores them.
+     */
+    default Technique transform(Key<Image> source, Key<Image> target, DisplayEncoding encoding,
+        com.truesim.engine.settings.EngineSettings settings) {
+        return transform(source, target, encoding);
+    }
+
+    /**
+     * What HDR windows tell their displays about the content, as {@code settings} (the window's: the graph's by
+     * default) say now: read again
      * when they change. Null (the default): nothing, the display guesses.
      */
     default com.truesim.engine.vulkan.HdrMetadata metadata(com.truesim.engine.settings.EngineSettings settings) {
