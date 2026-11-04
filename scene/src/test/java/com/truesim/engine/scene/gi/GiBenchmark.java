@@ -4,10 +4,13 @@ import static org.assertj.core.api.Assumptions.assumeThat;
 
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.GpuTimings;
+import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.AmbientOcclusion;
 import com.truesim.engine.render.Denoiser;
 import com.truesim.engine.render.ProbeVolume;
 import com.truesim.engine.render.ProbeVolumeLighting;
+import com.truesim.engine.render.RadianceCascades;
+import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanInstance;
 import java.nio.file.Path;
@@ -50,7 +53,25 @@ class GiBenchmark {
         });
     }
 
-    private record Sample(double frame, double ao, double probes, double shading) {
+    private static Setup cascades(String name, float spacing, int directions) {
+        return new Setup(name, g -> {
+            AmbientOcclusion.SLOT.choose(g.settings(), null);
+            ProbeVolumeLighting.SLOT.choose(g.settings(), ProbeVolumeLighting.CASCADES)
+                .set(RadianceCascades.SPACING, spacing).set(RadianceCascades.DIRECTIONS, directions);
+        });
+    }
+
+    /** Global illumination of {@code kind} alone, {@code setup} applied after. */
+    private static Setup gi(String name, TechniqueKind<?, ProbeVolumeLighting, Technique> kind,
+        java.util.function.Consumer<FrameGraph> setup) {
+        return new Setup(name, g -> {
+            AmbientOcclusion.SLOT.choose(g.settings(), null);
+            ProbeVolumeLighting.SLOT.choose(g.settings(), kind);
+            setup.accept(g);
+        });
+    }
+
+    private record Sample(double frame, double span, double ao, double probes, double shading) {
     }
 
     @Test
@@ -58,11 +79,35 @@ class GiBenchmark {
         String file = System.getProperty("truesim.gi.sponza");
         assumeThat(file).as("no Sponza given: -PgiSponza=<Sponza.gltf>").isNotNull();
         List<Setup> techniques = new ArrayList<>();
-        GiEvaluation.VARIANTS.forEach(v -> techniques.add(variant(v)));
+        GiEvaluation.variants().forEach(v -> techniques.add(variant(v)));
+        for (GiEvaluation.Variant v : GiEvaluation.variants()) {
+            if (v.ao() != null) {
+                techniques.add(new Setup(v.name() + ", half", g -> {
+                    v.apply(g);
+                    g.settings().techniques().set(g.settings(), AmbientOcclusion.SLOT, "resolution",
+                        AmbientOcclusion.Resolution.HALF);
+                }));
+            }
+        }
+        techniques.add(gi("probes, graphics queue", ProbeVolumeLighting.PROBES,
+            g -> g.settings().set(ProbeVolume.ASYNC, false)));
+        techniques.add(gi("cascades, graphics queue", ProbeVolumeLighting.CASCADES,
+            g -> g.settings().set(ProbeVolume.ASYNC, false)));
+        for (float budget : new float[] {0.5f, 0.25f}) {
+            techniques.add(gi("probes, budget " + budget, ProbeVolumeLighting.PROBES,
+                g -> g.settings().set(ProbeVolume.BUDGET, budget)));
+        }
         List<Setup> volumes = List.of(volume("probes, 64 rays, 3 cascades", 64, 3),
             volume("probes, 128 rays, 3 cascades", 128, 3), volume("probes, 256 rays, 3 cascades", 256, 3),
             volume("probes, 128 rays, 1 cascade", 128, 1), volume("probes, 128 rays, 2 cascades", 128, 2),
-            volume("probes, 128 rays, 4 cascades", 128, 4));
+            volume("probes, 128 rays, 4 cascades", 128, 4), cascades("cascades, 0.5 m, 4 x 4", 0.5f, 4),
+            cascades("cascades, 0.5 m, 6 x 6", 0.5f, 6), cascades("cascades, 0.5 m, 8 x 8", 0.5f, 8),
+            cascades("cascades, 1 m, 8 x 8", 1, 8));
+        String only = System.getProperty("truesim.gi.setups");
+        if (only != null && !only.isBlank()) {
+            techniques.removeIf(t -> !List.of(only.split(";")).contains(t.name()));
+            volumes = volumes.stream().filter(t -> List.of(only.split(";")).contains(t.name())).toList();
+        }
         try (VulkanInstance instance = VulkanInstance.builder().applicationName("gi").surfaces(false).build();
              VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
             assumeThat(device.rayTracing()).as("no ray tracing").isTrue();
@@ -80,28 +125,34 @@ class GiBenchmark {
                     for (int round = -WARMUP; round < ROUNDS; round++) {
                         for (int c = 0; c < setups.size(); c++) {
                             sponza.graph.settings().set(ProbeVolume.RAYS, ProbeVolume.RAYS.defaultValue())
-                                .set(ProbeVolume.CASCADES, ProbeVolume.CASCADES.defaultValue());
+                                .set(ProbeVolume.CASCADES, ProbeVolume.CASCADES.defaultValue())
+                                .set(RadianceCascades.SPACING, RadianceCascades.SPACING.defaultValue())
+                                .set(RadianceCascades.DIRECTIONS, RadianceCascades.DIRECTIONS.defaultValue())
+                                .set(ProbeVolume.ASYNC, true).set(ProbeVolume.BUDGET, 1f);
                             sponza.graph.settings().techniques().set(sponza.graph.settings(), AmbientOcclusion.SLOT,
                                 "denoiser", Denoiser.Mode.SVGF);
+                            sponza.graph.settings().techniques().set(sponza.graph.settings(), AmbientOcclusion.SLOT,
+                                "resolution", AmbientOcclusion.Resolution.FULL);
                             setups.get(c).apply().accept(sponza.graph);
                             Sample sample = measure(sponza);
                             if (round >= 0) {
                                 samples[c][round] = sample;
                             }
-                            System.out.printf(Locale.ROOT, "  round %d, %d x %d, %s: frame %.3f, AO %.3f, probes %.3f,"
-                                + " shading %.3f ms%n", round, size[0], size[1], setups.get(c).name(), sample.frame,
-                                sample.ao, sample.probes, sample.shading);
+                            System.out.printf(Locale.ROOT, "  round %d, %d x %d, %s: frame %.3f, span %.3f, AO %.3f,"
+                                + " probes %.3f, shading %.3f ms%n", round, size[0], size[1], setups.get(c).name(),
+                                sample.frame, sample.span, sample.ao, sample.probes, sample.shading);
                         }
                     }
                     System.out.printf(Locale.ROOT, "GI costs on %s, Sponza, %d x %d (ranges of the rounds' medians):%n",
                         device.gpu().name(), size[0], size[1]);
-                    System.out.println("| Size | Technique | Frame (passes) | AO passes | Probe passes | Shading pass |");
-                    System.out.println("|---|---|---|---|---|---|");
+                    System.out.println("| Size | Technique | Frame (passes) | Frame (GPU span) | AO passes | Probe passes"
+                        + " | Shading pass |");
+                    System.out.println("|---|---|---|---|---|---|---|");
                     for (int c = 0; c < setups.size(); c++) {
                         Sample[] all = samples[c];
-                        System.out.printf(Locale.ROOT, "| %d x %d | %s | %s | %s | %s | %s |%n", size[0], size[1],
-                            setups.get(c).name(), range(all, Sample::frame), range(all, Sample::ao),
-                            range(all, Sample::probes), range(all, Sample::shading));
+                        System.out.printf(Locale.ROOT, "| %d x %d | %s | %s | %s | %s | %s | %s |%n", size[0],
+                            size[1], setups.get(c).name(), range(all, Sample::frame), range(all, Sample::span),
+                            range(all, Sample::ao), range(all, Sample::probes), range(all, Sample::shading));
                     }
                 }
             }
@@ -118,12 +169,15 @@ class GiBenchmark {
         double[] ao = new double[TIMED];
         double[] probes = new double[TIMED];
         double[] shading = new double[TIMED];
+        double[] span = new double[TIMED];
+        java.util.Map<String, double[]> each = new java.util.TreeMap<>();
         for (int i = 0; i < TIMED; i++) {
             sponza.frames(1);
             GpuTimings timings = graph.timings();
             if (timings == null) {
                 continue;
             }
+            span[i] = timings.spanMillis();
             for (int t = 0; t < timings.count(); t++) {
                 String pass = timings.pass(t);
                 double ms = timings.millis(t);
@@ -131,18 +185,29 @@ class GiBenchmark {
                     continue;
                 }
                 frame[i] += ms;
+                each.computeIfAbsent(pass, k -> new double[TIMED])[i] += ms;
                 if (pass.startsWith("ambient occlusion")) {
                     ao[i] += ms;
-                } else if (pass.startsWith("probe ")) {
+                } else if (pass.startsWith("probe ") || pass.startsWith("cascade ")) {
                     probes[i] += ms;
                 } else if (pass.equals("visibility shading")) {
                     shading[i] += ms;
                 }
             }
         }
+        if (Boolean.getBoolean("truesim.gi.passes")) {
+            // Each pass's median, its name's digits taken as one (the layers, the cascades)
+            java.util.Map<String, Double> grouped = new java.util.TreeMap<>();
+            each.forEach((pass, times) -> grouped.merge(pass.replaceAll("[0-9]+", "#"), median(times), Double::sum));
+            grouped.forEach((pass, ms) -> {
+                if (ms >= 0.02) {
+                    System.out.printf(Locale.ROOT, "    pass %s: %.3f ms%n", pass, ms);
+                }
+            });
+        }
         graph.timings(false);
         sponza.device.waitIdle();
-        return new Sample(median(frame), median(ao), median(probes), median(shading));
+        return new Sample(median(frame), median(span), median(ao), median(probes), median(shading));
     }
 
     private static double median(double[] values) {

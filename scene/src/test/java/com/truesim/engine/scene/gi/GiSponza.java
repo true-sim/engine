@@ -67,7 +67,7 @@ class GiSponza {
                     float exposure = GiEvaluation.exposure(traced, WIDTH, HEIGHT);
                     GiError.png(traced, WIDTH, HEIGHT, exposure, out.resolve(name + "-reference.png"));
                     sponza.realtime();
-                    for (GiEvaluation.Variant v : GiEvaluation.VARIANTS) {
+                    for (GiEvaluation.Variant v : GiEvaluation.variants()) {
                         v.apply(sponza.graph);
                         sponza.frames(GiEvaluation.SETTLE);
                         float[] drawn = sponza.read();

@@ -364,6 +364,20 @@ at 0.0018.
 - Rule: a statistic that decides to drop history is zero-mean under noise alone, and is tested against its measured
   noise, not a fixed fraction; check a still scene's noise after adding one.
 
+**A radiance cascade's interval was continued by probes whose own intervals start across a wall.** Merging, a
+direction whose ray met nothing within its interval took the next cascade's light around the probe (eight probes,
+trilinear), as in 2D. Those probes' intervals start where this one's ends only along the same line from the same
+point; in 3D, 2 to 4 m from it at the first merge, they started outside rooms 2 m wide (the sun room took the sky:
++178 % mean error), and their four finer directions started up to a fifth of the interval to the side, beyond 5 cm walls
+(the leak room's dark side 0.0117 bright, against 0.0001 for the probe volume). Testing that the probes themselves see
+each other did not help; the white furnace lost 4 to 7 % of its light to the same continuations.
+- Proof: `GiEvaluation` (leak-5cm, sun-room, the furnace of `RadianceCascadesTest`) before and after each test, in
+  true-sim/engine's radiance cascades (GI S3): a ray from where the interval ends to where each probe's starts, and from
+  where the coarser direction's interval starts to where each finer one's does, leave out what a surface separates:
+  leak-5cm 0.0000, sun-room 7.3 %, the furnace within 2.1 %. With intervals long enough that nothing merges, no leak.
+- Rule: light continued from other rays is checked to continue the same path: the start of each continuation in sight
+  of where the ray it continues ended.
+
 ## Tests and measurements
 
 **A GPU time per frame that left out the frame start.** `GpuTimings` timed passes only; textures' copies and mip
@@ -513,9 +527,12 @@ that missed its beat because a bar rendered in milliseconds while its clip loade
   (`StreamRing.fill`). The stall could then begin before the voice read anything. Observation, not reproduced: a voice
   starting more than 0.67 s after the stall began would play the 40,000 buffered frames past its end, and nothing
   starves.
-- Proof: CI run 41751716422 (0.2627 against 0.2500), CI run 41771593506 (starvations 0, expected 1 to 2).
+- Third failure: 3 starvations where the test allowed 1 to 2. After the stall the reader can overtake the restarting
+  ring more than once on a busy runner; how often is scheduling, not the engine.
+- Proof: CI run 41751716422 (0.2627 against 0.2500), CI run 41771593506 (starvations 0, expected 1 to 2), CI run 41783096193 (starvations 3).
 - Rule: a test that makes a stream starve puts the stall past the ring's capacity, where the decoder only gets once
-  the voice reads. A test that finds where a signal starts accounts for samples that are 0 by design.
+  the voice reads. A test that finds where a signal starts accounts for samples that are 0 by design. Counts that
+  depend on scheduling are bounded from below only.
 
 **SDL's device thread takes a whole device buffer from the stream at once.** The audio queue was kept at the design's 2
 blocks (512 frames); SDL's dummy driver, and this machine's WASAPI device (which ignored

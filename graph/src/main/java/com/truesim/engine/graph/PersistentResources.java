@@ -44,7 +44,7 @@ final class PersistentResources {
             kept = null;
         }
         if (kept == null) {
-            kept = desc != null ? new Persistent(device, key, desc)
+            kept = desc != null ? new Persistent(device, key, desc, graphicsQueue.family(), computeQueue.family())
                 : new Persistent(device, key, size, count, graphicsQueue.family(), computeQueue.family());
             kept.firstFrame = frame + 1; // the frame being built is its first
             if (kept.image != null) {

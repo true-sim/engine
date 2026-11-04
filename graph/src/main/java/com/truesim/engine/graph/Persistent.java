@@ -61,10 +61,11 @@ final class Persistent implements AutoCloseable {
 
     /**
      * An image of {@code desc}: 2D, one sample, its layers (a cube's faces) and mip levels as it says, a sampled and a
-     * storage slot per level where it has several. Cleared by {@link #initialize}.
+     * storage slot per level where it has several, shared by the queues of {@code families} (async compute passes may
+     * use it). Cleared by {@link #initialize}.
      */
     @AllowAllocation("made rarely")
-    Persistent(VulkanDevice device, String key, ImageDesc desc) {
+    Persistent(VulkanDevice device, String key, ImageDesc desc, int... families) {
         if (desc.depth() > 1 || desc.samples() > 1) {
             throw new IllegalArgumentException("A persistent image is 2D, one sample: " + key);
         }
@@ -88,12 +89,17 @@ final class Persistent implements AutoCloseable {
             | attachment | ((features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0 ? VK_IMAGE_USAGE_STORAGE_BIT : 0);
         int aspect = desc.format().aspect();
         boolean levels = desc.layers() > 1 || desc.mips() > 1 || desc.cubeMap();
+        int[] shared = java.util.Arrays.stream(families).distinct().toArray();
+        if (shared.length < 2) {
+            shared = new int[0];
+        }
         gpuImage = levels ? GpuImage.create(device, desc.format(), desc.width(), desc.height(), 1, desc.layers(),
-            desc.cubeMap(), 1, desc.mips(), usage, new int[0])
-            : new GpuImage(device, desc.width(), desc.height(), desc.format().vk(), usage, aspect);
+            desc.cubeMap(), 1, desc.mips(), usage, shared)
+            : new GpuImage(device, desc.width(), desc.height(), desc.format().vk(), usage, aspect, shared);
         image = new ExternalImage(key, desc.width(), desc.height(), desc.format(), usage, VK_IMAGE_LAYOUT_GENERAL,
             VK_IMAGE_LAYOUT_GENERAL).set(gpuImage.handle(), gpuImage.view());
         image.kept = true;
+        image.concurrent = shared.length > 1;
         image.sampled = device.bindless().addSampled(gpuImage.view());
         boolean storage = (usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0;
         if (levels) {

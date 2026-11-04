@@ -110,6 +110,7 @@ final class SponzaScene implements AutoCloseable {
         this.width = width;
         this.height = height;
         graph = new FrameGraph(device, 2);
+        GiHarness.settings(graph);
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 22, 1 << 16, 1 << 11), graph.frameSlots());
         materials = new Materials(device, 1024, graph.frameSlots());
         textures = new Textures(device, graph.frameSlots());

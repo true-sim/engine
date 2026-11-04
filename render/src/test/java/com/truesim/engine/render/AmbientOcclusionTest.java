@@ -30,6 +30,7 @@ import com.truesim.engine.render.materials.UnlitParameters;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.TechniqueConfig;
 import com.truesim.engine.settings.TechniqueConfig.Tunable;
+import com.truesim.engine.settings.Setting;
 import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
@@ -303,6 +304,46 @@ class AmbientOcclusionTest {
                 assertThat(count).as("occluded pixels").isGreaterThan(SIZE * SIZE / 20);
                 assertThat(sum / count).as("%s: the mean difference from the traced occlusion", mode)
                     .isLessThan(0.08);
+            }
+            scene.setMaterials(null);
+        }
+    }
+
+    @Test
+    void halfResolutionComesCloseToFullResolutionAndKeepsEdges() {
+        try (Materials materials = new Materials(device, 8)) {
+            int white = materials.add(white());
+            scene.setMaterials(materials);
+            floor(white);
+            block(1, white, 0);
+            main(slanted(), this::visibilityBuffer);
+            graph.settings().set(AmbientOcclusion.DEBUG, AmbientOcclusion.Show.OCCLUSION);
+            for (TechniqueKind<?, AmbientOcclusion, Technique> mode : modes()) {
+                choose(mode);
+                Setting<AmbientOcclusion.Resolution> resolution = mode.setting("resolution");
+                graph.settings().set(resolution, AmbientOcclusion.Resolution.FULL);
+                float[] full = frames(40);
+                graph.settings().set(resolution, AmbientOcclusion.Resolution.HALF);
+                float[] half = frames(40);
+                graph.settings().set(resolution, AmbientOcclusion.Resolution.FULL);
+                save(mode.id() + "-full", full);
+                save(mode.id() + "-half", half);
+                double sum = 0;
+                for (int i = 0; i < half.length; i++) {
+                    sum += Math.abs(half[i] - full[i]);
+                }
+                assertThat(sum / half.length).as("%s: the mean difference of half from full resolution", mode)
+                    .isLessThan(0.02);
+                // The open floor stays open up to the block's edge: no occlusion bled across depth edges
+                float least = 1;
+                for (int row = SIZE - 4; row < SIZE; row++) {
+                    for (int column = 0; column < SIZE; column++) {
+                        if (full[row * SIZE + column] > 0.99f) {
+                            least = Math.min(least, half[row * SIZE + column]);
+                        }
+                    }
+                }
+                assertThat(least).as("%s: open floor at half resolution", mode).isGreaterThan(0.9f);
             }
             scene.setMaterials(null);
         }

@@ -14,6 +14,7 @@ import com.truesim.engine.graph.Order;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.graph.ViewPort;
+import com.truesim.engine.render.layout.AoHalfPush;
 import com.truesim.engine.render.layout.AoPush;
 import com.truesim.engine.render.shadows.ShadowSettings;
 import com.truesim.engine.render.shadows.TopLevel;
@@ -86,6 +87,17 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
         RAYS
     }
 
+    /** The resolution occlusion is found and denoised at (each kind's {@code resolution}). */
+    public enum Resolution {
+        /** Every pixel. */
+        FULL,
+        /**
+         * One pixel of each 2 x 2 (a quarter of the work), denoised at that resolution and brought back to every pixel
+         * by the composite from the texels around it on the pixel's surface.
+         */
+        HALF
+    }
+
     /** What the image shows ({@link #DEBUG}): the scene, or the occlusion alone. */
     public enum Show {
         /** The scene with its occlusion. */
@@ -117,6 +129,7 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
      * @param specular the specular occlusion of the environment's reflections
      * @param temporal accumulate over frames (a noise pattern moving in time)
      * @param denoiser the denoiser accumulating over frames, with {@code temporal}
+     * @param resolution the resolution occlusion is found and denoised at (read when the graph builds)
      */
     public record Gtao(
         @Tunable(value = "how far ambient occlusion looks for occluders, in meters", min = 0.01, max = 100,
@@ -134,7 +147,9 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
         @Tunable(value = "screen-space ambient occlusion accumulates over frames", formerly = "render.ao.temporal")
         boolean temporal,
         @Tunable(value = "the denoiser of temporal ambient occlusion: SVGF or ReBLUR", formerly = "render.ao.denoiser")
-        Denoiser.Mode denoiser) implements TechniqueConfig {
+        Denoiser.Mode denoiser,
+        @Tunable("the resolution ambient occlusion is found at: every pixel, or one of each 2 x 2 upsampled along "
+            + "surfaces") Resolution resolution) implements TechniqueConfig {
     }
 
     /**
@@ -149,6 +164,7 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
      * @param specular the specular occlusion of the environment's reflections
      * @param temporal accumulate over frames (a noise pattern moving in time)
      * @param denoiser the denoiser accumulating over frames, with {@code temporal}
+     * @param resolution the resolution occlusion is found and denoised at (read when the graph builds)
      */
     public record Bitmask(
         @Tunable(value = "how far ambient occlusion looks for occluders, in meters", min = 0.01, max = 100,
@@ -166,7 +182,9 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
         @Tunable(value = "screen-space ambient occlusion accumulates over frames", formerly = "render.ao.temporal")
         boolean temporal,
         @Tunable(value = "the denoiser of temporal ambient occlusion: SVGF or ReBLUR", formerly = "render.ao.denoiser")
-        Denoiser.Mode denoiser) implements TechniqueConfig {
+        Denoiser.Mode denoiser,
+        @Tunable("the resolution ambient occlusion is found at: every pixel, or one of each 2 x 2 upsampled along "
+            + "surfaces") Resolution resolution) implements TechniqueConfig {
     }
 
     /**
@@ -178,6 +196,7 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
      * @param multiBounce Jimenez et al.'s fit of interreflections between occluders by albedo
      * @param specular the specular occlusion of the environment's reflections
      * @param denoiser the denoiser accumulating over frames
+     * @param resolution the resolution occlusion is found and denoised at (read when the graph builds)
      */
     public record Rays(
         @Tunable(value = "how far ambient occlusion looks for occluders, in meters", min = 0.01, max = 100,
@@ -189,22 +208,24 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
         @Tunable(value = "specular occlusion of the environment's reflections from the bent normal",
             formerly = "render.ao.specular") boolean specular,
         @Tunable(value = "the denoiser of ray-traced ambient occlusion: SVGF or ReBLUR",
-            formerly = "render.ao.denoiser") Denoiser.Mode denoiser) implements TechniqueConfig {
+            formerly = "render.ao.denoiser") Denoiser.Mode denoiser,
+        @Tunable("the resolution ambient occlusion is found at: every pixel, or one of each 2 x 2 upsampled along "
+            + "surfaces") Resolution resolution) implements TechniqueConfig {
     }
 
     /** Horizons searched in screen space, the visible arc integrated in closed form (infinitely thick surfaces). */
     public static final TechniqueKind<Gtao, AmbientOcclusion, Technique> GTAO = TechniqueKind.of(SLOT, "gtao",
-        new Gtao(0.5f, 2, 8, 0.2f, false, true, false, Denoiser.Mode.SVGF),
+        new Gtao(0.5f, 2, 8, 0.2f, false, true, false, Denoiser.Mode.SVGF, Resolution.FULL),
         "horizons searched in screen space, the visible arc integrated in closed form",
         (ao, config) -> ao.new Engine(Mode.GTAO));
     /** A mask of sectors per slice, surfaces of a thickness, and one bounce of the scene's color: the default. */
     public static final TechniqueKind<Bitmask, AmbientOcclusion, Technique> BITMASK = TechniqueKind.of(SLOT, "bitmask",
-        new Bitmask(0.5f, 2, 8, 0.25f, true, true, false, Denoiser.Mode.SVGF),
+        new Bitmask(0.5f, 2, 8, 0.25f, true, true, false, Denoiser.Mode.SVGF, Resolution.FULL),
         "a mask of sectors per slice, surfaces of a thickness, and one bounce of the scene's color",
         (ao, config) -> ao.new Engine(Mode.BITMASK));
     /** Rays traced by ray queries, denoised: devices with ray tracing, elsewhere {@link #BITMASK}. */
     public static final TechniqueKind<Rays, AmbientOcclusion, Technique> RAYS = TechniqueKind.of(SLOT, "rays",
-        new Rays(0.5f, 1, false, true, Denoiser.Mode.SVGF), "rays traced by ray queries, denoised",
+        new Rays(0.5f, 1, false, true, Denoiser.Mode.SVGF, Resolution.FULL), "rays traced by ray queries, denoised",
         (ao, config) -> ao.new Engine(Mode.RAYS));
 
     /** What the image shows (debugging): every kind of the engine's. */
@@ -223,11 +244,14 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
     private static final int AO_SHOW_AO = 8;
     private static final int AO_SHOW_SPECULAR = 16;
     private static final int AO_SHOW_BOUNCE = 32;
+    private static final int AO_HALF = 128;
+    private static final int AO_HALF_MOTION = 1;  // half.slang's
 
     private final SceneView view;
     private final RayTracing rayTracing; // or null: no RAYS
     private final AoPush tracePush = new AoPush();
     private final AoPush compositePush = new AoPush();
+    private final AoHalfPush halfPush = new AoHalfPush();
     private final Map<TechniqueKind<?, ?, ?>, Technique> made = new IdentityHashMap<>(); // per kind, once chosen
 
     /** Ambient occlusion in {@code view}, traced in {@code rayTracing} for {@link #RAYS} (null: none). */
@@ -347,7 +371,14 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
         Image motion = temporal ? g.optional(Keys.MOTION) : null;
         Buffer topLevel = rays ? g.request(new TopLevel(rayTracing, view.view().renderer())) : null;
         ViewPort region = g.view();
-        ImageDesc signal = ImageDesc.of(Denoiser.FORMAT, color.width(), color.height());
+        boolean half = g.setting(switch (mode) {
+            case GTAO -> GTAO.<Resolution>setting("resolution");
+            case BITMASK -> BITMASK.<Resolution>setting("resolution");
+            case RAYS -> RAYS.<Resolution>setting("resolution");
+        }) == Resolution.HALF;
+        int width = half ? (color.width() + 1) / 2 : color.width();
+        int height = half ? (color.height() + 1) / 2 : color.height();
+        ImageDesc signal = ImageDesc.of(Denoiser.FORMAT, width, height);
         Image ao = g.create("ambient occlusion", signal);
         Image bounce = g.create("ambient occlusion bounce", signal);
         Image specular = g.create("specular occlusion", ImageDesc.of(SPECULAR_FORMAT, color.width(),
@@ -361,6 +392,38 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
         EngineSettings settings = g.settings();
         boolean bitmask = mode == Mode.BITMASK;
 
+        // At half resolution: the depth, normals and motion of the pixels traced, for the denoiser and the upsampling
+        Image halfDepth = null;
+        Image halfNormal = null;
+        Image halfMotion = null;
+        if (half) {
+            halfDepth = g.create("ambient occlusion depth", ImageDesc.of(Format.R32_SFLOAT, width, height));
+            halfNormal = g.create("ambient occlusion normals", ImageDesc.of(SurfaceOutputs.NORMAL_FORMAT, width,
+                height));
+            halfMotion = motion != null ? g.create("ambient occlusion motion", ImageDesc.of(MotionVectors.FORMAT,
+                width, height)) : null;
+            Pipeline downsample = g.computeProgram("shaders/ao/half.spv", "downsampleMain", AoHalfPush.BYTES);
+            Image d = halfDepth;
+            Image n = halfNormal;
+            Image m = halfMotion;
+            GraphBuilder.PassBuilder pass = g.pass("ambient occlusion downsample").read(depth, Access.SAMPLED_COMPUTE)
+                .read(normal, Access.STORAGE_READ).write(d, Access.STORAGE_WRITE).write(n, Access.STORAGE_WRITE);
+            if (m != null) {
+                pass.read(motion, Access.STORAGE_READ).write(m, Access.STORAGE_WRITE);
+            }
+            if (region != null) {
+                pass.region(region);
+            }
+            pass.record(ctx -> {
+                halfPush.depth(ctx.sampled(depth)).normal(ctx.storage(normal))
+                    .motion(m == null ? 0 : ctx.storage(motion)).halfDepth(ctx.storage(d)).halfNormal(ctx.storage(n))
+                    .halfMotion(m == null ? 0 : ctx.storage(m))
+                    .size(ctx.regionWidth(color) | ctx.regionHeight(color) << 16)
+                    .frame(temporal ? (int) ctx.frame() : 0).flags(m == null ? 0 : AO_HALF_MOTION);
+                ctx.dispatch(downsample, halfPush, (ctx.regionWidth(d) + 7) / 8, (ctx.regionHeight(d) + 7) / 8, 1);
+            });
+        }
+
         GraphBuilder.PassBuilder tracing = g.pass("ambient occlusion").read(depth, Access.SAMPLED_COMPUTE)
             .read(normal, Access.STORAGE_READ).write(ao, Access.STORAGE_WRITE).write(bounce, Access.STORAGE_WRITE);
         if (bitmask) {
@@ -373,19 +436,23 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
             tracing.region(region);
         }
         tracing.record(ctx -> {
-            push(tracePush, ctx, settings, mode, color, depth, normal, ao, bounce, null, temporal);
+            push(tracePush, ctx, settings, mode, color, depth, normal, ao, bounce, null, temporal, half);
             if (bitmask) {
                 tracePush.color(ctx.sampled(color));
             }
             ctx.dispatch(trace, tracePush, (ctx.regionWidth(ao) + 7) / 8, (ctx.regionHeight(ao) + 7) / 8, 1);
         });
 
-        Denoiser.Signal result = Denoiser.build(g, "ambient occlusion", view, depth, normal, motion,
-            new Denoiser.Signal(ao, bounce), g.setting(switch (mode) {
-                case GTAO -> GTAO.<Denoiser.Mode>setting("denoiser");
-                case BITMASK -> BITMASK.<Denoiser.Mode>setting("denoiser");
-                case RAYS -> RAYS.<Denoiser.Mode>setting("denoiser");
-            }), temporal);
+        Denoiser.Mode denoiser = g.setting(switch (mode) {
+            case GTAO -> GTAO.<Denoiser.Mode>setting("denoiser");
+            case BITMASK -> BITMASK.<Denoiser.Mode>setting("denoiser");
+            case RAYS -> RAYS.<Denoiser.Mode>setting("denoiser");
+        });
+        Denoiser.Signal result = half
+            ? Denoiser.build(g, "ambient occlusion", view, halfDepth, halfNormal, halfMotion,
+                new Denoiser.Signal(ao, bounce), denoiser, temporal, 1)
+            : Denoiser.build(g, "ambient occlusion", view, depth, normal, motion, new Denoiser.Signal(ao, bounce),
+                denoiser, temporal);
 
         GraphBuilder.PassBuilder compositing = g.pass("ambient occlusion composite")
             .read(depth, Access.SAMPLED_COMPUTE).read(normal, Access.STORAGE_READ)
@@ -396,13 +463,22 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
         if (indirect != null) {
             indirect.readBy(compositing, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
         }
+        if (half) {
+            compositing.read(halfDepth, Access.STORAGE_READ).read(halfNormal, Access.STORAGE_READ);
+        }
         if (region != null) {
             compositing.region(region);
         }
+        Image upDepth = halfDepth;
+        Image upNormal = halfNormal;
         compositing.record(ctx -> {
             push(compositePush, ctx, settings, mode, color, depth, normal, result.a(), result.b(), indirect,
-                temporal).diffuse(ctx.storage(diffuse)).reflectance(ctx.storage(reflectance))
+                temporal, half).diffuse(ctx.storage(diffuse)).reflectance(ctx.storage(reflectance))
                 .material(ctx.storage(material)).occlusion(ctx.storage(specular)).color(ctx.storage(color));
+            if (half) {
+                // At half resolution the composite reads the traced pixels' depth and normals in these two fields
+                compositePush.slices(ctx.storage(upDepth)).steps(ctx.storage(upNormal));
+            }
             ctx.dispatch(composite, compositePush, (ctx.regionWidth(color) + 7) / 8,
                 (ctx.regionHeight(color) + 7) / 8, 1);
         });
@@ -411,7 +487,7 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
 
     /** ao.slang's push block, as the frame records, with {@code mode}'s kind's tunables. Allocates nothing. */
     private AoPush push(AoPush push, PassContext ctx, EngineSettings settings, Mode mode, Image color, Image depth,
-        Image normal, Image ao, Image bounce, IndirectInputs.Set indirect, boolean temporal) {
+        Image normal, Image ao, Image bounce, IndirectInputs.Set indirect, boolean temporal, boolean half) {
         boolean rays = mode == Mode.RAYS;
         float radius;
         int slices = 1; // rays read none
@@ -448,7 +524,8 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
                 specular = config.specular();
             }
         }
-        int flags = (bounces ? AO_BOUNCE : 0) | (multiBounce ? AO_MULTI_BOUNCE : 0) | (specular ? AO_SPECULAR : 0);
+        int flags = (half ? AO_HALF : 0) | (bounces ? AO_BOUNCE : 0) | (multiBounce ? AO_MULTI_BOUNCE : 0)
+            | (specular ? AO_SPECULAR : 0);
         flags |= switch (settings.get(DEBUG)) {
             case SCENE -> 0;
             case OCCLUSION -> AO_SHOW_AO;
