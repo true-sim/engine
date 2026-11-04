@@ -110,19 +110,25 @@ class SelectionOutlineTest {
         }
     }
 
+    /** How many of the benchmark's rocks are highlighted: 0, 1 (selected) or 300 (299 selected, 1 hovered). */
+    private static int highlighted = 300;
+
     private static void benchmark(VulkanDevice device) throws InterruptedException {
-        System.out.printf(Locale.ROOT, "Selection outline on %s, 30,000 rocks, 300 selected and 1 hovered:%n",
-            device.gpu().name());
+        System.out.printf(Locale.ROOT, "Selection outline on %s, 30,000 rocks:%n", device.gpu().name());
         for (int[] size : new int[][] {{1920, 1080}, {3840, 2160}}) {
             for (boolean visibility : device.primitiveIds() ? new boolean[] {false, true} : new boolean[] {false}) {
-                for (var kind : java.util.Arrays.asList(SelectionOutline.OUTLINE, SelectionOutline.TINT, null)) {
+                for (int run = 0; run < 5; run++) {
+                    var kind = run == 0 ? null : run == 4 ? SelectionOutline.TINT : SelectionOutline.OUTLINE;
+                    highlighted = run == 0 || run == 1 ? 0 : run == 2 ? 1 : 300;
                     Drawn d = draw(device, size[0], size[1], visibility, kind, 30_000, 160);
-                    System.out.printf(Locale.ROOT, "  %d x %d, %s, %s: mask %.3f ms, outline %.3f ms, frame %.3f ms%n",
-                        size[0], size[1], visibility ? "visibility buffer" : "forward",
-                        kind == null ? "off" : kind.id(), d.maskMillis(), d.outlineMillis(), d.frameMillis());
+                    System.out.printf(Locale.ROOT, "  %d x %d, %s, %s, %d highlighted: mask %.3f ms, outline %.3f ms, "
+                        + "frame %.3f ms%n", size[0], size[1], visibility ? "visibility buffer" : "forward",
+                        kind == null ? "off" : kind.id(), highlighted, d.maskMillis(), d.outlineMillis(),
+                        d.frameMillis());
                 }
             }
         }
+        highlighted = 300;
     }
 
     /**
@@ -175,11 +181,13 @@ class SelectionOutlineTest {
                     nodes[i] = scene.create();
                     SceneBenchmark.place(scene, nodes[i], random, placed, i, 0);
                     renderables.set(nodes[i], SceneBenchmark.ROCK, List.of(SceneBenchmark.GRANITE));
-                    if (i % 100 == 0) {
+                    if (highlighted == 300 && i % 100 == 0 || highlighted == 1 && i == 0) {
                         scene.components().set(nodes[i], Selected.TYPE, Selected.YES);
                     }
                 }
-                scene.components().set(nodes[1], Hovered.TYPE, Hovered.YES);
+                if (highlighted == 300) {
+                    scene.components().set(nodes[1], Hovered.TYPE, Hovered.YES);
+                }
             }
             SceneSync sync = new SceneSync(resources, renderables, gpu);
             SelectionHighlights highlights = new SelectionHighlights();

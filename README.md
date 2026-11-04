@@ -315,11 +315,18 @@ Measured (2026-11-04, RX 9070 XT, Ryzen 9 9950X3D; `ScenePickingBenchmark`, `Sel
 | all pickable, boxes | 3.1 us (25.4) | 1.7 us (13.2) | 20 B on average (the hover store's log growing to its cap) |
 | all pickable, meshes | 3.5 us (59.8) | 1.5 us (39.7) | 20 B on average |
 
-| Outline GPU time (30,000 rocks, 300 selected, 1 hovered) | 1920 x 1080 | 3840 x 2160 |
+| Outline, 30,000 rocks: GPU frame (passes) | 1920 x 1080 | 3840 x 2160 |
 |---|---|---|
-| visibility buffer, outline: mask + outline | 0.009 + 0.039 ms | 0.027 + 0.144 ms |
-| visibility buffer, tint | 0.009 + 0.006 ms | 0.027 + 0.021 ms |
-| forward, outline (its own ID draw: frame 1.78 against 1.16 ms off; 3.98 against 2.50 ms) | 0.013 + 0.038 ms | 0.050 + 0.144 ms |
+| visibility buffer: slot off / outline with nothing highlighted | 0.890 / 0.887 ms (no work) | 2.203 / 2.197 ms (no work) |
+| visibility buffer, outline, 1 or 300 highlighted | 0.937 ms (mask 0.009 + outline 0.039) | 2.383 ms (0.027 + 0.144) |
+| visibility buffer, tint, 300 highlighted | 0.904 ms (0.009 + 0.006) | 2.256 ms (0.027 + 0.021) |
+| forward: slot off / outline with nothing highlighted | 1.165 / 1.166 ms (no ID draw) | 2.502 / 2.503 ms |
+| forward, outline, 1 highlighted (its own ID draw of the view) | 1.801 ms | 3.977 ms |
+| forward, outline, 300 highlighted | 1.778 ms | 3.975 ms |
+
+A forward view builds its ID draw only while something is highlighted (the graph rebuilds when highlighting starts or
+ends, in the frame it does); while it does, the draw covers the whole view, so it costs the same for 1 or 300
+highlighted. Drawing only the highlighted instances needs a per-instance filter in the GPU scene's culling: not built.
 
 ## UI
 

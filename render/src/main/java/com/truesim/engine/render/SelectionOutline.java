@@ -39,7 +39,9 @@ import java.util.Objects;
  *
  * <p>It reads the view's IDs: the visibility buffer's ({@link Keys#VISIBILITY_IDS}) where the view is shaded so (nothing
  * drawn twice), else an ID draw of its own through a render view of its own while the slot is not off (about the cost
- * of a depth pre-pass, for forward views; set that view's camera as the main one's). Two compute passes over the render region: a mask of the highlighted pixels (one byte each), then the
+ * of a depth pre-pass, for forward views; set that view's camera as the main one's). A forward view builds that draw
+ * only while something is highlighted, and every view skips its passes' work in frames with nothing highlighted: with
+ * nothing selected or hovered (or the slot off) it costs nothing. Two compute passes over the render region: a mask of the highlighted pixels (one byte each), then the
  * outline or tint written into {@link Keys#SCENE_COLOR} in place. It runs at {@link Anchor#TRANSPARENT}, after
  * transparency, so blended surfaces in front of an outline do not hide it, and before post effects. Only what the view
  * shows is outlined: the visible silhouette, its edge against what hides part of it included. Allocates nothing per
@@ -107,6 +109,7 @@ public final class SelectionOutline implements Technique {
     private final SelectionHighlights highlights;
     private final Map<TechniqueKind<?, ?, ?>, Technique> made = new IdentityHashMap<>();
     private Boolean occlusion;
+    private boolean ownIds; // the last build drew IDs of its own: a forward view
     private FrameBuffer flags;
     private final List<FrameBuffer> outgrown = new ArrayList<>(); // freed with it: frames in flight may read them
     private int flagWords;
@@ -173,10 +176,15 @@ public final class SelectionOutline implements Technique {
         return Order.at(Anchor.TRANSPARENT).after(Transparency.ID);
     }
 
-    /** The flags' room: it rebuilds when the marks outgrow it. */
+    /**
+     * The flags' room (it rebuilds when the marks outgrow it) and, on a forward view, whether anything is highlighted:
+     * its own ID draw is built only while something is, so a view with nothing highlighted costs nothing. The graph
+     * builds when the frame is submitted, after the highlights of the frame are marked: no frame of delay.
+     */
     @Override
     public long buildVersion() {
-        return Math.max(1, Integer.highestOneBit(Math.max(1, highlights.words())) * 2);
+        long room = Math.max(1, Integer.highestOneBit(Math.max(1, highlights.words())) * 2);
+        return ownIds && highlights.any() ? -room : room;
     }
 
     /** The chosen kind's technique, built in this one's place. */
@@ -220,16 +228,20 @@ public final class SelectionOutline implements Technique {
 
     @AllowAllocation("building the graph, when it changes")
     private void buildPasses(GraphBuilder g, int mode, java.util.function.Supplier<Style> style) {
-        Image color = g.modify(Keys.SCENE_COLOR);
         int width = view.width();
         int height = view.height();
         Image shownIds = g.optional(Keys.VISIBILITY_IDS);
+        ownIds = shownIds == null;
+        if (ownIds && !highlights.any()) {
+            return; // a forward view with nothing highlighted: no ID draw, no passes
+        }
+        Image color = g.modify(Keys.SCENE_COLOR);
         if (shownIds == null) {
             shownIds = g.request(new SceneDraw(geometry, ids, null, SurfaceOutput.ids(), depthFormat, width, height,
                 (occlusion != null ? occlusion : g.setting(RenderSettings.OCCLUSION)) && ids.options().occlusion()))
                 .color();
         }
-        int words = (int) buildVersion();
+        int words = (int) Math.abs(buildVersion());
         if (flags == null || flagWords < words) {
             if (flags != null) {
                 outgrown.add(flags);
@@ -248,6 +260,9 @@ public final class SelectionOutline implements Technique {
         Image shown = shownIds;
         g.pass("selection mask").read(shown, Access.STORAGE_READ).write(mask, Access.STORAGE_WRITE).record(ctx -> {
             upload();
+            if (!highlights.any()) {
+                return; // nothing highlighted this frame: nothing to mask
+            }
             int w = ctx.regionWidth(color);
             int h = ctx.regionHeight(color);
             ctx.dispatch(maskProgram, maskPush.flags(flags.deviceAddress()).ids(ctx.storage(shown))
@@ -255,6 +270,9 @@ public final class SelectionOutline implements Technique {
                 1);
         });
         g.pass("selection outline").read(mask, Access.STORAGE_READ).write(color, Access.STORAGE_WRITE).record(ctx -> {
+            if (!highlights.any()) {
+                return; // the colour stays as it is
+            }
             Style s = style.get();
             int w = ctx.regionWidth(color);
             int h = ctx.regionHeight(color);
