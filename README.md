@@ -322,9 +322,13 @@ Capture capture = input.capture(one, JUMP);   // the next input becomes a bindin
   image with a bindless slot a material samples (lit and fogged like the scene), again only when its UI changed;
   `DIRECT` draws its primitives after the opaque scene through a panel-to-clip matrix made in doubles relative to the
   camera, depth tested, MTSDF coverage worked out in the panel's pixels. Multiview (VR) direct drawing is not built.
-- **Gizmo occlusion** (`DepthOcclusion`, ui-gizmo's `GizmoOcclusion`): one level of the scene depth's farthest-depth
-  pyramid read back with the camera that drew it (`ui.gizmo.depthLevel`); a gizmo point behind every surface over its
-  block is faded. A frame or more old, never waited for.
+- **Gizmo occlusion** (`Gizmo.depthTest(true)`, ui-core's `Primitive.FLAG_DEPTH`): a depth tested gizmo records its
+  handles' lines, triangles and dots with their view depths; the UI pass reads the view's `Keys.SCENE_DEPTH` of the
+  same frame (after transparency, its render region mapped onto the UI's image) and fades each pixel of a handle the
+  scene is nearer than (times the theme's `gizmo-occluded`), the depth made view depth by `GpuUiRenderer.depthCamera`
+  (the plugin sets the scene bridge's camera). Exact per pixel, no frame of delay, also where an occluder moved this
+  frame; `ui.gizmo.depthBias` (1e-4, relative) keeps a handle lying on a surface visible. Gizmos of a camera view use
+  ui-gizmo's CPU `GizmoOcclusion` (`RayOcclusion`, by boxes) instead.
 - **GPU picking** (`GpuPicking`, opt-in): the visibility buffer's IDs (`Keys.VISIBILITY_IDS`) read under the
   pointers by one dispatch and read back, a frame or more late; for skinned, morphed, displaced and alpha-tested
   surfaces. At 100,489 instances, 1920 x 1080 (RX 9070 XT, 2026-11-04, with other builds running): the pick costs

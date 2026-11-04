@@ -14,6 +14,12 @@
 //
 // One draw per layer runs fragmentMain, which branches on the kind (the "uber" path); the per-kind path draws runs of
 // one kind with that kind's own fragment entry point (boxMain, glyphMain, ...), in list order.
+//
+// Depth tested primitives (FLAG_DEPTH: a gizmo's handles, projections of 3D shapes) are faded per pixel where the
+// scene drawn under the UI in this frame is nearer (design UI26): their view depth at the pixel (interpolated from
+// their corners', ui/primitive.slang) against the scene depth's texel under it (reverse depth turned into a view depth
+// by the camera's projection), their colour times their occluded opacity where behind. The view's depth is read in the
+// same frame it was drawn: no delay, exact where an occluder moved.
 import bindless;
 import ui.primitive;
 
@@ -31,6 +37,14 @@ struct UiPush
     float originX;      // the UI pixel at the image's top left: 0, or a docking OS window's region
     float originY;
     float* world;       // a world panel drawn in the 3D view: 16 floats, its pixels to clip space (column-major)
+    uint depth;         // the scene depth's sampled slot plus 1, 0 for none (depth tested primitives draw unfaded)
+    float depthScaleX;  // its texels per pixel of the image (its render region over the image's size)
+    float depthScaleY;
+    uint depthMaxX;     // its render region's last texel
+    uint depthMaxY;
+    float depthNear;    // under perspective: the near plane (reverse depth, infinite far: view depth = near / depth)
+    float depthRange;   // under an orthographic view: its depth range (view depth = (1 - depth) * range); else 0
+    float depthBias;    // how much farther than the scene (relative) a primitive must be to be hidden
 };
 
 [[vk::push_constant]]
@@ -514,6 +528,74 @@ float2 ownCoordinates(float2 px, uint header, Transform t)
     return (px - t.offset) / t.scale - clipOffset(header);
 }
 
+// ---------------------------------------------------------------------------------------------------- depth tests
+
+/** The view depth of the scene drawn under image pixel `position` (infinite where nothing is). */
+float sceneDepth(float2 position)
+{
+    uint2 texel = min(uint2(position * float2(push.depthScaleX, push.depthScaleY)),
+        uint2(push.depthMaxX, push.depthMaxY));
+    float d = textures[push.depth - 1].Load(int3(texel, 0)).r;
+    if (push.depthRange > 0)
+    {
+        return (1 - d) * push.depthRange;
+    }
+    return d > 0 ? push.depthNear / d : asfloat(0x7f800000u);
+}
+
+/**
+ * The view depth of depth tested primitive `p` (of kind `kind`) at `px`, in its own coordinates: a box's one depth;
+ * along a line its ends' at the pixel's projection onto it, clamped to it; over a triangle its corners' by barycentric
+ * weights. Under perspective the reciprocals are interpolated (what is linear on the screen), else the depths.
+ */
+float primitiveDepth(uint* p, uint kind, float2 px)
+{
+    float za = asfloat(p[DEPTH] & ~0xffu);
+    bool orthographic = push.depthRange > 0;
+    if (kind == LINE)
+    {
+        float zb = word(p, DEPTH_B);
+        float2 a = float2(word(p, X0), word(p, Y0));
+        float2 d = float2(word(p, X1), word(p, Y1)) - a;
+        float t = saturate(dot(px - a, d) / max(dot(d, d), 1e-12));
+        return orthographic ? lerp(za, zb, t) : 1 / lerp(1 / za, 1 / zb, t);
+    }
+    if (kind == TRIANGLE)
+    {
+        float2 r = halves(p[DEPTH_B]);
+        float zb = za * (1 + r.x);
+        float zc = za * (1 + r.y);
+        float2 a = float2(word(p, XA), word(p, YA));
+        float2 ab = float2(word(p, XB), word(p, YB)) - a;
+        float2 ac = float2(word(p, XC), word(p, YC)) - a;
+        float area = ab.x * ac.y - ab.y * ac.x;
+        if (area == 0)
+        {
+            return za;
+        }
+        float2 q = px - a;
+        float wb = (q.x * ac.y - q.y * ac.x) / area;
+        float wc = (ab.x * q.y - ab.y * q.x) / area;
+        float wa = 1 - wb - wc;
+        return orthographic ? wa * za + wb * zb + wc * zc : 1 / (wa / za + wb / zb + wc / zc);
+    }
+    return za;
+}
+
+/**
+ * What primitive `p`'s colour is multiplied by at image pixel `position` (`px` in its own coordinates): its occluded
+ * opacity where it is depth tested and the scene is nearer, else 1.
+ */
+float depthTest(uint* p, uint header, float2 px, float2 position)
+{
+    if (((header >> 8) & FLAG_DEPTH) == 0 || push.depth == 0)
+    {
+        return 1;
+    }
+    float z = primitiveDepth(p, header & 0xff, px);
+    return z > sceneDepth(position) * (1 + push.depthBias) ? float(p[DEPTH] & 0xffu) / 255.0 : 1;
+}
+
 // ----------------------------------------------------------------------------------------------- fragments, uber path
 
 [shader("fragment")]
@@ -553,7 +635,7 @@ float4 fragmentMain(VertexOut in) : SV_Target
         c = float4(0, 0, 0, 0);
         break;
     }
-    return c * (t.opacity * clipped(header, px));
+    return c * (t.opacity * clipped(header, px) * depthTest(p, header, local, in.position.xy));
 }
 
 // ------------------------------------------------------------------------------------------ fragments, per-kind path
@@ -565,7 +647,9 @@ float4 boxMain(VertexOut in) : SV_Target
     uint header = p[HEADER];
     Transform t = transformAt(p[TRANSFORM]);
     float2 px = uiPixel(in.position);
-    return box(p, header, ownCoordinates(px, header, t), t.scale) * (t.opacity * clipped(header, px));
+    float2 local = ownCoordinates(px, header, t);
+    return box(p, header, local, t.scale) * (t.opacity * clipped(header, px) * depthTest(p, header, local,
+        in.position.xy));
 }
 
 [shader("fragment")]
@@ -615,7 +699,9 @@ float4 lineMain(VertexOut in) : SV_Target
     uint header = p[HEADER];
     Transform t = transformAt(p[TRANSFORM]);
     float2 px = uiPixel(in.position);
-    return segment(p, ownCoordinates(px, header, t), t.scale) * (t.opacity * clipped(header, px));
+    float2 local = ownCoordinates(px, header, t);
+    return segment(p, local, t.scale) * (t.opacity * clipped(header, px) * depthTest(p, header, local,
+        in.position.xy));
 }
 
 [shader("fragment")]
@@ -625,14 +711,16 @@ float4 triangleMain(VertexOut in) : SV_Target
     uint header = p[HEADER];
     Transform t = transformAt(p[TRANSFORM]);
     float2 px = uiPixel(in.position);
-    return triangle(p, header, ownCoordinates(px, header, t), t.scale) * (t.opacity * clipped(header, px));
+    float2 local = ownCoordinates(px, header, t);
+    return triangle(p, header, local, t.scale) * (t.opacity * clipped(header, px) * depthTest(p, header, local,
+        in.position.xy));
 }
 
 // ------------------------------------------------------------------------------------------------------ world panels
 // A world panel's UI drawn directly in the 3D view (engine-ui's WorldPanelRenderer, design UI12): the primitives
 // placed as for the screen (in the panel's pixels: origin 0, toClip 2 / its size), then carried into the view by the
 // push's world matrix (panel pixel to clip space, made on the CPU relative to the camera); depth tested against the
-// scene. Coverage is worked out in the panel's pixels, the pixel's footprint there (fwidth) turning distances into
+// scene (its depth tested primitives are not: no depth is bound). Coverage is worked out in the panel's pixels, the pixel's footprint there (fwidth) turning distances into
 // screen pixels, so text (MTSDF) stays sharp at any angle and distance.
 
 struct WorldOut

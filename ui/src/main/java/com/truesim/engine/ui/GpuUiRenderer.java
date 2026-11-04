@@ -34,7 +34,10 @@ import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.graph.ViewPort;
+import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.Keys;
+import com.truesim.engine.settings.EngineSettings;
+import com.truesim.engine.settings.Setting;
 import com.truesim.engine.ui.layout.UiPush;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.FrameBuffer;
@@ -92,6 +95,15 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  * ui.submit(layers, layerCount, textures, width, height);
  * }</pre>
  *
+ * <p><b>Depth tested primitives</b> (ui-core's {@code Primitive.FLAG_DEPTH}: a gizmo's handles, {@code
+ * Gizmo.depthTest}) are faded per pixel where the view's scene depth ({@link Keys#SCENE_DEPTH}, read in the same frame
+ * after everything that writes it, where the view has one) is nearer than they are, their colour times their occluded
+ * opacity there: exact, with no frame of delay, also where an occluder moved this frame. The depth is turned into view
+ * depths by the projection of {@link #depthCamera}, the camera the view's scene is drawn through (the {@code UiPlugin}
+ * sets it from its scene bridge's); without one, or without a scene depth, they draw unfaded. Its render region maps
+ * onto the UI's image by its share of the view (dynamic resolution included); {@link #DEPTH_BIAS} keeps a handle lying
+ * on a surface visible.
+ *
  * <p><b>Several views of one UI.</b> A UI shown in several windows (docking's OS windows each show a region of it)
  * uploads once: {@link #share()} makes a renderer for another view that draws this one's buffers and textures (one
  * device, one upload, several presenter targets), at its own {@link #origin} (the UI pixel at its image's top left)
@@ -118,6 +130,13 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         ADAPTIVE
     }
 
+    /**
+     * How much farther than the scene (relative to its depth) a depth tested primitive must be to be faded: 1e-4 is
+     * 1 mm at 10 m, which keeps a handle lying on a surface from flickering.
+     */
+    public static final Setting<Float> DEPTH_BIAS = Setting.decimal("ui.gizmo.depthBias", 1e-4f, 0, 0.1f,
+        "how much farther than the scene (relative) a gizmo's part must be to be faded as hidden");
+
     /** The shortest run of one kind {@link Batching#ADAPTIVE} draws with its kind's own shader. */
     public static final int LONG_RUN = 256;
 
@@ -139,6 +158,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     private float originX;
     private float originY;
     private volatile Batching batching = Batching.ADAPTIVE;
+    private volatile Camera depthCamera;
 
     // Per layer: the list last submitted, its buffers, and what was drawn of it.
     private DrawList[] lists = new DrawList[0];
@@ -249,6 +269,20 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     /** The UI pixel at its image's top left. */
     public float originY() {
         return originY;
+    }
+
+    /**
+     * The camera the view's scene depth is drawn through (null: none), whose projection turns that depth into the view
+     * depths depth tested primitives are compared with; read as each frame records. Returns this.
+     */
+    public GpuUiRenderer depthCamera(Camera camera) {
+        depthCamera = camera;
+        return this;
+    }
+
+    /** The camera the view's scene depth is drawn through, or null. */
+    public Camera depthCamera() {
+        return depthCamera;
     }
 
     private Pipeline pipeline(ShaderModule shaders, String fragment) {
@@ -687,14 +721,47 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         Image image = g.unscaled(g.create("ui", ImageDesc.of(Format.R16G16B16A16_SFLOAT, imageWidth, imageHeight)));
         UiPush push = new UiPush();
         GraphBuilder.PassBuilder pass = g.pass("ui").attach(image, Clear.color(0, 0, 0, 0));
+        Image depth = view == null ? null : g.optional(Keys.SCENE_DEPTH); // as this frame's scene left it
+        if (depth != null) {
+            pass.read(depth, com.truesim.engine.graph.Access.SAMPLED_FRAGMENT);
+        }
+        EngineSettings settings = g.settings();
         GpuUiRenderer data = source != null ? source : this;
         for (com.truesim.engine.graph.Texture t : data.bound) {
             if (t != null) {
                 pass.read(g.texture(t), com.truesim.engine.graph.Access.SAMPLED_FRAGMENT); // after its view's copy
             }
         }
-        pass.record(ctx -> draw(ctx, push, imageWidth, imageHeight));
+        pass.record(ctx -> {
+            depth(ctx, push, depth, settings, imageWidth, imageHeight);
+            draw(ctx, push, imageWidth, imageHeight);
+        });
         g.provide(Keys.UI, image);
+    }
+
+    /**
+     * Sets {@code push}'s scene depth: {@code depth}'s slot, its render region's share of the UI's image, the
+     * projection turning it into view depths; none without a depth or a camera.
+     */
+    private void depth(PassContext ctx, UiPush push, Image depth, EngineSettings settings, int imageWidth,
+        int imageHeight) {
+        Camera camera = depthCamera;
+        if (depth == null || camera == null) {
+            push.depth(0);
+            return;
+        }
+        int regionWidth = ctx.regionWidth(depth);
+        int regionHeight = ctx.regionHeight(depth);
+        float range = 0;
+        if (camera.orthographic()) {
+            // reverse depth 1 - distance / range: the depth row of the view-projection is back / range
+            float[] m = camera.viewProjection();
+            range = (float) (1 / Math.sqrt(m[2] * m[2] + m[6] * m[6] + m[10] * m[10]));
+        }
+        push.depth(ctx.sampled(depth) + 1).depthScaleX((float) regionWidth / imageWidth)
+            .depthScaleY((float) regionHeight / imageHeight).depthMaxX(Math.max(0, regionWidth - 1))
+            .depthMaxY(Math.max(0, regionHeight - 1)).depthNear((float) camera.near()).depthRange(range)
+            .depthBias(settings.get(DEPTH_BIAS));
     }
 
     /** Draws the layers submitted last, back to front. */

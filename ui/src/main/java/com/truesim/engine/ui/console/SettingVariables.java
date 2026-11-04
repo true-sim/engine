@@ -70,7 +70,7 @@ public final class SettingVariables implements ConsoleVariables {
                 case INTEGER -> Kind.INTEGER;
                 case DECIMAL -> Kind.DECIMAL;
                 case TEXT -> Kind.TEXT;
-                case CHOICE -> Kind.CHOICE;
+                case CHOICE, TECHNIQUE -> Kind.CHOICE; // a technique slot: a choice of the kinds registered
             };
         }
 

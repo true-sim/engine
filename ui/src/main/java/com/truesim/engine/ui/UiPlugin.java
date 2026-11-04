@@ -154,8 +154,7 @@ public final class UiPlugin implements Plugin {
                 SettingGroup group = SettingGroup.root("ui", "settings.ui", 45);
                 registry.add(group, UiCommands.ALL.toArray(new Setting<?>[0]));
                 registry.add(group, VirtualCursor.ALL.toArray(new Setting<?>[0]));
-                registry.add(group, com.truesim.engine.ui.scene.UiScene.FAR,
-                    com.truesim.engine.ui.scene.DepthOcclusion.LEVEL);
+                registry.add(group, com.truesim.engine.ui.scene.UiScene.FAR, GpuUiRenderer.DEPTH_BIAS);
                 settings = startup.settings();
                 this.registry = registry;
                 this.group = group;
@@ -395,6 +394,7 @@ public final class UiPlugin implements Plugin {
         int height = view.height();
         if (scene != null) {
             scene.update(width, height);
+            renderer.depthCamera(scene.camera()); // depth tested gizmos fade by the depth it draws
         } else {
             ui.update(width, height);
         }

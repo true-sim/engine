@@ -24,6 +24,13 @@ public static const uint KINDS = 8;
 public static const uint FLAG_GRADIENT = 1;
 public static const uint FLAG_RASTER = 2;
 public static const uint FLAG_COLOR = 4;
+/**
+ * Flag of a solid BOX, a LINE or a TRIANGLE: depth tested against the scene drawn under the UI (a gizmo's handle). Word
+ * DEPTH holds its view depth (distance along the view's forward axis) at its first corner as a float whose low 8 mantissa
+ * bits are its occluded opacity (unorm8); word DEPTH_B a line's depth at its second end (a float) or a triangle's depths
+ * at b and c over a's, minus 1 (two halves). Where the scene is nearer, its colour is times the occluded opacity.
+ */
+public static const uint FLAG_DEPTH = 128;
 
 /**
  * Flags of a TRIANGLE (header bits 8-15): which of its edges are anti-aliased (a shape's outline); the others are hard,
@@ -60,6 +67,9 @@ public static const uint XB = 11;
 public static const uint YB = 12;
 public static const uint XC = 13;
 public static const uint YC = 14;
+/** A depth tested primitive's depth words (colour B's, which its kinds do not use otherwise). */
+public static const uint DEPTH = 7;
+public static const uint DEPTH_B = 8;
 
 /**
  * Floats per clip record (ui-core's DrawList.CLIP_FLOATS): x0, y0, x1, y1, corner radius (in the space of its

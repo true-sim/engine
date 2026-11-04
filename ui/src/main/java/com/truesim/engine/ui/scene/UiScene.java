@@ -158,10 +158,15 @@ public final class UiScene {
     }
 
     /**
-     * The frame's second phase, in place of {@code ui.update}: the UI and its world panels updated, the panels' draw
-     * lists handed to their renderer.
+     * The frame's second phase, in place of {@code ui.update}: the main view set again from the camera (the game may
+     * have moved it in its update: what the UI draws over the scene, gizmos and their depths, is projected by the
+     * camera that draws the scene this frame), the UI and its world panels updated, the panels' draw lists handed to
+     * their renderer.
      */
     public void update(float width, float height) {
+        if (camera != null) {
+            camera.follow(0, 0, width, height, far);
+        }
         picking.update(width, height);
         if (panels != null) {
             panels.submit();
