@@ -12,14 +12,14 @@ dependencies {
     implementation("com.truesim.scene:scene-gltf:0.64.1")
     // The UI gallery (UiGallery): the engine's UI over the galleries of ui's test fixtures
     implementation(project(":engine-ui"))
-    implementation("com.truesim.ui:ui-charts:0.8.0")
-    implementation("com.truesim.ui:ui-text-native:0.8.0")
-    implementation("com.truesim.ui:ui-fonts-cjk:0.8.0")
-    implementation("com.truesim.ui:ui-fonts-emoji:0.8.0")
-    implementation(testFixtures("com.truesim.ui:ui-controls:0.8.0"))
-    implementation(testFixtures("com.truesim.ui:ui-charts:0.8.0"))
-    implementation(testFixtures("com.truesim.ui:ui-props:0.8.0"))
-    implementation(testFixtures("com.truesim.ui:ui-profiler:0.8.0"))
+    implementation("com.truesim.ui:ui-charts:0.9.0")
+    implementation("com.truesim.ui:ui-text-native:0.9.0")
+    implementation("com.truesim.ui:ui-fonts-cjk:0.9.0")
+    implementation("com.truesim.ui:ui-fonts-emoji:0.9.0")
+    implementation(testFixtures("com.truesim.ui:ui-controls:0.9.0"))
+    implementation(testFixtures("com.truesim.ui:ui-charts:0.9.0"))
+    implementation(testFixtures("com.truesim.ui:ui-props:0.9.0"))
+    implementation(testFixtures("com.truesim.ui:ui-profiler:0.9.0"))
     testImplementation("org.lwjgl:lwjgl-sdl") // the gallery's test pushes mouse and key events through SDL
 }
 

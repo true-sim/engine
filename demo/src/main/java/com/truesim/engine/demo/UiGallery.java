@@ -124,6 +124,7 @@ public final class UiGallery implements Application {
     final List<Page> pages = new ArrayList<>();
     int current = -1;
     private ImmGallery imm;
+    PropsGallery props; // the property panels' gallery (its squad and panel)
     private long started;
     // the orbit camera
     private double targetX;
@@ -379,7 +380,7 @@ public final class UiGallery implements Application {
         page("Data", () -> DataGallery.build(ui));
         page("Files", () -> FilesGallery.build(ui));
         page("Charts", () -> ChartsGallery.build(ui));
-        page("Props", () -> PropsGallery.build(new Controls(ui), ui.root()));
+        page("Props", () -> props = PropsGallery.build(new Controls(ui), ui.root()));
         Page con = page("Console", () -> text("The developer console over the engine's settings and log: "
             + "` (backquote) opens and closes it. Try help, render.selection, profiler.overlay true."));
         con.shown = () -> console.console().open(true);
@@ -494,6 +495,17 @@ public final class UiGallery implements Application {
         }
         pages.add(page);
         return page;
+    }
+
+    /**
+     * Takes docking's OS windows off the mouse: each event is then placed by its own position, not by the system
+     * cursor (a test pushing events, where no real cursor follows them).
+     */
+    void mouseByEventsOnly() {
+        UiOsWindows os = uiPlugin.osWindows();
+        if (os != null) {
+            os.host(null);
+        }
     }
 
     void show(int index) {

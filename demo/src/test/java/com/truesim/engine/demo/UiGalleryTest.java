@@ -61,6 +61,7 @@ class UiGalleryTest {
         }
         try (Engine running = engine) {
             window = app.world.window.id();
+            onScreen();
             // what the window shows at each step, as PNGs: build/gallery-shots
             for (var target : engine.get(com.truesim.engine.graph.Rendering.KEY).presenter().targets()) {
                 if (target.view() == app.world.port) {
@@ -168,6 +169,7 @@ class UiGalleryTest {
         }
         try (Engine running = engine) {
             window = app.world.window.id();
+            onScreen();
             for (int i = 0; i < 2000 && app.world.assets.get(GalleryWorld.ROCK) == null; i++) {
                 engine.step();
             }
@@ -246,6 +248,7 @@ class UiGalleryTest {
         }
         try (Engine running = engine) {
             window = app.world.window.id();
+            onScreen();
             frames(20);
             var ui = app.scene.ui();
             int pages = app.pages.size();
@@ -291,6 +294,7 @@ class UiGalleryTest {
         }
         try (Engine running = engine) {
             window = app.world.window.id();
+            onScreen();
             var ui = app.scene.ui();
             int charts = 0;
             while (!app.pages.get(charts).name.equals("Charts")) {
@@ -376,6 +380,68 @@ class UiGalleryTest {
         shot(name);
     }
 
+    @Test
+    void reorderingThePropsPagesOrdersWithItsArrowKeepsEveryBindingWorking() {
+        // the gallery crashed (a Hold cast to a Move) after the down arrow moved a Move below a Hold on this page
+        app = new UiGallery(0, false);
+        try {
+            engine = Engine.create(app);
+        } catch (RuntimeException | UnsatisfiedLinkError e) { // StartupFailure, no display or no presentation (CI)
+            assumeThat(e).as("no window or GPU: " + e).isNull();
+            throw e;
+        }
+        try (Engine running = engine) {
+            window = app.world.window.id();
+            onScreen();
+            var ui = app.scene.ui();
+            int props = 0;
+            while (!app.pages.get(props).name.equals("Props")) {
+                props++;
+            }
+            app.show(props);
+            frames(20);
+            var orders = (com.truesim.ui.props.CollectionEditor) app.props.panel.row("orders").editor();
+            assertThat(app.props.squad.get().orders()).extracting(o -> o.getClass().getSimpleName())
+                .containsExactly("Move", "Hold");
+            com.truesim.ui.core.Element down = opButton(orders.element(), "down");
+            assertThat(down).as("the first order's down arrow").isNotNull();
+            app.pages.get(props).pane.reveal(down); // scrolled into view, as a user would
+            frames(5);
+            float x = ui.layout().x(down.slot()) + ui.layout().width(down.slot()) / 2;
+            float y = ui.layout().y(down.slot()) + ui.layout().height(down.slot()) / 2;
+            move(x, y, false);
+            frames(2);
+            press(x, y);
+            release(x, y);
+            frames(5);
+            assertThat(app.props.squad.get().orders()).extracting(o -> o.getClass().getSimpleName())
+                .as("moved down").containsExactly("Hold", "Move");
+            assertThat(ui.bindings().broken()).as("no binding read an item of another type").isZero();
+            // and back, by code around the editor
+            orders.row().model().set(java.util.List.of(app.props.squad.get().orders().get(1),
+                app.props.squad.get().orders().get(0)));
+            frames(5);
+            assertThat(ui.bindings().broken()).isZero();
+        } finally {
+            event.free();
+        }
+    }
+
+    /** The first {@code op} button (a collection operation) under {@code e}, depth first. */
+    private static com.truesim.ui.core.Element opButton(com.truesim.ui.core.Element e, String op) {
+        var s = e.store();
+        if ("button".equals(e.type()) && op.equals(e.id()) && "props-op".equals(e.style())) {
+            return e;
+        }
+        for (int c = s.firstChild(e.slot()); c != com.truesim.ui.core.UiStore.NONE; c = s.nextSibling(c)) {
+            com.truesim.ui.core.Element found = opButton(s.element(c), op);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
+    }
+
     private void wheel(float x, float y, float notches) {
         push(SDL_EVENT_MOUSE_WHEEL);
         long e = event.address();
@@ -399,6 +465,15 @@ class UiGalleryTest {
             right = !right;
         }
         return path;
+    }
+
+    /**
+     * Drives the mouse by the pushed events alone: docking's OS windows map the mouse by the system cursor, which a
+     * person's own mouse, a window past the display's edge or a driver without a cursor puts elsewhere.
+     */
+    private void onScreen() {
+        app.mouseByEventsOnly(); // the pushed events place the mouse, not a system cursor (none on CI's drivers)
+        frames(3);
     }
 
     /** Rocks whose middle is on screen, clear of the UI, under the pointer first: nearest the camera first. */
