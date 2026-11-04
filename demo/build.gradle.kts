@@ -68,7 +68,7 @@ tasks.register<JavaExec>("stereoBench") {
 
 // Hitches while content streams (StreamBench): ./gradlew :engine-demo:streamBench
 // [--args=window]: the same fly-over in a window with the profiler (F3, Shift+F3), until closed or -Pseconds=n
-// -Prange=n: cells in range each way (default 3, the window 10)
+// -Prange=n: cells in range each way (default 3, the window 10); -Pspeed=n: metres a second (10, the window 60)
 tasks.register<JavaExec>("streamBench") {
     group = "application"
     description = "Streams cells of meshes, textures and materials while frames run, and reports frame times."
@@ -78,6 +78,7 @@ tasks.register<JavaExec>("streamBench") {
     providers.gradleProperty("jfr").orNull?.let { jvmArgs("-XX:StartFlightRecording=filename=$it,settings=profile") }
     providers.gradleProperty("seconds").orNull?.let { systemProperty("truesim.demo.seconds", it) }
     providers.gradleProperty("range").orNull?.let { systemProperty("truesim.demo.range", it) } // cells each way
+    providers.gradleProperty("speed").orNull?.let { systemProperty("truesim.demo.speed", it) } // metres a second
 }
 
 // The effects showcase (Showcase): ./gradlew :engine-demo:showcase -Pcrowd=<path to Fox.gltf> [--args=measure]

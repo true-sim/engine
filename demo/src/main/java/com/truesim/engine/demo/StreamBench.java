@@ -67,7 +67,9 @@ public final class StreamBench {
     static final int WINDOW_RANGE = 10; // the window's default: 21 x 21 cells, the ground 250 m ahead
     static int range = RANGE;
     static int groundMaterial; // the small cells' ground tiles'
-    static final double SPEED = 10; // units per second
+    static final double SPEED = 10; // metres a second: the benchmark's default (-Pspeed=n)
+    static final double WINDOW_SPEED = 60; // the window's default: 2.5 cells a second
+    static double speed = SPEED;
     private static final int MESHES_PER_CELL = 3;
     private static final int INSTANCES_PER_CELL = 40;
 
@@ -79,6 +81,7 @@ public final class StreamBench {
         int texture = -1;
         int[] materials = new int[0];
         int[] instances = new int[0];
+        volatile boolean dropped; // the window's: left range before its build began, so the build is skipped
 
         Cell(long key) {
             this.key = key;
@@ -220,7 +223,7 @@ public final class StreamBench {
                 }
                 long start = System.nanoTime();
                 next = Math.max(next + BUDGET, start);
-                double x = f * SPEED / 90.0;
+                double x = f * speed / 90.0;
                 fly(camera, x, WIDTH, HEIGHT);
                 int builds = graph.builds();
                 int[] added = {0};
@@ -271,7 +274,7 @@ public final class StreamBench {
             device.waitIdle();
             long placed = cells.values().stream().filter(c -> c.building == null).count();
             System.out.println("Cells in range " + cells.size() + ", placed " + placed + ", meshes "
-                + pool.meshCount() + ", camera x " + (FRAMES * SPEED / 90.0));
+                + pool.meshCount() + ", camera x " + (FRAMES * speed / 90.0));
             report(frames, pool, textures, materials);
             for (Cell cell : cells.values()) {
                 if (cell.building == null) {
@@ -302,31 +305,43 @@ public final class StreamBench {
         inFrame = args.contains("inframe");
         grow = args.contains("grow");
         range = Integer.getInteger("truesim.demo.range", args.contains("window") ? WINDOW_RANGE : RANGE);
+        speed = Double.parseDouble(System.getProperty("truesim.demo.speed",
+            String.valueOf(args.contains("window") ? WINDOW_SPEED : SPEED)));
+        if (!(speed > 0)) {
+            throw new IllegalArgumentException("speed " + speed + ": metres a second, more than 0");
+        }
         if (range < 1) {
             throw new IllegalArgumentException("range " + range + ": at least 1 cell each way");
         }
     }
 
-    /** How many times the benchmark's default cells the range keeps (a column more while one leaves). */
-    private static int scale() {
-        return Math.max(1, ((2 * range + 2) * (2 * range + 1) + 55) / 56);
+    /** The most cells the range keeps: a column more while one leaves. */
+    private static int cells() {
+        return (2 * range + 2) * (2 * range + 1);
     }
 
     /** Instances to start with: every cell in range, its ground tile and rocks; the default's 8192 at least. */
     static int instanceCapacity() {
-        return Math.max(8192, (2 * range + 2) * (2 * range + 1) * (INSTANCES_PER_CELL + 1) + 1);
+        return Math.max(8192, cells() * (INSTANCES_PER_CELL + 1) + 1);
     }
 
-    /** Materials to start with: two a cell in range. */
+    /** Materials to start with: two a cell in range; the default's 1024 at least. */
     static int materialCapacity() {
-        return 1024 * scale();
+        return Math.max(1024, cells() * 2 + 16);
     }
 
-    /** The geometry pool's capacity for the options. */
+    /**
+     * The geometry pool's capacity for the options: the default's, or room for every cell in range where that is more
+     * (about 6,000 vertices a small cell, 70,000 a large one, 150,000 a heavy one, with a third to spare); it grows
+     * past that if it must.
+     */
     static GeometryPool.Capacity capacity() {
-        int k = scale();
-        return grow ? GeometryPool.START : large ? GeometryPool.Capacity.of((1 << 24) * k, (1 << 20) * k, 512 * k)
-            : GeometryPool.Capacity.of((1 << 22) * k, (1 << 17) * k, 512 * k);
+        if (grow) {
+            return GeometryPool.START;
+        }
+        long perCell = heavy ? 200_000 : large ? 95_000 : 8_000;
+        int vertices = (int) Math.min(1 << 30, Math.max(large ? 1 << 24 : 1 << 22, perCell * cells()));
+        return GeometryPool.Capacity.of(vertices, vertices / (large ? 16 : 32), Math.max(512, cells() * 4 + 64));
     }
 
     /** The camera over the cells at {@code x} along the flight (both modes fly the same path). */

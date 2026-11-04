@@ -70,8 +70,10 @@ import java.util.concurrent.TimeUnit;
  * {@code -Pseconds=n}. {@code ./gradlew :engine-demo:streamBench --args=window} (with rays, large, heavy, direct,
  * inframe or grow as the benchmark takes them).
  *
- * <p>The camera follows real time ({@code x = seconds * SPEED}, which the benchmark's {@code frame * SPEED / 90} is at
- * 90 Hz). Per frame it allocates nothing: the cells are an indexed list searched by key, the range is arithmetic, and
+ * <p>Speed ({@code -Pspeed=n} metres a second, 60 by default against the benchmark's 10) changes live with + and -
+ * (the keypad's too), and Space pauses: the {@code stream} actions ({@link StreamActions}), rebindable as any. The
+ * camera follows real time ({@code x} advances by the speed times the frame's real delta, as the benchmark's
+ * {@code frame * speed / 90} does at 90 Hz). Per frame it allocates nothing: the cells are an indexed list searched by key, the range is arithmetic, and
  * the line is rewritten in place once a second; cells coming into range allocate their content, as they do headless.
  */
 final class StreamWindow implements Application, PlatformListener {
@@ -92,6 +94,10 @@ final class StreamWindow implements Application, PlatformListener {
     private Element line;
     private final StringBuilder text = new StringBuilder(160);
     private long started = -1;
+    private com.truesim.engine.input.Player player;
+    private double speed = StreamBench.speed;
+    private boolean paused;
+    private double x;
     private long counted;
     private int meshesAdded;
     private int meshesRemoved;
@@ -110,7 +116,7 @@ final class StreamWindow implements Application, PlatformListener {
     @Override
     public void configure(AppConfig app) {
         app.id("truesim-stream").name("true-sim stream")
-            .use(new Desktop(), new Input(), new Rendering(), new Profiling(), stream,
+            .use(new Desktop(), new Input().add(StreamActions.STREAM), new Rendering(), new Profiling(), stream,
                 new UiPlugin(StreamWindow::ui).view("main"));
     }
 
@@ -131,6 +137,7 @@ final class StreamWindow implements Application, PlatformListener {
     public void start(Engine started) {
         engine = started;
         engine.get(Desktop.KEY).listen(this);
+        player = engine.get(Input.KEY).player(0);
         UiPlugin uiPlugin = engine.get(UiPlugin.KEY);
         uiPlugin.profiler();
         engine.settings().set(ProfilerSettings.OVERLAY, true);
@@ -139,8 +146,8 @@ final class StreamWindow implements Application, PlatformListener {
         ui.layerStack().get(com.truesim.ui.core.Layers.HUD).root().add(ui.panel("stream-hud").add(line));
         System.out.println("GPU: " + engine.get(Rendering.KEY).device().gpu().name());
         System.out.println("""
-            Keys: F3 the frame graph overlay (on), Shift+F3 the detailed profiler (wheel zooms, drag pans).
-            Close the window to stop.""");
+            Keys: F3 the frame graph overlay (on), Shift+F3 the detailed profiler (wheel zooms, drag pans),
+            + and - faster and slower, Space pauses. Close the window to stop.""");
     }
 
     @Override
@@ -153,7 +160,26 @@ final class StreamWindow implements Application, PlatformListener {
         if (seconds > 0 && now - started >= seconds * 1e9) {
             engine.quit();
         }
-        stream.step((now - started) / 1e9);
+        boolean changed = false;
+        if (player.pressed(StreamActions.FASTER)) {
+            speed = Math.min(2000, speed * 1.25);
+            changed = true;
+        }
+        if (player.pressed(StreamActions.SLOWER)) {
+            speed = Math.max(1, speed / 1.25);
+            changed = true;
+        }
+        if (player.pressed(StreamActions.PAUSE)) {
+            paused = !paused;
+            changed = true;
+        }
+        if (!paused) {
+            x += speed * Math.min(0.25, frame.realDelta()); // a long stall moves a quarter second, not a jump
+        }
+        stream.step(x);
+        if (changed) {
+            hud();
+        }
         meshesAdded += stream.meshesAdded;
         meshesRemoved += stream.meshesRemoved;
         texturesAdded += stream.texturesAdded;
@@ -176,7 +202,10 @@ final class StreamWindow implements Application, PlatformListener {
             .append(meshesAdded).append(" -").append(meshesRemoved).append(", textures +").append(texturesAdded)
             .append(" -").append(texturesRemoved).append("   on the GPU: ").append(stream.pool.meshCount())
             .append(" meshes, ").append(stream.textures.count()).append(" textures   x ")
-            .append((int) stream.x).append(" m");
+            .append((int) stream.x).append(" m   speed ").append(Math.round(speed)).append(" m/s");
+        if (paused) {
+            text.append(" (paused)");
+        }
         ui.text(line, text);
     }
 
@@ -192,7 +221,9 @@ final class StreamWindow implements Application, PlatformListener {
     private static final class Stream implements Plugin {
         static final PluginKey<Stream> KEY = PluginKey.of("demo.stream", Stream.class);
 
-        private final ExecutorService builders = Executors.newFixedThreadPool(3);
+        // more builders than the benchmark's 3: fast flights over wide ranges ask for hundreds of cells a second
+        private final ExecutorService builders = Executors.newFixedThreadPool(
+            Math.max(3, Runtime.getRuntime().availableProcessors() / 2));
         private final ArrayList<StreamBench.Cell> cells = new ArrayList<>();
         private final ArrayDeque<Integer> freeIds = new ArrayDeque<>();
         private final int[] added = new int[1];
@@ -269,9 +300,9 @@ final class StreamWindow implements Application, PlatformListener {
             rendering.presenter().outputTransform(new DisplayTransform()).present(port, Keys.SCENE_COLOR, window);
         }
 
-        /** A frame at {@code seconds} into the flight: the camera and the cells streamed as headless. */
-        void step(double seconds) {
-            x = seconds * StreamBench.SPEED;
+        /** A frame at {@code at} metres into the flight: the camera and the cells streamed as headless. */
+        void step(double at) {
+            x = at;
             StreamBench.fly(camera, x, Math.max(1, window.pixelWidth()), Math.max(1, window.pixelHeight()));
             added[0] = 0;
             meshesRemoved = 0;
@@ -285,8 +316,8 @@ final class StreamWindow implements Application, PlatformListener {
                     if (find(key) < 0) {
                         StreamBench.Cell cell = new StreamBench.Cell(key);
                         long cellSeed = seed++;
-                        cell.building = CompletableFuture.supplyAsync(() -> StreamBench.buildMeshes(cellSeed, key),
-                            builders);
+                        cell.building = CompletableFuture.supplyAsync(() -> cell.dropped ? null
+                            : StreamBench.buildMeshes(cellSeed, key), builders);
                         cells.add(cell);
                     }
                 }
@@ -294,8 +325,11 @@ final class StreamWindow implements Application, PlatformListener {
             for (int c = 0; c < cells.size(); c++) {
                 StreamBench.Cell cell = cells.get(c);
                 if (cell.building != null && cell.building.isDone()) {
-                    texturesAdded += StreamBench.place(cell, cell.building.join(), pool, textures, materials, scene,
-                        freeIds, added);
+                    StreamBench.Built built = cell.building.join(); // null: left range before its build began
+                    if (built != null) {
+                        texturesAdded += StreamBench.place(cell, built, pool, textures, materials, scene, freeIds,
+                            added);
+                    }
                     cell.building = null;
                 }
             }
@@ -304,6 +338,9 @@ final class StreamWindow implements Application, PlatformListener {
             for (int c = cells.size() - 1; c >= 0; c--) {
                 StreamBench.Cell cell = cells.get(c);
                 boolean wanted = Math.abs((int) (cell.key >> 32) - cx) <= range && Math.abs((int) cell.key) <= range;
+                if (!wanted && cell.building != null) {
+                    cell.dropped = true; // a build not begun yet is skipped (the flight outran the builders)
+                }
                 if (!wanted && cell.building == null) {
                     texturesRemoved += cell.texture >= 0 ? 1 : 0;
                     meshesRemoved += StreamBench.clear(cell, pool, textures, materials, scene, freeIds);
@@ -329,6 +366,9 @@ final class StreamWindow implements Application, PlatformListener {
 
         @Override
         public void stop() {
+            for (int c = 0; c < cells.size(); c++) {
+                cells.get(c).dropped = true; // builds queued are skipped
+            }
             builders.shutdown(); // the builds started finish (they prepare into the pool), then the pool closes
             try {
                 builders.awaitTermination(60, TimeUnit.SECONDS);
@@ -345,8 +385,10 @@ final class StreamWindow implements Application, PlatformListener {
                     StreamBench.clear(cell, pool, textures, materials, scene, freeIds);
                 } else if (!StreamBench.direct && cell.building.isDone() && !cell.building.isCompletedExceptionally()) {
                     StreamBench.Built unplaced = cell.building.join(); // built but never placed: its prepared content
-                    unplaced.preparedMeshes().forEach(GeometryPool.Prepared::close);
-                    unplaced.preparedTexture().close();
+                    if (unplaced != null) {
+                        unplaced.preparedMeshes().forEach(GeometryPool.Prepared::close);
+                        unplaced.preparedTexture().close();
+                    }
                 }
             }
             device.waitIdle();

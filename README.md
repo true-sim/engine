@@ -2502,10 +2502,11 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
   time per frame includes the frame start, where textures' copies and mip chains are recorded
   (`GpuTimings.frameStartMillis`). `--args=window` (with any of the others, e.g. `--args="window large"`) shows the
   same fly-over, camera path and streaming in a resizable window instead, 10 cells each way (21 x 21, the ground 250
-  m ahead) unless `-Prange` says otherwise, paced by the display, until the window is closed (`-Pseconds=n`: for n
+  m ahead) unless `-Prange` says otherwise, at 60 m/s rather than 10 (`-Pspeed=n` sets either; + and - change it
+  live, Space pauses: the `stream` actions, rebindable in the settings), paced by the display, until the window is closed (`-Pseconds=n`: for n
   seconds), with the profiler's frame graph overlay on (F3 toggles it, Shift+F3 the detailed profiler) and a line at
-  the bottom: cells in range, meshes and textures added and removed in the last second, what is on the GPU; it prints
-  no report.
+  the bottom: cells in range, meshes and textures added and removed in the last second, what is on the GPU, the
+  speed; it prints no report.
 - `./gradlew :engine-demo:stereoBench` times the scene drawn for two eyes at a Quest 3's eye size, offscreen, pass by
   pass and grouped by kind (`--args="visibility"` for the visibility buffer, `-Procks=20000` for more rocks,
   `shared` for one set of shadow cascades, `rebuild` for what rebuilds and resizes cost the render thread, `noshadows`
