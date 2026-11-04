@@ -162,6 +162,12 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
     private int layerCount;
     private int width;
     private int height;
+    // A full-screen box at the bottom (a console's translucent backdrop) cleared to instead of drawn: its colour, the
+    // layer and primitive it is (-1: none), and the version of that layer's list it was found in.
+    private final float[] clearColor = new float[4];
+    private int foldedLayer = -1;
+    private int foldedPrimitive = -1;
+    private volatile boolean foldBackdrop = true;
 
     // Textures: an image and a sampled slot per id, the table naming the slots.
     private UiTextures textures;
@@ -287,6 +293,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             this.width = uiWidth;
             this.height = uiHeight;
             uploaded = 0;
+            fold(source);
             return;
         }
         retiring.release();
@@ -308,6 +315,71 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         this.height = uiHeight;
         uploaded = bytes;
         totalUploaded += bytes;
+        fold(this);
+    }
+
+    /**
+     * Whether a full-screen box at the bottom of the UI (a console's translucent backdrop: the first primitive drawn,
+     * unclipped, a plain fill without radii, border or gradient, covering the region drawn) is cleared to instead of
+     * drawn (true by default): the same pixels, without blending every pixel of the image once more (at 4K, about 0.15
+     * ms on an RX 9070 XT). Off draws it as any other box, for comparison.
+     */
+    public GpuUiRenderer foldBackdrop(boolean fold) {
+        foldBackdrop = fold;
+        return this;
+    }
+
+    /** Whether a full-screen backdrop is cleared to instead of drawn. */
+    public boolean foldsBackdrop() {
+        return foldBackdrop;
+    }
+
+    /** The primitive {@link #foldBackdrop} clears to instead of drawing this frame, as {@code layer << 32 | index}, or -1. */
+    public long foldedBackdrop() {
+        return foldedLayer < 0 ? -1 : (long) foldedLayer << 32 | foldedPrimitive;
+    }
+
+    /** Finds the backdrop to clear to among {@code data}'s layers (this renderer's region), or none. */
+    private void fold(GpuUiRenderer data) {
+        foldedLayer = -1;
+        foldedPrimitive = -1;
+        clearColor[0] = 0;
+        clearColor[1] = 0;
+        clearColor[2] = 0;
+        clearColor[3] = 0;
+        if (!foldBackdrop || width <= 0 || height <= 0) {
+            return;
+        }
+        for (int i = 0; i < data.layerCount; i++) {
+            DrawList list = data.lists[i];
+            for (int p = 0; p < data.counts[i]; p++) {
+                int header = list.header(p);
+                if (Primitive.kind(header) == Primitive.EMPTY) {
+                    continue;
+                }
+                if (covers(list, p, header)) {
+                    float opacity = list.drawnOpacity(p);
+                    long color = list.colorAt(p, Primitive.COLOR_A);
+                    float a = Math.clamp(Float.float16ToFloat((short) (color >>> 48)), 0f, 1f);
+                    clearColor[0] = Float.float16ToFloat((short) color) * a * opacity;
+                    clearColor[1] = Float.float16ToFloat((short) (color >>> 16)) * a * opacity;
+                    clearColor[2] = Float.float16ToFloat((short) (color >>> 32)) * a * opacity;
+                    clearColor[3] = a * opacity;
+                    foldedLayer = i;
+                    foldedPrimitive = p;
+                }
+                return; // the first primitive drawn decides
+            }
+        }
+    }
+
+    /** Whether box {@code p} of {@code list} fills this renderer's whole region with one colour. */
+    private boolean covers(DrawList list, int p, int header) {
+        return Primitive.kind(header) == Primitive.BOX && Primitive.flags(header) == 0
+            && Primitive.clip(header) == DrawList.NO_CLIP && list.intAt(p, Primitive.RADII) == 0
+            && list.intAt(p, Primitive.RADII + 1) == 0 && list.floatAt(p, Primitive.WIDTH) == 0
+            && list.drawnX(p, Primitive.X0) <= originX && list.drawnY(p, Primitive.Y0) <= originY
+            && list.drawnX(p, Primitive.X1) >= originX + width && list.drawnY(p, Primitive.Y1) >= originY + height;
     }
 
     /** Uploads what changed of layer {@code i}, now {@code list}: its bytes. */
@@ -686,7 +758,8 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         int imageHeight = view == null ? Math.max(1, height) : view.outputHeight();
         Image image = g.unscaled(g.create("ui", ImageDesc.of(Format.R16G16B16A16_SFLOAT, imageWidth, imageHeight)));
         UiPush push = new UiPush();
-        GraphBuilder.PassBuilder pass = g.pass("ui").attach(image, Clear.color(0, 0, 0, 0));
+        // transparent, or the backdrop folded into the clear (read as each frame records)
+        GraphBuilder.PassBuilder pass = g.pass("ui").attach(image, Clear.color(clearColor));
         GpuUiRenderer data = source != null ? source : this;
         for (com.truesim.engine.graph.Texture t : data.bound) {
             if (t != null) {
@@ -710,13 +783,20 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
             if (data.counts[i] == 0) {
                 continue;
             }
+            if (i < foldedLayer) {
+                continue; // nothing drawn below the backdrop the image was cleared to
+            }
+            int skip = i == foldedLayer ? foldedPrimitive + 1 : 0; // the backdrop itself, and the empties before it
             push.primitives(data.primitives[i].deviceAddress()).clips(data.clips[i].deviceAddress())
                 .transforms(data.transforms[i].deviceAddress());
             int[] planned = data.draws[i];
             for (int d = 0; d < data.drawCounts[i]; d++) {
                 int pipeline = planned[d * 3 + 2];
-                ctx.draw(pipeline == 0 ? uber : kinds[pipeline], push.first(planned[d * 3]), 6 * planned[d * 3 + 1],
-                    1);
+                int first = Math.max(planned[d * 3], skip);
+                int count = planned[d * 3] + planned[d * 3 + 1] - first;
+                if (count > 0) {
+                    ctx.draw(pipeline == 0 ? uber : kinds[pipeline], push.first(first), 6 * count, 1);
+                }
             }
         }
     }

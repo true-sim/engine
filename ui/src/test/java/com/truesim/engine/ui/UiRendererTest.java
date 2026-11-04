@@ -586,6 +586,58 @@ class UiRendererTest {
     }
 
     @Test
+    void aFullScreenBackdropIsClearedToInsteadOfDrawnWithTheSamePixels() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            long backdrop = Rgba.pack(0.2f, 0.4f, 0.6f, 0.6f);
+            DrawList empty = new DrawList();
+            DrawList list = list(4, l -> {
+                l.box(-5, -5, W + 5, H + 5, backdrop, 0, 0, 0, 0, 0, 0); // a console's translucent backdrop
+                l.box(20, 20, 60, 60, Rgba.pack(1, 0, 0, 0.5f), 4, 4, 4, 4, 0, 0);
+                l.line(10, 100, 200, 100, 2, GREEN);
+            });
+            ui.foldBackdrop(false);
+            rig.frame(ui, null, empty, list);
+            float[] drawn = rig.rgba.clone();
+            assertThat(ui.foldedBackdrop()).isEqualTo(-1);
+            ui.foldBackdrop(true);
+            rig.frame(ui, null, empty, list);
+            assertThat(ui.foldedBackdrop()).as("layer 1, its first primitive; the empty layer below skipped")
+                .isEqualTo(1L << 32);
+            assertThat(rig.rgba).containsExactly(drawn, within(1e-3f));
+            assertThat(rig.at(5, 5)).as("the backdrop, premultiplied").containsExactly(
+                new float[] {0.12f, 0.24f, 0.36f, 0.6f}, within(2e-3f));
+            // Not a backdrop: it leaves a pixel out, it is rounded, or something is drawn before it.
+            DrawList narrow = list(1, l -> l.box(1, 0, W, H, backdrop, 0, 0, 0, 0, 0, 0));
+            rig.frame(ui, null, narrow);
+            assertThat(ui.foldedBackdrop()).isEqualTo(-1);
+            assertThat(rig.at(0, 5, 3)).isZero();
+            DrawList rounded = list(1, l -> l.box(0, 0, W, H, backdrop, 8, 8, 8, 8, 0, 0));
+            rig.frame(ui, null, rounded);
+            assertThat(ui.foldedBackdrop()).isEqualTo(-1);
+            DrawList under = list(2, l -> {
+                l.line(10, 10, 20, 20, 1, RED);
+                l.box(0, 0, W, H, backdrop, 0, 0, 0, 0, 0, 0);
+            });
+            rig.frame(ui, null, under);
+            assertThat(ui.foldedBackdrop()).isEqualTo(-1);
+            // Faded by its transform entry: the clear is faded alike.
+            DrawList faded = new DrawList();
+            int t = faded.addTransform();
+            faded.setTransform(t, 1, 0, 0, 0.5f);
+            int start = faded.allocate(1);
+            faded.begin(start, 1);
+            faded.useTransform(t);
+            faded.box(0, 0, W, H, backdrop, 0, 0, 0, 0, 0, 0);
+            faded.end();
+            rig.frame(ui, null, faded);
+            assertThat(ui.foldedBackdrop()).isZero();
+            assertThat(rig.at(100, 100)).containsExactly(new float[] {0.06f, 0.12f, 0.18f, 0.3f}, within(2e-3f));
+            rig.screenshot("backdrop-folded");
+        }
+    }
+
+    @Test
     void aUiOfAnotherSizeIsScaledToTheView() {
         try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
             rig.view.add(ui);
