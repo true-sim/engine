@@ -192,7 +192,7 @@ public final class GpuUiRenderer implements UiRenderer, Technique, AutoCloseable
         this.stagingArena = Arena.ofShared();
         try (ShaderModule shaders = ShaderModule.load(device, "shaders/ui/draw.spv")) {
             uber = pipeline(shaders, "fragmentMain");
-            for (int kind = 1; kind < Primitive.KINDS; kind++) {
+            for (int kind = 1; kind < Math.min(Primitive.KINDS, KIND_ENTRIES.length); kind++) { // kinds with a shader
                 kinds[kind] = pipeline(shaders, KIND_ENTRIES[kind]);
             }
         }

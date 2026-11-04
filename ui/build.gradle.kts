@@ -11,7 +11,13 @@ dependencies {
     api(project(":engine-input"))
     api("com.truesim.ui:ui-core:0.3.0")
     api("com.truesim.ui:ui-controls:0.3.0") // the Ui the plugin runs
+    api("com.truesim.ui:ui-scene:0.3.0") // the scene bridge: picking, world panels, camera views
+    api("com.truesim.ui:ui-gizmo:0.3.0") // gizmos, whose occlusion the view's depth answers
+    api("com.truesim.ui:ui-console:0.3.0") // the developer console over the engine's settings and log
+    api("com.truesim.ui:ui-props:0.3.0") // property panels: the settings screen, material parameters
     testImplementation(testFixtures("com.truesim.ui:ui-controls:0.3.0")) // the galleries the screenshots show
+    testImplementation(testFixtures("com.truesim.ui:ui-scene:0.3.0")) // the scene rig and fake camera source
+    testImplementation("com.truesim.scene:scene-meshbuild:0.62.0") // meshes for picking and panels
     testImplementation("com.truesim.ui:ui-text-native:0.3.0")
     testImplementation("com.truesim.ui:ui-fonts-cjk:0.3.0") // bundled fonts: the same text on every machine
     testImplementation("com.truesim.ui:ui-fonts-emoji:0.3.0") // colour emoji in the text field test

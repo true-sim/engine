@@ -30,6 +30,13 @@ public final class Camera {
     private boolean orthographic;
     private final double[] position = new double[3];
     private final double[] eye = new double[3];
+    // What was set, in doubles, for code that needs the camera as more than matrices (the UI's picking rays): the view's
+    // rotation (a unit quaternion turning -Z forward, +Y up), the vertical field of view, the near plane, an orthographic
+    // view's half height.
+    private final double[] rotation = {0, 0, 0, 1};
+    private double fovY = Math.PI / 3;
+    private double near = 0.1;
+    private double halfHeight = 1;
 
     /** Puts the camera at world position ({@code x}, {@code y}, {@code z}); its matrices are relative to it. */
     public Camera position(double x, double y, double z) {
@@ -97,6 +104,9 @@ public final class Camera {
         eye[0] = ex;
         eye[1] = ey;
         eye[2] = ez;
+        rotation(rx, ry, rz, tx, ty, tz, bx, by, bz);
+        this.fovY = fovY;
+        this.near = near;
         projectionScale = (float) (height * f / 2);
         // Frustum planes from the rows (Gribb and Hartmann): left, right, top, bottom from w +- x, w +- y; near from z
         // (depth <= 1 means w >= near); no far plane.
@@ -148,6 +158,13 @@ public final class Camera {
         eye[0] = ex;
         eye[1] = ey;
         eye[2] = ez;
+        double length = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+        rotation[0] = qx / length;
+        rotation[1] = qy / length;
+        rotation[2] = qz / length;
+        rotation[3] = qw / length;
+        this.fovY = up - down;
+        this.near = near;
         projectionScale = (float) (height / (u - d));
         plane(0, 3, 0, 1);
         plane(1, 3, 0, -1);
@@ -188,6 +205,9 @@ public final class Camera {
         eye[0] = ex;
         eye[1] = ey;
         eye[2] = ez;
+        rotation(rx, ry, rz, tx, ty, tz, bx, by, bz);
+        this.halfHeight = halfHeight;
+        this.near = 0;
         // x and y over the half extents (y flipped), depth 1 + (back . (p - eye)) / depth, w 1.
         set(0, rx / halfWidth, ry / halfWidth, rz / halfWidth, -re / halfWidth);
         set(1, -tx / halfHeight, -ty / halfHeight, -tz / halfHeight, te / halfHeight);
@@ -202,6 +222,71 @@ public final class Camera {
         plane(5, 2, 3, 0); // depth >= 0: not past the far end
         orthographic = true;
         return this;
+    }
+
+    /** The rotation whose columns are right {@code r}, up {@code t} and back {@code b}, as a unit quaternion. */
+    private void rotation(double rx, double ry, double rz, double tx, double ty, double tz, double bx, double by,
+        double bz) {
+        // Shepperd's method on the matrix with columns r, t, b (m00 = rx, m10 = ry, m20 = rz, m01 = tx...).
+        double trace = rx + ty + bz;
+        double x;
+        double y;
+        double z;
+        double w;
+        if (trace > 0) {
+            double s = Math.sqrt(trace + 1) * 2;
+            w = s / 4;
+            x = (tz - by) / s; // m21 - m12
+            y = (bx - rz) / s; // m02 - m20
+            z = (ry - tx) / s; // m10 - m01
+        } else if (rx > ty && rx > bz) {
+            double s = Math.sqrt(1 + rx - ty - bz) * 2;
+            w = (tz - by) / s;
+            x = s / 4;
+            y = (tx + ry) / s;
+            z = (bx + rz) / s;
+        } else if (ty > bz) {
+            double s = Math.sqrt(1 + ty - rx - bz) * 2;
+            w = (bx - rz) / s;
+            x = (tx + ry) / s;
+            y = s / 4;
+            z = (by + tz) / s;
+        } else {
+            double s = Math.sqrt(1 + bz - rx - ty) * 2;
+            w = (ry - tx) / s;
+            x = (bx + rz) / s;
+            y = (by + tz) / s;
+            z = s / 4;
+        }
+        double length = Math.sqrt(x * x + y * y + z * z + w * w);
+        rotation[0] = x / length;
+        rotation[1] = y / length;
+        rotation[2] = z / length;
+        rotation[3] = w / length;
+    }
+
+    /**
+     * Component {@code i} (x, y, z, w) of the view's rotation as last set, in doubles: the unit quaternion turning the
+     * camera's -Z (forward) and +Y (up) into the world. For code that needs the camera itself, not its matrices: the
+     * UI's picking rays and gizmos.
+     */
+    public double rotation(int i) {
+        return rotation[i];
+    }
+
+    /** The vertical field of view (radians) last set; for an off-center eye, its up and down angles together. */
+    public double fovY() {
+        return fovY;
+    }
+
+    /** The near plane's distance last set (0 for an orthographic view). */
+    public double near() {
+        return near;
+    }
+
+    /** Half the height an orthographic view sees ({@link #setOrthographic}). */
+    public double halfHeight() {
+        return halfHeight;
     }
 
     private void set(int row, double c0, double c1, double c2, double c3) {
