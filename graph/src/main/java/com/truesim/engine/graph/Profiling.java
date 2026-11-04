@@ -91,7 +91,7 @@ public final class Profiling implements Plugin {
                 graph = rendering.graph();
                 clock = new GpuClock(rendering.device());
                 gpuCounters = new GpuCounters(rendering.device(), clock);
-                counters = new Counters().add(new JvmCounters()).add(new OsCounters()).add(gpuCounters)
+                counters = new Counters().add(gpuCounters).add(new JvmCounters()).add(new OsCounters())
                     .add(new NativeCounters());
                 runtime = new RuntimeEvents();
                 for (int i = 0; i < submitFrame.length; i++) {

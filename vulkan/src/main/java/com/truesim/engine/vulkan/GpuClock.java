@@ -50,13 +50,19 @@ public final class GpuClock {
     /** The clock of {@code device}'s timestamps. */
     @AllowAllocation("made once")
     public GpuClock(VulkanDevice device) {
+        this(device, true);
+    }
+
+    /** As {@link #GpuClock(VulkanDevice)}; {@code calibrate} false estimates from frames even with the extension. */
+    @AllowAllocation("made once")
+    GpuClock(VulkanDevice device, boolean calibrate) {
         this.device = device;
         try (MemoryStack stack = stackPush()) {
             VkPhysicalDeviceProperties p = VkPhysicalDeviceProperties.calloc(stack);
             org.lwjgl.vulkan.VK10.vkGetPhysicalDeviceProperties(device.gpu().handle(), p);
             nanosPerTick = p.limits().timestampPeriod();
         }
-        extension = device.calibratedTimestamps();
+        extension = calibrate ? device.calibratedTimestamps() : null;
         int domain = -1;
         double qpc = 0;
         if (extension != null) {
@@ -185,8 +191,8 @@ public final class GpuClock {
      * offset follows the latest such bound of each window. Allocates nothing.
      */
     public void observe(long startTicks, long submitNanos) {
-        if (hostDomain >= 0) {
-            return;
+        if (hostDomain >= 0 && deviation >= 0) {
+            return; // calibrated: frames do not move it (until then they place it)
         }
         long bound = submitNanos - Math.round(startTicks * nanosPerTick);
         if (windowBound == Long.MIN_VALUE || bound > windowBound) {

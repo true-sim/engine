@@ -177,6 +177,90 @@ class UiProfilerTest {
     }
 
     @Test
+    void actionsConsoleCommandsBudgetsAndFreezingOnAHitch(@TempDir Path folder) throws Exception {
+        UiPlugin plugin = new UiPlugin(t -> ui()).view("main");
+        try (Engine engine = engine(plugin, false)) {
+            var console = plugin.console("profiler-test", com.truesim.ui.console.HistoryStore.memory());
+            UiProfiler profiler = plugin.profiler();
+            assertThat(plugin.profilerViews()).isSameAs(profiler);
+            var s = engine.settings();
+            s.set(ProfilerSettings.EXPORT_FOLDER, folder.toString());
+            var events = engine.get(Input.KEY).events();
+            press(engine, events, com.truesim.engine.platform.Key.F3, false);
+            assertThat(s.get(ProfilerSettings.OVERLAY)).isTrue();
+            press(engine, events, com.truesim.engine.platform.Key.F3, true);
+            assertThat(s.get(ProfilerSettings.VIEW)).isTrue();
+            for (int i = 0; i < 20; i++) {
+                engine.step();
+            }
+            press(engine, events, com.truesim.engine.platform.Key.F4, false);
+            assertThat(profiler.view().frozen().get()).isTrue();
+            press(engine, events, com.truesim.engine.platform.Key.F4, true); // step
+            press(engine, events, com.truesim.engine.platform.Key.F4, false);
+            assertThat(profiler.view().frozen().get()).isFalse();
+            s.set(com.truesim.engine.ui.console.SettingPermissions.DEVELOPER, true);
+            var shell = console.console().shell();
+            assertThat(shell.execute("profiler.freeze on")).isTrue();
+            assertThat(profiler.view().frozen().get()).isTrue();
+            shell.execute("profiler.freeze");
+            assertThat(profiler.view().frozen().get()).isFalse();
+            shell.execute("profiler.step");
+            shell.execute("profiler.counters");
+            shell.execute("profiler.export tsprof");
+            shell.execute("profiler.export chrome");
+            assertThat(profiler.lastExport()).endsWith(".json");
+            shell.execute("profiler.clear");
+            assertThat(profiler.times().latest()).isEqualTo(-1);
+            assertThat(profiler.exportFolder()).isEqualTo(folder);
+            // budgets: a list with the display's rate (none headless) and a bad entry
+            s.set(ProfilerSettings.BUDGETS, "30, display, x, 30, 240");
+            engine.step();
+            assertThat(profiler.frameGraph().budgetCount()).isEqualTo(2);
+            // freezing a few frames after a hitch
+            s.set(ProfilerSettings.FREEZE_ON_HITCH, true);
+            s.set(ProfilerSettings.FREEZE_AFTER, 2);
+            s.set(ProfilerSettings.HITCH_MIN, 1f);
+            for (int i = 0; i < 30; i++) {
+                engine.step();
+            }
+            Thread.sleep(40);
+            for (int i = 0; i < 10 && !profiler.view().frozen().get(); i++) {
+                engine.step();
+            }
+            assertThat(profiler.view().frozen().get()).as("frozen after the hitch").isTrue();
+            press(engine, events, com.truesim.engine.platform.Key.F4, UiActions.SHORTCUT == com.truesim.engine.input.Controls.CONTROL ? "ctrl" : "meta");
+            assertThat(profiler.lastExport()).contains(".tsprof");
+            assertThat(profiler.recording()).isNotNull();
+        }
+    }
+
+    private static void press(Engine engine, com.truesim.engine.platform.PlatformListener events,
+        com.truesim.engine.platform.Key key, boolean shift) {
+        if (shift) {
+            events.key(0, 1, 0, com.truesim.engine.platform.Key.LEFT_SHIFT, 0, 0, true, false);
+        }
+        events.key(0, 1, 0, key, 0, 0, true, false);
+        engine.step();
+        events.key(0, 1, 0, key, 0, 0, false, false);
+        if (shift) {
+            events.key(0, 1, 0, com.truesim.engine.platform.Key.LEFT_SHIFT, 0, 0, false, false);
+        }
+        engine.step();
+    }
+
+    private static void press(Engine engine, com.truesim.engine.platform.PlatformListener events,
+        com.truesim.engine.platform.Key key, String modifier) {
+        com.truesim.engine.platform.Key mod = modifier.equals("ctrl") ? com.truesim.engine.platform.Key.LEFT_CONTROL
+            : com.truesim.engine.platform.Key.LEFT_META;
+        events.key(0, 1, 0, mod, 0, 0, true, false);
+        events.key(0, 1, 0, key, 0, 0, true, false);
+        engine.step();
+        events.key(0, 1, 0, key, 0, 0, false, false);
+        events.key(0, 1, 0, mod, 0, 0, false, false);
+        engine.step();
+    }
+
+    @Test
     void framesWithTheProfilerOnAllocateNothing() {
         int off = allocatingFrames(false, false);
         int overlay = allocatingFrames(true, false);
