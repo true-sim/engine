@@ -1440,29 +1440,31 @@ so their mean absolute luminance instead:
 
 | Scene | No GI | Probes | Probes + BITMASK | Probes + RAYS (SVGF) |
 |---|---|---|---|---|
-| sun-room | 452.7 %, 1203 %, +452 % | 8.1 %, 33.6 %, +3.9 % | 6.8 %, 25.3 %, +1.3 % | 7.6 %, 33.4 %, -1.5 % |
-| leak-5cm (absolute) | 0.3006 | 0.0002 | 0.0001 | 0.0001 |
-| leak-25cm (absolute) | 0.3006 | 0.0002 | 0.0000 | 0.0000 |
-| leak-50cm (absolute) | 0.3005 | 0.0002 | 0.0000 | 0.0000 |
-| bleeding | 100.0 %, 100 %, -100 % | 23.7 %, 93.0 %, +21.0 % | 22.3 %, 67.1 %, +16.0 % | 20.1 %, 82.4 %, +12.9 % |
-| screens | 41.1 %, 100 %, -39.9 % | 18.8 %, 77.9 %, -14.3 % | 17.1 %, 65.6 %, -14.2 % | 17.1 %, 68.7 %, -14.4 % |
-| toggle (light on) | 65.4 %, 92.9 %, -65.4 % | 10.3 %, 22.2 %, -9.3 % | 7.7 %, 17.9 %, -6.3 % | 10.6 %, 32.1 %, -9.8 % |
-| door (open) | 339.2 %, 1053 %, +337 % | 9.0 %, 43.6 %, +1.2 % | 7.7 %, 26.7 %, -1.9 % | 8.9 %, 35.1 %, -1.9 % |
-| mover (moved) | 81.3 %, 94.3 %, -81.3 % | 7.6 %, 19.7 %, -7.3 % | 4.6 %, 13.4 %, -2.5 % | 7.6 %, 31.9 %, -5.4 % |
-| cornell (2 m box, 1 m probes) | 46.6 %, 100 %, -46.4 % | 29.1 %, 164 %, +11.9 % | 23.4 %, 92.6 %, -0.9 % | 18.3 %, 88.0 %, -6.5 % |
-| Sponza, view 1 | 331 %, 9004 %, +329 % | 17.8 %, 130 %, -1.2 % | 18.4 %, 87.3 %, -5.2 % | 17.7 %, 95.9 %, -2.7 % |
-| Sponza, view 2 | 1421 %, 12932 %, +1418 % | 26.6 %, 134 %, -4.7 % | 25.9 %, 127 %, -5.8 % | 25.3 %, 113 %, -5.0 % |
-| Sponza, view 3 | 3546 %, 11244 %, +3543 % | 72.4 %, 200 %, +29.4 % | 69.9 %, 154 %, +8.8 % | 70.4 %, 204 %, -13.5 % |
+| sun-room | 452.7 %, 1203 %, +452 % | 7.0 %, 28.5 %, +0.5 % | 6.8 %, 27.6 %, -1.0 % | 8.5 %, 37.9 %, -4.6 % |
+| leak-5cm (absolute) | 0.3006 | 0.0001 | 0.0001 | 0.0001 |
+| leak-25cm (absolute) | 0.3006 | 0.0000 | 0.0000 | 0.0000 |
+| leak-50cm (absolute) | 0.3005 | 0.0000 | 0.0000 | 0.0000 |
+| bleeding | 100.0 %, 100 %, -100 % | 19.9 %, 84.9 %, +12.5 % | 19.5 %, 62.2 %, +9.3 % | 19.2 %, 82.2 %, +3.1 % |
+| screens | 41.1 %, 100 %, -39.9 % | 19.7 %, 75.8 %, -16.2 % | 18.2 %, 67.7 %, -15.6 % | 17.8 %, 69.7 %, -15.5 % |
+| toggle (light on) | 65.4 %, 92.9 %, -65.4 % | 7.9 %, 18.4 %, -6.4 % | 7.6 %, 17.8 %, -6.2 % | 10.5 %, 32.0 %, -9.7 % |
+| door (shut, absolute) | 0.2174 | 0.0000 | 0.0000 | 0.0000 |
+| door (open) | 339.2 %, 1053 %, +337 % | 9.1 %, 38.1 %, -1.9 % | 9.2 %, 28.9 %, -5.5 % | 9.3 %, 36.5 %, -5.2 % |
+| mover (moved) | 81.3 %, 94.3 %, -81.3 % | 5.2 %, 15.8 %, -3.7 % | 4.5 %, 13.3 %, -2.3 % | 7.6 %, 32.0 %, -5.3 % |
+| cornell (2 m box, 1 m probes) | 46.6 %, 100 %, -46.4 % | 22.7 %, 115 %, +1.8 % | 19.2 %, 86.0 %, -7.6 % | 22.4 %, 94.0 %, -5.5 % |
+| Sponza, view 1 | 331 %, 9004 %, +329 % | 17.9 %, 123 %, -1.8 % | 18.5 %, 87.5 %, -5.3 % | 17.4 %, 92.7 %, -3.5 % |
+| Sponza, view 2 | 1421 %, 12932 %, +1418 % | 26.8 %, 129 %, -5.2 % | 26.3 %, 119 %, -6.7 % | 25.5 %, 110 %, -5.5 % |
+| Sponza, view 3 | 3546 %, 11244 %, +3543 % | 70.8 %, 196 %, +25.4 % | 69.6 %, 145 %, +7.7 % | 68.7 %, 166 %, +8.5 % |
 
 Ambient occlusion alone against 512 rays a pixel (mean absolute difference, by scene): GTAO 0.030-0.071, BITMASK
 0.030-0.073, RAYS with SVGF 0.024-0.070, with ReBLUR 0.015-0.064 (ReBLUR's blurs suit these still views; SVGF keeps
-contact sharper and noisier). With the probes, BITMASK's image is closer to the reference in 8 of the 16 views and
-GTAO's in 8 (`GiEvaluation`'s full table): a trade-off, so both stay.
+contact sharper and noisier). With the probes, BITMASK's image is closer to the reference in 7 views and GTAO's in 7
+(`GiEvaluation`'s full table, the views that are not black): a trade-off, so both stay.
 
 Lag of the dynamic scenes (frames until the image is within 10 % of the change from where it settles, each frame the
 mean of 4 runs, compared in 16 x 16 blocks): toggle 3 told, 3 found (48 by the history cap alone); door 2 told, 3
-found (48); mover 6 told, 26 found (51). The moved block changes the room's bounce by a few percent, below what one
-update's noise shows; that tail converges with the history.
+found (48); mover 6 to 26 told and 26 found over two evaluations (47-51): the targets (4 and 15) are not met there.
+The moved block changes the room's bounce by a few percent, below what one update's noise shows, and the measure
+hovers at its threshold for many frames; that tail converges with the history.
 
 What it costs (engine-scene's `GiBenchmark`, `TRUESIM_BENCHMARK=true -PgiSponza=<Sponza.gltf>`, RX 9070 XT,
 2026-11-04, JaCoCo off): Sponza from its first view, the visibility buffer, traced sun shadows; 3 rounds after a
