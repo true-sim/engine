@@ -654,6 +654,86 @@ class UiRendererTest {
     }
 
     @Test
+    void boxesDrawnFirstOverAFoldedPanelAreClearedWithTheSamePixels() {
+        try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
+            rig.view.add(ui);
+            long panel = Rgba.pack(0.05f, 0.07f, 0.1f, 0.86f);
+            long plot = Rgba.pack(0.01f, 0.01f, 0.02f, 0.35f);
+            // A chart: its panel (folded), its plot's translucent background, an opaque box over it, then the grid.
+            DrawList chart = list(5, l -> {
+                l.box(0, 0, W, H, panel, 6, 6, 6, 6, 1, Rgba.pack(0.3f, 0.3f, 0.3f, 1));
+                l.box(20, 12, 240, 110, plot, 0, 0, 0, 0, 0, 0);
+                l.box(40, 30, 60, 50, RED, 0, 0, 0, 0, 0, 0);
+                l.line(20, 60.5f, 240, 60.5f, 1, Rgba.pack(0.5f, 0.5f, 0.5f, 0.2f));
+                l.box(100, 20, 120, 40, Rgba.pack(0, 0, 1, 0.5f), 0, 0, 0, 0, 0, 0); // after the line: drawn
+            });
+            ui.foldBackdrop(false);
+            rig.frame(ui, null, chart);
+            float[] drawn = rig.rgba.clone();
+            assertThat(ui.clearedBoxes()).isEmpty();
+            ui.foldBackdrop(true);
+            rig.frame(ui, null, chart);
+            assertThat(ui.foldedBackdrop()).isZero();
+            assertThat(ui.clearedBoxes()).as("the plot's background and the opaque box").containsExactly(1, 2);
+            assertThat(rig.rgba).containsExactly(drawn, within(1e-3f));
+            float under = 1 - 0.35f;
+            assertThat(rig.at(30, 80)).as("the plot over the panel, premultiplied").containsExactly(new float[] {
+                0.01f * 0.35f + 0.05f * 0.86f * under, 0.01f * 0.35f + 0.07f * 0.86f * under,
+                0.02f * 0.35f + 0.1f * 0.86f * under, 0.35f + 0.86f * under}, within(2e-3f));
+            rig.screenshot("backdrop-plot-cleared");
+            // Drawn instead: translucent over the panel's corner, over a box cleared before, off whole pixels, rounded.
+            DrawList corner = list(2, l -> {
+                l.box(0, 0, W, H, panel, 6, 6, 6, 6, 1, Rgba.pack(0.3f, 0.3f, 0.3f, 1));
+                l.box(2, 2, 40, 40, plot, 0, 0, 0, 0, 0, 0);
+            });
+            rig.frame(ui, null, corner);
+            assertThat(ui.clearedBoxes()).isEmpty();
+            DrawList stacked = list(3, l -> {
+                l.box(0, 0, W, H, panel, 6, 6, 6, 6, 1, Rgba.pack(0.3f, 0.3f, 0.3f, 1));
+                l.box(20, 20, 80, 80, plot, 0, 0, 0, 0, 0, 0);
+                l.box(60, 60, 100, 100, plot, 0, 0, 0, 0, 0, 0);
+            });
+            ui.foldBackdrop(false);
+            rig.frame(ui, null, stacked);
+            float[] stackedDrawn = rig.rgba.clone();
+            ui.foldBackdrop(true);
+            rig.frame(ui, null, stacked);
+            assertThat(ui.clearedBoxes()).as("the first; the second lies over it").containsExactly(1);
+            assertThat(rig.rgba).containsExactly(stackedDrawn, within(1e-3f));
+            DrawList fractional = list(2, l -> {
+                l.box(0, 0, W, H, panel, 0, 0, 0, 0, 0, 0);
+                l.box(20.5f, 20, 80, 80, RED, 0, 0, 0, 0, 0, 0);
+            });
+            ui.foldBackdrop(false);
+            rig.frame(ui, null, fractional);
+            float[] fractionalDrawn = rig.rgba.clone();
+            ui.foldBackdrop(true);
+            rig.frame(ui, null, fractional);
+            assertThat(ui.clearedBoxes()).as("found, then drawn: off whole pixels").containsExactly(1);
+            assertThat(rig.rgba).containsExactly(fractionalDrawn, within(1e-3f));
+            DrawList rounded = list(2, l -> {
+                l.box(0, 0, W, H, panel, 0, 0, 0, 0, 0, 0);
+                l.box(20, 20, 80, 80, RED, 3, 3, 3, 3, 0, 0);
+            });
+            rig.frame(ui, null, rounded);
+            assertThat(ui.clearedBoxes()).isEmpty();
+            // Without a backdrop: opaque or over the image's transparency, the first boxes are cleared too.
+            DrawList bare = list(2, l -> {
+                l.box(10, 10, 50, 50, plot, 0, 0, 0, 0, 0, 0);
+                l.box(30, 30, 70, 70, RED, 0, 0, 0, 0, 0, 0);
+            });
+            ui.foldBackdrop(false);
+            rig.frame(ui, null, bare);
+            float[] bareDrawn = rig.rgba.clone();
+            ui.foldBackdrop(true);
+            rig.frame(ui, null, bare);
+            assertThat(ui.foldedBackdrop()).isEqualTo(-1);
+            assertThat(ui.clearedBoxes()).containsExactly(0, 1);
+            assertThat(rig.rgba).containsExactly(bareDrawn, within(1e-3f));
+        }
+    }
+
+    @Test
     void aUiOfAnotherSizeIsScaledToTheView() {
         try (GpuRig rig = GpuRig.open(W, H).show(Keys.UI); GpuUiRenderer ui = new GpuUiRenderer(rig.graph)) {
             rig.view.add(ui);

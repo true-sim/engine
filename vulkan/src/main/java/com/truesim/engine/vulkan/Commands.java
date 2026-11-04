@@ -64,8 +64,9 @@ public final class Commands {
     private static final int RESET_FENCES = 33;
     private static final int PRESENT = 34;
     private static final int BUILD_STRUCTURES = 35;
+    private static final int CLEAR_ATTACHMENTS = 36;
     // Immutable entries: a thread seeing an older one only wraps the address again.
-    private static final Fn[] FUNCTIONS = new Fn[36];
+    private static final Fn[] FUNCTIONS = new Fn[37];
 
     static {
         java.util.Arrays.fill(FUNCTIONS, NONE);
@@ -102,6 +103,8 @@ public final class Commands {
         JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT));
     private static final MethodHandle H_CLEAR_COLOR = handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG,
         JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle H_CLEAR_ATTACHMENTS = handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_INT,
+        JAVA_LONG, JAVA_INT, JAVA_LONG));
     private static final MethodHandle H_TIMESTAMP =
         handle(FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT));
     private static final MethodHandle H_RESET_QUERIES =
@@ -378,6 +381,20 @@ public final class Commands {
         try {
             H_CLEAR_COLOR.invokeExact(function(CLEAR_COLOR, of(commands).vkCmdClearColorImage), commands.address(),
                 image, layout, color, rangeCount, ranges);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /**
+     * {@code vkCmdClearAttachments}: the {@code attachmentCount} {@code VkClearAttachment}s at {@code attachments}
+     * over the {@code rectCount} {@code VkClearRect}s at {@code rects}, inside a rendering.
+     */
+    public static void clearAttachments(VkCommandBuffer commands, int attachmentCount, long attachments,
+        int rectCount, long rects) {
+        try {
+            H_CLEAR_ATTACHMENTS.invokeExact(function(CLEAR_ATTACHMENTS, of(commands).vkCmdClearAttachments),
+                commands.address(), attachmentCount, attachments, rectCount, rects);
         } catch (Throwable e) {
             throw failed(e);
         }

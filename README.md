@@ -288,7 +288,9 @@ Capture capture = input.capture(one, JUMP);   // the next input becomes a bindin
   stream uploads the points it appended), each a draw of its own expanding a quad per segment, column or piece in the
   vertex shader. A box covering the image at the bottom of the UI (a console's backdrop, a full-screen panel) is
   cleared to instead of blended over every pixel; its rounded corners and border are drawn along its edges without
-  blending (`foldBackdrop`).
+  blending (`foldBackdrop`). Square boxes drawn right after it on whole pixels (a chart's plot background over its
+  panel), opaque or over the clear alone, are cleared as rectangles to what drawing them leaves
+  (`vkCmdClearAttachments`, `clearedBoxes()`).
 - **Input** (`UiActions`, `UiCommands`, `MousePointer`): the `ui` action group of design section 10 with keyboard,
   mouse and gamepad defaults, bindings as settings (`input.ui.navigation.accept`); `UiCommands` (a
   `UiCommandSource`) adds each player's presses of the frame as `UiCommand`s, with repeats (`ui.repeatDelay`,
