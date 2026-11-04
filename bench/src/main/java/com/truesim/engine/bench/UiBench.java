@@ -229,36 +229,36 @@ public final class UiBench {
             double[] chunk = new double[1000];
             int frames = QUICK ? 200 : 1500;
             int warm = QUICK ? 100 : 500;
+            // The CPU's frames back to back, as the engine runs them while the GPU draws the frames before (frames in
+            // flight): a GPU frame waited for between them (the GPU run below) puts the CPU to sleep, which added up to
+            // 0.2 ms to its p99 on this machine.
             double[] cpu = new double[frames];
+            for (int f = -warm * 4; f < frames; f++) {
+                stream(ring, chunk, random);
+                long t = frame(ui, input, width, height);
+                if (f >= 0) {
+                    cpu[f] = t / 1e6;
+                }
+            }
+            String what = (area ? "a filled area" : "a line") + ", "
+                + (int) (chart.plotRight() - chart.plotLeft()) + " pixel columns";
+            add("Line chart: 1,000,000 points streaming 1,000 a frame, 4K: CPU", "≤ 0.5 ms",
+                what + "; the whole UI frame, frames back to back", cpu, 0.5, "");
             double[] gpuMs = new double[frames];
             double[] starts = new double[frames];
             long uploaded = 0;
             try (GpuBench b = GpuBench.open(width, height)) {
-                for (int f = -warm; f < frames; f++) {
-                    long base = ring.appended();
-                    for (int i = 0; i < chunk.length; i++) {
-                        chunk[i] = Maths.sin((base + i) * 0.0007) + random.nextGaussian() * 0.1;
-                    }
-                    ring.append(chunk, 0, chunk.length);
-                    long t = frame(ui, input, width, height);
-                    double g = Double.NaN;
-                    if (b != null) {
-                        b.renderer.submit(ui.layers(), ui.layerCount(), ui.textures(), width, height);
-                        g = b.frame();
-                    }
+                for (int f = -warm; f < frames && b != null; f++) {
+                    stream(ring, chunk, random);
+                    frame(ui, input, width, height);
+                    b.renderer.submit(ui.layers(), ui.layerCount(), ui.textures(), width, height);
+                    double g = b.frame();
                     if (f >= 0) {
-                        cpu[f] = t / 1e6;
                         gpuMs[f] = g;
-                        if (b != null) {
-                            starts[f] = b.lastStart;
-                            uploaded += b.renderer.uploadedBytes();
-                        }
+                        starts[f] = b.lastStart;
+                        uploaded += b.renderer.uploadedBytes();
                     }
                 }
-                String what = (area ? "a filled area (triangles)" : "a line") + ", "
-                    + (int) (chart.plotRight() - chart.plotLeft()) + " pixel columns";
-                add("Line chart: 1,000,000 points streaming 1,000 a frame, 4K: CPU", "≤ 0.5 ms",
-                    what + "; the whole UI frame", cpu, 0.5, "");
                 if (b != null) {
                     double[] valid = Arrays.stream(gpuMs).filter(v -> !Double.isNaN(v)).toArray();
                     if (valid.length > 0) {
@@ -271,6 +271,15 @@ public final class UiBench {
             }
         }
         zooming(width, height);
+    }
+
+    /** Appends 1,000 samples of the streaming chart's signal. */
+    private static void stream(VersionedDoubleRing ring, double[] chunk, SplittableRandom random) {
+        long base = ring.appended();
+        for (int i = 0; i < chunk.length; i++) {
+            chunk[i] = Maths.sin((base + i) * 0.0007) + random.nextGaussian() * 0.1;
+        }
+        ring.append(chunk, 0, chunk.length);
     }
 
     private void zooming(int width, int height) {
@@ -334,8 +343,8 @@ public final class UiBench {
             messages[i] = "Frame graph pass " + i + " recorded 1,204 draws into 3 render targets in 0.42 ms";
         }
         String[] loggers = {"com.truesim.render.Graph", "com.truesim.game.World", "com.truesim.net.Session"};
-        int frames = QUICK ? 100 : 600;
-        int warm = QUICK ? 100 : 300;
+        int frames = QUICK ? 100 : 1000;
+        int warm = QUICK ? 100 : 2000; // past the compiler's thresholds of what runs once a frame
         double[] ms = new double[frames];
         int s = 0;
         for (int f = -warm; f < frames; f++) {
@@ -387,7 +396,8 @@ public final class UiBench {
         md.append("# UI benchmarks\n\n");
         md.append("The UI's targets of ui's design, section 11, measured by `engine-bench` "
             + "(`./gradlew :engine-bench:uiBench`): GPU times are the UI pass plus the frame start (uploads) from the "
-            + "graph's timestamps, at 3840 x 2160 unless noted; CPU times the code named, per frame, after warm-up. "
+            + "graph's timestamps, at 3840 x 2160 unless noted; CPU times the code named, per frame, after warm-up, "
+            + "frames back to back (no GPU frame waited for between them). "
             + "No JaCoCo, no validation.\n\n");
         md.append(String.format(Locale.ROOT, "- Date: %s\n- CPU: %s (%d threads)\n- GPU: %s\n- OS: %s %s; Java %s\n",
             LocalDate.now(), cpuName(), Runtime.getRuntime().availableProcessors(), gpu,
