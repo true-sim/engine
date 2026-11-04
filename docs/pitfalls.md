@@ -455,6 +455,22 @@ shaders), then settled at 0.60-0.68 ms: the ranges of five rounds after one warm
 - Rule: a benchmark warms until its rounds agree (look at the per-round lines, not the ranges); short frames need more
   warm-up than long ones.
 
+**Drawn renderables had no bounds, so nothing picked them.** In the UI gallery a click on a rock selected nothing,
+while "select all" worked: `SceneSync` drew the renderables but nothing bounded their nodes, so the spatial index
+(the picker's broad phase, the marquee's frustum query) never returned them and the triangle test never ran.
+`RenderableBounds` existed in scene-render; no engine path used it.
+- Proof: `UiGalleryTest` (engine-demo), SDL mouse events through the window path, failed on "drawn rocks are bounded";
+  `SceneSync` now bounds its renderables (`bounds(false)` for a game's own) (true-sim/engine, UI gallery).
+- Rule: a feature that reads scene state another system must keep (bounds for picking) is tested with that system
+  as an application wires it, not with the state set by hand in the test.
+
+**A fixed array silently capped a selection.** The gizmo moved at most 64 selected nodes (its drivers array; the XR
+grab's likewise): with 400 rocks selected, the rest stayed.
+- Proof: `GizmoTest.aDragMovesEveryNodeOfABigSelection` (ui-gizmo) fails without the fix; `UiGalleryTest` checks
+  every rock moved by the same delta (true-sim/ui, true-sim/engine, UI gallery).
+- Rule: per-item arrays grow with what they hold (allocating when the selection grows is fine); a cap that drops items
+  is a bug unless it is a setting and says so.
+
 **Two renderers cleaned one texture's dirty region.** The UI gallery's labels lost letters on most pages in the
 window, while the galleries' offscreen screenshots were whole: its world panel's UI shares the screen's text system, so
 two `GpuUiRenderer`s uploaded the same atlas page, and the one submitting first cleared the page's dirty region each

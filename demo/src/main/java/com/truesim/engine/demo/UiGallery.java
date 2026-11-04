@@ -99,7 +99,7 @@ public final class UiGallery implements Application {
     private final boolean tour;
     private long frames;
     private GalleryShots shots; // with -Pshots=dir: what the window shows, a PNG per page of the tour
-    private final GalleryWorld world = new GalleryWorld();
+    final GalleryWorld world = new GalleryWorld();
     private final UiPlugin uiPlugin = new UiPlugin(this::makeUi).view("main");
     private StyleSheet defaultSheet;
     private StyleSheet testSheet;
@@ -108,10 +108,10 @@ public final class UiGallery implements Application {
     private Engine engine;
     private Ui ui;
     private Player player;
-    private UiScene scene;
-    private SceneInteraction interaction;
+    UiScene scene;
+    SceneInteraction interaction;
     private UiConsole console;
-    private Gizmo gizmo;
+    Gizmo gizmo;
     private SceneView minimapView;
     private Layer navLayer;
     private Layer backdropLayer;
@@ -146,7 +146,7 @@ public final class UiGallery implements Application {
         }
     }
 
-    private UiGallery(double seconds, boolean tour) {
+    UiGallery(double seconds, boolean tour) {
         this.seconds = seconds;
         this.tour = tour;
     }
@@ -458,7 +458,7 @@ public final class UiGallery implements Application {
         return page;
     }
 
-    private void show(int index) {
+    void show(int index) {
         if (index == current) {
             return;
         }

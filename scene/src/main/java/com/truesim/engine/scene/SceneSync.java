@@ -16,6 +16,7 @@ import com.truesim.scene.core.NodeChange;
 import com.truesim.scene.core.NodeHandle;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.render.MaterialData;
+import com.truesim.scene.render.RenderableBounds;
 import com.truesim.scene.render.Renderables;
 import com.truesim.scene.render.SkinBinding;
 import java.lang.foreign.MemorySegment;
@@ -117,6 +118,7 @@ public final class SceneSync implements AutoCloseable {
     private int[] fillEntries = new int[64];
     private int itemCount;
     private long instanceVersion;
+    private RenderableBounds bounds; // the renderables' nodes bounded by their meshes, or null: the game's own
     // Skinned items: the deformed copy each draws (NONE: its mesh as it is), and those that have one, densely.
     private int[] itemCopy = filled(64);
     private boolean[] itemCopySkinned = new boolean[64]; // whether its copy was made with the skin's joints
@@ -271,6 +273,7 @@ public final class SceneSync implements AutoCloseable {
         }
         this.scene = renderables.scene();
         this.clock = scene.clock();
+        bounds = new RenderableBounds(renderables, resources.assets());
         gpu.setMaterials(resources.materials()); // the resources' table: instances name its ids
         com.truesim.engine.settings.EngineSettings followed = resources.settings();
         if (followed != null) { // render.interpolation as the player sets it, switched at the next update
@@ -288,6 +291,29 @@ public final class SceneSync implements AutoCloseable {
         int[] array = new int[length];
         Arrays.fill(array, NONE);
         return array;
+    }
+
+    /**
+     * Whether the renderables' nodes are bounded by their meshes ({@link RenderableBounds}; default on): spatial
+     * queries, the scene interaction's picking and its marquee among them, find what is drawn without anyone setting
+     * bounds. Off for a game that sets its renderables' bounds itself (the meshes' replace them otherwise); the nodes
+     * keep the bounds they have. Returns this.
+     */
+    @AllowAllocation("switched rarely")
+    public SceneSync bounds(boolean on) {
+        checkOpen();
+        if (on && bounds == null) {
+            bounds = new RenderableBounds(renderables, resources.assets());
+        } else if (!on && bounds != null) {
+            bounds.close();
+            bounds = null;
+        }
+        return this;
+    }
+
+    /** Whether the renderables' nodes are bounded by their meshes ({@link #bounds(boolean)}). */
+    public boolean bounds() {
+        return bounds != null;
     }
 
     /** The instances this scene is kept as. */
@@ -311,6 +337,9 @@ public final class SceneSync implements AutoCloseable {
      */
     public void update() {
         checkOpen();
+        if (bounds != null) {
+            bounds.update(); // nodes bounded by their meshes: from the next scene.update() on, picking finds them
+        }
         if (listChanged) {
             listChanged = false;
             gpu.changeList(resources.settings().get(RenderSettings.CHANGE_LIST),
@@ -1774,6 +1803,10 @@ public final class SceneSync implements AutoCloseable {
     public void close() {
         if (!closed) {
             destroyAll();
+            if (bounds != null) {
+                bounds.close();
+                bounds = null;
+            }
             if (settingWatch != null) {
                 settingWatch.close();
                 listWatch.close();
