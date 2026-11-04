@@ -2506,7 +2506,8 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
   live, Space pauses: the `stream` actions, rebindable in the settings), paced by the display, until the window is closed (`-Pseconds=n`: for n
   seconds), with the profiler's frame graph overlay on (F3 toggles it, Shift+F3 the detailed profiler) and a line at
   the bottom: cells in range, meshes and textures added and removed in the last second, what is on the GPU, the
-  speed; it prints no report.
+  speed; it prints no report. `-Pmemory=n` prints memory by kind every n frames (GPU by category, VMA's heaps, LWJGL's
+  native memory, direct buffers, the heap, the process); `-Pframes=n` runs n frames instead of 2,700.
 - `./gradlew :engine-demo:stereoBench` times the scene drawn for two eyes at a Quest 3's eye size, offscreen, pass by
   pass and grouped by kind (`--args="visibility"` for the visibility buffer, `-Procks=20000` for more rocks,
   `shared` for one set of shadow cascades, `rebuild` for what rebuilds and resizes cost the render thread, `noshadows`

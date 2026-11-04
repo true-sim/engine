@@ -60,7 +60,11 @@ public final class StreamBench {
 
     private static final int WIDTH = 1920;
     private static final int HEIGHT = 1080;
-    private static final int FRAMES = 2700; // 30 seconds at 90 Hz
+    static int frameCount = Integer.getInteger("truesim.demo.frames", 2700); // 30 seconds at 90 Hz
+    static boolean paced = true; // frames start at 90 Hz; unpaced (tests), each frame waits for the builds it began
+    static int builderThreads = 3;
+    // -Pmemory=n: every n frames, memory by kind (GPU by category, LWJGL's native, direct buffers, the process's)
+    private static final int MEMORY_EVERY = Integer.getInteger("truesim.demo.memory", 0);
     private static final long BUDGET = 1_000_000_000L / 90; // a headset's frame
     static final double CELL = 24;
     static final int RANGE = 3; // cells each way: the benchmark's default (-Prange=n)
@@ -82,6 +86,8 @@ public final class StreamBench {
         int[] materials = new int[0];
         int[] instances = new int[0];
         volatile boolean dropped; // the window's: left range before its build began, so the build is skipped
+        Built placedContent; // its CPU-side content, freed a few frames after placing (once its copies recorded)
+        long freeAt;
 
         Cell(long key) {
             this.key = key;
@@ -128,8 +134,21 @@ public final class StreamBench {
      * A cell's content, made on a worker thread: its meshes and its texture's texels, and (unless {@code direct}) both
      * prepared for the GPU there too, so the frame's thread only adds them.
      */
-    record Built(List<MeshData> meshes, MemorySegment texels, int textureSize,
+    /** Cells' content built and not freed yet. */
+    static final java.util.concurrent.atomic.AtomicInteger UNFREED = new java.util.concurrent.atomic.AtomicInteger();
+
+    record Built(List<MeshData> meshes, Arena arena, MemorySegment texels, int textureSize,
         List<GeometryPool.Prepared> preparedMeshes, Textures.Prepared preparedTexture) {
+
+        /**
+         * Frees the CPU-side content: the meshes' buffers (a mesh built by hand is closed by its builder once uploaded:
+         * a shared arena each, which nothing else frees) and the texels.
+         */
+        void free() {
+            meshes.forEach(MeshData::close);
+            arena.close();
+            UNFREED.decrementAndGet();
+        }
     }
 
     static boolean direct; // meshes and textures staged on the frame's thread, as before preparing existed
@@ -161,14 +180,29 @@ public final class StreamBench {
      * fly-over in a window instead ({@link StreamWindow}).
      */
     public static void main(String[] args) throws Exception {
+        com.truesim.engine.platform.NativeMemory.install(); // before LWJGL loads, so its allocations are counted
         options(List.of(args));
         if (List.of(args).contains("window")) {
             StreamWindow.run(args);
             return;
         }
+        headless(MEMORY_EVERY <= 0 ? null : (f, cells, pool, textures, materials) -> {
+            if (f % MEMORY_EVERY == 0) {
+                memory(f, cells, pool, textures, materials);
+            }
+        });
+    }
+
+    /** Called every frame of a headless run, before the frame is submitted: what is streamed in now. */
+    interface Sampler {
+        void sample(int frame, int cells, GeometryPool pool, Textures textures, Materials materials);
+    }
+
+    /** The headless benchmark with the options set: its frames, then its report; {@code sampler} may be null. */
+    static void headless(Sampler sampler) throws Exception {
         int color = VK_FORMAT_R16G16B16A16_SFLOAT;
         int depth = VK_FORMAT_D32_SFLOAT;
-        ExecutorService builders = Executors.newFixedThreadPool(3);
+        ExecutorService builders = Executors.newFixedThreadPool(builderThreads);
         try (VulkanInstance instance = VulkanInstance.builder().applicationName("stream bench").surfaces(false)
                  .build();
              VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
@@ -178,6 +212,7 @@ public final class StreamBench {
              Textures textures = new Textures(device, graph.frameSlots());
              GpuScene scene = new GpuScene(device, pool, instanceCapacity(), graph.frameSlots());
              Lights lights = new Lights(device, 4, 8, graph.frameSlots())) {
+            StreamBench.device = device;
             scene.setMaterials(materials);
             if (inFrame) { // render.streamBudget 0: every copy in the frame, on the graphics queue
                 pool.streamBudget(0);
@@ -216,9 +251,9 @@ public final class StreamBench {
             List<Frame> frames = new ArrayList<>();
             long seed = 1;
             long next = System.nanoTime();
-            for (int f = 0; f < FRAMES; f++) {
+            for (int f = 0; f < frameCount; f++) {
                 // Paced as a headset paces frames: each starts at its time; its work is timed, the rest idles.
-                while (System.nanoTime() < next) {
+                while (paced && System.nanoTime() < next) {
                     java.util.concurrent.locks.LockSupport.parkNanos(Math.max(1, next - System.nanoTime() - 200_000));
                 }
                 long start = System.nanoTime();
@@ -246,11 +281,16 @@ public final class StreamBench {
                     }
                 }
                 for (Cell cell : cells.values()) {
+                    if (!paced && cell.building != null) {
+                        cell.building.join();
+                    }
                     if (cell.building != null && cell.building.isDone()) {
                         texturesAdded += place(cell, cell.building.get(), pool, textures, materials, scene, freeIds,
                             added);
                         cell.building = null;
+                        cell.freeAt = f + FREE_AFTER;
                     }
+                    freePlaced(cell, f);
                 }
                 for (java.util.Iterator<Cell> it = cells.values().iterator(); it.hasNext();) {
                     Cell cell = it.next();
@@ -262,6 +302,9 @@ public final class StreamBench {
                 sun.update();
                 graph.beginFrame();
                 graph.submit(0, 0);
+                if (sampler != null) {
+                    sampler.sample(f, cells.size(), pool, textures, materials);
+                }
                 long now = System.nanoTime();
                 frames.add(new Frame(f, (now - start) / 1e6, added[0], removed, texturesAdded,
                     graph.builds() - builds));
@@ -274,7 +317,7 @@ public final class StreamBench {
             device.waitIdle();
             long placed = cells.values().stream().filter(c -> c.building == null).count();
             System.out.println("Cells in range " + cells.size() + ", placed " + placed + ", meshes "
-                + pool.meshCount() + ", camera x " + (FRAMES * speed / 90.0));
+                + pool.meshCount() + ", camera x " + (frameCount * speed / 90.0));
             report(frames, pool, textures, materials);
             for (Cell cell : cells.values()) {
                 if (cell.building == null) {
@@ -283,6 +326,9 @@ public final class StreamBench {
                     Built unplaced = cell.building.get();
                     unplaced.preparedMeshes().forEach(GeometryPool.Prepared::close);
                     unplaced.preparedTexture().close();
+                    unplaced.free();
+                } else {
+                    cell.building.get().free();
                 }
             }
             device.waitIdle();
@@ -295,6 +341,43 @@ public final class StreamBench {
             builders.shutdownNow();
         }
     }
+
+    /** One line of memory by kind, in MB, with what is streamed in now. */
+    static void memory(int frame, int cells, GeometryPool pool, Textures textures, Materials materials) {
+        StringBuilder line = new StringBuilder(String.format(Locale.ROOT, "memory frame %6d cells %4d meshes %5d "
+            + "textures %4d materials %4d |", frame, cells, pool.meshCount(), textures.count(), materials.count()));
+        for (com.truesim.engine.vulkan.GpuMemory.Category c : com.truesim.engine.vulkan.GpuMemory.Category.values()) {
+            line.append(String.format(Locale.ROOT, " %s %.0f", c.name().toLowerCase(Locale.ROOT),
+                com.truesim.engine.vulkan.GpuMemory.bytes(c) / 1e6));
+        }
+        long direct = 0;
+        for (java.lang.management.BufferPoolMXBean b : java.lang.management.ManagementFactory
+            .getPlatformMXBeans(java.lang.management.BufferPoolMXBean.class)) {
+            direct += b.getMemoryUsed();
+        }
+        Runtime rt = Runtime.getRuntime();
+        long committed = ((com.sun.management.OperatingSystemMXBean) java.lang.management.ManagementFactory
+            .getOperatingSystemMXBean()).getCommittedVirtualMemorySize();
+        line.append(String.format(Locale.ROOT, " | lwjgl %.0f (%d) direct %.0f heap %.0f process %.0f",
+            com.truesim.engine.platform.NativeMemory.bytes() / 1e6, com.truesim.engine.platform.NativeMemory.count(),
+            direct / 1e6, (rt.totalMemory() - rt.freeMemory()) / 1e6, committed / 1e6));
+        if (device != null) {
+            try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+                org.lwjgl.util.vma.VmaBudget.Buffer budgets = org.lwjgl.util.vma.VmaBudget.calloc(
+                    org.lwjgl.vulkan.VK10.VK_MAX_MEMORY_HEAPS, stack);
+                org.lwjgl.util.vma.Vma.vmaGetHeapBudgets(device.allocator(), budgets);
+                for (int h = 0; h < 3; h++) {
+                    org.lwjgl.util.vma.VmaBudget b = budgets.get(h);
+                    line.append(String.format(Locale.ROOT, " | heap%d usage %.0f blocks %.0f (%d) allocs %.0f (%d)", h,
+                        b.usage() / 1e6, b.statistics().blockBytes() / 1e6, b.statistics().blockCount(),
+                        b.statistics().allocationBytes() / 1e6, b.statistics().allocationCount()));
+                }
+            }
+        }
+        System.out.println(line);
+    }
+
+    static VulkanDevice device; // for the memory line's heaps
 
     /** Reads the options both modes share: rays, large, heavy, direct, inframe, grow. */
     static void options(List<String> args) {
@@ -367,25 +450,47 @@ public final class StreamBench {
             meshes.add(DemoMeshes.groundTile(baseX, baseZ, CELL, 24)); // a quad a metre: 1,152 triangles
         }
         int size = heavy ? 4096 : large ? 2048 : 256;
-        MemorySegment texels = Arena.ofAuto().allocate(4L * size * size);
+        Arena arena = Arena.ofShared(); // freed with the meshes (Built.free), not left to the collector
+        UNFREED.incrementAndGet();
+        MemorySegment texels = arena.allocate(4L * size * size);
         int tint = (int) (seed * 2654435761L);
         for (int i = 0; i < size * size; i++) {
             texels.setAtIndex(ValueLayout.JAVA_INT, i, 0xff000000 | (tint ^ i * 31) & 0xffffff);
         }
         if (direct) {
-            return new Built(meshes, texels, size, null, null);
+            return new Built(meshes, arena, texels, size, null, null);
         }
         List<GeometryPool.Prepared> prepared = new ArrayList<>();
         for (MeshData mesh : meshes) {
             prepared.add(sharedPool.prepare(mesh));
         }
-        return new Built(meshes, texels, size, prepared, sharedTextures.prepareColor(size, size, texels));
+        return new Built(meshes, arena, texels, size, prepared, sharedTextures.prepareColor(size, size, texels));
     }
+
+    /** Frames after placing a cell before its CPU-side content is freed: its copies recorded by then. */
+    static final int FREE_AFTER = 4;
+
+    /** Frees {@code cell}'s CPU-side content once frame {@code frame} is {@link Cell#freeAt} or later. */
+    static void freePlaced(Cell cell, long frame) {
+        if (cell.placedContent != null && frame >= cell.freeAt) {
+            Built content = cell.placedContent;
+            FREES.execute(content::free);
+            cell.placedContent = null;
+        }
+    }
+
+    // Closing a shared arena makes every thread reach a safepoint (up to milliseconds): not on the frame's thread.
+    private static final ExecutorService FREES = Executors.newSingleThreadExecutor(task -> {
+        Thread thread = new Thread(task, "stream frees");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     /** Puts a built cell on the GPU; the textures added. */
     static int place(Cell cell, Built content, GeometryPool pool, Textures textures, Materials materials,
         GpuScene scene, ArrayDeque<Integer> freeIds, int[] added) {
         List<MeshData> built = content.meshes();
+        cell.placedContent = content;
         cell.meshes = new int[built.size()];
         for (int m = 0; m < built.size(); m++) {
             long since = System.nanoTime();
@@ -432,6 +537,7 @@ public final class StreamBench {
     /** Takes a cell off the GPU; the meshes removed. */
     static int clear(Cell cell, GeometryPool pool, Textures textures, Materials materials, GpuScene scene,
         ArrayDeque<Integer> freeIds) {
+        freePlaced(cell, Long.MAX_VALUE);
         for (int id : cell.instances) {
             scene.remove(id);
             freeIds.push(id);

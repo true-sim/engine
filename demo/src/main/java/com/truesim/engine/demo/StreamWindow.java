@@ -239,6 +239,7 @@ final class StreamWindow implements Application, PlatformListener {
         private RayTracing rayTracing;
         private Window window;
         private long seed = 1;
+        private long frames;
         double x;
         int inRange;
         int placed;
@@ -329,9 +330,11 @@ final class StreamWindow implements Application, PlatformListener {
                     if (built != null) {
                         texturesAdded += StreamBench.place(cell, built, pool, textures, materials, scene, freeIds,
                             added);
+                        cell.freeAt = frames + StreamBench.FREE_AFTER;
                     }
                     cell.building = null;
                 }
+                StreamBench.freePlaced(cell, frames);
             }
             inRange = 0;
             placed = 0;
@@ -352,6 +355,7 @@ final class StreamWindow implements Application, PlatformListener {
                 }
             }
             meshesAdded = added[0];
+            frames++;
             sun.update();
         }
 
@@ -383,11 +387,14 @@ final class StreamWindow implements Application, PlatformListener {
                 StreamBench.Cell cell = cells.get(c);
                 if (cell.building == null) {
                     StreamBench.clear(cell, pool, textures, materials, scene, freeIds);
-                } else if (!StreamBench.direct && cell.building.isDone() && !cell.building.isCompletedExceptionally()) {
+                } else if (cell.building.isDone() && !cell.building.isCompletedExceptionally()) {
                     StreamBench.Built unplaced = cell.building.join(); // built but never placed: its prepared content
                     if (unplaced != null) {
-                        unplaced.preparedMeshes().forEach(GeometryPool.Prepared::close);
-                        unplaced.preparedTexture().close();
+                        if (!StreamBench.direct) {
+                            unplaced.preparedMeshes().forEach(GeometryPool.Prepared::close);
+                            unplaced.preparedTexture().close();
+                        }
+                        unplaced.free();
                     }
                 }
             }

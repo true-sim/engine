@@ -79,6 +79,8 @@ tasks.register<JavaExec>("streamBench") {
     providers.gradleProperty("seconds").orNull?.let { systemProperty("truesim.demo.seconds", it) }
     providers.gradleProperty("range").orNull?.let { systemProperty("truesim.demo.range", it) } // cells each way
     providers.gradleProperty("speed").orNull?.let { systemProperty("truesim.demo.speed", it) } // metres a second
+    providers.gradleProperty("frames").orNull?.let { systemProperty("truesim.demo.frames", it) } // headless: 2700
+    providers.gradleProperty("memory").orNull?.let { systemProperty("truesim.demo.memory", it) } // every n frames
 }
 
 // The effects showcase (Showcase): ./gradlew :engine-demo:showcase -Pcrowd=<path to Fox.gltf> [--args=measure]
