@@ -51,6 +51,12 @@ public final class Keys {
     public static final Key<Image> SURFACE_REFLECTANCE = Key.image("truesim.surfaceReflectance");
     /** What their color weighs the diffuse light from all around by ({@link SurfaceOutputs}). */
     public static final Key<Image> SURFACE_DIFFUSE = Key.image("truesim.surfaceDiffuse");
+    /**
+     * A view's specular occlusion ({@link AmbientOcclusion}): per pixel, what ambient occlusion dimmed the environment's
+     * reflection by (8 bits, 1 where it did not), so a technique replacing that reflection after it
+     * ({@link ScreenSpaceReflections}) replaces the dimmed one.
+     */
+    public static final Key<Image> SPECULAR_OCCLUSION = Key.image("truesim.specularOcclusion");
 
     /** Towards the sun, the scene's one light, unit length; the shaders' SUN. */
     public static final float SUN_X = 0.42399915f;

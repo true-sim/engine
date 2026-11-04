@@ -186,11 +186,17 @@ float sixWay(float3 l, float4 a, float4 b)
  * from every side (a point lit per vertex), 1 by `normal` wrapped around (lit per pixel), 2 by six-way maps `a` and
  * `b` in the frame (`right`, `up`, `normal` towards the camera). Diffuse, over pi.
  */
-float3 particleLight(LightListHeader* h, float3 world, float3 normal, float3 right, float3 up, uint mode, float4 a,
-    float4 b, uint2 pixel, float depth)
+float3 particleLight(LightListHeader* h, IndirectLight* indirect, float3 world, float3 normal, float3 right,
+    float3 up, uint mode, float4 a, float4 b, uint2 pixel, float depth)
 {
     float sky = mode == 2 ? (a.r + a.g + a.b + b.r + b.g + b.b) / 6 : 1;
+    // The light from all around: the view's indirect light (the environment, or the probe volume where it reaches),
+    // as the irradiance facing `normal`; or the constant sky
     float3 sum = SKY_IRRADIANCE * sky;
+    if (indirect != nullptr)
+    {
+        sum = 3.14159265 * diffuseLightAt(indirect, normal, world, normal) * sky;
+    }
     if (h == nullptr)
     {
         float3 l = float3(dot(SUN, right), dot(SUN, up), dot(SUN, normal));
@@ -255,7 +261,8 @@ void lightMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
     float depth;
     pixelOf(view, center, pixel, depth);
     float3 toCamera = normalize(push.facing - center);
-    float3 lit = particleLight((LightListHeader*) d.lights, center, toCamera, 0, 0, 0, 0, 0, pixel, depth);
+    float3 lit = particleLight((LightListHeader*) d.lights, (IndirectLight*) d.indirect, center, toCamera, 0, 0, 0, 0,
+        0, pixel, depth);
     uint* commands = push.commands;
     uint at = LIT_WORDS + 4 * (e.first + k);
     commands[at] = asuint(lit.x);
@@ -611,6 +618,12 @@ LightListHeader* lightsOf(ParticleVertex v)
     return (LightListHeader*) draws[push.first].lights; // the same for every draw of the view
 }
 
+IndirectLight* indirectOf(ParticleVertex v)
+{
+    ParticleDrawRecord* draws = push.draws;
+    return (IndirectLight*) draws[push.first].indirect; // the same for every draw of the view
+}
+
 [shader("fragment")]
 float4 fragmentMain(ParticleVertex v) : SV_Target
 {
@@ -686,7 +699,7 @@ float4 shade(ParticleVertex v)
                 m = frame(r, v.draw.z, v.frames.x, v.uv).xyz * 2 - 1;
             }
             n = normalize(v.right * m.x + v.up * m.y + v.forward * m.z);
-            color.rgb *= particleLight(lightsOf(v), v.world, n, v.right, v.up, 1, 0, 0, pixel, depth);
+            color.rgb *= particleLight(lightsOf(v), indirectOf(v), v.world, n, v.right, v.up, 1, 0, 0, pixel, depth);
         }
         else
         {
@@ -697,7 +710,7 @@ float4 shade(ParticleVertex v)
                 b = frame(r, v.draw.z, v.frames.x, v.uv);
             }
             float4 a = texel;
-            color = float4(v.color.rgb * (particleLight(lightsOf(v), v.world, n, v.right, v.up, 2, a, b, pixel, depth)
+            color = float4(v.color.rgb * (particleLight(lightsOf(v), indirectOf(v), v.world, n, v.right, v.up, 2, a, b, pixel, depth)
                 + b.a),
                 v.color.a * a.a);
         }

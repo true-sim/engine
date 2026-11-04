@@ -1361,6 +1361,155 @@ where they are, never committed.
 `ShadowsTest`'s) run in CI rather than being skipped. Ray-traced tests still assume `device.rayTracing()`, and the
 reference's tests are small (32 x 32 pixels) for a CPU's ray tracing.
 
+### Global illumination: ambient occlusion and the probe volume
+
+The second and third stages (S1, S2): occlusion at small scale and diffuse light that bounces, each a setting with
+`OFF`, replacing exactly what shading added through the surface outputs or the indirect-light table.
+
+**Ambient occlusion** (`AmbientOcclusion`, one per view at `Anchor.OPAQUE` after the background, before
+reflections; `render.ao`): the cosine-weighted share of the hemisphere open within `render.ao.radius` (0.5 m).
+
+- `GTAO` (Jimenez et al. 2016, as XeGTAO): slices through the hemisphere, each side's highest horizon found along the
+  screen, the visible arc integrated in closed form; samples fade over the last `render.ao.falloff` of the radius;
+  surfaces infinitely thick.
+- `BITMASK` (the default; Therrien, Levesque and Gilet 2023): surfaces `render.ao.thickness` thick, each slice's
+  occlusion a mask of 32 sectors of equal cosine-weighted measure (the slice's measure from GTAO's closed form, so
+  every sector holds as much light), and one short-range bounce of the scene's color from the sectors each sample
+  covers (`render.ao.bounce`).
+- `RAYS` (#34): `render.ao.rays` cosine-distributed rays per pixel by ray queries, as long as the radius: exact,
+  off-screen occluders included, denoised. Devices without ray tracing take `BITMASK`.
+
+Only the diffuse light from all around is darkened (design D12): color + diffuse weight x ((ao - 1) x the diffuse
+light + bounce), the diffuse light recomputed at the pixel from the view's table (the environment's harmonics, the
+constant sky, or the probe volume), so an unoccluded surface keeps its color exactly (tested on every technique), and
+direct light, emission and unlit surfaces are untouched (`anOccludedCornerDarkensOnlyTheDiffuseLight`). Reflections
+get a separate specular occlusion (`render.ao.specular`): the cone of the visible directions around the bent normal
+against the GGX lobe's cone (Oat and Sander's cap intersection), relative to what the open hemisphere leaves of the
+lobe; it is provided as `Keys.SPECULAR_OCCLUSION`, so screen-space reflections replace the environment as it was
+dimmed. The cone's aperture from the occlusion is steep near 1: grazing reflections on open floors lose up to 12 %.
+The screen-space ones are single-frame by default (a noise pattern fixed in time, then
+`render.denoise.spatialPasses` of an edge-stopping filter); `render.ao.temporal` and rays accumulate over frames.
+`render.ao.debug` shows the occlusion, the specular occlusion or the bounce alone.
+
+**The denoiser** (`Denoiser`, design §9, D6), for any signal of two images: `SVGF` (temporal accumulation, then
+`render.denoise.passes` steps of an a-trous filter guided by the depth's plane, the normal and the variance) and
+`REBLUR` (a blur, the temporal accumulation, a blur whose radius shrinks with the history, the history holding the
+blurred result), chosen by `render.ao.denoiser`. Both find the history through `Keys.MOTION` (or the camera's
+reprojection) and keep only taps of the same surface; the history holds `render.denoise.maxFrames` (30) at most, and a
+fast history of `render.denoise.fastFrames` (4) restarts it where the two disagree beyond the fast one's noise
+(`render.denoise.clamp` deviations): a change nothing announced shows within 15 frames
+(`tracedOcclusionFollowsAnUnannouncedChangeWithinFifteenFrames`, both families). Neither wins outright (below), so
+both stay.
+
+**The probe volume** (`ProbeVolume`, a frame-level request; `ProbeVolumeLighting`, per view, `render.gi` = `OFF` or
+`PROBES`; DDGI: Majercik et al. 2019 and 2021). `render.gi.volume.cascades` (3) grids of `probes` x `probesUp` x
+`probes` (16 x 8 x 16) probes, the first `spacing` (1 m) apart, each next twice as far, around the anchor view's
+camera; they scroll with it (a slot is a probe's world grid coordinate modulo the grid: only probes coming into the
+grid start anew), half a spacing off the grid's planes. Per probe, in octahedral atlases: irradiance (6 x 6 texels and
+a border, half floats) with its sky visibility (the share of its rays that met nothing), and the distance's mean and
+mean square (14 x 14 and a border), so a shaded point ignores probes that cannot see it (Chebyshev). Each frame:
+
+- **Rays shaded by type:** `render.gi.volume.rays` (128) rays per probe, turned anew each frame, plus a fixed set for
+  relocation and classification, run as paths of the reference path tracer's wavefront in its probe mode: hits binned
+  and shaded by their material type's own hit entry point, with the BRDF shading uses, the world light grid
+  (`WorldLights`: the sun, punctual lights, the GPU's particle lights) and a shadow ray each, emission, the
+  environment where rays leave, and the volume's own light of the frame before at the hit (infinite bounces). Back
+  faces mark probes inside geometry: they move out (`relocate`) or are turned off (`classify`).
+- **Shading everywhere:** the volume's diffuse light replaces the environment's spherical harmonics through the view's
+  indirect-light table in every path: opaque on both shading techniques, blended and transmissive surfaces, lit
+  particles (which took the constant sky before), and the composites of ambient occlusion and reflections; its sky
+  visibility dims the environment's reflections (specular occlusion at the probes' scale), which is what keeps a
+  closed room dark. One look-up gives both. Views given equal volumes share one update (a headset's eyes, D7:
+  `twoViewsShareOneVolume`).
+- **Lag (design D3), no latency:** a probe's history holds `render.gi.response.maxFrames` (30) updates at most.
+  Probes within `instanceMargin` (3) times a changed instance's bounding sphere (moved, changed or skinned: D91's
+  records compared on the GPU with the frame before's) or `lightMargin` (2) times a changed light's reach restart at
+  once (`render.gi.response.invalidate`), all of them for a directional light or the environment; a probe whose update
+  differs from its history beyond its noise (`sensitivity`), or drifts from it over a few updates (`drift`), restarts
+  too (`render.gi.response.adaptive`); probes that restarted update again within the frame
+  (`render.gi.response.iterations`, 2), a further bounce of the change each time.
+
+Tested against closed forms (`ProbeVolumeTest`): the white furnace through the probes (E / (1 - rho) within 3 %, which
+only infinite bounces reach), a light changing color inside a box (90 % in 2 frames told, 2 found, more by the history
+cap alone), two views one update, no allocation.
+
+**Against the path-traced references** (engine-scene's `GiEvaluation` and `GiSponza`, `TRUESIM_SCREENSHOTS=true`,
+`-PgiReferences=<GiReferences' directory>`; 640 x 400 against 4,096 samples, Sponza 960 x 540 against 2,048; RX 9070
+XT, 2026-11-04): mean relative luminance error, its 95th percentile, the bias; the leak rooms' references are black,
+so their mean absolute luminance instead:
+
+| Scene | No GI | Probes | Probes + BITMASK | Probes + RAYS (SVGF) |
+|---|---|---|---|---|
+| sun-room | 452.7 %, 1203 %, +452 % | 7.0 %, 28.5 %, +0.5 % | 6.8 %, 27.6 %, -1.0 % | 8.5 %, 37.9 %, -4.6 % |
+| leak-5cm (absolute) | 0.3006 | 0.0001 | 0.0001 | 0.0001 |
+| leak-25cm (absolute) | 0.3006 | 0.0000 | 0.0000 | 0.0000 |
+| leak-50cm (absolute) | 0.3005 | 0.0000 | 0.0000 | 0.0000 |
+| bleeding | 100.0 %, 100 %, -100 % | 19.9 %, 84.9 %, +12.5 % | 19.5 %, 62.2 %, +9.3 % | 19.2 %, 82.2 %, +3.1 % |
+| screens | 41.1 %, 100 %, -39.9 % | 19.7 %, 75.8 %, -16.2 % | 18.2 %, 67.7 %, -15.6 % | 17.8 %, 69.7 %, -15.5 % |
+| toggle (light on) | 65.4 %, 92.9 %, -65.4 % | 7.9 %, 18.4 %, -6.4 % | 7.6 %, 17.8 %, -6.2 % | 10.5 %, 32.0 %, -9.7 % |
+| door (shut, absolute) | 0.2174 | 0.0000 | 0.0000 | 0.0000 |
+| door (open) | 339.2 %, 1053 %, +337 % | 9.1 %, 38.1 %, -1.9 % | 9.2 %, 28.9 %, -5.5 % | 9.3 %, 36.5 %, -5.2 % |
+| mover (moved) | 81.3 %, 94.3 %, -81.3 % | 5.2 %, 15.8 %, -3.7 % | 4.5 %, 13.3 %, -2.3 % | 7.6 %, 32.0 %, -5.3 % |
+| cornell (2 m box, 1 m probes) | 46.6 %, 100 %, -46.4 % | 22.7 %, 115 %, +1.8 % | 19.2 %, 86.0 %, -7.6 % | 22.4 %, 94.0 %, -5.5 % |
+| Sponza, view 1 | 331 %, 9004 %, +329 % | 17.9 %, 123 %, -1.8 % | 18.5 %, 87.5 %, -5.3 % | 17.4 %, 92.7 %, -3.5 % |
+| Sponza, view 2 | 1421 %, 12932 %, +1418 % | 26.8 %, 129 %, -5.2 % | 26.3 %, 119 %, -6.7 % | 25.5 %, 110 %, -5.5 % |
+| Sponza, view 3 | 3546 %, 11244 %, +3543 % | 70.8 %, 196 %, +25.4 % | 69.6 %, 145 %, +7.7 % | 68.7 %, 166 %, +8.5 % |
+
+Ambient occlusion alone against 512 rays a pixel (mean absolute difference, by scene): GTAO 0.030-0.071, BITMASK
+0.030-0.073, RAYS with SVGF 0.024-0.070, with ReBLUR 0.015-0.064 (ReBLUR's blurs suit these still views; SVGF keeps
+contact sharper and noisier). With the probes, BITMASK's image is closer to the reference in 7 views and GTAO's in 7
+(`GiEvaluation`'s full table, the views that are not black): a trade-off, so both stay.
+
+Lag of the dynamic scenes (frames until the image is within 10 % of the change from where it settles, each frame the
+mean of 4 runs, compared in 16 x 16 blocks): toggle 3 told, 3 found (48 by the history cap alone); door 2 told, 3
+found (48); mover 6 to 26 told and 26 found over two evaluations (47-51): the targets (4 and 15) are not met there.
+The moved block changes the room's bounce by a few percent, below what one update's noise shows, and the measure
+hovers at its threshold for many frames; that tail converges with the history.
+
+What it costs (engine-scene's `GiBenchmark`, `TRUESIM_BENCHMARK=true -PgiSponza=<Sponza.gltf>`, RX 9070 XT,
+2026-11-04, JaCoCo off): Sponza from its first view, the visibility buffer, traced sun shadows; 3 rounds after a
+warm-up, ranges of each round's median of the GPU's pass timings. "Frame": every pass; "AO": ambient occlusion's
+passes and its denoiser's (the composite samples the volume where it lights the view); "probes": the volume's update
+and lighting passes (6,144 probes); "shading": the visibility buffer's shading pass, where the volume is sampled.
+
+| Size | Technique | Frame (passes) | AO passes | Probe passes | Shading pass |
+|---|---|---|---|---|---|
+| 1920 x 1080 | raster | 0.848-0.892 ms | 0.000-0.000 ms | 0.000-0.000 ms | 0.608-0.648 ms |
+| 1920 x 1080 | gtao | 2.587-2.607 ms | 1.551-1.558 ms | 0.000-0.000 ms | 0.789-0.794 ms |
+| 1920 x 1080 | bitmask | 2.825-2.972 ms | 1.854-1.940 ms | 0.000-0.000 ms | 0.738-0.786 ms |
+| 1920 x 1080 | rays-svgf | 3.605-3.633 ms | 2.567-2.580 ms | 0.000-0.000 ms | 0.797-0.797 ms |
+| 1920 x 1080 | rays-reblur | 3.383-3.388 ms | 2.427-2.431 ms | 0.000-0.000 ms | 0.728-0.728 ms |
+| 1920 x 1080 | probes | 2.612-2.663 ms | 0.000-0.000 ms | 1.415-1.445 ms | 0.933-0.960 ms |
+| 1920 x 1080 | probes+gtao | 5.057-5.073 ms | 2.196-2.206 ms | 1.510-1.534 ms | 1.102-1.106 ms |
+| 1920 x 1080 | probes+bitmask | 5.424-5.445 ms | 2.553-2.555 ms | 1.520-1.542 ms | 1.105-1.108 ms |
+| 1920 x 1080 | probes+rays-svgf | 6.080-6.082 ms | 3.156-3.164 ms | 1.555-1.557 ms | 1.119-1.120 ms |
+| 1920 x 1080 | probes+rays-reblur | 5.810-5.823 ms | 3.016-3.030 ms | 1.488-1.497 ms | 1.069-1.076 ms |
+| 1920 x 1080 | probes, 64 rays, 3 cascades | 2.073-2.112 ms | 0.000-0.000 ms | 0.891-0.908 ms | 0.938-0.956 ms |
+| 1920 x 1080 | probes, 128 rays, 3 cascades | 2.607-2.656 ms | 0.000-0.000 ms | 1.405-1.452 ms | 0.929-0.958 ms |
+| 1920 x 1080 | probes, 256 rays, 3 cascades | 4.075-4.118 ms | 0.000-0.000 ms | 2.890-2.911 ms | 0.940-0.945 ms |
+| 1920 x 1080 | probes, 128 rays, 1 cascade | 1.794-1.848 ms | 0.000-0.000 ms | 0.677-0.687 ms | 0.879-0.899 ms |
+| 1920 x 1080 | probes, 128 rays, 2 cascades | 2.244-2.308 ms | 0.000-0.000 ms | 1.083-1.111 ms | 0.908-0.935 ms |
+| 1920 x 1080 | probes, 128 rays, 4 cascades | 3.001-3.075 ms | 0.000-0.000 ms | 1.833-1.858 ms | 0.933-0.953 ms |
+| 3840 x 2160 | raster | 3.384-3.394 ms | 0.000-0.000 ms | 0.000-0.000 ms | 2.460-2.464 ms |
+| 3840 x 2160 | gtao | 10.726-10.737 ms | 6.806-6.820 ms | 0.000-0.000 ms | 2.996-3.011 ms |
+| 3840 x 2160 | bitmask | 11.906-11.945 ms | 7.959-7.983 ms | 0.000-0.000 ms | 3.052-3.071 ms |
+| 3840 x 2160 | rays-svgf | 14.438-14.470 ms | 10.498-10.507 ms | 0.000-0.000 ms | 3.044-3.068 ms |
+| 3840 x 2160 | rays-reblur | 14.642-14.644 ms | 11.029-11.052 ms | 0.000-0.000 ms | 2.746-2.749 ms |
+| 3840 x 2160 | probes | 6.210-6.220 ms | 0.000-0.000 ms | 1.521-1.534 ms | 3.735-3.748 ms |
+| 3840 x 2160 | probes+gtao | 16.287-16.340 ms | 9.432-9.517 ms | 1.620-1.630 ms | 4.304-4.323 ms |
+| 3840 x 2160 | probes+bitmask | 17.534-17.568 ms | 10.589-10.636 ms | 1.651-1.667 ms | 4.351-4.355 ms |
+| 3840 x 2160 | probes+rays-svgf | 20.065-20.126 ms | 13.072-13.118 ms | 1.663-1.692 ms | 4.398-4.405 ms |
+| 3840 x 2160 | probes+rays-reblur | 20.129-20.162 ms | 13.568-13.576 ms | 1.549-1.557 ms | 4.125-4.137 ms |
+
+The volume's update does not depend on the resolution (1.4-1.5 ms at 128 rays and 3 cascades, about linear in rays
+and cascades); sampling it costs the shading pass 0.3 ms at 1080p and 1.3 ms at 4K. Ambient occlusion at full
+resolution is the expensive part: 1.6-2.6 ms at 1080p, 6.8-11 ms at 4K (each technique's tracing, then the filter);
+GTAO is the cheapest, rays the dearest, the two denoisers within 0.15 ms at 1080p.
+
+Not yet: the baked volume (`BAKED`, the same format filled offline by the path tracer and shipped as a scene asset;
+it needs the scene repo's asset type, design S4); ambient occlusion at a lower resolution (its cost above is at full
+resolution); the probe volume's update on the async queue and a budget below every probe each frame (S3).
+
 ## Frame graph
 
 `engine-graph` assembles the frame from **techniques**, such as the meshlet scene, bloom or tone mapping, without any

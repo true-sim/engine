@@ -41,6 +41,7 @@ tasks.test {
     providers.gradleProperty("giSamples").orNull?.let { systemProperty("truesim.gi.samples", it) }
     providers.gradleProperty("giSponza").orNull?.let { systemProperty("truesim.gi.sponza", it) }
     providers.gradleProperty("giBounces").orNull?.let { systemProperty("truesim.gi.bounces", it) }
+    providers.gradleProperty("giReferences").orNull?.let { systemProperty("truesim.gi.references", it) }
 }
 
 // The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.

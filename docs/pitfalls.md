@@ -346,6 +346,24 @@ on the floor, which are untraced but lie on the floor's plane.
 - Rule: a test of a screen-space hit uses what the ray did (the pixel it went behind, how deep), not the visible
   pixel's properties; a filter over neighbors leaves out texels not traced at all, not only those of other planes.
 
+**Probes on the planes of axis-aligned walls saw half of nothing.** The probe volume placed probes at whole multiples
+of their spacing; walls built on whole meters (the GI test scenes, a box from -1 to 1) put probe rows exactly in
+their planes. Rays from such a probe going outwards met nothing (neither a back face to relocate it nor a wall), so
+half of its texels took the black environment, and the white furnace read 0.471 instead of 0.5.
+- Proof: `ProbeVolumeTest.aClosedBoxGlowingAndReflectingEvenlyIsEOverOneMinusTheAlbedoThroughTheProbes` (5.8 % low)
+  passes within 3 % with the probes half a spacing off the grid's planes (true-sim/engine, GI S2).
+- Rule: test a probe or sample grid with geometry on its own planes; keep grid points off the coordinates content is
+  authored on.
+
+**A change detector averaging relative differences was biased by noise.** The probe volume's drift detector first
+averaged each texel's (new - old) / max(new, old): not zero for noise alone, so probes of a still scene restarted
+again and again and its frames' noise (16 x 16 blocks against their settled mean) rose from 0.0017 to 0.0085 in the
+mover scene; the difference of the texels' sums over the old sum, tested against its own running deviation, kept it
+at 0.0018.
+- Proof: `GiEvaluation`'s lag table, the mover scene's noise column, before and after (true-sim/engine, GI S2).
+- Rule: a statistic that decides to drop history is zero-mean under noise alone, and is tested against its measured
+  noise, not a fixed fraction; check a still scene's noise after adding one.
+
 ## Tests and measurements
 
 **A GPU time per frame that left out the frame start.** `GpuTimings` timed passes only; textures' copies and mip

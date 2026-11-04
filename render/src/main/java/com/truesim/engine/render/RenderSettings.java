@@ -64,6 +64,10 @@ public final class RenderSettings {
         all.add(Transparency.MODE);
         all.add(Transparency.SORTED_RUNS);
         all.addAll(ScreenSpaceReflections.ALL);
+        all.addAll(AmbientOcclusion.ALL);
+        all.addAll(Denoiser.ALL);
+        all.add(ProbeVolumeLighting.MODE);
+        all.addAll(ProbeVolume.ALL);
         all.addAll(ClusteredLights.ALL);
         all.addAll(WorldLights.ALL);
         all.addAll(ReferencePathTracer.ALL);

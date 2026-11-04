@@ -15,6 +15,9 @@ import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.graph.ViewPort;
+import com.truesim.engine.render.AmbientOcclusion;
+import com.truesim.engine.render.ProbeVolume;
+import com.truesim.engine.render.ProbeVolumeLighting;
 import com.truesim.engine.render.Camera;
 import com.truesim.engine.render.ClusteredLights;
 import com.truesim.engine.render.EnvironmentLighting;
@@ -82,7 +85,7 @@ public final class GiHarness implements AutoCloseable {
         graph = new FrameGraph(device, 2);
         pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 16, 1 << 10, 64), graph.frameSlots());
         scene = new GpuScene(device, pool, 256, graph.frameSlots());
-        materials = new Materials(device, 64, graph.frameSlots());
+        materials = new Materials(device, 256, graph.frameSlots());
         scene.setMaterials(materials);
         lights = new Lights(device, 16, 4, graph.frameSlots());
         rayTracing = new RayTracing(device, pool, 256);
@@ -136,6 +139,42 @@ public final class GiHarness implements AutoCloseable {
         use(techniques.toArray(Technique[]::new));
         frames(8);
         return read();
+    }
+
+    /**
+     * Sets up scene {@code name} in {@code state} for the real-time image with global illumination: the visibility
+     * buffer, the sun's shadows traced inline, the environment, ambient occlusion and the probe volume, each as the
+     * graph's settings choose ({@link AmbientOcclusion#MODE}, {@link ProbeVolumeLighting#MODE}); then
+     * {@link #render} draws frames of it and {@link #state} changes its state in place.
+     */
+    public void realtime(String name, int state) {
+        GiScenes.build(name, stage, state);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        List<Technique> techniques = new ArrayList<>(List.of(new VisibilityBufferShading(geometry, main,
+            VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_D32_SFLOAT), new ClusteredLights(lights, main),
+            new EnvironmentLighting(stage.environment, main), new SkyBackground(stage.environment, main),
+            new AmbientOcclusion(main, rayTracing), new ProbeVolumeLighting(main, new ProbeVolume(rayTracing,
+                renderer, lights, stage.environment, main))));
+        if (stage.sun) {
+            techniques.add(new InlineRayShadows(rayTracing, view, lights, 0, 0));
+        }
+        use(techniques.toArray(Technique[]::new));
+    }
+
+    /** Scene {@code name} in {@code state}, built again in place: the same materials and instance ids. */
+    public void state(String name, int state) {
+        GiScenes.build(name, stage, state);
+    }
+
+    /** {@code count} frames, the last read back: linear RGBA floats. */
+    public float[] render(int count) {
+        frames(count);
+        return read();
+    }
+
+    /** The harness's frame graph (its settings). */
+    public FrameGraph graph() {
+        return graph;
     }
 
     /** The view's techniques: these, the ones before removed. */
