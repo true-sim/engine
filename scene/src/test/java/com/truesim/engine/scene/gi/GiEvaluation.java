@@ -106,9 +106,10 @@ class GiEvaluation {
             System.out.println("|---|---|---|---|");
             occlusion.forEach(System.out::println);
             System.out.println();
-            System.out.println("Lag of the dynamic scenes' changes: frames until within 10 % of the change (D3):");
-            System.out.println("| Scene | Response | Frames |");
-            System.out.println("|---|---|---|");
+            System.out.println("Lag of the dynamic scenes' changes: frames until within 10 % of the change, above the "
+                + "settled image's noise (D3); the change and the noise as mean absolute luminance:");
+            System.out.println("| Scene | Response | Frames | Change | Noise |");
+            System.out.println("|---|---|---|---|---|");
             lags.forEach(System.out::println);
             assertThat(instance.validationErrors()).isZero();
         }
@@ -190,7 +191,8 @@ class GiEvaluation {
 
     /**
      * The probe volume's lag in dynamic scene {@code scene} (design D3): settled in state 0, then changed to state 1;
-     * frames until the image is within 10 % of the change from what it settles at, with the volume told of the change
+     * frames until the image is within 10 % of the change from what it settles at (the mean of its last 30 frames,
+     * their noise about it allowed for), with the volume told of the change
      * (invalidation), finding it alone (adaptive), and by its history cap alone.
      */
     private static List<String> lags(GiHarness harness, String scene) {
@@ -208,17 +210,29 @@ class GiEvaluation {
             for (int f = 0; f < seen.length; f++) {
                 seen[f] = harness.render(1);
             }
-            float[] after = seen[seen.length - 1];
+            // What it settles at: the mean of the last 30 frames, and their noise about it
             int pixels = harness.width() * harness.height();
+            float[] after = new float[seen[0].length];
+            int settled = 30;
+            for (int f = seen.length - settled; f < seen.length; f++) {
+                for (int i = 0; i < after.length; i++) {
+                    after[i] += seen[f][i] / settled;
+                }
+            }
+            double noise = 0;
+            for (int f = seen.length - settled; f < seen.length; f++) {
+                noise += difference(seen[f], after, pixels) / settled;
+            }
             double change = difference(before, after, pixels);
             int lag = seen.length + 1;
             for (int f = 0; f < seen.length; f++) {
-                if (difference(seen[f], after, pixels) <= 0.1 * change) {
+                if (difference(seen[f], after, pixels) <= 0.1 * change + noise) {
                     lag = f + 1;
                     break;
                 }
             }
-            rows.add(String.format(Locale.ROOT, "| %s | %s | %d |", scene, responses[r], lag));
+            rows.add(String.format(Locale.ROOT, "| %s | %s | %d | %.5f | %.5f |", scene, responses[r], lag, change,
+                noise));
         }
         graph.settings().set(ProbeVolume.INVALIDATE, true).set(ProbeVolume.ADAPTIVE, true);
         return rows;

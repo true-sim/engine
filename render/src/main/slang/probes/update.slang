@@ -79,6 +79,8 @@ static const uint PROBES_CLASSIFY = 8;   // turn off probes inside geometry
 /** Probe flags beside indirect.slang's: marked by invalidate.slang, and to update this frame. */
 static const uint PROBE_INVALIDATED = 4;
 static const uint PROBE_UPDATE = 8;
+/** Its history restarted this frame: a repeated update (render.gi.response.iterations) refines it again. */
+static const uint PROBE_RESTARTED = 16;
 
 /** Probes per row of the ray image. */
 static const uint RAY_ROW = 32;
@@ -152,9 +154,36 @@ void prepareMain(uint3 id : SV_DispatchThreadID)
         frames = 0;
     }
     bool update = restart || (index + push.frame) % max(push.period, 1u) == 0;
-    flags &= ~(PROBE_INVALIDATED | PROBE_UPDATE);
+    flags &= ~(PROBE_INVALIDATED | PROBE_UPDATE | PROBE_RESTARTED);
     states[index].flags = flags | (update ? PROBE_UPDATE : 0);
     states[index].frames = frames;
+}
+
+/**
+ * A repeated update within the frame: the probes whose history restarted update again, from scratch, their rays'
+ * hits now reading this frame's first update of the volume: one more bounce of the new light per repeat, so a change
+ * spreads through high albedo rooms in fewer frames (no image waits for it).
+ */
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void prepareAgainMain(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= probeCount())
+    {
+        return;
+    }
+    ProbeState* states = push.volume[0].states;
+    uint flags = states[index].flags;
+    if ((flags & PROBE_RESTARTED) != 0 && (flags & PROBE_ACTIVE) != 0)
+    {
+        states[index].flags = flags | PROBE_UPDATE;
+        states[index].frames = 0;
+    }
+    else
+    {
+        states[index].flags = flags & ~PROBE_UPDATE;
+    }
 }
 
 /** Point `i` of `n` on the sphere, spherical Fibonacci (as DDGI's rays). */
@@ -502,7 +531,8 @@ void blendMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         {
             valid = 0;
         }
-        states[index].flags = kept | (nowActive ? PROBE_ACTIVE : 0) | valid;
+        states[index].flags = kept | (nowActive ? PROBE_ACTIVE : 0) | valid
+            | (blend && frames == 0 ? PROBE_RESTARTED : 0);
         states[index].frames = blend ? taken : frames;
     }
 }

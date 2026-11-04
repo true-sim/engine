@@ -259,6 +259,8 @@ public struct ParticleDrawRecord
     public uint lighting;          // LIGHTING_*: its renderer's, lowered by the quality
     public uint extra;             // its second texture's sampled slot: a normal map, six-way maps' second; or NO_TEXTURE
     public uint64_t lights;        // LightListHeader*: the view's light list, for lit renderers; or 0: the sun
+    public uint64_t indirect;      // IndirectLight*: the view's indirect light (environment, probe volume); or 0: the
+                                   // constant sky
 };
 
 // ---------------------------------------------------------------------------------------------- modules

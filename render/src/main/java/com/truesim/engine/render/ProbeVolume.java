@@ -7,6 +7,8 @@ import static org.lwjgl.system.MemoryUtil.memPutLong;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
 import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
 import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.math.Maths;
@@ -137,8 +139,17 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
     public static final Setting<Float> LIGHT_MARGIN = Setting.decimal("render.gi.response.lightMargin", 2, 1, 100,
         "how many times its reach a changed light restarts probes within");
 
+    /**
+     * Updates a frame of the probes whose history restarted (a change told or found): each repeat reads the update
+     * before, so a change's further bounces arrive in fewer frames; probes that did not restart are not updated again.
+     * The graph rebuilds when it changes.
+     */
+    public static final Setting<Integer> ITERATIONS = Setting.integer("render.gi.response.iterations", 2, 1, 4,
+        "updates a frame of the probes whose history restarted (bounces of a change per frame)");
+
     /** Its settings. */
-    public static final List<Setting<?>> ALL = List.of(CASCADES, PROBES, PROBES_UP, SPACING, RAYS, FIXED_RAYS, BUDGET,
+    public static final List<Setting<?>> ALL = List.of(ITERATIONS, CASCADES, PROBES, PROBES_UP, SPACING, RAYS,
+        FIXED_RAYS, BUDGET,
         LAYERS, NORMAL_BIAS, VIEW_BIAS, BLEND, DEPTH_RANGE, RELOCATE, CLASSIFY, MAX_FRAMES, ADAPTIVE, SENSITIVITY,
         INVALIDATE, LIGHT_MARGIN);
 
@@ -325,70 +336,95 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             .record(ctx -> ctx.dispatch(prepare, frame.probePush(preparePush, ctx, settings, camera, coarsest, data,
                 status, null, null, null, null, null), (count + 63) / 64));
 
-        ProbePush generatePush = new ProbePush();
-        g.pass("probe rays").read(data, BufferAccess.STORAGE_READ).read(states, BufferAccess.STORAGE_READ)
-            .write(paths[0], BufferAccess.STORAGE_WRITE).write(counts, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> ctx.dispatch(generate, frame.probePush(generatePush, ctx, settings, camera, coarsest, data,
-                null, paths[0], counts, null, null, null), (rays + 63) / 64, Math.min(count, 65535),
-                (count + 65534) / 65535));
-
-        int pushes = 4 * layers;
-        PathPush[] push = new PathPush[pushes];
-        for (int i = 0; i < pushes; i++) {
-            push[i] = new PathPush();
-        }
         int groupRows = (int) (((capacity + 63) / 64 + ROW - 1) / ROW);
-        for (int b = 0; b < layers; b++) {
-            int bounce = b;
-            Buffer current = paths[b & 1];
-            Buffer next = paths[(b + 1) & 1];
-            long binTable = 4 * tableWords * b;
-            PathPush tracePush = push[4 * b];
-            PathPush layoutPush = push[4 * b + 1];
-            PathPush scatterPush = push[4 * b + 2];
-            PathPush shadePush = push[4 * b + 3];
-            scene.read(g.pass("probe trace " + b), BufferAccess.STORAGE_READ)
-                .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ).read(table, BufferAccess.STORAGE_READ)
-                .read(maps.specular(), Access.SAMPLED_COMPUTE)
-                .write(current, BufferAccess.STORAGE_WRITE).read(counts, BufferAccess.STORAGE_READ)
-                .write(binTables, BufferAccess.STORAGE_WRITE).write(rayImage, Access.STORAGE_WRITE)
-                .record(ctx -> ctx.dispatch(tracing, pathPush(tracePush, ctx, rayImage, current, null, binTables,
-                    counts, table, null, binTable, tablesBytes, bounce, bins, 0, layers), ROW, groupRows, 1));
-            g.pass("probe bins " + b).write(binTables, BufferAccess.STORAGE_WRITE)
-                .record(ctx -> ctx.dispatch(layout, pathPush(layoutPush, ctx, null, null, null, binTables, null,
-                    null, null, binTable, tablesBytes, bounce, bins, 0, layers), 1));
-            g.pass("probe scatter " + b).read(current, BufferAccess.STORAGE_READ)
-                .read(counts, BufferAccess.STORAGE_READ).write(binTables, BufferAccess.STORAGE_WRITE)
-                .record(ctx -> ctx.dispatch(scatter, pathPush(scatterPush, ctx, null, current, null, binTables,
-                    counts, null, null, binTable, tablesBytes, bounce, bins, 0, layers), ROW, groupRows, 1));
-            GraphBuilder.PassBuilder shadePass = scene.read(g.pass("probe shade " + b), BufferAccess.STORAGE_READ)
-                .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ)
-                .read(current, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
-                .write(counts, BufferAccess.STORAGE_WRITE).read(binTables, BufferAccess.INDIRECT)
-                .read(binTables, BufferAccess.STORAGE_READ).write(rayImage, Access.STORAGE_WRITE)
-                .read(table, BufferAccess.STORAGE_READ).read(data, BufferAccess.STORAGE_READ)
-                .read(states, BufferAccess.STORAGE_READ).read(irradiance, Access.SAMPLED_COMPUTE)
-                .read(depth, Access.SAMPLED_COMPUTE).read(maps.specular(), Access.SAMPLED_COMPUTE)
-                .read(maps.sheen(), Access.SAMPLED_COMPUTE).read(brdf, Access.SAMPLED_COMPUTE);
-            world.readBy(shadePass);
-            shadePass.record(ctx -> {
-                for (int bin = 0; bin < shade.length; bin++) {
-                    if (shade[bin] != null) {
-                        ctx.dispatchIndirect(shade[bin], pathPush(shadePush, ctx, rayImage, current, next, binTables,
-                            counts, table, world, binTable, tablesBytes, bounce, bins, bin, layers), binTables,
-                            binTable + 16L * bin);
-                    }
-                }
-            });
-        }
+        Pipeline prepareAgain = g.computeProgram(update, "prepareAgainMain", ProbePush.BYTES);
+        int iterations = g.setting(ITERATIONS);
+        for (int iteration = 0; iteration < iterations; iteration++) {
+            String again = iteration == 0 ? "" : " (again " + iteration + ")";
+            if (iteration > 0) {
+                ProbePush againPush = new ProbePush();
+                g.pass("probe repeat" + again).read(data, BufferAccess.STORAGE_READ)
+                    .write(states, BufferAccess.STORAGE_WRITE).write(counts, BufferAccess.TRANSFER_DST)
+                    .write(binTables, BufferAccess.TRANSFER_DST)
+                    .record(ctx -> {
+                        ctx.fill(counts, 0);
+                        ctx.fill(binTables, 0, tablesBytes, 0);
+                        Barriers.memory(ctx.unsafe().commands(), VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                            VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+                        ctx.dispatch(prepareAgain, frame.probePush(againPush, ctx, settings, camera, coarsest, data,
+                            null, null, null, null, null, null), (count + 63) / 64);
+                    });
+            }
+            ProbePush generatePush = new ProbePush();
+            g.pass("probe rays" + again).read(data, BufferAccess.STORAGE_READ)
+                .read(states, BufferAccess.STORAGE_READ)
+                .write(paths[0], BufferAccess.STORAGE_WRITE).write(counts, BufferAccess.STORAGE_WRITE)
+                .record(ctx -> ctx.dispatch(generate, frame.probePush(generatePush, ctx, settings, camera, coarsest,
+                    data,
+                    null, paths[0], counts, null, null, null), (rays + 63) / 64, Math.min(count, 65535),
+                    (count + 65534) / 65535));
 
-        ProbePush blendPush = new ProbePush();
-        g.pass("probe blending").read(data, BufferAccess.STORAGE_READ).read(rayImage, Access.STORAGE_READ)
-            .write(irradiance, Access.STORAGE_WRITE).write(depth, Access.STORAGE_WRITE)
-            .write(states, BufferAccess.STORAGE_WRITE)
-            .record(ctx -> ctx.dispatch(blend, frame.probePush(blendPush, ctx, settings, camera, coarsest, data,
-                null, null, null, rayImage, irradiance, depth), Math.min(count, 65535), (count + 65534) / 65535,
-                1));
+            int pushes = 4 * layers;
+            PathPush[] push = new PathPush[pushes];
+            for (int i = 0; i < pushes; i++) {
+                push[i] = new PathPush();
+            }
+            for (int b = 0; b < layers; b++) {
+                int bounce = b;
+                Buffer current = paths[b & 1];
+                Buffer next = paths[(b + 1) & 1];
+                long binTable = 4 * tableWords * b;
+                PathPush tracePush = push[4 * b];
+                PathPush layoutPush = push[4 * b + 1];
+                PathPush scatterPush = push[4 * b + 2];
+                PathPush shadePush = push[4 * b + 3];
+                scene.read(g.pass("probe trace " + b + again), BufferAccess.STORAGE_READ)
+                    .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ).read(table, BufferAccess.STORAGE_READ)
+                    .read(maps.specular(), Access.SAMPLED_COMPUTE)
+                    .write(current, BufferAccess.STORAGE_WRITE).read(counts, BufferAccess.STORAGE_READ)
+                    .write(binTables, BufferAccess.STORAGE_WRITE).write(rayImage, Access.STORAGE_WRITE)
+                    .record(ctx -> ctx.dispatch(tracing, pathPush(tracePush, ctx, rayImage, current, null, binTables,
+                        counts, table, null, binTable, tablesBytes, bounce, bins, 0, layers), ROW, groupRows, 1));
+                g.pass("probe bins " + b + again).write(binTables, BufferAccess.STORAGE_WRITE)
+                    .record(ctx -> ctx.dispatch(layout, pathPush(layoutPush, ctx, null, null, null, binTables, null,
+                        null, null, binTable, tablesBytes, bounce, bins, 0, layers), 1));
+                g.pass("probe scatter " + b + again).read(current, BufferAccess.STORAGE_READ)
+                    .read(counts, BufferAccess.STORAGE_READ).write(binTables, BufferAccess.STORAGE_WRITE)
+                    .record(ctx -> ctx.dispatch(scatter, pathPush(scatterPush, ctx, null, current, null, binTables,
+                        counts, null, null, binTable, tablesBytes, bounce, bins, 0, layers), ROW, groupRows, 1));
+                GraphBuilder.PassBuilder shadePass = scene.read(g.pass("probe shade " + b + again),
+                    BufferAccess.STORAGE_READ)
+                    .read(topLevel, BufferAccess.ACCELERATION_STRUCTURE_READ)
+                    .read(current, BufferAccess.STORAGE_READ).write(next, BufferAccess.STORAGE_WRITE)
+                    .write(counts, BufferAccess.STORAGE_WRITE).read(binTables, BufferAccess.INDIRECT)
+                    .read(binTables, BufferAccess.STORAGE_READ).write(rayImage, Access.STORAGE_WRITE)
+                    .read(table, BufferAccess.STORAGE_READ).read(data, BufferAccess.STORAGE_READ)
+                    .read(states, BufferAccess.STORAGE_READ).read(irradiance, Access.SAMPLED_COMPUTE)
+                    .read(depth, Access.SAMPLED_COMPUTE).read(maps.specular(), Access.SAMPLED_COMPUTE)
+                    .read(maps.sheen(), Access.SAMPLED_COMPUTE).read(brdf, Access.SAMPLED_COMPUTE);
+                world.readBy(shadePass);
+                shadePass.record(ctx -> {
+                    for (int bin = 0; bin < shade.length; bin++) {
+                        if (shade[bin] != null) {
+                            ctx.dispatchIndirect(shade[bin], pathPush(shadePush, ctx, rayImage, current, next,
+                                binTables,
+                                counts, table, world, binTable, tablesBytes, bounce, bins, bin, layers), binTables,
+                                binTable + 16L * bin);
+                        }
+                    }
+                });
+            }
+
+            ProbePush blendPush = new ProbePush();
+            g.pass("probe blending" + again).read(data, BufferAccess.STORAGE_READ)
+                .read(rayImage, Access.STORAGE_READ)
+                .write(irradiance, Access.STORAGE_WRITE).write(depth, Access.STORAGE_WRITE)
+                .write(states, BufferAccess.STORAGE_WRITE)
+                .record(ctx -> ctx.dispatch(blend, frame.probePush(blendPush, ctx, settings, camera, coarsest, data,
+                    null, null, null, rayImage, irradiance, depth), Math.min(count, 65535), (count + 65534) / 65535,
+                    1));
+        }
         return new Volume(data, states, irradiance, depth, camera, coarsest);
     }
 

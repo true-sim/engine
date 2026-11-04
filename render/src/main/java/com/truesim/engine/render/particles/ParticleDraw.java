@@ -190,6 +190,8 @@ public final class ParticleDraw implements Technique {
         Buffer commands = g.createBuffer(name, 16L * MAX_DRAWS + 16L * particles.pool().slots());
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
+        // The view's indirect light (an environment, the probe volume): the light from all around lit particles take
+        com.truesim.engine.render.IndirectInputs.Set indirect = com.truesim.engine.render.IndirectInputs.of(g);
         Pipeline cull = g.computeProgram("shaders/particles/draw.spv", "cullMain", ParticleDrawPush.BYTES);
         Pipeline[] pipelines = pipelines(color.format().vk(), overdraw ? Particles.DRAW_OVERDRAW
             : Particles.DRAW_COLOR);
@@ -203,9 +205,13 @@ public final class ParticleDraw implements Technique {
         if (lights != null) {
             culling.read(lights, BufferAccess.STORAGE_READ); // its address in the draws' records
         }
+        if (indirect != null) {
+            indirect.readBy(culling, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
+        }
         culling.read(state, BufferAccess.STORAGE_READ).write(commands, BufferAccess.STORAGE_WRITE)
             .record(ctx -> {
-                int n = list.prepare(ctx.frame(), camera, lights == null ? 0 : ctx.address(lights), split);
+                int n = list.prepare(ctx.frame(), camera, lights == null ? 0 : ctx.address(lights),
+                    indirect == null ? 0 : ctx.address(indirect.table()), split);
                 if (n > 0) {
                     ctx.dispatch(cull, list.common(cullPush, renderView.address(), camera, sortCenter, paired)
                         .commands(ctx.address(commands)).drawCount(n), (n + 63) / 64);
@@ -215,12 +221,16 @@ public final class ParticleDraw implements Technique {
         ParticleDrawPush lightPush = new ParticleDrawPush();
         GraphBuilder.PassBuilder lighting = g.pass("particle lighting" + suffix).read(pool, BufferAccess.STORAGE_READ)
             .read(state, BufferAccess.STORAGE_READ).write(commands, BufferAccess.STORAGE_WRITE);
+        if (indirect != null) {
+            indirect.readBy(lighting, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
+        }
         if (lights != null) {
             lighting.read(lights, BufferAccess.STORAGE_READ);
             shadows.readBy(lighting, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
         }
         lighting.record(ctx -> {
-            int n = list.prepare(ctx.frame(), camera, lights == null ? 0 : ctx.address(lights), split);
+            int n = list.prepare(ctx.frame(), camera, lights == null ? 0 : ctx.address(lights),
+                    indirect == null ? 0 : ctx.address(indirect.table()), split);
             if (n > 0 && list.vertexLit() > 0) {
                 if (shadows != null) {
                     shadows.prepare(ctx);
@@ -231,10 +241,14 @@ public final class ParticleDraw implements Technique {
             }
         });
         if (!before && particles.drawsHalf()) {
-            half(g, color, depth, pool, side, order, sorted, commands, lights, shadows, camera, sortCenter, paired);
+            half(g, color, depth, pool, side, order, sorted, commands, lights, shadows, indirect, camera, sortCenter,
+                paired);
         }
         ParticleDrawPush drawPush = new ParticleDrawPush();
         GraphBuilder.PassBuilder drawPass = g.pass("particle draw" + suffix);
+        if (indirect != null) {
+            indirect.readBy(drawPass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
+        }
         if (lights != null) {
             drawPass.read(lights, BufferAccess.DRAW_READ);
             shadows.readBy(drawPass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
@@ -248,7 +262,8 @@ public final class ParticleDraw implements Technique {
             .read(commands, BufferAccess.DRAW_READ)
             .read(depth, Access.SAMPLED_FRAGMENT).attach(color, Load.LOAD, Store.STORE).region()
             .record(ctx -> {
-                int n = list.prepare(ctx.frame(), camera, lights == null ? 0 : ctx.address(lights), split);
+                int n = list.prepare(ctx.frame(), camera, lights == null ? 0 : ctx.address(lights),
+                    indirect == null ? 0 : ctx.address(indirect.table()), split);
                 if (shadows != null && list.lit() > 0) {
                     shadows.prepare(ctx);
                 }
@@ -285,7 +300,8 @@ public final class ParticleDraw implements Technique {
      */
     @AllowAllocation("building the graph, when it changes")
     private void half(GraphBuilder g, Image color, Image depth, Buffer pool, Buffer side, Buffer order,
-        ParticleSort.Order sorted, Buffer commands, Buffer lights, ShadowInputs.Set shadows, Camera camera,
+        ParticleSort.Order sorted, Buffer commands, Buffer lights, ShadowInputs.Set shadows,
+        com.truesim.engine.render.IndirectInputs.Set indirect, Camera camera,
         Camera sortCenter, boolean paired) {
         int width = (color.width() + 1) / 2;
         int height = (color.height() + 1) / 2;
@@ -307,6 +323,9 @@ public final class ParticleDraw implements Technique {
         com.truesim.engine.render.RenderView renderView = view.view();
         ParticleDrawPush drawPush = new ParticleDrawPush();
         GraphBuilder.PassBuilder drawPass = g.pass("particle draw, half");
+        if (indirect != null) {
+            indirect.readBy(drawPass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
+        }
         if (lights != null) {
             drawPass.read(lights, BufferAccess.DRAW_READ);
             shadows.readBy(drawPass, Access.SAMPLED_FRAGMENT, BufferAccess.DRAW_READ);
@@ -437,7 +456,7 @@ public final class ParticleDraw implements Technique {
          * (0: the sun), with emitters split at glass apart when {@code split} (a glass depth is there); returns how
          * many there are.
          */
-        synchronized int prepare(long frame, Camera camera, long lights, boolean split) {
+        synchronized int prepare(long frame, Camera camera, long lights, long indirect, boolean split) {
             if (frame == this.frame) {
                 return count;
             }
@@ -500,6 +519,7 @@ public final class ParticleDraw implements Technique {
                 staged.putInt(at + ParticleDrawRecordLayout.LIGHTING, lighting);
                 staged.putInt(at + ParticleDrawRecordLayout.EXTRA, particles.rendererExtra(e, index[o]));
                 staged.putLong(at + ParticleDrawRecordLayout.LIGHTS, lights);
+                staged.putLong(at + ParticleDrawRecordLayout.INDIRECT, indirect);
                 lit += lighting != ParticleConstants.LIGHTING_UNLIT ? 1 : 0;
                 if (lighting == ParticleConstants.LIGHTING_VERTEX) {
                     vertexLit++;

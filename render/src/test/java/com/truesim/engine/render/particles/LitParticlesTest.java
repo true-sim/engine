@@ -269,6 +269,26 @@ class LitParticlesTest {
     }
 
     @Test
+    void litParticlesTakeTheViewsIndirectLight() {
+        // A green environment and no light reaching them: the light from all around is the environment's, not the
+        // constant sky's (and where a probe volume lights the view, its light)
+        graph(true, 100);
+        view.port().add(new com.truesim.engine.render.EnvironmentLighting(
+            com.truesim.engine.render.Environment.uniform("green", 0, 1, 0), view,
+            new com.truesim.engine.render.EnvironmentMaps.Quality(64, 32, 4, 16, 64)));
+        puffs(1, -1.5f, 1, Renderer.billboard(Renderer.Facing.POSITION).lighting(Renderer.Lighting.PER_VERTEX));
+        puffs(1, 1.5f, 1, Renderer.billboard(Renderer.Facing.POSITION).lighting(Renderer.Lighting.PER_PIXEL));
+        int[] image = frames(3);
+        double red = red(image, 0, SIZE);
+        double green = 0;
+        for (int p : image) {
+            green += (p >> 8) & 0xff;
+        }
+        green /= image.length;
+        assertThat(green).as("green, from the environment").isGreaterThan(3 * red + 2);
+    }
+
+    @Test
     void withoutALightListTheSunLights() {
         graph(false, 0);
         puffs(1, 0, 2, Renderer.billboard(Renderer.Facing.POSITION).lighting(Renderer.Lighting.PER_VERTEX));
