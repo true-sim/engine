@@ -71,7 +71,7 @@ class WorldPanelGpuTest {
                 .place(-2, 1.5, 0, 0, 0, 0, 1, 1);
             WorldPanel floating = new WorldPanel(panelUi("Direct", floatingLabel), 320, 200).pixelsPerMeter(200)
                 .place(2, 1.5, 0, 0, 0, 0, 1, 1);
-            panels.add(monitor, WorldPanelRenderer.Mode.TEXTURE).add(floating, WorldPanelRenderer.Mode.DIRECT);
+            panels.add(monitor).add(floating, WorldPanelRenderer.Mode.DIRECT);
             assertThatIllegalArgumentException().isThrownBy(() -> panels.add(monitor, WorldPanelRenderer.Mode.DIRECT));
             assertThatIllegalArgumentException().isThrownBy(() -> panels.textureSlot(floating));
             // the monitor: a quad of the panel's size whose material shows the panel's texture (as its emission)

@@ -85,7 +85,7 @@ import org.lwjgl.vulkan.VkViewport;
  * <pre>{@code
  * WorldPanelRenderer panels = new WorldPanelRenderer(graph, camera);
  * mainView.add(panels);                           // the direct panels' pass
- * panels.add(screen, Mode.TEXTURE);               // a monitor in the game: lit like the scene
+ * panels.add(screen);                             // a monitor in the game: lit like the scene (TEXTURE)
  * int material = materials.add(new Material(MR.withBaseColorTexture(panels.textureSlot(screen))...));
  * panels.add(label, Mode.DIRECT);                 // a floating label
  * // each frame, after the panels' UIs updated (UiScene.update), before the frame records:
@@ -161,6 +161,15 @@ public final class WorldPanelRenderer implements Technique, FrameSlots.FrameStar
         this.camera = Objects.requireNonNull(viewCamera, "viewCamera");
         this.retiring = new com.truesim.engine.vulkan.Retiring(graph.frameSlots());
         graph.frameSlots().register(this);
+    }
+
+    /**
+     * Draws {@code panel} into a texture ({@link Mode#TEXTURE}, the default: lit and fogged like the scene by the
+     * material that samples it); {@link #add(WorldPanel, Mode)} chooses {@link Mode#DIRECT} instead.
+     */
+    @AllowAllocation("panels are added when made")
+    public WorldPanelRenderer add(WorldPanel panel) {
+        return add(panel, Mode.TEXTURE);
     }
 
     /** Draws {@code panel} by {@code mode}; returns this. */
