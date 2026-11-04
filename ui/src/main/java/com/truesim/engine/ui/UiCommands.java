@@ -9,6 +9,7 @@ import com.truesim.engine.input.Player;
 import com.truesim.engine.input.TextListener;
 import com.truesim.engine.platform.GamepadButton;
 import com.truesim.engine.platform.Key;
+import com.truesim.engine.platform.MouseButton;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
 import com.truesim.ui.core.input.UiCommand;
@@ -17,6 +18,7 @@ import com.truesim.ui.core.input.UiInput;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.BooleanSupplier;
 import java.util.function.DoubleSupplier;
 
 /**
@@ -31,9 +33,17 @@ import java.util.function.DoubleSupplier;
  * {@link #stopText} undoes both. While text is taken, Home, End and Enter give the text commands (line start, line
  * end, submit) instead of the navigation ones, and Space types rather than accepts.
  *
+ * <p><b>The other groups.</b> Tabs ({@code NEXT_TAB}, {@code PREVIOUS_TAB} repeating, {@code CLOSE_TAB}), docking's
+ * window keys ({@code NEXT_WINDOW}, {@code WINDOW_MOVE}, {@code WINDOW_RESIZE}) and the console's toggle work while
+ * typing too (the toggle's key types nothing: {@link UiTextInput}); the chart reset and the gizmo's mode keys only
+ * while not ({@code W} types). {@code COMPLETE}, {@code HISTORY_UP} and {@code HISTORY_DOWN} come only while the
+ * console's command line has the text ({@link #console}), in place of {@code NEXT}, {@code UP} and {@code DOWN} from
+ * the same keys. Mnemonics and pointers' modifiers come from {@link UiKeyboard}.
+ *
  * <p><b>Confirm button</b> (UI29): {@link #CONFIRM} says which gamepad button accepts, south or east, or what the
  * platform does ({@link Confirm#PLATFORM}: south on Windows, Linux and macOS); cancel is the other. It sets the
- * game defaults of {@link UiActions#ACCEPT} and {@link UiActions#CANCEL}, so a player's own bindings stay.
+ * game defaults of {@link UiActions#ACCEPT}, {@link UiActions#CANCEL} and the gizmo's {@link UiActions#CANCEL_DRAG},
+ * so a player's own bindings stay.
  *
  * <pre>{@code
  * UiCommands commands = new UiCommands(input, engine.settings(), () -> frame.realTime());
@@ -76,6 +86,7 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
     private static final int TEXT_ONLY = 2;   // only while text is taken
     private static final int NOT_TEXT = 4;    // not while text is taken (its text twin is given instead)
     private static final int MOVE = 8;        // moves a caret or a selection: extends with Shift
+    private static final int CONSOLE_LINE = 16; // only while the console's command line takes the text
 
     // The mapping: action, command, flags.
     private static final BinaryAction[] ACTIONS = {
@@ -86,6 +97,10 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
         UiActions.DELETE_BACK, UiActions.DELETE_FORWARD, UiActions.DELETE_WORD_BACK, UiActions.DELETE_WORD_FORWARD,
         UiActions.WORD_LEFT, UiActions.WORD_RIGHT, UiActions.LINE_START, UiActions.LINE_END, UiActions.DOC_START,
         UiActions.DOC_END, UiActions.SUBMIT, UiActions.NEWLINE,
+        UiActions.NEXT_TAB, UiActions.PREVIOUS_TAB, UiActions.CLOSE_TAB, UiActions.RESET_VIEW,
+        UiActions.TRANSLATE, UiActions.ROTATE, UiActions.SCALE, UiActions.UNIVERSAL, UiActions.TOGGLE_SPACE,
+        UiActions.CANCEL_DRAG, UiActions.NEXT_WINDOW, UiActions.WINDOW_MOVE, UiActions.WINDOW_RESIZE,
+        UiActions.TOGGLE_CONSOLE, UiActions.COMPLETE, UiActions.HISTORY_UP, UiActions.HISTORY_DOWN,
     };
     private static final UiCommand[] COMMANDS = {
         UiCommand.UP, UiCommand.DOWN, UiCommand.LEFT, UiCommand.RIGHT, UiCommand.NEXT, UiCommand.PREVIOUS,
@@ -95,6 +110,11 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
         UiCommand.DELETE_BACK, UiCommand.DELETE_FORWARD, UiCommand.DELETE_WORD_BACK, UiCommand.DELETE_WORD_FORWARD,
         UiCommand.WORD_LEFT, UiCommand.WORD_RIGHT, UiCommand.LINE_START, UiCommand.LINE_END, UiCommand.DOC_START,
         UiCommand.DOC_END, UiCommand.SUBMIT, UiCommand.NEWLINE,
+        UiCommand.NEXT_TAB, UiCommand.PREVIOUS_TAB, UiCommand.CLOSE_TAB, UiCommand.CHART_RESET,
+        UiCommand.GIZMO_TRANSLATE, UiCommand.GIZMO_ROTATE, UiCommand.GIZMO_SCALE, UiCommand.GIZMO_UNIVERSAL,
+        UiCommand.GIZMO_TOGGLE_SPACE, UiCommand.GIZMO_CANCEL, UiCommand.NEXT_WINDOW, UiCommand.WINDOW_MOVE,
+        UiCommand.WINDOW_RESIZE, UiCommand.CONSOLE_TOGGLE, UiCommand.COMPLETE, UiCommand.HISTORY_UP,
+        UiCommand.HISTORY_DOWN,
     };
     private static final int R = REPEATS;
     private static final int[] FLAGS = {
@@ -104,7 +124,39 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
         TEXT_ONLY | R, TEXT_ONLY | R, TEXT_ONLY | R, TEXT_ONLY | R,
         TEXT_ONLY | R | MOVE, TEXT_ONLY | R | MOVE, TEXT_ONLY | MOVE, TEXT_ONLY | MOVE, TEXT_ONLY | MOVE,
         TEXT_ONLY | MOVE, TEXT_ONLY, TEXT_ONLY | R,
+        R, R, 0, NOT_TEXT,
+        NOT_TEXT, NOT_TEXT, NOT_TEXT, NOT_TEXT, NOT_TEXT,
+        0, 0, 0, 0,
+        0, CONSOLE_LINE, CONSOLE_LINE | R, CONSOLE_LINE | R,
     };
+    /** When a mapping's twin, held, takes its place: in the console's command line, or with the virtual cursor on. */
+    private static final int IN_CONSOLE = 1;
+    private static final int WITH_CURSOR = 2;
+    // Per mapping: the twin action (null: none) and when it takes the place. In the console's line Tab completes, Up
+    // and Down walk the history (the console reads UP and DOWN as the history too: one command, not two); the virtual
+    // cursor's click is no accept or cancel.
+    private static final BinaryAction[] TWINS = new BinaryAction[ACTIONS.length];
+    private static final int[] TWIN_WHEN = new int[ACTIONS.length];
+
+    static {
+        twin(UiActions.NEXT, UiActions.COMPLETE, IN_CONSOLE);
+        twin(UiActions.UP, UiActions.HISTORY_UP, IN_CONSOLE);
+        twin(UiActions.DOWN, UiActions.HISTORY_DOWN, IN_CONSOLE);
+        twin(UiActions.ACCEPT, UiActions.CURSOR_CLICK, WITH_CURSOR);
+        twin(UiActions.CANCEL, UiActions.CURSOR_CLICK, WITH_CURSOR);
+    }
+
+    private static void twin(BinaryAction action, BinaryAction twin, int when) {
+        int m = Arrays.asList(ACTIONS).indexOf(action);
+        TWINS[m] = twin;
+        TWIN_WHEN[m] = when;
+    }
+
+    /** The command {@code action} gives, or null (tests). */
+    static UiCommand commandOf(BinaryAction action) {
+        int m = Arrays.asList(ACTIONS).indexOf(action);
+        return m < 0 ? null : COMMANDS[m];
+    }
 
     private final Input input;
     private final EngineSettings settings;
@@ -114,6 +166,8 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
     private Confirm applied;
     private double[] nextRepeat = new double[0]; // per player and mapping: when it repeats next, or NaN when not held
     private long dropped;
+    private BooleanSupplier consoleLine = () -> false;
+    private BooleanSupplier cursorOn = () -> false;
 
     /**
      * Commands from {@code input}'s players, its {@link UiActions} added if they were not; {@code settings} the
@@ -130,7 +184,7 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
         }
         input.enable(UiActions.TEXT, false);
         text = input.context("ui.text", TEXT_PRIORITY).groups(UiActions.NAVIGATION, UiActions.TEXT, UiActions.POINTER,
-            UiActions.SCROLL, UiActions.TABS);
+            UiActions.SCROLL, UiActions.TABS, UiActions.DOCKING, UiActions.CONSOLE); // tabs, windows, the console too
         confirmWatch = settings.onChange(CONFIRM, this::applyConfirm);
         applyConfirm();
     }
@@ -158,6 +212,7 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
             // The actions' own defaults: nothing over them.
             settings.clear(EngineSettings.Layer.GAME, input.bindingSetting(UiActions.ACCEPT));
             settings.clear(EngineSettings.Layer.GAME, input.bindingSetting(UiActions.CANCEL));
+            settings.clear(EngineSettings.Layer.GAME, input.bindingSetting(UiActions.CANCEL_DRAG));
             return;
         }
         // The game layer (as Input.defaults sets it, which waits for the engine to start; this may come before).
@@ -165,6 +220,8 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
             List.of(Binding.key(Key.ENTER), Binding.key(Key.SPACE), Binding.pad(GamepadButton.EAST))));
         settings.set(EngineSettings.Layer.GAME, input.bindingSetting(UiActions.CANCEL), Binding.format(
             List.of(Binding.key(Key.ESCAPE), Binding.pad(GamepadButton.SOUTH))));
+        settings.set(EngineSettings.Layer.GAME, input.bindingSetting(UiActions.CANCEL_DRAG), Binding.format(
+            List.of(Binding.key(Key.ESCAPE), Binding.mouse(MouseButton.RIGHT), Binding.pad(GamepadButton.SOUTH))));
     }
 
     /**
@@ -192,6 +249,31 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
         return this;
     }
 
+    /**
+     * Says when the developer console's command line has the text (e.g. {@code () -> ui.interaction().focused(0) ==
+     * console.field().element()}): only then do Tab, Up and Down give {@link UiCommand#COMPLETE},
+     * {@link UiCommand#HISTORY_UP} and {@link UiCommand#HISTORY_DOWN}, in place of {@code NEXT}, {@code UP} and
+     * {@code DOWN}. Asked each frame while text is taken; must not allocate.
+     */
+    public UiCommands console(BooleanSupplier commandLineFocused) {
+        consoleLine = Objects.requireNonNull(commandLineFocused, "commandLineFocused");
+        return this;
+    }
+
+    /**
+     * Says when a gamepad's virtual cursor is on ({@link VirtualCursor}): its click
+     * ({@link UiActions#CURSOR_CLICK}) then gives no accept or cancel. Asked each frame; must not allocate.
+     */
+    public UiCommands virtualCursor(BooleanSupplier on) {
+        cursorOn = Objects.requireNonNull(on, "on");
+        return this;
+    }
+
+    /** The input it reads. */
+    Input input() {
+        return input;
+    }
+
     /** The context a text field pushes ({@link #startText}). */
     public InputContext textContext() {
         return text;
@@ -209,6 +291,8 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
         double delay = settings.get(REPEAT_DELAY);
         double period = 1.0 / settings.get(REPEAT_RATE);
         boolean typing = input.textContext() == text;
+        boolean console = typing && consoleLine.getAsBoolean();
+        boolean cursor = cursorOn.getAsBoolean();
         for (int p = 0; p < players; p++) {
             Player player = input.player(p);
             boolean extend = typing && player.down(UiActions.EXTEND_SELECTION);
@@ -216,7 +300,10 @@ public final class UiCommands implements UiCommandSource, AutoCloseable {
                 int flags = FLAGS[m];
                 BinaryAction action = ACTIONS[m];
                 int at = p * mappings + m;
-                if ((flags & TEXT_ONLY) != 0 && !typing || (flags & NOT_TEXT) != 0 && typing) {
+                int when = TWIN_WHEN[m];
+                if ((flags & TEXT_ONLY) != 0 && !typing || (flags & NOT_TEXT) != 0 && typing
+                    || (flags & CONSOLE_LINE) != 0 && !console
+                    || when != 0 && (when == IN_CONSOLE ? console : cursor) && player.down(TWINS[m])) {
                     nextRepeat[at] = Double.NaN;
                     continue;
                 }

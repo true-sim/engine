@@ -18,6 +18,8 @@ import com.truesim.engine.platform.Window;
 import com.truesim.engine.settings.Setting;
 import com.truesim.engine.settings.SettingGroup;
 import com.truesim.engine.settings.SettingRegistry;
+import com.truesim.engine.xr.Xr;
+import com.truesim.engine.xr.XrControls;
 import com.truesim.ui.controls.Ui;
 import com.truesim.ui.core.Tunable;
 import com.truesim.ui.core.input.Cursor;
@@ -40,7 +42,10 @@ import java.util.function.Function;
  * <li><b>Input</b>: the {@code ui} action group ({@link UiActions#UI}) is added to input; each frame starts with the
  * frame's {@link UiCommands}, the {@link MousePointer} and the typed text and IME composition of {@link UiTextInput}
  * written into one {@link UiInput}, with any other {@link PointerSource}s added ({@link #pointers}: a virtual
- * cursor, touch, tests). The window's clipboard ({@link SdlClipboard}) is the UI's.</li>
+ * cursor, touch, tests). With a window, the {@link UiKeyboard} gives mnemonics and pointers' modifiers, and fingers
+ * ({@link TouchPointers}) and a pen ({@link PenPointer}) are pointers of their own; a gamepad's {@link VirtualCursor}
+ * is one when its setting is on, and with a headset ({@code Xr}) the controllers' rays are ({@link XrPointers}). The
+ * window's clipboard ({@link SdlClipboard}) is the UI's.</li>
  * <li><b>The frame, in two phases</b> (no frame of latency either way): at its start ({@link #beforeUpdate}), after
  * input sampled the devices, the UI processes that input ({@code ui.input(input, nanos)}, the frame's real time):
  * picking, events, focus, commands and text, so the game's update sees this frame's clicks. After the game's update
@@ -81,6 +86,7 @@ public final class UiPlugin implements Plugin {
     private UiCommands commands;
     private MousePointer mouse;
     private UiTextInput text;
+    private UiKeyboard keyboard;
     private GpuUiRenderer renderer;
     private ViewPort view;
     private Window window;
@@ -125,7 +131,7 @@ public final class UiPlugin implements Plugin {
 
     @Override
     public List<PluginKey<?>> after() {
-        return List.of(Desktop.KEY);
+        return List.of(Desktop.KEY, Xr.KEY);
     }
 
     @Override
@@ -139,6 +145,7 @@ public final class UiPlugin implements Plugin {
                 SettingRegistry registry = startup.registry();
                 SettingGroup group = SettingGroup.root("ui", "settings.ui", 45);
                 registry.add(group, UiCommands.ALL.toArray(new Setting<?>[0]));
+                registry.add(group, VirtualCursor.ALL.toArray(new Setting<?>[0]));
                 tunables = new UiTunables(startup.settings()).add(registry, group,
                     ui.tunables().toArray(new Tunable[0]));
                 commands = new UiCommands(in, startup.settings());
@@ -182,11 +189,30 @@ public final class UiPlugin implements Plugin {
         renderer = new GpuUiRenderer(graph);
         view.add(renderer);
         Input in = startup.get(Input.KEY);
+        ViewPort shown = view;
+        VirtualCursor cursor = new VirtualCursor(in, startup.settings(), () -> System.nanoTime() / 1e9, shown::width,
+            shown::height);
+        commands.virtualCursor(cursor::on);
+        pointers(cursor);
+        if (startup.find(Xr.KEY).isPresent()) {
+            in.addDeviceClass(XrControls.XR);
+            XrPointers.defaults(in);
+            pointers(new XrPointers(in));
+        }
         if (window != null && desktop != null) {
             platform = desktop.platform();
             mouse = new MousePointer(window, in);
             desktop.listen(mouse);
             text = new UiTextInput(commands, window);
+            keyboard = new UiKeyboard(in);
+            desktop.listen(keyboard);
+            text.keyboard(keyboard);
+            mouse.modifiers(keyboard::pointerModifiers).ignoreEmulated(true);
+            TouchPointers touch = new TouchPointers(window);
+            PenPointer pen = new PenPointer(window).modifiers(keyboard::pointerModifiers);
+            desktop.listen(touch);
+            desktop.listen(pen);
+            pointers(touch).pointers(pen);
             ui.interaction().textInputHost(text);
             ui.interaction().clipboard(new SdlClipboard(platform));
             if (target != null) {
@@ -252,6 +278,9 @@ public final class UiPlugin implements Plugin {
         }
         input.beginFrame();
         commands.poll(input);
+        if (keyboard != null) {
+            keyboard.poll(input);
+        }
         if (mouse != null) {
             mouse.poll(input);
         }
@@ -293,6 +322,9 @@ public final class UiPlugin implements Plugin {
     public void stop() {
         if (desktop != null && mouse != null) {
             desktop.unlisten(mouse);
+        }
+        if (desktop != null && keyboard != null) {
+            desktop.unlisten(keyboard);
         }
         if (osWindows != null) {
             desktop.unlisten(osWindows);

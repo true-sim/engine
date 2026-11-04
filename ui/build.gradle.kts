@@ -9,6 +9,7 @@ description = "Engine UI for true-sim: the UI's renderer (a frame graph techniqu
 dependencies {
     api(project(":engine-render"))
     api(project(":engine-input"))
+    implementation(project(":engine-xr")) // the headset's controls, for the XR rays' default bindings
     api("com.truesim.ui:ui-core:0.3.0")
     api("com.truesim.ui:ui-controls:0.3.0") // the Ui the plugin runs
     testImplementation(testFixtures("com.truesim.ui:ui-controls:0.3.0")) // the galleries the screenshots show

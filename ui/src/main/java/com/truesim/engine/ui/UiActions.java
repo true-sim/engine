@@ -7,6 +7,7 @@ import com.truesim.engine.input.BinaryAction;
 import com.truesim.engine.input.Binding;
 import com.truesim.engine.input.Control;
 import com.truesim.engine.input.Controls;
+import com.truesim.engine.input.PoseAction;
 import com.truesim.engine.platform.GamepadAxis;
 import com.truesim.engine.platform.GamepadButton;
 import com.truesim.engine.platform.HatPosition;
@@ -25,10 +26,13 @@ import java.util.Locale;
  * input.enable(UiActions.GIZMO, false);             // a game without gizmos switches them off in one call
  * }</pre>
  *
- * <p>Touch has no device kind in the action system yet: taps and fingers reach the UI as pointers. XR controllers'
- * defaults come with engine-xr's device class ({@code input.defaults(...)}); the mouse's position is read by
- * {@link MousePointer} directly (UI22), so {@link #POSITION} is unbound by default (a gamepad's virtual cursor may bind
- * it). Text shortcuts use Cmd on macOS, word moves Option there; Ctrl elsewhere.
+ * <p>Touch and pens have no device kind in the action system: fingers and pens reach the UI as pointers
+ * ({@link TouchPointers}, {@link PenPointer}). XR controllers' defaults come with engine-xr's device class, set as the
+ * game's defaults when a headset's input is there ({@link XrPointers#defaults}): the aim poses and triggers of
+ * {@link #AIM_LEFT} and the others, and the left menu button held for {@link #TOGGLE_CONSOLE}. The mouse's position is
+ * read by {@link MousePointer} directly (UI22), so {@link #POSITION} is unbound by default; a gamepad's virtual cursor
+ * ({@link VirtualCursor}, off unless its setting is on) reads {@link #CURSOR} and {@link #CURSOR_CLICK}. Text
+ * shortcuts use Cmd on macOS, word moves Option there; Ctrl elsewhere.
  */
 public final class UiActions {
 
@@ -97,6 +101,18 @@ public final class UiActions {
     public static final BinaryAction MIDDLE = POINTER.binary("middle", Binding.mouse(MouseButton.MIDDLE));
     public static final BinaryAction DRAG_COPY = POINTER.binary("dragCopy", Binding.of(Controls.CONTROL));
     public static final BinaryAction DRAG_LINK = POINTER.binary("dragLink", Binding.of(Controls.ALT));
+    /** A gamepad's virtual cursor moving (by its speed a second at full tilt): the right stick. */
+    public static final Axis2Action CURSOR = POINTER.axis2("cursor", Binding.stick(true));
+    /** A gamepad's virtual cursor clicking (its primary button): south. */
+    public static final BinaryAction CURSOR_CLICK = POINTER.binary("cursorClick", Binding.pad(GamepadButton.SOUTH));
+    /** The left hand's XR pointing ray; bound to the controller's aim pose when a headset is there. */
+    public static final PoseAction AIM_LEFT = POINTER.pose("aimLeft");
+    /** The right hand's XR pointing ray. */
+    public static final PoseAction AIM_RIGHT = POINTER.pose("aimRight");
+    /** The left XR ray's primary button: the trigger. */
+    public static final BinaryAction SELECT_LEFT = POINTER.binary("selectLeft");
+    /** The right XR ray's primary button. */
+    public static final BinaryAction SELECT_RIGHT = POINTER.binary("selectRight");
 
     // ---------------------------------------------------------------- ui.scroll
 
@@ -141,7 +157,7 @@ public final class UiActions {
         Binding.chord(Controls.CONTROL, Controls.key(Key.TAB)).with(Controls.SHIFT),
         Binding.chord(Controls.CONTROL, Controls.key(Key.PAGE_UP)), Binding.pad(GamepadButton.LEFT_SHOULDER));
     public static final BinaryAction CLOSE_TAB = TABS.binary("closeTab",
-        Binding.chord(SHORTCUT, Controls.key(Key.W)));
+        Binding.chord(SHORTCUT, Controls.key(Key.W)), Binding.chord(Controls.CONTROL, Controls.key(Key.F4)));
 
     public static final Axis1Action ZOOM = CHARTS.axis1("zoom", Binding.of(Controls.WHEEL_Y),
         Binding.pad(GamepadAxis.RIGHT_Y).filter(com.truesim.engine.input.Filters.AXES, -1, 1, 1));
@@ -165,9 +181,20 @@ public final class UiActions {
     public static final BinaryAction DOCK_MODIFIER = DOCKING.binary("dockModifier", Binding.of(Controls.SHIFT));
     public static final BinaryAction NEXT_WINDOW = DOCKING.binary("nextWindow",
         Binding.chord(Controls.CONTROL, Controls.key(Key.F6)));
+    /** Moves the focused (or active) window by keys or the d-pad: Alt+F7, as on Windows and KDE. */
+    public static final BinaryAction WINDOW_MOVE = DOCKING.binary("windowMove",
+        Binding.chord(Controls.ALT, Controls.key(Key.F7)));
+    /** Resizes the focused (or active) window by keys or the d-pad: Alt+F8. */
+    public static final BinaryAction WINDOW_RESIZE = DOCKING.binary("windowResize",
+        Binding.chord(Controls.ALT, Controls.key(Key.F8)));
 
+    /**
+     * Opens and closes the console: the grave key (also while a text field types: it types no grave), both sticks
+     * clicked together; with a headset, the left menu button held ({@link XrPointers#defaults}).
+     */
     public static final BinaryAction TOGGLE_CONSOLE = CONSOLE.binary("toggle", Binding.key(Key.BACKQUOTE),
         Binding.chord(Controls.pad(GamepadButton.LEFT_STICK), Controls.pad(GamepadButton.RIGHT_STICK)));
+    /** Completes the console's command line (only while it has the text: {@link UiCommands#console}). */
     public static final BinaryAction COMPLETE = CONSOLE.binary("complete", Binding.key(Key.TAB));
     public static final BinaryAction HISTORY_UP = CONSOLE.binary("historyUp", Binding.key(Key.UP));
     public static final BinaryAction HISTORY_DOWN = CONSOLE.binary("historyDown", Binding.key(Key.DOWN));

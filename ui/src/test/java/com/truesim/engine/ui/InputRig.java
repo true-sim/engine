@@ -73,9 +73,28 @@ final class InputRig implements AutoCloseable {
         return input.events();
     }
 
+    /** Listeners given the keys too (a {@link UiKeyboard}), after input. */
+    final List<PlatformListener> keyListeners = new ArrayList<>();
+
     InputRig key(Key key, boolean down) {
-        events().key(0, 1, 0, key, 0, 0, down, false);
+        int character = character(key);
+        events().key(0, 1, 0, key, character, 0, down, false);
+        for (PlatformListener listener : keyListeners) {
+            listener.key(0, 1, 0, key, character, 0, down, false);
+        }
         return this;
+    }
+
+    /** The character a US layout gives {@code key} (letters lower case), or 0. */
+    static int character(Key key) {
+        String name = key.name();
+        if (name.length() == 1) {
+            return Character.toLowerCase(name.charAt(0));
+        }
+        if (name.startsWith("DIGIT_")) {
+            return name.charAt(6);
+        }
+        return key == Key.BACKQUOTE ? '`' : 0;
     }
 
     InputRig tap(Key key) {
