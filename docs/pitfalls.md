@@ -455,6 +455,16 @@ shaders), then settled at 0.60-0.68 ms: the ranges of five rounds after one warm
 - Rule: a benchmark warms until its rounds agree (look at the per-round lines, not the ranges); short frames need more
   warm-up than long ones.
 
+**Two renderers cleaned one texture's dirty region.** The UI gallery's labels lost letters on most pages in the
+window, while the galleries' offscreen screenshots were whole: its world panel's UI shares the screen's text system, so
+two `GpuUiRenderer`s uploaded the same atlas page, and the one submitting first cleared the page's dirty region each
+frame. The screen's renderer kept the page as first uploaded: 54 glyphs in the atlas, all READY, a third of them blank.
+- Proof: the gallery's shots of the presented image (`-Pshots`), before and after; the panel on a text system of its
+  own drew every glyph; `UiRendererTest.aTextureAnotherRendererUploadedFirstIsStillUploadedHere` fails without the fix
+  (0 bytes uploaded) (true-sim/engine, UI gallery).
+- Rule: state that several consumers read (a texture's changes) is tracked per consumer (`UiTexture.regionSince` from
+  the version each uploaded), never as one flag a consumer clears; check UI changes in the real window path too.
+
 **Two full benchmark runs hours apart differed by up to 43 % on unchanged code.** The before/after run of the picking
 branch showed `MeshletBenchmark`'s classic indexed draw ("without meshlets, full detail") at 3.49 / 10.71 / 35.64 /
 106.3 ms before and 5.14 / 15.25 / 50.65 / 151.8 ms after, `SkinnedCrowdBenchmark`'s GPU deformation at 0.397 against
