@@ -78,6 +78,10 @@ class ShadowsBenchmark {
             boolean pointsOnly = "points".equals(System.getenv("TRUESIM_SHADOWS_ONLY"));
             for (int[] size : pointsOnly ? new int[0][] : new int[][] {{1920, 1080}, {3840, 2160}}) {
                 List<Config> configs = sunConfigs(rayTracing != null);
+                String only = System.getenv("TRUESIM_SHADOWS_ONLY");
+                if (only != null) {
+                    configs.removeIf(c -> !c.name().contains(only)); // a part of a run
+                }
                 for (boolean moving : new boolean[] {false, true}) {
                     run(device, renderer, view, geometry, lights, rayTracing, size[0], size[1], moving, configs,
                         String.format(Locale.ROOT, "%d x %d, the camera %s", size[0], size[1],

@@ -123,6 +123,15 @@ frame before and drew the newly visible twice.
 - Rule: a bin drawn after the late phase accumulates both phases' lists; a test of anything culled in two phases runs
   three frames or more.
 
+**Shadow tiles with lists of a fixed size dropped casters without a word.** The `Shadows` owner's tile views were made
+with room for 16,384 meshlets; the sun's map and cascades over 3,000 detailed rocks wanted more, and what did not fit
+was not drawn: most rocks cast no shadow by maps while hard rays showed them, and every test (a quad over a floor)
+passed.
+- Proof: `Screenshots.renderShadowOwner`'s maps and cascades against its rays, before and after; the views now double
+  when `RenderView.overflowed()` says so, and every tile is drawn again (true-sim/engine, shadows as data).
+- Rule: views whose lists a technique sizes follow `overflowed()` and grow; a screenshot of a dense scene against a
+  method with no lists (rays) is part of checking a shadow technique.
+
 ## Shaders and the GPU
 
 **An instance's `mesh` word holds flag bits.** Indexing the mesh table with it unmasked read out of bounds and lost the
@@ -620,6 +629,17 @@ Fresnel, of a band of Footprint Court of radiance about 10 behind the camera. Th
   the 2.0 quad and the 1.5 quad's top-right corner, where they are (`predict.py`, PBR fixes work).
 - Rule: before calling a difference from a reference a bug, check what the reference's camera and environment would
   show; reflections depend on both.
+
+**Shadow maps and rays differed where lights sat inside rocks.** Comparing 24 point lights' AUTO maps with hard rays
+over the rocks, 52,000 pixels were brighter by maps and the maps showed blotches of acne; the lights stood 2 to 5 units
+over the terrain, among rocks up to 4 high, so many were inside one. A light inside a closed mesh sees its back faces,
+which depth draws cull: no caster, light leaks; rays meet every face. Raising the bias to 4 texels removed the blotches.
+With the lights 4.5 to 7 units up, maps and rays differ in 195 darker and 165 brighter pixels of 2 million, at the
+default bias (1.5 texels) as at 3.
+- Proof: the screenshots and counts of `Screenshots.renderShadowOwner` with the lights at both heights and both
+  biases (true-sim/engine, shadows as data).
+- Rule: compare shadow maps with rays for lights outside geometry; a light inside a closed mesh is a scene mistake or
+  a case for rays, not for tuning the bias.
 
 ## Audio
 

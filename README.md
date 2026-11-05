@@ -1459,6 +1459,39 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
 - **The reference** (`ReferencePathTracer`) samples a light's size too: a light's `radius` (its spec's softness) turns
   its shadow rays to points of its disc or sphere, so soft shadows are checked against path-traced penumbras
   (`ShadowOwnerTest.softShadowsMatchThePathTracedReference`).
+- **What it costs** (`ShadowsBenchmark`, RX 9070 XT, 2026-11-05, JaCoCo off; 30,000 rocks on the terrain, the
+  visibility buffer; GPU time of the whole frame, and of the shadows' passes alone, medians of 60 frames, ranges of 3
+  rounds; "before": the single techniques, in the same run):
+
+  | Sun's shadows | 1920 x 1080 still | 1920 x 1080 turning | 3840 x 2160 still | 3840 x 2160 turning |
+  |---|---|---|---|---|
+  | unshadowed | 0.88 ms | 0.87 ms | 2.00 ms | 1.99 ms |
+  | maps: one 4096 to 300 | 0.90 (0.00) | 1.69 (0.72) | 2.09 (0.00) | 2.87 (0.75) |
+  | cascades: 3 of 2048 to 300 | 0.90 (0.00) | 1.66 (0.69) | 2.08 (0.00) | 2.79 (0.69) |
+  | cascades: AUTO to 300 (4 cascades, 2048 at 1080p, 4096 at 2160p) | 0.89 (0.00) | 1.83 (0.87) | 2.10 (0.00) | 4.35 (2.22) |
+  | before: `CascadedShadowMaps` 3 of 2048 | 1.58 (0.61) | 1.64 (0.68) | 2.76 (0.63) | 2.81 (0.69) |
+  | ray traced | 1.15 (0.27) | 1.16 (0.28) | 3.10 (1.00) | 3.12 (1.02) |
+  | before: `RayTracedShadows` | 1.13 (0.23) | 1.12 (0.24) | 2.96 (0.85) | 2.98 (0.88) |
+  | soft ray traced, sun 0.0047, SVGF (2 steps) | 2.06 (1.16) | 2.08 (1.18) | 7.15 (4.82) | 7.26 (4.95) |
+  | soft ray traced, REBLUR | 2.04 (1.14) | 2.05 (1.15) | 7.91 (5.71) | 8.04 (5.85) |
+  | soft ray traced, 4 rays, SVGF | 2.85 (1.90) | 2.91 (1.97) | 9.95 (7.61) | 10.25 (7.89) |
+
+  A still camera keeps its cascades (no draw at all); turning, the owner's cascades cost what the technique's did.
+  The owner's traced mask is 0.04 ms (1080p) to 0.15 ms (2160p) slower than `RayTracedShadows`' (its pass 0.27 against
+  0.23 ms; a leaner variant without the keep() path measured the same, so it is not that). Soft shadows cost the
+  denoiser above all (1 ray: trace 0.29 ms, SVGF's temporal pass 0.18 ms and 0.33 ms per a-trous step at 1080p); 2
+  steps are also closer to the reference than 4 (`softShadowsMatchThePathTracedReference`: mean penumbra error 0.018
+  against 0.024; REBLUR 0.035; hard rays 0.141). AUTO cascades take a texel per pixel at each cascade's end: at 2160p
+  four 4096 maps; `shadows.auto.scale` trades that for less.
+
+  200 point lights (ranges 6 to 15) over the rocks, the camera flying over them at 1920 x 1080: unshadowed 0.93 ms;
+  AUTO maps 0.97 to 0.98 ms (61 M atlas texels, the shadow atlas pass 0.002 ms in the median frame: tiles stay; at
+  most 12 drawn in a frame as sizes change); fixed 256 maps 0.96 to 0.98 ms; with 29 lights' specs switched every
+  frame 1.7 to 2.2 ms (64 tiles drawn a frame). No graph build in any of them after the first frames.
+- **Checked** (screenshots of every method, `Screenshots.renderShadowOwner`): with lights above the rocks, AUTO point
+  light maps and hard rays differ in 195 pixels darker and 165 brighter of 2 million. Lights inside a rock (closed
+  meshes around the light) leak through maps and not through rays: depth draws cull back faces (52,000 pixels
+  brighter); such lights want rays.
 - **Not yet:** inline ray shadows (`InlineRayShadows`) are not a method of the owner (they cannot test `keep()` from a
   shading pass of another type); classic LOD geometry does not draw into the atlas; the techniques below stay for now.
 
