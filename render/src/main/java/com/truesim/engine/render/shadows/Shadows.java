@@ -219,7 +219,30 @@ public final class Shadows implements AutoCloseable {
      */
     @AllowAllocation("set up rarely")
     public Technique view(SceneView view) {
-        View part = new View(view);
+        return add(new View(view, null, 0));
+    }
+
+    /**
+     * The owner's part in {@code view}, sharing the directional lights' cascades of {@code cascadesOf}'s part (added
+     * before) instead of fitting its own: views close together, such as a headset's eyes. Those cascades reach
+     * {@code margin} units beyond their view's frustum, enough to cover this one (the distance between the eyes). Half
+     * the cascade work of the two views; spot and point lights' maps are every view's anyway.
+     */
+    @AllowAllocation("set up rarely")
+    public Technique view(SceneView view, Technique cascadesOf, double margin) {
+        if (!(cascadesOf instanceof View anchor) || anchor.owner() != this || anchor.anchor != null) {
+            throw new IllegalArgumentException("Cascades are shared from a part of this owner's that has its own");
+        }
+        if (!(margin >= 0)) {
+            throw new IllegalArgumentException("A margin is not negative: " + margin);
+        }
+        anchor.margin = Math.max(anchor.margin, margin);
+        return add(new View(view, anchor, margin));
+    }
+
+    @AllowAllocation("set up rarely")
+    private Technique add(View part) {
+        SceneView view = part.view;
         views.add(part);
         view.port().own(() -> {
             views.remove(part);
@@ -361,7 +384,9 @@ public final class Shadows implements AutoCloseable {
             if (directional) {
                 for (int v4 = 0; v4 < views.size(); v4++) {
                     View view = views.get(v4);
-                    view.cascades(light, spec, settings);
+                    if (view.anchor == null) {
+                        view.cascades(light, spec, settings);
+                    }
                 }
             } else {
                 localMaps(light, spec, type, settings);
@@ -1153,7 +1178,11 @@ public final class Shadows implements AutoCloseable {
         private boolean[] named = new boolean[0]; // lights this part named in its table last frame
         private final TracedMasks traced;
 
-        View(SceneView view) {
+        private final View anchor; // whose cascades it uses, or null: its own
+        private double margin; // how far its cascades reach beyond its frustum: for the parts sharing them
+
+        View(SceneView view, View anchor, double margin) {
+            this.anchor = anchor;
             this.view = view;
             this.port = view.port();
             this.traced = new TracedMasks(Shadows.this, view, lights);
@@ -1192,6 +1221,10 @@ public final class Shadows implements AutoCloseable {
             }
         }
 
+        Shadows owner() {
+            return Shadows.this;
+        }
+
         void traced(int light, ShadowSpec spec) {
             traced.add(light, spec);
         }
@@ -1208,7 +1241,7 @@ public final class Shadows implements AutoCloseable {
                 : (int) Math.max(1, Math.min(4, Math.round(Maths.log(Math.max(distance / 2, 1)) / Maths.log(4))));
             Camera camera = view.camera();
             lights.direction(light, direction);
-            fit.fit(camera, count, distance, settings.get(ShadowSettings.CASCADE_LAMBDA), 0, direction[0],
+            fit.fit(camera, count, distance, settings.get(ShadowSettings.CASCADE_LAMBDA), margin, direction[0],
                 direction[1], direction[2]);
             if (group.count != count) {
                 for (int i = count; i < group.count; i++) {
@@ -1254,7 +1287,7 @@ public final class Shadows implements AutoCloseable {
                 ShadowSpec spec = group.spec;
                 double distance = spec.distance() > 0 ? spec.distance() : settings.get(ShadowSettings.MAP_DISTANCE);
                 lights.direction(group.light, direction);
-                fit.fit(camera, group.count, distance, lambda, 0, direction[0], direction[1], direction[2]);
+                fit.fit(camera, group.count, distance, lambda, margin, direction[0], direction[1], direction[2]);
                 float biasTexels = Float.isNaN(spec.bias()) ? settings.get(ShadowSettings.CASCADE_BIAS) : spec.bias();
                 for (int i = 0; i < group.count; i++) {
                     Tile tile = group.tiles[i];
@@ -1335,7 +1368,7 @@ public final class Shadows implements AutoCloseable {
             int overflowed = 0;
             for (int light = 0; light < count; light++) {
                 int used = 0;
-                Group group = cascades[light];
+                Group group = (anchor != null ? anchor : this).cascades[light];
                 if (atlasSlot >= 0) {
                     used = writeShared(table, light, entry, atlasSlot);
                     if (used == 0 && group != null && group.usedNow && !group.droppedNow) {

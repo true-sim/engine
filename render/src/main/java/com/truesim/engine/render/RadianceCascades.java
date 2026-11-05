@@ -184,7 +184,14 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
         long tableWords = ((6L * bins + 3) / 4) * 4;
         long tablesBytes = 4 * tableWords * layers;
         Buffer binTables = g.createBuffer("cascade bins", tablesBytes + 4 * capacity);
-        Buffer counts = g.createBuffer("cascade counts", 4L * (layers + 1));
+        // The counts, then where the material table has types with geometry hooks, the shadow rays waiting for keep()
+        LightRays light = LightRays.of(g, renderer, rayTracing, anchor.view(), grid.width(), grid.height());
+        long countsBytes = (4L * (layers + 1) + 15) / 16 * 16;
+        Buffer counts = g.createBuffer("cascade counts", countsBytes + (light == null ? 0 : light.bytes()));
+        if (light != null) {
+            light.place(counts, countsBytes);
+        }
+        int lightWords = light == null ? 0 : light.words();
         Buffer topLevel = g.request(new TopLevel(rayTracing, renderer));
         SceneData.Buffers scene = g.request(new SceneData(renderer));
         WorldLights.Grid world = g.request(new WorldLights(lights, camera));
@@ -220,7 +227,10 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
             .record(ctx -> {
                 frame.setup(ctx, settings, camera, data, levels, table, states, irradiance, depth, maps, brdf,
                     specularMips, sheenMips);
-                ctx.fill(counts, 0);
+                ctx.fill(counts, 0, countsBytes, 0);
+                if (light != null) {
+                    light.reset(ctx);
+                }
                 ctx.fill(binTables, 0, tablesBytes, 0);
             });
 
@@ -285,13 +295,16 @@ public record RadianceCascades(RayTracing rayTracing, MeshletRenderer renderer, 
                 for (int bin = 0; bin < shade.length; bin++) {
                     if (shade[bin] != null) {
                         ctx.dispatchIndirect(shade[bin], pathPush(shadePush, ctx, settings, rayImage, current, next,
-                            binTables, counts, table, world, binTable, tablesBytes, bounce, bins, bin, layers),
-                            binTables, binTable + 16L * bin);
+                            binTables, counts, table, world, binTable, tablesBytes, bounce, bins, bin, layers)
+                            .lightRays(lightWords), binTables, binTable + 16L * bin);
                     }
                 }
             });
         }
 
+        if (light != null) {
+            light.resolve(g, "cascade", name -> pass(g, name), topLevel, rayImage);
+        }
         // The merges, from the last cascade to the first, which writes the volume shading samples
         for (int c = cascades - 1; c >= 0; c--) {
             int cascade = c;

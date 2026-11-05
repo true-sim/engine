@@ -190,6 +190,9 @@ class ShadowsBenchmark {
         place(camera, 0, width, height);
         view.set(camera, 1, MeshletRenderer.MODE_LIT);
         try (FrameGraph graph = new FrameGraph(device, 2)) {
+            if (System.getenv("TRUESIM_SHADOWS_SYNC") != null) {
+                graph.asyncCompute(false); // every pass on the graphics queue: no overlap in the timings
+            }
             SceneView main = new SceneView(graph.addView("main").size(width, height), view, camera);
             List<Technique> added = new ArrayList<>();
             added.add(new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT));

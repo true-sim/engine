@@ -66,6 +66,8 @@ public struct ShadowTrace
     public uint64_t traceSlots;            // TraceSlot*
     public uint64_t sceneTable;            // SceneTable*: for the keep entry points
     public uint64_t view;                  // View*: the camera's, for the keep entry points
+    public uint queueB;                    // light rays (LightRays): words from this record to the second queue
+    public uint sums;                      // and to the light found per pixel, rgb as floats' bits
 };
 
 /** The way a ray met nothing, something, or a triangle whose keep() decides. */
@@ -204,11 +206,65 @@ public void shadowKeep<M : IMaterial>(ShadowMasksPush push, uint index)
     {
         return;
     }
-    ShadowRay* rays = (ShadowRay*)(queue + QUEUE_HEADER);
-    ShadowRay ray = rays[index];
+    // The queue's records: shadow rays (8 words), or light rays (LightRay, push.pad words) beginning with one
+    uint stride = push.pad != 0 ? push.pad : 8;
+    ShadowRay* at = (ShadowRay*)(queue + QUEUE_HEADER + index * stride);
+    ShadowRay ray = at[0];
     if ((ray.kept >> 8) != push.mode)
     {
         return;
     }
-    rays[index].kept = (ray.kept & ~0xffu) | (shadowKept<M>(push.trace, ray) ? KEPT : HOLE);
+    at[0].kept = (ray.kept & ~0xffu) | (shadowKept<M>(push.trace, ray) ? KEPT : HOLE);
+}
+
+/**
+ * A light ray of the path tracer's next-event estimation waiting for a keep() test (its hit), the light it brings to
+ * pixel `pixel` (weighted already) if nothing else blocks it: 80 bytes.
+ */
+[HostLayout]
+public struct LightRay
+{
+    public ShadowRay hit;
+    public float3 origin;          // in the top level's space
+    public float tMax;
+    public float3 direction;
+    public uint pixel;             // x | y << 16
+    public float3 contribution;
+    public uint pad;
+};
+
+/** Words of a LightRay. */
+public static const uint LIGHT_RAY_WORDS = 20;
+
+/** Appends `ray` to the light-ray queue at `queue`, holding `capacity`; false when it is full. */
+public bool enqueueLight(uint* queue, uint capacity, LightRay ray)
+{
+    uint index;
+    InterlockedAdd(queue[0], 1, index);
+    if (index >= capacity)
+    {
+        return false;
+    }
+    if ((index & 63) == 0)
+    {
+        InterlockedAdd(queue[1], 1);
+    }
+    ((LightRay*)(queue + QUEUE_HEADER))[index] = ray;
+    return true;
+}
+
+/** Adds `value` to the float whose bits word `word` holds (a compare-and-swap loop: floats without atomics). */
+public void addFloat(uint* word, float value)
+{
+    uint seen = word[0];
+    while (true)
+    {
+        uint was;
+        InterlockedCompareExchange(word[0], seen, asuint(asfloat(seen) + value), was);
+        if (was == seen)
+        {
+            return;
+        }
+        seen = was;
+    }
 }

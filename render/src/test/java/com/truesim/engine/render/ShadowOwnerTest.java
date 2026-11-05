@@ -445,6 +445,50 @@ class ShadowOwnerTest {
         scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
     }
 
+    /**
+     * The path-traced reference's shadow rays go through the holes of keep() too (light rays waiting for the type's
+     * test): under the checkerboard-cut quad, the floor below a hole is lit, below a kept cell dark.
+     */
+    @Test
+    void theReferencesShadowRaysGoThroughTheHolesOfKeep() {
+        assumeThat(rays()).as("no ray tracing").isTrue();
+        MeshData mapped = uvQuad();
+        int mappedQuad = pool.add(mapped);
+        rayTracing.add(mappedQuad, mapped, mapped.levels().size() - 1);
+        try (Materials materials = new Materials(device, 4)) {
+            materials.register(com.truesim.engine.render.materials.Dissolve.TYPE);
+            int cut = materials.add(new Material(com.truesim.engine.render.materials.DissolveParameters.DEFAULTS
+                .withCell(0.5f)));
+            scene.setMaterials(materials);
+            scene.set(1, mappedQuad, cut, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            sun(ShadowSpec.NONE);
+            graph.close();
+            graph = new FrameGraph(device, 2);
+            graph.settings().set(ReferencePathTracer.SAMPLES, 16).set(ReferencePathTracer.BOUNCES, 1);
+            SceneView main = new SceneView(graph.addView("main").size(SIZE, SIZE), view, camera);
+            main.port().add(new ReferencePathTracer(SceneGeometry.meshlets(renderer), rayTracing, main,
+                VK_FORMAT_R8G8B8A8_UNORM)).add(new ClusteredLights(lights, main))
+                .output(Keys.SCENE_COLOR, new ExternalImage("target", SIZE, SIZE,
+                    com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                        | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(colorTarget.handle(), colorTarget.view()));
+            byte[] color = null;
+            for (int i = 0; i < 20; i++) {
+                color = frame();
+            }
+            assertThat(graph.passes()).anyMatch(pass -> pass.startsWith("reference light rays"));
+            double[] s = sunShadow();
+            int lit = floor(color, 3, -2);
+            assertThat(floor(color, s[0] - 0.5, s[1] - 0.5)).as("below a kept cell").isLessThan(lit / 2);
+            assertThat(floor(color, s[0] + 0.5, s[1] - 0.5)).as("below a hole").isGreaterThan(lit * 9 / 10);
+            device.waitIdle();
+            graph.close();
+            graph = new FrameGraph(device, 2);
+            scene.setMaterials(null);
+        }
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
     /** Ray tracing of the quads, where the device traces rays. */
     private boolean rays(MeshData... more) {
         if (!device.rayTracing()) {
@@ -616,7 +660,7 @@ class ShadowOwnerTest {
     }
 
     /** The test quad (2 x 2, in the xz plane) with texture coordinates: u along x, v along z, 0 to 1. */
-    private static MeshData uvQuad() {
+    static MeshData uvQuad() {
         float[] positions = {-1, 0, -1, 1, 0, -1, -1, 0, 1, 1, 0, 1};
         float[] uvs = {0, 0, 1, 0, 0, 1, 1, 1};
         return new com.truesim.scene.meshbuild.MeshBuilder(

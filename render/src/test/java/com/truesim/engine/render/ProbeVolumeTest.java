@@ -207,6 +207,40 @@ class ProbeVolumeTest {
         ProbeVolumeLighting.SLOT.choose(graph.settings(), ProbeVolumeLighting.PROBES);
     }
 
+    /**
+     * The probes' shadow rays go through the holes of a type's keep(): a closed box lit by the sun through its ceiling,
+     * a type cut in a checkerboard (half holes), shows the sun's light bounced inside through the probe volume; with
+     * the same type keeping all of the ceiling (one cell), nothing comes in. Without light rays waiting for keep(),
+     * both are dark: a hooked triangle stops every shadow ray.
+     */
+    @Test
+    void probeShadowRaysGoThroughTheHolesOfKeep() {
+        MeshData cut = ShadowOwnerTest.uvQuad();
+        int cutQuad = pool.add(cut);
+        rayTracing.add(cutQuad, cut, cut.levels().size() - 1);
+        materials.register(com.truesim.engine.render.materials.Dissolve.TYPE);
+        int white = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.8f, 0.8f, 1))).feature(LAMBERT));
+        com.truesim.engine.render.materials.DissolveParameters black =
+            com.truesim.engine.render.materials.DissolveParameters.DEFAULTS.withColor(new Color(0, 0, 0, 1));
+        int holes = materials.add(new Material(black.withCell(0.5f)));
+        int whole = materials.add(new Material(black.withCell(1)));
+        box(white);
+        scene.set(3, cutQuad, holes, 0, 1, 0, ReferencePathTracerTest.DOWN[0], ReferencePathTracerTest.DOWN[1],
+            ReferencePathTracerTest.DOWN[2], ReferencePathTracerTest.DOWN[3], 1.001f, 1.001f, 1.001f);
+        lights.directional(0, 0.1f, -1, 0.05f, 3, 3, 3).setCount(1);
+        lit("main", Environment.uniform("black", 0, 0, 0));
+        double through = mean(frames(60), 0);
+        ProbeVolumeLighting.SLOT.choose(graph.settings(), null);
+        double direct = mean(frames(3), 0);
+        ProbeVolumeLighting.SLOT.choose(graph.settings(), ProbeVolumeLighting.PROBES);
+        scene.set(3, cutQuad, whole, 0, 1, 0, ReferencePathTracerTest.DOWN[0], ReferencePathTracerTest.DOWN[1],
+            ReferencePathTracerTest.DOWN[2], ReferencePathTracerTest.DOWN[3], 1.001f, 1.001f, 1.001f);
+        double shut = mean(frames(60), 0);
+        assertThat(through - direct).as("light bounced in through the holes (%s with, %s without the volume, %s shut)",
+            through, direct, shut).isGreaterThan(0.05);
+        assertThat(shut - direct).as("the ceiling whole: nothing comes in").isLessThan((through - direct) / 10);
+    }
+
     @Test
     void theUpdateOnTheAsyncComputeQueueLightsTheSame() {
         float rho = 0.5f;

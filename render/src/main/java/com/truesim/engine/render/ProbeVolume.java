@@ -267,7 +267,14 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
         long tableWords = ((6L * bins + 3) / 4) * 4;
         long tablesBytes = 4 * tableWords * layers;
         Buffer binTables = g.createBuffer("probe bins", tablesBytes + 4 * capacity);
-        Buffer counts = g.createBuffer("probe counts", 4L * (layers + 1));
+        // The counts, then where the material table has types with geometry hooks, the shadow rays waiting for keep()
+        LightRays light = LightRays.of(g, renderer, rayTracing, anchor.view(), rayImage.width(), rayImage.height());
+        long countsBytes = (4L * (layers + 1) + 15) / 16 * 16;
+        Buffer counts = g.createBuffer("probe counts", countsBytes + (light == null ? 0 : light.bytes()));
+        if (light != null) {
+            light.place(counts, countsBytes);
+        }
+        int lightWords = light == null ? 0 : light.words();
         Buffer status = g.createBuffer("probe status", 16);
         int instanceCapacity = renderer.scene().capacity();
         Buffer previousInstances = g.persistentBuffer("probe instances before", 64L * instanceCapacity);
@@ -317,7 +324,10 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                 frame.setup(ctx, settings, camera, coarsest, data, table, states, irradiance, depth, maps, brdf,
                     specularMips, sheenMips, skinned);
                 ctx.fill(status, 0);
-                ctx.fill(counts, 0);
+                ctx.fill(counts, 0, countsBytes, 0);
+                if (light != null) {
+                    light.reset(ctx);
+                }
                 ctx.fill(binTables, 0, tablesBytes, 0);
             });
 
@@ -356,7 +366,10 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                     .write(states, BufferAccess.STORAGE_WRITE).write(counts, BufferAccess.TRANSFER_DST)
                     .write(binTables, BufferAccess.TRANSFER_DST)
                     .record(ctx -> {
-                        ctx.fill(counts, 0);
+                        ctx.fill(counts, 0, countsBytes, 0);
+                        if (light != null) {
+                            light.reset(ctx);
+                        }
                         ctx.fill(binTables, 0, tablesBytes, 0);
                         Barriers.memory(ctx.unsafe().commands(), VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                             VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -417,13 +430,17 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                         if (shade[bin] != null) {
                             ctx.dispatchIndirect(shade[bin], pathPush(shadePush, ctx, rayImage, current, next,
                                 binTables,
-                                counts, table, world, binTable, tablesBytes, bounce, bins, bin, layers), binTables,
+                                counts, table, world, binTable, tablesBytes, bounce, bins, bin, layers)
+                                .lightRays(lightWords), binTables,
                                 binTable + 16L * bin);
                         }
                     }
                 });
             }
 
+            if (light != null) {
+                light.resolve(g, "probe" + again, name -> pass(g, name), topLevel, rayImage);
+            }
             ProbePush blendPush = new ProbePush();
             pass(g, "probe blending" + again).read(data, BufferAccess.STORAGE_READ)
                 .read(rayImage, Access.STORAGE_READ)

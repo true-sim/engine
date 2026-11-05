@@ -228,3 +228,65 @@ void continueMain(uint3 id : SV_DispatchThreadID)
         trace(t, slot, pixel, p, index + 1, lit, 0); // blocked: the next rays
     }
 }
+
+// ---------------------------------------------------------------- the path tracer's light rays (LightRays)
+
+/**
+ * Light rays of the path tracer's next-event estimation that waited for a keep() test (the push's trace is their
+ * record, queueIn the rays tested): through a hole, traced on beyond it, their light added to their pixel's sum where
+ * nothing else blocks it; at another hooked type's triangle, queued again (queueOut) unless this is the last round
+ * (mode 1: blocked). A kept point blocks.
+ */
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lightRaysMain(uint3 id : SV_DispatchThreadID)
+{
+    ShadowTrace* t = push.trace;
+    uint* queue = push.queueIn;
+    if (id.x >= min(queue[0], t.capacity))
+    {
+        return;
+    }
+    LightRay ray = ((LightRay*)(queue + QUEUE_HEADER))[id.x];
+    if ((ray.hit.kept & 0xff) != HOLE)
+    {
+        return; // a kept point: blocked
+    }
+    ShadowRay hit;
+    uint way = traceShadow((RayScene*)t.scene, ray.origin, ray.direction, ray.hit.t * (1 + 1.0e-4) + 1.0e-4,
+        ray.tMax, hit);
+    if (way == CLEAR)
+    {
+        uint* sums = (uint*)t + t.sums;
+        uint index = 3 * ((ray.pixel >> 16) * (t.size & 0xffff) + (ray.pixel & 0xffff));
+        addFloat(sums + index, ray.contribution.x);
+        addFloat(sums + index + 1, ray.contribution.y);
+        addFloat(sums + index + 2, ray.contribution.z);
+    }
+    else if (way == PENDING && push.mode == 0)
+    {
+        ray.hit = hit;
+        enqueueLight(push.queueOut, t.capacity, ray);
+    }
+}
+
+/** Adds each pixel's light found by light rays (their sums) to its radiance in storage image `mode`. */
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void lightMergeMain(uint3 id : SV_DispatchThreadID)
+{
+    ShadowTrace* t = push.trace;
+    uint2 size = regionSize(t);
+    if (id.x >= size.x || id.y >= size.y)
+    {
+        return;
+    }
+    uint* sums = (uint*)t + t.sums;
+    uint index = 3 * (id.y * size.x + id.x);
+    float3 light = float3(asfloat(sums[index]), asfloat(sums[index + 1]), asfloat(sums[index + 2]));
+    if (any(light != 0))
+    {
+        float4 was = images[push.mode][id.xy];
+        images[push.mode][id.xy] = float4(was.rgb + light, was.a);
+    }
+}
