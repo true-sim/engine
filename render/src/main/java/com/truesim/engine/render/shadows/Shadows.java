@@ -1,6 +1,8 @@
 package com.truesim.engine.render.shadows;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.annotations.AllowImpure;
+import com.truesim.common.math.Maths;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
@@ -227,7 +229,8 @@ public final class Shadows implements AutoCloseable {
 
     @Override
     public void close() {
-        for (View part : views) {
+        for (int v1 = 0; v1 < views.size(); v1++) {
+            View part = views.get(v1);
             part.close();
         }
         for (RenderView view : slotViews) {
@@ -328,7 +331,8 @@ public final class Shadows implements AutoCloseable {
         stats.shrunk = 0;
         stats.dropped = 0;
         boolean tracing = rayTracing != null; // made only where the device traces rays
-        for (View view : views) {
+        for (int v2 = 0; v2 < views.size(); v2++) {
+            View view = views.get(v2);
             view.startFrame(count);
         }
         for (int light = 0; light < count; light++) {
@@ -346,14 +350,16 @@ public final class Shadows implements AutoCloseable {
             ShadowMethod method = spec.method();
             if ((method == ShadowMethod.RAY_TRACED || method == ShadowMethod.SOFT_RAY_TRACED) && tracing) {
                 stats.traced++;
-                for (View view : views) {
+                for (int v3 = 0; v3 < views.size(); v3++) {
+                    View view = views.get(v3);
                     view.traced(light, spec);
                 }
                 continue;
             }
             stats.mapped++;
             if (directional) {
-                for (View view : views) {
+                for (int v4 = 0; v4 < views.size(); v4++) {
+                    View view = views.get(v4);
                     view.cascades(light, spec, settings);
                 }
             } else {
@@ -365,7 +371,8 @@ public final class Shadows implements AutoCloseable {
                 releaseGroup(shared[light]);
             }
         }
-        for (View view : views) {
+        for (int v5 = 0; v5 < views.size(); v5++) {
+            View view = views.get(v5);
             view.releaseUnused();
         }
         if (usedCount > 0) {
@@ -417,7 +424,8 @@ public final class Shadows implements AutoCloseable {
     @AllowAllocation("growing with the lights")
     private void grow() {
         shared = Arrays.copyOf(shared, lights.capacity());
-        for (View view : views) {
+        for (int v6 = 0; v6 < views.size(); v6++) {
+            View view = views.get(v6);
             view.grow(lights.capacity());
         }
     }
@@ -433,7 +441,8 @@ public final class Shadows implements AutoCloseable {
                 }
             }
         }
-        for (View view : views) {
+        for (int v7 = 0; v7 < views.size(); v7++) {
+            View view = views.get(v7);
             view.forgetTiles();
         }
     }
@@ -456,7 +465,8 @@ public final class Shadows implements AutoCloseable {
         // How big its reach shows: the most pixels across in any view.
         double pixels = 0;
         double nearest = Double.MAX_VALUE;
-        for (View view : views) {
+        for (int v8 = 0; v8 < views.size(); v8++) {
+            View view = views.get(v8);
             Camera camera = view.view.camera();
             double ex = x - camera.position(0);
             double ey = y - camera.position(1);
@@ -529,7 +539,7 @@ public final class Shadows implements AutoCloseable {
 
     /** A power-of-two size near {@code wanted}, within bounds, changed from the tile's only past the hysteresis. */
     private static int sized(Tile tile, double wanted, int min, int max, float hysteresis) {
-        double target = Math.log(Math.max(wanted, 1)) / Math.log(2);
+        double target = Maths.log(Math.max(wanted, 1)) / Maths.log(2);
         int lo = Integer.numberOfTrailingZeros(min);
         int hi = Integer.numberOfTrailingZeros(max);
         int now = tile.size > 0 ? Integer.numberOfTrailingZeros(tile.size) : -1;
@@ -559,7 +569,7 @@ public final class Shadows implements AutoCloseable {
         if (point) {
             // Cube faces +x, -x, +y, -y, +z, -z (lights.slang's order), each a little wider than 90 degrees: two texels
             // past each edge, so filtering near an edge stays within the face.
-            fov = 2 * Math.atan((double) size / (size - 4));
+            fov = 2 * Maths.atan((double) size / (size - 4));
             fx = face == 0 ? 1 : face == 1 ? -1 : 0;
             fy = face == 2 ? 1 : face == 3 ? -1 : 0;
             fz = face == 4 ? 1 : face == 5 ? -1 : 0;
@@ -568,8 +578,8 @@ public final class Shadows implements AutoCloseable {
                 uz = 1;
             }
         } else {
-            double cone = Math.acos(Math.max(-1, Math.min(1, p[7])));
-            fov = Math.min(2 * cone + 4.0 / size, Math.toRadians(170));
+            double cone = Maths.acos(Math.max(-1, Math.min(1, p[7])));
+            fov = Math.min(2 * cone + 4.0 / size, 170 * Math.PI / 180);
             fx = p[3];
             fy = p[4];
             fz = p[5];
@@ -580,7 +590,7 @@ public final class Shadows implements AutoCloseable {
         }
         tile.camera.position(p[0], p[1], p[2]).set(fx, fy, fz, ux, uy, uz, fov, size, size, near)
             .farPlane(reach);
-        double texelAngle = 2 * Math.tan(fov / 2) / size;
+        double texelAngle = 2 * Maths.tan(fov / 2) / size;
         float bias = (float) p[10];
         float casterError = Math.max(0, (float) p[11] - 1);
         tile.near = near;
@@ -736,7 +746,8 @@ public final class Shadows implements AutoCloseable {
                 }
             }
         }
-        for (View view : views) {
+        for (int v9 = 0; v9 < views.size(); v9++) {
+            View view = views.get(v9);
             view.placeCascades();
         }
     }
@@ -996,21 +1007,25 @@ public final class Shadows implements AutoCloseable {
         }
         DepthDraws draws = DepthDraws.of(g, renderer, slotViews);
         RenderView[] views = slotViews;
-        pass.record(ctx -> {
-            for (int i = 0; i < views.length; i++) {
-                Tile tile = slotTiles[i];
-                if (tile == null) {
-                    continue;
-                }
-                ctx.clearDepth(tile.x, tile.y, tile.size, tile.size, 0); // reverse depth: 0 is far
-                ctx.viewport(tile.x, tile.y, tile.size, tile.size);
-                ctx.scissor(tile.x, tile.y, tile.size, tile.size);
-                draws.draw(ctx, views[i]);
-                tile.dirty = false;
-                tile.valid = true;
-            }
-        });
+        pass.record(ctx -> drawTiles(ctx, draws, views));
         return image;
+    }
+
+    /** Draws the frame's tiles, each into its rectangle, and marks them drawn. Allocates nothing. */
+    @AllowImpure("marks the tiles drawn when the frame records: what the next frame's prepare reads")
+    private void drawTiles(com.truesim.engine.graph.PassContext ctx, DepthDraws draws, RenderView[] views) {
+        for (int i = 0; i < views.length; i++) {
+            Tile tile = slotTiles[i];
+            if (tile == null) {
+                continue;
+            }
+            ctx.clearDepth(tile.x, tile.y, tile.size, tile.size, 0); // reverse depth: 0 is far
+            ctx.viewport(tile.x, tile.y, tile.size, tile.size);
+            ctx.scissor(tile.x, tile.y, tile.size, tile.size);
+            draws.draw(ctx, views[i]);
+            tile.dirty = false;
+            tile.valid = true;
+        }
     }
 
     /** After a build every tile is drawn again; the frame's slots too, as many as there are now. */
@@ -1113,7 +1128,7 @@ public final class Shadows implements AutoCloseable {
             }
             double distance = spec.distance() > 0 ? spec.distance() : settings.get(ShadowSettings.MAP_DISTANCE);
             int count = spec.method() == ShadowMethod.MAPS ? 1 : spec.cascades() != ShadowSpec.AUTO ? spec.cascades()
-                : (int) Math.max(1, Math.min(4, Math.round(Math.log(Math.max(distance / 2, 1)) / Math.log(4))));
+                : (int) Math.max(1, Math.min(4, Math.round(Maths.log(Math.max(distance / 2, 1)) / Maths.log(4))));
             Camera camera = view.camera();
             lights.direction(light, direction);
             fit.fit(camera, count, distance, settings.get(ShadowSettings.CASCADE_LAMBDA), 0, direction[0],

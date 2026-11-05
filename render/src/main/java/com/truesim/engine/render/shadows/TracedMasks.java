@@ -4,6 +4,7 @@ import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
 import com.truesim.annotations.AllowAllocation;
+import com.truesim.annotations.AllowImpure;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
@@ -206,6 +207,7 @@ final class TracedMasks implements AutoCloseable {
 
     /** Adds the view's tracing, denoising and the masks shading samples, for the slots there are now. */
     @AllowAllocation("building the graph, when it changes")
+    @AllowImpure("keeps what the graph was built with (slots, images, the trace buffer): shading's setup reads them")
     void build(GraphBuilder g, ShadowInputs.Set inputs, RayTracing rayTracing) {
         hardBuilt = hardWanted;
         softBuilt = softWanted;
