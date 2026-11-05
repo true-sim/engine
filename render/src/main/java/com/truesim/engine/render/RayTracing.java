@@ -314,6 +314,11 @@ public final class RayTracing implements AutoCloseable {
         return top(scene).slot;
     }
 
+    /** The device it builds on. */
+    public VulkanDevice device() {
+        return device;
+    }
+
     /**
      * The address of {@code scene}'s {@code RayScene} (raytracing.slang) for the frame recording: its top level's slot
      * and what alpha-tests its masked triangles, for shaders tracing rays into it ({@code occluded}). Written as its

@@ -139,6 +139,7 @@ public final class GraphBuilder {
     private final Set<String> persistentKeys = new HashSet<>();
     final List<PassInfo> passes = new ArrayList<>();
     private final List<PassBuilder> openPasses = new ArrayList<>();
+    private BooleanSupplier mask; // masked(): what passes added now run by
     final List<ReadbackPlan> readbacks = new ArrayList<>();
     private final Resolution<Object, Technique> resolution;
     private final List<ViewPort> views;
@@ -852,6 +853,7 @@ public final class GraphBuilder {
 
         private PassBuilder(String name) {
             this.name = name;
+            this.active = mask;
         }
 
         /** The pass reads all of {@code image}. */
@@ -1115,7 +1117,9 @@ public final class GraphBuilder {
          * work no light, view or slot needs this frame. {@code active} must not allocate.
          */
         public PassBuilder when(BooleanSupplier active) {
-            this.active = Objects.requireNonNull(active, "active");
+            Objects.requireNonNull(active, "active");
+            BooleanSupplier outer = this.active;
+            this.active = outer == null ? active : () -> outer.getAsBoolean() && active.getAsBoolean();
             return this;
         }
 
@@ -1175,6 +1179,22 @@ public final class GraphBuilder {
             info.view = regionView;
             info.active = active;
             return info;
+        }
+    }
+
+    /**
+     * Runs {@code build}, every pass it adds running only in frames where {@code active} says so
+     * ({@link PassBuilder#when}): for work made by code that knows nothing of the mask (a denoiser's passes for a slot
+     * no light uses this frame). Masks nest.
+     */
+    public void masked(BooleanSupplier active, Runnable build) {
+        Objects.requireNonNull(active, "active");
+        BooleanSupplier outer = mask;
+        mask = outer == null ? active : () -> outer.getAsBoolean() && active.getAsBoolean();
+        try {
+            build.run();
+        } finally {
+            mask = outer;
         }
     }
 

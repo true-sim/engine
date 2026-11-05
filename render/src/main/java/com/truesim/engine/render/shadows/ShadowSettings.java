@@ -76,10 +76,29 @@ public final class ShadowSettings {
      */
     public static final Setting<Integer> CHANGE_TESTS = Setting.integer("shadows.atlas.changeTests", 1 << 20, 0,
         1 << 30, "the most moved-caster-against-tile tests a frame before testing their box as one");
+    /** Soft ray-traced shadows: rays per pixel and light, before the denoiser. */
+    public static final Setting<Integer> SOFT_RAYS = Setting.integer("shadows.soft.rays", 1, 1, 64,
+        "soft ray-traced shadows: rays per pixel and light, before denoising");
+    /** Soft ray-traced shadows: the denoiser's family. */
+    public static final Setting<com.truesim.engine.render.Denoiser.Mode> SOFT_DENOISER = Setting.choice(
+        "shadows.soft.denoiser", com.truesim.engine.render.Denoiser.Mode.SVGF,
+        "soft ray-traced shadows: the denoiser (SVGF or REBLUR)");
+    /**
+     * Traced shadows: the shadow rays a view's queue holds while their hit's keep() is tested (material types with a
+     * geometry hook); rays past it count as blocked.
+     */
+    public static final Setting<Integer> RAY_QUEUE = Setting.integer("shadows.rays.queue", 1 << 18, 64, 1 << 24,
+        "traced shadows: rays waiting for a keep() test a view holds");
+    /**
+     * Traced shadows: how many holes of geometry hooks (keep()) one ray goes through; at the last, a ray meeting another
+     * such triangle counts as blocked.
+     */
+    public static final Setting<Integer> KEEP_ROUNDS = Setting.integer("shadows.rays.keepRounds", 3, 1, 16,
+        "traced shadows: holes of keep() one ray goes through, at most");
     /** Every shadow setting. */
     public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, RAY_OFFSET,
         CASTER_DETAIL, ATLAS_SIZE, ATLAS_DRAWS, TILE_DRAWS, TILE_TRIANGLES, AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF,
-        MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS);
+        MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, SOFT_RAYS, SOFT_DENOISER, RAY_QUEUE, KEEP_ROUNDS);
 
     private ShadowSettings() {
     }

@@ -211,12 +211,18 @@ public final class Shadows implements AutoCloseable {
     public Technique view(SceneView view) {
         View part = new View(view);
         views.add(part);
-        view.port().own(() -> views.remove(part));
+        view.port().own(() -> {
+            views.remove(part);
+            part.close();
+        });
         return part;
     }
 
     @Override
     public void close() {
+        for (View part : views) {
+            part.close();
+        }
         for (RenderView view : slotViews) {
             view.close();
         }
@@ -1158,6 +1164,7 @@ public final class Shadows implements AutoCloseable {
         }
 
         void releaseUnused() {
+            traced.assign();
             for (Group group : cascades) {
                 if (group != null && !group.usedNow && group.spec != null) {
                     releaseGroup(group);
@@ -1173,6 +1180,10 @@ public final class Shadows implements AutoCloseable {
         @Override
         public List<Key<?>> modifies() {
             return List.of(Keys.LIGHT_LIST);
+        }
+
+        void close() {
+            traced.close();
         }
 
         @Override

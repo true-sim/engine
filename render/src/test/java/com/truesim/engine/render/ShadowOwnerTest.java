@@ -290,4 +290,105 @@ class ShadowOwnerTest {
         assertThat(shadows.stats().dropped()).as("too big for what is left").isEqualTo(1);
         assertThat(lights.shadow(1).method()).isEqualTo(ShadowMethod.MAPS);
     }
+
+    /** Ray tracing of the quads, where the device traces rays. */
+    private boolean rays(MeshData... more) {
+        if (!device.rayTracing()) {
+            return false;
+        }
+        rayTracing = new RayTracing(device, pool, 16);
+        rayTracing.add(quad, quadMesh, quadMesh.levels().size() - 1);
+        return true;
+    }
+
+    @Test
+    void lightsCastByHardAndSoftRaysUnderBothShadings() {
+        assumeThat(rays()).as("no ray tracing").isTrue();
+        double[] dark = {1.4, -5.6, 1.8, -6.0};
+        for (Function<SceneView, Technique> shading : java.util.List.of(forward(), visibility())) {
+            newGraph(shading);
+            sun(ShadowSpec.rayTraced());
+            expectShadow("the sun, hard rays", sunShadow(), new double[] {3, -2});
+            sun(ShadowSpec.softRayTraced(0.01));
+            expectShadow("the sun, soft rays", sunShadow(), new double[] {3, -2});
+            lights.directional(0, 0, 0, 0, 0, 0, 0);
+            lights.spot(1, 0, -1, -5, 20, 60, 60, 60, 0, -1, 0, 0.9, 1.05);
+            lights.shadow(1, ShadowSpec.rayTraced()).setCount(2);
+            expectShadow("a spot light, hard rays", dark, new double[] {3, -2});
+            lights.point(1, 0, -1, -5, 20, 60, 60, 60);
+            lights.shadow(1, ShadowSpec.softRayTraced(0.05));
+            expectShadow("a point light, soft rays", dark, new double[] {3, -2});
+            assertThat(shadows.stats().traced()).isEqualTo(1);
+        }
+        ShadowSpec[] specs = {ShadowSpec.rayTraced(), ShadowSpec.maps(256), ShadowSpec.softRayTraced(0.1),
+            ShadowSpec.NONE, ShadowSpec.softRayTraced(0.05)};
+        int builds = graph.builds();
+        for (ShadowSpec spec : specs) {
+            lights.shadow(1, spec);
+            frame();
+        }
+        assertThat(graph.builds()).as("the atlas, first used: one build").isEqualTo(builds + 1);
+        builds = graph.builds();
+        for (int round = 0; round < 3; round++) {
+            for (ShadowSpec spec : specs) {
+                lights.shadow(1, spec);
+                frame();
+            }
+        }
+        assertThat(graph.builds()).as("methods switched without a build").isEqualTo(builds);
+    }
+
+    /**
+     * The quad of a type whose keep() cuts it in a checkerboard of two by two cells: the kept cells cast, the holes
+     * let light through, by maps and by hard and soft rays alike (rays meeting it wait for its keep() test).
+     */
+    @Test
+    void holesOfKeepLetLightThroughByEveryMethod() {
+        MeshData mapped = uvQuad();
+        int mappedQuad = pool.add(mapped);
+        boolean traced = rays();
+        if (traced) {
+            rayTracing.add(mappedQuad, mapped, mapped.levels().size() - 1);
+        }
+        try (Materials materials = new Materials(device, 4)) {
+            materials.register(com.truesim.engine.render.materials.Dissolve.TYPE);
+            int cut = materials.add(new Material(com.truesim.engine.render.materials.DissolveParameters.DEFAULTS
+                .withCell(0.5f)));
+            scene.setMaterials(materials);
+            scene.set(1, mappedQuad, cut, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            double[] shadow = sunShadow();
+            double[] kept = {shadow[0] - 0.5, shadow[1] - 0.5, shadow[0] + 0.5, shadow[1] + 0.5};
+            double[] holes = {shadow[0] + 0.5, shadow[1] - 0.5, shadow[0] - 0.5, shadow[1] + 0.5};
+            java.util.List<ShadowSpec> specs = new java.util.ArrayList<>(java.util.List.of(ShadowSpec.maps(1024)
+                .distance(30)));
+            if (traced) {
+                specs.add(ShadowSpec.rayTraced());
+                specs.add(ShadowSpec.softRayTraced(0.002));
+            }
+            for (Function<SceneView, Technique> shading : java.util.List.of(forward(), visibility())) {
+                newGraph(shading);
+                for (ShadowSpec spec : specs) {
+                    sun(spec);
+                    byte[] color = expectShadow(spec.method() + ": the kept cells", kept, new double[] {3, -2});
+                    int lit = floor(color, 3, -2);
+                    for (int i = 0; i < holes.length; i += 2) {
+                        assertThat(floor(color, holes[i], holes[i + 1])).as("%s: under a hole", spec.method())
+                            .isGreaterThan(lit * 9 / 10);
+                    }
+                }
+            }
+            scene.setMaterials(null);
+        }
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
+    /** The test quad (2 x 2, in the xz plane) with texture coordinates: u along x, v along z, 0 to 1. */
+    private static MeshData uvQuad() {
+        float[] positions = {-1, 0, -1, 1, 0, -1, -1, 0, 1, 1, 0, 1};
+        float[] uvs = {0, 0, 1, 0, 0, 1, 1, 1};
+        return new com.truesim.scene.meshbuild.MeshBuilder(
+            VertexFormat.of(com.truesim.scene.assets.mesh.VertexAttribute.UV0), 4)
+            .positions(positions).attribute(com.truesim.scene.assets.mesh.VertexAttribute.UV0, uvs)
+            .submesh(new int[] {0, 2, 1, 1, 2, 3}).buildFlat();
+    }
 }

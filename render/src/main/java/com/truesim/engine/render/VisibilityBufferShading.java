@@ -113,6 +113,17 @@ public final class VisibilityBufferShading implements Technique {
             + 31 * (materials.graphBuffersVersion() + 31L * materials.drawnVersion());
     }
 
+    /**
+     * The draw of the view's IDs and depth it shades from, as {@code g} would build it: other techniques of the view
+     * needing the camera's depth before shading (ray-traced shadow masks) request the same draw, drawn once.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public SceneDraw idsDraw(GraphBuilder g) {
+        return new SceneDraw(geometry, view.view(), null, SurfaceOutput.ids(), depthFormat, view.width(),
+            view.height(), (occlusion != null ? occlusion : g.setting(RenderSettings.OCCLUSION))
+                && view.view().options().occlusion());
+    }
+
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
@@ -123,9 +134,7 @@ public final class VisibilityBufferShading implements Technique {
             throw new IllegalStateException("The visibility buffer shades up to 65,535 pixels per side: " + width
                 + " x " + height);
         }
-        SceneDraw draw = new SceneDraw(geometry, view.view(), null, SurfaceOutput.ids(), depthFormat, width, height,
-            (occlusion != null ? occlusion : g.setting(RenderSettings.OCCLUSION)) && view.view().options().occlusion());
-        SceneDraw.Targets targets = g.request(draw);
+        SceneDraw.Targets targets = g.request(idsDraw(g));
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         IndirectInputs.Set indirect = IndirectInputs.of(g);
