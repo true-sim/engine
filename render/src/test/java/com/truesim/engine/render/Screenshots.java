@@ -113,8 +113,8 @@ class Screenshots {
     /**
      * The {@link com.truesim.engine.render.shadows.Shadows} owner's methods on rocks resting on the terrain, through the
      * visibility buffer: the sun by one map, cascades (fixed and AUTO), hard and soft rays (a sun of 0.02 radians, to
-     * see its penumbras), the soft sun path traced for reference; then 24 point lights at dusk by AUTO maps, by hard
-     * and by soft rays. Into build/screenshots/owner-*.png.
+     * see its penumbras), the soft sun path traced for reference; then 24 point lights at dusk above the rocks by AUTO
+     * maps, by hard and by soft rays. Into build/screenshots/owner-*.png.
      */
     @Test
     void renderShadowOwner() throws IOException {
@@ -181,7 +181,8 @@ class Screenshots {
                 for (int i = 1; i <= 24; i++) {
                     double x = random.nextDouble(-30, 30);
                     double z = random.nextDouble(-60, -8);
-                    lights.point(i, x, groundY + MeshletBenchmark.terrainHeight(x, z) + random.nextDouble(2, 5), z, 14,
+                    double y = groundY + MeshletBenchmark.terrainHeight(x, z) + random.nextDouble(4.5, 7); // above
+                    lights.point(i, x, y, z, 14,
                         (float) random.nextDouble(5, 25), (float) random.nextDouble(5, 25),
                         (float) random.nextDouble(5, 25));
                 }
@@ -193,6 +194,10 @@ class Screenshots {
                     points.add(new Object[] {"points-rays", com.truesim.scene.core.ShadowSpec.rayTraced()});
                     points.add(new Object[] {"points-soft-rays",
                         com.truesim.scene.core.ShadowSpec.softRayTraced(0.3)});
+                }
+                if (System.getenv("TRUESIM_SHADOW_BIAS") != null) {
+                    graph.settings().set(com.truesim.engine.render.shadows.ShadowSettings.CASCADE_BIAS,
+                        Float.parseFloat(System.getenv("TRUESIM_SHADOW_BIAS")));
                 }
                 for (Object[] shot : points) {
                     for (int i = 1; i <= 24; i++) {

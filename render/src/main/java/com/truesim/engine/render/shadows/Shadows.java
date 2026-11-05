@@ -95,6 +95,7 @@ public final class Shadows implements AutoCloseable {
     private final Tile[] slotTiles = new Tile[4096];
     private int slotsWanted; // grows: the graph builds again
     private boolean anyDrawn;
+    private long[] checkFrom = new long[0]; // per draw view: the frame from which its overflow is read again
     private Tile[] dirty = new Tile[64];
     // Change tracking
     private double[] spheres = new double[0]; // per instance: world x, y, z, radius (< 0: none)
@@ -144,6 +145,7 @@ public final class Shadows implements AutoCloseable {
         int shrunk;
         int dropped;
         int overflowed;
+        int grown;
         long texels;
         long atlasTexels;
 
@@ -190,6 +192,11 @@ public final class Shadows implements AutoCloseable {
         /** Lights casting no shadow in some view for want of shadow table entries. */
         public int overflowed() {
             return overflowed;
+        }
+
+        /** How many times a tile view's lists overflowed and grew (each, a build and every tile drawn again). */
+        public int grown() {
+            return grown;
         }
 
         /** Texels of the atlas in tiles. */
@@ -300,6 +307,7 @@ public final class Shadows implements AutoCloseable {
             casterDetail = detail;
             allDirty = true;
         }
+        growOverflowed(frame);
         long shapesNow = scene.materials().shapesVersion();
         if (shapesNow != shapes) {
             shapes = shapesNow;
@@ -374,6 +382,27 @@ public final class Shadows implements AutoCloseable {
         stats.tiles = 0;
         for (int i = 0; i < usedCount; i++) {
             stats.tiles += used[i].node >= 0 ? 1 : 0;
+        }
+    }
+
+    /**
+     * Grows the lists of draw views whose last cull wanted more than they hold (read a frame or more late, as the GPU
+     * finished it): twice the room, the graph built again, every tile drawn again (what overflowed was left out).
+     */
+    @AllowAllocation("growing, rarely")
+    private void growOverflowed(long frame) {
+        if (checkFrom.length < slotViews.length) {
+            checkFrom = Arrays.copyOf(checkFrom, slotViews.length);
+        }
+        for (int i = 0; i < slotViews.length; i++) {
+            RenderView view = slotViews[i];
+            if (frame >= checkFrom[i] && view.overflowed()) {
+                ViewOptions options = view.options();
+                view.resize(Math.min(2 * options.draws(), 1 << 24), Math.min(2 * options.triangles(), 1 << 28));
+                checkFrom[i] = frame + 4; // its counts are the old cull's until it culls again
+                allDirty = true;
+                stats.grown++;
+            }
         }
     }
 

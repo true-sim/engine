@@ -46,12 +46,15 @@ public final class ShadowSettings {
      */
     public static final Setting<Integer> ATLAS_DRAWS = Setting.integer("shadows.atlas.draws", 64, 1, 4096,
         "the most shadow atlas tiles drawn in one frame (tiles nothing changed in are kept)");
-    /** The draws a tile's culling lists hold. */
-    public static final Setting<Integer> TILE_DRAWS = Setting.integer("shadows.tiles.draws", 1 << 14, 64, 1 << 22,
-        "draws (meshlets) a shadow tile's culling lists hold");
-    /** The triangles a tile's culling lists hold (the indexed path's index buffer). */
-    public static final Setting<Integer> TILE_TRIANGLES = Setting.integer("shadows.tiles.triangles", 1 << 18, 1024,
-        1 << 26, "triangles a shadow tile's culling lists hold");
+    /**
+     * The draws a tile's culling lists hold to start with; a list that overflows doubles (the graph builds again and
+     * every tile is drawn again).
+     */
+    public static final Setting<Integer> TILE_DRAWS = Setting.integer("shadows.tiles.draws", 1 << 16, 64, 1 << 22,
+        "draws (meshlets) a shadow tile's culling lists hold to start with (they grow when they overflow)");
+    /** The triangles a tile's culling lists hold to start with (the indexed path's index buffer); they grow too. */
+    public static final Setting<Integer> TILE_TRIANGLES = Setting.integer("shadows.tiles.triangles", 1 << 20, 1024,
+        1 << 26, "triangles a shadow tile's culling lists hold to start with (they grow when they overflow)");
     /** AUTO maps: texels per pixel the light's reach shows across on screen. */
     public static final Setting<Float> AUTO_SCALE = Setting.decimal("shadows.auto.scale", 1, 0.0625f, 16,
         "AUTO shadow maps: texels per pixel of the light's reach on screen");
