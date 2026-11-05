@@ -630,6 +630,18 @@ Fresnel, of a band of Footprint Court of radiance about 10 behind the camera. Th
 - Rule: before calling a difference from a reference a bug, check what the reference's camera and environment would
   show; reflections depend on both.
 
+**The owner's ray-traced mask is slower than the single technique's, and why was not found.** The `Shadows` owner's
+trace pass took 0.27 ms against `RayTracedShadows`' 0.23 at 1920 x 1080 (0.96-1.01 against 0.81-0.86 ms at 3840 x
+2160) on an RX 9070 XT, the same scene and frames, the two alternating in one run. Each of these was tried in turn and
+changed nothing: a variant without the keep() path (no hooked types: the queue code compiled out), the plain
+`occluded()` query in place of `traceShadow`, every pass on the graphics queue (no async overlap), the depth's matrix
+loaded once per thread instead of through the trace record's pointer; reading the slot through `WaveReadLaneFirst`
+made it slower (0.29 ms). Left untried: the slot's and light's records in push constants as the old pass had them.
+- Proof: `ShadowsBenchmark` with `TRUESIM_SHADOWS_ONLY=aced TRUESIM_SHADOWS_PASSES=1` (per-pass times), each variant
+  in its own run beside the old technique (true-sim/engine, shadows as data).
+- Rule: compare a merged pass with the one it replaces in one run, per pass; a gap whose cause is not found is
+  written down as measured, not explained.
+
 **Shadow maps and rays differed where lights sat inside rocks.** Comparing 24 point lights' AUTO maps with hard rays
 over the rocks, 52,000 pixels were brighter by maps and the maps showed blotches of acne; the lights stood 2 to 5 units
 over the terrain, among rocks up to 4 high, so many were inside one. A light inside a closed mesh sees its back faces,
@@ -638,8 +650,11 @@ With the lights 4.5 to 7 units up, maps and rays differ in 195 darker and 165 br
 default bias (1.5 texels) as at 3.
 - Proof: the screenshots and counts of `Screenshots.renderShadowOwner` with the lights at both heights and both
   biases (true-sim/engine, shadows as data).
-- Rule: compare shadow maps with rays for lights outside geometry; a light inside a closed mesh is a scene mistake or
-  a case for rays, not for tuning the bias.
+- Then: the owner's tiles draw casters two-sided (both faces, as rays meet them), and a light inside a closed rock is
+  shut in by its maps too (`ShadowOwnerTest.aLightInsideAClosedMeshIsShutInByMapsAsByRays`: 149 lit before, under 74
+  after).
+- Rule: compare shadow maps with rays for lights outside geometry first; where they differ inside geometry, the maps
+  draw what rays meet (every face), rather than the bias being tuned.
 
 ## Audio
 

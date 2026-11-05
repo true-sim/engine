@@ -7,8 +7,8 @@ import com.truesim.engine.render.Camera;
  * Fits a directional light's cascades to a camera's view: practical splits (a blend of logarithmic and uniform,
  * {@code lambda}), each cascade the sphere around its slice of the frustum ({@link #fit}), then placed at a size
  * ({@link #place}): an orthographic light camera at the slice's center snapped to whole texels of the world along the
- * light's right and up, so its map neither grows nor shimmers as the camera turns and moves. Shared by
- * {@link CascadedShadowMaps} and {@link Shadows}. Allocates nothing once made.
+ * light's right and up, so its map neither grows nor shimmers as the camera turns and moves. For
+ * {@link Shadows}' cascades. Allocates nothing once made.
  */
 final class CascadeFit {
 

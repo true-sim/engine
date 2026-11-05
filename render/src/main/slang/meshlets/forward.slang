@@ -150,7 +150,7 @@ public float4 shadeTyped<M : IMaterial>(VertexOut s, uint2 pixel)
 {
     float4 uvs = float4(s.uv, s.uv1);
     discardHoles<M>(s, ddx(uvs), ddy(uvs));
-    return shadeMaterial<M, NoRays>(NoRays(), push.view[0], s, push.scene[0].materials, ddx(uvs), ddy(uvs),
+    return shadeMaterial<M>(push.view[0], s, push.scene[0].materials, ddx(uvs), ddy(uvs),
         push.lights, pixel, FEATURES, behind(s.instance), push.indirect);
 }
 
@@ -182,7 +182,7 @@ public ShadedSurface shadeTypedSurface<M : IMaterial>(VertexOut s, uint2 pixel)
     float4 uvs = float4(s.uv, s.uv1);
     discardHoles<M>(s, ddx(uvs), ddy(uvs));
     SurfaceOut surface;
-    float4 color = shadeMaterialSurface<M, NoRays>(NoRays(), push.view[0], s, push.scene[0].materials, ddx(uvs),
+    float4 color = shadeMaterialSurface<M>(push.view[0], s, push.scene[0].materials, ddx(uvs),
         ddy(uvs), push.lights, pixel, FEATURES, behind(s.instance), push.indirect, surface);
     return surfaceTargets(color, surface);
 }

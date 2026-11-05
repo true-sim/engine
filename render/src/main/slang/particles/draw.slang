@@ -208,7 +208,7 @@ float3 particleLight(LightListHeader* h, IndirectLight* indirect, float3 world, 
     for (uint i = 0; i < list.count(); i++)
     {
         float3 toLight;
-        float3 e = lightIrradiance(NoRays(), header, list.light(i), world, normal, pixel, depth, toLight);
+        float3 e = lightIrradiance(header, list.light(i), world, normal, pixel, depth, toLight);
         float w = 1;
         if (mode == 1)
         {

@@ -3,8 +3,8 @@
 // layout. Every way of shading imports this, so lights look the same in all.
 //
 // A light casts shadows through consecutive entries of the shadow table, each of a kind (a shadow map with its filter,
-// a screen-space mask, an inline ray query) evaluated by an IShadow: lights of one frame may each use another
-// technique.
+// a screen-space mask, which ray-traced shadows write) evaluated by an IShadow: lights of one frame may each use
+// another technique.
 // A spot light uses one entry; a directional light one per cascade, chosen by view depth (the first whose split is
 // beyond the surface); a point light six, cube faces +x, -x, +y, -y, +z, -z, chosen by the direction from the light.
 module lights;
@@ -54,15 +54,13 @@ public float3 lessCamera(float3 high, float3 low, float3 cameraHigh, float3 came
 public struct Shadow
 {
     public float4x4 toShadow;      // maps: positions relative to the entry's to the map's clip space (reverse depth)
-    public uint kind;              // SHADOW_MAP, SHADOW_MASK, SHADOW_RAY
+    public uint kind;              // SHADOW_MAP, SHADOW_MASK
     public uint filter;            // maps: PCF, ...
-    public uint map;               // maps: the depth map's sampled slot; masks: the mask's; rays: the low half of the
-                                   // scene's RayScene address (raytracing.slang)
-    public uint size;              // maps: texels across; rays: the high half of that address
+    public uint map;               // maps: the depth map's sampled slot; masks: the mask's
+    public uint size;              // maps: texels across
     public float bias;             // maps: in the map's depth units
     public float split;            // cascades: the view depth this cascade reaches
-    public float2 params;          // maps: (normal offset, near); masks: (channel, 0); rays: (offset per unit of
-                                   // distance, 0)
+    public float2 params;          // maps: (normal offset, near); masks: (channel, 0)
                                    // a map's near > 0: a perspective map (reverse depth, near / view depth), its normal
                                    // offset and bias per unit of distance from the light
     public float3 position;        // the entry's world position, high part
@@ -74,7 +72,6 @@ public struct Shadow
 /** Shadow kinds. */
 public static const uint SHADOW_MAP = 0;
 public static const uint SHADOW_MASK = 1;
-public static const uint SHADOW_RAY = 2;
 /** No shadow: an entry no technique of the view set reads as lit. */
 public static const uint SHADOW_NONE = 3;
 
@@ -243,22 +240,6 @@ public struct ShadowQuery
     public float fromViewer;       // distance from the viewer
 };
 
-/** Traces shadow rays, or not: pipelines without ray queries use NoRays, so only traced variants need the feature. */
-public interface IShadowRays
-{
-    /** Whether the way from origin along direction is clear up to tMax: 1, or 0 when something is in the way. */
-    float clear(uint64_t scene, float3 origin, float3 direction, float tMax);
-}
-
-/** No ray tracing: inline ray shadows count as lit. */
-public struct NoRays : IShadowRays
-{
-    public float clear(uint64_t scene, float3 origin, float3 direction, float tMax)
-    {
-        return 1;
-    }
-}
-
 /** How a kind of shadow (or a shadow map filter) is evaluated: a new technique implements this. */
 public interface IShadow
 {
@@ -318,26 +299,8 @@ public struct MaskShadow : IShadow
     }
 }
 
-/** An inline ray query towards the light, from just off the surface. */
-public struct RayShadow<R : IShadowRays> : IShadow
-{
-    R rays;
-
-    public __init(R rays)
-    {
-        this.rays = rays;
-    }
-
-    public float visibility(Shadow s, ShadowQuery q)
-    {
-        float offset = s.params.x * q.fromViewer + 1.0e-3;
-        float3 normal = dot(q.normal, q.toLight) < 0 ? -q.normal : q.normal;
-        return rays.clear((uint64_t(s.size) << 32) | s.map, q.world + normal * offset, q.toLight, q.distance);
-    }
-}
-
 /** Shadow entry `s` evaluated by its kind's IShadow. */
-public float shadowVisibility<R : IShadowRays>(R rays, Shadow s, ShadowQuery q)
+public float shadowVisibility(Shadow s, ShadowQuery q)
 {
     switch (s.kind)
     {
@@ -345,8 +308,6 @@ public float shadowVisibility<R : IShadowRays>(R rays, Shadow s, ShadowQuery q)
         return s.filter == PCF ? PcfShadow().visibility(s, q) : 1;
     case SHADOW_MASK:
         return MaskShadow().visibility(s, q);
-    case SHADOW_RAY:
-        return RayShadow<R>(rays).visibility(s, q);
     default:
         return 1;
     }
@@ -400,14 +361,13 @@ int shadowFor(Light light, Shadow* shadows, float3 world, float depth, uint2 pix
 }
 
 /**
- * What light `light` adds to surface `s` at `world`, seen from `toViewer`, at `pixel`, `depth` from the viewer; shadow
- * rays traced by `rays`.
+ * What light `light` adds to surface `s` at `world`, seen from `toViewer`, at `pixel`, `depth` from the viewer.
  */
-public float3 lightSurface<R : IShadowRays>(R rays, LightListHeader h, Light light, Surface s, float3 world,
+public float3 lightSurface(LightListHeader h, Light light, Surface s, float3 world,
     float3 toViewer, uint2 pixel, float depth)
 {
     float3 toLight;
-    float3 irradiance = lightIrradiance(rays, h, light, world, s.normal, pixel, depth, toLight);
+    float3 irradiance = lightIrradiance(h, light, world, s.normal, pixel, depth, toLight);
     return all(irradiance <= 0) ? 0 : reflected(s, toViewer, toLight, irradiance);
 }
 
@@ -416,7 +376,7 @@ public float3 lightSurface<R : IShadowRays>(R rays, LightListHeader h, Light lig
  * `pixel`, `depth` from the viewer, after its shadow; the direction to it into `toLight`. What every way of lighting a
  * point uses, surfaces and particles alike.
  */
-public float3 lightIrradiance<R : IShadowRays>(R rays, LightListHeader h, Light light, float3 world, float3 normal,
+public float3 lightIrradiance(LightListHeader h, Light light, float3 world, float3 normal,
     uint2 pixel, float depth, out float3 toLight)
 {
     Shadow* shadows = h.shadows;
@@ -450,29 +410,28 @@ public float3 lightIrradiance<R : IShadowRays>(R rays, LightListHeader h, Light 
     {
         Shadow entry = shadows[shadow];
         ShadowQuery q = { world + h.toEntry(entry), normal, toLight, distance, pixel, depth, length(world) };
-        irradiance *= shadowVisibility(rays, entry, q);
+        irradiance *= shadowVisibility(entry, q);
     }
     return irradiance;
 }
 
 /** What every light of `list` adds to surface `s` at `world`, seen from `toViewer`, `depth` from the viewer. */
-public float3 lightAll<L : ILightList, R : IShadowRays>(L list, R rays, LightListHeader h, Surface s, float3 world,
+public float3 lightAll<L : ILightList>(L list, LightListHeader h, Surface s, float3 world,
     float3 toViewer, uint2 pixel, float depth)
 {
     float3 sum = 0;
     for (uint i = 0; i < list.count(); i++)
     {
-        sum += lightSurface(rays, h, list.light(i), s, world, toViewer, pixel, depth);
+        sum += lightSurface(h, list.light(i), s, world, toViewer, pixel, depth);
     }
     return sum;
 }
 
 /**
  * What the lights of light list `h` add to the surface at `pixel` and `depth` (from the viewer, along the view
- * direction): the layout's ILightList opened there, shadow rays traced by `rays`. Without a light list (null),
- * nothing.
+ * direction): the layout's ILightList opened there. Without a light list (null), nothing.
  */
-public float3 lightList<R : IShadowRays>(R rays, LightListHeader* h, Surface s, float3 world, float3 toViewer,
+public float3 lightList(LightListHeader* h, Surface s, float3 world, float3 toViewer,
     uint2 pixel, float depth)
 {
     if (h == nullptr)
@@ -483,7 +442,7 @@ public float3 lightList<R : IShadowRays>(R rays, LightListHeader* h, Surface s, 
     switch (header.layout)
     {
     case CLUSTERS:
-        return lightAll(ClusterLightList(header, pixel, depth), rays, header, s, world, toViewer, pixel, depth);
+        return lightAll(ClusterLightList(header, pixel, depth), header, s, world, toViewer, pixel, depth);
     default:
         return 0;
     }

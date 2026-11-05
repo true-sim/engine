@@ -40,10 +40,7 @@ import java.util.function.Function;
  *                        parameters' attribute, as the build reads it
  * @param shader          the shader of its entry point, a resource path as
  *                        {@link com.truesim.engine.vulkan.ShaderModule#load} takes
- * @param entry           its entry point, inline ray shadows counting as lit
- * @param tracedShader    the shader of its entry point tracing inline ray shadows (ray queries), or null for none:
- *                        then it is shaded without them where they are on
- * @param tracedEntry     that entry point; null with no shader
+ * @param entry           its entry point
  * @param forwardShader   the shader of its forward fragment entry points from full vertices ({@code <name>FragmentMain},
  *                        {@code <name>MaskedMain}, {@code <name>BlendedMain}): the indexed path, classic LOD and mesh
  *                        shaders without barycentrics
@@ -61,7 +58,7 @@ import java.util.function.Function;
  */
 public record MaterialType(String name, Class<? extends MaterialParameters> parameters,
     Function<MaterialValues, ? extends MaterialParameters> fromValues, int allowedFeatures, String shader,
-    String entry, String tracedShader, String tracedEntry, String forwardShader, String forwardLeanShader,
+    String entry, String forwardShader, String forwardLeanShader,
     String geometryShader, String hitShader, String hitEntry) {
 
     public MaterialType {
@@ -75,9 +72,6 @@ public record MaterialType(String name, Class<? extends MaterialParameters> para
         Objects.requireNonNull(geometryShader, "geometryShader");
         if ((hitShader == null) != (hitEntry == null)) {
             throw new IllegalArgumentException("A hit shader and its entry point, or neither: " + name);
-        }
-        if ((tracedShader == null) != (tracedEntry == null)) {
-            throw new IllegalArgumentException("A traced shader and its entry point, or neither: " + name);
         }
         if ((allowedFeatures & ~(Material.FEATURES | Material.GEOMETRY_HOOKS)) != 0) {
             throw new IllegalArgumentException(name + " allows features there are none of: " + allowedFeatures);

@@ -1338,6 +1338,11 @@ public final class Shadows implements AutoCloseable {
 
         void close() {
             traced.close();
+            for (Group group : cascades) {
+                if (group != null && atlas != null) {
+                    releaseGroup(group); // its tiles free for the others
+                }
+            }
         }
 
         @Override

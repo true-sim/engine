@@ -23,7 +23,6 @@ public final class ShadowTable implements AutoCloseable {
     static final int SHADOW_BYTES = 128;
     private static final int SHADOW_MAP = LightsConstants.SHADOW_MAP;
     private static final int SHADOW_MASK = LightsConstants.SHADOW_MASK;
-    private static final int SHADOW_RAY = LightsConstants.SHADOW_RAY;
     private static final int SHADOW_NONE = LightsConstants.SHADOW_NONE;
     private static final int PCF = LightsConstants.PCF;
 
@@ -161,21 +160,6 @@ public final class ShadowTable implements AutoCloseable {
     public ShadowTable shadowMask(int entry, int mask, int channel) {
         long o = shadow(entry, SHADOW_MASK, 0, mask);
         shadows.putFloat(o + 88, channel);
-        return this;
-    }
-
-    /**
-     * Entry {@code entry}, an inline ray query into the top level whose {@code RayScene} lies at address {@code scene}
-     * ({@link RayTracing#sceneAddress}: its slot, and what alpha-tests masked triangles), built
-     * relative to world position ({@code x}, {@code y}, {@code z}), from {@code offset} per unit of distance off the
-     * surface (the drawn surface may be a detail level within a pixel of the traced one). Shading that cannot trace
-     * counts it as lit. Allocates nothing.
-     */
-    public ShadowTable shadowRay(int entry, long scene, float offset, double x, double y, double z) {
-        long o = shadow(entry, SHADOW_RAY, 0, (int) scene);
-        shadows.putInt(o + 76, (int) (scene >>> 32)); // the address's high half, where maps keep their size
-        shadows.putFloat(o + 88, offset);
-        Lights.putPosition(shadows, o + 96, 16, x, y, z);
         return this;
     }
 

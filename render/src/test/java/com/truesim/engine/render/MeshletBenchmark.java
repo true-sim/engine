@@ -36,10 +36,6 @@ import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_MEMORY_WRITE_BIT;
 
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
-import com.truesim.engine.render.shadows.RayTracedShadows;
-import com.truesim.engine.render.shadows.ShadowMapShadows;
-import com.truesim.engine.render.shadows.CascadedShadowMaps;
-import com.truesim.engine.render.shadows.InlineRayShadows;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.Images;
@@ -316,7 +312,6 @@ class MeshletBenchmark {
                 }
                 occlusion(device, renderer, color, depth, queries, period, rock, ground, placed, camera);
                 classicLod(device, renderer, color, depth, queries, period, rock, rockLod, rockLods, placed, camera);
-                shadows(device, pool, renderer, color, depth, queries, period, rock, rockMesh, ground, terrainMesh);
                 lighting(device, renderer, color, depth, queries, period, rock, ground);
                 renderer.scene().set(0, ground, 0, -6, 0, 0, 0, 0, 1, 1, 1, 1);
                 renderer.scene().removeFrom(1);
@@ -623,92 +618,6 @@ class MeshletBenchmark {
                 scale, scale);
         }
         renderer.scene().removeFrom(count + 1);
-    }
-
-    /**
-     * The sun's orthographic view of a square {@code extent} wide around the middle of {@link #rocksOnTerrain}'s
-     * rocks, for a {@code size} x {@code size} shadow map.
-     */
-    static Camera sun(double extent, double groundY, int size) {
-        double cz = -extent / 2 - 5;
-        double back = extent;
-        return new Camera().setOrthographic(back * Keys.SUN_X, groundY + back * Keys.SUN_Y, cz + back * Keys.SUN_Z,
-            -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 1, 0, 0, extent * 0.75, extent * 0.75, 2 * back, size, size);
-    }
-
-    /** A shadow map bias of about two texels' depth, for {@link #sun}. */
-    static float sunBias(double extent, int size) {
-        return (float) (2 * (1.5 * extent / size) / (2 * extent));
-    }
-
-    /**
-     * Sun shadows, through the frame graph: 30,000 rocks resting on the terrain, the camera looking down at them, drawn
-     * with occlusion culling; the frame without shadows, with ray-traced shadows (where the device has ray tracing) and
-     * with shadow maps of two sizes, each with the composite.
-     */
-    private static void shadows(VulkanDevice device, GeometryPool pool, MeshletRenderer renderer, GpuImage color,
-        GpuImage depth, long queries, double period, int rock, MeshData rockMesh, int ground, MeshData terrainMesh) {
-        double extent = 600;
-        double groundY = -12;
-        rocksOnTerrain(renderer, rock, ground, 30_000, extent, groundY);
-        Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-        mainView(renderer).set(camera, 1, MeshletRenderer.MODE_LIT);
-        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
-        try (GpuImage shaded = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM,
-            org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
-             Lights lights = new Lights(device, 1, 1);
-             Lights cascadeLights = new Lights(device, 1, 3);
-             RayTracing rayTracing = device.rayTracing() ? new RayTracing(device, pool, 100_000) : null) {
-            ExternalImage target = new ExternalImage("shaded", WIDTH, HEIGHT, Format.R8G8B8A8_UNORM,
-                org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shaded.handle(), 0);
-            lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
-            cascadeLights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
-            if (rayTracing != null) {
-                long t0 = System.nanoTime();
-                rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
-                rayTracing.add(ground, terrainMesh, terrainMesh.levels().size() - 1);
-                System.out.printf(Locale.ROOT, "  bottom levels (rock and terrain at full detail, %s vertices): %,d "
-                    + "bytes compacted, built in %.0f ms%n", rayTracing.quantizedVertices() ? "quantized" : "decoded",
-                    rayTracing.bottomLevelBytes(), (System.nanoTime() - t0) / 1e6);
-            }
-            SceneDraw depthOnly = new SceneDraw(geometry, geometry.createView(ViewOptions.of(1 << 20, 80_000_000)), camera, SurfaceOutput.depth(), VK_FORMAT_D32_SFLOAT, WIDTH,
-                HEIGHT, false); // forward's depth for the mask: the camera as a view of its own
-            SceneDraw ids = new SceneDraw(geometry, mainView(renderer), null, SurfaceOutput.ids(), VK_FORMAT_D32_SFLOAT, WIDTH, HEIGHT,
-                true);
-            RenderView sunView = geometry.createView(ViewOptions.shadow(1 << 18, 1 << 24));
-            CascadedShadowMaps cascades = new CascadedShadowMaps(geometry, cascadeLights, 0, 0, camera, 3, 2048,
-                ViewOptions.shadow(1 << 18, 1 << 24), 300);
-            for (boolean forward : new boolean[] {true, false}) {
-                Function<SceneView, Technique> shading = main -> forward ? forward(main)
-                    : new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
-                String scene = "30,000 rocks on the terrain, from above, "
-                    + (forward ? "forward" : "visibility buffer");
-                RenderView view = mainView(renderer);
-                time(device, color, depth, queries, period, scene + ", the sun unshadowed", target, view, camera,
-                    main -> List.of(shading.apply(main), new ClusteredLights(lights, main)));
-                for (int size : new int[] {2048, 4096}) {
-                    ShadowMapShadows shadows = new ShadowMapShadows(geometry, lights, 0, 0, sun(extent, groundY, size),
-                        size, sunView, sunBias(extent, size));
-                    time(device, color, depth, queries, period, scene + ", shadow map " + size + " x " + size, target,
-                        view, camera, main -> List.of(shading.apply(main), new ClusteredLights(lights, main), shadows));
-                }
-                cascades.update();
-                time(device, color, depth, queries, period, scene + ", 3 cascades of 2048 x 2048 to 300 units", target,
-                    view, camera,
-                    main -> List.of(shading.apply(main), new ClusteredLights(cascadeLights, main), cascades));
-                if (rayTracing != null) {
-                    time(device, color, depth, queries, period, scene + ", ray-traced mask", target, view, camera,
-                        main -> List.of(shading.apply(main), new ClusteredLights(lights, main),
-                            new RayTracedShadows(rayTracing, lights, 0, 0, forward ? depthOnly : ids, camera)));
-                    if (!forward) {
-                        time(device, color, depth, queries, period, scene + ", inline rays", target, view, camera,
-                            main -> List.of(shading.apply(main), new ClusteredLights(lights, main),
-                                new InlineRayShadows(rayTracing, view, lights, 0, 0)));
-                    }
-                }
-            }
-        }
     }
 
     /**

@@ -35,7 +35,8 @@ import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.SkyBackground;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.VisibilityBufferShading;
-import com.truesim.engine.render.shadows.InlineRayShadows;
+import com.truesim.engine.render.shadows.Shadows;
+import com.truesim.scene.core.ShadowSpec;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
@@ -73,6 +74,8 @@ public final class GiHarness implements AutoCloseable {
     private final ExternalImage output;
     private final GiScenes.Stage stage;
     private final List<Technique> added = new ArrayList<>();
+    private final Shadows shadows; // the sun's: traced, the view's part reused by each image
+    private final Technique sunShadows;
 
     /** A harness rendering {@code width} x {@code height} images on {@code device} (which must trace rays). */
     public GiHarness(VulkanDevice device, int width, int height) {
@@ -103,6 +106,8 @@ public final class GiHarness implements AutoCloseable {
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view());
         stage = new GiScenes.Stage(pool, scene, materials, lights, rayTracing, camera, width, height);
         main.port().output(Keys.SCENE_COLOR, output);
+        shadows = new Shadows(geometry, lights).rayTracing(rayTracing);
+        sunShadows = shadows.view(main);
     }
 
     /**
@@ -152,7 +157,8 @@ public final class GiHarness implements AutoCloseable {
             VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_D32_SFLOAT), new ClusteredLights(lights, main),
             new EnvironmentLighting(stage.environment, main), new SkyBackground(stage.environment, main)));
         if (stage.sun) {
-            techniques.add(new InlineRayShadows(rayTracing, view, lights, 0, 0));
+            lights.shadow(0, ShadowSpec.rayTraced());
+            techniques.add(sunShadows);
         }
         use(techniques.toArray(Technique[]::new));
         frames(8);
@@ -174,7 +180,8 @@ public final class GiHarness implements AutoCloseable {
             new AmbientOcclusion(main, rayTracing), new ProbeVolumeLighting(main, new ProbeVolume(rayTracing,
                 renderer, lights, stage.environment, main))));
         if (stage.sun) {
-            techniques.add(new InlineRayShadows(rayTracing, view, lights, 0, 0));
+            lights.shadow(0, ShadowSpec.rayTraced());
+            techniques.add(sunShadows);
         }
         use(techniques.toArray(Technique[]::new));
     }
@@ -232,6 +239,7 @@ public final class GiHarness implements AutoCloseable {
     public void close() {
         device.waitIdle();
         graph.close();
+        shadows.close();
         pixels.close();
         target.close();
         view.close();

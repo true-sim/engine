@@ -8,8 +8,6 @@ import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.GpuTimings;
 import com.truesim.engine.graph.Technique;
-import com.truesim.engine.render.shadows.CascadedShadowMaps;
-import com.truesim.engine.render.shadows.RayTracedShadows;
 import com.truesim.engine.render.shadows.ShadowSettings;
 import com.truesim.engine.render.shadows.Shadows;
 import com.truesim.engine.vulkan.Format;
@@ -29,7 +27,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 /**
  * The {@link Shadows} owner's methods, timed (TRUESIM_BENCHMARK=true): 30,000 rocks on the terrain, the visibility
  * buffer, the sun's shadows by each method at 1920 x 1080 and 3840 x 2160, the camera still and turning (a still
- * camera keeps its cascades' tiles); the techniques they replace beside them; then 200 point lights with AUTO maps as
+ * camera keeps its cascades' tiles); then 200 point lights with AUTO maps as
  * the camera flies over them (cost, tiles drawn, atlas use, graph builds), and specs switched every frame. GPU time per
  * frame (every pass and the frame start) and the shadows' passes alone, medians over frames, ranges over rounds taken
  * in turns after a warm-up round.
@@ -107,22 +105,8 @@ class ShadowsBenchmark {
         configs.add(new Config("cascades: 3 of 2048 to 300", s -> sun(s, ShadowSpec.cascades(3, 2048, 300))));
         configs.add(new Config("cascades: AUTO to 300", s -> sun(s, ShadowSpec.cascades(ShadowSpec.AUTO,
             ShadowSpec.AUTO, 300))));
-        configs.add(new Config("(before) CascadedShadowMaps 3 of 2048 to 300", s -> {
-            s.lights().directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
-            s.lights().shadow(0, ShadowSpec.NONE);
-            CascadedShadowMaps cascades = new CascadedShadowMaps(s.geometry(), s.lights(), 0, 0, s.main(), 3, 2048,
-                ViewOptions.shadow(1 << 18, 1 << 24), 300);
-            s.added().add(cascades);
-        }));
         if (rays) {
             configs.add(new Config("ray traced", s -> sun(s, ShadowSpec.rayTraced())));
-            configs.add(new Config("(before) RayTracedShadows", s -> {
-                s.lights().directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
-                s.lights().shadow(0, ShadowSpec.NONE);
-                SceneDraw ids = new SceneDraw(s.geometry(), s.main().view(), null, SurfaceOutput.ids(),
-                    VK_FORMAT_D32_SFLOAT, s.main().width(), s.main().height(), true); // the visibility buffer's
-                s.added().add(new RayTracedShadows(s.rays(), s.lights(), 0, 0, ids, s.main().camera()));
-            }));
             configs.add(new Config("soft ray traced (sun 0.0047), SVGF", s -> sun(s,
                 ShadowSpec.softRayTraced(0.0047))));
             configs.add(new Config("soft ray traced (sun 0.0047), REBLUR", s -> {
@@ -203,24 +187,18 @@ class ShadowsBenchmark {
                 main.port().add(technique);
             }
             main.port().output(Keys.SCENE_COLOR, target);
-            CascadedShadowMaps legacy = null;
-            for (Technique technique : added) {
-                if (technique instanceof CascadedShadowMaps cascades) {
-                    legacy = cascades;
-                }
-            }
             ShadowSpec[] specs = {ShadowSpec.maps(ShadowSpec.AUTO), ShadowSpec.maps(128), ShadowSpec.maps(512)};
             int frame = 0;
             graph.timings(true); // before the warm-up: turning timings on builds the graph again
             for (int i = 0; i < 30; i++) {
-                frame = step(device, graph, camera, width, height, moving, legacy, lights, switching, specs, frame);
+                frame = step(device, graph, camera, width, height, moving, lights, switching, specs, frame);
             }
             int builds = graph.builds();
             double[] frames = new double[FRAMES];
             double[] shadow = new double[FRAMES];
             int drawn = 0;
             for (int i = -4; i < FRAMES; i++) {
-                frame = step(device, graph, camera, width, height, moving, legacy, lights, switching, specs, frame);
+                frame = step(device, graph, camera, width, height, moving, lights, switching, specs, frame);
                 GpuTimings timings = graph.timings();
                 if (i < 0 || timings == null) {
                     continue;
@@ -256,21 +234,15 @@ class ShadowsBenchmark {
             if (owner[0] != null) {
                 owner[0].close();
             }
-            if (legacy != null) {
-                legacy.close();
-            }
             return new Sample(median(frames), median(shadow), drawn, texels, built);
         }
     }
 
-    /** A frame: the camera placed (turning, or still), the legacy cascades fitted, specs switched where asked. */
+    /** A frame: the camera placed (turning, or still), specs switched where asked. */
     private static int step(VulkanDevice device, FrameGraph graph, Camera camera, int width, int height,
-        boolean moving, CascadedShadowMaps legacy, Lights lights, boolean switching, ShadowSpec[] specs, int frame) {
+        boolean moving, Lights lights, boolean switching, ShadowSpec[] specs, int frame) {
         if (moving) {
             place(camera, frame, width, height);
-        }
-        if (legacy != null) {
-            legacy.update();
         }
         if (switching) {
             for (int i = 0; i < 200; i += 7) {

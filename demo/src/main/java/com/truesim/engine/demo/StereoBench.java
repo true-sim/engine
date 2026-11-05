@@ -21,7 +21,9 @@ import com.truesim.engine.render.MeshletRenderer;
 import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.VisibilityBufferShading;
-import com.truesim.engine.render.shadows.CascadedShadowMaps;
+import com.truesim.engine.render.shadows.Shadows;
+import com.truesim.scene.core.ShadowSpec;
+import com.truesim.engine.graph.Technique;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -82,10 +84,12 @@ public final class StereoBench {
                 graph.timings(false); // timings make a rebuild wait for the GPU
             }
             double[] cpu = new double[6]; // ordinary, rebuilt as is, resized: total ms, count
-            List<CascadedShadowMaps> cascades = new ArrayList<>();
-            CascadedShadowMaps sharedCascades = new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, eyes[0],
-                3, 2048, ViewOptions.shadow(1 << 16, 1 << 22), 150).margin(0.064f);
-            owned.add(sharedCascades);
+            // The sun's shadows by one owner: traced (rays), its cascades (one set per eye, or with shared one set
+            // fitted to the left eye, its margin the distance between the eyes), or none
+            Shadows owner = new Shadows(world.geometry(), world.lights()).rayTracing(rays ? world.rayTracing() : null);
+            owned.add(owner);
+            world.lights().shadow(0, rays ? ShadowSpec.rayTraced() : shadows ? DemoScene.SUN_SHADOWS : ShadowSpec.NONE);
+            Technique leftShadows = null;
             // -Ptruesim.demo.effect=x,y,z: the demo's effects there (g+h: h above the ground); with -Pcharacter the
             // fox's feet kick up dust
             String effect = System.getProperty("truesim.demo.effect");
@@ -121,13 +125,11 @@ public final class StereoBench {
                 if (effects != null) {
                     port.add(new com.truesim.engine.render.particles.ParticleDraw(effects.particles(), view, head));
                 }
-                if (rays) {
-                    port.add(new com.truesim.engine.render.shadows.InlineRayShadows(world.rayTracing(), view.view(),
-                        world.lights(), 0, 0));
-                } else if (shadows) {
-                    port.add(shared ? (e == 0 ? sharedCascades : sharedCascades.share()) : add(cascades,
-                        new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, view, 3, 2048,
-                            ViewOptions.shadow(1 << 16, 1 << 22), 150)));
+                if (rays || shadows) {
+                    Technique part = shared && leftShadows != null ? owner.view(view, leftShadows, 0.064)
+                        : owner.view(view);
+                    leftShadows = leftShadows == null ? part : leftShadows;
+                    port.add(part);
                 }
                 if (e == 0 && System.getProperty("truesim.demo.png") != null) {
                     png = new Capture(device, port); // the left eye as a window shows it: tone mapped, sRGB
@@ -171,12 +173,6 @@ public final class StereoBench {
                 head.position(0.5 * (eyes[0].position(0) + eyes[1].position(0)),
                     0.5 * (eyes[0].position(1) + eyes[1].position(1)),
                     0.5 * (eyes[0].position(2) + eyes[1].position(2)));
-                if (shared) {
-                    sharedCascades.update();
-                }
-                for (CascadedShadowMaps each : cascades) {
-                    each.update(); // fitted to its eye, every frame
-                }
                 int kind = 0;
                 if (rebuilds && frame > 30 && frame % 20 == 0) {
                     kind = frame % 40 == 0 ? 1 : 2;
@@ -259,11 +255,6 @@ public final class StereoBench {
     private static double height(String value, double x, double z) {
         return value.startsWith("g") ? DemoMeshes.height(x, z) + Double.parseDouble(value.substring(1))
             : Double.parseDouble(value);
-    }
-
-    private static CascadedShadowMaps add(List<CascadedShadowMaps> all, CascadedShadowMaps cascades) {
-        all.add(cascades);
-        return cascades;
     }
 
     private static void report(Map<String, double[]> sums, boolean visibility) {

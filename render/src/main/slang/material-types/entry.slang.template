@@ -6,5 +6,5 @@ import {module};
 [numthreads(8, 8, 1)]
 void {name}Main(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
-    shadeTiles<{struct}>(NoRays(), group, thread);
+    shadeTiles<{struct}>(group, thread);
 }

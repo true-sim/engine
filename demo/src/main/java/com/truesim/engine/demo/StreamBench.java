@@ -28,7 +28,7 @@ import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
-import com.truesim.engine.render.shadows.CascadedShadowMaps;
+import com.truesim.engine.render.shadows.Shadows;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -235,10 +235,10 @@ public final class StreamBench {
             ViewPort port = graph.addView("main").size(WIDTH, HEIGHT);
             SceneView view = geometry.createView(port, camera, ViewOptions.of(1 << 14, 1 << 22).withOcclusion(true))
                 .set(1, MeshletRenderer.MODE_LIT);
-            CascadedShadowMaps sun = new CascadedShadowMaps(geometry, lights, 0, 0, view, 3, 2048,
-                ViewOptions.shadow(1 << 16, 1 << 22), 120);
+            Shadows sun = new Shadows(geometry, lights); // the sun's cascades, kept while nothing they show moves
+            lights.shadow(0, com.truesim.scene.core.ShadowSpec.cascades(3, 2048, 120));
             port.add(new ClusteredForwardShading(geometry, view, color, depth).clearColor(0.4f, 0.55f, 0.8f))
-                .add(new ClusteredLights(lights, view)).add(sun)
+                .add(new ClusteredLights(lights, view)).add(sun.view(view))
                 .output(Keys.SCENE_COLOR, new ExternalImage("target", WIDTH, HEIGHT, Format.R8G8B8A8_UNORM, usage,
                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(),
                     target.view()));
@@ -299,7 +299,6 @@ public final class StreamBench {
                         it.remove();
                     }
                 }
-                sun.update();
                 graph.beginFrame();
                 graph.submit(0, 0);
                 if (sampler != null) {
@@ -332,6 +331,7 @@ public final class StreamBench {
                 }
             }
             device.waitIdle();
+            sun.close();
             renderer.close();
             target.close();
             if (rayTracing != null) {

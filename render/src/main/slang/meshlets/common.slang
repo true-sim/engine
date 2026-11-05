@@ -797,12 +797,12 @@ public Surface typedSurface<M : IMaterial>(MaterialRef ref, SurfaceInput input, 
  * type: by the lights `lights` gives it (the frame's light list) and the sky or, without a light list (null), by the
  * sun and the sky. Shadow rays are traced by `rays` (NoRays: none).
  */
-public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
+public float4 shadeMaterial<M : IMaterial>(View view, VertexOut in, Material* materials,
     float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features, Background behind,
     IndirectLight* indirect)
 {
     SurfaceOut surface;
-    return shadeMaterialSurface<M, R>(rays, view, in, materials, dx, dy, lights, pixel, features, behind, indirect,
+    return shadeMaterialSurface<M>(view, in, materials, dx, dy, lights, pixel, features, behind, indirect,
         surface);
 }
 
@@ -814,7 +814,7 @@ public static const float3 SKY_REFLECTED = SKY_IRRADIANCE * 0.5 / 3.14159265;
  * the weight of the environment's reflection (the view's indirect-light table's specularLight, or SKY_REFLECTED
  * without a table) in the color returned.
  */
-public float4 shadeMaterialSurface<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in,
+public float4 shadeMaterialSurface<M : IMaterial>(View view, VertexOut in,
     Material* materials, float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features,
     Background behind, IndirectLight* indirect, out SurfaceOut surface)
 {
@@ -845,7 +845,7 @@ public float4 shadeMaterialSurface<M : IMaterial, R : IShadowRays>(R rays, View 
     else
     {
         float depth = mul(view.viewProjection, float4(in.world, 1)).w; // along the view direction
-        color += lightList(rays, lights, s, in.world, toViewer, pixel, depth);
+        color += lightList(lights, s, in.world, toViewer, pixel, depth);
     }
     if ((features & FEATURE_TRANSMISSION) != 0 && s.transmission > 0)
     {

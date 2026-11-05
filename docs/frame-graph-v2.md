@@ -964,8 +964,10 @@ is released.
   size with hysteresis; a budget shrinking then dropping the least important), drawn only when what they show changed,
   in one pass through views culled with the others; hard and soft ray-traced masks in one dispatch per view, soft ones
   through the denoiser; shadow rays through `keep()` holes; masks from data (`PassBuilder.when`,
-  `GraphBuilder.masked`). Measured in the README. Left: variance/moments maps, virtual maps, the single techniques'
-  removal, classic LOD geometry in the atlas, inline rays as a method, shared far cascades between views.
+  `GraphBuilder.masked`); casters drawn two-sided, classic LOD casting, near views sharing cascades; the single
+  techniques removed (inline rays dropped: they cannot run another type's keep()); the path tracer's and GI's shadow
+  rays through keep() holes. Measured in the README. Left: variance/moments maps, virtual maps, far cascades shared
+  between views at a distance.
 - **Phase 7 status (2026-10-31):** landed by 0.74: imported buffers on async queues and buffers swapped without a
   rebuild (earlier), persistent images and buffers (`g.persistent`, `g.persistentBuffer`) and history buffers
   (`g.historyBuffer`). A persistent image is one layer, mip level and sample for now.

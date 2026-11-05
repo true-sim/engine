@@ -23,7 +23,7 @@ import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.ChosenTransparency;
 import com.truesim.engine.render.particles.ParticleDraw;
-import com.truesim.engine.render.shadows.CascadedShadowMaps;
+import com.truesim.engine.render.shadows.Shadows;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -96,22 +96,19 @@ public final class Showcase {
     }
 
     /** A view of {@code camera} at its size in {@code port}: forward shading, lights, particles, the sun's shadows. */
-    private static CascadedShadowMaps view(DemoScene world, ShowcaseEffects effects, ViewPort port, Camera camera,
-        Camera head, int color, int depth) {
+    private static void view(DemoScene world, ShowcaseEffects effects, ViewPort port, Camera camera,
+        Camera head, int color, int depth, Shadows shadows) {
         SceneView view = world.geometry().createView(port, camera, ViewOptions.of(1 << 14, 1 << 22)
             .withOcclusion(true)).set(1, MeshletRenderer.MODE_LIT);
-        CascadedShadowMaps cascades = new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, view, 3, 2048,
-            ViewOptions.shadow(1 << 16, 1 << 22), 150);
         port.add(new ClusteredForwardShading(world.geometry(), view, color, depth).clearColor(0.07f, 0.1f, 0.26f))
             .add(new ClusteredLights(world.lights(), view))
             .add(head == null ? new ParticleDraw(effects.particles(), view)
                 : new ParticleDraw(effects.particles(), view, head))
-            .add(cascades);
+            .add(shadows.view(view));
         if (ShowcaseEffects.GLASS > 0) { // windows: blended glass, and the fires drawn before it
             port.add(new ChosenTransparency(world.geometry(), view))
                 .add(ParticleDraw.beforeGlass(effects.particles(), view, head));
         }
-        return cascades;
     }
 
     /** Frames from one camera along the path, written as PNG files (and stills), simulated at 60 Hz. */
@@ -130,12 +127,12 @@ public final class Showcase {
         }
         Camera camera = new Camera();
         ViewPort port = graph.addView("camera").size(width, height);
-        CascadedShadowMaps cascades = view(world, effects, port, camera, null, VK_FORMAT_R16G16B16A16_SFLOAT,
-            VK_FORMAT_D32_SFLOAT);
+        Shadows shadows = new Shadows(world.geometry(), world.lights());
+        view(world, effects, port, camera, null, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT, shadows);
         double[] eye = new double[3];
         double[] target = new double[3];
         int written = 0;
-        try (Capture capture = new Capture(device, port); cascades) {
+        try (Capture capture = new Capture(device, port); shadows) {
             for (int frame = 0; frame < frames; frame++) {
                 double seconds = frame / 60.0;
                 world.update(seconds);
@@ -144,7 +141,6 @@ public final class Showcase {
                     target[2] - eye[2], 0, 1, 0, Math.PI / 3, width, height, 0.05);
                 world.crowd().lod(eye[0], eye[2]);
                 effects.update(1 / 60.0, eye);
-                cascades.update();
                 graph.beginFrame();
                 graph.submit(0, 0);
                 world.recorded();
@@ -181,15 +177,14 @@ public final class Showcase {
         List<AutoCloseable> owned = new ArrayList<>();
         Camera[] eyes = {new Camera(), new Camera()};
         Camera head = new Camera();
-        CascadedShadowMaps[] cascades = new CascadedShadowMaps[2];
+        Shadows shadows = new Shadows(world.geometry(), world.lights());
+        owned.add(shadows);
         for (int e = 0; e < 2; e++) {
             GpuImage target = new GpuImage(device, EYE_WIDTH, EYE_HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage,
                 VK_IMAGE_ASPECT_COLOR_BIT);
             owned.add(target);
             ViewPort port = graph.addView(e == 0 ? "left" : "right").size(EYE_WIDTH, EYE_HEIGHT);
-            cascades[e] = view(world, effects, port, eyes[e], head, VK_FORMAT_R16G16B16A16_SFLOAT,
-                VK_FORMAT_D32_SFLOAT);
-            owned.add(cascades[e]);
+            view(world, effects, port, eyes[e], head, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_D32_SFLOAT, shadows);
             port.output(Keys.SCENE_COLOR, new ExternalImage("eye " + e, EYE_WIDTH, EYE_HEIGHT, Format.R8G8B8A8_UNORM,
                 usage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
                 .set(target.handle(), target.view()));
@@ -234,8 +229,6 @@ public final class Showcase {
             }
             head.position(eye[0], eye[1], eye[2]);
             world.crowd().lod(eye[0], eye[2]);
-            cascades[0].update();
-            cascades[1].update();
             long updated = System.nanoTime();
             effects.update(1 / 72.0, eye);
             long synced = System.nanoTime();

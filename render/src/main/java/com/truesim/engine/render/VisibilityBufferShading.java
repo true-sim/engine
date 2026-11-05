@@ -141,17 +141,13 @@ public final class VisibilityBufferShading implements Technique {
         // The surface outputs, written by the shading passes' variants with SURFACES where a technique asks for them
         SurfaceOutputs.Images surfaces = SurfaceOutputs.wanted(g) ? SurfaceOutputs.create(g, "scene", width, height)
             : null;
-        // With inline ray shadows, the variant tracing them, where the device can.
-        boolean traced = shadows != null && shadows.traced() && g.capabilities().rayTracing();
         // A variant per bin: a type, and the features its materials show; made for the combinations in use only.
         Materials materials = renderer.scene().materials();
         Pipeline[] shade = new Pipeline[materials.binCount()];
         for (int bin = 0; bin < shade.length; bin++) {
             MaterialType type = materials.binType(bin);
             int features = materials.binFeatures(bin);
-            boolean rays = traced && type.tracedShader() != null;
-            shade[bin] = compute(g, rays ? type.tracedShader() : type.shader(), rays ? type.tracedEntry() : type.entry(),
-                features, surfaces != null ? 1 : 0);
+            shade[bin] = compute(g, type.shader(), type.entry(), features, surfaces != null ? 1 : 0);
         }
         Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain", 0, 0);
         Image ids = targets.color();
@@ -205,7 +201,7 @@ public final class VisibilityBufferShading implements Technique {
             pass.read(lights, BufferAccess.STORAGE_READ);
         }
         if (shadows != null) {
-            shadows.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ, traced);
+            shadows.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
         }
         if (indirect != null) {
             indirect.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
