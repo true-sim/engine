@@ -368,6 +368,52 @@ class ShadowOwnerTest {
         }
     }
 
+    /**
+     * A tile kept from frames before is drawn again when a caster's mask arrives: the masked quad casts while its
+     * material has no texture yet, and none once its mask texture (alpha 0 throughout) is set, in place or by setting
+     * the material, as textures loading late reach materials.
+     */
+    @Test
+    void aMaskArrivingLateRedrawsTheTilesItCasts() {
+        try (Materials materials = new Materials(device, 4); Textures textures = new Textures(device)) {
+            java.lang.foreign.MemorySegment clear = java.lang.foreign.Arena.ofAuto().allocate(4L * 4 * 4, 4);
+            for (int i = 0; i < 16; i++) {
+                clear.setAtIndex(java.lang.foreign.ValueLayout.JAVA_INT, i, 0x00ffffff);
+            }
+            int masked = materials.add(Material.DEFAULT.alphaMask(0.5f));
+            scene.setMaterials(materials);
+            scene.set(1, quad, masked, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            newGraph(forward());
+            sun(ShadowSpec.maps(1024).distance(30));
+            expectShadow("no mask yet", sunShadow(), new double[] {3, -2});
+            frame();
+            assertThat(shadows.stats().drawn()).as("kept").isZero();
+            int texture = textures.color(4, 4, clear);
+            frame(); // the texture uploads with the next frame; then the material names it
+            materials.update(masked, com.truesim.engine.render.materials.MetallicRoughnessParameters.BASE_COLOR_TEXTURE,
+                texture);
+            byte[] color = null;
+            for (int i = 0; i < 3; i++) {
+                color = frame();
+            }
+            int lit = floor(color, 3, -2);
+            assertThat(floor(color, sunShadow()[0], sunShadow()[1])).as("its mask arrived, in place: no shadow")
+                .isGreaterThan(lit * 9 / 10);
+            materials.set(masked, Material.DEFAULT.alphaMask(0.5f));
+            expectShadow("the mask gone again", sunShadow(), new double[] {3, -2});
+            materials.set(masked, new Material(com.truesim.engine.render.materials.MetallicRoughnessParameters.DEFAULTS
+                .withBaseColorTexture(texture)).alphaMask(0.5f));
+            for (int i = 0; i < 3; i++) {
+                color = frame();
+            }
+            assertThat(floor(color, sunShadow()[0], sunShadow()[1])).as("its mask arrived, the material set: none")
+                .isGreaterThan(lit * 9 / 10);
+            device.waitIdle();
+            scene.setMaterials(null);
+        }
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
     /** Ray tracing of the quads, where the device traces rays. */
     private boolean rays(MeshData... more) {
         if (!device.rayTracing()) {
