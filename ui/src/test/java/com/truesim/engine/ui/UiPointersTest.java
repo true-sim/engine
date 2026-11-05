@@ -12,6 +12,7 @@ import com.truesim.engine.input.InputSource;
 import com.truesim.engine.platform.GamepadAxis;
 import com.truesim.engine.platform.GamepadButton;
 import com.truesim.engine.platform.MouseButton;
+import com.truesim.engine.platform.PenAxis;
 import com.truesim.engine.platform.PenState;
 import com.truesim.engine.platform.TouchPhase;
 import com.truesim.engine.xr.Hand;
@@ -140,6 +141,48 @@ class UiPointersTest {
         pen.penProximity(0, 1, 1, false);
         poll(ui, pen);
         assertThat(ui.pointerCount()).isZero();
+    }
+
+    @Test
+    void aPenPassesOnItsPressureTiltAndRotation() {
+        PenPointer pen = new PenPointer(null);
+        UiInput ui = new UiInput(8);
+        pen.penProximity(0, 1, 1, true);
+        pen.penMoved(0, 1, 1, 40, 30, PenState.IN_PROXIMITY);
+        poll(ui, pen);
+        Pointer p = find(ui, PenPointer.ID);
+        assertThat(p.reportsPressure()).as("no pressure axis yet").isFalse();
+        assertThat(p.pressure()).isZero();
+        pen.penTouch(0, 1, 1, 40, 30, false, true);
+        pen.penAxis(0, 1, 1, 40, 30, PenAxis.PRESSURE, 0.3f);
+        pen.penAxis(0, 1, 1, 40, 30, PenAxis.PRESSURE, 0.65f); // the newest before the frame counts
+        pen.penAxis(0, 1, 1, 41, 30, PenAxis.TILT_X, -25);
+        pen.penAxis(0, 1, 1, 41, 30, PenAxis.TILT_Y, 12.5f);
+        pen.penAxis(0, 1, 1, 41, 30, PenAxis.ROTATION, -90);
+        pen.penAxis(0, 1, 1, 41, 30, PenAxis.DISTANCE, 0.4f);
+        poll(ui, pen);
+        p = find(ui, PenPointer.ID);
+        assertThat(p.buttons()).isEqualTo(Pointer.PRIMARY);
+        assertThat(p.x()).isEqualTo(41f);
+        assertThat(p.reportsPressure()).isTrue();
+        assertThat(p.pressure()).isEqualTo(0.65f);
+        assertThat(p.tiltX()).isEqualTo(-25f);
+        assertThat(p.tiltY()).isEqualTo(12.5f);
+        assertThat(p.twist()).as("SDL's -180..180 as [0, 360)").isEqualTo(270f);
+        assertAllocationFree(() -> {
+            pen.penAxis(0, 1, 1, 41, 30, PenAxis.PRESSURE, 0.7f);
+            pen.poll(ui);
+        });
+        // out of range and back: the next pen starts without pressure or tilt
+        pen.penProximity(0, 1, 1, false);
+        poll(ui, pen);
+        pen.penProximity(0, 1, 1, true);
+        pen.penMoved(0, 1, 1, 40, 30, PenState.IN_PROXIMITY);
+        poll(ui, pen);
+        p = find(ui, PenPointer.ID);
+        assertThat(p.reportsPressure()).isFalse();
+        assertThat(p.tiltX()).isZero();
+        assertThat(p.twist()).isZero();
     }
 
     /** A headset's controllers, playing recorded poses: per frame, the right hand's aim and its trigger. */

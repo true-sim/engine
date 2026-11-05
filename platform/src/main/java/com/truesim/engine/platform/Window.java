@@ -89,6 +89,8 @@ import com.truesim.annotations.AllowAllocation;
 import java.nio.IntBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import org.lwjgl.sdl.SDLProperties;
+import org.lwjgl.sdl.SDLVideo;
 import org.lwjgl.sdl.SDL_DisplayMode;
 import org.lwjgl.sdl.SDL_Rect;
 import org.lwjgl.system.MemoryStack;
@@ -134,6 +136,17 @@ public final class Window implements AutoCloseable {
     long handle() {
         check();
         return handle;
+    }
+
+    /**
+     * The operating system's window for OS integrations (UI Automation): the Win32 {@code HWND} under the Windows
+     * video driver, 0 under every other driver.
+     */
+    @AllowAllocation("asked once, by an integration starting")
+    public long nativeWindow() {
+        check();
+        return SDLProperties.SDL_GetPointerProperty(SDLVideo.SDL_GetWindowProperties(handle),
+            SDLVideo.SDL_PROP_WINDOW_WIN32_HWND_POINTER, 0L);
     }
 
     public boolean isClosed() {

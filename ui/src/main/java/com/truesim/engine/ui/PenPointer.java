@@ -1,5 +1,6 @@
 package com.truesim.engine.ui;
 
+import com.truesim.engine.platform.PenAxis;
 import com.truesim.engine.platform.PenState;
 import com.truesim.engine.platform.PlatformListener;
 import com.truesim.engine.platform.Window;
@@ -11,8 +12,9 @@ import java.util.function.IntSupplier;
 /**
  * A pen (a tablet's stylus) as a UI pointer of {@link Pointer.Kind#PEN}: there while the pen is near enough to be
  * tracked (it hovers), at its position in the window's pixels, its tip (or eraser) on the surface the primary button,
- * barrel button 1 the secondary and 2 the middle. ui-core's pointer has no pressure or tilt: those are not passed on.
- * A touch and lift between two frames is still seen pressed for one frame. The mouse events SDL makes from the pen are
+ * barrel button 1 the secondary and 2 the middle. Its pressure, tilt and barrel rotation (SDL's pen axes) are the
+ * pointer's ({@link Pointer#pressure()}, {@link Pointer#tiltX()}, {@link Pointer#twist()}), the newest values at the
+ * frame's start; a pen that reports no pressure axis has none ({@link Pointer#reportsPressure()}). A touch and lift between two frames is still seen pressed for one frame. The mouse events SDL makes from the pen are
  * ignored ({@link MousePointer#ignoreEmulated}). Use it on the platform's thread; polling allocates nothing.
  */
 public final class PenPointer implements PointerSource, PlatformListener {
@@ -29,6 +31,10 @@ public final class PenPointer implements PointerSource, PlatformListener {
     private int state;         // PenState bits
     private boolean tapped;    // the tip touched since the last poll
     private boolean wasNear;
+    private float pressure = Pointer.NO_PRESSURE;
+    private float tiltX;
+    private float tiltY;
+    private float twist;
 
     /** The pen over {@code window} (null: any window, unscaled). */
     public PenPointer(Window window) {
@@ -51,6 +57,10 @@ public final class PenPointer implements PointerSource, PlatformListener {
             near = in;
             if (!in) {
                 state = 0;
+                pressure = Pointer.NO_PRESSURE; // the next pen may have no pressure axis
+                tiltX = 0;
+                tiltY = 0;
+                twist = 0;
             }
         }
     }
@@ -82,6 +92,23 @@ public final class PenPointer implements PointerSource, PlatformListener {
         }
     }
 
+    @Override
+    public void penAxis(long timestamp, int windowId, int pen, float px, float py, PenAxis axis, float value) {
+        if (!ours(windowId)) {
+            return;
+        }
+        place(px, py);
+        switch (axis) {
+            case PRESSURE -> pressure = value;
+            case TILT_X -> tiltX = value;
+            case TILT_Y -> tiltY = value;
+            case ROTATION -> twist = value;
+            default -> {
+                // distance, slider, tangential pressure: not a pointer's
+            }
+        }
+    }
+
     private void place(float px, float py) {
         x = px;
         y = py;
@@ -107,7 +134,12 @@ public final class PenPointer implements PointerSource, PlatformListener {
         tapped = false;
         float sx = window == null || window.width() <= 0 ? 1 : (float) window.pixelWidth() / window.width();
         float sy = window == null || window.height() <= 0 ? 1 : (float) window.pixelHeight() / window.height();
-        ui.pointer(ID, Pointer.Kind.PEN).moveTo(x * sx, y * sy).buttons(buttons)
-            .modifiers(modifiers == null ? 0 : modifiers.getAsInt());
+        Pointer p = ui.pointer(ID, Pointer.Kind.PEN).moveTo(x * sx, y * sy).buttons(buttons)
+            .modifiers(modifiers == null ? 0 : modifiers.getAsInt()).tilt(tiltX, tiltY).twist(twist);
+        if (pressure >= 0) {
+            p.pressure(pressure);
+        } else {
+            p.noPressure();
+        }
     }
 }

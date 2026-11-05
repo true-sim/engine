@@ -83,10 +83,15 @@ public static const uint CLIP_FLOATS = 8;
 
 /**
  * Floats per transform table entry (ui-core's DrawList.TRANSFORM_FLOATS, 32 bytes): scale, offset x, offset y, opacity,
- * four reserved. A primitive draws at scale * (p + its clip's offset) + offset, its sizes times the scale, its colour
- * times the opacity; entry 0 is the identity.
+ * the rotation's sine and cosine, the parent entry's index (0: none), one reserved. A primitive draws at
+ * scale * R * (p + its clip's offset) + offset, its sizes times the scale, its colour times the opacity; a local entry
+ * (with a parent) places p first, then the clip's offset is added and the parent places it. Entry 0 is the identity.
  */
 public static const uint TRANSFORM_FLOATS = 8;
+/** Floats of an entry (ui-core's DrawList.TRANSFORM_SIN, TRANSFORM_COS, TRANSFORM_PARENT). */
+public static const uint TRANSFORM_SIN = 4;
+public static const uint TRANSFORM_COS = 5;
+public static const uint TRANSFORM_PARENT = 6;
 
 /** Words of the kinds over vertices (ui-core's Primitive). */
 public static const uint FIRST_VERTEX = 7;
