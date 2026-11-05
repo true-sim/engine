@@ -105,6 +105,8 @@ class PlatformTest {
             assertThat(at[1]).isFinite();
         }
         assertThat(platform.globalMouse(at)).isEqualTo(known); // asked once what the system tells
+        // the Win32 window under the Windows driver (UI Automation's), none under the others
+        assertThat(placed.nativeWindow() != 0).isEqualTo("windows".equals(driver));
         placed.close();
         hidden.close();
     }
