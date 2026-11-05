@@ -1465,9 +1465,11 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   | Sun's shadows | 1920 x 1080 still | 1920 x 1080 turning | 3840 x 2160 still | 3840 x 2160 turning |
   |---|---|---|---|---|
   | unshadowed | 0.88 ms | 0.87 ms | 2.00 ms | 1.99 ms |
-  | maps: one 4096 to 300 | 0.90 (0.00) | 1.69 (0.72) | 2.09 (0.00) | 2.87 (0.75) |
-  | cascades: 3 of 2048 to 300 | 0.90 (0.00) | 1.66 (0.69) | 2.08 (0.00) | 2.79 (0.69) |
-  | cascades: AUTO to 300 (4 cascades, 2048 at 1080p, 4096 at 2160p) | 0.89 (0.00) | 1.83 (0.87) | 2.10 (0.00) | 4.35 (2.22) |
+  | maps: one 4096 to 300 | 0.90 (0.00) | 2.33 (1.37) | 2.08 (0.00) | 3.56 (1.44) |
+  | maps: one 4096 to 300, front faces | 0.90 (0.00) | 1.69 (0.72) | 2.08 (0.00) | 2.87 (0.75) |
+  | cascades: 3 of 2048 to 300 | 0.90 (0.00) | 2.22 (1.28) | 2.06 (0.00) | 3.40 (1.29) |
+  | cascades: 3 of 2048 to 300, front faces | 0.89 (0.00) | 1.65 (0.69) | 2.06 (0.00) | 2.81 (0.69) |
+  | cascades: AUTO to 300 (4 cascades, 2048 at 1080p, 4096 at 2160p) | 0.89 (0.00) | 2.55 (1.60) | 2.09 (0.00) | 5.88 (3.72) |
   | before (removed since): `CascadedShadowMaps` 3 of 2048 | 1.58 (0.61) | 1.64 (0.68) | 2.76 (0.63) | 2.81 (0.69) |
   | ray traced | 1.15 (0.27) | 1.16 (0.28) | 3.10 (1.00) | 3.12 (1.02) |
   | before (removed since): `RayTracedShadows` | 1.13 (0.23) | 1.12 (0.24) | 2.96 (0.85) | 2.98 (0.88) |
@@ -1475,7 +1477,10 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   | soft ray traced, REBLUR | 2.04 (1.14) | 2.05 (1.15) | 7.91 (5.71) | 8.04 (5.85) |
   | soft ray traced, 4 rays, SVGF | 2.85 (1.90) | 2.91 (1.97) | 9.95 (7.61) | 10.25 (7.89) |
 
-  A still camera keeps its cascades (no draw at all); turning, the owner's cascades cost what the technique's did.
+  A still camera keeps its cascades (no draw at all). Casters drawn two-sided (`shadows.casters.faces` `BOTH`, the
+  default: as rays meet them) take about twice the tiles' drawing of front faces alone (`FRONT`, as the technique
+  before drew them, which cost the same: 0.68 against 0.69 ms); `FRONT` stays a choice: exact for closed meshes lit from
+  outside (every sun), but a light inside a mesh leaks and one-sided surfaces seen from behind cast nothing.
   The owner's traced mask was 0.04 ms (1080p) to 0.15 ms (2160p) slower than `RayTracedShadows`' (its pass 0.27
   against 0.23 ms, in the same runs); the cause was not found (pitfalls.md: what was ruled out). Soft shadows cost the
   denoiser above all (1 ray: trace 0.29 ms, SVGF's temporal pass 0.18 ms and 0.33 ms per a-trous step at 1080p); 2

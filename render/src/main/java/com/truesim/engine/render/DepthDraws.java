@@ -16,9 +16,12 @@ public final class DepthDraws {
     private final MeshletRenderer renderer;
     private final RasterPipelines.Geometry geometry; // null: every type with the shared pipelines
 
-    private DepthDraws(MeshletRenderer renderer, RasterPipelines.Geometry geometry) {
+    private final boolean bothSides;
+
+    private DepthDraws(MeshletRenderer renderer, RasterPipelines.Geometry geometry, boolean bothSides) {
         this.renderer = renderer;
         this.geometry = geometry;
+        this.bothSides = bothSides;
     }
 
     /**
@@ -27,15 +30,29 @@ public final class DepthDraws {
      */
     @AllowAllocation("building the graph, when it changes")
     public static DepthDraws of(GraphBuilder g, MeshletRenderer renderer, RenderView... views) {
+        return of(g, renderer, true, views);
+    }
+
+    /**
+     * Like {@link #of(GraphBuilder, MeshletRenderer, RenderView...)}, with {@code bothSides} false the casters' front
+     * faces alone (one-sided materials' back faces culled, as a camera's depth): cheaper, but a light inside a closed
+     * mesh is not shut in, and one-sided surfaces seen from behind cast nothing.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public static DepthDraws of(GraphBuilder g, MeshletRenderer renderer, boolean bothSides, RenderView... views) {
         Objects.requireNonNull(g, "g");
-        RasterPipelines.Geometry geometry = renderer.geometryPipelines(RasterPipelines.SHADOW);
+        int role = bothSides ? RasterPipelines.SHADOW : RasterPipelines.DEPTH;
+        RasterPipelines.Geometry geometry = renderer.geometryPipelines(role);
         if (geometry != null) {
             int opaque = (1 << MeshletRenderer.BIN_BLENDED) - 1;
             for (RenderView view : views) {
                 view.splitByType(geometry.categories(), opaque, opaque);
             }
         }
-        return new DepthDraws(renderer, geometry);
+        for (RenderView view : views) {
+            view.bothSides(bothSides);
+        }
+        return new DepthDraws(renderer, geometry, bothSides);
     }
 
     /** Draws {@code view}'s depth as culled (its only phase) into the pass's attachments. Allocates nothing. */
@@ -43,7 +60,11 @@ public final class DepthDraws {
         if (geometry != null) {
             renderer.drawGeometryAttached(ctx.unsafe().commands(), view, false, geometry);
         } else {
-            renderer.drawCastersAttached(ctx.unsafe().commands(), view);
+            if (bothSides) {
+                renderer.drawCastersAttached(ctx.unsafe().commands(), view);
+            } else {
+                renderer.drawAttached(ctx.unsafe().commands(), view, false, true, 0);
+            }
         }
     }
 }

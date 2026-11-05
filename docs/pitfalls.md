@@ -652,7 +652,8 @@ default bias (1.5 texels) as at 3.
   biases (true-sim/engine, shadows as data).
 - Then: the owner's tiles draw casters two-sided (both faces, as rays meet them), and a light inside a closed rock is
   shut in by its maps too (`ShadowOwnerTest.aLightInsideAClosedMeshIsShutInByMapsAsByRays`: 149 lit before, under 74
-  after).
+  after); at about twice the tiles' drawing (`ShadowsBenchmark`: 3 cascades turning 1.28 against 0.69 ms), so
+  front faces alone stay a setting, `shadows.casters.faces`.
 - Rule: compare shadow maps with rays for lights outside geometry first; where they differ inside geometry, the maps
   draw what rays meet (every face), rather than the bias being tuned.
 

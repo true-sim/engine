@@ -1066,6 +1066,7 @@ public final class Shadows implements AutoCloseable {
         }
         // A new build: the atlas may be new (zeroed), every tile drawn again
         forgetDrawn();
+        boolean bothSides = g.setting(ShadowSettings.CASTER_FACES) == ShadowSettings.Faces.BOTH;
         boolean meshlets = false;
         for (com.truesim.engine.render.GeometryProvider provider : geometry.providers()) {
             meshlets |= provider instanceof com.truesim.engine.render.MeshletGeometry;
@@ -1081,7 +1082,7 @@ public final class Shadows implements AutoCloseable {
                 culling.add(slotViews[i], false, null, () -> slotTiles[slot] != null);
                 culling.drawing(pass, slotViews[i]);
             }
-            draws = DepthDraws.of(g, renderer, slotViews);
+            draws = DepthDraws.of(g, renderer, bothSides, slotViews);
         }
         DepthDraws meshletDraws = draws;
         RenderView[] views = slotViews;
@@ -1099,7 +1100,7 @@ public final class Shadows implements AutoCloseable {
                 int slot = i;
                 int k = c;
                 g.masked(() -> slotTiles[slot] != null,
-                    () -> casters[k][slot] = classics.get(k).casters(g, views[slot]));
+                    () -> casters[k][slot] = classics.get(k).casters(g, views[slot], bothSides));
                 casters[c][i].declare(pass);
             }
         }

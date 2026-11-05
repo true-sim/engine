@@ -87,7 +87,8 @@ public static const uint INSTANCE_MESH = 0xffffffu;
 
 /** View flags. */
 public static const uint VIEW_CASTERS_ONLY = 1;             // shadow views: instances casting shadows only
-public static const uint VIEW_HIGHLIGHTED_ONLY = 2;         // instances with a highlight flag (View.highlights) only
+public static const uint VIEW_HIGHLIGHTED_ONLY = 2;
+public static const uint VIEW_BOTH_SIDES = 4;                // shadow casters drawn two-sided: back faces kept         // instances with a highlight flag (View.highlights) only
 
 /**
  * Whether stored instance `instance` of id `id` (as stored, before relative()) is drawn in `view`: live, on its layers,
@@ -507,9 +508,9 @@ public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets,
         return false;
     }
     float4 cone = decodeSnorm8(meshlets[w + 7]);
-    // Back faces as seen from the eye; orthographic views and shadow views (casters only) keep them.
+    // Back faces as seen from the eye; orthographic views and views of casters drawn two-sided keep them.
     float3 fromEye = center - view.eye;
-    return doubleSided || view.orthographic != 0 || (view.flags & VIEW_CASTERS_ONLY) != 0 || cone.w >= 1
+    return doubleSided || view.orthographic != 0 || (view.flags & VIEW_BOTH_SIDES) != 0 || cone.w >= 1
         || dot(fromEye, normalToWorld(instance, cone.xyz)) < cone.w * length(fromEye) + radius;
 }
 

@@ -332,6 +332,15 @@ class ShadowOwnerTest {
                 assertThat(floor(shut, 3, -2)).as("%s: the floor beside the rock, %d with the light unshadowed",
                     spec.method(), lit).isLessThan(lit / 2);
             }
+            // Front faces alone (the cheaper choice): the inside's back faces are not drawn, the light leaks
+            graph.settings().set(com.truesim.engine.render.shadows.ShadowSettings.CASTER_FACES,
+                com.truesim.engine.render.shadows.ShadowSettings.Faces.FRONT);
+            lights.shadow(1, ShadowSpec.maps(256));
+            byte[] leaking = null;
+            for (int i = 0; i < 3; i++) {
+                leaking = frame();
+            }
+            assertThat(floor(leaking, 3, -2)).as("front faces: the light leaks").isGreaterThan(lit * 3 / 4);
         }
         scene.remove(2);
     }

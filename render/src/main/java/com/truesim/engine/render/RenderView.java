@@ -394,8 +394,23 @@ public final class RenderView implements AutoCloseable {
     }
 
     private int flags() {
-        return (castersOnly ? 1 : 0) | (highlightedOnly ? 2 : 0);
+        return (castersOnly ? 1 : 0) | (highlightedOnly ? 2 : 0) | (bothSides ? 4 : 0);
     }
+
+    /**
+     * Keeps meshlets facing away from the eye (shadow casters drawn two-sided, as rays meet every face); off by default:
+     * a camera's view culls them. Allocates nothing.
+     */
+    public RenderView bothSides(boolean on) {
+        checkOpen();
+        if (on != bothSides) {
+            bothSides = on;
+            putInt(ViewLayout.FLAGS, flags());
+        }
+        return this;
+    }
+
+    private boolean bothSides;
 
     private boolean castersOnly;
     private boolean highlightedOnly;

@@ -612,12 +612,19 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
      */
     @AllowAllocation("building the graph, when it changes")
     public Casters casters(GraphBuilder g, RenderView view) {
+        return casters(g, view, true);
+    }
+
+    /** Like {@link #casters(GraphBuilder, RenderView)}, with {@code bothSides} false the front faces alone. */
+    @AllowAllocation("building the graph, when it changes")
+    public Casters casters(GraphBuilder g, RenderView view, boolean bothSides) {
         Materials materials = renderer.scene().materials();
         int geometryTypes = !materials.drawsGeometry() ? 0 : materials.geometryTypeCount();
         Selection selection = new Selection(this, view, null, null, geometryTypes + 1, 0,
             geometryTypes == 0 ? 0 : OPAQUE_LISTS);
         Buffer list = g.request(selection);
-        Pipeline[] pipelines = geometry(materials, drawCasters, ShadingPipelines.DEPTH, selection, true);
+        Pipeline[] pipelines = geometry(materials, bothSides ? drawCasters : drawDepth, ShadingPipelines.DEPTH,
+            selection, bothSides);
         return new Casters(selection, list, pipelines);
     }
 

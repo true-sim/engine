@@ -103,6 +103,14 @@ class ShadowsBenchmark {
         configs.add(new Config("unshadowed", s -> sun(s, null)));
         configs.add(new Config("maps: one 4096 to 300", s -> sun(s, ShadowSpec.maps(4096).distance(300))));
         configs.add(new Config("cascades: 3 of 2048 to 300", s -> sun(s, ShadowSpec.cascades(3, 2048, 300))));
+        configs.add(new Config("cascades: 3 of 2048 to 300, front faces", s -> {
+            s.graph().settings().set(ShadowSettings.CASTER_FACES, ShadowSettings.Faces.FRONT);
+            sun(s, ShadowSpec.cascades(3, 2048, 300));
+        }));
+        configs.add(new Config("maps: one 4096 to 300, front faces", s -> {
+            s.graph().settings().set(ShadowSettings.CASTER_FACES, ShadowSettings.Faces.FRONT);
+            sun(s, ShadowSpec.maps(4096).distance(300));
+        }));
         configs.add(new Config("cascades: AUTO to 300", s -> sun(s, ShadowSpec.cascades(ShadowSpec.AUTO,
             ShadowSpec.AUTO, 300))));
         if (rays) {

@@ -105,10 +105,27 @@ public final class ShadowSettings {
      */
     public static final Setting<Integer> KEEP_ROUNDS = Setting.integer("shadows.rays.keepRounds", 3, 1, 16,
         "traced shadows: holes of keep() one ray goes through, at most");
+    /** Which faces of casters shadow maps draw. */
+    public enum Faces {
+        /**
+         * Both sides of every face, as shadow rays meet them: a light inside a closed mesh is shut in, one-sided
+         * surfaces cast from behind too. About twice the tiles' drawing (RX 9070 XT, 30,000 rocks).
+         */
+        BOTH,
+        /**
+         * Front faces alone, as a camera's depth: cheaper; exact for closed meshes lit from outside, but a light inside
+         * one leaks, and one-sided surfaces seen from behind cast nothing.
+         */
+        FRONT
+    }
+
+    /** Which faces of casters shadow maps draw ({@link Faces}). */
+    public static final Setting<Faces> CASTER_FACES = Setting.choice("shadows.casters.faces", Faces.BOTH,
+        "faces of casters shadow maps draw: BOTH (as rays meet them) or FRONT (cheaper; lights inside meshes leak)");
     /** Every shadow setting. */
     public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, RAY_OFFSET,
         CASTER_DETAIL, ATLAS_SIZE, ATLAS_DRAWS, TILE_DRAWS, TILE_TRIANGLES, AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF,
-        MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, SOFT_RAYS, SOFT_DENOISER, SOFT_PASSES, RAY_QUEUE,
+        MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, CASTER_FACES, SOFT_RAYS, SOFT_DENOISER, SOFT_PASSES, RAY_QUEUE,
         KEEP_ROUNDS);
 
     private ShadowSettings() {
