@@ -32,7 +32,8 @@ public struct Light
     public float cosInner;         // spot: full light within this
     public int shadowFirst;        // its first entry in the shading view's shadow table, or -1: set as the view's
     public uint shadowCount;       // light list hands it out (handOut), from that table's ranges
-    public uint pad;
+    public float radius;           // its size, for soft shadows and the reference: a directional light's angular
+                                   // radius in radians, a point or spot light's radius (its ShadowSpec's softness)
     public float3 positionLow;     // world position, the rest
     public uint pad1;
 };
@@ -60,11 +61,13 @@ public struct Shadow
     public uint size;              // maps: texels across; rays: the high half of that address
     public float bias;             // maps: in the map's depth units
     public float split;            // cascades: the view depth this cascade reaches
-    public float2 params;          // maps: (normal offset, 0); masks: (channel, 0); rays: (offset per unit of distance, 0)
+    public float2 params;          // maps: (normal offset, near); masks: (channel, 0); rays: (offset per unit of distance, 0)
+                                   // a map's near > 0: a perspective map (reverse depth, near / view depth), its normal
+                                   // offset and bias per unit of distance from the light
     public float3 position;        // the entry's world position, high part
-    public uint pad;
+    public uint tile;              // maps in an atlas: the tile's corner in texels, x | y << 16
     public float3 positionLow;     // and the rest
-    public uint pad1;
+    public uint atlas;             // maps in an atlas: its texels per side (the tile's are `size`); 0: a map of its own
 };
 
 /** Shadow kinds. */
@@ -271,20 +274,28 @@ public struct PcfShadow : IShadow
     public float visibility(Shadow s, ShadowQuery q)
     {
         float3 normal = dot(q.normal, q.toLight) < 0 ? -q.normal : q.normal;
-        float4 clip = mul(s.toShadow, float4(q.world + normal * s.params.x, 1));
+        bool perspective = s.params.y > 0;
+        // A perspective map's texels grow with the distance from the light: its offset and bias with them.
+        float scale = perspective ? length(q.world) : 1;
+        float4 clip = mul(s.toShadow, float4(q.world + normal * (s.params.x * scale), 1));
         float3 p = clip.xyz / clip.w;
         float2 uv = p.xy * 0.5 + 0.5;
         if (any(uv < 0) || any(uv > 1) || p.z < 0 || p.z > 1)
         {
             return 1;
         }
-        int2 texel = int2(floor(uv * s.size));
+        // Reverse depth: a perspective map holds near / view depth, compared at the view depth less the bias.
+        float depth = perspective ? s.params.y / max(s.params.y / max(p.z, 1.0e-20) - s.bias * scale, s.params.y)
+            : p.z + s.bias;
+        uint atlas = s.atlas != 0 ? s.atlas : s.size;
+        int2 corner = int2(s.tile & 0xffff, s.tile >> 16);
+        // The 3 x 3 texels around, kept within the tile (an atlas's neighbours are other lights' maps).
+        int2 texel = clamp(int2(floor(uv * s.size)), 1, int(s.size) - 2) + corner;
         uint map = NonUniformResourceIndex(s.map); // neighbours may read other cascades and lights
         // The 3 x 3 texels around, in four gathers of 2 x 2 rather than nine loads: each taken at a texel corner (in
         // texels, c: its 2 x 2 is c - 1 and c each way, as bilinear filtering would read there), edges clamped by the
         // sampler. Gathered as (x: left bottom, y: right bottom, z: right top, w: left top), top the lower row.
-        float depth = p.z + s.bias;
-        float texelSize = 1.0 / s.size;
+        float texelSize = 1.0 / atlas;
         float4 a = textures[map].GatherRed(samplers[NEAREST_CLAMP], float2(texel) * texelSize);
         float4 b = textures[map].GatherRed(samplers[NEAREST_CLAMP], float2(texel + int2(2, 0)) * texelSize);
         float4 c = textures[map].GatherRed(samplers[NEAREST_CLAMP], float2(texel + int2(0, 2)) * texelSize);

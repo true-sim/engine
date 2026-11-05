@@ -633,6 +633,35 @@ public final class GpuScene implements AutoCloseable {
         return version + motion.frames(); // interpolated instances move every frame
     }
 
+    /**
+     * The id of the {@code i}-th instance changed since the last upload ({@code i} below {@link #pendingCount}), its new
+     * pose into {@code pose} (x, y, z, qx, qy, qz, qw, sx, sy, sz) and its mesh returned, or -1 if it is no longer there
+     * or casts no shadows: for what follows the changes before they upload (shadow maps drawn only where something
+     * moved). Read on the thread that writes, between frames. Allocates nothing.
+     */
+    public int changedId(int i) {
+        return instances.pendingIndex(i);
+    }
+
+    /** {@link #changedId}'s pose and mesh: the mesh, or -1 if it is gone or casts no shadows. Allocates nothing. */
+    public int changedCaster(int i, double[] pose) {
+        MemorySegment m = instances.changes(i);
+        long o = instances.offset(i);
+        int word = m.get(INT, o + InstanceLayout.MESH);
+        if ((word & LIVE) == 0 || (word & CASTS_SHADOWS) == 0) {
+            return -1;
+        }
+        for (int axis = 0; axis < 3; axis++) {
+            pose[axis] = (double) m.get(FLOAT, o + InstanceLayout.POSITION + 4L * axis)
+                + m.get(FLOAT, o + InstanceLayout.POSITION_LOW + 4L * axis);
+            pose[7 + axis] = m.get(FLOAT, o + InstanceLayout.SCALE + 4L * axis);
+        }
+        for (int k = 0; k < 4; k++) {
+            pose[3 + k] = m.get(FLOAT, o + InstanceLayout.ROTATION + 4L * k);
+        }
+        return word & MESH_BITS;
+    }
+
     /** How many instances changed since the last upload: what the next one scatters. */
     public int pendingCount() {
         return instances.pendingCount();

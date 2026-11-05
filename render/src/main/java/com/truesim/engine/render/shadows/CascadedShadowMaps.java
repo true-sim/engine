@@ -3,7 +3,6 @@ package com.truesim.engine.render.shadows;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT;
 
 import com.truesim.annotations.AllowAllocation;
-import com.truesim.common.math.Maths;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
@@ -60,8 +59,7 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
     private final float[] biases;
     private final float[] normalOffsets;
     private final double[] direction = new double[3];
-    private final double[] corner = new double[3];
-    private final double[] center = new double[3];
+    private final CascadeFit fit;
     private Float lambda; // these three, or null: as the graph's settings say
     private Float biasTexels;
     private Float casters;
@@ -106,6 +104,7 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
             cameras[i] = new Camera();
         }
         this.splits = new float[cascades + 1];
+        this.fit = new CascadeFit(cascades);
         this.biases = new float[cascades];
         this.normalOffsets = new float[cascades];
     }
@@ -209,95 +208,15 @@ public final class CascadedShadowMaps implements Technique, AutoCloseable {
         // light too: so much more depth bias, so they do not shadow those surfaces in spots.
         float casterError = Math.max(0, settings.get(ShadowSettings.CASTER_DETAIL) - 1);
         float casters = this.casters != null ? this.casters : settings.get(ShadowSettings.CASCADE_CASTERS);
-        double x = camera.position(0);
-        double y = camera.position(1);
-        double z = camera.position(2);
-        float[] viewProjection = camera.viewProjection();
-        // The splits and corners take depth as near / distance: an infinite reverse-depth perspective, as Camera.set
-        // makes; another projection would fit the cascades wrongly without a word.
-        // (Its depth row is then (0, 0, 0, near) whatever the camera's turn: column-major, entries 2, 6, 10 and 14.)
-        if (camera.orthographic() || viewProjection[2] != 0 || viewProjection[6] != 0 || viewProjection[10] != 0) {
-            throw new IllegalStateException("Cascades fit a camera of infinite reverse-depth perspective (Camera.set)");
-        }
-        double near = viewProjection[14]; // reverse depth: depth = near / distance
-        splits[0] = (float) near;
-        for (int i = 1; i <= cascades; i++) {
-            double t = (double) i / cascades;
-            double logarithmic = near * Maths.pow(maxDistance / near, t);
-            double uniform = near + (maxDistance - near) * t;
-            splits[i] = (float) (lambda * logarithmic + (1 - lambda) * uniform);
-        }
         lights.direction(light, direction);
-        double dx = direction[0];
-        double dy = direction[1];
-        double dz = direction[2];
-        // The light's axes: back (towards the light), right and up, as Camera.setOrthographic makes them.
-        double ux = Math.abs(dy) < 0.99 ? 0 : 1;
-        double uy = Math.abs(dy) < 0.99 ? 1 : 0;
-        double bx = -dx;
-        double by = -dy;
-        double bz = -dz;
-        double rx = uy * bz;
-        double ry = -ux * bz;
-        double rz = ux * by - uy * bx;
-        double rl = Math.sqrt(rx * rx + ry * ry + rz * rz);
-        rx /= rl;
-        ry /= rl;
-        rz /= rl;
-        double tx = by * rz - bz * ry;
-        double ty = bz * rx - bx * rz;
-        double tz = bx * ry - by * rx;
-        float[] inverse = camera.inverseViewProjection();
+        fit.fit(camera, cascades, maxDistance, lambda, margin, direction[0], direction[1], direction[2]);
+        splits[0] = camera.viewProjection()[14];
         for (int i = 0; i < cascades; i++) {
-            // The sphere around the frustum's slice: its corners averaged, the farthest corner's distance. From a tenth
-            // of the slice before on: lights.slang's shadowFor dithers the last tenth of a cascade into the next.
-            double from = i == 0 ? splits[0] : splits[i] - 0.1 * (splits[i] - splits[i - 1]);
-            center[0] = 0;
-            center[1] = 0;
-            center[2] = 0;
-            for (int c = 0; c < 8; c++) {
-                corner(inverse, near, (c >> 2) == 0 ? from : splits[i + 1], (c & 1) * 2 - 1, (c >> 1 & 1) * 2 - 1);
-                center[0] += corner[0] / 8;
-                center[1] += corner[1] / 8;
-                center[2] += corner[2] / 8;
-            }
-            double radius = 0;
-            for (int c = 0; c < 8; c++) {
-                corner(inverse, near, (c >> 2) == 0 ? from : splits[i + 1], (c & 1) * 2 - 1, (c >> 1 & 1) * 2 - 1);
-                double ex = corner[0] - center[0];
-                double ey = corner[1] - center[1];
-                double ez = corner[2] - center[2];
-                radius = Math.max(radius, Math.sqrt(ex * ex + ey * ey + ez * ez));
-            }
-            radius = Math.ceil((radius + margin) * 16) / 16; // steady as the camera turns
-            // Snapped to whole texels of the world along the light's right and up.
-            double texel = 2 * radius / size;
-            double wx = x + center[0];
-            double wy = y + center[1];
-            double wz = z + center[2];
-            double alongRight = rx * wx + ry * wy + rz * wz;
-            double alongUp = tx * wx + ty * wy + tz * wz;
-            double shiftRight = Math.floor(alongRight / texel) * texel - alongRight;
-            double shiftUp = Math.floor(alongUp / texel) * texel - alongUp;
-            double cx = center[0] + rx * shiftRight + tx * shiftUp;
-            double cy = center[1] + ry * shiftRight + ty * shiftUp;
-            double cz = center[2] + rz * shiftRight + tz * shiftUp;
-            double back = radius + casters;
-            double depth = back + radius;
-            // At the slice's snapped center in the world, looking from back along the light.
-            cameras[i].position(x + cx, y + cy, z + cz).setOrthographic(bx * back, by * back, bz * back, dx, dy, dz,
-                ux, uy, 0, radius, radius, depth, size, size);
+            splits[i + 1] = fit.split(i);
+            double texel = fit.place(i, size, casters, cameras[i]);
+            double depth = 2 * fit.radius(i) + casters;
             biases[i] = (float) ((biasTexels / 3 + casterError) * texel / depth);
             normalOffsets[i] = (float) (biasTexels * texel);
-        }
-    }
-
-    /** Corner ({@code ndcX}, {@code ndcY}) of the view at {@code distance}, camera-relative, into {@link #corner}. */
-    private void corner(float[] inverse, double near, double distance, int ndcX, int ndcY) {
-        double ndcZ = near / distance;
-        double w = inverse[3] * ndcX + inverse[7] * ndcY + inverse[11] * ndcZ + inverse[15];
-        for (int k = 0; k < 3; k++) {
-            corner[k] = (inverse[k] * ndcX + inverse[4 + k] * ndcY + inverse[8 + k] * ndcZ + inverse[12 + k]) / w;
         }
     }
 

@@ -483,7 +483,8 @@ public final class PassContext {
     /**
      * Clears {@code width} by {@code height} pixels at ({@code x}, {@code y}) of the pass's depth attachment to
      * {@code depth}, inside its rendering ({@code vkCmdClearAttachments}; in a multiview pass, in every view): an
-     * occluder's footprint, as a test's stand-in for drawn geometry.
+     * occluder's footprint, as a test's stand-in for drawn geometry; a tile of an atlas drawn again while the rest keeps
+     * its contents.
      */
     public void clearDepth(int x, int y, int width, int height, float depth) {
         if (x < 0 || y < 0 || width <= 0 || height <= 0) {

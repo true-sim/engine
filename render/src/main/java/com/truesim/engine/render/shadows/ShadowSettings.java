@@ -33,9 +33,53 @@ public final class ShadowSettings {
     public static final Setting<Float> CASTER_DETAIL = Setting.decimal("shadows.casterDetail", 1, 0.25f, 16,
         "the error in pixels shadow casters allow when choosing detail: higher draws coarser casters, faster, with "
             + "cascade bias to match");
+    /**
+     * The {@link Shadows} owner's shadow atlas, texels per side: every map of every light (spot and point lights' tiles,
+     * directional lights' cascades) is a tile of it. Its memory is the maps' budget (32-bit depth: 256 MiB at 8192);
+     * made the first time a light uses maps. Changing it rebuilds the graph and draws every tile again.
+     */
+    public static final Setting<Integer> ATLAS_SIZE = Setting.integer("shadows.atlas.size", 8192, 512, 16384,
+        "texels per side of the shadow atlas, every light's maps' budget (a power of two)");
+    /**
+     * The most tiles the owner draws in one frame: tiles kept from frames before cost nothing, and those over the
+     * count, least important first, wait for the next frame (their light keeps its last map, or casts none yet).
+     */
+    public static final Setting<Integer> ATLAS_DRAWS = Setting.integer("shadows.atlas.draws", 64, 1, 4096,
+        "the most shadow atlas tiles drawn in one frame (tiles nothing changed in are kept)");
+    /** The draws a tile's culling lists hold. */
+    public static final Setting<Integer> TILE_DRAWS = Setting.integer("shadows.tiles.draws", 1 << 14, 64, 1 << 22,
+        "draws (meshlets) a shadow tile's culling lists hold");
+    /** The triangles a tile's culling lists hold (the indexed path's index buffer). */
+    public static final Setting<Integer> TILE_TRIANGLES = Setting.integer("shadows.tiles.triangles", 1 << 18, 1024,
+        1 << 26, "triangles a shadow tile's culling lists hold");
+    /** AUTO maps: texels per pixel the light's reach shows across on screen. */
+    public static final Setting<Float> AUTO_SCALE = Setting.decimal("shadows.auto.scale", 1, 0.0625f, 16,
+        "AUTO shadow maps: texels per pixel of the light's reach on screen");
+    /**
+     * AUTO maps: how far (in octaves) a light's wanted size must move past the halfway point between two sizes before
+     * its tile changes size: tiles stay as the camera moves a little.
+     */
+    public static final Setting<Float> AUTO_HYSTERESIS = Setting.decimal("shadows.auto.hysteresis", 0.25f, 0, 4,
+        "AUTO shadow maps: octaves of hysteresis before a tile changes size");
+    /** AUTO maps: beyond this distance from every view (units; 0: none), a light casts no shadow. */
+    public static final Setting<Float> AUTO_CUTOFF = Setting.decimal("shadows.auto.cutoff", 0, 0, 1.0e7f,
+        "AUTO shadow maps: the distance from the views beyond which a light casts none (0: no cutoff)");
+    /** Spot and point lights' maps: the near plane, in units. */
+    public static final Setting<Float> MAP_NEAR = Setting.decimal("shadows.maps.near", 0.05f, 1.0e-4f, 100,
+        "the near plane of spot and point lights' shadow maps, in units");
+    /** A directional light's maps reach this far from the camera where its spec gives no distance. */
+    public static final Setting<Float> MAP_DISTANCE = Setting.decimal("shadows.maps.distance", 100, 0.1f, 1.0e7f,
+        "how far a directional light's maps reach where its spec gives no distance, in units");
+    /**
+     * The most tests of moved casters against tiles a frame (moved instances times tiles); past it, the tiles meeting
+     * the box around every moved caster are drawn again.
+     */
+    public static final Setting<Integer> CHANGE_TESTS = Setting.integer("shadows.atlas.changeTests", 1 << 20, 0,
+        1 << 30, "the most moved-caster-against-tile tests a frame before testing their box as one");
     /** Every shadow setting. */
     public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, RAY_OFFSET,
-        CASTER_DETAIL);
+        CASTER_DETAIL, ATLAS_SIZE, ATLAS_DRAWS, TILE_DRAWS, TILE_TRIANGLES, AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF,
+        MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS);
 
     private ShadowSettings() {
     }

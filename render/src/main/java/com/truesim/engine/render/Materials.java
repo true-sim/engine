@@ -106,6 +106,7 @@ public final class Materials implements AutoCloseable {
     private int[] slotRaster = new int[16];
     private int[] binDrawn = new int[16];
     private volatile long drawnVersion;
+    private long shapesVersion; // fields cutting shapes updated in place
     private final List<DrawListener> listeners = new java.util.concurrent.CopyOnWriteArrayList<>();
     private int bins;
     private final Map<Long, Integer> binOf = new HashMap<>();
@@ -295,6 +296,11 @@ public final class Materials implements AutoCloseable {
         if (field.owner() != material.parameters().getClass()) {
             return; // a feature's: features hold no mask
         }
+        for (int i = 0; i < geometryTypes.size(); i++) {
+            if (geometryTypes.get(i).parameters() == field.owner()) {
+                shapesVersion++; // its keep() may read the field: its holes may have moved
+            }
+        }
         int[] masks = maskOffsets.get(field.owner());
         if (masks == null) {
             return;
@@ -302,9 +308,11 @@ public final class Materials implements AutoCloseable {
         long block = heapStart + heapUnit[id] * ALIGNMENT;
         long slot = (long) SLOT_BYTES * id;
         if (masks[0] >= 0 && block + masks[0] >= at && block + masks[0] < at + bytes) {
+            shapesVersion++;
             table.putFloat(slot + MaterialLayout.MASK_ALPHA, table.getFloat(block + masks[0]));
         }
         if (masks[1] >= 0 && block + masks[1] >= at && block + masks[1] < at + bytes) {
+            shapesVersion++;
             table.putInt(slot + MaterialLayout.MASK_TEXTURE, table.getInt(block + masks[1]));
         }
     }
@@ -1090,6 +1098,15 @@ public final class Materials implements AutoCloseable {
      */
     public long version() {
         return version;
+    }
+
+    /**
+     * Changes as the shapes materials cut change: materials added, set or removed ({@link #version}), and fields updated
+     * in place that a mask (alpha, its texture) or a geometry hook ({@code keep()}) may read. What was drawn from the
+     * shapes and kept (cached shadow maps) is drawn again. Allocates nothing.
+     */
+    public long shapesVersion() {
+        return version + shapesVersion;
     }
 
     /** How many materials the table holds, the default one included. */

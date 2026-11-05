@@ -38,6 +38,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.BooleanSupplier;
 import java.util.Set;
 import java.util.function.Function;
 import org.lwjgl.vulkan.VkCommandBuffer;
@@ -681,8 +682,9 @@ public final class FrameGraph implements AutoCloseable {
         for (int i = 0; i < order.length; i++) {
             ExternalImage into = order[i].into;
             Switch switched = passSwitch[i];
+            BooleanSupplier active = order[i].active;
             passSkipped[i] = !runs(passViews[i]) || into != null && into.heldThisFrame
-                || switched != null && !switched.on;
+                || switched != null && !switched.on || active != null && !active.getAsBoolean();
         }
         if (resources.hasRetired()) {
             resources.release(false, frame);

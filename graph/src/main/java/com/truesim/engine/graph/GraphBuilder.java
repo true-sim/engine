@@ -110,6 +110,7 @@ public final class GraphBuilder {
         ExternalImage into; // an output's copy: its target, skipped while held; else null
         boolean region; // renders within its view's render region (PassBuilder.region())
         ViewPort view; // the view whose region it renders within, set when the graph is built; null: the frame's
+        java.util.function.BooleanSupplier active; // PassBuilder.when: skipped in frames it says false; null: never
 
         PassInfo(String name, String owner, Object scope, int[] images, Access[] accesses, int[] ranges,
             boolean[] discards, Attachment[] attachments, int[] buffers, BufferAccess[] bufferAccesses,
@@ -847,6 +848,7 @@ public final class GraphBuilder {
         private String owner;
         private Object scope;
         private boolean scoped; // its scope set by in(), not by who records it
+        private BooleanSupplier active; // when(): read as each frame starts
 
         private PassBuilder(String name) {
             this.name = name;
@@ -1106,6 +1108,17 @@ public final class GraphBuilder {
             return this;
         }
 
+        /**
+         * Runs the pass only in frames where {@code active} says so, read as each frame starts (before its passes
+         * record), as a switched-off technique's passes are skipped: its barriers kept, its body left out, so
+         * attachments it loads keep their contents and nothing rebuilds. A mask from data: a technique leaving out
+         * work no light, view or slot needs this frame. {@code active} must not allocate.
+         */
+        public PassBuilder when(BooleanSupplier active) {
+            this.active = Objects.requireNonNull(active, "active");
+            return this;
+        }
+
         /** Adds the pass, recording with {@code body}. */
         public void record(PassBody body) {
             if (index >= 0) {
@@ -1160,6 +1173,7 @@ public final class GraphBuilder {
                 sideEffects, async, body);
             info.region = region;
             info.view = regionView;
+            info.active = active;
             return info;
         }
     }

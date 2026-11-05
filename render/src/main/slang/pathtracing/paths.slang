@@ -440,7 +440,7 @@ public float3 directLight(Surface s, float3 p, float3 ng, float3 v, View view, i
         sun.cosInner = 0;
         sun.shadowFirst = -1;
         sun.shadowCount = 0;
-        sun.pad = 0;
+        sun.radius = 0;
         sun.pad1 = 0;
         return lightOne(sun, s, p, ng, v);
     }

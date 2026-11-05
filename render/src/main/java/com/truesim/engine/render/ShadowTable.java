@@ -136,6 +136,25 @@ public final class ShadowTable implements AutoCloseable {
     }
 
     /**
+     * Entry {@code entry}, a tile of a shadow atlas filtered by 3 x 3 PCF: {@code size} texels per side at
+     * ({@code x}, {@code y}) of the depth atlas in sampled slot {@code atlas}, {@code atlasSize} texels per side, drawn
+     * from {@code camera} (its view-projection and world position). An orthographic camera's tile is compared with
+     * {@code bias} in its depth units and looked up {@code normalOffset} units along the surface's normal, as
+     * {@link #shadowMap(int, Camera, int, int, float, float, float)}; a perspective one's (reverse depth from
+     * {@code near}) with {@code bias} and {@code normalOffset} per unit of distance from the camera, as its texels grow
+     * with it. A cascade covers view depths up to {@code split}. Allocates nothing.
+     */
+    public ShadowTable atlasMap(int entry, Camera camera, int atlas, int atlasSize, int x, int y, int size, float bias,
+        float split, float normalOffset, float near) {
+        shadowMap(entry, camera, atlas, size, bias, split, normalOffset);
+        long o = (long) SHADOW_BYTES * entry;
+        shadows.putFloat(o + 92, near);
+        shadows.putInt(o + 108, x | y << 16);
+        shadows.putInt(o + 124, atlasSize);
+        return this;
+    }
+
+    /**
      * Entry {@code entry}, a screen-space mask: channel {@code channel} of the image in sampled slot {@code mask}, the
      * size of the shaded image, 1 lit and 0 in shadow per pixel. Allocates nothing.
      */
@@ -176,6 +195,8 @@ public final class ShadowTable implements AutoCloseable {
         shadows.putFloat(o + 84, Float.MAX_VALUE); // covers every depth, unless a cascade's split says otherwise
         shadows.putFloat(o + 88, 0);
         shadows.putFloat(o + 92, 0);
+        shadows.putInt(o + 108, 0); // not in an atlas
+        shadows.putInt(o + 124, 0);
         return o;
     }
 
