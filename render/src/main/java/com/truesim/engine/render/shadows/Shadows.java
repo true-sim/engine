@@ -102,6 +102,7 @@ public final class Shadows implements AutoCloseable {
     // Change tracking
     private double[] spheres = new double[0]; // per instance: world x, y, z, radius (< 0: none)
     private boolean[] deformed = new boolean[0];
+    private double[] reach = new double[0]; // per instance: how far its mesh reaches from its origin, unscaled; NaN
     private int[] deformedIds = new int[16];
     private int deformedCount;
     private final double[] pose = new double[10];
@@ -316,8 +317,8 @@ public final class Shadows implements AutoCloseable {
             shapes = shapesNow;
             allDirty = true;
         }
-        if (scene.motion().count() > 0 || scene.gpuCount() > 0) {
-            allDirty = true; // instances moved on the GPU: not followed one by one
+        if (scene.gpuCount() > 0) {
+            allDirty = true; // instances the GPU writes (mesh particles): where they are is not known here
         }
         int count = lights.count();
         if (shared.length < lights.capacity()) {
@@ -380,9 +381,7 @@ public final class Shadows implements AutoCloseable {
         }
         budget(atlasSize);
         allocate();
-        if (usedCount > 0) {
-            followCasters(settings);
-        }
+        followCasters(settings); // kept up even without maps: their tiles need where casters were
         assignSlots(settings);
         stats.atlasTexels = mapsUsed ? (long) atlasSize * atlasSize : 0;
         stats.texels = atlas.used();
@@ -782,7 +781,8 @@ public final class Shadows implements AutoCloseable {
             growSpheres(capacity);
         }
         int changes = scene.pendingCount();
-        long tests = 2L * changes * usedCount;
+        com.truesim.engine.render.InstanceMotion motion = scene.motion();
+        long tests = (2L * changes + motion.count()) * usedCount;
         boolean asOne = tests > settings.get(ShadowSettings.CHANGE_TESTS);
         double minX = Double.MAX_VALUE;
         double minY = Double.MAX_VALUE;
@@ -796,7 +796,9 @@ public final class Shadows implements AutoCloseable {
             int o = 4 * id;
             for (int pass = 0; pass < 2; pass++) {
                 double r = spheres[o + 3];
-                if (r >= 0) {
+                if (r == -2) {
+                    allDirty = true; // where it was is not known
+                } else if (r >= 0) {
                     if (asOne) {
                         minX = Math.min(minX, spheres[o] - r);
                         minY = Math.min(minY, spheres[o + 1] - r);
@@ -812,6 +814,45 @@ public final class Shadows implements AutoCloseable {
                 if (pass == 0) {
                     sphereOf(c, id);
                 }
+            }
+        }
+        // Instances drawn between two steps' poses move on the GPU every frame: the tiles around the way between
+        // them are drawn again, and the instance's sphere is that way's from then on.
+        for (int slot = 0, slots = motion.highWater(); slot < slots && motion.count() > 0; slot++) {
+            int id = motion.slotInstance(slot);
+            if (id < 0) {
+                continue;
+            }
+            if (id >= reach.length || Double.isNaN(reach[id])) {
+                allDirty = true; // not seen yet: its size is not known
+                continue;
+            }
+            double fx = motion.slotPose(slot, 0);
+            double fy = motion.slotPose(slot, 1);
+            double fz = motion.slotPose(slot, 2);
+            double tx = motion.slotPose(slot, 3);
+            double ty = motion.slotPose(slot, 4);
+            double tz = motion.slotPose(slot, 5);
+            double half = 0.5 * Math.sqrt((tx - fx) * (tx - fx) + (ty - fy) * (ty - fy) + (tz - fz) * (tz - fz));
+            double r = half + motion.slotPose(slot, 6) * reach[id];
+            double x = (fx + tx) / 2;
+            double y = (fy + ty) / 2;
+            double z = (fz + tz) / 2;
+            int o = 4 * id;
+            spheres[o] = x;
+            spheres[o + 1] = y;
+            spheres[o + 2] = z;
+            spheres[o + 3] = r;
+            if (asOne) {
+                minX = Math.min(minX, x - r);
+                minY = Math.min(minY, y - r);
+                minZ = Math.min(minZ, z - r);
+                maxX = Math.max(maxX, x + r);
+                maxY = Math.max(maxY, y + r);
+                maxZ = Math.max(maxZ, z + r);
+                any = true;
+            } else {
+                dirtyAround(x, y, z, r);
             }
         }
         if (any) {
@@ -839,8 +880,12 @@ public final class Shadows implements AutoCloseable {
         int had = spheres.length / 4;
         spheres = Arrays.copyOf(spheres, 4 * capacity);
         deformed = Arrays.copyOf(deformed, capacity);
+        reach = Arrays.copyOf(reach, capacity);
+        Arrays.fill(reach, had, capacity, Double.NaN);
         for (int i = had; i < capacity; i++) {
-            spheres[4 * i + 3] = -1;
+            // Instances there before the owner followed the scene: where they are is not known (-2), so their first
+            // change draws every tile again; free ids: nothing there (-1)
+            spheres[4 * i + 3] = scene.contains(i) ? -2 : -1;
         }
     }
 
@@ -850,6 +895,7 @@ public final class Shadows implements AutoCloseable {
         int mesh = scene.changedCaster(c, pose);
         if (mesh < 0 || !pool.contains(mesh)) {
             spheres[o + 3] = -1;
+            reach[id] = Double.NaN;
             setDeformed(id, false);
             return;
         }
@@ -870,6 +916,7 @@ public final class Shadows implements AutoCloseable {
         spheres[o + 2] = pose[2] + sz + qw * tz + (qx * ty - qy * tx);
         double scale = Math.max(Math.abs(pose[7]), Math.max(Math.abs(pose[8]), Math.abs(pose[9])));
         spheres[o + 3] = scale * bounds[3];
+        reach[id] = Math.sqrt(bounds[0] * bounds[0] + bounds[1] * bounds[1] + bounds[2] * bounds[2]) + bounds[3];
         setDeformed(id, pool.deformedFrom(mesh) >= 0);
     }
 

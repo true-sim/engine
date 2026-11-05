@@ -414,6 +414,37 @@ class ShadowOwnerTest {
         scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
     }
 
+    /**
+     * The quad drawn between two steps' poses (instance motion, moved on the GPU each frame): only the tiles around its
+     * way are drawn again, a point light's beside it, not those of a light far off; and its shadow follows it.
+     */
+    @Test
+    void instancesMovingOnTheGpuRedrawOnlyTheTilesAroundTheirWay() {
+        newGraph(visibility());
+        lights.point(0, 0, -1, -5, 16, 60, 60, 60);
+        lights.shadow(0, ShadowSpec.maps(256));
+        lights.point(1, 30, -1, -5, 6, 60, 60, 60); // far off: its reach does not meet the quad's way
+        lights.shadow(1, ShadowSpec.maps(256)).setCount(2);
+        for (int i = 0; i < 4; i++) {
+            frame();
+        }
+        assertThat(shadows.stats().drawn()).as("still").isZero();
+        InstanceMotion motion = scene.motion();
+        int slot = motion.add();
+        motion.beginStep(1);
+        motion.write(motion.claim(slot, true), 1, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1, 0.5, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+        int most = 0;
+        for (int i = 0; i < 4; i++) {
+            motion.blend(1);
+            frame();
+            most = Math.max(most, shadows.stats().drawn());
+        }
+        assertThat(most).as("the faces around the quad's way, not the far light's").isBetween(1, 6);
+        expectShadow("drawn at the step's end", new double[] {2.2, -5.6}, new double[] {3, -2});
+        motion.remove(slot);
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
     /** Ray tracing of the quads, where the device traces rays. */
     private boolean rays(MeshData... more) {
         if (!device.rayTracing()) {
