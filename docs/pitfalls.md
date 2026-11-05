@@ -530,6 +530,18 @@ them read the same on both: classic draw 5.140 / 15.241 / 50.615 / 151.616 (base
 - Rule: a regression found by comparing runs from different times is confirmed in one session, alternating the two
   builds, before anyone looks for its cause.
 
+**An included scene build brings its own sibling checkouts.** In the A/B of the renderables branch, the base used
+scene's published jars (`-Ptruesim.scene=false`) and the branch `-Ptruesim.scene=../scene-renderables`: the included
+scene's settings include `../common-collision` (and the other `../common-*` not switched off), so the branch's demo
+ran the local common-collision checkout and the base the published 0.2.0 (`:engine-demo:dependencies`, runtime
+classpath, both builds). `streamBench`, which touches no changed code, read 0.45-0.57 ms (base) against 0.56-0.70 ms
+(branch) frame work at p50 in that run; whether the checkout caused that was not established.
+- Proof: the dependency listings of both builds; rerun with `-Ptruesim.common-collision=false` for both (properties
+  reach included builds), alternating six times: 0.59-0.74 ms against 0.61-0.73 ms (one branch run disturbed, 0.94)
+  (true-sim/engine, renderables as components).
+- Rule: an A/B with one side on an included build compares the resolved dependencies of both sides first, and switches
+  off every sibling include (`-Ptruesim.<repo>=false`) that is not the change.
+
 **Benchmark numbers in the README go stale.** The per-path table stayed from the first mesh shader benchmark while
 materials and lighting doubled the mesh path's time.
 - Proof: [#143](https://github.com/true-sim/engine/issues/143).
