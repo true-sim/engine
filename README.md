@@ -280,8 +280,8 @@ fingers, pen, XR rays, a gamepad's virtual cursor) through this frame's camera, 
 SceneInteraction interaction = engine.get(SceneInteraction.KEY);
 InteractionWorld world = interaction.world(scene, index);
 world.view(camera).port(mainView);                                    // or world.view(cameraNode): D129
-world.picker().resolver(new RenderablePicking(renderables, cache::get)); // Pickable.mesh(): the renderable's triangles
-long[] car = model.spawn(scene, renderables, scene.create());         // glTF "truesim.pickable": pickable on spawn
+world.picker().resolver(new RenderablePicking(scene, cache::get));   // Pickable.mesh(): the renderable's triangles
+long[] car = model.spawn(scene, scene.create());                      // glTF "truesim.pickable": pickable on spawn
 world.on(car[0], SceneEventType.CLICK, e -> honk(e.currentNode()));   // the parts' clicks bubble to the root
 interaction.selection().enabled(true);                                // click, Shift, Ctrl, marquee, Ctrl+A, Escape
 port.add(new SelectionOutline(graph, geometry, view.view(), view, depthFormat, highlights));
@@ -935,10 +935,10 @@ Drawing and shading are separate, and each is swappable:
   every posed copy (`Deformation`: joint matrices and the pose's box, linear blend skinning, normals by cofactors),
   recomputes its meshlet spheres, turns cone culling off for it and grows its detail spheres by how far the joints
   move. Morph targets go first: a copy of a mesh with targets takes their weights (`Deformation.weight`), the
-  deltas uploaded once per mesh. `SceneSync` does it for renderables with a skin (`Renderables.setSkin`, set by
-  `ModelData.spawn`) or morph targets (`Renderables.setMorphWeights`), posing them each update from their joints'
-  world transforms and weights; scene-animation's `Animators` move the joints and, through
-  `animators.morphSink(renderables::setMorphWeights)`, the weights. Meshlet paths only
+  deltas uploaded once per mesh. `SceneSync` does it for renderables with a skin (`Renderable.withSkin`, set by
+  `ModelData.spawn`) or morph targets (weights in the node's `MorphWeights` component), posing them each update from
+  their joints' world transforms and weights; scene-animation's `Animators` move the joints and, through
+  `animators.morphSink((node, w, offset, count) -> MorphWeights.write(scene, node, w, offset, count))`, the weights. Meshlet paths only
   for now; ray tracing traces each copy through a bottom level of its own, refitted as it is posed (Ray tracing).
   Animated material values (glTF's `KHR_animation_pointer`: colors, factors, texture transforms) go into the material
   table in place, for every renderable drawing the material: `resources.animate(material, "baseColor", values, 0, 4)`,
@@ -2075,8 +2075,10 @@ waits makes it report races between the queues.
 
 ## Drawing scenes
 
-`engine-scene` draws scene's `Renderables` (a mesh and per-submesh materials on a node, from `scene-render`) with the
-renderers above, following the scene's change logs and asset cache:
+`engine-scene` draws scene's `Renderable` components (a mesh and per-submesh materials on a node, from
+`scene-render`; application-api.md D46) with the renderers above, following the scene's change logs and asset cache.
+A renderable's change logs the fields it changed (mesh, materials, shadows, skin), and the sync redoes only those: a
+material swap takes new materials and keeps the mesh and the instance id.
 
 - `SceneResources` is the GPU side of the assets, shared by every scene on a device: meshes in a `GeometryPool`,
   materials in `Materials`, textures in `Textures`. It acquires what scenes use in the `AssetCache`, uploads each asset
@@ -2143,8 +2145,8 @@ SceneResources resources = new SceneResources(assets, pool, materials, textures)
     .prepareOn(tasks, 2);
 
 GpuScene worldGpu = new GpuScene(device, resources.pool(), 100_000, slots);
-SceneSync world = new SceneSync(resources, worldRenderables, worldGpu);
-SceneSync gizmos = new SceneSync(resources, gizmoRenderables, worldGpu); // same table: its nodes on layer 1
+SceneSync world = new SceneSync(resources, worldScene, worldGpu);
+SceneSync gizmos = new SceneSync(resources, gizmoScene, worldGpu);     // same table: its nodes on layer 1
 SceneGeometry geometry = SceneGeometry.meshlets(new MeshletRenderer(device, worldGpu, colorFormat, depthFormat, slots));
 FrameGraph worldGraph = new FrameGraph(device, slots);
 ViewPort port = worldGraph.addView("main").size(width, height);
@@ -2158,7 +2160,7 @@ int slot = worldGraph.beginFrame();
 previewGraph.beginFrame();
 slots.begin(slot);
 tasks.drainCompleted();                               // the frame boundary: loads arrive and upload
-scene.update(); worldRenderables.update();
+worldScene.update(); gizmoScene.update();
 world.update(); gizmos.update();
 camera.position(cameraX, cameraY, cameraZ);           // the camera's world position, in doubles
 view.set(1, MeshletRenderer.MODE_LIT);
