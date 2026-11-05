@@ -391,6 +391,39 @@ class FrameGraphTest {
     }
 
     @Test
+    void aPassAttachingEveryLayerRendersThemAsViews() {
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Image eyes = g.create("eyes", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE).layers(2));
+            Image depth = g.create("eye depth", ImageDesc.of(Format.D32_SFLOAT, SIZE, SIZE).layers(2));
+            // one pass, both layers: a multiview scope (view mask 0b11) whose clear reaches every view
+            g.pass("both eyes").attach(eyes, Clear.color(0, 1, 0, 1)).attachDepth(depth, Clear.FAR)
+                .record(ctx -> { });
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("blit the right eye").read(eyes.layer(1), Access.TRANSFER_SRC).write(out, Access.TRANSFER_DST)
+                .record(ctx -> ctx.blit(eyes.layer(1), out.whole(), false));
+            g.provide(OUT, out);
+        })).output(OUT, output);
+        assertThat(frame()).containsOnly(GREEN);
+    }
+
+    @Test
+    void attachmentsOfOnePassDrawAsManyViews() {
+        graph.add(new Lambda(List.of(OUT), g -> {
+            Image eyes = g.create("eyes", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE).layers(2));
+            Image flat = g.create("flat depth", ImageDesc.of(Format.D32_SFLOAT, SIZE, SIZE));
+            Image many = g.create("many", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE).layers(7));
+            assertThatIllegalArgumentException().isThrownBy(() -> g.pass("mixed").attach(eyes, Clear.color(0, 0, 0, 1))
+                .attachDepth(flat, Clear.FAR)).withMessageContaining("as many views");
+            assertThatIllegalArgumentException().isThrownBy(() -> g.pass("too many").attach(many,
+                Clear.color(0, 0, 0, 1))).withMessageContaining("at most 6");
+            Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
+            g.pass("clear").write(out, Access.TRANSFER_DST).record(ctx -> ctx.clear(out.whole(), 0, 0, 1, 1));
+            g.provide(OUT, out);
+        })).output(OUT, output);
+        assertThat(frame()).containsOnly(BLUE);
+    }
+
+    @Test
     void imagesCopyToBuffersAndBack() {
         graph.add(new Lambda(List.of(OUT), g -> {
             Image cleared = g.create("cleared", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));

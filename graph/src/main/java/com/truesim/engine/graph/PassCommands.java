@@ -99,7 +99,9 @@ final class PassCommands {
             memPutInt(rendering + VkRenderingInfo.STYPE, VK_STRUCTURE_TYPE_RENDERING_INFO);
             memPutInt(rendering + VkRenderingInfo.RENDERAREA + VkRect2D.EXTENT, width);
             memPutInt(rendering + VkRenderingInfo.RENDERAREA + VkRect2D.EXTENT + 4, height);
+            int views = attachments[0].target().layerCount(); // all its layers: one view each (multiview)
             memPutInt(rendering + VkRenderingInfo.LAYERCOUNT, 1);
+            memPutInt(rendering + VkRenderingInfo.VIEWMASK, views > 1 ? (1 << views) - 1 : 0);
             memPutInt(rendering + VkRenderingInfo.COLORATTACHMENTCOUNT, colorCount);
             memPutAddress(rendering + VkRenderingInfo.PCOLORATTACHMENTS, colorCount == 0 ? 0 : colors);
             memPutAddress(rendering + VkRenderingInfo.PDEPTHATTACHMENT, depth);
