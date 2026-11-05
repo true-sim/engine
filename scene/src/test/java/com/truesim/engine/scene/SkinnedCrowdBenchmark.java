@@ -48,10 +48,11 @@ import com.truesim.scene.assets.Generator;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.assets.mesh.VertexAttribute;
 import com.truesim.scene.assets.mesh.VertexFormat;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.meshbuild.MeshBuilder;
 import com.truesim.scene.render.RenderAssets;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import com.truesim.scene.render.SkinBinding;
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
@@ -202,8 +203,8 @@ class SkinnedCrowdBenchmark {
                  VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
              FrameGraph graph = new FrameGraph(device, slots)) {
             SceneGraph scene = new SceneGraph(new ChangeClock(), CROWD * (JOINTS + 2) + 64, 1 << 20);
-            Renderables renderables = new Renderables(scene);
-            SceneSync sync = new SceneSync(resources, renderables, gpu, jobs);
+            ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+            SceneSync sync = new SceneSync(resources, scene, gpu, jobs);
             Animation animation = new Animation();
             Skeleton skeleton = skeleton();
             Rig rig = Rig.of(skeleton);
@@ -247,8 +248,8 @@ class SkinnedCrowdBenchmark {
                         nodes[j] = scene.create(j == 0 ? holder : nodes[j - 1]);
                         scene.setTranslation(nodes[j], 0, 0, j == 0 ? 0 : LENGTH);
                     }
-                    renderables.set(body, BODY, List.of(SceneSyncTest.RED));
-                    renderables.setSkin(body, new SkinBinding(nodes, inverseBinds));
+                    renderables.set(body, Renderable.of(BODY, List.of(SceneSyncTest.RED)));
+                    renderables.set(body, renderables.get(body).withSkin(new SkinBinding(nodes, inverseBinds)));
                     crowd[i] = animators.add(rig, nodes);
                     crowd[i].play(swing).loop(true).time(i * 0.013 % 1);
                 }
@@ -283,14 +284,13 @@ class SkinnedCrowdBenchmark {
     }
 
     private static void frame(Engine engine, FrameGraph graph, FrameSlots slots, TaskScheduler tasks,
-        SceneGraph scene, Renderables renderables, SceneSync sync, RenderView cameraView, Camera camera, long[] now) {
+        SceneGraph scene, ComponentStore<Renderable> renderables, SceneSync sync, RenderView cameraView, Camera camera, long[] now) {
         int slot = graph.beginFrame();
         slots.begin(slot);
         tasks.drainCompleted();
         now[0] += 1_000_000_000L / 144;
         engine.stepAt(now[0]);
         scene.update();
-        renderables.update();
         sync.update();
         cameraView.set(camera, 1, MeshletRenderer.MODE_LIT);
         graph.submit(0, 0);
@@ -298,7 +298,7 @@ class SkinnedCrowdBenchmark {
     }
 
     private static void measure(String run, Engine engine, Clock clock, FrameGraph graph, FrameSlots slots,
-        TaskScheduler tasks, SceneGraph scene, Renderables renderables, SceneSync sync, GeometryPool pool,
+        TaskScheduler tasks, SceneGraph scene, ComponentStore<Renderable> renderables, SceneSync sync, GeometryPool pool,
         RenderView cameraView, Camera camera, long[] now) {
         long[] phases = new long[FRAMES];
         long[] syncs = new long[FRAMES];
@@ -321,7 +321,6 @@ class SkinnedCrowdBenchmark {
             engine.stepAt(now[0]); // FIXED (fixed animators, joints captured), ANIMATE (the others)
             long t1 = System.nanoTime();
             scene.update();
-            renderables.update();
             sync.update();
             long t2 = System.nanoTime();
             cameraView.set(camera, 1, MeshletRenderer.MODE_LIT);

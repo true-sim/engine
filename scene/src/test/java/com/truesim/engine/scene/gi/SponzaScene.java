@@ -50,13 +50,14 @@ import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.PathAssets;
 import com.truesim.scene.assets.PathSource;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.gltf.Gltf;
 import com.truesim.scene.render.ImageImporter;
 import com.truesim.scene.render.ModelData;
 import com.truesim.scene.render.NodeVisibility;
 import com.truesim.scene.render.RenderAssets;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -91,7 +92,7 @@ final class SponzaScene implements AutoCloseable {
     final RayTracing rayTracing;
     final SceneResources resources;
     final SceneGraph scene = new SceneGraph(new ChangeClock());
-    final Renderables renderables = new Renderables(scene);
+    final ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
     final GpuScene gpu;
     final SceneSync sync;
     final MeshletRenderer renderer;
@@ -127,9 +128,9 @@ final class SponzaScene implements AutoCloseable {
         cache.acquire(ref);
         ModelData model = await(ref);
         NodeVisibility visibility = new NodeVisibility(scene);
-        model.spawn(scene, renderables, scene.create(), visibility);
+        model.spawn(scene, scene.create(), visibility);
         gpu = new GpuScene(device, pool, 4096, graph.frameSlots());
-        sync = new SceneSync(resources, renderables, gpu);
+        sync = new SceneSync(resources, scene, gpu);
         renderer = new MeshletRenderer(device, gpu, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_D32_SFLOAT,
             graph.frameSlots());
         geometry = SceneGeometry.meshlets(renderer);
@@ -184,7 +185,6 @@ final class SponzaScene implements AutoCloseable {
             graph.beginFrame();
             tasks.drainCompleted();
             scene.update();
-            renderables.update();
             sync.update();
             graph.submit(0, 0);
             if (i % 16 == 0) {

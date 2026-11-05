@@ -59,15 +59,17 @@ import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.PathAssets;
 import com.truesim.scene.assets.PathSource;
 import com.truesim.scene.assets.mesh.MeshData;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.gltf.Gltf;
 import com.truesim.scene.render.ImageImporter;
 import com.truesim.scene.render.ModelData;
+import com.truesim.scene.render.MorphWeights;
 import com.truesim.scene.render.NodeVisibility;
 import com.truesim.scene.render.RadianceImporter;
 import com.truesim.scene.render.TextureData;
 import com.truesim.scene.render.RenderAssets;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import java.awt.image.BufferedImage;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Files;
@@ -149,13 +151,14 @@ class SampleModelsRender {
             double[][] world = worldMatrices(model);
             double[] bounds = bounds(model, world, tasks, cache);
             SceneGraph scene = new SceneGraph(new ChangeClock());
-            Renderables renderables = new Renderables(scene);
+            ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
             NodeVisibility visibility = new NodeVisibility(scene);
-            long[] nodes = model.spawn(scene, renderables, scene.create(), visibility);
+            long[] nodes = model.spawn(scene, scene.create(), visibility);
             // -PgltfAnimation=t1,t2,...: the model's first clip (or -PgltfClip=name) posed at each time, an image each
             String times = System.getProperty("truesim.gltf.animation");
             Animators animators = new Animators(scene);
-            animators.morphSink(renderables::setMorphWeights); // animated morph weights drawn
+            animators.morphSink((node, weights, offset, count) -> // animated morph weights drawn
+                MorphWeights.write(scene, node, weights, offset, count));
             // Pointer tracks: materials into the table, visibility by layers, lights' values kept for them
             double[][] lightValues = lightValues(model);
             animators.pointerSink(resources.pointerSink().andThen(visibility).andThen((animator, pointer, values,
@@ -177,7 +180,7 @@ class SampleModelsRender {
             }
             GpuScene gpu = new GpuScene(device, pool, 4096, slots);
             closing.add(gpu);
-            SceneSync sync = new SceneSync(resources, renderables, gpu);
+            SceneSync sync = new SceneSync(resources, scene, gpu);
             closing.add(sync);
             FrameGraph graph = new FrameGraph(device, slots);
             closing.add(graph);
@@ -257,7 +260,6 @@ class SampleModelsRender {
                 if (lights != null) { // at their nodes as posed
                     lights(lights, model, sceneMatrices(scene, nodes), lightValues, nodes, visibility);
                 }
-                renderables.update();
                 sync.update();
                 view.set(camera, 1, MeshletRenderer.MODE_LIT);
                 graph.submit(0, 0);

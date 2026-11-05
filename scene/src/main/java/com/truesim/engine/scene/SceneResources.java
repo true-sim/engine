@@ -51,9 +51,9 @@ import org.slf4j.LoggerFactory;
  * FrameSlots slots = graph.frameSlots();          // or slots shared by several graphs
  * SceneResources resources = new SceneResources(assets, new GeometryPool(device, capacity, slots),
  *     new Materials(device, 4096, slots), new Textures(device, slots));
- * SceneSync world = new SceneSync(resources, worldRenderables, gpu);
- * SceneSync gizmos = new SceneSync(resources, gizmoRenderables, gpu);  // same table, other layers
- * SceneSync preview = new SceneSync(resources, previewRenderables, previewGpu);
+ * SceneSync world = new SceneSync(resources, worldScene, gpu);
+ * SceneSync gizmos = new SceneSync(resources, gizmoScene, gpu);  // same table, other layers
+ * SceneSync preview = new SceneSync(resources, previewScene, previewGpu);
  * }</pre>
  *
  * <p>An asset is acquired in the cache while some scene uses it, uploaded once it has loaded, and freed on the GPU (once

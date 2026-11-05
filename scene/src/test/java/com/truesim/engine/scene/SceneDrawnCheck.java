@@ -40,8 +40,9 @@ import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanInstance;
 import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.mesh.MeshData;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.SceneGraph;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import com.truesim.engine.vulkan.Format;
 import java.awt.image.BufferedImage;
 import java.lang.foreign.ValueLayout;
@@ -134,20 +135,20 @@ class SceneDrawnCheck {
             SceneView cameraView = geometry.createView(port, camera,
                 ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
             SceneGraph scene = new SceneGraph(new ChangeClock(), ROCKS + 64, SceneGraph.DEFAULT_LOG_CAPACITY);
-            Renderables renderables = new Renderables(scene);
+            ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
             SceneSync sync = null;
             double[] placed = new double[3 * ROCKS];
             SplittableRandom random = new SplittableRandom(11);
             if (throughScene) {
                 long ground = scene.create();
                 scene.setTranslation(ground, far, -12, far);
-                renderables.set(ground, SceneBenchmark.GROUND, List.of(SceneBenchmark.GRASS));
+                renderables.set(ground, Renderable.of(SceneBenchmark.GROUND, List.of(SceneBenchmark.GRASS)));
                 for (int i = 0; i < ROCKS; i++) {
                     long node = scene.create();
                     SceneBenchmark.place(scene, node, random, placed, i, far);
-                    renderables.set(node, SceneBenchmark.ROCK, List.of(SceneBenchmark.GRANITE));
+                    renderables.set(node, Renderable.of(SceneBenchmark.ROCK, List.of(SceneBenchmark.GRANITE)));
                 }
-                sync = new SceneSync(resources, renderables, gpu);
+                sync = new SceneSync(resources, scene, gpu);
             } else {
                 // The reference: the meshes added and the instances set straight, as the renderer's tests do.
                 int rockMesh = pool.add(rock);
@@ -188,7 +189,6 @@ class SceneDrawnCheck {
                 tasks.drainCompleted();
                 if (sync != null) {
                     scene.update();
-                    renderables.update();
                     sync.update();
                     settled += resources.uploadedMeshCount() == 2 ? 1 : 0;
                 } else {

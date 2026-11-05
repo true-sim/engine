@@ -18,6 +18,8 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
 import com.truesim.common.jobs.TaskScheduler;
+import com.truesim.scene.core.ComponentStore;
+import com.truesim.scene.render.MorphWeights;
 import java.time.Duration;
 import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.graph.Access;
@@ -82,7 +84,7 @@ import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.meshbuild.MeshBuilder;
 import com.truesim.scene.render.MaterialData;
 import com.truesim.scene.render.RenderAssets;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import com.truesim.scene.render.SkinBinding;
 import com.truesim.scene.render.TextureData;
 import com.truesim.engine.vulkan.Format;
@@ -376,8 +378,7 @@ class SceneSyncTest {
         tasks.drainCompleted(); // the frame boundary: loads arrive
         for (int s = 0; s < syncs.size(); s++) {
             SceneSync sync = syncs.get(s);
-            sync.renderables().scene().update();
-            sync.renderables().update();
+            sync.scene().update();
             sync.update();
         }
         for (int v = 0; v < cameraViews.size(); v++) {
@@ -410,13 +411,13 @@ class SceneSyncTest {
     @Test
     void renderablesDrawOnceTheirAssetsLoadRelativeToTheCamera() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         GpuBuffer[] readbacks = {readback(), readback()};
         FrameGraph graph = graph(sync, false, readbacks);
         // Far from the world origin, left of a camera there too: floats relative to the camera keep it precise.
         long node = facing(scene, 1e7 - 1, 0, -3);
-        renderables.set(node, SQUARE, List.of(RED));
+        renderables.set(node, Renderable.of(SQUARE, List.of(RED)));
         camera.position(1e7, 0, 0);
         frame(List.of(graph), List.of(sync), camera);
         assertThat(sync.renderableCount()).isEqualTo(1);
@@ -450,7 +451,7 @@ class SceneSyncTest {
         long own = facing(scene, 1e7 - 1, 0, -3); // a game's own bounds stay
         scene.setLocalBounds(own, -5, -5, -5, 5, 5, 5);
         scene.components().set(own, com.truesim.scene.core.Pickable.TYPE, com.truesim.scene.core.Pickable.mesh());
-        renderables.set(own, SQUARE, List.of(RED));
+        renderables.set(own, Renderable.of(SQUARE, List.of(RED)));
         assertThat(sync.bounds(false).bounds(true).bounds(true).bounds()).isTrue();
         for (int frame = 0; frame < 2; frame++) {
             frame(List.of(graph), List.of(sync), camera);
@@ -475,7 +476,7 @@ class SceneSyncTest {
         assertThat(litColumn(readbacks[0], 0)).as("the camera moved past it").isLessThan(SIZE / 2.0 - 4);
         // A material change draws in the new one, keeping the mesh on the GPU and the instance id.
         int mesh = sync.meshOf(node);
-        renderables.setMaterials(node, List.of(GREEN));
+        renderables.set(node, renderables.get(node).withMaterials(List.of(GREEN)));
         frame(List.of(graph), List.of(sync), camera);
         assertThat(sync.meshOf(node)).as("the same mesh, not uploaded again").isEqualTo(mesh);
         assertThat(sync.slotOf(node)).isZero();
@@ -507,8 +508,8 @@ class SceneSyncTest {
     @Test
     void skinnedRenderablesDrawCopiesPosedByTheirJoints() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         GpuBuffer[] readbacks = {readback(), readback()};
         FrameGraph graph = graph(sync, false, readbacks);
         long body = facing(scene, -1, 0, -3);
@@ -519,8 +520,8 @@ class SceneSyncTest {
             identities[5 * i] = 1; // two identity matrices
             identities[16 + 5 * i] = 1;
         }
-        renderables.set(body, SKINNED, List.of(RED));
-        renderables.setSkin(body, new SkinBinding(new long[] {left, right}, identities));
+        renderables.set(body, Renderable.of(SKINNED, List.of(RED)));
+        renderables.set(body, renderables.get(body).withSkin(new SkinBinding(new long[] {left, right}, identities)));
         settle(List.of(graph), List.of(sync));
         device.waitIdle();
         assertThat(sync.instanceCount()).isOne();
@@ -552,7 +553,7 @@ class SceneSyncTest {
         scene.setTranslation(right, 2, 0, 0);
         // Without its skin the mesh draws as it is, at rest; the copy leaves the pool.
         int meshes = pool.meshCount();
-        renderables.setSkin(body, null);
+        renderables.set(body, renderables.get(body).withSkin(null));
         for (int frame = 0; frame < 2; frame++) {
             frame(List.of(graph), List.of(sync), camera);
         }
@@ -561,7 +562,7 @@ class SceneSyncTest {
         assertThat(pool.meshCount()).isEqualTo(meshes - 1);
         assertThat(litColumn(readbacks[0], 0)).as("at rest again").isCloseTo(rest, within(0.5));
         // Skinned again, then removed: the copy goes with it, before its mesh.
-        renderables.setSkin(body, new SkinBinding(new long[] {left, right}, identities));
+        renderables.set(body, renderables.get(body).withSkin(new SkinBinding(new long[] {left, right}, identities)));
         frame(List.of(graph), List.of(sync), camera);
         assertThat(pool.deformation().size()).isOne();
         renderables.remove(body);
@@ -576,12 +577,12 @@ class SceneSyncTest {
         tracing = closing(new RayTracing(device, pool, INSTANCES));
         assumeThat(tracing.quantizedVertices()).as("copies' levels read quantized positions").isTrue();
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         GpuBuffer[] readbacks = {readback(), readback()};
         FrameGraph graph = graph(sync, false, readbacks);
         long still = facing(scene, 1, 0, -3);
-        renderables.set(still, SQUARE, List.of(RED));
+        renderables.set(still, Renderable.of(SQUARE, List.of(RED)));
         long body = facing(scene, -1, 0, -3);
         long left = scene.create(body);
         long right = scene.create(body);
@@ -590,8 +591,8 @@ class SceneSyncTest {
             identities[5 * i] = 1;
             identities[16 + 5 * i] = 1;
         }
-        renderables.set(body, SKINNED, List.of(RED));
-        renderables.setSkin(body, new SkinBinding(new long[] {left, right}, identities));
+        renderables.set(body, Renderable.of(SKINNED, List.of(RED)));
+        renderables.set(body, renderables.get(body).withSkin(new SkinBinding(new long[] {left, right}, identities)));
         settle(List.of(graph), List.of(sync));
         int square = sync.meshOf(still);
         int copy = copyOf(sync.meshOf(body));
@@ -620,10 +621,10 @@ class SceneSyncTest {
         frame(List.of(graph), List.of(sync), camera);
         assertThat(tracing.bottomLevelsUpdatedLastFrame()).isZero();
         // Without its skin the copy leaves, its level with it; skinned again, a new copy has one from the start.
-        renderables.setSkin(body, null);
+        renderables.set(body, renderables.get(body).withSkin(null));
         frame(List.of(graph), List.of(sync), camera);
         assertThat(tracing.bottomLevelAdded(copy)).isFalse();
-        renderables.setSkin(body, new SkinBinding(new long[] {left, right}, identities));
+        renderables.set(body, renderables.get(body).withSkin(new SkinBinding(new long[] {left, right}, identities)));
         frame(List.of(graph), List.of(sync), camera);
         int again = copyOf(sync.meshOf(body));
         assertThat(tracing.bottomLevelAdded(again)).isTrue();
@@ -633,7 +634,7 @@ class SceneSyncTest {
         assertThat(tracing.hasBottomLevel(again)).isTrue();
         // Meshes uploaded later get theirs too; leaving the pool, they go.
         long late = facing(scene, 0, 1, -3);
-        renderables.set(late, SMALL, List.of(GREEN));
+        renderables.set(late, Renderable.of(SMALL, List.of(GREEN)));
         settle(List.of(graph), List.of(sync));
         int small = sync.meshOf(late);
         assertThat(tracing.bottomLevelAdded(small)).isTrue();
@@ -653,13 +654,13 @@ class SceneSyncTest {
         resources.rayTracing(tracing);
         segmentCapacity = 4;
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         FrameGraph graph = graph(sync, false, new GpuBuffer[] {readback(), readback()});
         long red = facing(scene, 1, 0, -3);
-        renderables.set(red, SQUARE, List.of(RED));
+        renderables.set(red, Renderable.of(SQUARE, List.of(RED)));
         long green = facing(scene, -1, 0, -3);
-        renderables.set(green, SQUARE, List.of(GREEN));
+        renderables.set(green, Renderable.of(SQUARE, List.of(GREEN)));
         settle(List.of(graph), List.of(sync));
         for (int frame = 0; frame < 12 && tracing.pendingBottomLevels() > 0; frame++) {
             frame(List.of(graph), List.of(sync), camera);
@@ -717,18 +718,18 @@ class SceneSyncTest {
     @Test
     void morphingRenderablesDrawCopiesMovedByTheirWeights() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         GpuBuffer[] readbacks = {readback(), readback()};
         FrameGraph graph = graph(sync, false, readbacks);
         long face = facing(scene, -1, 0, -3);
-        renderables.set(face, MORPHING, List.of(RED));
+        renderables.set(face, Renderable.of(MORPHING, List.of(RED)));
         settle(List.of(graph), List.of(sync));
         device.waitIdle();
         assertThat(pool.deformation().size()).as("a copy, without a skin").isOne();
         double rest = litColumn(readbacks[0], 0);
         assertThat(rest).as("weight 0: at rest, left").isLessThan(SIZE / 2.0 - 4);
-        renderables.setMorphWeights(face, new double[] {1}, 0, 1);
+        MorphWeights.write(scene, face, new double[] {1}, 0, 1);
         for (int frame = 0; frame < 2; frame++) {
             frame(List.of(graph), List.of(sync), camera);
         }
@@ -744,17 +745,17 @@ class SceneSyncTest {
         // 5,000 small squares, followed twice: by a sync writing on the calling thread and one writing on four. All
         // move each frame: every instance is rewritten, in parallel in the second, and both draw the same image.
         SceneGraph scene = new SceneGraph(new ChangeClock(), 6000, SceneGraph.DEFAULT_LOG_CAPACITY);
-        Renderables renderables = new Renderables(scene);
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
         long[] nodes = new long[5000];
         for (int i = 0; i < nodes.length; i++) {
             nodes[i] = facing(scene, (i % 100 - 49.5) * 0.05, (i / 100 - 24.5) * 0.05, -3);
             scene.setScale(nodes[i], 0.01, 0.01, 0.01);
-            renderables.set(nodes[i], SQUARE, List.of(RED));
+            renderables.set(nodes[i], Renderable.of(SQUARE, List.of(RED)));
         }
         try (com.truesim.common.jobs.JobSystem jobs = new com.truesim.common.jobs.JobSystem(4)) {
-            SceneSync serial = closing(new SceneSync(resources, renderables, closing(new GpuScene(device, pool, 5000,
+            SceneSync serial = closing(new SceneSync(resources, scene, closing(new GpuScene(device, pool, 5000,
                 slots))));
-            SceneSync parallel = closing(new SceneSync(resources, renderables, closing(new GpuScene(device, pool,
+            SceneSync parallel = closing(new SceneSync(resources, scene, closing(new GpuScene(device, pool,
                 5000, slots)), jobs));
             GpuBuffer[] serialReadbacks = {readback(), readback()};
             GpuBuffer[] parallelReadbacks = {readback(), readback()};
@@ -799,13 +800,13 @@ class SceneSyncTest {
             (glow, seed) -> MaterialData.builder(MR).alpha(MaterialData.AlphaMode.BLEND, 0.5f).build(),
             new Glow(1, 1, 1), 6);
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         List<FrameGraph> graphs = List.of(graph(sync, false, new GpuBuffer[] {readback(), readback()}));
         RenderView cameraView = cameraViews.getLast();
-        renderables.set(facing(scene, -1.5, 0, -4), SQUARE, List.of(masked));
-        renderables.set(facing(scene, 0, 0, -4), SQUARE, List.of(twoSided));
-        renderables.set(facing(scene, 1.5, 0, -4), SQUARE, List.of(blended));
+        renderables.set(facing(scene, -1.5, 0, -4), Renderable.of(SQUARE, List.of(masked)));
+        renderables.set(facing(scene, 0, 0, -4), Renderable.of(SQUARE, List.of(twoSided)));
+        renderables.set(facing(scene, 1.5, 0, -4), Renderable.of(SQUARE, List.of(blended)));
         settle(graphs, List.of(sync));
         device.waitIdle();
         assertThat(cameraView.visibleMeshlets(0)).as("none opaque and one-sided").isZero();
@@ -839,16 +840,16 @@ class SceneSyncTest {
             }
         });
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, closing(new GpuScene(device, pool, 8, slots))));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, closing(new GpuScene(device, pool, 8, slots))));
         List<FrameGraph> graphs = List.of(graph(sync, false, new GpuBuffer[] {readback(), readback()}));
         int before = materials.count();
-        renderables.set(facing(scene, -1, 0, -4), SQUARE, List.of(green.ref()));
-        renderables.set(facing(scene, 1, 0, -4), SQUARE, List.of(same.ref()));
-        renderables.set(facing(scene, 0, 1, -4), SQUARE, List.of(unknown.ref()));
-        renderables.set(facing(scene, 0, -1, -4), SQUARE, List.of(outOfRange.ref()));
-        renderables.set(facing(scene, 2, 0, -4), SQUARE, List.of(unknownFeature.ref()));
-        renderables.set(facing(scene, -2, 0, -4), SQUARE, List.of(typos.ref()));
+        renderables.set(facing(scene, -1, 0, -4), Renderable.of(SQUARE, List.of(green.ref())));
+        renderables.set(facing(scene, 1, 0, -4), Renderable.of(SQUARE, List.of(same.ref())));
+        renderables.set(facing(scene, 0, 1, -4), Renderable.of(SQUARE, List.of(unknown.ref())));
+        renderables.set(facing(scene, 0, -1, -4), Renderable.of(SQUARE, List.of(outOfRange.ref())));
+        renderables.set(facing(scene, 2, 0, -4), Renderable.of(SQUARE, List.of(unknownFeature.ref())));
+        renderables.set(facing(scene, -2, 0, -4), Renderable.of(SQUARE, List.of(typos.ref())));
         settle(graphs, List.of(sync));
         device.waitIdle();
         assertThat(materials.count()).as("one for the equal data, one each for the rest").isEqualTo(before + 5);
@@ -884,10 +885,10 @@ class SceneSyncTest {
             (glow, seed) -> MaterialData.builder(MR)
                 .feature("clearcoat", coat -> coat.set("roughness", 0.1f)).build(), new Glow(1, 1, 1), 7);
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         List<FrameGraph> graphs = List.of(graph(sync, false, new GpuBuffer[] {readback(), readback()}));
-        renderables.set(facing(scene, 0, 0, -4), SQUARE, List.of(coated));
+        renderables.set(facing(scene, 0, 0, -4), Renderable.of(SQUARE, List.of(coated)));
         settle(graphs, List.of(sync));
         device.waitIdle();
         Materials materials = resources.materials();
@@ -906,11 +907,11 @@ class SceneSyncTest {
         // and each graph's view draws one of them by its layers (the gizmos' nodes on layer 1).
         SceneGraph world = new SceneGraph(new ChangeClock());
         SceneGraph gizmos = new SceneGraph(new ChangeClock());
-        Renderables worldRenderables = new Renderables(world);
-        Renderables gizmoRenderables = new Renderables(gizmos);
+        ComponentStore<Renderable> worldRenderables = world.components().store(Renderable.TYPE);
+        ComponentStore<Renderable> gizmoRenderables = gizmos.components().store(Renderable.TYPE);
         GpuScene gpu = gpu();
-        SceneSync worldSync = closing(new SceneSync(resources, worldRenderables, gpu));
-        SceneSync gizmoSync = closing(new SceneSync(resources, gizmoRenderables, gpu));
+        SceneSync worldSync = closing(new SceneSync(resources, world, gpu));
+        SceneSync gizmoSync = closing(new SceneSync(resources, gizmos, gpu));
         GpuBuffer[] worldReadbacks = {readback(), readback()};
         GpuBuffer[] gizmoReadbacks = {readback(), readback()};
         List<FrameGraph> graphs = List.of(
@@ -920,8 +921,8 @@ class SceneSyncTest {
         long left = facing(world, -1, 0, -3);
         long right = facing(gizmos, 1, 0, -3);
         gizmos.setLayers(right, 1 << 1);
-        worldRenderables.set(left, SQUARE, List.of(RED));
-        gizmoRenderables.set(right, SQUARE, List.of(RED));
+        worldRenderables.set(left, Renderable.of(SQUARE, List.of(RED)));
+        gizmoRenderables.set(right, Renderable.of(SQUARE, List.of(RED)));
         frame(graphs, syncs, camera);
         load();
         for (int frame = 0; frame < 3; frame++) {
@@ -950,10 +951,10 @@ class SceneSyncTest {
         boolean visibility = device.primitiveIds();
         SceneGraph first = new SceneGraph(new ChangeClock());
         SceneGraph second = new SceneGraph(new ChangeClock());
-        Renderables firstRenderables = new Renderables(first);
-        Renderables secondRenderables = new Renderables(second);
-        SceneSync firstSync = closing(new SceneSync(resources, firstRenderables, gpu()));
-        SceneSync secondSync = closing(new SceneSync(resources, secondRenderables, gpu()));
+        ComponentStore<Renderable> firstRenderables = first.components().store(Renderable.TYPE);
+        ComponentStore<Renderable> secondRenderables = second.components().store(Renderable.TYPE);
+        SceneSync firstSync = closing(new SceneSync(resources, first, gpu()));
+        SceneSync secondSync = closing(new SceneSync(resources, second, gpu()));
         GpuBuffer[] firstReadbacks = {readback(), readback()};
         GpuBuffer[] secondReadbacks = {readback(), readback()};
         List<FrameGraph> graphs = List.of(graph(firstSync, false, firstReadbacks),
@@ -961,8 +962,8 @@ class SceneSyncTest {
         List<SceneSync> syncs = List.of(firstSync, secondSync);
         long left = facing(first, -1, 0, -3);
         long right = facing(second, 1, 0, -3);
-        firstRenderables.set(left, SQUARE, List.of(RED));
-        secondRenderables.set(right, SQUARE, List.of(RED));
+        firstRenderables.set(left, Renderable.of(SQUARE, List.of(RED)));
+        secondRenderables.set(right, Renderable.of(SQUARE, List.of(RED)));
         frame(graphs, syncs, camera);
         load();
         for (int frame = 0; frame < 4; frame++) {
@@ -1002,19 +1003,19 @@ class SceneSyncTest {
         AssetRef<MaterialData> textured = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
             (glow, seed) -> MaterialData.builder(MR).texture("baseColorTexture", white).build(), new Glow(1, 1, 1), 2);
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         long a = facing(scene, -1, 0, -3);
         long b = facing(scene, 1, 0, -3);
         long bare = facing(scene, 0, 1, -3);
-        renderables.set(a, SQUARE, List.of(textured));
-        renderables.set(b, SQUARE, List.of(textured));
-        renderables.set(bare, SQUARE, List.of()); // the default material
-        update(scene, renderables, sync);
+        renderables.set(a, Renderable.of(SQUARE, List.of(textured)));
+        renderables.set(b, Renderable.of(SQUARE, List.of(textured)));
+        renderables.set(bare, Renderable.of(SQUARE, List.of())); // the default material
+        update(scene, sync);
         load();
-        update(scene, renderables, sync);
+        update(scene, sync);
         load(); // the texture, asked for once the material loaded
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.instanceCount()).isEqualTo(3);
         assertThat(sync.firstMaterialOf(a)).isEqualTo(sync.firstMaterialOf(b));
         assertThat(sync.firstMaterialOf(bare)).isNotEqualTo(sync.firstMaterialOf(a));
@@ -1025,7 +1026,7 @@ class SceneSyncTest {
         // Gone: the texture leaves too.
         renderables.remove(a);
         renderables.remove(b);
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(resources.textureCount()).isZero();
         assertThat(assets.holders(white)).isZero();
         assertThat(sync.renderableCount()).isEqualTo(1);
@@ -1062,17 +1063,17 @@ class SceneSyncTest {
             }
         });
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         long node = facing(scene, 0, 0, -3);
-        renderables.set(node, SQUARE, List.of(moved));
-        renderables.set(facing(scene, 1, 0, -3), SQUARE, List.of(thirdSet));
-        renderables.set(facing(scene, 0, 1, -3), SQUARE, List.of(badOffset));
+        renderables.set(node, Renderable.of(SQUARE, List.of(moved)));
+        renderables.set(facing(scene, 1, 0, -3), Renderable.of(SQUARE, List.of(thirdSet)));
+        renderables.set(facing(scene, 0, 1, -3), Renderable.of(SQUARE, List.of(badOffset)));
         for (int round = 0; round < 4; round++) {
-            update(scene, renderables, sync);
+            update(scene, sync);
             load();
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         Material made = materials.material(sync.firstMaterialOf(node));
         MetallicRoughnessParameters p = (MetallicRoughnessParameters) made.parameters();
         assertThat(TextureSampler.transformOf(p.baseColorTexture())).isEqualTo(1);
@@ -1116,12 +1117,12 @@ class SceneSyncTest {
                 .feature("clearcoat", coat -> coat.set("strength", 0.2f).texture("normalTexture", white))
                 .build(), new Glow(1, 1, 1), 71);
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         long node = facing(scene, 0, 0, -3);
-        renderables.set(node, SQUARE, List.of(lamp));
+        renderables.set(node, Renderable.of(SQUARE, List.of(lamp)));
         for (int round = 0; round < 4; round++) {
-            update(scene, renderables, sync);
+            update(scene, sync);
             load();
         }
         // First animated: the material converts with the values, then each change goes in place
@@ -1136,7 +1137,7 @@ class SceneSyncTest {
         resources.animate(lamp, "sheen:sheenRoughnessFactor", new double[] {1}, 0, 1); // no sheen shown: ignored
         resources.animate(lamp, "baseColorTexture", new double[] {3}, 0, 1);     // a texture slot: not animated
         resources.animate(RED, "baseColor", new double[] {0, 0, 1, 1}, 0, 4);    // drawn by nothing here
-        update(scene, renderables, sync);
+        update(scene, sync);
         int id = sync.firstMaterialOf(node);
         Material made = materials.material(id);
         MetallicRoughnessParameters p = (MetallicRoughnessParameters) made.parameters();
@@ -1191,8 +1192,8 @@ class SceneSyncTest {
         resources.pointerSink().value(null, mesh, new double[] {5}, 0, 1);
         assertThat(materials.value(id, MetallicRoughnessParameters.BASE_COLOR, 2)).isEqualTo(1);
         long second = facing(scene, 1, 0, -3);
-        renderables.set(second, SQUARE, List.of(lamp, RED));
-        update(scene, renderables, sync);
+        renderables.set(second, Renderable.of(SQUARE, List.of(lamp, RED)));
+        update(scene, sync);
         assertThat(((MetallicRoughnessParameters) materials.material(sync.firstMaterialOf(second)).parameters())
             .baseColor()).isEqualTo(new Color(0, 0, 1, 1));
         double[] values = new double[4];
@@ -1205,7 +1206,7 @@ class SceneSyncTest {
         // Let go of, it is forgotten
         renderables.remove(node);
         renderables.remove(second);
-        update(scene, renderables, sync);
+        update(scene, sync);
         resources.animate(lamp, "baseColor", new double[] {1, 1, 1, 1}, 0, 4);
     }
 
@@ -1223,15 +1224,15 @@ class SceneSyncTest {
                     .set("diffuseTransmissionColorFactor", 1f, 0.5f, 0f))
                 .build(), new Glow(1, 1, 1), 83);
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         long node = facing(scene, 0, 0, -3);
-        renderables.set(node, SQUARE, List.of(rich));
+        renderables.set(node, Renderable.of(SQUARE, List.of(rich)));
         for (int round = 0; round < 3; round++) {
-            update(scene, renderables, sync);
+            update(scene, sync);
             load();
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         Material made = materials.material(sync.firstMaterialOf(node));
         assertThat(made.features()).containsExactlyInAnyOrder(
             AnisotropyParameters.DEFAULTS.withAnisotropyStrength(0.5f).withAnisotropyRotation(1),
@@ -1252,15 +1253,15 @@ class SceneSyncTest {
                     .set("attenuationColor", 0.25f, 0.5f, 0.75f))
                 .build(), new Glow(1, 1, 1), 82);
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         long node = facing(scene, 0, 0, -3);
-        renderables.set(node, SQUARE, List.of(glass));
+        renderables.set(node, Renderable.of(SQUARE, List.of(glass)));
         for (int round = 0; round < 3; round++) {
-            update(scene, renderables, sync);
+            update(scene, sync);
             load();
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         Material made = materials.material(sync.firstMaterialOf(node));
         assertThat(made.features()).containsExactlyInAnyOrder(
             TransmissionParameters.DEFAULTS.withTransmissionFactor(0.9f),
@@ -1280,15 +1281,15 @@ class SceneSyncTest {
                 .feature("sheen", f -> f.set("sheenColorFactor", 0.2f, 0.3f, 0.4f).set("sheenRoughnessFactor", 0.6f))
                 .build(), new Glow(1, 1, 1), 81);
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         long node = facing(scene, 0, 0, -3);
-        renderables.set(node, SQUARE, List.of(cloth));
+        renderables.set(node, Renderable.of(SQUARE, List.of(cloth)));
         for (int round = 0; round < 3; round++) {
-            update(scene, renderables, sync);
+            update(scene, sync);
             load();
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         Material made = materials.material(sync.firstMaterialOf(node));
         assertThat(made.features()).containsExactlyInAnyOrder(
             SpecularParameters.DEFAULTS.withSpecularFactor(0.5f).withSpecularColorFactor(new Color(1, 0.5, 0.5, 1)),
@@ -1305,25 +1306,24 @@ class SceneSyncTest {
             (glow, seed) -> MaterialData.builder("tinted").feature("unlit", unlit -> { }).build(), new Glow(1, 1, 1),
             71);
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         long node = facing(scene, 0, 0, -3);
-        renderables.set(node, SQUARE, List.of(flat));
+        renderables.set(node, Renderable.of(SQUARE, List.of(flat)));
         for (int round = 0; round < 3; round++) {
-            update(scene, renderables, sync);
+            update(scene, sync);
             load();
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         Material made = materials.material(sync.firstMaterialOf(node));
         assertThat(made.parameters()).isInstanceOf(TintedParameters.class);
         assertThat(made.features()).containsExactly(UnlitParameters.DEFAULTS);
         assertThat(made.featureMask()).isEqualTo(Material.FEATURE_UNLIT);
     }
 
-    private void update(SceneGraph scene, Renderables renderables, SceneSync sync) {
+    private void update(SceneGraph scene, SceneSync sync) {
         tasks.drainCompleted();
         scene.update();
-        renderables.update();
         sync.update();
     }
 
@@ -1336,8 +1336,8 @@ class SceneSyncTest {
     @Test
     void wholeRenderablesWaitForTheirAssetsStreamedOnesDoNot() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 41);
         AssetRef<TextureData> late = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xff00ff00), 42);
         AssetRef<MaterialData> whole = textured(white, 41);
@@ -1349,9 +1349,9 @@ class SceneSyncTest {
         assertThat(resources.loadingOf(late)).isEqualTo(SceneResources.Loading.STREAM);
         long waits = facing(scene, 0, 0, -3);
         long draws = facing(scene, 1, 0, -3);
-        renderables.set(waits, SQUARE, List.of(whole));
-        renderables.set(draws, SQUARE, List.of(streamed));
-        update(scene, renderables, sync);
+        renderables.set(waits, Renderable.of(SQUARE, List.of(whole)));
+        renderables.set(draws, Renderable.of(SQUARE, List.of(streamed)));
+        update(scene, sync);
         long deadline = System.nanoTime() + 10_000_000_000L;
         while (tasks.pending() > 0) { // the mesh loaded, not handed over yet
             assertThat(System.nanoTime()).isLessThan(deadline);
@@ -1359,7 +1359,6 @@ class SceneSyncTest {
         }
         tasks.drainCompleted(); // the mesh arrives: its renderables' materials are asked for
         scene.update();
-        renderables.update();
         sync.update(); // nothing more handed over meanwhile
         assertThat(sync.slotOf(draws)).as("streamed: drawn with its mesh").isNotNegative();
         assertThat(sync.slotOf(waits)).as("whole: waits for its material and texture").isEqualTo(-1);
@@ -1367,7 +1366,7 @@ class SceneSyncTest {
         assertThat(resources.loadingCount()).isPositive();
         for (int round = 0; round < 4 && sync.slotOf(waits) < 0; round++) {
             load();
-            update(scene, renderables, sync);
+            update(scene, sync);
         }
         assertThat(sync.slotOf(waits)).as("drawn once all of it is on the GPU").isNotNegative();
         assertThat(sync.waitingCount()).isZero();
@@ -1378,12 +1377,12 @@ class SceneSyncTest {
                 throw new IllegalStateException("no such texture");
             }, new Plain(0), 43);
         long failing = facing(scene, 2, 0, -3);
-        renderables.set(failing, SQUARE, List.of(textured(broken, 43)));
+        renderables.set(failing, Renderable.of(SQUARE, List.of(textured(broken, 43))));
         for (int round = 0; round < 4 && sync.slotOf(failing) < 0; round++) {
-            update(scene, renderables, sync);
+            update(scene, sync);
             load();
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.slotOf(failing)).isNotNegative();
         resources.loading(late, null);
         assertThat(resources.loadingOf(late)).as("back to the default").isEqualTo(SceneResources.Loading.WHOLE);
@@ -1392,50 +1391,48 @@ class SceneSyncTest {
     @Test
     void drawnRenderablesKeepTheirIdsAndLooksUntilWhatTheyChangeToArrives() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         resources.loading(SceneResources.Loading.WHOLE);
         long node = facing(scene, 0, 0, -3);
-        renderables.set(node, SQUARE, List.of(RED));
+        renderables.set(node, Renderable.of(SQUARE, List.of(RED)));
         for (int round = 0; round < 4 && sync.slotOf(node) < 0; round++) {
-            update(scene, renderables, sync);
+            update(scene, sync);
             load();
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         int slot = sync.slotOf(node);
         int redBlock = sync.firstMaterialOf(node);
         int square = sync.meshOf(node);
         assertThat(slot).isNotNegative();
         // A textured material, waited for whole: drawn red, in its id, until the material and its texture are there.
         AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 61);
-        renderables.setMaterials(node, List.of(textured(white, 61)));
+        renderables.set(node, renderables.get(node).withMaterials(List.of(textured(white, 61))));
         scene.update();
-        renderables.update();
         sync.update(); // nothing loaded yet
         assertThat(sync.slotOf(node)).isEqualTo(slot);
         assertThat(sync.firstMaterialOf(node)).as("red until the new one is whole").isEqualTo(redBlock);
         for (int round = 0; round < 4 && sync.firstMaterialOf(node) == redBlock; round++) {
             load();
-            update(scene, renderables, sync);
+            update(scene, sync);
         }
         assertThat(sync.firstMaterialOf(node)).isNotEqualTo(redBlock);
         assertThat(sync.slotOf(node)).as("the same instance").isEqualTo(slot);
         // Another mesh: the square drawn, in the id, until the small one is on the GPU; then the small one there.
-        renderables.setMesh(node, SMALL);
+        renderables.set(node, renderables.get(node).withMesh(SMALL));
         scene.update();
-        renderables.update();
         sync.update();
         assertThat(sync.slotOf(node)).isEqualTo(slot);
         assertThat(sync.meshOf(node)).as("the square until the new mesh comes").isEqualTo(square);
         for (int round = 0; round < 4 && sync.meshOf(node) == square; round++) {
             load();
-            update(scene, renderables, sync);
+            update(scene, sync);
         }
         assertThat(sync.meshOf(node)).isNotEqualTo(square);
         assertThat(sync.slotOf(node)).as("the same instance, the occlusion history with it").isEqualTo(slot);
         assertThat(sync.instanceCount()).isEqualTo(1);
         renderables.remove(node);
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(resources.meshCount()).isZero();
         assertThat(resources.materialSetCount()).isZero();
     }
@@ -1454,11 +1451,11 @@ class SceneSyncTest {
             });
         closedPool.close();
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        try (SceneSync sync = new SceneSync(broken, renderables, new GpuScene(device, closedPool, 4, slots))) {
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        try (SceneSync sync = new SceneSync(broken, scene, new GpuScene(device, closedPool, 4, slots))) {
             AssetRef<MeshData> lost = AssetRef.generated(RenderAssets.MESH, SQUARES, new Square(7), 1);
-            renderables.set(facing(scene, 0, 0, -3), lost, List.of());
-            update(scene, renderables, sync);
+            renderables.set(facing(scene, 0, 0, -3), Renderable.of(lost, List.of()));
+            update(scene, sync);
             assertThat(broken.awaitLoaded(tasks, Duration.ofSeconds(10))).as("not waited for forever").isTrue();
             assertThat(failed).containsExactly(lost);
             assertThat(broken.loadingCount()).isZero();
@@ -1475,13 +1472,12 @@ class SceneSyncTest {
         load();
         resources.loading(SceneResources.Loading.WHOLE);
         SceneGraph other = new SceneGraph(new ChangeClock());
-        Renderables using = new Renderables(other);
-        SceneSync sync = closing(new SceneSync(resources, using, gpu()));
+        SceneSync sync = closing(new SceneSync(resources, other, gpu()));
         long node = facing(other, 0, 0, -3);
-        using.set(node, SQUARE, List.of(textured(missing, 62)));
-        update(other, using, sync);
+        other.components().set(node, Renderable.TYPE, Renderable.of(SQUARE, List.of(textured(missing, 62))));
+        update(other, sync);
         assertThat(resources.awaitLoaded(tasks, Duration.ofSeconds(10))).isTrue();
-        update(other, using, sync);
+        update(other, sync);
         assertThat(sync.slotOf(node)).as("drawn untextured, not waiting").isNotNegative();
         assets.release(missing);
         // Misuse: a mode for a mesh, and waiting on a scheduler other than the one preparing.
@@ -1496,26 +1492,26 @@ class SceneSyncTest {
     @Test
     void assetsPreparedOnWorkersAreAwaitedWhole() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         resources.prepareOn(tasks, 2).loading(SceneResources.Loading.WHOLE);
         AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 51);
         long node = facing(scene, 0, 0, -3);
-        renderables.set(node, SQUARE, List.of(textured(white, 51)));
-        update(scene, renderables, sync);
+        renderables.set(node, Renderable.of(SQUARE, List.of(textured(white, 51))));
+        update(scene, sync);
         assertThat(resources.loadingCount()).isPositive();
         // A loading screen's wait: the mesh, its material and texture loaded, made ready on the workers and added.
         assertThat(resources.awaitLoaded(tasks, Duration.ofSeconds(10))).isTrue();
         assertThat(resources.loadingCount()).isZero();
         assertThat(resources.uploadedMeshCount()).isEqualTo(1);
         assertThat(textures.count()).isEqualTo(1);
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.slotOf(node)).as("all of it drawn from the next frame").isNotNegative();
         // Let go of while being made ready: freed once the workers are done, nothing leaks.
         AssetRef<TextureData> gray = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xff808080), 52);
         long brief = facing(scene, 1, 0, -3);
-        renderables.set(brief, SMALL, List.of(textured(gray, 52)));
-        update(scene, renderables, sync);
+        renderables.set(brief, Renderable.of(SMALL, List.of(textured(gray, 52))));
+        update(scene, sync);
         assertThat(resources.awaitLoaded(tasks, Duration.ZERO)).as("not at once").isFalse();
         long deadline = System.nanoTime() + 10_000_000_000L;
         while (resources.meshCount() < 2 || tasks.pending() == 0 && resources.uploadedMeshCount() < 2) {
@@ -1524,9 +1520,9 @@ class SceneSyncTest {
             tasks.drainCompleted();
         }
         renderables.remove(brief);
-        update(scene, renderables, sync);
+        update(scene, sync);
         load();
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(resources.meshCount()).isEqualTo(1);
         assertThat(resources.loadingCount()).isZero();
         resources.prepareOn(tasks, 0);
@@ -1535,37 +1531,43 @@ class SceneSyncTest {
     @Test
     void renderablesBeyondTheTablesRoomGrowIt() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         long[] nodes = new long[INSTANCES + 2];
         for (int i = 0; i < nodes.length; i++) {
             nodes[i] = facing(scene, i, 0, -3);
-            renderables.set(nodes[i], SQUARE, List.of());
+            renderables.set(nodes[i], Renderable.of(SQUARE, List.of()));
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         load();
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.instanceCount()).as("the instance table grew").isEqualTo(INSTANCES + 2);
         assertThat(sync.waitingCount()).isZero();
         assertThat(sync.slotOf(nodes[nodes.length - 1])).isNotNegative();
         renderables.remove(nodes[nodes.length - 1]);
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.instanceCount()).isEqualTo(INSTANCES + 1);
         // A mesh change: drawn again with the new mesh once it loads.
-        renderables.setMesh(nodes[2], SMALL);
-        update(scene, renderables, sync);
+        renderables.set(nodes[2], renderables.get(nodes[2]).withMesh(SMALL));
+        update(scene, sync);
         load();
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.meshCount()).isEqualTo(2);
         assertThat(sync.meshOf(nodes[2])).isNotEqualTo(sync.meshOf(nodes[3]));
         // Falling behind the renderables' log rebuilds from them as they are.
-        Renderables few = new Renderables(scene, 2);
-        try (SceneSync behind = new SceneSync(resources, few, gpu())) {
+        SceneGraph apart = new SceneGraph(new ChangeClock());
+        ComponentStore<Renderable> few = apart.components().store(Renderable.TYPE);
+        try (SceneSync behind = new SceneSync(resources, apart, gpu())) {
             behind.update();
             for (int i = 0; i < 3; i++) {
-                few.set(facing(scene, 0, -i, -3), SQUARE, List.of());
+                few.set(facing(apart, 0, -i, -3), Renderable.of(SQUARE, List.of()));
             }
-            update(scene, few, behind);
+            Renderable lit = few.value(0);
+            Renderable unlit = lit.withCastsShadows(false);
+            for (int i = 0; i <= ComponentStore.MAX_LOG; i++) { // more changes than the log keeps
+                few.set(few.node(0), i % 2 == 0 ? unlit : lit);
+            }
+            update(apart, behind);
             assertThat(behind.instanceCount()).isEqualTo(3);
         }
         assertThat(sync.slotOf(scene.create())).isEqualTo(-1);
@@ -1590,7 +1592,7 @@ class SceneSyncTest {
         AssetRef<MaterialData> moss = AssetRef.generated(RenderAssets.MATERIAL, (Generator<Glow, MaterialData>)
             (glow, seed) -> MaterialData.builder(MR).texture("baseColorTexture", missing).build(), new Glow(0, 0.5f, 0), 3);
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
         List<AssetRef<?>> failed = new ArrayList<>();
         resources.diagnostics(new SceneResources.Diagnostics() {
             @Override
@@ -1598,16 +1600,16 @@ class SceneSyncTest {
                 failed.add(asset);
             }
         });
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         long rock = facing(scene, 0, 0, -3);
         long bush = facing(scene, 1, 0, -3);
-        renderables.set(rock, SQUARE, List.of(stone));
-        renderables.set(bush, SMALL, List.of(moss));
-        update(scene, renderables, sync);
+        renderables.set(rock, Renderable.of(SQUARE, List.of(stone)));
+        renderables.set(bush, Renderable.of(SMALL, List.of(moss)));
+        update(scene, sync);
         load(); // the meshes: drawn at the next update, their materials asked for then
-        update(scene, renderables, sync);
+        update(scene, sync);
         load(); // the materials, then their textures
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.instanceCount()).isEqualTo(2);
         assertThat(assets.state(missing)).isEqualTo(AssetState.FAILED);
         assertThat(failed).as("reported").containsExactly(missing);
@@ -1616,21 +1618,21 @@ class SceneSyncTest {
         // Gone, and back: what the cache still has draws at once.
         renderables.remove(rock);
         renderables.remove(bush);
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(resources.materialCount()).isZero();
         assertThat(resources.textureCount()).isZero();
         assertThat(textures.count()).isZero();
         assertThat(assets.state(stone)).isEqualTo(AssetState.LOADED);
-        renderables.set(rock, SQUARE, List.of(stone));
-        update(scene, renderables, sync);
+        renderables.set(rock, Renderable.of(SQUARE, List.of(stone)));
+        update(scene, sync);
         assertThat(sync.instanceCount()).isEqualTo(1);
         assertThat(textures.count()).isEqualTo(1);
         // A material arriving for a renderable already gone is never written.
-        renderables.setMaterials(rock, List.of(GREEN));
-        update(scene, renderables, sync);
+        renderables.set(rock, renderables.get(rock).withMaterials(List.of(GREEN)));
+        update(scene, sync);
         load();
         renderables.remove(rock);
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(resources.materialSetCount()).isZero();
         // Assets used elsewhere than in syncs are not uploaded, nor freed when they leave the cache.
         AssetRef<MeshData> elsewhere = AssetRef.generated(RenderAssets.MESH, SQUARES, new Square(3), 1);
@@ -1648,17 +1650,17 @@ class SceneSyncTest {
     @Test
     void thePoolGrowsForMoreMeshes() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         int meshes = pool.capacity().meshes() + 1;
         long[] nodes = new long[meshes];
         for (int i = 0; i < meshes; i++) {
             nodes[i] = facing(scene, i, 0, -3);
-            renderables.set(nodes[i], AssetRef.generated(RenderAssets.MESH, SQUARES, new Square(i + 1), 1), List.of());
+            renderables.set(nodes[i], Renderable.of(AssetRef.generated(RenderAssets.MESH, SQUARES, new Square(i + 1), 1), List.of()));
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         load();
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(resources.uploadedMeshCount()).isEqualTo(meshes);
         assertThat(pool.meshCount()).isEqualTo(meshes);
         assertThat(pool.capacity().meshes()).isGreaterThanOrEqualTo(meshes);
@@ -1670,8 +1672,8 @@ class SceneSyncTest {
     void onlyWhatViewsFollowIsRewritten() throws InterruptedException {
         // A scene keeping few changes, and nodes past the first of the sync's arrays.
         SceneGraph scene = new SceneGraph(new ChangeClock(), 16, 4);
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         for (int i = 0; i < 70; i++) {
             scene.create();
         }
@@ -1680,32 +1682,32 @@ class SceneSyncTest {
         long c = facing(scene, 1, 0, -3);
         long bare = scene.create();
         for (long node : new long[] {a, b, c}) {
-            renderables.set(node, SQUARE, List.of());
+            renderables.set(node, Renderable.of(SQUARE, List.of()));
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         load();
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.instanceCount()).isEqualTo(3);
         int slot = sync.slotOf(b);
         // Shadows are not followed yet: nothing changes. Nor do nodes without renderables.
-        renderables.setCastsShadows(b, false);
+        renderables.set(b, renderables.get(b).withCastsShadows(false));
         scene.setTranslation(bare, 5, 5, 5);
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.slotOf(b)).isEqualTo(slot);
         // More moves than the scene keeps: every instance is written again.
         for (int i = 0; i < 8; i++) {
             scene.setTranslation(a, -1, i, -3);
             scene.update();
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         // The middle one of a mesh's renderables goes.
         renderables.remove(b);
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.instanceCount()).isEqualTo(2);
         assertThat(sync.slotOf(b)).isEqualTo(-1);
         renderables.remove(a);
         renderables.remove(c);
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(resources.meshCount()).isZero();
     }
 
@@ -1714,12 +1716,12 @@ class SceneSyncTest {
         // The whole frame, as an application runs it: the frame boundary, the scene, the sync and both graphs'
         // frames, one forward, one through a visibility buffer, blitted into their targets.
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         long[] nodes = new long[3];
         for (int i = 0; i < nodes.length; i++) {
             nodes[i] = facing(scene, i - 1, 0, -3);
-            renderables.set(nodes[i], SQUARE, List.of(RED));
+            renderables.set(nodes[i], Renderable.of(SQUARE, List.of(RED)));
         }
         List<FrameGraph> graphs = List.of(graph(sync, false, new GpuBuffer[] {readback(), readback()}),
             graph(sync, device.primitiveIds(), new GpuBuffer[] {readback(), readback()}));
@@ -1737,27 +1739,30 @@ class SceneSyncTest {
     @Test
     void renderablesComingGoingAndChangingAllocateNothingOnceTheirAssetsAreIn() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         List<AssetRef<MaterialData>> red = List.of(RED);
         List<AssetRef<MaterialData>> green = List.of(GREEN);
         long kept = facing(scene, 0, 0, -3);
-        renderables.set(kept, SQUARE, red);
-        renderables.set(facing(scene, 1, 0, -3), SQUARE, green); // both blocks stay in use
-        renderables.set(facing(scene, 2, 0, -3), SQUARE, red);
+        renderables.set(kept, Renderable.of(SQUARE, red));
+        renderables.set(facing(scene, 1, 0, -3), Renderable.of(SQUARE, green)); // both blocks stay in use
+        renderables.set(facing(scene, 2, 0, -3), Renderable.of(SQUARE, red));
         long[] coming = {facing(scene, -1, 0, -3)};
-        renderables.set(coming[0], SQUARE, red);
-        update(scene, renderables, sync);
+        renderables.set(coming[0], Renderable.of(SQUARE, red));
+        update(scene, sync);
         load();
-        update(scene, renderables, sync);
+        update(scene, sync);
         int[] frame = {0};
+        // The values are made once, as a game switching looks keeps them: what is measured is the sync.
+        Renderable redSquare = Renderable.of(SQUARE, red);
+        Renderable greenSquare = Renderable.of(SQUARE, green);
         com.truesim.testing.AllocationAssertions.assertAllocationFree(() -> {
             boolean even = frame[0]++ % 2 == 0;
-            renderables.setMaterials(kept, even ? green : red);
+            renderables.set(kept, even ? greenSquare : redSquare);
             scene.remove(coming[0]);
             coming[0] = scene.create();
-            renderables.set(coming[0], SQUARE, even ? red : green);
-            update(scene, renderables, sync);
+            renderables.set(coming[0], even ? redSquare : greenSquare);
+            update(scene, sync);
         }, 20_000, 2_000, 5);
         assertThat(sync.instanceCount()).isEqualTo(4);
         assertThat(resources.materialSetCount()).isEqualTo(2);
@@ -1774,17 +1779,17 @@ class SceneSyncTest {
         AssetRef<MaterialData> b = AssetRef.generated(RenderAssets.MATERIAL, textured, new Glow(0, 1, 0), 5);
         AssetRef<MeshData> strips = AssetRef.generated(RenderAssets.MESH, STRIPS, 3, 1);
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         long one = facing(scene, -2, 0, -6);
         long twice = facing(scene, 1, 0, -6);
-        renderables.set(one, strips, List.of(a));
-        renderables.set(twice, strips, List.of(a, b, a));
-        update(scene, renderables, sync);
+        renderables.set(one, Renderable.of(strips, List.of(a)));
+        renderables.set(twice, Renderable.of(strips, List.of(a, b, a)));
+        update(scene, sync);
         load();
-        update(scene, renderables, sync);
+        update(scene, sync);
         load(); // the texture, asked for once the materials loaded
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.instanceCount()).isEqualTo(2);
         assertThat(resources.materialSetCount()).isEqualTo(2);
         assertThat(materials.count()).as("the default and two blocks of three").isEqualTo(7);
@@ -1793,7 +1798,7 @@ class SceneSyncTest {
         assertThat(assets.holders(white)).isEqualTo(1);
         renderables.remove(one);
         renderables.remove(twice);
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(resources.materialSetCount()).isZero();
         assertThat(resources.materialCount()).isZero();
         assertThat(resources.textureCount()).isZero();
@@ -1807,17 +1812,17 @@ class SceneSyncTest {
     @Test
     void renderablesGoneBeforeTheyCouldDrawAreNotDrawn() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         // Removed while its mesh loads, the mesh arriving at the frame boundary before the sync hears of it.
         long early = facing(scene, 0, 0, -3);
         long stays = facing(scene, 1, 0, -3);
-        renderables.set(early, SQUARE, List.of());
-        renderables.set(stays, SQUARE, List.of());
-        update(scene, renderables, sync);
+        renderables.set(early, Renderable.of(SQUARE, List.of()));
+        renderables.set(stays, Renderable.of(SQUARE, List.of()));
+        update(scene, sync);
         renderables.remove(early);
         load(); // arrives: the sync is told before it follows the removal
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.slotOf(early)).isEqualTo(-1);
         assertThat(sync.slotOf(stays)).isZero();
         assertThat(sync.instanceCount()).isEqualTo(1);
@@ -1826,26 +1831,28 @@ class SceneSyncTest {
     @Test
     void fallingBehindTheRenderablesKeepsWhatIsOnTheGpu() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene, 4); // keeps four changes
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         long kept = facing(scene, 0, 0, -3);
         long gone = facing(scene, 1, 0, -3);
         long changed = facing(scene, 2, 0, -3);
-        renderables.set(kept, SQUARE, List.of(RED));
-        renderables.set(gone, SQUARE, List.of(RED));
-        renderables.set(changed, SQUARE, List.of(RED));
-        update(scene, renderables, sync);
+        renderables.set(kept, Renderable.of(SQUARE, List.of(RED)));
+        renderables.set(gone, Renderable.of(SQUARE, List.of(RED)));
+        renderables.set(changed, Renderable.of(SQUARE, List.of(RED)));
+        update(scene, sync);
         load();
-        update(scene, renderables, sync);
+        update(scene, sync);
         int mesh = sync.meshOf(kept);
         int block = sync.firstMaterialOf(kept);
         // More changes than the log keeps: the sync reconciles every renderable, and keeps what did not change.
         renderables.remove(gone);
-        renderables.setMaterials(changed, List.of(GREEN));
-        for (int i = 0; i < 4; i++) {
-            renderables.setCastsShadows(kept, i % 2 == 0);
+        renderables.set(changed, renderables.get(changed).withMaterials(List.of(GREEN)));
+        Renderable lit = renderables.get(kept);
+        Renderable unlit = lit.withCastsShadows(false);
+        for (int i = 0; i <= ComponentStore.MAX_LOG; i++) {
+            renderables.set(kept, i % 2 == 0 ? unlit : lit);
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.meshOf(kept)).isEqualTo(mesh);
         assertThat(sync.firstMaterialOf(kept)).isEqualTo(block);
         assertThat(pool.contains(mesh)).isTrue();
@@ -1859,17 +1866,16 @@ class SceneSyncTest {
     void theMaterialTableGrowsForMoreMaterials() throws InterruptedException {
         // The table starts with 16 ids, the default one taken: 16 renderables of materials of their own grow it.
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, closing(new GpuScene(device, pool, 32, slots))));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, closing(new GpuScene(device, pool, 32, slots))));
         long[] nodes = new long[16];
         for (int i = 0; i < nodes.length; i++) {
             nodes[i] = facing(scene, i, 0, -3);
-            renderables.set(nodes[i], SQUARE,
-                List.of(AssetRef.generated(RenderAssets.MATERIAL, GLOWS, new Glow(i, 0, 0), 9)));
+            renderables.set(nodes[i], Renderable.of(SQUARE, List.of(AssetRef.generated(RenderAssets.MATERIAL, GLOWS, new Glow(i, 0, 0), 9))));
         }
-        update(scene, renderables, sync);
+        update(scene, sync);
         load();
-        update(scene, renderables, sync);
+        update(scene, sync);
         assertThat(sync.instanceCount()).isEqualTo(16);
         assertThat(sync.waitingCount()).isZero();
         assertThat(materials.count()).isEqualTo(17);
@@ -1877,9 +1883,8 @@ class SceneSyncTest {
         long changing = nodes[3];
         int mesh = sync.meshOf(changing);
         int slot = sync.slotOf(changing);
-        renderables.setMaterials(changing,
-            List.of(AssetRef.generated(RenderAssets.MATERIAL, GLOWS, new Glow(99, 0, 0), 9)));
-        update(scene, renderables, sync);
+        renderables.set(changing, renderables.get(changing).withMaterials(List.of(AssetRef.generated(RenderAssets.MATERIAL, GLOWS, new Glow(99, 0, 0), 9))));
+        update(scene, sync);
         assertThat(sync.slotOf(changing)).isEqualTo(slot);
         assertThat(sync.meshOf(changing)).isEqualTo(mesh);
     }
@@ -1887,16 +1892,16 @@ class SceneSyncTest {
     @Test
     void idsStayWhileDrawnAndLayersAndShadowsFollowTheScene() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
         GpuScene gpu = gpu();
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu));
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu));
         GpuBuffer[] readbacks = {readback(), readback()};
         List<FrameGraph> graphs = List.of(graph(sync, false, readbacks));
         RenderView cameraView = cameraViews.getLast();
         long[] nodes = new long[3];
         for (int i = 0; i < 3; i++) {
             nodes[i] = facing(scene, 2 * i - 2, 0, -8);
-            renderables.set(nodes[i], SQUARE, List.of());
+            renderables.set(nodes[i], Renderable.of(SQUARE, List.of()));
         }
         frame(graphs, List.of(sync), camera);
         load();
@@ -1913,12 +1918,12 @@ class SceneSyncTest {
         assertThat(gpu.count()).isEqualTo(2);
         // A new one takes the lowest free id.
         long next = facing(scene, 0, 0, -8);
-        renderables.set(next, SQUARE, List.of());
+        renderables.set(next, Renderable.of(SQUARE, List.of()));
         frame(graphs, List.of(sync), camera);
         assertThat(sync.slotOf(next)).isEqualTo(ids[1]);
         // Layers and shadows, from the scene: one node on layer 5, one casting no shadow.
         scene.setLayers(nodes[0], 1 << 5);
-        renderables.setCastsShadows(nodes[2], false);
+        renderables.set(nodes[2], renderables.get(nodes[2]).withCastsShadows(false));
         cameraView.filter(1, false);
         frame(graphs, List.of(sync), camera);
         device.waitIdle();
@@ -1936,18 +1941,18 @@ class SceneSyncTest {
 
     @Test
     void nodesRemovedAfterTheRenderablesUpdateStopDrawing() throws InterruptedException {
-        // A node moved, then removed between renderables.update() and sync.update(): the renderables have not seen the
-        // removal yet, the scene's log has. Its instance goes at once, whether the sync follows the changes (one node
+        // A node moved, then removed between scene.update() and sync.update(): its renderable went with it, logged
+        // after the moves the sync follows. Its instance goes at once, whether the sync follows the changes (one node
         // of four moved) or rewrites every instance (all three left moved).
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
         GpuScene gpu = gpu();
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu));
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu));
         List<FrameGraph> graphs = List.of(graph(sync, false, new GpuBuffer[] {readback(), readback()}));
         long[] nodes = new long[4];
         for (int i = 0; i < nodes.length; i++) {
             nodes[i] = facing(scene, 2 * i - 3, 0, -8);
-            renderables.set(nodes[i], SQUARE, List.of());
+            renderables.set(nodes[i], Renderable.of(SQUARE, List.of()));
         }
         frame(graphs, List.of(sync), camera);
         load();
@@ -1964,7 +1969,6 @@ class SceneSyncTest {
             slots.begin(slot);
             tasks.drainCompleted();
             scene.update();
-            renderables.update();
             scene.remove(removed);
             sync.update();
             graphs.getFirst().submit(0, 0);
@@ -1980,9 +1984,8 @@ class SceneSyncTest {
         slots.begin(slot);
         tasks.drainCompleted();
         scene.update();
-        renderables.update();
         long brief = facing(scene, 0, 0, -8);
-        renderables.set(brief, SQUARE, List.of());
+        renderables.set(brief, Renderable.of(SQUARE, List.of()));
         scene.remove(brief);
         sync.update();
         graphs.getFirst().submit(0, 0);
@@ -1997,10 +2000,10 @@ class SceneSyncTest {
         try (GeometryPool other = new GeometryPool(device, GeometryPool.Capacity.of(64, 1, 1));
              GpuScene elsewhere = new GpuScene(device, other, INSTANCES)) {
             assertThatIllegalArgumentException()
-                .isThrownBy(() -> new SceneSync(resources, new Renderables(scene), elsewhere))
+                .isThrownBy(() -> new SceneSync(resources, scene, elsewhere))
                 .withMessageContaining("another geometry pool");
         }
-        SceneSync sync = closing(new SceneSync(resources, new Renderables(scene), gpu()));
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         assertThat(sync.resources()).isSameAs(resources);
         assertThat(sync.gpu().pool()).isSameAs(pool);
         resources.close();
@@ -2009,8 +2012,8 @@ class SceneSyncTest {
         assertThat(resources.materials()).isSameAs(materials);
         assertThat(resources.textures()).isSameAs(textures);
         assertThat(resources.loadingCount()).isZero();
-        Renderables renderables = sync.renderables();
-        renderables.set(scene.create(), SQUARE, List.of());
+        ComponentStore<Renderable> renderables = sync.scene().components().store(Renderable.TYPE);
+        renderables.set(scene.create(), Renderable.of(SQUARE, List.of()));
         assertThatIllegalStateException().isThrownBy(sync::update).withMessageContaining("closed");
     }
 
@@ -2059,8 +2062,8 @@ class SceneSyncTest {
     @Test
     void particleMeshShapesEmitFromSkinnedRenderablesAsPosedAndBoneShapesAlongJoints() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());
-        Renderables renderables = new Renderables(scene);
-        SceneSync sync = closing(new SceneSync(resources, renderables, gpu()));
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
         FrameGraph graph = closing(new FrameGraph(device, slots));
         MeshletRenderer renderer = closing(new MeshletRenderer(device, sync.gpu(), VK_FORMAT_R8G8B8A8_UNORM,
             VK_FORMAT_D32_SFLOAT, slots));
@@ -2083,8 +2086,8 @@ class SceneSyncTest {
             identities[5 * i] = 1;
             identities[16 + 5 * i] = 1;
         }
-        renderables.set(body, SKINNED, List.of(RED));
-        renderables.setSkin(body, new SkinBinding(new long[] {left, right}, identities));
+        renderables.set(body, Renderable.of(SKINNED, List.of(RED)));
+        renderables.set(body, renderables.get(body).withSkin(new SkinBinding(new long[] {left, right}, identities)));
         com.truesim.scene.effects.Effects effects = new com.truesim.scene.effects.Effects(scene);
         EffectSync fx = new EffectSync(effects, particles).meshes(sync);
         // Short-lived particles, many: their box is where they were born lately
@@ -2107,7 +2110,6 @@ class SceneSyncTest {
             slots.begin(slot);
             tasks.drainCompleted();
             scene.update();
-            renderables.update();
             sync.update();
             if (frames[0]++ == 1) {
                 fx.joints(effect, 1, left, right);

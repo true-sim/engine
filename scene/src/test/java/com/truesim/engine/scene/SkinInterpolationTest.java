@@ -56,8 +56,9 @@ import com.truesim.scene.animation.Animators;
 import com.truesim.scene.animation.Skeleton;
 import com.truesim.scene.animation.Track;
 import com.truesim.scene.assets.AssetCache;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.SceneGraph;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import com.truesim.scene.render.SkinBinding;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -182,13 +183,13 @@ class SkinInterpolationTest {
      */
     private final class World implements Application {
         final SceneGraph scene = new SceneGraph(new ChangeClock());
-        final Renderables renderables = new Renderables(scene);
+        final ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
         final Animation animation = new Animation();
         final long body = scene.create();
         final long left = scene.create(body);
         final long right = scene.create(body);
         final GpuScene gpu = closing(new GpuScene(device, pool, 4, slots));
-        final SceneSync sync = closing(new SceneSync(resources, renderables, gpu));
+        final SceneSync sync = closing(new SceneSync(resources, scene, gpu));
         final GpuBuffer[] readbacks = {readback(), readback()};
         final FrameGraph graph;
         int lastSlot;
@@ -209,8 +210,8 @@ class SkinInterpolationTest {
                 identities[5 * i] = 1; // two identity matrices
                 identities[16 + 5 * i] = 1;
             }
-            renderables.set(body, SceneSyncTest.SKINNED, List.of(SceneSyncTest.RED));
-            renderables.setSkin(body, new SkinBinding(new long[] {left, right}, identities));
+            renderables.set(body, Renderable.of(SceneSyncTest.SKINNED, List.of(SceneSyncTest.RED)));
+            renderables.set(body, renderables.get(body).withSkin(new SkinBinding(new long[] {left, right}, identities)));
             graph = closing(new FrameGraph(device, slots));
             MeshletRenderer renderer = closing(new MeshletRenderer(device, gpu, VK_FORMAT_R8G8B8A8_UNORM,
                 VK_FORMAT_D32_SFLOAT, slots));
@@ -266,7 +267,6 @@ class SkinInterpolationTest {
             slots.begin(slot);
             tasks.drainCompleted();
             scene.update();
-            renderables.update();
             sync.update();
             graph.submit(0, 0);
             slots.end();

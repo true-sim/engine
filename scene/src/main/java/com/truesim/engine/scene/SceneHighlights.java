@@ -40,7 +40,7 @@ public final class SceneHighlights {
     public SceneHighlights(SceneSync sync, SelectionHighlights highlights) {
         this.sync = Objects.requireNonNull(sync, "sync");
         this.out = Objects.requireNonNull(highlights, "highlights");
-        this.scene = sync.renderables().scene();
+        this.scene = sync.scene();
         this.selected = scene.components().store(Selected.TYPE);
         this.hovered = scene.components().store(Hovered.TYPE);
     }
