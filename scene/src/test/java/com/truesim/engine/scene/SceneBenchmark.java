@@ -196,7 +196,7 @@ class SceneBenchmark {
             // Loading: the meshes are generated in the background, uploaded as they arrive at frame boundaries.
             start = System.nanoTime();
             frame(graph, slots, tasks, scene, renderables, sync, cameraView, camera, unused, 0);
-            long firstUpdate = unused.stages[3][0];
+            long firstUpdate = unused.stages[2][0];
             int frames = 1;
             while (resources.uploadedMeshCount() < 2) {
                 Thread.sleep(1);
@@ -204,7 +204,7 @@ class SceneBenchmark {
                 frames++;
             }
             long loaded = System.nanoTime() - start;
-            long uploadFrame = unused.stages[0][0] + unused.stages[3][0]; // uploads and shows land in the drain
+            long uploadFrame = unused.stages[0][0] + unused.stages[2][0]; // uploads and shows land in the drain
             System.out.printf(Locale.ROOT, "  loading: %.1f ms over %d frames to generate and upload the rock "
                 + "(%,d meshlets) and the terrain (%,d meshlets); first sync update (%,d renderables waiting) %.3f ms,"
                 + " the frame they arrived (uploads, %,d shown and written) %.1f ms%n", loaded / 1e6, frames,
