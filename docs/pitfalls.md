@@ -704,3 +704,18 @@ an upcall; an upcall out of a critical downcall kills the JVM instead of logging
 - Proof: `CommandsTest.validationErrorsInsideCommandsAreReportedNotFatal` crashes the test JVM with the option and
   passes without it ([#152](https://github.com/true-sim/engine/issues/152)).
 - Rule: no `critical` on Vulkan downcalls.
+
+**A `MeshData` built by hand is never freed by the collector.** Its buffers are a shared arena, which only `close()`
+frees; the stream benchmark kept no reference to its cells' meshes after placing them and never closed them, so every
+cell left about 220 KB of native memory behind: the window at 100 m/s over 33 x 33 cells grew from 3.4 to 15 GB in ten
+minutes, while every engine count (GPU memory by category, VMA's heaps, LWJGL's native memory, direct buffers, the
+heap) stayed flat. The counts said where it was not; Native Memory Tracking found it ("Other" grew 166 MB over 7,000
+meshes built and dropped, with nothing else). Its texels, in automatic arenas, were freed only by a collection: up to
+4 GB of direct memory between collections with `large`.
+- Proof: the headless benchmark at `-Pspeed=100 -Prange=16 -Pmemory=900`: process memory 2,949 to 6,239 MB over
+  9,000 frames before, 1,973 to 1,956 MB after (meshes closed and texels in a shared arena, freed a few frames after
+  placing, on a thread of their own: closed on the frame's thread, the slowest frame took 139 ms and the median
+  rose from 0.94 to 1.18 ms; on a thread of their own, 6.4 and 0.94).
+  `StreamBenchMemoryTest` fails with the frees left out (382 MB grown over 1,000 cells) and passes with them.
+- Rule: whoever builds a `MeshData` closes it once uploaded; a memory test of streaming counts memory outside the
+  heap of the whole process, not only the engine's own accounts.
