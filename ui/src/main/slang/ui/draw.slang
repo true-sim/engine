@@ -37,7 +37,7 @@ struct UiPush
     float toClipY;      // 2 / its height
     float originX;      // the UI pixel at the image's top left: 0, or a docking OS window's region
     float originY;
-    float* world;       // a world panel drawn in the 3D view: 16 floats, its pixels to clip space (column-major)
+    float* world;       // a world panel in the 3D view: per view 16 floats (column-major), pixels to clip
     uint depth;         // the scene depth's sampled slot plus 1, 0 for none (depth tested primitives draw unfaded)
     float depthScaleX;  // its texels per pixel of the image (its render region over the image's size)
     float depthScaleY;
@@ -1315,7 +1315,7 @@ struct WorldOut
 };
 
 [shader("vertex")]
-WorldOut worldVertexMain(uint vertex : SV_VulkanVertexID)
+WorldOut worldVertexMain(uint vertex : SV_VulkanVertexID, uint view : SV_ViewID)
 {
     VertexOut flat = vertexMain(vertex);
     WorldOut out;
@@ -1327,7 +1327,7 @@ WorldOut worldVertexMain(uint vertex : SV_VulkanVertexID)
         return out;
     }
     float2 at = (flat.position.xy + 1) / float2(push.toClipX, push.toClipY);
-    float* m = push.world;
+    float* m = push.world + 16 * view; // a matrix per view: a multiview pass draws each eye through its own
     out.pixel = at;
     out.position = float4(m[0] * at.x + m[4] * at.y + m[12], m[1] * at.x + m[5] * at.y + m[13],
         m[2] * at.x + m[6] * at.y + m[14], m[3] * at.x + m[7] * at.y + m[15]);

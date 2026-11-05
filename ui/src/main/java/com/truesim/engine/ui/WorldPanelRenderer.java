@@ -92,9 +92,12 @@ import org.lwjgl.vulkan.VkViewport;
  * panels.submit();
  * }</pre>
  *
- * <p>VR: the direct pass draws once per view; a multiview (stereo) view would take one matrix per eye and the
- * {@code SV_ViewID} to pick it (not built: the XR path cannot be tested headless here). Texture panels need nothing
- * more for stereo. Per frame it allocates nothing.
+ * <p>VR: made with a camera per eye ({@link #WorldPanelRenderer(FrameGraph, Camera...)}), in a view whose scene colour
+ * and depth have a layer per eye, the direct panels draw into every eye in one pass (multiview: the frame graph opens
+ * the pass over all the layers, each eye's vertices placed by its own matrix, picked by {@code SV_ViewID}), each eye
+ * depth tested against its own layer of the scene's depth. With one camera the view's images must have one layer.
+ * Texture panels need nothing more for stereo: the scene samples their image from every eye. Per frame it allocates
+ * nothing.
  */
 public final class WorldPanelRenderer implements Technique, FrameSlots.FrameStart, AutoCloseable {
 
@@ -137,7 +140,7 @@ public final class WorldPanelRenderer implements Technique, FrameSlots.FrameStar
 
     private final FrameGraph graph;
     private final VulkanDevice device;
-    private final Camera camera;
+    private final Camera[] cameras; // one per view (eye) of the pass
     private final List<Entry> entries = new ArrayList<>();
     private final UiPush rawPush = new UiPush();
     private final double[] pose = new double[8];
@@ -147,18 +150,37 @@ public final class WorldPanelRenderer implements Technique, FrameSlots.FrameStar
     private final double[] corner = new double[3];
     private final com.truesim.engine.vulkan.Retiring retiring;
     private final Arena arena = Arena.ofShared();
-    private final MemorySegment matrixBytes = arena.allocate(64, 16);
+    private final MemorySegment matrixBytes;
     private Pipeline world;
     private int worldColor;
     private int worldDepth;
+    private int worldViews;
     private boolean closed;
 
     /** A renderer of panels in a view of {@code graph} seen through {@code viewCamera}. */
     @AllowAllocation("made once")
     public WorldPanelRenderer(FrameGraph graph, Camera viewCamera) {
+        this(graph, new Camera[] {Objects.requireNonNull(viewCamera, "viewCamera")});
+    }
+
+    /**
+     * A renderer of panels in a view of {@code graph} with a layer per camera of {@code eyes} (a headset's eyes, left
+     * first, in a view whose scene colour and depth have as many layers): direct panels draw into every eye in one
+     * multiview pass, each eye through its camera.
+     */
+    @AllowAllocation("made once")
+    public WorldPanelRenderer(FrameGraph graph, Camera... eyes) {
         this.graph = Objects.requireNonNull(graph, "graph");
         this.device = graph.device();
-        this.camera = Objects.requireNonNull(viewCamera, "viewCamera");
+        if (eyes.length < 1 || eyes.length > com.truesim.engine.graph.GraphBuilder.MAX_VIEWS) {
+            throw new IllegalArgumentException("A view has 1 to " + com.truesim.engine.graph.GraphBuilder.MAX_VIEWS
+                + " eyes: " + eyes.length);
+        }
+        this.cameras = eyes.clone();
+        for (Camera eye : cameras) {
+            Objects.requireNonNull(eye, "eye");
+        }
+        this.matrixBytes = arena.allocate(64L * cameras.length, 16);
         this.retiring = new com.truesim.engine.vulkan.Retiring(graph.frameSlots());
         graph.frameSlots().register(this);
     }
@@ -180,7 +202,8 @@ public final class WorldPanelRenderer implements Technique, FrameSlots.FrameStar
         if (find(panel) != null) {
             throw new IllegalArgumentException("The panel is drawn already");
         }
-        FrameBuffer matrix = mode == Mode.DIRECT ? FrameBuffer.create(device, 64, BUFFER_USAGE, graph.frameSlots())
+        FrameBuffer matrix = mode == Mode.DIRECT ? FrameBuffer.create(device, 64L * cameras.length, BUFFER_USAGE,
+            graph.frameSlots())
             : null;
         Entry e = new Entry(panel, mode, new GpuUiRenderer(graph), matrix);
         if (mode == Mode.TEXTURE) {
@@ -356,15 +379,20 @@ public final class WorldPanelRenderer implements Technique, FrameSlots.FrameStar
     public void build(GraphBuilder g) {
         Image color = g.modify(Keys.SCENE_COLOR);
         Image depth = g.read(Keys.SCENE_DEPTH);
-        Pipeline pipeline = pipeline(color.format().vk(), depth.format().vk());
+        int views = color.desc().layers();
+        if (views != cameras.length) {
+            throw new IllegalStateException("The view's scene colour has " + views + " layers for "
+                + cameras.length + " cameras: a layer per eye");
+        }
+        Pipeline pipeline = pipeline(color.format().vk(), depth.format().vk(), views);
         UiPush push = new UiPush();
         g.pass("world panels").attach(color, Load.LOAD, Store.STORE).attachDepthReadOnly(depth).region()
             .record(ctx -> drawDirect(ctx, pipeline, push));
     }
 
     @AllowAllocation("building the graph, when its formats change")
-    private Pipeline pipeline(int colorFormat, int depthFormat) {
-        if (world == null || worldColor != colorFormat || worldDepth != depthFormat) {
+    private Pipeline pipeline(int colorFormat, int depthFormat, int views) {
+        if (world == null || worldColor != colorFormat || worldDepth != depthFormat || worldViews != views) {
             if (world != null) {
                 retiring.add(world);
             }
@@ -372,10 +400,12 @@ public final class WorldPanelRenderer implements Technique, FrameSlots.FrameStar
                 world = Pipeline.graphics(device).stage(VK_SHADER_STAGE_VERTEX_BIT, shaders, "worldVertexMain")
                     .stage(VK_SHADER_STAGE_FRAGMENT_BIT, shaders, "worldFragmentMain").color(colorFormat)
                     .depth(depthFormat).depthTest(VK_COMPARE_OP_GREATER_OR_EQUAL, false)
-                    .blend(0, Pipeline.Blend.PREMULTIPLIED).pushConstants(UiPush.BYTES).doubleSided().build();
+                    .blend(0, Pipeline.Blend.PREMULTIPLIED).pushConstants(UiPush.BYTES).doubleSided()
+                    .viewMask(views > 1 ? (1 << views) - 1 : 0).build();
             }
             worldColor = colorFormat;
             worldDepth = depthFormat;
+            worldViews = views;
         }
         return world;
     }
@@ -388,11 +418,13 @@ public final class WorldPanelRenderer implements Technique, FrameSlots.FrameStar
             }
             int w = (int) Math.ceil(e.panel.width());
             int h = (int) Math.ceil(e.panel.height());
-            matrix(w, h);
-            for (int k = 0; k < 16; k++) {
-                matrixBytes.setAtIndex(FLOAT, k, (float) m[k]);
+            for (int v = 0; v < cameras.length; v++) {
+                matrix(cameras[v], w, h);
+                for (int k = 0; k < 16; k++) {
+                    matrixBytes.setAtIndex(FLOAT, 16L * v + k, (float) m[k]);
+                }
             }
-            e.matrix.put(0, matrixBytes, 0, 64);
+            e.matrix.put(0, matrixBytes, 0, 64L * cameras.length);
             push.world(e.matrix.deviceAddress());
             e.uploads.drawLayers(ctx, pipeline, push, w, h);
         }
@@ -400,9 +432,9 @@ public final class WorldPanelRenderer implements Technique, FrameSlots.FrameStar
 
     /**
      * {@link #m}: the matrix (column-major) from a {@code w x h} panel's pixels at {@link #pose} to clip space, in
-     * doubles relative to the camera, through the camera's view-projection.
+     * doubles relative to {@code camera}, through its view-projection.
      */
-    private void matrix(int w, int h) {
+    private void matrix(Camera camera, int w, int h) {
         double s = pose[7];
         double qx = pose[3];
         double qy = pose[4];

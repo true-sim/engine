@@ -402,7 +402,15 @@ highlighted the ID draw finds nothing to draw and the mask and outline do nothin
 - **World panels** (`WorldPanelRenderer`, per panel): `TEXTURE` renders the panel's UI at the frame's start into an
   image with a bindless slot a material samples (lit and fogged like the scene), again only when its UI changed;
   `DIRECT` draws its primitives after the opaque scene through a panel-to-clip matrix made in doubles relative to the
-  camera, depth tested, MTSDF coverage worked out in the panel's pixels. Multiview (VR) direct drawing is not built.
+  camera, depth tested, MTSDF coverage worked out in the panel's pixels. Made with a camera per eye
+  (`new WorldPanelRenderer(graph, left, right)`) in a view whose scene colour and depth have a layer per eye, it
+  draws both eyes in one multiview pass (a matrix per eye, `SV_ViewID`); the frame graph opens a pass attaching every
+  layer of its images as a multiview rendering.
+- **3D gizmos** (`GizmoRenderer`, XR): each gizmo's handles as ui-gizmo's `GizmoMesh` (true geometry in world units
+  about the gizmo's origin, sized by angular size from the head), drawn after the opaque scene twice with
+  complementary hardware depth tests against the scene's depth (where the scene is in front at the `gizmo-occluded`
+  opacity, else at full), back faces culled; one camera or one per eye (multiview), matrices made in doubles
+  relative to each camera. `ui.gizmo.meshSides` sets the tessellation.
 - **Gizmo occlusion** (`Gizmo.depthTest(true)`, ui-core's `Primitive.FLAG_DEPTH`): a depth tested gizmo records its
   handles' lines, triangles and dots with their view depths; the UI pass reads the view's `Keys.SCENE_DEPTH` of the
   same frame (after transparency, its render region mapped onto the UI's image) and fades each pixel of a handle the
