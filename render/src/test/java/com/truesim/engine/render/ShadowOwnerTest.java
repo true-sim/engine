@@ -411,31 +411,42 @@ class ShadowOwnerTest {
         for (int i = 0; i < 520; i++) {
             reference = frame();
         }
-        newGraph(visibility());
-        byte[] soft = null;
-        for (int i = 0; i < 40; i++) {
-            soft = frame();
+        double[] want = profile(reference);
+        double soft = Double.NaN;
+        for (Object[] denoiser : new Object[][] {{Denoiser.Mode.SVGF, 2}, {Denoiser.Mode.SVGF, 4},
+            {Denoiser.Mode.REBLUR, 2}}) {
+            newGraph(visibility());
+            graph.settings().set(ShadowSettings.SOFT_DENOISER, (Denoiser.Mode) denoiser[0])
+                .set(ShadowSettings.SOFT_PASSES, (Integer) denoiser[1]);
+            sun(ShadowSpec.softRayTraced(0.15));
+            byte[] color = null;
+            for (int i = 0; i < 40; i++) {
+                color = frame();
+            }
+            double error = error(profile(color), want);
+            System.out.printf(java.util.Locale.ROOT, "penumbra against the reference, %s %d: %.4f%n", denoiser[0],
+                denoiser[1], error);
+            assertThat(error).as("soft rays (%s, %d) against the reference", denoiser[0], denoiser[1])
+                .isLessThan(0.06);
+            soft = Double.isNaN(soft) ? error : Math.max(soft, error);
         }
         sun(ShadowSpec.rayTraced());
         byte[] hard = null;
         for (int i = 0; i < 3; i++) {
             hard = frame();
         }
-        double[] want = profile(reference);
-        double[] got = profile(soft);
-        double[] sharp = profile(hard);
+        double hardError = error(profile(hard), want);
+        System.out.printf(java.util.Locale.ROOT, "penumbra against the reference, hard: %.4f%n", hardError);
+        assertThat(hardError).as("hard rays against it: the penumbra matters").isGreaterThan(2 * soft);
+    }
+
+    /** The mean difference of two profiles. */
+    private static double error(double[] got, double[] want) {
         double error = 0;
-        double hardError = 0;
-        StringBuilder table = new StringBuilder();
         for (int i = 0; i < want.length; i++) {
             error += Math.abs(got[i] - want[i]) / want.length;
-            hardError += Math.abs(sharp[i] - want[i]) / want.length;
-            table.append(String.format("%.2f/%.2f/%.2f ", want[i], got[i], sharp[i]));
         }
-        System.out.printf(java.util.Locale.ROOT, "penumbra against the reference: soft %.4f, hard %.4f; %s%n", error,
-            hardError, table);
-        assertThat(error).as("soft rays against the reference (reference/soft/hard): %s", table).isLessThan(0.06);
-        assertThat(hardError).as("hard rays against it: the penumbra matters").isGreaterThan(2 * error);
+        return error;
     }
 
     /** Visibility across the quad's shadow's +x edge, 0 in its umbra to 1 lit, in 25 steps of 0.05 units. */

@@ -84,6 +84,13 @@ public final class ShadowSettings {
         "shadows.soft.denoiser", com.truesim.engine.render.Denoiser.Mode.SVGF,
         "soft ray-traced shadows: the denoiser (SVGF or REBLUR)");
     /**
+     * Soft ray-traced shadows: SVGF's a-trous steps (the engine's denoiser's {@code render.denoise.passes} is for every
+     * signal). Each step costs about 0.33 ms at 1920 x 1080 on an RX 9070 XT; penumbras measured against the reference
+     * are as close with 2 as with 4 (ShadowOwnerTest).
+     */
+    public static final Setting<Integer> SOFT_PASSES = Setting.integer("shadows.soft.passes", 2, 0, 8,
+        "soft ray-traced shadows: SVGF's a-trous filter steps");
+    /**
      * Traced shadows: the shadow rays a view's queue holds while their hit's keep() is tested (material types with a
      * geometry hook); rays past it count as blocked.
      */
@@ -98,7 +105,8 @@ public final class ShadowSettings {
     /** Every shadow setting. */
     public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, RAY_OFFSET,
         CASTER_DETAIL, ATLAS_SIZE, ATLAS_DRAWS, TILE_DRAWS, TILE_TRIANGLES, AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF,
-        MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, SOFT_RAYS, SOFT_DENOISER, RAY_QUEUE, KEEP_ROUNDS);
+        MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, SOFT_RAYS, SOFT_DENOISER, SOFT_PASSES, RAY_QUEUE,
+        KEEP_ROUNDS);
 
     private ShadowSettings() {
     }

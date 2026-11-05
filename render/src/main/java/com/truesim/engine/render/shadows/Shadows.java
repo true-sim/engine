@@ -1105,10 +1105,10 @@ public final class Shadows implements AutoCloseable {
             double near = camera.viewProjection()[14];
             for (int i = 0; i < count; i++) {
                 Tile tile = group.tiles[i];
-                // The pixels near the cascade's start, but not the camera's near plane: a quarter of its reach.
-                double start = Math.max(i == 0 ? near : fit.split(i - 1), fit.split(i) / 4);
-                double wanted = auto ? 2 * fit.radius(i) * scale * camera.projectionScale() / Math.max(start, near)
-                    : spec.resolution();
+                // A texel per pixel where the cascade ends: about the view's width per side, finer than the pixels
+                // nearer in it (a texel per pixel at its start would take its ratio of splits more per side).
+                double wanted = auto ? 2 * fit.radius(i) * scale * camera.projectionScale() / Math.max(fit.split(i),
+                    near) : spec.resolution();
                 tile.wanted = sized(tile, wanted, auto ? spec.minSize() : MIN_TILE, auto ? spec.maxSize()
                     : spec.resolution(), hysteresis);
                 tile.priority = group.priority * (count - i); // the near ones first

@@ -75,7 +75,8 @@ class ShadowsBenchmark {
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
             System.out.printf(Locale.ROOT, "Shadows on %s (%s), 30,000 rocks on the terrain, the visibility buffer:%n",
                 device.gpu().name(), rayTracing != null ? "ray tracing" : "no ray tracing");
-            for (int[] size : new int[][] {{1920, 1080}, {3840, 2160}}) {
+            boolean pointsOnly = "points".equals(System.getenv("TRUESIM_SHADOWS_ONLY"));
+            for (int[] size : pointsOnly ? new int[0][] : new int[][] {{1920, 1080}, {3840, 2160}}) {
                 List<Config> configs = sunConfigs(rayTracing != null);
                 for (boolean moving : new boolean[] {false, true}) {
                     run(device, renderer, view, geometry, lights, rayTracing, size[0], size[1], moving, configs,
@@ -203,11 +204,11 @@ class ShadowsBenchmark {
             }
             ShadowSpec[] specs = {ShadowSpec.maps(ShadowSpec.AUTO), ShadowSpec.maps(128), ShadowSpec.maps(512)};
             int frame = 0;
+            graph.timings(true); // before the warm-up: turning timings on builds the graph again
             for (int i = 0; i < 30; i++) {
                 frame = step(device, graph, camera, width, height, moving, legacy, lights, switching, specs, frame);
             }
             int builds = graph.builds();
-            graph.timings(true);
             double[] frames = new double[FRAMES];
             double[] shadow = new double[FRAMES];
             int drawn = 0;
@@ -217,7 +218,15 @@ class ShadowsBenchmark {
                 if (i < 0 || timings == null) {
                     continue;
                 }
-                double total = timings.frameStartMillis();
+                double start = timings.frameStartMillis();
+                double total = Double.isNaN(start) ? 0 : start;
+                if (i == 0 && System.getenv("TRUESIM_SHADOWS_PASSES") != null) {
+                    StringBuilder passes = new StringBuilder(config.name() + ":");
+                    for (int t = 0; t < timings.count(); t++) {
+                        passes.append(String.format(Locale.ROOT, " %s %.3f;", timings.pass(t), timings.millis(t)));
+                    }
+                    System.out.println(passes);
+                }
                 for (int t = 0; t < timings.count(); t++) {
                     double ms = timings.millis(t);
                     if (Double.isNaN(ms)) {

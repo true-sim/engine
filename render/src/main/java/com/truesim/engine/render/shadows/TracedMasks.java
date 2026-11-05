@@ -314,6 +314,7 @@ final class TracedMasks implements AutoCloseable {
         this.masks = masks;
         Image[] denoised = new Image[softBuilt];
         Denoiser.Mode mode = settings.get(ShadowSettings.SOFT_DENOISER);
+        int passes = settings.get(ShadowSettings.SOFT_PASSES);
         for (int i = 0; i < softBuilt; i++) {
             int slot = i;
             Image a = softA[i];
@@ -321,7 +322,7 @@ final class TracedMasks implements AutoCloseable {
             Image[] result = new Image[1];
             g.masked(() -> softActive.length > slot && softActive[slot], () -> result[0] = Denoiser.denoiseValue(g,
                 "soft shadow " + slot, view, depth, normal, null, a, b, mode,
-                () -> softRestart.length > slot && softRestart[slot]));
+                () -> softRestart.length > slot && softRestart[slot], passes));
             denoised[i] = result[0];
             inputs.sample(denoised[i]);
         }
