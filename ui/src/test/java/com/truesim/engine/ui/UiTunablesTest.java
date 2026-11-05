@@ -89,7 +89,7 @@ class UiTunablesTest {
         // the scene bridge and gizmos (TunableSources of ui-scene and ui-gizmo)
         "ui.pick.sceneHits", "ui.pick.rayLength", "ui.gizmo.pickTolerance", "ui.gizmo.xrPickAngle",
         "ui.gizmo.xrAngularSize", "ui.gizmo.xrGrabRadius", "ui.gizmo.snapByDefault", "ui.gizmo.snapTranslate",
-        "ui.gizmo.snapRotate", "ui.gizmo.snapScale", "ui.viewCube.orbitSpeed",
+        "ui.gizmo.snapRotate", "ui.gizmo.snapScale", "ui.gizmo.meshSides", "ui.viewCube.orbitSpeed",
         // the console (ConsoleTunables, outside Ui.tunables())
         "ui.console.logCapacity", "ui.console.maxLine", "ui.console.historyLimit", "ui.console.completions",
         "ui.console.execDepth",

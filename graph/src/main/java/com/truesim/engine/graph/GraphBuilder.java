@@ -84,6 +84,12 @@ public final class GraphBuilder {
     }
 
     /**
+     * The most views a multiview pass draws (attachments of that many layers): the least
+     * {@code maxMultiviewViewCount} Vulkan 1.1 allows.
+     */
+    public static final int MAX_VIEWS = 6;
+
+    /**
      * One pass of the build: its accesses (image id and access, in pairs, with each access's mip and layer range: base
      * mip, mip count, base layer, layer count, four per access) and body.
      */
@@ -933,6 +939,7 @@ public final class GraphBuilder {
             if (first != null && (first.width != target.width || first.height != target.height)) {
                 throw new IllegalArgumentException(name + ": attachments are of one size: " + target + " and " + first);
             }
+            checkViews(whole);
             attachments.add(new Attachment(whole, Load.LOAD, Store.NONE, null, true, null, true));
             return use(whole, Access.DEPTH_TEST, false);
         }
@@ -963,6 +970,21 @@ public final class GraphBuilder {
             return use(into, Access.COLOR_ATTACHMENT, true);
         }
 
+        /**
+         * Every attachment of a pass draws the same views: one layer each, or all of their images' layers (a multiview
+         * pass, a headset's eyes in one: as many views as layers, at most {@link #MAX_VIEWS}).
+         */
+        private void checkViews(Subresource target) {
+            if (target.layerCount() > MAX_VIEWS) {
+                throw new IllegalArgumentException(name + ": a multiview attachment has at most " + MAX_VIEWS
+                    + " layers: " + target);
+            }
+            if (!attachments.isEmpty() && attachments.getFirst().target().layerCount() != target.layerCount()) {
+                throw new IllegalArgumentException(name + ": attachments draw as many views (layers) as each other: "
+                    + target + " and " + attachments.getFirst().target());
+            }
+        }
+
         private PassBuilder attachment(Subresource target, Load load, Store store, Clear clear, boolean depth) {
             Objects.requireNonNull(load, "load");
             Objects.requireNonNull(store, "store");
@@ -970,14 +992,15 @@ public final class GraphBuilder {
                 throw new IllegalArgumentException(name + ": " + target + " is cleared with a " + (depth ? "depth"
                     : "color") + " clear value exactly when it loads with CLEAR");
             }
-            if (target.image().mips != 1 || !target.oneLayer()) {
-                throw new IllegalArgumentException(name + ": an attachment is one layer of an image of one mip level: "
-                    + target);
+            if (target.image().mips != 1 || !target.oneLayer() && !target.whole()) {
+                throw new IllegalArgumentException(name + ": an attachment is one layer of an image of one mip level, "
+                    + "or all its layers (multiview): " + target);
             }
             Image first = attachments.isEmpty() ? null : attachments.getFirst().target().image();
             if (first != null && (first.width != target.image().width || first.height != target.image().height)) {
                 throw new IllegalArgumentException(name + ": attachments are of one size: " + target + " and " + first);
             }
+            checkViews(target);
             if (depth && attachments.stream().anyMatch(Attachment::depth)) {
                 throw new IllegalStateException(name + " has a depth attachment already");
             }

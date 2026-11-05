@@ -49,6 +49,53 @@ final class DemoMeshes {
             .attribute(VertexAttribute.NORMAL, normals(positions, indices)).submesh(indices).buildHierarchy();
     }
 
+    /**
+     * A tile of the ground in world coordinates: {@code size} by {@code size} from ({@code x0}, {@code z0}) in
+     * {@code n} by {@code n} quads, its vertices relative to that corner (place it there, unscaled) at the world's
+     * {@link #height}, with the height function's own normals, so tiles side by side meet without a seam and anything
+     * placed at {@code height(x, z)} stands on it.
+     */
+    static MeshData groundTile(double x0, double z0, double size, int n) {
+        int count = (n + 1) * (n + 1);
+        float[] positions = new float[count * 3];
+        float[] normals = new float[count * 3];
+        double step = size / n;
+        for (int z = 0; z <= n; z++) {
+            for (int x = 0; x <= n; x++) {
+                int v = z * (n + 1) + x;
+                double wx = x0 + x * step;
+                double wz = z0 + z * step;
+                positions[3 * v] = (float) (x * step);
+                positions[3 * v + 1] = (float) height(wx, wz);
+                positions[3 * v + 2] = (float) (z * step);
+                // the height's slopes: d/dx and d/dz of height(x, z)
+                double dx = 3 / 9.0 * Maths.cos(wx / 9.0) * Maths.cos(wz / 13.0)
+                    + 1.5 / 31.0 * Maths.cos(wx / 31.0 + wz / 23.0);
+                double dz = -3 / 13.0 * Maths.sin(wx / 9.0) * Maths.sin(wz / 13.0)
+                    + 1.5 / 23.0 * Maths.cos(wx / 31.0 + wz / 23.0);
+                double length = Math.sqrt(dx * dx + 1 + dz * dz);
+                normals[3 * v] = (float) (-dx / length);
+                normals[3 * v + 1] = (float) (1 / length);
+                normals[3 * v + 2] = (float) (-dz / length);
+            }
+        }
+        int[] indices = new int[n * n * 6];
+        int at = 0;
+        for (int z = 0; z < n; z++) {
+            for (int x = 0; x < n; x++) {
+                int a = z * (n + 1) + x;
+                indices[at++] = a;
+                indices[at++] = a + n + 1;
+                indices[at++] = a + 1;
+                indices[at++] = a + 1;
+                indices[at++] = a + n + 1;
+                indices[at++] = a + n + 2;
+            }
+        }
+        return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL), count).positions(positions)
+            .attribute(VertexAttribute.NORMAL, normals).submesh(indices).buildHierarchy();
+    }
+
     /** A square of 1 by 1 in the XY plane about the origin, facing +Z: a window pane. */
     static MeshData pane() {
         float[] positions = {-0.5f, -0.5f, 0, 0.5f, -0.5f, 0, 0.5f, 0.5f, 0, -0.5f, 0.5f, 0};

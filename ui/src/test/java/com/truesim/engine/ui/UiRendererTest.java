@@ -68,7 +68,7 @@ class UiRendererTest {
                 continue;
             }
             Object expected = constant.getName().equals("CLIP_FLOATS") ? DrawList.CLIP_FLOATS
-                : constant.getName().equals("TRANSFORM_FLOATS") ? DrawList.TRANSFORM_FLOATS
+                : constant.getName().startsWith("TRANSFORM_") ? field(DrawList.class, constant.getName())
                 : constant.getName().equals("VERTEX_FLOATS") ? DrawList.VERTEX_FLOATS
                 : field(Primitive.class, constant.getName());
             assertThat(constant.get(null)).as(constant.getName()).isEqualTo(expected);

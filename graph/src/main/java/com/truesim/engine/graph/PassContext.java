@@ -480,6 +480,29 @@ public final class PassContext {
         }
     }
 
+    /**
+     * Clears {@code width} by {@code height} pixels at ({@code x}, {@code y}) of the pass's depth attachment to
+     * {@code depth}, inside its rendering ({@code vkCmdClearAttachments}; in a multiview pass, in every view): an
+     * occluder's footprint, as a test's stand-in for drawn geometry.
+     */
+    public void clearDepth(int x, int y, int width, int height, float depth) {
+        if (x < 0 || y < 0 || width <= 0 || height <= 0) {
+            throw new IllegalArgumentException("Clearing " + width + " x " + height + " at " + x + ", " + y);
+        }
+        try (MemoryStack stack = stackPush()) {
+            long clear = stack.ncalloc(VkClearAttachment.ALIGNOF, 1, VkClearAttachment.SIZEOF);
+            memPutInt(clear + VkClearAttachment.ASPECTMASK, org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
+            memPutFloat(clear + VkClearAttachment.CLEARVALUE, depth);
+            long rect = stack.ncalloc(VkClearRect.ALIGNOF, 1, VkClearRect.SIZEOF);
+            memPutInt(rect + VkClearRect.RECT + VkRect2D.OFFSET, x);
+            memPutInt(rect + VkClearRect.RECT + VkRect2D.OFFSET + 4, y);
+            memPutInt(rect + VkClearRect.RECT + VkRect2D.EXTENT, width);
+            memPutInt(rect + VkClearRect.RECT + VkRect2D.EXTENT + 4, height);
+            memPutInt(rect + VkClearRect.LAYERCOUNT, 1);
+            Commands.clearAttachments(commands, 1, clear, 1, rect);
+        }
+    }
+
     /** Sets the viewport to {@code width} by {@code height} at ({@code x}, {@code y}), depths 0 to 1. */
     public void viewport(float x, float y, float width, float height) {
         try (MemoryStack stack = stackPush()) {

@@ -61,6 +61,8 @@ import java.util.function.Function;
  * ({@code osWindows().host(new OsDockHost(overlays, dock, osWindows()))}), each frame draws every OS window's region
  * of the UI into it, maps the mouse of every window into the UI, starts text input on the window holding the field,
  * and closes a window's area when its close button is pressed.</li>
+ * <li><b>Screen readers</b> on Windows ({@link #accessibility()}, with a window): the UI's semantics through UI
+ * Automation; what a reader asks runs in the next frame, changes are told after each update.</li>
  * </ul>
  *
  * <p>Per frame it allocates nothing: the input, the layers and the cursor change are kept.
@@ -95,6 +97,7 @@ public final class UiPlugin implements Plugin {
     private Platform platform;
     private Desktop desktop;
     private UiOsWindows osWindows;
+    private com.truesim.ui.a11y.windows.WindowsAccessibility accessibility; // UI Automation on Windows, or null
     private SystemCursor shownCursor;
     private float shownScale = -1;
     private PointerSource[] sources = new PointerSource[0];
@@ -260,7 +263,19 @@ public final class UiPlugin implements Plugin {
                 mouse.mapper(osWindows);
                 text.locator(osWindows);
             }
+            if (com.truesim.ui.a11y.windows.WindowsAccessibility.supported() && window.nativeWindow() != 0) {
+                accessibility = com.truesim.ui.a11y.windows.WindowsAccessibility.attach(window.nativeWindow(),
+                    new com.truesim.ui.a11y.AccessibilityBridge(ui.store(), ui.interaction()));
+            }
         }
+    }
+
+    /**
+     * The UI exposed to screen readers through Windows UI Automation (setting {@code ui.a11y.bridge}), or null: not
+     * Windows, or no window. From {@link Stage#RUN}.
+     */
+    public com.truesim.ui.a11y.windows.WindowsAccessibility accessibility() {
+        return accessibility;
     }
 
     /**
@@ -460,6 +475,13 @@ public final class UiPlugin implements Plugin {
             ui.update(width, height);
         }
         renderer.submit(ui.layers(), ui.layerCount(), ui.textures(), width, height);
+        if (accessibility != null) {
+            float toClient = (float) window.pixelWidth() / Math.max(1, width); // UI pixels to the window's
+            if (toClient > 0 && toClient != accessibility.scale()) {
+                accessibility.scale(toClient);
+            }
+            accessibility.update(); // what a screen reader asked runs in the next frame's input; changes are told
+        }
         if (osWindows != null) {
             osWindows.submit(ui);
         }
@@ -474,6 +496,10 @@ public final class UiPlugin implements Plugin {
 
     @Override
     public void stop() {
+        if (accessibility != null) {
+            accessibility.close();
+            accessibility = null;
+        }
         if (desktop != null && mouse != null) {
             desktop.unlisten(mouse);
         }

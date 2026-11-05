@@ -402,7 +402,15 @@ highlighted the ID draw finds nothing to draw and the mask and outline do nothin
 - **World panels** (`WorldPanelRenderer`, per panel): `TEXTURE` renders the panel's UI at the frame's start into an
   image with a bindless slot a material samples (lit and fogged like the scene), again only when its UI changed;
   `DIRECT` draws its primitives after the opaque scene through a panel-to-clip matrix made in doubles relative to the
-  camera, depth tested, MTSDF coverage worked out in the panel's pixels. Multiview (VR) direct drawing is not built.
+  camera, depth tested, MTSDF coverage worked out in the panel's pixels. Made with a camera per eye
+  (`new WorldPanelRenderer(graph, left, right)`) in a view whose scene colour and depth have a layer per eye, it
+  draws both eyes in one multiview pass (a matrix per eye, `SV_ViewID`); the frame graph opens a pass attaching every
+  layer of its images as a multiview rendering.
+- **3D gizmos** (`GizmoRenderer`, XR): each gizmo's handles as ui-gizmo's `GizmoMesh` (true geometry in world units
+  about the gizmo's origin, sized by angular size from the head), drawn after the opaque scene twice with
+  complementary hardware depth tests against the scene's depth (where the scene is in front at the `gizmo-occluded`
+  opacity, else at full), back faces culled; one camera or one per eye (multiview), matrices made in doubles
+  relative to each camera. `ui.gizmo.meshSides` sets the tessellation.
 - **Gizmo occlusion** (`Gizmo.depthTest(true)`, ui-core's `Primitive.FLAG_DEPTH`): a depth tested gizmo records its
   handles' lines, triangles and dots with their view depths; the UI pass reads the view's `Keys.SCENE_DEPTH` of the
   same frame (after transparency, its render region mapped onto the UI's image) and fades each pixel of a handle the
@@ -2494,13 +2502,22 @@ title shows the frame rate, GPU time, render size and display encoding. Settings
   thumbstick walks, triggers buzz, `P` shows the left eye on the desktop for people watching.
 - `--args="--validation"` turns Vulkan validation on and prints the error count at exit; `--seconds=10` quits by
   itself; `--probe` prints what the main view's scene color holds now and then.
-- `./gradlew :engine-demo:streamBench` flies over a grid of cells for 30 s at 90 Hz: cells coming into range get
-  meshes built on worker threads, a texture, materials and instances, those leaving lose them. It reports frame work
-  percentiles, GPU time per frame and the slowest frames with what happened in them (`--args=rays` builds bottom
-  levels too, `large` streams 131,000-triangle tiles and 2048 x 2048 textures, `heavy` 295,000-triangle tiles and
-  4096 x 4096 textures, `direct` stages them on the frame's thread instead of preparing them on the loaders', `inframe`
-  copies them in the frame instead of on the transfer queue). GPU time per frame includes the frame start, where
-  textures' copies and mip chains are recorded (`GpuTimings.frameStartMillis`).
+- `./gradlew :engine-demo:streamBench` flies over a grid of cells for 30 s at 90 Hz: cells coming into range (3 each
+  way, 7 x 7; `-Prange=n` for n) get meshes built on worker threads (three rocks and the cell's ground tile, 24 x 24
+  quads at the world's heights, so the ground stays put under the rocks), a texture, materials and instances, those
+  leaving lose them. It reports frame work percentiles, GPU time per frame and the slowest frames with what happened
+  in them (`--args=rays` builds bottom levels too, `large` streams 131,000-triangle ground tiles and 2048 x 2048
+  textures, `heavy` 295,000-triangle tiles and 4096 x 4096 textures, `direct` stages them on the frame's thread
+  instead of preparing them on the loaders', `inframe` copies them in the frame instead of on the transfer queue). GPU
+  time per frame includes the frame start, where textures' copies and mip chains are recorded
+  (`GpuTimings.frameStartMillis`). `--args=window` (with any of the others, e.g. `--args="window large"`) shows the
+  same fly-over, camera path and streaming in a resizable window instead, 10 cells each way (21 x 21, the ground 250
+  m ahead) unless `-Prange` says otherwise, at 60 m/s rather than 10 (`-Pspeed=n` sets either; + and - change it
+  live, Space pauses: the `stream` actions, rebindable in the settings), paced by the display, until the window is closed (`-Pseconds=n`: for n
+  seconds), with the profiler's frame graph overlay on (F3 toggles it, Shift+F3 the detailed profiler) and a line at
+  the bottom: cells in range, meshes and textures added and removed in the last second, what is on the GPU, the
+  speed; it prints no report. `-Pmemory=n` prints memory by kind every n frames (GPU by category, VMA's heaps, LWJGL's
+  native memory, direct buffers, the heap, the process); `-Pframes=n` runs n frames instead of 2,700.
 - `./gradlew :engine-demo:stereoBench` times the scene drawn for two eyes at a Quest 3's eye size, offscreen, pass by
   pass and grouped by kind (`--args="visibility"` for the visibility buffer, `-Procks=20000` for more rocks,
   `shared` for one set of shadow cascades, `rebuild` for what rebuilds and resizes cost the render thread, `noshadows`
