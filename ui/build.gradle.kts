@@ -19,6 +19,7 @@ dependencies {
     api("com.truesim.ui:ui-console:0.9.0") // the developer console over the engine's settings and log
     api("com.truesim.ui:ui-props:0.9.0") // property panels: the settings screen, material parameters
     api("com.truesim.ui:ui-profiler:0.9.0") // the profiler's views: the frame graph overlay, the detailed profiler
+    api("com.truesim.ui:ui-a11y-windows:0.9.0") // screen readers through Windows UI Automation (FFM, Windows only)
     runtimeOnly("com.truesim.ui:ui-charts:0.9.0") // charts' tunables (a TunableSource service) as settings
     testImplementation(testFixtures("com.truesim.ui:ui-controls:0.9.0")) // the galleries the screenshots show
     testImplementation(testFixtures("com.truesim.ui:ui-charts:0.9.0"))
