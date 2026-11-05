@@ -45,6 +45,11 @@ final class RasterPipelines implements AutoCloseable {
     static final int DEPTH = 1;
     /** The visibility buffer's IDs ({@link MeshletRenderer#ID_FORMAT}) and depth. */
     static final int IDS = 2;
+    /**
+     * Shadow casters' depth: as {@link #DEPTH}, every face drawn (both sides, one-sided materials' back faces too), as
+     * shadow rays meet every face: a light inside a closed mesh sees its inside.
+     */
+    static final int SHADOW = 3;
     /** Every raster pipeline takes forward.slang's push block. */
     private static final int DRAW_PUSH = ForwardPush.BYTES;
     private static final int BINS = MeshletRenderer.BINS;
@@ -55,8 +60,8 @@ final class RasterPipelines implements AutoCloseable {
     private final VulkanDevice device;
     // Per role, then raster bin (BIN_*): on the indexed path, and on mesh shaders (null without); the IDs' role is null
     // without primitive IDs. Index 0 (color) is unused: color is drawn by type.
-    private final Pipeline[][] indexed = new Pipeline[3][];
-    private final Pipeline[][] mesh = new Pipeline[3][];
+    private final Pipeline[][] indexed = new Pipeline[4][];
+    private final Pipeline[][] mesh = new Pipeline[4][];
     private final boolean slimMeshes;
     private final ShadingPipelines store;
 
@@ -72,6 +77,8 @@ final class RasterPipelines implements AutoCloseable {
             // materials' back faces), depth only too, so shadow maps mask what the camera does.
             indexed[DEPTH] = bins(bin -> depthOnly(raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT, "vertexMain"),
                 bin, drawShader).depth(depthFormat).build());
+            indexed[SHADOW] = bins(bin -> shadowOnly(raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT,
+                "vertexMain").doubleSided(), bin, drawShader).depth(depthFormat).build());
             indexed[IDS] = idsShader == null ? null : bins(bin -> raster(bin, drawShader, VK_SHADER_STAGE_VERTEX_BIT,
                 "vertexMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader, masking(bin) ? "maskedIdsMain"
                 : "idsMain").color(MeshletRenderer.ID_FORMAT).depth(depthFormat).build());
@@ -84,9 +91,15 @@ final class RasterPipelines implements AutoCloseable {
                         mesh[DEPTH] = bins(bin -> (masking(bin) ? depthOnly(raster(bin, meshShader,
                             VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain"), bin, drawShader) : raster(bin, meshShader,
                             VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain")).depth(depthFormat).build());
+                        mesh[SHADOW] = bins(bin -> (masking(bin) ? shadowOnly(raster(bin, meshShader,
+                            VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain").doubleSided(), bin, drawShader)
+                            : raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT, "meshMain").doubleSided())
+                            .depth(depthFormat).build());
                     } else {
                         mesh[DEPTH] = bins(bin -> depthOnly(raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT,
                             "meshIdsMain"), bin, drawShader).depth(depthFormat).build());
+                        mesh[SHADOW] = bins(bin -> shadowOnly(raster(bin, meshShader, VK_SHADER_STAGE_MESH_BIT_EXT,
+                            "meshIdsMain").doubleSided(), bin, drawShader).depth(depthFormat).build());
                     }
                     mesh[IDS] = idsShader == null ? null : bins(bin -> raster(bin, meshShader,
                         VK_SHADER_STAGE_MESH_BIT_EXT, "meshIdsMain").stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader,
@@ -294,7 +307,8 @@ final class RasterPipelines implements AutoCloseable {
     @AllowAllocation("building the graph, when it changes")
     ShadingPipelines.Key geometryKey(MaterialType type, int bin, int role, boolean meshShading) {
         boolean masked = masking(bin);
-        boolean depth = role == DEPTH;
+        boolean shadow = role == SHADOW;
+        boolean depth = role == DEPTH || shadow;
         boolean slim = meshShading && slimMeshes && depth && !masked && type == null;
         String geometryShader = !meshShading ? "shaders/meshlets/draw.spv" : "shaders/meshlets/mesh.spv";
         String geometryEntry = !meshShading ? "vertexMain" : slim ? "meshTypedMain" : "meshIdsTypedMain";
@@ -302,16 +316,17 @@ final class RasterPipelines implements AutoCloseable {
         String fragmentEntry;
         if (type != null) {
             fragmentShader = type.geometryShader();
-            fragmentEntry = type.name() + (masked ? "Masked" : "") + (depth ? "DepthMain" : "IdsMain");
+            fragmentEntry = type.name() + (masked ? "Masked" : "") + (shadow ? "ShadowMain" : depth ? "DepthMain"
+                : "IdsMain");
         } else if (depth) {
             fragmentShader = masked ? "shaders/meshlets/draw.spv" : null;
-            fragmentEntry = masked ? "maskedDepthMain" : null;
+            fragmentEntry = masked ? (shadow ? "maskedShadowMain" : "maskedDepthMain") : null;
         } else {
             fragmentShader = "shaders/visibility/ids.spv";
             fragmentEntry = masked ? "maskedIdsMain" : "idsMain";
         }
         return new ShadingPipelines.Key(geometryShader, geometryEntry, meshShading, fragmentShader, fragmentEntry, 0,
-            type == null ? 0 : type.geometry(), bin == BIN_OPAQUE ? ShadingPipelines.CULL_BACK
+            type == null ? 0 : type.geometry(), bin == BIN_OPAQUE && !shadow ? ShadingPipelines.CULL_BACK
             : ShadingPipelines.DOUBLE_SIDED, depth ? ShadingPipelines.DEPTH : ShadingPipelines.IDS, DRAW_PUSH);
     }
 
@@ -569,6 +584,12 @@ final class RasterPipelines implements AutoCloseable {
     /** Depth only: no fragment stage but the masked bins', which discard what they mask. */
     private static Pipeline.Graphics depthOnly(Pipeline.Graphics graphics, int bin, ShaderModule drawShader) {
         return masking(bin) ? graphics.stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "maskedDepthMain")
+            : graphics;
+    }
+
+    /** Casters' depth: as {@link #depthOnly}, the masked bins keeping back faces. */
+    private static Pipeline.Graphics shadowOnly(Pipeline.Graphics graphics, int bin, ShaderModule drawShader) {
+        return masking(bin) ? graphics.stage(VK_SHADER_STAGE_FRAGMENT_BIT, drawShader, "maskedShadowMain")
             : graphics;
     }
 

@@ -291,6 +291,47 @@ class ShadowOwnerTest {
         assertThat(lights.shadow(1).method()).isEqualTo(ShadowMethod.MAPS);
     }
 
+    /**
+     * A point light inside a closed rock: no light gets out, by its cube of maps (every face of a caster drawn, as rays
+     * meet every face: from inside, a closed mesh shows only its back faces) as by rays.
+     */
+    @Test
+    void aLightInsideAClosedMeshIsShutInByMapsAsByRays() {
+        MeshData rockMesh = MeshletBenchmark.rock(2);
+        int rock = pool.add(rockMesh);
+        boolean traced = rays();
+        if (traced) {
+            rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
+        }
+        scene.set(2, rock, 0, -1, -5, 0, 0, 0, 1, 1.5f, 1.5f, 1.5f);
+        java.util.List<ShadowSpec> specs = new java.util.ArrayList<>(java.util.List.of(ShadowSpec.maps(256)));
+        if (traced) {
+            specs.add(ShadowSpec.rayTraced());
+        }
+        lights.point(1, 0, -1, -5, 20, 60, 60, 60);
+        lights.directional(0, (float) -Keys.SUN_X, (float) -Keys.SUN_Y, (float) -Keys.SUN_Z, 0.3f, 0.3f, 0.3f)
+            .setCount(2);
+        for (Function<SceneView, Technique> shading : java.util.List.of(forward(), visibility())) {
+            newGraph(shading);
+            lights.shadow(1, ShadowSpec.NONE);
+            byte[] open = null;
+            for (int i = 0; i < 3; i++) {
+                open = frame();
+            }
+            int lit = floor(open, 3, -2);
+            for (ShadowSpec spec : specs) {
+                lights.shadow(1, spec);
+                byte[] shut = null;
+                for (int i = 0; i < 3; i++) {
+                    shut = frame();
+                }
+                assertThat(floor(shut, 3, -2)).as("%s: the floor beside the rock, %d with the light unshadowed",
+                    spec.method(), lit).isLessThan(lit / 2);
+            }
+        }
+        scene.remove(2);
+    }
+
     /** Ray tracing of the quads, where the device traces rays. */
     private boolean rays(MeshData... more) {
         if (!device.rayTracing()) {

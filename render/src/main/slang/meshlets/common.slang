@@ -507,9 +507,9 @@ public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets,
         return false;
     }
     float4 cone = decodeSnorm8(meshlets[w + 7]);
-    // Back faces as seen from the eye; orthographic views (shadow maps) keep them.
+    // Back faces as seen from the eye; orthographic views and shadow views (casters only) keep them.
     float3 fromEye = center - view.eye;
-    return doubleSided || view.orthographic != 0 || cone.w >= 1
+    return doubleSided || view.orthographic != 0 || (view.flags & VIEW_CASTERS_ONLY) != 0 || cone.w >= 1
         || dot(fromEye, normalToWorld(instance, cone.xyz)) < cone.w * length(fromEye) + radius;
 }
 

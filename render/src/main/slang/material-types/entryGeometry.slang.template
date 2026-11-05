@@ -18,6 +18,18 @@ void {name}MaskedDepthMain(VertexOut in, bool front : SV_IsFrontFace)
 }
 
 [shader("fragment")]
+void {name}ShadowMain(VertexOut in)
+{
+    typedDepth<{struct}>(in, true, false);
+}
+
+[shader("fragment")]
+void {name}MaskedShadowMain(VertexOut in)
+{
+    typedDepth<{struct}>(in, true, true); // back faces kept: casters' every face
+}
+
+[shader("fragment")]
 uint2 {name}IdsMain(VertexOut in, uint primitive : SV_PrimitiveID, bool front : SV_IsFrontFace) : SV_Target
 {
     return typedIds<{struct}>(in, primitive, front, false);

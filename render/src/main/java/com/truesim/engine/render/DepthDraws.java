@@ -7,9 +7,9 @@ import java.util.Objects;
 
 /**
  * Depth draws of a renderer's views into a rendering scope a pass opens itself, for techniques drawing several views
- * into one image (a shadow atlas: each view a tile, its viewport set by the pass): as {@link MeshletGeometry} draws a
- * {@link SceneDraw}'s depth, by type where the material table has types with geometry hooks ({@code keep()}: their
- * holes alike in every pass), else with the shared pipelines. Meshlet geometry only.
+ * into one image (a shadow atlas: each view a tile, its viewport set by the pass): shadow casters, every face, both
+ * sides (shadow rays meet every face too), by type where the material table has types with geometry hooks
+ * ({@code keep()}: their holes alike in every pass), else with the shared pipelines.
  */
 public final class DepthDraws {
 
@@ -28,7 +28,7 @@ public final class DepthDraws {
     @AllowAllocation("building the graph, when it changes")
     public static DepthDraws of(GraphBuilder g, MeshletRenderer renderer, RenderView... views) {
         Objects.requireNonNull(g, "g");
-        RasterPipelines.Geometry geometry = renderer.geometryPipelines(RasterPipelines.DEPTH);
+        RasterPipelines.Geometry geometry = renderer.geometryPipelines(RasterPipelines.SHADOW);
         if (geometry != null) {
             int opaque = (1 << MeshletRenderer.BIN_BLENDED) - 1;
             for (RenderView view : views) {
@@ -43,7 +43,7 @@ public final class DepthDraws {
         if (geometry != null) {
             renderer.drawGeometryAttached(ctx.unsafe().commands(), view, false, geometry);
         } else {
-            renderer.drawAttached(ctx.unsafe().commands(), view, false, true, 0);
+            renderer.drawCastersAttached(ctx.unsafe().commands(), view);
         }
     }
 }
