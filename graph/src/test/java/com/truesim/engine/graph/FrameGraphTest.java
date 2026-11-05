@@ -397,7 +397,10 @@ class FrameGraphTest {
             Image depth = g.create("eye depth", ImageDesc.of(Format.D32_SFLOAT, SIZE, SIZE).layers(2));
             // one pass, both layers: a multiview scope (view mask 0b11) whose clear reaches every view
             g.pass("both eyes").attach(eyes, Clear.color(0, 1, 0, 1)).attachDepth(depth, Clear.FAR)
-                .record(ctx -> { });
+                .record(ctx -> {
+                    ctx.clearDepth(0, 0, 2, 2, 0.5f); // an occluder's footprint, in both views
+                    assertThatIllegalArgumentException().isThrownBy(() -> ctx.clearDepth(0, 0, 0, 2, 1));
+                });
             Image out = g.create("out", ImageDesc.of(Format.R8G8B8A8_UNORM, SIZE, SIZE));
             g.pass("blit the right eye").read(eyes.layer(1), Access.TRANSFER_SRC).write(out, Access.TRANSFER_DST)
                 .record(ctx -> ctx.blit(eyes.layer(1), out.whole(), false));
