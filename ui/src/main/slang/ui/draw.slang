@@ -6,11 +6,14 @@
 // rectangle. EMPTY primitives (padding of an element's range) are degenerate: no pixels.
 //
 // Where a primitive draws: its coordinates plus its clip's offset (a scrolled region records its content once,
-// unscrolled, and scrolling moves the offset), then its transform table entry's scale and offset (an element's
-// animated scale or drawn offset: the animation rewrites the entry, not the primitives). The vertices are placed so;
-// the kinds' coverage is worked out at the pixel mapped back into the primitive's own coordinates, distances scaled to
-// pixels by the entry's scale, and the colour times the entry's opacity. A clip's rectangle is drawn by its own
-// entry (its owner's: a scaled or moved subtree is cut where it draws) and tested at the pixel itself.
+// unscrolled, and scrolling moves the offset), then its transform table entry's scale, rotation and offset (an
+// element's animated scale or drawn offset: the animation rewrites the entry, not the primitives). A local entry (one
+// naming a parent: rotated text) places the coordinates first, then the clip's offset is added and the parent places
+// them. The vertices are placed so (a rotated primitive's quad turned with it, cut by its clip at the pixel only); the
+// kinds' coverage is worked out at the pixel mapped back into the primitive's own coordinates, distances scaled to
+// pixels by the scale, and the colour times the opacity. A clip's rectangle is drawn by its own entry's scale and
+// offset (its owner's: a scaled or moved subtree is cut where it draws; clips are not rotated) and tested at the pixel
+// itself. Columns (pixel columns) are never rotated.
 //
 // One draw per layer runs fragmentMain, which branches on the kind (the "uber" path); the per-kind path draws runs of
 // one kind with that kind's own fragment entry point (boxMain, glyphMain, ...), in list order. The kinds over vertices
@@ -61,30 +64,93 @@ struct VertexOut
 /** Two triangles: corners top left, top right, bottom left, then bottom left, top right, bottom right. */
 static const uint CORNERS[6] = { 0, 1, 2, 2, 1, 3 };
 
-/** A transform table entry: points map to scale * p + offset, colours times opacity. */
+/**
+ * Where a transform table entry places its primitives: own coordinates p map to
+ * outer(inner(p) + clip offset), each stage scale * R * q + offset (R a rotation, (cos, sin)); the inner stage is a
+ * local entry's own (its parent the outer one), the identity otherwise. Colours times the opacity.
+ */
 struct Transform
 {
-    float scale;
-    float2 offset;
-    float opacity;
+    float scale;        // pixels a unit of the primitive's own coordinates draws at (both stages)
+    float2 offset;      // the outer stage's offset
+    float opacity;      // the entry's times its parent's
+    float outerScale;
+    float2 outerTurn;   // cos, sin
+    float innerScale;
+    float2 innerTurn;
+    float2 innerOffset;
+    bool turns;         // a rotation in either stage
 };
+
+/** `p` turned by `r` (cos, sin): clockwise on the screen, y being down. */
+float2 turn(float2 r, float2 p)
+{
+    return float2(r.x * p.x - r.y * p.y, r.y * p.x + r.x * p.y);
+}
+
+/** `p` turned back by `r`. */
+float2 turnBack(float2 r, float2 p)
+{
+    return float2(r.x * p.x + r.y * p.y, r.x * p.y - r.y * p.x);
+}
 
 /** Entry `index` of the transform table; entry 0, the identity of nearly every primitive, without a memory read. */
 Transform transformAt(uint index)
 {
     Transform x;
+    x.scale = 1;
+    x.offset = float2(0, 0);
+    x.opacity = 1;
+    x.outerScale = 1;
+    x.outerTurn = float2(1, 0);
+    x.innerScale = 1;
+    x.innerTurn = float2(1, 0);
+    x.innerOffset = float2(0, 0);
+    x.turns = false;
     if (index == 0)
     {
-        x.scale = 1;
-        x.offset = float2(0, 0);
-        x.opacity = 1;
         return x;
     }
     float* t = push.transforms + index * TRANSFORM_FLOATS;
-    x.scale = t[0];
-    x.offset = float2(t[1], t[2]);
-    x.opacity = t[3];
+    uint parent = uint(t[TRANSFORM_PARENT]);
+    float* o = t;
+    if (parent != 0)
+    {
+        x.innerScale = t[0];
+        x.innerOffset = float2(t[1], t[2]);
+        x.innerTurn = float2(t[TRANSFORM_COS], t[TRANSFORM_SIN]);
+        o = push.transforms + parent * TRANSFORM_FLOATS;
+        x.opacity = t[3] * o[3];
+    }
+    else
+    {
+        x.opacity = t[3];
+    }
+    x.outerScale = o[0];
+    x.offset = float2(o[1], o[2]);
+    x.outerTurn = float2(o[TRANSFORM_COS], o[TRANSFORM_SIN]);
+    x.scale = x.innerScale * x.outerScale;
+    x.turns = x.innerTurn.y != 0 || x.innerTurn.x != 1 || x.outerTurn.y != 0 || x.outerTurn.x != 1;
     return x;
+}
+
+/** Where own point `p` of a primitive placed by `t`, its clip's offset `clipOffset`, draws (UI pixels). */
+float2 place(Transform t, float2 p, float2 clipOffset)
+{
+    float2 q = turn(t.innerTurn, p) * t.innerScale + t.innerOffset + clipOffset;
+    return turn(t.outerTurn, q) * t.outerScale + t.offset;
+}
+
+/** A coordinate placed by `t` without its rotation (columns, never rotated): x (or y) of `place`. */
+float placeX(Transform t, float x, float clipOffset)
+{
+    return (x * t.innerScale + t.innerOffset.x + clipOffset) * t.outerScale + t.offset.x;
+}
+
+/** As `placeX`, y. */
+float placeY(Transform t, float y, float clipOffset)
+{
+    return (y * t.innerScale + t.innerOffset.y + clipOffset) * t.outerScale + t.offset.y;
 }
 
 float word(uint* p, uint at)
@@ -184,8 +250,8 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
     }
     Transform t = transformAt(p[TRANSFORM]);
     float2 offset = clipOffset(header);
-    float2 a = (float2(word(p, X0), word(p, Y0)) + offset) * t.scale + t.offset;
-    float2 b = (float2(word(p, X1), word(p, Y1)) + offset) * t.scale + t.offset;
+    float2 a = place(t, float2(word(p, X0), word(p, Y0)), offset);
+    float2 b = place(t, float2(word(p, X1), word(p, Y1)), offset);
     float2 at;
     if (kind == LINE)
     {
@@ -198,6 +264,18 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID)
         float extent = max(word(p, WIDTH) * t.scale, 1) * 0.5 + 0.5;
         at = ((corner & 1) != 0 ? b + along * 0.5 : a - along * 0.5)
             + normal * ((corner & 2) != 0 ? extent : -extent);
+    }
+    else if (t.turns)
+    {
+        // a rotated quad: the box's corners (in its own coordinates, grown by what it may touch) placed and turned;
+        // its clip cuts at the pixel
+        float2 lo = min(float2(word(p, X0), word(p, Y0)), float2(word(p, X1), word(p, Y1)));
+        float2 hi = max(float2(word(p, X0), word(p, Y0)), float2(word(p, X1), word(p, Y1)));
+        float grow = kind == SHADOW ? 3 * max(word(p, WIDTH), 0)
+            : kind == BOX || kind == TRIANGLE ? 0.5 / max(t.scale, 1e-6) : 0;
+        lo -= grow;
+        hi += grow;
+        at = place(t, float2((corner & 1) != 0 ? hi.x : lo.x, (corner & 2) != 0 ? hi.y : lo.y), offset);
     }
     else
     {
@@ -527,7 +605,12 @@ float2 uiPixel(float4 position)
 /** UI pixel `px` in the coordinates primitive `p` (header `header`, transform `t`) was recorded in. */
 float2 ownCoordinates(float2 px, uint header, Transform t)
 {
-    return (px - t.offset) / t.scale - clipOffset(header);
+    if (!t.turns)
+    {
+        return ((px - t.offset) / t.outerScale - clipOffset(header) - t.innerOffset) / t.innerScale;
+    }
+    float2 q = turnBack(t.outerTurn, (px - t.offset) / t.outerScale) - clipOffset(header);
+    return turnBack(t.innerTurn, (q - t.innerOffset) / t.innerScale);
 }
 
 // ---------------------------------------------------------------------------------------------------- depth tests
@@ -731,8 +814,8 @@ VertexOut edgesVertexMain(uint vertex : SV_VulkanVertexID)
     uint header = p[HEADER];
     Transform t = transformAt(p[TRANSFORM]);
     float2 offset = clipOffset(header);
-    float2 a = (float2(word(p, X0), word(p, Y0)) + offset) * t.scale + t.offset;
-    float2 b = (float2(word(p, X1), word(p, Y1)) + offset) * t.scale + t.offset;
+    float2 a = place(t, float2(word(p, X0), word(p, Y0)), offset);
+    float2 b = place(t, float2(word(p, X1), word(p, Y1)), offset);
     float2 lo = min(a, b) - 0.5;
     float2 hi = max(a, b) + 0.5;
     float2 top = halves(p[RADII]);
@@ -882,7 +965,7 @@ bool pathPoint(Path q, int j, out float2 at, out float s)
         return false;
     }
     float4 v = vertexAt(q.p, j);
-    at = (v.xy + q.offset) * q.t.scale + q.t.offset;
+    at = place(q.t, v.xy, q.offset);
     s = v.z * q.t.scale;
     return present(v.x) && present(v.y);
 }
@@ -1107,12 +1190,12 @@ Columns columnsOf(uint* p, uint header)
     c.t = transformAt(p[TRANSFORM]);
     c.offset = clipOffset(header);
     c.count = int(p[VERTEX_COUNT]);
-    c.x = (word(p, COLUMN_X) + c.offset.x) * c.t.scale + c.t.offset.x;
+    c.x = placeX(c.t, word(p, COLUMN_X), c.offset.x);
     c.step = word(p, COLUMN_STEP) * c.t.scale;
     c.width = word(p, WIDTH) * c.t.scale;
     c.fill = (p[STROKE] & COLUMNS_FILL) != 0;
     c.steps = (p[STROKE] & COLUMNS_STEPS) != 0;
-    c.base = (word(p, BASELINE) + c.offset.y) * c.t.scale + c.t.offset.y;
+    c.base = placeY(c.t, word(p, BASELINE), c.offset.y);
     return c;
 }
 
@@ -1123,7 +1206,9 @@ float4 columnAt(Columns c, int k)
     {
         return float4(asfloat(0x7fc00000u), 0, 0, 0);
     }
-    return (vertexAt(c.p, k) + c.offset.y) * c.t.scale + c.t.offset.y;
+    float4 v = vertexAt(c.p, k);
+    return float4(placeY(c.t, v.x, c.offset.y), placeY(c.t, v.y, c.offset.y), placeY(c.t, v.z, c.offset.y),
+        placeY(c.t, v.w, c.offset.y));
 }
 
 /** Columns of a fill a quad covers (GpuUiRenderer.FILL_GROUP): quads a pixel wide rasterize slowly. */
