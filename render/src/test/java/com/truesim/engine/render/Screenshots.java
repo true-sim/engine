@@ -111,6 +111,120 @@ class Screenshots {
     }
 
     /**
+     * The {@link com.truesim.engine.render.shadows.Shadows} owner's methods on rocks resting on the terrain, through the
+     * visibility buffer: the sun by one map, cascades (fixed and AUTO), hard and soft rays (a sun of 0.02 radians, to
+     * see its penumbras), the soft sun path traced for reference; then 24 point lights at dusk by AUTO maps, by hard
+     * and by soft rays. Into build/screenshots/owner-*.png.
+     */
+    @Test
+    void renderShadowOwner() throws IOException {
+        Path out = Files.createDirectories(Path.of("build", "screenshots"));
+        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        try (VulkanInstance instance = VulkanInstance.builder().applicationName("screenshots").surfaces(false)
+                 .build();
+             VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
+             GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 100_000, 4));
+             GpuImage target = new GpuImage(device, WIDTH, HEIGHT, VK_FORMAT_R8G8B8A8_UNORM, usage,
+                 VK_IMAGE_ASPECT_COLOR_BIT);
+             GpuBuffer pixels = GpuBuffer.hostVisible(device, (long) WIDTH * HEIGHT * 4,
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+             GpuScene gpu = new GpuScene(device, pool, 100_000);
+             MeshletRenderer renderer = MeshletBenchmark.withView(new MeshletRenderer(device, gpu,
+                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT), 20_000_000);
+             RayTracing rayTracing = device.rayTracing() ? new RayTracing(device, pool, 100_000) : null;
+             Lights lights = new Lights(device, 32, 256)) {
+            com.truesim.scene.assets.mesh.MeshData rockMesh = MeshletBenchmark.rock(6);
+            com.truesim.scene.assets.mesh.MeshData terrainMesh = MeshletBenchmark.terrain(1024);
+            int rock = pool.add(rockMesh);
+            int ground = pool.add(terrainMesh);
+            if (rayTracing != null) {
+                rayTracing.add(rock, rockMesh, rockMesh.levels().size() - 1);
+                rayTracing.add(ground, terrainMesh, terrainMesh.levels().size() - 1);
+            }
+            double groundY = -12;
+            MeshletBenchmark.rocksOnTerrain(renderer, rock, ground, 3000, 150, groundY);
+            Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
+            RenderView view = MeshletBenchmark.mainView(renderer);
+            view.set(camera, 1, MeshletRenderer.MODE_LIT);
+            com.truesim.engine.graph.ExternalImage external = new com.truesim.engine.graph.ExternalImage("target",
+                WIDTH, HEIGHT, com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
+            SceneGeometry geometry = SceneGeometry.meshlets(renderer);
+            java.util.List<Object[]> sun = new java.util.ArrayList<>(java.util.List.of(
+                new Object[] {"sun-map", com.truesim.scene.core.ShadowSpec.maps(4096).distance(150)},
+                new Object[] {"sun-cascades", com.truesim.scene.core.ShadowSpec.cascades(3, 2048, 150)},
+                new Object[] {"sun-cascades-auto", com.truesim.scene.core.ShadowSpec.cascades(
+                    com.truesim.scene.core.ShadowSpec.AUTO, com.truesim.scene.core.ShadowSpec.AUTO, 150)}));
+            if (rayTracing != null) {
+                sun.add(new Object[] {"sun-rays", com.truesim.scene.core.ShadowSpec.rayTraced()});
+                sun.add(new Object[] {"sun-soft-rays", com.truesim.scene.core.ShadowSpec.softRayTraced(0.02)});
+            }
+            lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3).setCount(1);
+            try (com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
+                com.truesim.engine.graph.ViewPort port = graph.addView("main").size(WIDTH, HEIGHT);
+                SceneView main = new SceneView(port, view, camera);
+                com.truesim.engine.render.shadows.Shadows shadows =
+                    new com.truesim.engine.render.shadows.Shadows(geometry, lights).rayTracing(rayTracing);
+                port.add(new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT))
+                    .add(new ClusteredLights(lights, main)).add(shadows.view(main)).output(Keys.SCENE_COLOR, external);
+                for (Object[] shot : sun) {
+                    lights.shadow(0, (com.truesim.scene.core.ShadowSpec) shot[1]);
+                    for (int i = 0; i < 40; i++) {
+                        capture(device, graph, target, pixels);
+                    }
+                    write(capture(device, graph, target, pixels), out.resolve("owner-" + shot[0] + ".png"));
+                }
+                // Dusk: 24 point lights over the rocks
+                lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 0.05f, 0.05f, 0.08f);
+                lights.shadow(0, com.truesim.scene.core.ShadowSpec.NONE);
+                java.util.SplittableRandom random = new java.util.SplittableRandom(7);
+                for (int i = 1; i <= 24; i++) {
+                    double x = random.nextDouble(-30, 30);
+                    double z = random.nextDouble(-60, -8);
+                    lights.point(i, x, groundY + MeshletBenchmark.terrainHeight(x, z) + random.nextDouble(2, 5), z, 14,
+                        (float) random.nextDouble(5, 25), (float) random.nextDouble(5, 25),
+                        (float) random.nextDouble(5, 25));
+                }
+                lights.setCount(25);
+                java.util.List<Object[]> points = new java.util.ArrayList<>();
+                points.add(new Object[] {"points-maps-auto", com.truesim.scene.core.ShadowSpec.maps(
+                    com.truesim.scene.core.ShadowSpec.AUTO)});
+                if (rayTracing != null) {
+                    points.add(new Object[] {"points-rays", com.truesim.scene.core.ShadowSpec.rayTraced()});
+                    points.add(new Object[] {"points-soft-rays",
+                        com.truesim.scene.core.ShadowSpec.softRayTraced(0.3)});
+                }
+                for (Object[] shot : points) {
+                    for (int i = 1; i <= 24; i++) {
+                        lights.shadow(i, (com.truesim.scene.core.ShadowSpec) shot[1]);
+                    }
+                    for (int i = 0; i < 40; i++) {
+                        capture(device, graph, target, pixels);
+                    }
+                    write(capture(device, graph, target, pixels), out.resolve("owner-" + shot[0] + ".png"));
+                }
+                shadows.close();
+            }
+            if (rayTracing != null) {
+                // The soft sun path traced: direct light only, its shadow rays to points of its disc
+                lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 3, 3, 3);
+                lights.shadow(0, com.truesim.scene.core.ShadowSpec.softRayTraced(0.02)).setCount(1);
+                try (com.truesim.engine.graph.FrameGraph graph = new com.truesim.engine.graph.FrameGraph(device, 2)) {
+                    graph.settings().set(ReferencePathTracer.SAMPLES, 256).set(ReferencePathTracer.BOUNCES, 1);
+                    com.truesim.engine.graph.ViewPort port = graph.addView("main").size(WIDTH, HEIGHT);
+                    SceneView main = new SceneView(port, view, camera);
+                    port.add(new ReferencePathTracer(geometry, rayTracing, main, VK_FORMAT_R8G8B8A8_UNORM))
+                        .add(new ClusteredLights(lights, main)).output(Keys.SCENE_COLOR, external);
+                    for (int i = 0; i < 260; i++) {
+                        capture(device, graph, target, pixels);
+                    }
+                    write(capture(device, graph, target, pixels), out.resolve("owner-sun-soft-reference.png"));
+                }
+            }
+        }
+    }
+
+    /**
      * The sun's shadows on rocks resting on the terrain, through the visibility buffer: by a shadow map (2048 x 2048
      * over a 150 unit square) and by inline ray queries (where the device traces rays); close-ups near the camera, and
      * where they differ (red: shadowed only by ray tracing, e.g. contact shadows the map misses; blue: only by the

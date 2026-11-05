@@ -61,7 +61,8 @@ public struct Shadow
     public uint size;              // maps: texels across; rays: the high half of that address
     public float bias;             // maps: in the map's depth units
     public float split;            // cascades: the view depth this cascade reaches
-    public float2 params;          // maps: (normal offset, near); masks: (channel, 0); rays: (offset per unit of distance, 0)
+    public float2 params;          // maps: (normal offset, near); masks: (channel, 0); rays: (offset per unit of
+                                   // distance, 0)
                                    // a map's near > 0: a perspective map (reverse depth, near / view depth), its normal
                                    // offset and bias per unit of distance from the light
     public float3 position;        // the entry's world position, high part

@@ -382,6 +382,74 @@ class ShadowOwnerTest {
         scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
     }
 
+    /**
+     * The penumbra soft ray-traced shadows draw against the path-traced reference's, from a sun of 0.15 radians (its
+     * spec's softness, the reference sampling its disc): the floor's visibility across the shadow's edge, from umbra
+     * (0) to lit (1), measured in each image against its own umbra and lit floor, so ambient light differing between
+     * them cancels. Hard rays, against the same reference, show what a wrong penumbra measures.
+     */
+    @Test
+    void softShadowsMatchThePathTracedReference() {
+        assumeThat(rays()).as("no ray tracing").isTrue();
+        sun(ShadowSpec.softRayTraced(0.15));
+        // the reference: direct light, its shadow rays to points of the sun's disc
+        if (shadows != null) {
+            shadows.close();
+            shadows = null;
+        }
+        graph.close();
+        graph = new FrameGraph(device, 2);
+        graph.settings().set(ReferencePathTracer.SAMPLES, 512).set(ReferencePathTracer.BOUNCES, 1);
+        SceneView main = new SceneView(graph.addView("main").size(SIZE, SIZE), view, camera);
+        main.port().add(new ReferencePathTracer(SceneGeometry.meshlets(renderer), rayTracing, main,
+            VK_FORMAT_R8G8B8A8_UNORM)).add(new ClusteredLights(lights, main))
+            .output(Keys.SCENE_COLOR, new ExternalImage("target", SIZE, SIZE,
+                com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                    | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(colorTarget.handle(), colorTarget.view()));
+        byte[] reference = null;
+        for (int i = 0; i < 520; i++) {
+            reference = frame();
+        }
+        newGraph(visibility());
+        byte[] soft = null;
+        for (int i = 0; i < 40; i++) {
+            soft = frame();
+        }
+        sun(ShadowSpec.rayTraced());
+        byte[] hard = null;
+        for (int i = 0; i < 3; i++) {
+            hard = frame();
+        }
+        double[] want = profile(reference);
+        double[] got = profile(soft);
+        double[] sharp = profile(hard);
+        double error = 0;
+        double hardError = 0;
+        StringBuilder table = new StringBuilder();
+        for (int i = 0; i < want.length; i++) {
+            error += Math.abs(got[i] - want[i]) / want.length;
+            hardError += Math.abs(sharp[i] - want[i]) / want.length;
+            table.append(String.format("%.2f/%.2f/%.2f ", want[i], got[i], sharp[i]));
+        }
+        System.out.printf(java.util.Locale.ROOT, "penumbra against the reference: soft %.4f, hard %.4f; %s%n", error,
+            hardError, table);
+        assertThat(error).as("soft rays against the reference (reference/soft/hard): %s", table).isLessThan(0.06);
+        assertThat(hardError).as("hard rays against it: the penumbra matters").isGreaterThan(2 * error);
+    }
+
+    /** Visibility across the quad's shadow's +x edge, 0 in its umbra to 1 lit, in 25 steps of 0.05 units. */
+    private double[] profile(byte[] color) {
+        double[] s = sunShadow();
+        double umbra = floor(color, s[0], s[1]);
+        double lit = floor(color, s[0] + 2.5, s[1]);
+        double[] v = new double[25];
+        for (int i = 0; i < v.length; i++) {
+            v[i] = (floor(color, s[0] + 0.4 + 0.05 * i, s[1]) - umbra) / Math.max(lit - umbra, 1);
+        }
+        return v;
+    }
+
     /** The test quad (2 x 2, in the xz plane) with texture coordinates: u along x, v along z, 0 to 1. */
     private static MeshData uvQuad() {
         float[] positions = {-1, 0, -1, 1, 0, -1, -1, 0, 1, 1, 0, 1};

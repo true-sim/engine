@@ -313,7 +313,7 @@ bool lightVisible(float3 p, float3 ng, float3 toLight, float distance, bool dire
 }
 
 /** What one light adds at `p` (geometric normal `ng`) on surface `s` seen from `v`, its shadow traced. */
-float3 lightOne(Light light, Surface s, float3 p, float3 ng, float3 v)
+float3 lightOne(Light light, Surface s, float3 p, float3 ng, float3 v, inout uint rng)
 {
     float3 toLight;
     float distance;
@@ -321,6 +321,29 @@ float3 lightOne(Light light, Surface s, float3 p, float3 ng, float3 v)
     if (all(c <= 0))
     {
         return 0;
+    }
+    if (light.radius > 0)
+    {
+        // A light of a size (its ShadowSpec's softness): the shadow ray towards a point of it, uniform over the sun's
+        // disc (a cone of its angular radius) or a sphere's disc facing the point, so its shadows have penumbras.
+        float u = random01(rng);
+        float w = random01(rng);
+        float phi = 6.2831853 * w;
+        float3 a = normalize(abs(toLight.y) < 0.99 ? cross(toLight, float3(0, 1, 0))
+            : cross(toLight, float3(1, 0, 0)));
+        float3 b = cross(toLight, a);
+        if (light.type == DIRECTIONAL)
+        {
+            float cosTheta = 1 - u * (1 - cos(light.radius));
+            float sinTheta = sqrt(max(0, 1 - cosTheta * cosTheta));
+            toLight = normalize(toLight * cosTheta + (a * cos(phi) + b * sin(phi)) * sinTheta);
+        }
+        else
+        {
+            float3 d = light.position + (a * cos(phi) + b * sin(phi)) * (light.radius * sqrt(u)) - p;
+            distance = length(d);
+            toLight = d / max(distance, 1.0e-6);
+        }
     }
     return lightVisible(p, ng, toLight, distance, light.type == DIRECTIONAL) ? c : float3(0);
 }
@@ -338,7 +361,7 @@ float3 worldLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uin
     uint4 directional = g[0].directional;
     for (uint i = 0; i < directionalCount; i++)
     {
-        sum += lightOne(gridLightRelative(g, directional[i], view.position, view.positionLow), s, p, ng, v);
+        sum += lightOne(gridLightRelative(g, directional[i], view.position, view.positionLow), s, p, ng, v, rng);
     }
     float3 toGrid = lessCamera(view.position, view.positionLow, g[0].origin, g[0].originLow);
     int cell = gridCell(g, p + toGrid);
@@ -350,7 +373,7 @@ float3 worldLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uin
             Light l = gridLightRelative(g, i, view.position, view.positionLow);
             if (l.type != DIRECTIONAL)
             {
-                sum += lightOne(l, s, p, ng, v);
+                sum += lightOne(l, s, p, ng, v, rng);
             }
         }
         return sum;
@@ -362,7 +385,7 @@ float3 worldLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uin
         uint listed = min(list[0], slots); // past the slots: overflowed (noted in the header)
         for (uint k = 0; k < listed; k++)
         {
-            sum += lightOne(gridLightRelative(g, list[1 + k], view.position, view.positionLow), s, p, ng, v);
+            sum += lightOne(gridLightRelative(g, list[1 + k], view.position, view.positionLow), s, p, ng, v, rng);
         }
         return sum;
     }
@@ -376,7 +399,7 @@ float3 worldLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uin
             Light l = gridLightRelative(g, i, view.position, view.positionLow);
             if (l.type != DIRECTIONAL)
             {
-                sum += lightOne(l, s, p, ng, v);
+                sum += lightOne(l, s, p, ng, v, rng);
             }
         }
         return sum;
@@ -442,17 +465,17 @@ public float3 directLight(Surface s, float3 p, float3 ng, float3 v, View view, i
         sun.shadowCount = 0;
         sun.radius = 0;
         sun.pad1 = 0;
-        return lightOne(sun, s, p, ng, v);
+        return lightOne(sun, s, p, ng, v, rng);
     }
     LightListHeader h = loadHeader(list);
     float3 sum = 0;
     for (uint i = 0; i < h.lightCount; i++)
     {
-        sum += lightOne(h.relativeTo(h.lights[i]), s, p, ng, v);
+        sum += lightOne(h.relativeTo(h.lights[i]), s, p, ng, v, rng);
     }
     for (uint i = 0; i < h.extraCount; i++)
     {
-        sum += lightOne(h.relativeTo(h.extra[i]), s, p, ng, v);
+        sum += lightOne(h.relativeTo(h.extra[i]), s, p, ng, v, rng);
     }
     return sum;
 }

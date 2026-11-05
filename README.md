@@ -927,7 +927,8 @@ port.add(new ClusteredLights(lights, main));                         // provides
   `lightList()`'s dispatch on the header's layout.
 - **Shadows, single or many per light:** a light names consecutive shadow table entries, each of a kind (a shadow
   map with its filter, a mask, an inline ray). A spot light uses one; a directional light one per cascade, chosen by
-  view depth; a point light six cube faces, chosen by direction. See "Shadows per light" below.
+  view depth; a point light six cube faces, chosen by direction. See "Shadows as data" below: one owner draws every
+  light by its `ShadowSpec`.
 - **Fixed slots per cluster** (128 by default): no atomics, a deterministic order, and overflow reported (the most
   lights any cluster wanted is in the header).
 - Tested against the same cluster boxes computed on the CPU.
@@ -1399,9 +1400,72 @@ try (RayTracing rayTracing = new RayTracing(device, pool, 100_000)) { // at most
   per segment visiting every triangle on it, and reads back the nearest 8 crossings of each (instance, facing,
   material id) a frame or more later; `collect(ticket, words)` hands them over. Allocation-free per batch.
 
-### Shadows per light
+### Shadows as data: the `Shadows` owner
 
-Every light chooses its own shadow technique, and lights of one frame may mix them. A light names consecutive entries
+Which lights cast shadows, and how, is per-light data (engine#120, frame graph v2 §4.15): each light carries a
+`ShadowSpec` (scene-core; on a `LightSource` component, which `LightSync` hands to `Lights.shadow(id, spec)`), and one
+owner draws every light's shadows by it. Giving a light shadows, switching its method, size or softness, or turning
+them off takes effect from the next frame without a graph build.
+
+```java
+Shadows shadows = new Shadows(geometry, lights).rayTracing(rayTracing); // rayTracing: optional
+views.addPerView(shadows::view);                                         // or port.add(shadows.view(main))
+sun.shadow(ShadowSpec.cascades(ShadowSpec.AUTO, ShadowSpec.AUTO, 300)); // on the LightSource component
+lamp.shadow(ShadowSpec.maps(ShadowSpec.AUTO).auto(128, 1024));
+torch.shadow(ShadowSpec.softRayTraced(0.05));                            // a 5 cm sphere: soft, denoised
+lights.shadow(id, ShadowSpec.rayTraced());                               // or straight on the engine's lights
+```
+
+| Method | Spot, point lights | Directional lights | Evaluated by |
+|---|---|---|---|
+| `NONE` | - | - | - |
+| `MAPS` | a tile of the shadow atlas; six (cube faces) for a point light; perspective, depth compared at view depth less a bias that grows with distance | one map fitted around each view's camera to `distance` | `PcfShadow` in the tile |
+| `CASCADES` | as `MAPS` | `cascades` per view (practical splits, snapped to world texels), tiles of the atlas | `PcfShadow`, the cascade by view depth |
+| `RAY_TRACED` | a mask per view: one ray per pixel to the light | one ray per pixel along the light | `MaskShadow` |
+| `SOFT_RAY_TRACED` | rays to points of a sphere of radius `softness`, denoised | rays in a cone of angular radius `softness` (the sun: 0.0047), denoised | `MaskShadow` (the denoised value) |
+
+- **One atlas for every map** (`shadows.atlas.size`, 8192 by default: 256 MiB of 32-bit depth, made the first time a
+  light uses maps). Tiles are powers of two allocated in a quadtree; a light keeps its tile while its size stays.
+  Tiles are drawn in one pass, each through a view of its own culled with the frame's other views (`DepthDraws`:
+  geometry hooks too), into its rectangle (cleared, then viewport and scissor).
+- **Drawn only when something changed.** A tile is drawn again when its light moved or its spec changed, a caster
+  within its frustum moved, was added or removed (the scene's changes before they upload: `GpuScene.changedId`, against
+  the instance's bounding sphere before and after), the materials' shapes changed (`Materials.shapesVersion`: masks and
+  geometry hooks' fields updated in place), or the caster detail setting changed. A still light over a still scene
+  keeps its tile, drawn once; a still camera keeps its cascades. Deformed copies dirty the tiles around them every
+  frame; instances moved on the GPU (interpolated motion, mesh particles) dirty every tile while there are any.
+  At most `shadows.atlas.draws` tiles (64) are drawn a frame, the most important first; more wait a frame (their light
+  keeps its last map, or casts none until drawn). No "every N frames" for far lights: it would lag.
+- **AUTO sizes** (`ShadowSpec.AUTO`, within the spec's `minSize` and `maxSize`): a spot or point light's maps from how
+  many pixels its reach covers in the views (`shadows.auto.scale` texels per pixel, times the spec's `importance`), a
+  cascade's from the screen's pixel size at its start; rounded to powers of two, changed only past
+  `shadows.auto.hysteresis` octaves from the halfway point, so tiles stay as the camera moves. Beyond
+  `shadows.auto.cutoff` units from every view (0: no cutoff) an AUTO light casts none.
+- **Budget:** over the atlas, the least important light's tiles halve first (not below its `minSize`), then the least
+  important lights cast none (`Shadows.stats()`: shrunk, dropped).
+- **Rays** (where a `RayTracing` is given; else those lights take maps): every traced light of a view is traced in one
+  dispatch from the view's depth (the visibility buffer's own IDs draw; for forward shading a depth draw of its own),
+  on the async queue. Soft lights take `shadows.soft.rays` rays a pixel (1) and the engine's denoiser
+  (`shadows.soft.denoiser`: SVGF or REBLUR, both kept), its history restarting when a slot changes light. A light
+  keeps its mask while traced; more traced lights than ever before in a view build the graph once more.
+- **Shadow rays respect materials' shapes:** alpha masks as before, and **geometry hooks' holes** (`keep()`): instances
+  of such types enter the top level non-opaque; a ray whose nearest candidate is of a hooked type waits in a queue
+  (`shadows.rays.queue`), that type's generated keep entry point (`material-types/entryShadowKeep`) tests the point,
+  and the ray goes on beyond a hole, up to `shadows.rays.keepRounds` holes (3); then it counts as blocked.
+- **The graph's part:** `PassBuilder.when(supplier)` and `GraphBuilder.masked(supplier, build)` skip passes from data
+  each frame (barriers kept, no build): the atlas pass while no tile is drawn, a soft slot's denoiser while unused,
+  the traced passes while no light is traced. The atlas, more draw views and more traced slots are structure: they
+  only ever grow, each growth one build.
+- **The reference** (`ReferencePathTracer`) samples a light's size too: a light's `radius` (its spec's softness) turns
+  its shadow rays to points of its disc or sphere, so soft shadows are checked against path-traced penumbras
+  (`ShadowOwnerTest.softShadowsMatchThePathTracedReference`).
+- **Not yet:** inline ray shadows (`InlineRayShadows`) are not a method of the owner (they cannot test `keep()` from a
+  shading pass of another type); classic LOD geometry does not draw into the atlas; the techniques below stay for now.
+
+### Shadow techniques and the shadow table
+
+The owner above writes the same shadow table as these single techniques, which stay for now (one light each, added
+to the graph: a change of technique builds it again). Every light chooses its own shadow technique, and lights of one frame may mix them. A light names consecutive entries
 of the shadow table; each entry has a **kind**, evaluated in shading by an implementation of `lights.slang`'s `IShadow`
 interface:
 
