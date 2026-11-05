@@ -40,7 +40,7 @@ import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
-import com.truesim.engine.render.shadows.CascadedShadowMaps;
+import com.truesim.engine.render.shadows.Shadows;
 import com.truesim.engine.ui.UiPlugin;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.ui.controls.Ui;
@@ -235,7 +235,7 @@ final class StreamWindow implements Application, PlatformListener {
         private GpuScene scene;
         private Lights lights;
         private MeshletRenderer renderer;
-        private CascadedShadowMaps sun;
+        private Shadows sun; // the sun's cascades
         private RayTracing rayTracing;
         private Window window;
         private long seed = 1;
@@ -289,10 +289,10 @@ final class StreamWindow implements Application, PlatformListener {
             ViewPort port = graph.addView("main");
             SceneView view = geometry.createView(port, camera, ViewOptions.of(1 << 14, 1 << 22).withOcclusion(true))
                 .set(1, MeshletRenderer.MODE_LIT);
-            sun = new CascadedShadowMaps(geometry, lights, 0, 0, view, 3, 2048, ViewOptions.shadow(1 << 16, 1 << 22),
-                120);
+            sun = new Shadows(geometry, lights);
+            lights.shadow(0, com.truesim.scene.core.ShadowSpec.cascades(3, 2048, 120));
             port.add(new ClusteredForwardShading(geometry, view, COLOR, DEPTH).clearColor(0.4f, 0.55f, 0.8f))
-                .add(new ClusteredLights(lights, view)).add(sun);
+                .add(new ClusteredLights(lights, view)).add(sun.view(view));
             for (int id = StreamBench.instanceCapacity() - 1; id >= 1; id--) {
                 freeIds.push(id);
             }
@@ -356,7 +356,6 @@ final class StreamWindow implements Application, PlatformListener {
             }
             meshesAdded = added[0];
             frames++;
-            sun.update();
         }
 
         private int find(long key) {
@@ -399,6 +398,9 @@ final class StreamWindow implements Application, PlatformListener {
                 }
             }
             device.waitIdle();
+            if (sun != null) {
+                sun.close();
+            }
             renderer.close();
             if (rayTracing != null) {
                 rayTracing.close();
