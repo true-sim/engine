@@ -132,7 +132,8 @@ sugar, settings files per app id (D7), plugins registering their lists (D8).
   `MorphWeights` (`truesim.morph-weights`, written in place, not logged) replace the `Renderables` store. Component
   types may declare their fields (`ComponentType.of(name, class, fields)`): a set logs `CHANGED` with the bits of the
   fields that changed (`Renderable.MESH`, `MATERIALS`, `SHADOWS`, `SKIN`) and nothing when none did, so per-field
-  change granularity stays. `SceneSync`, `RenderableBounds`, `RenderablePicking` and `ModelData.spawn` read and set
+  change granularity stays. `Renderable.setMaterials`, `setCastsShadows`, `setMesh` and `setSkin` change one field
+  without allocating once warm (each node reuses its last 8 values). `SceneSync`, `RenderableBounds`, `RenderablePicking` and `ModelData.spawn` read and set
   the stores; a removed node loses its renderable at once (no `renderables.update()`).
 
 ## 4. Assets

@@ -266,8 +266,8 @@ class SceneBenchmark {
             run("100 rocks changing material", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> {
                 for (int i = 0; i < 100; i++) {
                     int r = churn.nextInt(ROCKS);
-                    Renderable rock = renderables.get(rocks[r]);
-                    renderables.set(rocks[r], rock.withMaterials(List.of(rock.material(0) == GRANITE ? GRASS : GRANITE)));
+                    Renderable.setMaterials(scene, rocks[r],
+                        List.of(renderables.get(rocks[r]).material(0) == GRANITE ? GRASS : GRANITE));
                 }
             });
             fixedSteps(graph, slots, tasks, scene, renderables, sync, cameraView, camera, rocks, placed);

@@ -476,7 +476,7 @@ class SceneSyncTest {
         assertThat(litColumn(readbacks[0], 0)).as("the camera moved past it").isLessThan(SIZE / 2.0 - 4);
         // A material change draws in the new one, keeping the mesh on the GPU and the instance id.
         int mesh = sync.meshOf(node);
-        renderables.set(node, renderables.get(node).withMaterials(List.of(GREEN)));
+        Renderable.setMaterials(scene, node, List.of(GREEN));
         frame(List.of(graph), List.of(sync), camera);
         assertThat(sync.meshOf(node)).as("the same mesh, not uploaded again").isEqualTo(mesh);
         assertThat(sync.slotOf(node)).isZero();
@@ -521,7 +521,7 @@ class SceneSyncTest {
             identities[16 + 5 * i] = 1;
         }
         renderables.set(body, Renderable.of(SKINNED, List.of(RED)));
-        renderables.set(body, renderables.get(body).withSkin(new SkinBinding(new long[] {left, right}, identities)));
+        Renderable.setSkin(scene, body, new SkinBinding(new long[] {left, right}, identities));
         settle(List.of(graph), List.of(sync));
         device.waitIdle();
         assertThat(sync.instanceCount()).isOne();
@@ -553,7 +553,7 @@ class SceneSyncTest {
         scene.setTranslation(right, 2, 0, 0);
         // Without its skin the mesh draws as it is, at rest; the copy leaves the pool.
         int meshes = pool.meshCount();
-        renderables.set(body, renderables.get(body).withSkin(null));
+        Renderable.setSkin(scene, body, null);
         for (int frame = 0; frame < 2; frame++) {
             frame(List.of(graph), List.of(sync), camera);
         }
@@ -562,7 +562,7 @@ class SceneSyncTest {
         assertThat(pool.meshCount()).isEqualTo(meshes - 1);
         assertThat(litColumn(readbacks[0], 0)).as("at rest again").isCloseTo(rest, within(0.5));
         // Skinned again, then removed: the copy goes with it, before its mesh.
-        renderables.set(body, renderables.get(body).withSkin(new SkinBinding(new long[] {left, right}, identities)));
+        Renderable.setSkin(scene, body, new SkinBinding(new long[] {left, right}, identities));
         frame(List.of(graph), List.of(sync), camera);
         assertThat(pool.deformation().size()).isOne();
         renderables.remove(body);
@@ -592,7 +592,7 @@ class SceneSyncTest {
             identities[16 + 5 * i] = 1;
         }
         renderables.set(body, Renderable.of(SKINNED, List.of(RED)));
-        renderables.set(body, renderables.get(body).withSkin(new SkinBinding(new long[] {left, right}, identities)));
+        Renderable.setSkin(scene, body, new SkinBinding(new long[] {left, right}, identities));
         settle(List.of(graph), List.of(sync));
         int square = sync.meshOf(still);
         int copy = copyOf(sync.meshOf(body));
@@ -621,10 +621,10 @@ class SceneSyncTest {
         frame(List.of(graph), List.of(sync), camera);
         assertThat(tracing.bottomLevelsUpdatedLastFrame()).isZero();
         // Without its skin the copy leaves, its level with it; skinned again, a new copy has one from the start.
-        renderables.set(body, renderables.get(body).withSkin(null));
+        Renderable.setSkin(scene, body, null);
         frame(List.of(graph), List.of(sync), camera);
         assertThat(tracing.bottomLevelAdded(copy)).isFalse();
-        renderables.set(body, renderables.get(body).withSkin(new SkinBinding(new long[] {left, right}, identities)));
+        Renderable.setSkin(scene, body, new SkinBinding(new long[] {left, right}, identities));
         frame(List.of(graph), List.of(sync), camera);
         int again = copyOf(sync.meshOf(body));
         assertThat(tracing.bottomLevelAdded(again)).isTrue();
@@ -1407,7 +1407,7 @@ class SceneSyncTest {
         assertThat(slot).isNotNegative();
         // A textured material, waited for whole: drawn red, in its id, until the material and its texture are there.
         AssetRef<TextureData> white = AssetRef.generated(RenderAssets.TEXTURE, PLAINS, new Plain(0xffffffff), 61);
-        renderables.set(node, renderables.get(node).withMaterials(List.of(textured(white, 61))));
+        Renderable.setMaterials(scene, node, List.of(textured(white, 61)));
         scene.update();
         sync.update(); // nothing loaded yet
         assertThat(sync.slotOf(node)).isEqualTo(slot);
@@ -1419,7 +1419,7 @@ class SceneSyncTest {
         assertThat(sync.firstMaterialOf(node)).isNotEqualTo(redBlock);
         assertThat(sync.slotOf(node)).as("the same instance").isEqualTo(slot);
         // Another mesh: the square drawn, in the id, until the small one is on the GPU; then the small one there.
-        renderables.set(node, renderables.get(node).withMesh(SMALL));
+        Renderable.setMesh(scene, node, SMALL);
         scene.update();
         sync.update();
         assertThat(sync.slotOf(node)).isEqualTo(slot);
@@ -1548,7 +1548,7 @@ class SceneSyncTest {
         update(scene, sync);
         assertThat(sync.instanceCount()).isEqualTo(INSTANCES + 1);
         // A mesh change: drawn again with the new mesh once it loads.
-        renderables.set(nodes[2], renderables.get(nodes[2]).withMesh(SMALL));
+        Renderable.setMesh(scene, nodes[2], SMALL);
         update(scene, sync);
         load();
         update(scene, sync);
@@ -1628,7 +1628,7 @@ class SceneSyncTest {
         assertThat(sync.instanceCount()).isEqualTo(1);
         assertThat(textures.count()).isEqualTo(1);
         // A material arriving for a renderable already gone is never written.
-        renderables.set(rock, renderables.get(rock).withMaterials(List.of(GREEN)));
+        Renderable.setMaterials(scene, rock, List.of(GREEN));
         update(scene, sync);
         load();
         renderables.remove(rock);
@@ -1690,7 +1690,7 @@ class SceneSyncTest {
         assertThat(sync.instanceCount()).isEqualTo(3);
         int slot = sync.slotOf(b);
         // Shadows are not followed yet: nothing changes. Nor do nodes without renderables.
-        renderables.set(b, renderables.get(b).withCastsShadows(false));
+        Renderable.setCastsShadows(scene, b, false);
         scene.setTranslation(bare, 5, 5, 5);
         update(scene, sync);
         assertThat(sync.slotOf(b)).isEqualTo(slot);
@@ -1753,12 +1753,14 @@ class SceneSyncTest {
         load();
         update(scene, sync);
         int[] frame = {0};
-        // The values are made once, as a game switching looks keeps them: what is measured is the sync.
+        // The kept one switches its materials through the setter (reusing its looks, logged MATERIALS) and its shadows;
+        // the one coming is set from values kept, as a game spawning a look keeps it.
         Renderable redSquare = Renderable.of(SQUARE, red);
         Renderable greenSquare = Renderable.of(SQUARE, green);
         com.truesim.testing.AllocationAssertions.assertAllocationFree(() -> {
             boolean even = frame[0]++ % 2 == 0;
-            renderables.set(kept, even ? greenSquare : redSquare);
+            Renderable.setMaterials(scene, kept, even ? green : red);
+            Renderable.setCastsShadows(scene, kept, !even);
             scene.remove(coming[0]);
             coming[0] = scene.create();
             renderables.set(coming[0], even ? redSquare : greenSquare);
@@ -1846,7 +1848,7 @@ class SceneSyncTest {
         int block = sync.firstMaterialOf(kept);
         // More changes than the log keeps: the sync reconciles every renderable, and keeps what did not change.
         renderables.remove(gone);
-        renderables.set(changed, renderables.get(changed).withMaterials(List.of(GREEN)));
+        Renderable.setMaterials(scene, changed, List.of(GREEN));
         Renderable lit = renderables.get(kept);
         Renderable unlit = lit.withCastsShadows(false);
         for (int i = 0; i <= ComponentStore.MAX_LOG; i++) {
@@ -1883,7 +1885,8 @@ class SceneSyncTest {
         long changing = nodes[3];
         int mesh = sync.meshOf(changing);
         int slot = sync.slotOf(changing);
-        renderables.set(changing, renderables.get(changing).withMaterials(List.of(AssetRef.generated(RenderAssets.MATERIAL, GLOWS, new Glow(99, 0, 0), 9))));
+        Renderable.setMaterials(scene, changing,
+            List.of(AssetRef.generated(RenderAssets.MATERIAL, GLOWS, new Glow(99, 0, 0), 9)));
         update(scene, sync);
         assertThat(sync.slotOf(changing)).isEqualTo(slot);
         assertThat(sync.meshOf(changing)).isEqualTo(mesh);
@@ -1923,7 +1926,7 @@ class SceneSyncTest {
         assertThat(sync.slotOf(next)).isEqualTo(ids[1]);
         // Layers and shadows, from the scene: one node on layer 5, one casting no shadow.
         scene.setLayers(nodes[0], 1 << 5);
-        renderables.set(nodes[2], renderables.get(nodes[2]).withCastsShadows(false));
+        Renderable.setCastsShadows(scene, nodes[2], false);
         cameraView.filter(1, false);
         frame(graphs, List.of(sync), camera);
         device.waitIdle();
@@ -2087,7 +2090,7 @@ class SceneSyncTest {
             identities[16 + 5 * i] = 1;
         }
         renderables.set(body, Renderable.of(SKINNED, List.of(RED)));
-        renderables.set(body, renderables.get(body).withSkin(new SkinBinding(new long[] {left, right}, identities)));
+        Renderable.setSkin(scene, body, new SkinBinding(new long[] {left, right}, identities));
         com.truesim.scene.effects.Effects effects = new com.truesim.scene.effects.Effects(scene);
         EffectSync fx = new EffectSync(effects, particles).meshes(sync);
         // Short-lived particles, many: their box is where they were born lately

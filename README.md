@@ -935,7 +935,7 @@ Drawing and shading are separate, and each is swappable:
   every posed copy (`Deformation`: joint matrices and the pose's box, linear blend skinning, normals by cofactors),
   recomputes its meshlet spheres, turns cone culling off for it and grows its detail spheres by how far the joints
   move. Morph targets go first: a copy of a mesh with targets takes their weights (`Deformation.weight`), the
-  deltas uploaded once per mesh. `SceneSync` does it for renderables with a skin (`Renderable.withSkin`, set by
+  deltas uploaded once per mesh. `SceneSync` does it for renderables with a skin (`Renderable.setSkin`, set by
   `ModelData.spawn`) or morph targets (weights in the node's `MorphWeights` component), posing them each update from
   their joints' world transforms and weights; scene-animation's `Animators` move the joints and, through
   `animators.morphSink((node, w, offset, count) -> MorphWeights.write(scene, node, w, offset, count))`, the weights. Meshlet paths only
