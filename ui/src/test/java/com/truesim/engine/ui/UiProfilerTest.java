@@ -112,12 +112,15 @@ class UiProfilerTest {
             for (int i = 0; i < 120; i++) {
                 engine.step();
             }
-            Thread.sleep(100); // a counters sample or more
-            for (int i = 0; i < 10; i++) {
+            Recording r = profiler.recording();
+            // the counters thread samples when it gets to run: wait for it, however busy the machine
+            long deadline = System.nanoTime() + 20_000_000_000L;
+            while (!(counter(r, "memory.heap") > 0 && counter(r, "gpu.memory.render_targets") > 0)
+                && System.nanoTime() < deadline) {
                 engine.step();
+                Thread.sleep(5);
             }
             assertThat(Profiler.zones()).isTrue();
-            Recording r = profiler.recording();
             int main = lane(r, Thread.currentThread().getName(), LaneKind.THREAD);
             assertThat(main).isNotNegative();
             List<String> names = zoneNames(r, main);
@@ -129,7 +132,7 @@ class UiProfilerTest {
             // GPU work of a frame starts after its submit (on the CPU's clock, calibrated or bounded)
             long f = r.endFrame() - 5;
             assertThat(r.frameGpuStart(f)).isPositive();
-            assertThat(r.frameGpuStart(f)).isGreaterThanOrEqualTo(r.frameEnd(f) - 1_000_000);
+            assertThat(r.frameGpuStart(f)).isGreaterThanOrEqualTo(earliestGpuStart(engine, r, main, f));
             assertThat(profiler.times().cpu().size()).isPositive();
             assertThat(profiler.times().gpu().size()).isPositive();
             assertThat(counter(r, "memory.heap")).isPositive();
@@ -148,18 +151,18 @@ class UiProfilerTest {
             profiler.view().frozen().set(true);
             engine.step();
             long frozenAt = r.endFrame();
-            int frames = count(r, main, "frame");
+            long zonesAt = r.endZone(main); // counted from here: older zones may age out of the kept span meanwhile
             for (int i = 0; i < 5; i++) {
                 engine.step();
             }
             assertThat(r.endFrame()).isEqualTo(frozenAt);
-            assertThat(count(r, main, "frame")).isEqualTo(frames);
+            assertThat(r.endZone(main)).isEqualTo(zonesAt);
             assertThat(profiler.times().latest()).as("the overlay keeps running").isGreaterThan(frozenAt);
             profiler.view().stepButton().click();
             engine.step();
             engine.step();
             assertThat(r.endFrame()).isGreaterThan(frozenAt);
-            assertThat(count(r, main, "frame")).as("one frame taken").isEqualTo(frames + 1);
+            assertThat(countSince(r, main, "frame", zonesAt)).as("one frame taken").isEqualTo(1);
             profiler.view().frozen().set(false);
             // exports
             String files = profiler.export("tsprof", "json");
@@ -189,15 +192,12 @@ class UiProfilerTest {
             for (int i = 0; i < 60; i++) {
                 engine.step();
             }
-            Thread.sleep(60);
-            for (int i = 0; i < 5; i++) {
-                engine.step();
-            }
             Recording r = profiler.recording();
             assertThat(engine.get(Profiling.KEY).clock().calibrated()).isFalse();
             assertThat(lane(r, "GPU graphics", LaneKind.GPU)).as("placed by their submits").isNotNegative();
             long f = r.endFrame() - 5;
-            assertThat(r.frameGpuStart(f)).isGreaterThanOrEqualTo(r.frameEnd(f) - 1_000_000);
+            int main = lane(r, Thread.currentThread().getName(), LaneKind.THREAD);
+            assertThat(r.frameGpuStart(f)).isGreaterThanOrEqualTo(earliestGpuStart(engine, r, main, f));
             for (int c = 0; c < r.counters(); c++) {
                 assertThat(r.counterName(c)).doesNotStartWith("gpu.pipeline.");
             }
@@ -250,10 +250,11 @@ class UiProfilerTest {
             s.set(ProfilerSettings.FREEZE_ON_HITCH, true);
             s.set(ProfilerSettings.FREEZE_AFTER, 2);
             s.set(ProfilerSettings.HITCH_MIN, 1f);
+            s.set(ProfilerSettings.HITCH_MILLIS, 40f); // a frame of the sleep below is one, however slow the others
             for (int i = 0; i < 30; i++) {
                 engine.step();
             }
-            Thread.sleep(40);
+            Thread.sleep(50);
             for (int i = 0; i < 10 && !profiler.view().frozen().get(); i++) {
                 engine.step();
             }
@@ -336,9 +337,36 @@ class UiProfilerTest {
         return -1;
     }
 
+    /**
+     * The earliest frame {@code f}'s GPU work can start on the CPU's clock: when its submit call began (the
+     * {@code render.submit} zone; the GPU may start and even finish within the call, before the frame's submit mark),
+     * less the clock's stated uncertainty: a calibrated clock's deviation and its drift until the next calibration
+     * (at most 100 ppm of the interval); a clock bounded by submits never places a frame before its submit.
+     */
+    private static long earliestGpuStart(Engine engine, Recording r, int main, long f) {
+        long submit = -1;
+        int name = r.name("render.submit");
+        for (long z = r.firstZone(main); z < r.endZone(main); z++) {
+            if (r.zoneName(main, z) == name && r.zoneStart(main, z) >= r.frameStart(f)
+                && r.zoneEnd(main, z) <= r.frameEnd(f)) {
+                submit = r.zoneStart(main, z);
+            }
+        }
+        assertThat(submit).as("frame " + f + "'s submit zone").isPositive();
+        var clock = engine.get(Profiling.KEY).clock();
+        long deviation = clock.deviation();
+        long drift = (long) (engine.settings().get(ProfilerSettings.CALIBRATE_EVERY) * 1e9 * 1e-4);
+        return clock.calibrated() && deviation >= 0 ? submit - deviation - drift : submit;
+    }
+
     private static int count(Recording r, int lane, String name) {
+        return countSince(r, lane, name, r.firstZone(lane));
+    }
+
+    /** The zones named {@code name} on {@code lane} from absolute zone {@code from} on (or the oldest kept). */
+    private static int countSince(Recording r, int lane, String name, long from) {
         int n = 0;
-        for (long z = r.firstZone(lane); z < r.endZone(lane); z++) {
+        for (long z = Math.max(from, r.firstZone(lane)); z < r.endZone(lane); z++) {
             n += r.nameOf(r.zoneName(lane, z)).equals(name) ? 1 : 0;
         }
         return n;

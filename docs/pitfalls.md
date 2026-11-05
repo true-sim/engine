@@ -481,6 +481,8 @@ inlined.
 - Proof: JFR with 4 KB TLABs (`-XX:TLABSize=4096 -XX:-ResizeTLAB`, `jdk.ObjectAllocationInNewTLAB`): turning TLABs off
   hid them, the JIT compiling differently; after `SdlCalls` (addresses bound once, out-parameters by address) and
   `Commands.acquireNextImage`, 0 bytes in the median frame (true-sim/engine, UI gallery).
+- Again later: with a joystick plugged in, a third of the sweep's frames allocated: `SDL_IsGamepad` on every joystick
+  event and `SDL_PollEvent` itself went through LWJGL's wrappers (JFR with 4 KB TLABs); both are `SdlCalls` now.
 - Rule: per-frame native calls bind their function once (`Commands`, `SdlCalls`) and pass out-parameters by address
   (`nmalloc`), never LWJGL's buffer-taking overloads.
 

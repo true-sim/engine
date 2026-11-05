@@ -124,6 +124,7 @@ public final class UiGallery implements Application {
     final List<Page> pages = new ArrayList<>();
     int current = -1;
     private ImmGallery imm;
+    PropsGallery props; // the property panels' gallery (its squad and panel)
     private long started;
     // the orbit camera
     private double targetX;
@@ -141,6 +142,7 @@ public final class UiGallery implements Application {
         Runnable shown = () -> { };
         Runnable hidden = () -> { };
         Button button;
+        com.truesim.ui.controls.data.ScrollPane pane; // what it put on the screen's root scrolls in it, or null
 
         Page(String name) {
             this.name = name;
@@ -378,7 +380,7 @@ public final class UiGallery implements Application {
         page("Data", () -> DataGallery.build(ui));
         page("Files", () -> FilesGallery.build(ui));
         page("Charts", () -> ChartsGallery.build(ui));
-        page("Props", () -> PropsGallery.build(new Controls(ui), ui.root()));
+        page("Props", () -> props = PropsGallery.build(new Controls(ui), ui.root()));
         Page con = page("Console", () -> text("The developer console over the engine's settings and log: "
             + "` (backquote) opens and closes it. Try help, render.selection, profiler.overlay true."));
         con.shown = () -> console.console().open(true);
@@ -390,7 +392,7 @@ public final class UiGallery implements Application {
         });
         dbg.shown = () -> console.debugger().show(true);
         dbg.hidden = () -> console.debugger().show(false);
-        page("Windows", this::windowsPage);
+        page("Windows", this::windowsPage, false); // the dock space fills the area: nothing to scroll
         page("Profiler", () -> {
             text("The profiler's views over recorded data. The live profiler of this app: F3 (overlay), Shift+F3 "
                 + "(detailed), F4 freeze, Shift+F4 step, Ctrl+F4 export.");
@@ -411,9 +413,7 @@ public final class UiGallery implements Application {
         WindowManager windows = new WindowManager(overlays);
         DockSpace dock = new DockSpace(overlays, windows);
         Element root = dock.root();
-        ui.root().add(root);
-        ui.codeLayout(root, Ui.CODE_WIDTH | Ui.CODE_HEIGHT);
-        ui.layout().width(root.slot(), 100, Unit.PERCENT).height(root.slot(), 100, Unit.PERCENT);
+        ui.root().add(root); // placed over the area above the bar each frame
         for (String[] p : new String[][] {{"scene", "Scene"}, {"game", "Game"}, {"hierarchy", "Hierarchy"},
             {"inspector", "Inspector"}, {"console", "Console"}, {"profiler", "Profiler"}}) {
             DockPanel panel = dock.panel(p[0], p[1]);
@@ -436,6 +436,15 @@ public final class UiGallery implements Application {
 
     /** Builds a page by {@code build}, keeping what it added to the UI's layers, and hides it. */
     private Page page(String name, Runnable build) {
+        return page(name, build, true);
+    }
+
+    /**
+     * Builds a page by {@code build}, keeping what it added to the UI's layers, and hides it; what it put on the
+     * screen's root goes in a scroll pane of its own ({@code scrolled}: wheel, scrollbar, keys, touch) in the area above
+     * the bar, else straight in that area (a dock space filling it).
+     */
+    private Page page(String name, Runnable build, boolean scrolled) {
         Page page = new Page(name);
         UiStore store = ui.store();
         Set<Integer> before = new HashSet<>();
@@ -464,8 +473,39 @@ public final class UiGallery implements Application {
         for (Element child : page.children) {
             child.detach();
         }
+        if (scrolled) {
+            page.pane = new com.truesim.ui.controls.data.ScrollPane(ui, name); // as wide as the area: rows wrap
+            Element inner = page.pane.content();
+            // a column stretching each part to the area's width: a gallery's wrapping rows wrap at it
+            ui.styles().inline(inner.slot(), com.truesim.ui.style.InlineStyle.builder()
+                .set(com.truesim.ui.style.Styles.LAYOUT, com.truesim.ui.style.value.LayoutKind.FLEX)
+                .set(com.truesim.ui.style.Styles.DIRECTION, com.truesim.ui.style.value.Direction.COLUMN)
+                .set(com.truesim.ui.style.Styles.ALIGN_ITEMS, com.truesim.ui.style.value.Align.STRETCH).build());
+            ui.codeLayout(inner, ui.codeLayout(inner) | Ui.CODE_WIDTH); // the viewport's width, not the content's
+            ui.layout().width(inner.slot(), 100, Unit.PERCENT);
+            for (int i = page.children.size() - 1; i >= 0; i--) {
+                if (page.parents.get(i) == content) {
+                    page.parents.remove(i);
+                    inner.add(page.children.remove(i)); // in reverse: put back in order below
+                }
+            }
+            reverse(inner);
+            page.parents.add(content);
+            page.children.add(page.pane.root());
+        }
         pages.add(page);
         return page;
+    }
+
+    /**
+     * Takes docking's OS windows off the mouse: each event is then placed by its own position, not by the system
+     * cursor (a test pushing events, where no real cursor follows them).
+     */
+    void mouseByEventsOnly() {
+        UiOsWindows os = uiPlugin.osWindows();
+        if (os != null) {
+            os.host(null);
+        }
     }
 
     void show(int index) {
@@ -544,6 +584,15 @@ public final class UiGallery implements Application {
         place(backdrop, 0, 0, w, h);
         none(ui.root());
         place(content, 0, 0, w, h - NAV_HEIGHT);
+        if (current > 0) { // the page's own area: its scroll pane, or (a dock space) what fills it
+            none(content);
+            Page page = pages.get(current);
+            for (int i = 0; i < page.children.size(); i++) {
+                if (page.parents.get(i) == content) {
+                    place(page.children.get(i), 0, 0, w, h - NAV_HEIGHT);
+                }
+            }
+        }
         sized.run();
         if (current == 0) {
             orbit();
@@ -605,6 +654,19 @@ public final class UiGallery implements Application {
 
     // ---------------------------------------------------------------- placement
 
+    /** Reverses the order of {@code parent}'s children. */
+    private void reverse(Element parent) {
+        UiStore store = ui.store();
+        List<Element> kids = new ArrayList<>();
+        for (int c = store.firstChild(parent.slot()); c != UiStore.NONE; c = store.nextSibling(c)) {
+            kids.add(store.element(c));
+        }
+        for (int i = kids.size() - 1; i >= 0; i--) {
+            kids.get(i).detach();
+            parent.add(kids.get(i));
+        }
+    }
+
     /** Children of {@code parent} placed by code ({@link #place}). */
     private void none(Element parent) {
         ui.codeLayout(parent, ui.codeLayout(parent) | Ui.CODE_KIND);
@@ -612,7 +674,7 @@ public final class UiGallery implements Application {
     }
 
     private void place(Element e, float x, float y, float w, float h) {
-        ui.codeLayout(e, Ui.CODE_PLACEMENT | Ui.CODE_WIDTH | Ui.CODE_HEIGHT);
+        ui.codeLayout(e, ui.codeLayout(e) | Ui.CODE_PLACEMENT | Ui.CODE_WIDTH | Ui.CODE_HEIGHT); // keep what it owns
         int slot = e.slot();
         ui.layout().anchors(slot, 0, 0, 0, 0).offsets(slot, x, y, 0, 0).width(slot, w, Unit.PX).height(slot, h,
             Unit.PX);

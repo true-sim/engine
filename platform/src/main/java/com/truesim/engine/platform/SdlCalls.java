@@ -9,11 +9,14 @@ import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.invoke.MethodHandle;
+import org.lwjgl.sdl.SDLEvents;
+import org.lwjgl.sdl.SDLGamepad;
 import org.lwjgl.sdl.SDLMouse;
 import org.lwjgl.sdl.SDLVideo;
 
 /**
- * The SDL calls made every frame (a window's flags, display, scale, position and size; the global mouse), straight
+ * The SDL calls made every frame (polling events, a joystick's kind; a window's flags, display, scale, position and
+ * size; the global mouse), straight
  * through the foreign function API with each function's address bound once: LWJGL wraps the address in a
  * {@code MemorySegment} on every call, which the JIT removes only where it inlines the whole call (pitfalls.md, "LWJGL
  * Vulkan calls allocate per call"; SDL's are the same). Out-parameters by address, not buffers. Allocates nothing.
@@ -42,7 +45,30 @@ final class SdlCalls {
         MemorySegment.ofAddress(SDLMouse.Functions.GetGlobalMouseState), FunctionDescriptor.of(JAVA_INT, JAVA_LONG,
             JAVA_LONG));
 
+    private static final MethodHandle POLL_EVENT = LINKER.downcallHandle(
+        MemorySegment.ofAddress(SDLEvents.Functions.PollEvent), FunctionDescriptor.of(JAVA_BOOLEAN, JAVA_LONG));
+    private static final MethodHandle IS_GAMEPAD = LINKER.downcallHandle(
+        MemorySegment.ofAddress(SDLGamepad.Functions.IsGamepad), FunctionDescriptor.of(JAVA_BOOLEAN, JAVA_INT));
+
     private SdlCalls() {
+    }
+
+    /** {@code SDL_PollEvent} into the event at {@code event} (an address): whether there was one. */
+    static boolean pollEvent(long event) {
+        try {
+            return (boolean) POLL_EVENT.invokeExact(event);
+        } catch (Throwable e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** {@code SDL_IsGamepad}: whether joystick {@code id} is a gamepad (on every joystick event). */
+    static boolean isGamepad(int id) {
+        try {
+            return (boolean) IS_GAMEPAD.invokeExact(id);
+        } catch (Throwable e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /** {@code SDL_GetGlobalMouseState}, the two floats at {@code x} and {@code y} (addresses); the buttons held. */
