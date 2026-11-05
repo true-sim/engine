@@ -11,9 +11,10 @@ dependencies {
     implementation("com.truesim.scene:scene-meshbuild:0.64.1")
     implementation("com.truesim.scene:scene-gltf:0.64.1")
     // The UI gallery (UiGallery): the engine's UI over the galleries of ui's test fixtures
-    implementation(project(":engine-ui"))
+    implementation(project(":engine-ui")) // the UI gallery, and the stream benchmark's window (the profiler, a line of text)
     implementation("com.truesim.ui:ui-charts:0.9.0")
     implementation("com.truesim.ui:ui-text-native:0.9.0")
+    implementation("com.truesim.ui:ui-fonts:0.9.0")
     implementation("com.truesim.ui:ui-fonts-cjk:0.9.0")
     implementation("com.truesim.ui:ui-fonts-emoji:0.9.0")
     implementation(testFixtures("com.truesim.ui:ui-controls:0.9.0"))
@@ -66,6 +67,8 @@ tasks.register<JavaExec>("stereoBench") {
 }
 
 // Hitches while content streams (StreamBench): ./gradlew :engine-demo:streamBench
+// [--args=window]: the same fly-over in a window with the profiler (F3, Shift+F3), until closed or -Pseconds=n
+// -Prange=n: cells in range each way (default 3, the window 10); -Pspeed=n: metres a second (10, the window 60)
 tasks.register<JavaExec>("streamBench") {
     group = "application"
     description = "Streams cells of meshes, textures and materials while frames run, and reports frame times."
@@ -73,6 +76,11 @@ tasks.register<JavaExec>("streamBench") {
     mainClass = "com.truesim.engine.demo.StreamBench"
     jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xmx4g")
     providers.gradleProperty("jfr").orNull?.let { jvmArgs("-XX:StartFlightRecording=filename=$it,settings=profile") }
+    providers.gradleProperty("seconds").orNull?.let { systemProperty("truesim.demo.seconds", it) }
+    providers.gradleProperty("range").orNull?.let { systemProperty("truesim.demo.range", it) } // cells each way
+    providers.gradleProperty("speed").orNull?.let { systemProperty("truesim.demo.speed", it) } // metres a second
+    providers.gradleProperty("frames").orNull?.let { systemProperty("truesim.demo.frames", it) } // headless: 2700
+    providers.gradleProperty("memory").orNull?.let { systemProperty("truesim.demo.memory", it) } // every n frames
 }
 
 // The effects showcase (Showcase): ./gradlew :engine-demo:showcase -Pcrowd=<path to Fox.gltf> [--args=measure]
