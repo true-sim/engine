@@ -99,6 +99,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
     // Per draw list (raster bin, then mirrored): depth only, and the visibility buffer's IDs (null without primitive
     // IDs). Shaded draws take the material types' pipelines.
     private final Pipeline[] drawDepth;
+    private final Pipeline[] drawCasters; // shadow casters' depth: both sides, back faces kept
     private final Pipeline[] drawIds;
     private final ShadingPipelines shading;
     // Per view, the selection its opaque draw requested in the graph last built: its blended draw shares it.
@@ -148,6 +149,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             // A pipeline per raster bin, as the meshlet paths have them: the double-sided and masked bins cull
             // nothing, the masked one discards what it masks (in depth only too).
             drawDepth = new Pipeline[LISTS];
+            drawCasters = new Pipeline[LISTS];
             drawIds = device.primitiveIds() ? new Pipeline[LISTS] : null;
             try (ShaderModule idsShader = device.primitiveIds() ? ShaderModule.load(device, "shaders/classic/ids.spv")
                 : null) {
@@ -157,6 +159,9 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                     Pipeline.Graphics depth = raster(device, list, vertexShader).depth(depthFormat);
                     drawDepth[list] = (masked ? depth.stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading, "maskedDepthMain")
                         : depth).build();
+                    Pipeline.Graphics casters = raster(device, list, vertexShader).doubleSided().depth(depthFormat);
+                    drawCasters[list] = (masked ? casters.stage(VK_SHADER_STAGE_FRAGMENT_BIT, shading,
+                        "maskedShadowMain") : casters).build();
                     if (idsShader != null) {
                         drawIds[list] = raster(device, list, vertexShader).stage(VK_SHADER_STAGE_FRAGMENT_BIT, idsShader,
                             masked ? "maskedClassicIdsMain" : "classicIdsMain")
@@ -457,6 +462,13 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
      */
     @AllowAllocation("building the graph, when it changes")
     private Pipeline[] geometry(Materials materials, Pipeline[] pipelines, int target, Selection selection) {
+        return geometry(materials, pipelines, target, selection, false);
+    }
+
+    /** Like the above, with {@code casters}: shadow casters' entry points, both sides. */
+    @AllowAllocation("building the graph, when it changes")
+    private Pipeline[] geometry(Materials materials, Pipeline[] pipelines, int target, Selection selection,
+        boolean casters) {
         int categories = selection.categories();
         Pipeline[] parts = shared(pipelines, categories);
         if (selection.byGeometry() == 0) {
@@ -466,7 +478,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             MaterialType type = materials.geometryType(number);
             for (int list = 0; list < LISTS; list++) {
                 if ((selection.byGeometry() & 1 << list) != 0) {
-                    parts[list * categories + number] = shading.get(geometryKey(type, list, target));
+                    parts[list * categories + number] = shading.get(geometryKey(type, list, target, casters));
                 }
             }
         }
@@ -479,11 +491,18 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
      */
     @AllowAllocation("building the graph, when it changes")
     static ShadingPipelines.Key geometryKey(MaterialType type, int list, int target) {
+        return geometryKey(type, list, target, false);
+    }
+
+    /** Like the above, with {@code casters}: shadow casters' depth, both sides, back faces kept. */
+    @AllowAllocation("building the graph, when it changes")
+    static ShadingPipelines.Key geometryKey(MaterialType type, int list, int target, boolean casters) {
         int bin = list % MeshletRenderer.BINS;
         boolean masked = bin == MeshletRenderer.BIN_MASKED || bin == MeshletRenderer.BIN_BLENDED;
         return new ShadingPipelines.Key("shaders/classic/draw.spv", "classicVertexMain", false, type.geometryShader(),
-            type.name() + (masked ? "Masked" : "") + (target == ShadingPipelines.DEPTH ? "DepthMain" : "ClassicIdsMain"),
-            0, type.geometry(), (bin == MeshletRenderer.BIN_OPAQUE ? ShadingPipelines.CULL_BACK
+            type.name() + (masked ? "Masked" : "") + (casters ? "ShadowMain" : target == ShadingPipelines.DEPTH
+                ? "DepthMain" : "ClassicIdsMain"),
+            0, type.geometry(), (bin == MeshletRenderer.BIN_OPAQUE && !casters ? ShadingPipelines.CULL_BACK
             : ShadingPipelines.DOUBLE_SIDED) | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0), target,
             DRAW_PUSH);
     }
@@ -582,6 +601,46 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                         byGeometry);
                 });
             return list;
+        }
+    }
+
+    /**
+     * Shadow casters of {@code view} (one of the renderer's, casters only) for a technique drawing several views into one
+     * image in a pass of its own (a shadow atlas: the view a tile, its viewport set by the pass): the view's selection,
+     * through the camera the view is set to, every face drawn, both sides, as shadow rays meet every face. Declare the
+     * draw on the pass ({@link Casters#declare}), then draw it there ({@link Casters#draw}).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public Casters casters(GraphBuilder g, RenderView view) {
+        Materials materials = renderer.scene().materials();
+        int geometryTypes = !materials.drawsGeometry() ? 0 : materials.geometryTypeCount();
+        Selection selection = new Selection(this, view, null, null, geometryTypes + 1, 0,
+            geometryTypes == 0 ? 0 : OPAQUE_LISTS);
+        Buffer list = g.request(selection);
+        Pipeline[] pipelines = geometry(materials, drawCasters, ShadingPipelines.DEPTH, selection, true);
+        return new Casters(selection, list, pipelines);
+    }
+
+    /** A view's shadow casters ({@link #casters}). */
+    public final class Casters {
+        private final Selection selection;
+        private final Buffer list;
+        private final Pipeline[] pipelines;
+
+        private Casters(Selection selection, Buffer list, Pipeline[] pipelines) {
+            this.selection = selection;
+            this.list = list;
+            this.pipelines = pipelines;
+        }
+
+        /** Declares what drawing them reads on {@code pass}. */
+        public GraphBuilder.PassBuilder declare(GraphBuilder.PassBuilder pass) {
+            return pass.read(list, BufferAccess.INDIRECT).read(list, BufferAccess.DRAW_READ);
+        }
+
+        /** Draws them into the pass's depth attachment, at the viewport set. Allocates nothing. */
+        public void draw(PassContext ctx) {
+            record(ctx, pipelines, selection, 0, list, 0);
         }
     }
 
@@ -817,6 +876,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             select.close();
             for (int list = 0; list < LISTS; list++) {
                 drawDepth[list].close();
+                drawCasters[list].close();
             }
             if (drawIds != null) {
                 for (Pipeline pipeline : drawIds) {

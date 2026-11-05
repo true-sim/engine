@@ -142,6 +142,11 @@ class ShadowOwnerTest {
 
     /** A new graph: shading of one kind, light clusters and the owner's part, in a view "main". */
     private void newGraph(Function<SceneView, Technique> shading) {
+        newGraph(shading, SceneGeometry.meshlets(renderer));
+    }
+
+    /** {@link #newGraph(Function)}, the owner's maps drawing {@code geometry}. */
+    private void newGraph(Function<SceneView, Technique> shading, SceneGeometry geometry) {
         if (shadows != null) {
             shadows.close();
         }
@@ -149,7 +154,6 @@ class ShadowOwnerTest {
         graph = new FrameGraph(device, 2);
         graph.settings().set(ShadowSettings.ATLAS_SIZE, 2048);
         SceneView main = new SceneView(graph.addView("main").size(SIZE, SIZE), view, camera);
-        SceneGeometry geometry = SceneGeometry.meshlets(renderer);
         shadows = new Shadows(geometry, lights).rayTracing(rayTracing);
         main.port().add(shading.apply(main)).add(new ClusteredLights(lights, main)).add(shadows.view(main))
             .output(Keys.SCENE_COLOR, new ExternalImage("target", SIZE, SIZE,
@@ -330,6 +334,38 @@ class ShadowOwnerTest {
             }
         }
         scene.remove(2);
+    }
+
+    /** Classic LOD geometry casts into the atlas as meshlets do: the sun's map and cascades, a point light's cube. */
+    @Test
+    void classicGeometryCastsIntoTheAtlas() {
+        try (ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_FORMAT_D32_SFLOAT, 16)) {
+            classic.add(quad, quadMesh);
+            SceneGeometry geometry = new SceneGeometry(classic);
+            java.util.List<Function<SceneView, Technique>> shadings = new java.util.ArrayList<>();
+            shadings.add(main -> new ClusteredForwardShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                VK_FORMAT_D32_SFLOAT));
+            if (device.primitiveIds()) {
+                shadings.add(main -> new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_FORMAT_D32_SFLOAT));
+            }
+            for (Function<SceneView, Technique> shading : shadings) {
+                newGraph(shading, geometry);
+                sun(ShadowSpec.maps(1024).distance(30));
+                expectShadow("classic, one map", sunShadow(), new double[] {3, -2});
+                assertThat(graph.passes()).anyMatch(pass -> pass.startsWith("classic LOD, view")
+                    && pass.endsWith("selection"));
+                sun(ShadowSpec.cascades(3, 512, 50));
+                expectShadow("classic, cascades", sunShadow(), new double[] {3, -2});
+                lights.directional(0, 0, 0, 0, 0, 0, 0);
+                lights.point(1, 0, -1, -5, 20, 60, 60, 60);
+                lights.shadow(1, ShadowSpec.maps(256)).setCount(2);
+                expectShadow("classic, a point light's cube", new double[] {1.4, -5.6, 1.8, -6.0},
+                    new double[] {3, -2});
+                lights.shadow(1, ShadowSpec.NONE).setCount(1);
+            }
+        }
     }
 
     /** Ray tracing of the quads, where the device traces rays. */

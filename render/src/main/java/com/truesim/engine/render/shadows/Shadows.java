@@ -951,8 +951,10 @@ public final class Shadows implements AutoCloseable {
         int slots = slotViews.length;
         int drawn = Math.min(dirtyCount, slots);
         Arrays.fill(slotTiles, 0, slots, null);
+        float detail = settings.get(ShadowSettings.CASTER_DETAIL);
         for (int i = 0; i < drawn; i++) {
             slotTiles[i] = dirty[i];
+            slotViews[i].camera(dirty[i].camera, detail); // before anything selects or culls it this frame
         }
         anyDrawn = drawn > 0;
         stats.drawn = drawn;
@@ -992,28 +994,51 @@ public final class Shadows implements AutoCloseable {
         }
         // A new build: the atlas may be new (zeroed), every tile drawn again
         forgetDrawn();
-        MeshletCulling.Views culling = g.request(new MeshletCulling(renderer));
-        for (int i = 0; i < slotViews.length; i++) {
-            int slot = i;
-            RenderView view = slotViews[i];
-            culling.add(view, false, () -> view.camera(slotTiles[slot].camera, casterDetail),
-                () -> slotTiles[slot] != null);
+        boolean meshlets = false;
+        for (com.truesim.engine.render.GeometryProvider provider : geometry.providers()) {
+            meshlets |= provider instanceof com.truesim.engine.render.MeshletGeometry;
         }
         SceneData.Buffers data = g.request(new SceneData(renderer));
         GraphBuilder.PassBuilder pass = data.read(g.pass("shadow atlas"), BufferAccess.DRAW_READ)
             .attachDepth(image, Load.LOAD, Store.STORE).when(() -> anyDrawn);
-        for (RenderView view : slotViews) {
-            culling.drawing(pass, view);
+        DepthDraws draws = null;
+        if (meshlets) { // culled with the frame's other views, while each draws a tile
+            MeshletCulling.Views culling = g.request(new MeshletCulling(renderer));
+            for (int i = 0; i < slotViews.length; i++) {
+                int slot = i;
+                culling.add(slotViews[i], false, null, () -> slotTiles[slot] != null);
+                culling.drawing(pass, slotViews[i]);
+            }
+            draws = DepthDraws.of(g, renderer, slotViews);
         }
-        DepthDraws draws = DepthDraws.of(g, renderer, slotViews);
+        DepthDraws meshletDraws = draws;
         RenderView[] views = slotViews;
-        pass.record(ctx -> drawTiles(ctx, draws, views));
+        // Classic LOD geometry casts too: each slot's selection, run only while the slot draws a tile
+        java.util.List<com.truesim.engine.render.ClassicLodGeometry> classics = new ArrayList<>();
+        for (com.truesim.engine.render.GeometryProvider provider : geometry.providers()) {
+            if (provider instanceof com.truesim.engine.render.ClassicLodGeometry classic) {
+                classics.add(classic);
+            }
+        }
+        com.truesim.engine.render.ClassicLodGeometry.Casters[][] casters =
+            new com.truesim.engine.render.ClassicLodGeometry.Casters[classics.size()][views.length];
+        for (int c = 0; c < classics.size(); c++) {
+            for (int i = 0; i < views.length; i++) {
+                int slot = i;
+                int k = c;
+                g.masked(() -> slotTiles[slot] != null,
+                    () -> casters[k][slot] = classics.get(k).casters(g, views[slot]));
+                casters[c][i].declare(pass);
+            }
+        }
+        pass.record(ctx -> drawTiles(ctx, meshletDraws, views, casters));
         return image;
     }
 
     /** Draws the frame's tiles, each into its rectangle, and marks them drawn. Allocates nothing. */
     @AllowImpure("marks the tiles drawn when the frame records: what the next frame's prepare reads")
-    private void drawTiles(com.truesim.engine.graph.PassContext ctx, DepthDraws draws, RenderView[] views) {
+    private void drawTiles(com.truesim.engine.graph.PassContext ctx, DepthDraws draws, RenderView[] views,
+        com.truesim.engine.render.ClassicLodGeometry.Casters[][] casters) {
         for (int i = 0; i < views.length; i++) {
             Tile tile = slotTiles[i];
             if (tile == null) {
@@ -1022,7 +1047,12 @@ public final class Shadows implements AutoCloseable {
             ctx.clearDepth(tile.x, tile.y, tile.size, tile.size, 0); // reverse depth: 0 is far
             ctx.viewport(tile.x, tile.y, tile.size, tile.size);
             ctx.scissor(tile.x, tile.y, tile.size, tile.size);
-            draws.draw(ctx, views[i]);
+            if (draws != null) {
+                draws.draw(ctx, views[i]);
+            }
+            for (int c = 0; c < casters.length; c++) {
+                casters[c][i].draw(ctx);
+            }
             tile.dirty = false;
             tile.valid = true;
         }
