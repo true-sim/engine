@@ -1321,6 +1321,44 @@ class SceneSyncTest {
         assertThat(made.featureMask()).isEqualTo(Material.FEATURE_UNLIT);
     }
 
+    @Test
+    void aBatchAttachedAndRemovedIsDrawnAndTornDownInOnePass() throws InterruptedException {
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
+        GpuBuffer[] readbacks = {readback(), readback()};
+        FrameGraph graph = graph(sync, false, readbacks);
+        com.truesim.scene.core.SceneBatch batch = new com.truesim.scene.core.SceneBatch();
+        int root = batch.add();
+        batch.setTranslation(root, 0, 0, -3);
+        for (int i = 0; i < 6; i++) { // rows of squares sharing a mesh: looked up once while the batch is taken in
+            int node = batch.add(root);
+            batch.setTranslation(node, i - 2.5, 0, 0);
+            batch.setRotation(node, HALF, 0, 0, HALF);
+            batch.set(node, Renderable.TYPE, Renderable.of(i == 5 ? SMALL : SQUARE, List.of(i % 2 == 0 ? RED : GREEN)));
+        }
+        long[] handles = new long[7];
+        scene.attach(batch, com.truesim.scene.core.NodeHandle.NONE, handles);
+        settle(List.of(graph), List.of(sync));
+        device.waitIdle();
+        assertThat(sync.renderableCount()).isEqualTo(6);
+        assertThat(sync.instanceCount()).isEqualTo(6);
+        assertThat(litColumn(readbacks[0], 0)).as("drawn").isPositive();
+        int meshes = pool.meshCount();
+        // A single one's renderable taken away, then the whole subtree removed: torn down in one pass
+        scene.components().remove(handles[6], Renderable.TYPE);
+        update(scene, sync);
+        assertThat(sync.instanceCount()).isEqualTo(5);
+        scene.remove(handles[0]);
+        update(scene, sync);
+        assertThat(sync.instanceCount()).isZero();
+        assertThat(sync.renderableCount()).isZero();
+        for (int frame = 0; frame < 4 && resources.releasesWaiting() > 0; frame++) {
+            frame(List.of(graph), List.of(sync), camera); // what only they used goes within the frame budget
+        }
+        assertThat(resources.releasesWaiting()).isZero();
+        assertThat(pool.meshCount()).isLessThan(meshes);
+    }
+
     private void update(SceneGraph scene, SceneSync sync) {
         tasks.drainCompleted();
         scene.update();

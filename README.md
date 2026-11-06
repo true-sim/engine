@@ -2266,6 +2266,18 @@ material swap takes new materials and keeps the mesh and the instance id.
 - **Prepared on worker threads:** `resources.prepareOn(tasks, threads)` makes meshes and textures ready for the GPU
   (`GeometryPool.prepare`, `Textures.prepareColor`) on that many threads of the scheduler, handed over as it drains,
   so the main thread only places them: a frame of latency for milliseconds of main-thread time per large asset.
+- **Streamed content within a frame budget:** `render.streamFrameBudget` (0.25 ms) bounds what a frame spends taking
+  in content made ready on workers (meshes placed, textures added) and letting go of what removed renderables used;
+  the sync's own work in the frame (renderables attached or torn down) counts toward it, and a frame whose update spent
+  it leaves the rest to the next. Material blocks and meshes others still use are let go of at once (a count taken
+  down); only the last user's release waits for the budget. `render.meshSpares` (64) keeps removed meshes' pool ranges
+  for meshes of the same sizes (`GeometryPool.spares`), and the assets plugin's `assets.meshPool` (64) keeps evicted
+  generated meshes' memory for generators building into it (`Assets.meshPool()`, scene's `MeshPool`): content that
+  comes and goes in equal sizes is placed without allocating and leaves without freeing.
+- **Batches** (scene's `SceneBatch`, `SceneGraph.attach`, `remove`): a subtree attached or removed in one pass is one
+  entry of each change log, and the sync takes it in one pass too: a batch's renderables are reconciled together (a
+  mesh shared by neighbours looked up once) and the instances of those torn down leave the `GpuScene` at once
+  (`GpuScene.remove(int[], ...)`, the records zeroed in bulk).
 - `SceneSync` keeps a scene on the GPU: its renderables as instances of a `GpuScene` at their world positions,
   written once and again only where nodes moved or renderables changed. Given a `JobSystem`, many instances at once
   (most nodes moved) are claimed in order and written on its threads: 30,000 moving rocks in 0.5 ms on 4 threads

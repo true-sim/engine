@@ -88,6 +88,7 @@ public final class GpuScene implements AutoCloseable {
     private final List<java.util.function.Consumer<Materials>> tableListeners =
         new java.util.concurrent.CopyOnWriteArrayList<>();
     private int count;
+    private int[] clearing = new int[0]; // a bulk removal's ids, cleared at once
     private long version; // changes with every claim and removal
     private int highWater;
     private boolean closed;
@@ -500,6 +501,43 @@ public final class GpuScene implements AutoCloseable {
         while (highWater > 0 && !contains(highWater - 1)) {
             highWater--;
         }
+    }
+
+    /**
+     * Removes instances {@code ids[from]} to {@code ids[from + length - 1]} as {@link #remove(int)} removes each, in one
+     * pass: a batch of instances leaving together (a streamed cell, a model despawned). Allocates nothing.
+     */
+    public void remove(int[] ids, int from, int length) {
+        Objects.checkFromIndexSize(from, length, ids.length);
+        if (clearing.length < length) {
+            growClearing(length);
+        }
+        int removedNow = 0;
+        int lowestWord = firstFreeWord;
+        for (int i = from; i < from + length; i++) {
+            int id = ids[i];
+            Objects.checkIndex(id, capacity);
+            if (!contains(id) || gpuWritten(id)) {
+                continue;
+            }
+            used[id >>> 6] &= ~(1L << id);
+            clearing[removedNow++] = id;
+            lowestWord = Math.min(lowestWord, id >>> 6);
+        }
+        if (removedNow > 0) {
+            instances.clear(clearing, 0, removedNow); // holes, written in bulk
+            version++;
+            count -= removedNow;
+            firstFreeWord = lowestWord;
+            while (highWater > 0 && !contains(highWater - 1)) {
+                highWater--;
+            }
+        }
+    }
+
+    @AllowAllocation("growing with the most instances removed at once")
+    private void growClearing(int length) {
+        clearing = new int[Math.max(length, 2 * clearing.length)];
     }
 
     /** Removes every instance from id {@code id} on. Allocates nothing. */
