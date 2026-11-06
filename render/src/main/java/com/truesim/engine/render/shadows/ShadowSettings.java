@@ -180,8 +180,9 @@ public final class ShadowSettings {
      */
     public enum MobilityUse {
         /**
-         * Static and dynamic both: a static caster joins its tiles' still layers at once (no settle wait), a dynamic
-         * one never does (none of the churn of one pausing); a static light skips its own change tests while nothing
+         * Static and dynamic both: a static caster joins its tiles' still layers at once (no settle wait; one new to
+         * the scene is drawn into the current layers it reaches, over what they hold), a dynamic one never does (none
+         * of the churn of one pausing); a static light skips its own change tests while nothing
          * writes it, a dynamic one's tiles rank {@link #LIGHT_MOVING_WEIGHT} times as urgent. Instances and lights
          * without a hint (made outside the scene) are detected. For applications that mark both ways: the scene's
          * default is dynamic, so a scene that never marks its static nodes keeps every caster out of the still layers.

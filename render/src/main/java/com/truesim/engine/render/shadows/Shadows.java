@@ -136,6 +136,15 @@ public final class Shadows implements AutoCloseable {
     private int[] movingIds = new int[16];
     private MemorySegment movingIdSegment = MemorySegment.ofArray(movingIds);
     private int movingCount;
+    // Static casters new to the scene lately, each with the frame it came (frameNow): drawn into the still layers of
+    // the tiles they reach, over what those hold, while a tile waits for them
+    private int[] addedIds = new int[16];
+    private long[] addedAt = new long[16];
+    private int addedCount;
+    private int[] addIds = new int[16]; // this frame's to draw into layers, uploaded after the moving ids
+    private MemorySegment addIdSegment = MemorySegment.ofArray(addIds);
+    private int addCount;
+    private final boolean[] layerAdding = new boolean[4096]; // per layer slot this frame: newcomers only, no clear
     // Mobility hints (GpuScene's numbers): per instance the hint as last applied (MOVING: kept moving, never
     // settling); the policies as last applied; whether every instance's hint is to be applied again
     private byte[] hintSeen = new byte[0];
@@ -152,7 +161,7 @@ public final class Shadows implements AutoCloseable {
     private FrameBuffer movingUpload;
     private final List<FrameBuffer> outgrown = new ArrayList<>(); // freed with the owner: frames in flight read them
     private long frameNow; // frames prepared
-    private long[] checkFrom = new long[0]; // per draw view: the frame from which its overflow is read again
+    private long[] checkFrom = new long[0]; // per draw view: the frame (frameNow) from which its overflow is read again
     private Tile[] dirty = new Tile[64];
     private double[] dirtyImportance = new double[64];
     private int[] dirtyWaited = new int[64];
@@ -189,6 +198,19 @@ public final class Shadows implements AutoCloseable {
     public Shadows rayTracing(RayTracing rays) {
         this.rayTracing = rays;
         return this;
+    }
+
+    /**
+     * Where light {@code light}'s map {@code face} (a point light's cube face, else 0) lies in the atlas this frame, for
+     * tests and tools: its x, y (16 bits each) and size (from bit 32), packed; -1 if it has none.
+     */
+    public long tile(int light, int face) {
+        Group group = light >= 0 && light < shared.length ? shared[light] : null;
+        if (group == null || !group.usedNow || group.droppedNow || face < 0 || face >= group.count) {
+            return -1;
+        }
+        Tile tile = group.tiles[face];
+        return tile.node < 0 ? -1 : tile.x | (long) tile.y << 16 | (long) tile.size << 32;
     }
 
     /** What the shadows of the last frame took: counts for tests, benchmarks and tools. */
@@ -269,6 +291,7 @@ public final class Shadows implements AutoCloseable {
         int movingCasters;
         int drawnMovingLight;
         long prepareNanos;
+        int layersAdded;
         long texels;
         long atlasTexels;
 
@@ -310,6 +333,14 @@ public final class Shadows implements AutoCloseable {
         /** Of the tiles drawn, those whose layer of still casters was drawn again first. */
         public int layered() {
             return layered;
+        }
+
+        /**
+         * Of the tiles drawn, those whose current layer had static casters new to the scene drawn into it first (only
+         * those culled and drawn, over what it held), not {@link #layered} again.
+         */
+        public int layersAdded() {
+            return layersAdded;
         }
 
         /** Of the tiles drawn, those drawing only their moving casters, over their layer's depth. */
@@ -514,6 +545,7 @@ public final class Shadows implements AutoCloseable {
         double brightness = Double.NaN; // its light's, for the update order (directional: NaN, not compared)
         boolean movingLight; // its light is marked dynamic: ranked LIGHT_MOVING_WEIGHT times as important
         long waitFrom = -1; // the frame (frameNow) it was first found changed and not drawn since; -1: drawn
+        long addsFrom = -1; // its layer as drawn lacks the static casters added since this frame (frameNow); -1: none
         float bias;
         float normalOffset;
         float near; // > 0: perspective
@@ -579,7 +611,7 @@ public final class Shadows implements AutoCloseable {
             allDirty = true;
             paramEpoch++; // in every light's parameters
         }
-        growOverflowed(frame);
+        growOverflowed();
         long shapesNow = scene.materials().shapesVersion();
         if (shapesNow != shapes) {
             shapes = shapesNow;
@@ -771,18 +803,19 @@ public final class Shadows implements AutoCloseable {
     /**
      * Grows the lists of draw views whose last cull wanted more than they hold (read a frame or more late, as the GPU
      * finished it): twice the room, the graph built again, every tile drawn again (what overflowed was left out).
+     * Frames are counted here (frames prepared): a scene on a single frame slot counts none.
      */
     @AllowAllocation("growing, rarely")
-    private void growOverflowed(long frame) {
+    private void growOverflowed() {
         if (checkFrom.length < slotViews.length) {
             checkFrom = Arrays.copyOf(checkFrom, slotViews.length);
         }
         for (int i = 0; i < slotViews.length; i++) {
             RenderView view = slotViews[i];
-            if (frame >= checkFrom[i] && view.overflowed()) {
+            if (frameNow >= checkFrom[i] && view.overflowed()) {
                 ViewOptions options = view.options();
                 view.resize(Math.min(2 * options.draws(), 1 << 24), Math.min(2 * options.triangles(), 1 << 28));
-                checkFrom[i] = frame + 4; // its counts are the old cull's until it culls again
+                checkFrom[i] = frameNow + 4; // its counts are the old cull's until it culls again
                 allDirty = true;
                 stats.grown++;
             }
@@ -1054,6 +1087,7 @@ public final class Shadows implements AutoCloseable {
         tile.dirty = true;
         tile.moved = false;
         tile.layered = false;
+        tile.addsFrom = -1;
         tile.size = 0;
         tile.usedNow = false;
         tile.waitFrom = -1;
@@ -1200,6 +1234,11 @@ public final class Shadows implements AutoCloseable {
     private static final int RELAYER = 2;
     /** The still casters changed, the moving drawn as they are (a caster that stopped joins them): the layer stale. */
     private static final int UNLAYER = 3;
+    /**
+     * A static caster new to the scene: drawn into the tile's still layer over what it holds (the depth test keeps the
+     * nearest, as a layer drawn again would), the tile then as MOVED; a stale layer is drawn again whole, with it.
+     */
+    private static final int ADDED = 4;
     /** A frame long before any: never moved. */
     private static final long NEVER = Long.MIN_VALUE / 4;
 
@@ -1251,6 +1290,7 @@ public final class Shadows implements AutoCloseable {
                 markMoving(id);
             }
             hintSeen[id] = hint;
+            boolean fresh = still && spheres[o + 3] == -1; // new to the scene (or to its id): nothing to take out
             for (int pass = 0; pass < 2; pass++) {
                 double r = spheres[o + 3];
                 if (r == -2) {
@@ -1267,8 +1307,11 @@ public final class Shadows implements AutoCloseable {
                     } else {
                         // Where it was: a still caster leaves the still layers there
                         dirtyAround(spheres[o], spheres[o + 1], spheres[o + 2], r,
-                            !split ? FULL : still ? (pass == 0 && was ? MOVED : RELAYER)
+                            !split ? FULL : still ? (pass == 0 && was ? MOVED : fresh ? ADDED : RELAYER)
                                 : pass == 0 && !was ? RELAYER : MOVED);
+                        if (fresh) {
+                            added(id);
+                        }
                     }
                 }
                 if (pass == 0) {
@@ -1549,6 +1592,12 @@ public final class Shadows implements AutoCloseable {
                             tile.layered = false;
                             tile.moved = true;
                         }
+                        case ADDED -> {
+                            tile.moved = true;
+                            if (tile.addsFrom < 0) {
+                                tile.addsFrom = frameNow;
+                            }
+                        }
                         default -> tile.layered = false;
                     }
                 }
@@ -1628,10 +1677,14 @@ public final class Shadows implements AutoCloseable {
         float detail = settings.get(ShadowSettings.CASTER_DETAIL);
         long flags = 0;
         int flagged = movingFlags.length * 16;
+        addCount = 0;
         if (split && drawn > 0) {
+            listAdds(drawn);
             flags = uploadMoving();
         }
+        long adds = flags + 4L * movingFlags.length + 4L * movingCount; // the newcomers' ids after the moving ids
         int layerSlots = 0;
+        int layersAdded = 0;
         movingDrawn = 0;
         int movingLightDrawn = 0;
         long waitedSum = 0;
@@ -1642,14 +1695,20 @@ public final class Shadows implements AutoCloseable {
             tile.waitFrom = -1; // drawn this frame
             movingLightDrawn += tile.movingLight ? 1 : 0;
             boolean full = tile.dirty || !split;
-            if (!full && !tile.layered) {
+            boolean adding = !full && tile.layered && tile.addsFrom >= 0; // newcomers into a current layer
+            if (!full && (!tile.layered || adding)) {
                 if (layerSlots < layerViews.length) {
                     layerTiles[layerSlots] = tile;
-                    layerViews[layerSlots++].camera(tile.camera, detail).unhighlightedOnly(flags, flagged);
+                    layerAdding[layerSlots] = adding;
+                    layersAdded += adding ? 1 : 0;
+                    // the still casters, or of them only the newcomers' ids (culled alone)
+                    layerViews[layerSlots++].camera(tile.camera, detail).unhighlightedOnly(flags, flagged)
+                        .instances(adding ? adds : 0, addCount);
                 } else {
                     full = true; // no layer slot free this frame: every caster
                 }
             }
+            tile.addsFrom = -1; // its layer drawn with them, or stale (drawn again whole when next needed)
             slotTiles[i] = tile;
             slotFull[i] = full;
             slotViews[i].camera(tile.camera, detail); // before anything selects or culls it this frame
@@ -1660,8 +1719,10 @@ public final class Shadows implements AutoCloseable {
         }
         anyDrawn = drawn > 0;
         anyLayered = layerSlots > 0;
+        forgetAdds();
         stats.drawn = drawn;
-        stats.layered = layerSlots;
+        stats.layered = layerSlots - layersAdded;
+        stats.layersAdded = layersAdded;
         stats.moving = movingDrawn;
         stats.drawnMovingLight = movingLightDrawn;
         stats.waiting = dirtyCount - drawn;
@@ -1669,6 +1730,72 @@ public final class Shadows implements AutoCloseable {
         stats.maxWait = maxWait;
         stats.waited = waitedSum;
         stats.late = late;
+    }
+
+    /**
+     * Lists the static casters added since the earliest frame whose newcomers a tile drawn this frame (of the first
+     * {@code drawn} in the schedule's order) lacks in its layer, and still there: those its layer slot draws over the
+     * layer. A newcomer drawn into a layer that already holds it changes nothing (the same depth).
+     */
+    private void listAdds(int drawn) {
+        long from = Long.MAX_VALUE;
+        for (int i = 0; i < drawn; i++) {
+            Tile tile = dirty[schedule.order(i)];
+            if (!tile.dirty && tile.layered && tile.addsFrom >= 0) {
+                from = Math.min(from, tile.addsFrom);
+            }
+        }
+        if (from == Long.MAX_VALUE) {
+            return;
+        }
+        if (addIds.length < addedCount) {
+            growAddIds(addedCount);
+        }
+        for (int i = 0; i < addedCount; i++) {
+            int id = addedIds[i];
+            if (addedAt[i] >= from && scene.contains(id)) {
+                addIds[addCount++] = id;
+            }
+        }
+    }
+
+    /** Static caster {@code id} new to the scene this frame: listed for the layers of the tiles it reaches. */
+    private void added(int id) {
+        if (addedCount == addedIds.length) {
+            growAdded();
+        }
+        addedIds[addedCount] = id;
+        addedAt[addedCount++] = frameNow;
+    }
+
+    /** Drops the newcomers no tile's layer waits for any more: those older than the oldest a waiting tile lacks. */
+    private void forgetAdds() {
+        long oldest = Long.MAX_VALUE;
+        for (int i = 0; i < usedCount; i++) {
+            if (used[i].addsFrom >= 0) {
+                oldest = Math.min(oldest, used[i].addsFrom);
+            }
+        }
+        int kept = 0;
+        for (int i = 0; i < addedCount; i++) {
+            if (addedAt[i] >= oldest) {
+                addedIds[kept] = addedIds[i];
+                addedAt[kept++] = addedAt[i];
+            }
+        }
+        addedCount = kept;
+    }
+
+    @AllowAllocation("growing with the casters added in a while")
+    private void growAdded() {
+        addedIds = Arrays.copyOf(addedIds, 2 * addedIds.length);
+        addedAt = Arrays.copyOf(addedAt, addedIds.length);
+    }
+
+    @AllowAllocation("growing with the casters added in a while")
+    private void growAddIds(int count) {
+        addIds = Arrays.copyOf(addIds, Math.max(count, 2 * addIds.length));
+        addIdSegment = MemorySegment.ofArray(addIds);
     }
 
     @AllowAllocation("growing with the tiles")
@@ -1679,18 +1806,22 @@ public final class Shadows implements AutoCloseable {
     }
 
     /**
-     * This frame's copy of the moving casters' flags, then their ids; its device address. Allocates nothing, unless it
-     * grows.
+     * This frame's copy of the moving casters' flags, then their ids, then the static newcomers' to draw into layers
+     * ({@link #listAdds}); its device address. Allocates nothing, unless it grows.
      */
     private long uploadMoving() {
         long bytes = 4L * movingFlags.length;
         long ids = 4L * movingCount;
-        if (movingUpload == null || movingUpload.size() < bytes + ids) {
-            growUpload(2 * (bytes + ids));
+        long adds = 4L * addCount;
+        if (movingUpload == null || movingUpload.size() < bytes + ids + adds) {
+            growUpload(2 * (bytes + ids + adds));
         }
         movingUpload.put(0, movingSegment, 0, bytes);
         if (ids > 0) {
             movingUpload.put(bytes, movingIdSegment, 0, ids); // the moving ids after the flags
+        }
+        if (adds > 0) {
+            movingUpload.put(bytes + ids, addIdSegment, 0, adds); // then the static newcomers' ids
         }
         return movingUpload.deviceAddress();
     }
@@ -1831,7 +1962,10 @@ public final class Shadows implements AutoCloseable {
         return casters;
     }
 
-    /** Draws the frame's stale layers of still casters, each into its tile's rectangle. Allocates nothing. */
+    /**
+     * Draws the frame's stale layers of still casters, each into its tile's rectangle; or, into a current layer, the
+     * static casters added since it was drawn, over what it holds. Allocates nothing.
+     */
     private void drawLayers(com.truesim.engine.graph.PassContext ctx, DepthDraws draws, RenderView[] views,
         com.truesim.engine.render.ClassicLodGeometry.Casters[][] casters) {
         for (int i = 0; i < views.length; i++) {
@@ -1839,7 +1973,9 @@ public final class Shadows implements AutoCloseable {
             if (tile == null) {
                 continue;
             }
-            ctx.clearDepth(tile.x, tile.y, tile.size, tile.size, 0); // reverse depth: 0 is far
+            if (!layerAdding[i]) {
+                ctx.clearDepth(tile.x, tile.y, tile.size, tile.size, 0); // reverse depth: 0 is far
+            }
             ctx.viewport(tile.x, tile.y, tile.size, tile.size);
             ctx.scissor(tile.x, tile.y, tile.size, tile.size);
             if (draws != null) {

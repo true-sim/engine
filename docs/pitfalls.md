@@ -918,13 +918,38 @@ counting as loading once a drain hands it over: it either did not wait or waited
 - Rule: a test of quantized music reads where its segments actually started (or waits for their clips before playing)
   and checks the quantized frame from there; a loop waiting for an asset drains the tasks it waits on.
 
-**Shadowed images with moving rocks differ from run to run.** `ShadowsBenchmark`'s static part reads its image back
-after everything stood 12 frames (60 tried too) and compares the modes; the reference itself (caster layers off), run
-twice in turn, differed in one place of the frame (a light's shading around a few rocks, 400 to 5,900 pixels by up to
-116 levels) whenever rocks had moved, and by at most 1 pixel without moving rocks. Cause not found.
-- Proof: `TRUESIM_SHADOWS_ONLY=static TRUESIM_SHADOWS_REPEAT=1` (the reference twice; `TRUESIM_SHADOWS_DUMP` saves
-  both images and their difference), true-sim/engine `static-hint-bench`.
-- Rule: compare a mode's image against the reference's own run-to-run difference, not against zero.
+**Shadowed images differed from run to run: the culling had no room, and nothing ended its frames to grow it.**
+`ShadowsBenchmark`'s static part read its image back once everything stood and compared the modes; the reference
+itself (caster layers off), run twice in turn, differed in one place (a light's shading around a few rocks, 400 to
+5,900 pixels by up to 116 levels) whenever rocks had moved. Every tile's size, rectangle, dirty flags, wait and draw
+slot, logged each frame in both runs, were the same: the placement and the schedule were deterministic. The atlas read
+back was not: 398 of 1,200 tiles differed between the image standing and the same tiles drawn again (graph rebuilt, or
+`casterDetail` nudged), many of them empty in one and covered in the other; the standing image differed from the
+redrawn one by about 200,000 pixels (a light's whole cube face dark, or lit). The renderer culls every view of a
+frame together into chunks of 64 meshlets, with room for 65,535 (`MeshletRenderer.MAX_CHUNKS`); frames drawing 200 to
+500 tiles wanted 489,535, and what did not fit was left out of whichever views the GPU's order put last. The room grows
+as a frame ends (`FrameSlots.onEnd`), but the benchmark's scene was on a single frame slot (shared by every graph of
+the run), which nothing ended: it never grew, and every busy frame drew tiles without some of their casters, which
+they then kept while nothing changed in them. The timing columns of the shadow tables measured those partial draws
+too. In an application the scene is on the graph's slots: the room grows after the first frame that wanted more, the
+graph builds again for it and every tile is drawn again.
+- Proof: `renderer.wantedChunks()` 489,535 against `chunkCapacity()` 65,535 in every frame of the run (logged per
+  frame); with room for 2,097,152 chunks, the reference twice and every mode alike (0 pixels in every round: three
+  runs of cells, props and the mixed scene, one of rocks circling), and every tile drawn again once standing changed 1
+  pixel (against 198,000). `ShadowsBenchmark` now fails when the
+  culling overflowed; `ShadowOwnerTest.framesCulledWithoutRoomForEveryCasterLeaveNoTileWithoutThem` (room for one
+  chunk, on the graph's slots: two renders of the scene standing within a level) (true-sim/engine, shadow determinism).
+- Rule: a renderer on frame slots that are not a graph's (`FrameSlots.single()`) grows its culling room only when its
+  owner ends frames (`slots.end()`); a benchmark or tool sharing a scene between graphs gives it the room it needs and
+  fails on `chunksOverflowed()`. To tell a stale cache from a wrong draw, draw everything again standing and diff.
+
+**A single frame slot counts no frames, again: tile lists grew once.** `Shadows` read a tile view's overflow again from
+the scene's frame count plus 4 after growing it; on a single frame slot that count stays 0, so a view never grew a
+second time and its tiles kept leaving casters out.
+- Proof: `ShadowOwnerTest.tileListsGrowEveryTimeTheyOverflowOnASingleFrameSlot` (lists from 64 meshlets, about 800
+  wanted): grown once and 83 levels off the image with room from the start before; grown more than once and within a
+  level with the frames counted by the owner (true-sim/engine, shadow determinism).
+- Rule: as before, count your own frames for anything timed in frames.
 
 ## Java
 

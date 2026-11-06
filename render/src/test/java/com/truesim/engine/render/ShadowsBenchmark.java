@@ -60,6 +60,9 @@ import org.lwjgl.vulkan.VkImageMemoryBarrier2;
 class ShadowsBenchmark {
 
     private static final int ROUNDS = 3;
+    /** Chunks of 64 meshlets the culling has room for: more than any frame here wants (about 500,000). */
+    private static final int CHUNKS = System.getenv("TRUESIM_SHADOWS_CHUNKS") != null
+        ? Integer.parseInt(System.getenv("TRUESIM_SHADOWS_CHUNKS")) : 1 << 21;
     private static final int FRAMES = 60;
     private static final ManyLights MOVING = new ManyLights(40);
 
@@ -101,17 +104,20 @@ class ShadowsBenchmark {
     private record Sample(double frame, double shadows, double drawn, double waiting, long texels, int builds,
         double[] frames, double[] shadowFrames, double forced, long waited, long drawnTotal, int maxWait, long late,
         long changed, double culling, double prepare, double movingCasters, double fromLayers, double layersDrawn,
-        int[] image) {
+        double layersAdded, int[] image) {
     }
 
     @Test
     void shadowMethods() {
-        try (VulkanInstance instance = VulkanInstance.builder().applicationName("benchmark").surfaces(false).build();
+        try (VulkanInstance instance = VulkanInstance.builder().applicationName("benchmark").surfaces(false)
+                 .validation(System.getenv("TRUESIM_SHADOWS_VALIDATE") != null).build(); // with its variables' checks
              VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu());
              GeometryPool pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 21, 100_000, 4));
              GpuScene scene = new GpuScene(device, pool, 100_000);
+             // Room for the chunks hundreds of tiles culled together want: on the scene's single frame slot (shared
+             // by every graph of the run) the renderer cannot grow it as frames end
              MeshletRenderer renderer = MeshletBenchmark.withView(new MeshletRenderer(device, scene,
-                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT), 80_000_000);
+                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT, scene.frameSlots(), CHUNKS), 80_000_000);
              Lights lights = new Lights(device, 256, 1024);
              RayTracing rayTracing = device.rayTracing() ? new RayTracing(device, pool, 100_000) : null) {
             MeshData rockMesh = MeshletBenchmark.rock(4);
@@ -523,7 +529,8 @@ class ShadowsBenchmark {
         long[] differing = new long[configs.size()]; // pixels unlike the scene's first mode's, the most of any round
         int[] largest = new int[configs.size()]; // the largest difference of a channel, of any round
         try (GpuImage shaded = new GpuImage(device, width, height, VK_FORMAT_R8G8B8A8_UNORM,
-            org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT)) {
+            org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT | org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT)) {
             ExternalImage target = new ExternalImage("shaded", width, height, Format.R8G8B8A8_UNORM,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shaded.handle(), 0);
@@ -562,17 +569,19 @@ class ShadowsBenchmark {
                             sample.waiting(), sample.texels(), sample.builds(), sample.frames(), sample.shadowFrames(),
                             sample.forced(), sample.waited(), sample.drawnTotal(), sample.maxWait(), sample.late(),
                             sample.changed(), sample.culling(), sample.prepare(), sample.movingCasters(),
-                            sample.fromLayers(), sample.layersDrawn(), null); // the image not kept
+                            sample.fromLayers(), sample.layersDrawn(), sample.layersAdded(), null); // the image not kept
                     }
                 }
             }
         }
         System.out.println(title + ":");
+        System.out.printf(Locale.ROOT, "(the culling wanted at most %,d chunks of 64 meshlets a frame so far, room for %,d)%n",
+            renderer.wantedChunks(), renderer.chunkCapacity());
         System.out.println("| Shadows | Frame (GPU) | Frame p99 | Shadow passes | Shadow p99 | Culling"
             + " | Tiles drawn a frame"
             + " | Of them forced | Tiles waiting | Lag drawn mean / changed mean / max (frames) | Atlas texels"
             + " | Builds | Prepare (CPU) | Moving casters | Shadow mean"
-            + " | Drawn with every caster / over their layer / layers drawn"
+            + " | Drawn with every caster / over their layer / layers drawn / layers added to"
             + " | Image: pixels unlike the first mode's / most |");
         System.out.println("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
         for (int c = 0; c < configs.size(); c++) {
@@ -590,9 +599,11 @@ class ShadowsBenchmark {
             double movers = 0;
             double fromLayers = 0;
             double layersDrawn = 0;
+            double layersAdded = 0;
             for (Sample sample : all) {
                 fromLayers += sample.fromLayers() / all.length;
                 layersDrawn += sample.layersDrawn() / all.length;
+                layersAdded += sample.layersAdded() / all.length;
                 culling += sample.culling() / all.length;
                 prepare += sample.prepare() / all.length;
                 movers += sample.movingCasters() / all.length;
@@ -606,12 +617,12 @@ class ShadowsBenchmark {
                 waiting += sample.waiting() / all.length;
             }
             System.out.printf(Locale.ROOT, "| %s | %s | %.2f ms | %s | %.2f ms | %.2f ms | %.1f | %.1f | %.1f"
-                    + " | %.2f / %.2f / %d | %,d | %d | %.3f ms | %.0f | %.3f ms | %.1f / %.1f / %.1f | %s |%n",
+                    + " | %.2f / %.2f / %d | %,d | %d | %.3f ms | %.0f | %.3f ms | %.1f / %.1f / %.1f / %.1f | %s |%n",
                 configs.get(c).name(), range(all, true),
                 p99(all, true),
                 range(all, false), p99(all, false), culling, drawnMean, forced, waiting, drawn == 0 ? 0 : waited / (double) drawn,
                 changed == 0 ? 0 : late / (double) changed, maxWait, all[0].texels(), all[0].builds(), prepare, movers,
-                mean(all), drawnMean - fromLayers, fromLayers, layersDrawn,
+                mean(all), drawnMean - fromLayers, fromLayers, layersDrawn, layersAdded,
                 checkImages ? String.format(Locale.ROOT, "%,d / %d", differing[c], largest[c]) : "-");
         }
     }
@@ -662,6 +673,7 @@ class ShadowsBenchmark {
             double movers = 0;
             double fromLayers = 0;
             double layersDrawn = 0;
+            double layersAdded = 0;
             for (int i = -4; i < FRAMES; i++) {
                 frame = step(device, graph, camera, width, height, moving, lights, switching, specs, frame, config,
                     renderer.scene(), stage);
@@ -712,9 +724,14 @@ class ShadowsBenchmark {
                     movers += stats.movingCasters() / (double) FRAMES;
                     fromLayers += stats.moving() / (double) FRAMES;
                     layersDrawn += stats.layered() / (double) FRAMES;
+                    layersAdded += stats.layersAdded() / (double) FRAMES;
                 }
             }
             graph.timings(false);
+            if (renderer.chunksOverflowed()) { // instances left out of the culling: tiles drawn without casters
+                throw new IllegalStateException("Culling wanted " + renderer.wantedChunks() + " chunks, room for "
+                    + renderer.chunkCapacity());
+            }
             int[] image = null;
             if (checkImages) { // everything standing a few frames (the late tiles drawn), then the image read back
                 String stand = System.getenv("TRUESIM_SHADOWS_STAND"); // frames standing first (12)
@@ -740,7 +757,7 @@ class ShadowsBenchmark {
             }
             return new Sample(median(frames), median(shadow), drawn, waiting, texels, built, frames, shadow, forced,
                 waited, drawnTotal, maxWait, late, changed, median(culling), median(prepare), movers, fromLayers,
-                layersDrawn, image);
+                layersDrawn, layersAdded, image);
         }
     }
 

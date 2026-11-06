@@ -559,6 +559,167 @@ class ShadowOwnerTest {
         scene.remove(2);
     }
 
+    /**
+     * A frame whose culling wants more chunks of 64 meshlets than the renderer has room for leaves instances out of
+     * every view it culls, the tiles' too, which casters following the GPU's order; the room grows as such a frame
+     * ends (the graph built again: every tile drawn again). Two renders of the scene standing, the second after every
+     * tile was drawn again, are alike within a level: no tile keeps casters left out. In ShadowsBenchmark the
+     * renderer, on a single frame slot nobody ended, never grew: two renders of one scene differed by up to 116.
+     */
+    @Test
+    void framesCulledWithoutRoomForEveryCasterLeaveNoTileWithoutThem() {
+        graph.close();
+        graph = new FrameGraph(device, 2);
+        // A renderer on the graph's frame slots (it grows its room as frames end), with room for one chunk at first
+        try (GpuScene tightScene = new GpuScene(device, pool, 16, graph.frameSlots());
+             MeshletRenderer tight = new MeshletRenderer(device, tightScene, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT, graph.frameSlots(), 1)) {
+            tightScene.set(0, quad, 0, -5, -5, 0, 0, 0, 1, 10, 1, 10);
+            tightScene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            RenderView eye = tight.createView(ViewOptions.of(256, 1 << 12).withOcclusion(true));
+            eye.set(camera, 1, MeshletRenderer.MODE_LIT);
+            graph.settings().set(ShadowSettings.ATLAS_SIZE, 2048);
+            SceneView main = new SceneView(graph.addView("main").size(SIZE, SIZE), eye, camera);
+            Shadows owner = new Shadows(SceneGeometry.meshlets(tight), lights);
+            try {
+                main.port().add(visibility().apply(main)).add(new ClusteredLights(lights, main)).add(owner.view(main))
+                    .output(Keys.SCENE_COLOR, new ExternalImage("target", SIZE, SIZE,
+                        com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                            | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(colorTarget.handle(), colorTarget.view()));
+                lights.point(0, 0, -1, -5, 20, 60, 60, 60);
+                lights.shadow(0, ShadowSpec.maps(256)).setCount(1);
+                byte[] standing = null;
+                for (int i = 0; i < 8; i++) {
+                    standing = frame();
+                }
+                assertThat(tight.chunkCapacity()).as("the room grew").isGreaterThan(1);
+                assertThat(tight.chunksOverflowed()).isFalse();
+                assertThat(owner.stats().drawn()).as("standing").isZero();
+                graph.invalidate(); // a build: every tile drawn again, with room for every caster
+                byte[] again = null;
+                for (int i = 0; i < 4; i++) {
+                    again = frame();
+                }
+                assertThat(maxDifference(standing, again)).as("the scene standing as drawn again")
+                    .isLessThanOrEqualTo(1);
+                int lit = floor(standing, 3, -2);
+                assertThat(floor(standing, 1.4, -5.6)).as("the quad's shadow").isLessThan(lit / 2);
+            } finally {
+                device.waitIdle();
+                graph.close();
+                owner.close();
+                graph = new FrameGraph(device, 2); // closed again after the test, with nothing in it
+            }
+        }
+    }
+
+    /**
+     * A tile view's lists that overflow grow every time, also with the scene on a single frame slot, which counts no
+     * frames: the owner read a view's overflow again from that count plus 4 after growing it, so never, and a second
+     * overflow left casters out of its tiles for good. Lists starting at 64 meshlets shadow a bumpy ground under a
+     * bumpy sheet (about 800 meshlets) as lists with room for all of it from the start (within a level).
+     */
+    @Test
+    void tileListsGrowEveryTimeTheyOverflowOnASingleFrameSlot() {
+        MeshData bumpy = MeshletRendererTest.grid(160, 0.2f, true, VertexFormat.POSITIONS_ONLY);
+        try (GeometryPool finePool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 16, 4096, 2));
+             GpuScene fineScene = new GpuScene(device, finePool, 4);
+             MeshletRenderer fine = new MeshletRenderer(device, fineScene, VK_FORMAT_R8G8B8A8_UNORM,
+                 VK_FORMAT_D32_SFLOAT)) {
+            assertThat(fineScene.frameSlots().isSingle()).isTrue();
+            int ground = finePool.add(bumpy);
+            fineScene.set(0, ground, 0, -5, -5, 0, 0, 0, 1, 1, 1, 1);
+            fineScene.set(1, ground, 0, -3, -5, 0, 0, 0, 1, 0.25f, 1, 0.25f); // a small bumpy sheet over it
+            RenderView eye = fine.createView(ViewOptions.of(1 << 14, 1 << 20));
+            eye.set(camera, 1, MeshletRenderer.MODE_LIT);
+            int[] grown = new int[1];
+            byte[] small = shadowedGround(fine, eye, 64, grown);
+            assertThat(grown[0]).as("lists grown, more than once").isGreaterThan(1);
+            byte[] roomy = shadowedGround(fine, eye, 1 << 16, grown);
+            assertThat(grown[0]).as("room from the start").isZero();
+            assertThat(maxDifference(small, roomy)).as("lists grown as with room from the start")
+                .isLessThanOrEqualTo(1);
+        }
+    }
+
+    /**
+     * {@code renderer}'s scene through {@code eye}, under a spot light's map whose tile's lists start with room for
+     * {@code draws} meshlets, after 24 frames, in a graph of its own; the times lists grew into {@code grown}.
+     */
+    private byte[] shadowedGround(MeshletRenderer renderer, RenderView eye, int draws, int[] grown) {
+        graph.close();
+        graph = new FrameGraph(device, 2);
+        graph.settings().set(ShadowSettings.ATLAS_SIZE, 2048).set(ShadowSettings.TILE_DRAWS, draws);
+        SceneView main = new SceneView(graph.addView("main").size(SIZE, SIZE), eye, camera);
+        Shadows owner = new Shadows(SceneGeometry.meshlets(renderer), lights);
+        try {
+            main.port().add(visibility().apply(main)).add(new ClusteredLights(lights, main)).add(owner.view(main))
+                .output(Keys.SCENE_COLOR, new ExternalImage("target", SIZE, SIZE,
+                    com.truesim.engine.vulkan.Format.R8G8B8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                        | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(colorTarget.handle(), colorTarget.view()));
+            lights.spot(0, 0, 3, -5, 30, 60, 60, 60, 0, -1, 0, 0.9, 1.05); // one tile over the whole ground
+            lights.shadow(0, ShadowSpec.maps(1024)).setCount(1);
+            byte[] color = null;
+            for (int i = 0; i < 24; i++) {
+                color = frame();
+            }
+            grown[0] = owner.stats().grown();
+            return color;
+        } finally {
+            device.waitIdle();
+            graph.close();
+            owner.close();
+            graph = new FrameGraph(device, 2); // closed again after the test, with nothing in it
+        }
+    }
+
+    /**
+     * The atlas is laid out by the lights' order and their sizes alone: the same frames (lights sized by a moving view,
+     * more than the atlas holds, so some shrink) give every tile the same place, in two owners one after the other.
+     */
+    @Test
+    void theSameFramesLayTheAtlasOutAlike() {
+        long[][] first = atlasLayouts();
+        long[][] second = atlasLayouts();
+        assertThat(second).isDeepEqualTo(first);
+        int placed = 0;
+        for (long[] frame : first) {
+            for (long tile : frame) {
+                placed += tile >= 0 ? 1 : 0;
+            }
+        }
+        assertThat(placed).as("tiles placed").isPositive();
+    }
+
+    /** Each frame's tiles of four AUTO-mapped point lights ({@link Shadows#tile}) as the view backs away from them. */
+    private long[][] atlasLayouts() {
+        newGraph(visibility());
+        graph.settings().set(ShadowSettings.ATLAS_SIZE, 512);
+        for (int l = 0; l < 4; l++) {
+            lights.point(l, -3 + 2 * l, -1, -4 - 2 * l, 6, 20, 20, 20);
+            lights.shadow(l, ShadowSpec.maps(ShadowSpec.AUTO));
+        }
+        lights.setCount(4);
+        long[][] layouts = new long[12][24];
+        try {
+            for (int f = 0; f < layouts.length; f++) {
+                camera.position(0, 0, 2.0 * f);
+                frame();
+                for (int l = 0; l < 4; l++) {
+                    for (int face = 0; face < 6; face++) {
+                        layouts[f][6 * l + face] = shadows.tile(l, face);
+                    }
+                }
+            }
+        } finally {
+            camera.position(0, 0, 0);
+            lights.setCount(0);
+        }
+        return layouts;
+    }
+
     /** A quad of scale {@code scale} at (x, -2, z), as instance {@code id}, marked {@code mobility} (null: not known). */
     private void quadAt(int id, double x, double z, float scale, Mobility mobility) {
         scene.set(id, new GpuScene.Instance().mesh(quad).position(x, -2, z).scale(scale, 1, scale)
@@ -640,6 +801,74 @@ class ShadowOwnerTest {
             .isZero();
         scene.remove(2);
         scene.remove(4);
+    }
+
+    /**
+     * Static casters new to the scene (cells streamed in, props placed) are drawn into their tiles' current still
+     * layers over what those hold, not the layers drawn again: each frame's shadow is that of every caster drawn, and
+     * stays so once they stand (they are in the layers); one taken out has its tiles' layers drawn again without it.
+     */
+    @Test
+    void staticCastersAddedAreDrawnIntoTheLayersTheyReach() {
+        newGraph(visibility());
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, true).set(ShadowSettings.CASTER_SETTLE, 5)
+            .set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
+        lights.point(0, 0, 0, -5, 16, 60, 60, 60);
+        lights.shadow(0, ShadowSpec.maps(256)).setCount(1);
+        scene.setMobility(0, Mobility.STATIC);
+        scene.setMobility(1, Mobility.STATIC);
+        quadAt(2, -2, -5, 0.5f, Mobility.STATIC);
+        quadAt(3, 1, -6, 0.3f, Mobility.DYNAMIC);
+        for (int i = 0; i < 4; i++) {
+            frame();
+        }
+        quadAt(3, 1.2, -6, 0.3f, Mobility.DYNAMIC); // a dynamic quad moves: its tiles' layers drawn, current from now
+        frame();
+        assertThat(shadows.stats().layered()).isPositive();
+        frame();
+        assertThat(shadows.stats().movingCasters()).as("the dynamic quad").isOne();
+        double[][] at = {{1.5, -4.5}, {-1, -6}, {2, -6.5}, {0.5, -3.5}};
+        for (int i = 0; i < at.length; i++) { // the layers they reach that were stale drawn again, with them
+            quadAt(8 + i, -at[i][0], -10 - at[i][1], 0.25f, Mobility.STATIC);
+            frame();
+        }
+        frame();
+        byte[][] layered = new byte[at.length + 1][];
+        int added = 0;
+        int relayered = 0;
+        for (int i = 0; i < at.length; i++) {
+            quadAt(4 + i, at[i][0], at[i][1], 0.3f, Mobility.STATIC); // new ids: new to the scene
+            layered[i] = frame();
+            added += shadows.stats().layersAdded();
+            relayered += shadows.stats().layered();
+        }
+        assertThat(added).as("layers the newcomers were drawn into").isPositive();
+        assertThat(relayered).as("layers drawn again").isZero();
+        assertThat(shadows.stats().movingCasters()).as("static: still at once").isOne();
+        frame();
+        assertThat(shadows.stats().drawn()).as("standing: nothing drawn").isZero();
+        scene.remove(5); // taken out: its tiles' layers drawn again
+        layered[at.length] = frame();
+        assertThat(shadows.stats().layered()).as("layers drawn again without it").isPositive();
+        // The same frames with every caster drawn
+        for (int i = 0; i < at.length; i++) {
+            scene.remove(4 + i);
+        }
+        frame();
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, false);
+        int most = 0;
+        for (int i = 0; i < at.length; i++) {
+            quadAt(4 + i, at[i][0], at[i][1], 0.3f, Mobility.STATIC);
+            most = Math.max(most, maxDifference(layered[i], frame()));
+        }
+        scene.remove(5);
+        most = Math.max(most, maxDifference(layered[at.length], frame()));
+        assertThat(most).as("each frame as every caster drawn").isLessThanOrEqualTo(2);
+        for (int i : new int[] {2, 3, 4, 6, 7, 8, 9, 10, 11}) {
+            scene.remove(i);
+        }
+        scene.setMobility(0, null);
+        scene.setMobility(1, null);
     }
 
     /**
