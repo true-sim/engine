@@ -98,6 +98,12 @@ class CameraAndLightSyncTest {
             sync.update();
             assertThat(lights.shadow(id)).isSameAs(soft);
             assertThat(lights.shadowVersion()).isGreaterThan(specs);
+            // the node's mobility as the light's hint: dynamic by default, changed at runtime
+            assertThat(lights.mobilityHint(id)).isEqualTo(com.truesim.engine.render.GpuScene.MOVING);
+            scene.setMobility(lamp, com.truesim.scene.core.Mobility.STATIC);
+            scene.update();
+            sync.update();
+            assertThat(lights.mobilityHint(id)).isEqualTo(com.truesim.engine.render.GpuScene.STILL);
             // moved, changed in place, hidden, removed
             scene.setTranslation(lamp, 5, 2, 3);
             scene.update();

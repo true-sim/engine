@@ -167,6 +167,7 @@ public final class SceneResources implements AutoCloseable {
     private com.truesim.engine.settings.EngineSettings.Subscription releaseWatch;
     private com.truesim.engine.settings.EngineSettings.Subscription sparesWatch; // render.meshSpares, or null
     private boolean deferred; // the last flush placed and released nothing: its update had spent the budget
+    private long frameBegan; // beginFrame's time, or 0
     private final MeshUser heldMeshes = mesh -> { }; // the techniques' holds: placed() counts the arrival
 
     /**
@@ -1554,7 +1555,19 @@ public final class SceneResources implements AutoCloseable {
      * the next at least one of each: what waits is never held two frames running. Allocates nothing.
      */
     void flush(long since) {
-        flush(since, true);
+        // the frame's start, if marked this frame (within a frame's time of the update): else the update's
+        boolean marked = frameBegan != 0 && frameBegan - since < 0 && since - frameBegan < 100_000_000L;
+        flush(marked ? frameBegan : since, true);
+    }
+
+    /**
+     * Marks the start of the frame's streaming work (the engine's assets plugin calls it before each frame's update;
+     * a program of its own calls it as its frame begins): the frame budget ({@code render.streamFrameBudget}) runs from
+     * here, so what the frame did before the scene syncs update (nodes attached or removed, loads taken in) counts
+     * too. Without it, the budget runs from each sync's update. Allocates nothing.
+     */
+    public void beginFrame() {
+        frameBegan = System.nanoTime();
     }
 
     private void flush(long since, boolean mayDefer) {

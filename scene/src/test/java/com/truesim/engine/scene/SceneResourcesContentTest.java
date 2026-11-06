@@ -234,6 +234,29 @@ class SceneResourcesContentTest {
     }
 
     @Test
+    void theStreamingBudgetRunsFromTheFramesStart() {
+        com.truesim.engine.settings.EngineSettings settings = new com.truesim.engine.settings.EngineSettings();
+        settings.set(com.truesim.engine.settings.EngineSettings.Layer.GAME,
+            com.truesim.engine.render.RenderSettings.STREAM_FRAME_BUDGET, 1f); // 1 ms
+        resources.settings(settings);
+        SceneResources.MaterialSet one = resources.acquireSet(List.of(), 1);
+        SceneResources.MaterialSet two = resources.acquireSet(List.of(), 2);
+        resources.releaseSetLater(one);
+        resources.releaseSetLater(two);
+        resources.beginFrame();
+        long spent = System.nanoTime() + 2_000_000; // the frame's own work took 2 ms before the sync's update
+        while (System.nanoTime() < spent) {
+            Thread.onSpinWait();
+        }
+        resources.flush(System.nanoTime()); // a sync's update: the frame's budget spent already
+        assertThat(resources.releasesWaiting()).as("left to the next frame").isEqualTo(2);
+        resources.flush(System.nanoTime()); // the next: at least one, whatever was spent
+        assertThat(resources.releasesWaiting()).isLessThan(2);
+        resources.flush(); // a technique's flush, outside the syncs: always at least one
+        assertThat(resources.releasesWaiting()).isZero();
+    }
+
+    @Test
     void releasesAndArrivalsSpreadOverFramesWithinTheStreamingBudget() {
         com.truesim.engine.settings.EngineSettings settings = new com.truesim.engine.settings.EngineSettings();
         settings.set(com.truesim.engine.settings.EngineSettings.Layer.GAME,

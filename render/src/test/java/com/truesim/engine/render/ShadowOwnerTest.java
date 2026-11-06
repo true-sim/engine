@@ -25,6 +25,7 @@ import com.truesim.engine.vulkan.VulkanException;
 import com.truesim.engine.vulkan.VulkanInstance;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.assets.mesh.VertexFormat;
+import com.truesim.scene.core.Mobility;
 import com.truesim.scene.core.ShadowMethod;
 import com.truesim.scene.core.ShadowSpec;
 import java.util.function.Function;
@@ -557,6 +558,301 @@ class ShadowOwnerTest {
         expectShadow("the still quad's shadow", new double[] {0, -5}, new double[] {-2, -3});
         scene.remove(2);
     }
+
+    /** A quad of scale {@code scale} at (x, -2, z), as instance {@code id}, marked {@code mobility} (null: not known). */
+    private void quadAt(int id, double x, double z, float scale, Mobility mobility) {
+        scene.set(id, new GpuScene.Instance().mesh(quad).position(x, -2, z).scale(scale, 1, scale)
+            .mobility(mobility));
+    }
+
+    /** The images of {@code frames} frames, with caster layers on, then off: the same frames drawn by every caster. */
+    private int differenceFromEveryCaster(Runnable[] frames) {
+        byte[][] layered = new byte[frames.length][];
+        for (int i = 0; i < frames.length; i++) {
+            frames[i].run();
+            layered[i] = frame();
+        }
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, false);
+        int most = 0;
+        for (int i = 0; i < frames.length; i++) {
+            frames[i].run();
+            most = Math.max(most, maxDifference(layered[i], frame()));
+        }
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, true);
+        return most;
+    }
+
+    /**
+     * Casters' mobility as a hint: a quad marked static joins its tiles' still layer the frame it is placed (no settle
+     * wait) and one marked dynamic never does, however long it stands; with the hint ignored (DETECT) the dynamic one
+     * settles as detected, and counts as moving again once the hint is used again. Drawn over those layers, a quad
+     * that moves shadows as every caster drawn.
+     */
+    @Test
+    void castersMarkedStaticJoinTheStillLayersAtOnceAndDynamicOnesNever() {
+        newGraph(visibility());
+        // static only by default (unmarked nodes are dynamic): both ways for an application marking both
+        assertThat(ShadowSettings.CASTER_MOBILITY.defaultValue()).isEqualTo(ShadowSettings.MobilityUse.STATIC_ONLY);
+        assertThat(ShadowSettings.LIGHT_MOBILITY.defaultValue()).isEqualTo(ShadowSettings.MobilityUse.STATIC_ONLY);
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, true).set(ShadowSettings.CASTER_SETTLE, 5)
+            .set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
+        lights.point(0, 0, 0, -5, 16, 60, 60, 60);
+        lights.shadow(0, ShadowSpec.maps(256)).setCount(1);
+        for (int i = 0; i < 8; i++) {
+            frame(); // the floor and the quad, placed before: detected moving, settled
+        }
+        assertThat(shadows.stats().movingCasters()).isZero();
+        // A dynamic quad first: its tiles' layers drawn without it
+        quadAt(4, 2, -6, 0.4f, Mobility.DYNAMIC);
+        frame();
+        quadAt(4, 2.2, -6, 0.4f, Mobility.DYNAMIC);
+        frame();
+        quadAt(2, -2, -5, 0.5f, Mobility.STATIC);
+        frame();
+        assertThat(shadows.stats().movingCasters()).as("static: still at once, the dynamic one moving").isOne();
+        assertThat(shadows.stats().layered()).as("its tiles' layers drawn again with it").isPositive();
+        for (int i = 0; i < 12; i++) {
+            frame(); // more than CASTER_SETTLE frames
+        }
+        assertThat(shadows.stats().movingCasters()).as("dynamic: never still").isOne();
+        // A quad moving between them, over layers holding the static quad, without the dynamic one: as every caster
+        int[] step = {0};
+        Runnable[] moves = new Runnable[4];
+        for (int i = 0; i < moves.length; i++) {
+            moves[i] = () -> quadAt(3, -1.5 + 0.4 * (step[0]++ % 4), -4.5, 0.3f, null);
+        }
+        assertThat(differenceFromEveryCaster(moves)).as("over the layers, as every caster").isLessThanOrEqualTo(2);
+        scene.remove(3);
+        // The hint ignored: the dynamic quad settles; used again: moving again, without a move
+        graph.settings().set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.DETECT);
+        for (int i = 0; i < 8; i++) {
+            frame();
+        }
+        assertThat(shadows.stats().movingCasters()).as("detected: settled").isZero();
+        graph.settings().set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
+        frame();
+        assertThat(shadows.stats().movingCasters()).as("the hint again").isOne();
+        graph.settings().set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.STATIC_ONLY);
+        for (int i = 0; i < 8; i++) {
+            frame();
+        }
+        assertThat(shadows.stats().movingCasters()).as("static only (the default): the dynamic one detected")
+            .isZero();
+        scene.remove(2);
+        scene.remove(4);
+    }
+
+    /**
+     * A quad marked static that moves all the same: its first move puts it straight into the layers, the next ones
+     * (within CASTER_SETTLE frames) have it detected moving; every frame's shadow is that of every caster drawn, and it
+     * follows the quad.
+     */
+    @Test
+    void aStaticCasterThatMovesIsShadowedWhereItIs() {
+        newGraph(visibility());
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, true).set(ShadowSettings.CASTER_SETTLE, 5);
+        lights.point(0, 0, 0, -5, 16, 60, 60, 60);
+        lights.shadow(0, ShadowSpec.maps(256)).setCount(1);
+        quadAt(2, -2, -5, 0.5f, Mobility.STATIC);
+        for (int i = 0; i < 10; i++) {
+            frame();
+        }
+        int[] step = {0};
+        int[] moving = new int[1];
+        Runnable[] moves = new Runnable[12];
+        for (int i = 0; i < moves.length; i++) {
+            moves[i] = () -> {
+                moving[0] = Math.max(moving[0], shadows.stats().movingCasters());
+                quadAt(2, -2 + 0.3 * (step[0]++ % 12), -5, 0.5f, Mobility.STATIC);
+            };
+        }
+        assertThat(differenceFromEveryCaster(moves)).as("each frame as every caster").isLessThanOrEqualTo(2);
+        assertThat(moving[0]).as("moving every frame: detected").isOne();
+        assertThat(scene.mobility(2)).isEqualTo(Mobility.STATIC);
+        for (int i = 0; i < 10; i++) {
+            frame();
+        }
+        assertThat(shadows.stats().movingCasters()).as("settled").isZero();
+        // Its last place, x 0.8 to 1.8: the light 2 above it at x 0, the floor 3 below: its shadow from x 2 to 4.5
+        expectShadow("where the static quad went", new double[] {3, -5}, new double[] {-3, -5});
+        scene.remove(2);
+    }
+
+    /**
+     * Hints changed at runtime, without a move: a still quad marked dynamic leaves the still layers (counted moving at
+     * once), marked static again it joins them; shadows drawn over the layers between match every caster drawn. The
+     * scene's list of hints changed empties with the frame's upload.
+     */
+    @Test
+    void hintsChangedAtRuntimeAreFollowed() {
+        newGraph(visibility());
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, true).set(ShadowSettings.CASTER_SETTLE, 5)
+            .set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
+        lights.point(0, 0, 0, -5, 16, 60, 60, 60);
+        lights.shadow(0, ShadowSpec.maps(256)).setCount(1);
+        quadAt(2, -2, -5, 0.5f, null);
+        quadAt(3, -1.5, -4.5, 0.3f, Mobility.DYNAMIC);
+        for (int i = 0; i < 10; i++) {
+            frame();
+        }
+        assertThat(shadows.stats().movingCasters()).as("settled, but the dynamic quad").isOne();
+        quadAt(3, -1.1, -4.5, 0.3f, Mobility.DYNAMIC); // its tiles' layers drawn, holding the settled quad
+        frame();
+        scene.setMobility(2, Mobility.DYNAMIC);
+        assertThat(scene.mobilityChangedCount()).isOne();
+        frame();
+        assertThat(scene.mobilityChangedCount()).as("seen and cleared by the upload").isZero();
+        assertThat(shadows.stats().movingCasters()).as("dynamic: moving without a move").isEqualTo(2);
+        assertThat(shadows.stats().drawn()).as("its tiles' images stand").isZero();
+        // It moves, dynamic: drawn over its tiles' layers, which no longer hold it where it stood
+        int[] step = {0};
+        Runnable[] own = new Runnable[4];
+        for (int i = 0; i < own.length; i++) {
+            own[i] = () -> quadAt(2, -2 + 0.4 * (step[0]++ % 4), -5, 0.5f, Mobility.DYNAMIC);
+        }
+        assertThat(differenceFromEveryCaster(own)).as("dynamic, moving over its layer").isLessThanOrEqualTo(2);
+        Runnable[] moves = new Runnable[4];
+        for (int i = 0; i < moves.length; i++) {
+            moves[i] = () -> quadAt(3, -1.5 + 0.4 * (step[0]++ % 4), -4.5, 0.3f, Mobility.DYNAMIC);
+        }
+        for (int i = 0; i < 3; i++) {
+            moves[i].run(); // its tiles' layers drawn again, without the dynamic quads
+            frame();
+        }
+        scene.setMobility(2, Mobility.STATIC);
+        frame();
+        assertThat(shadows.stats().movingCasters()).as("static: still at once").isOne();
+        assertThat(differenceFromEveryCaster(moves)).as("static, in its layer").isLessThanOrEqualTo(2);
+        scene.setMobility(2, null);
+        assertThat(scene.mobility(2)).isNull();
+        scene.remove(2);
+        scene.remove(3);
+    }
+
+    /**
+     * A light marked static skips its own change tests while nothing writes it: its tiles stay until a caster changes;
+     * written all the same with the same values, it is compared and kept; moved, its tiles are drawn again and its
+     * shadow follows. Ignoring the hint (DETECT) tests it each frame.
+     */
+    @Test
+    void aStaticLightsTilesAreKeptUntilCastersChange() {
+        newGraph(visibility());
+        lights.point(0, 0, -1, -5, 20, 60, 60, 60);
+        lights.shadow(0, ShadowSpec.maps(256)).mobility(0, Mobility.STATIC).setCount(1);
+        for (int i = 0; i < 4; i++) {
+            frame();
+        }
+        assertThat(shadows.stats().stillLights()).as("its tests skipped").isOne();
+        assertThat(shadows.stats().drawn()).as("still").isZero();
+        lights.point(0, 0, -1, -5, 20, 60, 60, 60); // written, the same
+        frame();
+        assertThat(shadows.stats().stillLights()).as("written: tested").isZero();
+        assertThat(shadows.stats().drawn()).as("the same: kept").isZero();
+        frame();
+        assertThat(shadows.stats().stillLights()).isOne();
+        scene.set(1, quad, 0.5f, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+        frame();
+        assertThat(shadows.stats().drawn()).as("a caster moved").isBetween(1, 6);
+        frame();
+        assertThat(shadows.stats().drawn()).isZero();
+        // Moved though static: followed (the quad from x -0.5 to 1.5, 2 below the light at x 1: its shadow -2 to 2)
+        lights.point(0, 1, -1, -5, 20, 60, 60, 60);
+        frame();
+        assertThat(shadows.stats().drawn()).as("every face again").isEqualTo(6);
+        expectShadow("the static light moved", new double[] {-1.5, -5.6}, new double[] {2.6, -5.6});
+        graph.settings().set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.DETECT);
+        frame();
+        assertThat(shadows.stats().stillLights()).as("detected").isZero();
+        assertThat(shadows.stats().drawn()).isZero();
+        graph.settings().set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.STATIC_ONLY);
+        scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+    }
+
+    /**
+     * The update order ranks a dynamic light's changed tiles {@code shadows.lights.movingWeight} times as important:
+     * one tile a frame (CAPPED), both lights moving, the dynamic light farther off: drawn first with the weight, never
+     * at 1.
+     */
+    @Test
+    void dynamicLightsTilesAreUpdatedFirst() {
+        newGraph(visibility());
+        graph.settings().set(ShadowSettings.ATLAS_UPDATES, ShadowSettings.Updates.CAPPED)
+            .set(ShadowSettings.ATLAS_DRAWS, 1)
+            .set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
+        lights.shadow(0, ShadowSpec.maps(64)).mobility(0, Mobility.DYNAMIC);
+        lights.shadow(1, ShadowSpec.maps(64)).setCount(2);
+        int[] drawn = new int[2];
+        float[] weights = {4, 1};
+        for (int w = 0; w < weights.length; w++) {
+            graph.settings().set(ShadowSettings.LIGHT_MOVING_WEIGHT, weights[w]);
+            for (int f = 0; f < 10; f++) {
+                double wobble = 0.01 * (f % 2);
+                lights.point(0, -8 + wobble, -1, -6, 6, 60, 60, 60); // 9.4 from the camera
+                lights.point(1, 6 + wobble, -1, -5, 6, 60, 60, 60); // 7.2
+                frame();
+                if (f >= 2) {
+                    drawn[w] += shadows.stats().drawnMovingLight();
+                    assertThat(shadows.stats().drawn()).isOne();
+                }
+            }
+        }
+        assertThat(drawn[0]).as("weighted: the dynamic light's tiles every frame").isEqualTo(8);
+        assertThat(drawn[1]).as("alike: the nearer light's first").isZero();
+        graph.settings().set(ShadowSettings.LIGHT_MOVING_WEIGHT, 4f)
+            .set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.STATIC_ONLY);
+        int byDefault = 0;
+        for (int f = 0; f < 6; f++) {
+            lights.point(0, -8 + 0.01 * (f % 2), -1, -6, 6, 60, 60, 60);
+            lights.point(1, 6 + 0.01 * (f % 2), -1, -5, 6, 60, 60, 60);
+            frame();
+            byDefault += f >= 2 ? shadows.stats().drawnMovingLight() : 0;
+        }
+        assertThat(byDefault).as("static only (the default): the dynamic mark not used").isZero();
+        graph.settings().set(ShadowSettings.ATLAS_UPDATES, ShadowSettings.Updates.IMPORTANCE)
+            .set(ShadowSettings.ATLAS_DRAWS, 64);
+    }
+
+    /**
+     * Frames with hints in use allocate nothing: a dynamic quad moving every frame beside a static one, their hints
+     * and a static light's changed now and then (a frame allocating once in a while is the compiler's).
+     */
+    @Test
+    void framesWithMobilityHintsAllocateNothing() {
+        newGraph(visibility());
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, true).set(ShadowSettings.CASTER_SETTLE, 5)
+            .set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.USE_HINT)
+            .set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
+        lights.point(0, 0, 0, -5, 16, 60, 60, 60);
+        lights.shadow(0, ShadowSpec.maps(256)).mobility(0, Mobility.STATIC).setCount(1);
+        quadAt(2, -2, -5, 0.5f, Mobility.STATIC);
+        GpuScene.Instance moved = new GpuScene.Instance().mesh(quad).scale(0.3f, 1, 0.3f).mobility(Mobility.DYNAMIC);
+        java.util.function.Consumer<org.lwjgl.vulkan.VkCommandBuffer> record = graph::record;
+        com.sun.management.ThreadMXBean threads =
+            (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
+        int allocating = 0;
+        int frames = 300;
+        for (int f = -frames; f < frames; f++) {
+            // submitAndWait allocates on its own (320 bytes here): an empty one's taken off
+            long before = threads.getCurrentThreadAllocatedBytes();
+            device.submitAndWait(device.graphics(), NOTHING);
+            long waiting = threads.getCurrentThreadAllocatedBytes() - before;
+            before = threads.getCurrentThreadAllocatedBytes();
+            scene.set(3, moved.position(1 + 0.01 * (f & 7), -2, -5));
+            if ((f & 15) == 0) {
+                scene.setMobility(2, (f & 16) == 0 ? Mobility.DYNAMIC : Mobility.STATIC);
+                lights.mobility(0, (f & 16) == 0 ? Mobility.DYNAMIC : Mobility.STATIC);
+            }
+            device.submitAndWait(device.graphics(), record);
+            if (f >= 0 && threads.getCurrentThreadAllocatedBytes() - before != waiting) {
+                allocating++;
+            }
+        }
+        assertThat(allocating).as("frames allocating").isLessThan(8);
+        scene.remove(2);
+        scene.remove(3);
+    }
+
+    private static final java.util.function.Consumer<org.lwjgl.vulkan.VkCommandBuffer> NOTHING = commands -> { };
 
     private static int maxDifference(byte[] a, byte[] b) {
         int most = 0;

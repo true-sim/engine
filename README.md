@@ -308,6 +308,10 @@ port.add(new SelectionOutline(graph, geometry, view.view(), view, depthFormat, h
   the visibility buffer's IDs (forward views draw IDs of their own while the slot is on).
 - **Cameras and lights as components:** `CameraSync` sets a renderer camera from a camera node's world transform and
   `CameraLens`; `LightSync` places `LightSource` components in `Lights`, following moves and changes.
+- **Mobility as a hint:** `SceneSync` gives each instance its node's `Mobility` (`GpuScene.setMobility`, CPU only:
+  nothing uploads; changes followed from the scene's log) and `LightSync` each light its node's (`Lights.mobility`).
+  Shadow maps cache by it (see Shadows: mobility); an instance or light made outside the scene has none and is
+  detected.
 
 Measured (2026-11-04, RX 9070 XT, Ryzen 9 9950X3D; `ScenePickingBenchmark`, `SelectionOutlineTest` with
 `TRUESIM_BENCHMARK=true`):
@@ -1437,7 +1441,8 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   within its frustum moved, was added or removed (the scene's changes before they upload: `GpuScene.changedId`, against
   the instance's bounding sphere before and after), the materials' shapes changed (`Materials.shapesVersion`: masks and
   geometry hooks' fields updated in place), or the caster detail setting changed. A still light over a still scene
-  keeps its tile, drawn once; a still camera keeps its cascades. Deformed copies dirty the tiles around them every
+  keeps its tile, drawn once; a still camera keeps its cascades. The scene's `Mobility` is a hint for both (see
+  Mobility below). Deformed copies dirty the tiles around them every
   frame; instances moved on the GPU (interpolated motion, mesh particles) dirty every tile while there are any.
   Which changed tiles a frame draws is `shadows.atlas.updates` (their light keeps its last map, or casts none, until
   drawn): `IMPORTANCE` (the default) draws a tile the frame it changes where its light shows at least
@@ -1555,6 +1560,45 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
 
   Layers cost a second atlas (256 MiB at 8192), so they stay a choice; they pay most with few movers among many
   still casters.
+
+  **Mobility** (the scene's `Mobility`, per instance and light: a hint, never a promise). `shadows.casters.mobility`
+  (`STATIC_ONLY` by default, `USE_HINT`, `DETECT`): a caster marked static joins its tiles' still layers the frame it
+  is placed or moved (no `shadows.casters.settle` wait; its tiles' layers drawn again where it was and is); the rest is
+  detected as before. Static only, because the scene makes every node it is not told otherwise dynamic: taking that at
+  its word would keep every caster of an application that never marks its nodes out of the still layers. With
+  `USE_HINT`, for applications that mark both ways, a caster marked dynamic counts as moving for good (never in a
+  layer: no layers drawn again when it pauses). Instances without a hint (made outside the scene) are detected. A static caster moved again within the settle frames is detected
+  moving as any caster, so one that moves anyway costs what detection costs and is shadowed where it is. A hint changed
+  without a move only marks its tiles' layers stale. `shadows.lights.mobility`: a static spot or point light that
+  nothing wrote (`Lights.version`) keeps its parameters without reading or comparing them (`Shadows.stats().stillLights()`);
+  written, it is compared as any; its tiles redraw only when casters change (`STATIC_ONLY`, the default, as
+  `USE_HINT`). With `USE_HINT` a dynamic light's changed tiles also rank `shadows.lights.movingWeight` (4) times as
+  important in the update order.
+
+  Measured (`ShadowsBenchmark`, `TRUESIM_SHADOWS_MOBILITY`, RX 9070 XT, 2026-11-06, JaCoCo off; the flight over 200
+  AUTO-mapped lights, `IMPORTANCE` updates, caster layers on; the moving rocks and lights marked dynamic and everything
+  else static, used both ways (`USE_HINT`) against ignored (`DETECT`), in turns in one run; two runs, another agent's benchmark
+  sharing the GPU in parts of them, the quieter one here; shadow GPU: median (mean) of the shadow passes; prepare: the
+  owner's CPU time a frame, median):
+
+  | Scene | Shadow GPU, `USE_HINT` / `DETECT` | Tiles drawn | Lag mean / max (frames) | Prepare (CPU) | Casters moving |
+  |---|---|---|---|---|---|
+  | all still | 0.01 (0.03) / 0.01 (0.03) ms | 1.7 / 1.7 | 0 / 0 | 0.18 / 0.18 ms | 0 / 0 |
+  | 10 rocks moving | 0.20 (0.21) / 0.20 (0.21) | 49.5 / 49.5 | 0 / 0 | 0.20 / 0.22 | 10 / 10 |
+  | 100 rocks moving | 0.44 (0.43) / 0.44 (0.43) | 212 / 212 | 0.71 / 2, the same | 0.41 / 0.39 | 100 / 100 |
+  | 500 rocks moving | 0.94 (0.93) / 0.94 (0.93) | 430 / 430 | 0.76 / 2, the same | 1.14 / 1.12 | 500 / 500 |
+  | 2,000 rocks moving | 1.19 (1.22) / 1.19 (1.22) | 461 / 461 | 0.77 / 2, the same | 3.69 / 3.70 | 2,000 / 2,000 |
+  | 10% of the lights moving | 0.45 (0.47) / 0.41 (0.43) | 121 / 91 | 0 / 0, against 0.29 / 2 | 0.21 / 0.20 | 0 / 0 |
+  | 300 rocks, 10% of the lights | 1.01 (1.02) / 1.08 (1.08) | 431 / 393 | 0.68 / 2, against 0.76 / 2 | 0.79 / 0.78 | 300 / 300 |
+  | 100 rocks moving 40 frames, standing 40 | 0.01 (0.18) / 0.01 (0.20) | 79 / 79 | 0.66 / 2, the same | 0.18 / 0.19 | 100 / 82 |
+  | 500 rocks moving 40 frames, standing 40 | 0.01 (0.35) / 0.01 (0.33) | 157 / 157 | 0.73 / 2, the same | 0.19 / 0.18 | 500 / 408 |
+
+  Where things move steadily, detection ends where the hints start: the same tiles, time and lag. The hints change
+  transients (the dynamic marks only with `USE_HINT`): a dynamic light's tiles are drawn the frame it moves (no lag, about 30 more tiles and 0.04 ms a frame with
+  20 lights moving); pausing rocks stay out of the layers (no layers drawn again as they start), which in these scenes
+  neither saved nor cost measurably (the movers, culled from their own list, are cheap to draw over a layer). Skipping
+  200 static lights' tests did not show in the owner's CPU time (0.18 ms either way); 2,000 moving rocks cost it 3.7 ms
+  either way (their tests against every light).
 
   Ray-traced point lights: a mask per light over the view's pixels, so at most `shadows.rays.lights` (16) spot and
   point lights are traced a frame, the most important (how big their reach shows, times their importance; those
@@ -2266,10 +2310,11 @@ material swap takes new materials and keeps the mesh and the instance id.
 - **Prepared on worker threads:** `resources.prepareOn(tasks, threads)` makes meshes and textures ready for the GPU
   (`GeometryPool.prepare`, `Textures.prepareColor`) on that many threads of the scheduler, handed over as it drains,
   so the main thread only places them: a frame of latency for milliseconds of main-thread time per large asset.
-- **Streamed content within a frame budget:** `render.streamFrameBudget` (0.25 ms) bounds what a frame spends taking
-  in content made ready on workers (meshes placed, textures added) and letting go of what removed renderables used;
-  the sync's own work in the frame (renderables attached or torn down) counts toward it, and a frame whose update spent
-  it leaves the rest to the next. Material blocks and meshes others still use are let go of at once (a count taken
+- **Streamed content within a frame budget:** `render.streamFrameBudget` (0.1 ms) bounds what a frame spends taking
+  in content made ready on workers (meshes placed, textures added) and letting go of what removed renderables used.
+  It runs from the frame's start (`SceneResources.beginFrame()`, which the assets plugin calls before each update), so
+  the frame's own streaming work (nodes attached or removed, renderables taken in or torn down) counts toward it, and a
+  frame that spent it leaves the rest to the next. Material blocks and meshes others still use are let go of at once (a count taken
   down); only the last user's release waits for the budget. `render.meshSpares` (64) keeps removed meshes' pool ranges
   for meshes of the same sizes (`GeometryPool.spares`), and the assets plugin's `assets.meshPool` (64) keeps evicted
   generated meshes' memory for generators building into it (`Assets.meshPool()`, scene's `MeshPool`): content that

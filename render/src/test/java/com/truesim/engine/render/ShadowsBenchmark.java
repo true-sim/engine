@@ -15,6 +15,7 @@ import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanInstance;
 import com.truesim.scene.assets.mesh.MeshData;
+import com.truesim.scene.core.Mobility;
 import com.truesim.scene.core.ShadowMethod;
 import com.truesim.scene.core.ShadowSpec;
 import java.util.ArrayList;
@@ -40,12 +41,22 @@ class ShadowsBenchmark {
     private static final int FRAMES = 60;
     private static final ManyLights MOVING = new ManyLights(40);
 
-    /** A configuration: {@code rocks} rocks and {@code share} of the lights of {@link ManyLights} moving. */
-    private record Config(String name, Consumer<Setup> setup, int rocks, double share) {
+    /**
+     * A configuration: {@code rocks} rocks and {@code share} of the lights of {@link ManyLights} moving ({@code pausing}:
+     * the rocks standing every other {@link #PAUSE} frames, as characters pausing).
+     */
+    private record Config(String name, Consumer<Setup> setup, int rocks, double share, boolean pausing) {
         Config(String name, Consumer<Setup> setup) {
-            this(name, setup, 0, 0);
+            this(name, setup, 0, 0, false);
+        }
+
+        Config(String name, Consumer<Setup> setup, int rocks, double share) {
+            this(name, setup, rocks, share, false);
         }
     }
+
+    /** Frames pausing rocks move, then stand. */
+    private static final int PAUSE = 40;
 
     /** What a configuration sets up in a graph. */
     private record Setup(FrameGraph graph, SceneView main, SceneGeometry geometry, Lights lights, RayTracing rays,
@@ -54,7 +65,7 @@ class ShadowsBenchmark {
 
     private record Sample(double frame, double shadows, double drawn, double waiting, long texels, int builds,
         double[] frames, double[] shadowFrames, double forced, long waited, long drawnTotal, int maxWait, long late,
-        long changed, double culling) {
+        long changed, double culling, double prepare, double movingCasters) {
     }
 
     @Test
@@ -161,18 +172,43 @@ class ShadowsBenchmark {
         };
         // TRUESIM_SHADOWS_AB: each case with caster layers on too, in turns
         boolean ab = System.getenv("TRUESIM_SHADOWS_AB") != null && method.method() == ShadowMethod.MAPS;
+        // TRUESIM_SHADOWS_MOBILITY: each case with the scene's hints (the moving rocks and lights dynamic, the rest
+        // static) used both ways (USE_HINT), and ignored (DETECT), in turns; with cases of rocks pausing
+        boolean mobility = System.getenv("TRUESIM_SHADOWS_MOBILITY") != null;
         Consumer<Setup> layered = s -> {
             s.graph().settings().set(ShadowSettings.CASTER_LAYERS, true);
             setup.accept(s);
         };
         String[] names = {"all still", "10 rocks moving", "100 rocks moving", "500 rocks moving", "2,000 rocks moving",
             "10% of the lights moving", "50% of the lights moving", "300 rocks and 10% of the lights moving (the video)",
-            "500 rocks and 10% of the lights moving", "2,000 rocks and 50% of the lights moving"};
-        int[] rocks = {0, 10, 100, 500, 2000, 0, 0, 300, 500, 2000};
-        double[] shares = {0, 0, 0, 0, 0, 0.1, 0.5, 0.1, 0.1, 0.5};
+            "500 rocks and 10% of the lights moving", "2,000 rocks and 50% of the lights moving",
+            "100 rocks moving and pausing", "500 rocks moving and pausing"};
+        int[] rocks = {0, 10, 100, 500, 2000, 0, 0, 300, 500, 2000, 100, 500};
+        double[] shares = {0, 0, 0, 0, 0, 0.1, 0.5, 0.1, 0.1, 0.5, 0, 0};
         String cases = System.getenv("TRUESIM_SHADOWS_CASES"); // names, separated by ';': those alone
         for (int i = 0; i < names.length; i++) {
             if (cases != null && !Arrays.asList(cases.split(";")).contains(names[i])) {
+                continue;
+            }
+            boolean pausing = names[i].contains("pausing");
+            if (pausing && !mobility) {
+                continue; // the hints' cases
+            }
+            if (mobility) {
+                int moving = rocks[i];
+                double share = shares[i];
+                configs.add(new Config(names[i] + ", USE_HINT", s -> {
+                    hint(s, moving, share);
+                    s.graph().settings().set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.USE_HINT)
+                        .set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
+                    setup.accept(s);
+                }, rocks[i], shares[i], pausing));
+                configs.add(new Config(names[i] + ", DETECT", s -> {
+                    hint(s, moving, share);
+                    s.graph().settings().set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.DETECT)
+                        .set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.DETECT);
+                    setup.accept(s);
+                }, rocks[i], shares[i], pausing));
                 continue;
             }
             configs.add(new Config(names[i], setup, rocks[i], shares[i]));
@@ -181,6 +217,22 @@ class ShadowsBenchmark {
             }
         }
         return configs;
+    }
+
+    /**
+     * The scene's hints as an application marks them: the rocks that move (1 to {@code rocks}) and the lights of
+     * {@code share} dynamic, the terrain and every other rock and light static.
+     */
+    private static void hint(Setup s, int rocks, double share) {
+        GpuScene scene = s.geometry().renderer().scene();
+        for (int id = 0; id < scene.highWater(); id++) {
+            if (scene.contains(id)) {
+                scene.setMobility(id, id >= 1 && id <= rocks ? Mobility.DYNAMIC : Mobility.STATIC);
+            }
+        }
+        for (int i = 0; i < ManyLights.COUNT; i++) {
+            s.lights().mobility(i, ManyLights.moves(i, share) ? Mobility.DYNAMIC : Mobility.STATIC);
+        }
     }
 
     private static List<Config> sunConfigs(boolean rays) {
@@ -254,8 +306,8 @@ class ShadowsBenchmark {
         System.out.println("| Shadows | Frame (GPU) | Frame p99 | Shadow passes | Shadow p99 | Culling"
             + " | Tiles drawn a frame"
             + " | Of them forced | Tiles waiting | Lag drawn mean / changed mean / max (frames) | Atlas texels"
-            + " | Builds |");
-        System.out.println("|---|---|---|---|---|---|---|---|---|---|---|---|");
+            + " | Builds | Prepare (CPU) | Moving casters | Shadow mean |");
+        System.out.println("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
         for (int c = 0; c < configs.size(); c++) {
             Sample[] all = samples[c];
             long waited = 0;
@@ -267,8 +319,12 @@ class ShadowsBenchmark {
             double forced = 0;
             double waiting = 0;
             double culling = 0;
+            double prepare = 0;
+            double movers = 0;
             for (Sample sample : all) {
                 culling += sample.culling() / all.length;
+                prepare += sample.prepare() / all.length;
+                movers += sample.movingCasters() / all.length;
                 waited += sample.waited();
                 drawn += sample.drawnTotal();
                 maxWait = Math.max(maxWait, sample.maxWait());
@@ -279,9 +335,10 @@ class ShadowsBenchmark {
                 waiting += sample.waiting() / all.length;
             }
             System.out.printf(Locale.ROOT, "| %s | %s | %.2f ms | %s | %.2f ms | %.2f ms | %.1f | %.1f | %.1f"
-                    + " | %.2f / %.2f / %d | %,d | %d |%n", configs.get(c).name(), range(all, true), p99(all, true),
+                    + " | %.2f / %.2f / %d | %,d | %d | %.3f ms | %.0f | %.3f ms |%n", configs.get(c).name(), range(all, true),
+                p99(all, true),
                 range(all, false), p99(all, false), culling, drawnMean, forced, waiting, drawn == 0 ? 0 : waited / (double) drawn,
-                changed == 0 ? 0 : late / (double) changed, maxWait, all[0].texels(), all[0].builds());
+                changed == 0 ? 0 : late / (double) changed, maxWait, all[0].texels(), all[0].builds(), prepare, movers, mean(all));
         }
     }
 
@@ -326,6 +383,8 @@ class ShadowsBenchmark {
             int maxWait = 0;
             long late = 0;
             long changed = 0;
+            double[] prepare = new double[FRAMES];
+            double movers = 0;
             for (int i = -4; i < FRAMES; i++) {
                 frame = step(device, graph, camera, width, height, moving, lights, switching, specs, frame, config,
                     renderer.scene());
@@ -372,6 +431,8 @@ class ShadowsBenchmark {
                     maxWait = Math.max(maxWait, stats.maxWait());
                     late += stats.late();
                     changed += stats.drawn() + stats.waiting();
+                    prepare[i] = stats.prepareNanos() / 1.0e6;
+                    movers += stats.movingCasters() / (double) FRAMES;
                 }
             }
             graph.timings(false);
@@ -391,7 +452,7 @@ class ShadowsBenchmark {
                 MeshletBenchmark.rocksOnTerrain(renderer, rockMesh, groundMesh, 30_000, 600, -12); // where they were
             }
             return new Sample(median(frames), median(shadow), drawn, waiting, texels, built, frames, shadow, forced,
-                waited, drawnTotal, maxWait, late, changed, median(culling));
+                waited, drawnTotal, maxWait, late, changed, median(culling), median(prepare), movers);
         }
     }
 
@@ -402,7 +463,8 @@ class ShadowsBenchmark {
         if (moving) {
             place(camera, frame, width, height);
         }
-        if (config.rocks() > 0 || config.share() > 0) {
+        boolean standing = config.pausing() && frame / PAUSE % 2 == 1;
+        if ((config.rocks() > 0 || config.share() > 0) && !standing) {
             MOVING.move(scene, rockMesh, config.rocks(), lights, 0, config.share(), frame / 60.0);
         }
         if (switching) {
@@ -419,6 +481,19 @@ class ShadowsBenchmark {
         double a = 0.004 * frame;
         camera.position(0, 0, -0.5 * frame);
         camera.set(Math.sin(a), -0.35, -Math.cos(a), 0, 1, 0, Math.PI / 3, width, height, 0.1);
+    }
+
+    /** The mean of every round's shadow passes over their frames. */
+    private static double mean(Sample[] samples) {
+        double sum = 0;
+        int n = 0;
+        for (Sample s : samples) {
+            for (double v : s.shadowFrames()) {
+                sum += v;
+                n++;
+            }
+        }
+        return n == 0 ? 0 : sum / n;
     }
 
     private static double median(double[] values) {

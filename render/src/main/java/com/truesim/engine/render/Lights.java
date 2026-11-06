@@ -67,6 +67,8 @@ public final class Lights implements AutoCloseable {
     private boolean[] taken; // ids add() handed out and remove() did not take back
     private ShadowSpec[] specs; // how each casts shadows (for the Shadows owner); NONE until set
     private long shadowVersion; // changes with every spec set
+    private long[] versions; // per light: changes with every write of it (what it is, where, its spec)
+    private byte[] mobility; // per light: its mobility hint (GpuScene's numbers), CPU only
     // Lights the GPU writes each frame (particle lights, effects.md §2.5): a count, three words, then the lights; the
     // keys whose producers write them, built before the lights are binned
     private com.truesim.engine.vulkan.GpuBuffer written;
@@ -94,6 +96,8 @@ public final class Lights implements AutoCloseable {
         this.shadowCapacity = shadowCapacity;
         this.taken = new boolean[capacity];
         this.specs = new ShadowSpec[capacity];
+        this.versions = new long[capacity];
+        this.mobility = new byte[capacity];
         java.util.Arrays.fill(specs, ShadowSpec.NONE);
         int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         // Read by the graphics queue and by async compute (light clusters, ray-traced shadows): shared by both.
@@ -178,6 +182,7 @@ public final class Lights implements AutoCloseable {
     private Lights set(int index, int type, double x, double y, double z, float range, float r, float g, float b,
         float dx, float dy, float dz, float cosInner, float cosOuter) {
         long o = light(index);
+        versions[index]++;
         float length = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
         float scale = length > 0 ? 1 / length : 0;
         putPosition(lights, o, 64, x, y, z);
@@ -280,6 +285,7 @@ public final class Lights implements AutoCloseable {
             throw new IllegalArgumentException("No light " + id + " was added");
         }
         taken[id] = false;
+        mobility[id] = GpuScene.UNKNOWN;
         off(id);
         shadow(id, ShadowSpec.NONE);
         while (count > 0 && !taken[count - 1]) {
@@ -303,6 +309,8 @@ public final class Lights implements AutoCloseable {
         }
         taken = java.util.Arrays.copyOf(taken, more);
         specs = java.util.Arrays.copyOf(specs, more);
+        versions = java.util.Arrays.copyOf(versions, more);
+        mobility = java.util.Arrays.copyOf(mobility, more);
         java.util.Arrays.fill(specs, capacity, more, ShadowSpec.NONE);
         capacity = more;
     }
@@ -319,6 +327,7 @@ public final class Lights implements AutoCloseable {
         if (specs[index] != spec) {
             specs[index] = spec;
             shadowVersion++;
+            versions[index]++;
         }
         lights.putFloat(o + 60, (float) spec.softness());
         return this;
@@ -328,6 +337,35 @@ public final class Lights implements AutoCloseable {
     public ShadowSpec shadow(int index) {
         light(index);
         return specs[index];
+    }
+
+    /**
+     * A number that changes whenever light {@code index} is written ({@link #point}, {@link #spot},
+     * {@link #directional}, {@link #shadow} with another spec, {@link #remove}), whether or not its values changed:
+     * while it stands, nothing about the light changed. Allocates nothing.
+     */
+    public long version(int index) {
+        light(index);
+        return versions[index];
+    }
+
+    /**
+     * Says whether light {@code index} is expected to move ({@link com.truesim.scene.core.Mobility}, its scene node's;
+     * null: not known): a hint for what caches its shadows ({@link com.truesim.engine.render.shadows.Shadows} skips a
+     * static light's own change tests while its {@link #version} stands), never a promise: a static light written
+     * anew is followed all the same. Lasts until set again or the light is removed. Allocates nothing.
+     */
+    public Lights mobility(int index, com.truesim.scene.core.Mobility hint) {
+        light(index);
+        mobility[index] = hint == null ? GpuScene.UNKNOWN
+            : hint == com.truesim.scene.core.Mobility.STATIC ? GpuScene.STILL : GpuScene.MOVING;
+        return this;
+    }
+
+    /** Light {@code index}'s mobility hint, as {@link GpuScene#mobilityHint} numbers it. */
+    public byte mobilityHint(int index) {
+        light(index);
+        return mobility[index];
     }
 
     /** A number that changes whenever a light's {@link #shadow shadow spec} does. */
