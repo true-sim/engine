@@ -24,8 +24,8 @@ import java.util.Objects;
  * buffer IDs of the view's camera, and the same point of it is placed as the frame before drew it. The IDs are a
  * {@link SceneDraw} of a render view: the view's own where it is shaded through the visibility buffer (the same
  * request, so drawn once; the same {@link SceneGeometry} object), or, for forward shading (which culls its view
- * itself), a second render view set to the same camera, drawn for them alone (as {@link
- * com.truesim.engine.render.shadows.RayTracedShadows} draws depth for forward shading).
+ * itself), a second render view set to the same camera, drawn for them alone (as the
+ * {@link com.truesim.engine.render.shadows.Shadows} owner's traced masks draw depth for forward shading).
  *
  * <ul>
  *

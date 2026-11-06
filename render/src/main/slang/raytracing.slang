@@ -167,15 +167,6 @@ public bool occluded(RayScene* scene, float3 origin, float3 direction, float tMi
     return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
 }
 
-/** Shadow rays by ray queries into the frame's scenes: for lights.slang's inline ray shadows. */
-public struct QueryRays : IShadowRays
-{
-    public float clear(uint64_t scene, float3 origin, float3 direction, float tMax)
-    {
-        return occluded((RayScene*)scene, origin, direction, 0, tMax) ? 0 : 1;
-    }
-}
-
 /** The nearest triangle a ray meets: which, where along it, and where on it. */
 public struct RayHit
 {

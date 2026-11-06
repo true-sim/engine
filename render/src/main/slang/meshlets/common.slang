@@ -88,17 +88,21 @@ public static const uint INSTANCE_MESH = 0xffffffu;
 /** View flags. */
 public static const uint VIEW_CASTERS_ONLY = 1;             // shadow views: instances casting shadows only
 public static const uint VIEW_HIGHLIGHTED_ONLY = 2;         // instances with a highlight flag (View.highlights) only
+public static const uint VIEW_BOTH_SIDES = 4;                // shadow casters drawn two-sided: back faces kept
+public static const uint VIEW_UNHIGHLIGHTED_ONLY = 8;        // instances without a highlight flag only
 
 /**
  * Whether stored instance `instance` of id `id` (as stored, before relative()) is drawn in `view`: live, on its layers,
- * casting shadows in a shadow view, highlighted in a highlight view (two bits per id, sixteen ids a word).
+ * casting shadows in a shadow view, highlighted in a highlight view (two bits per id, sixteen ids a word), not
+ * highlighted in an unhighlighted one (a shadow tile's static casters).
  */
 public bool drawnIn(Instance instance, uint id, View view)
 {
     return (instance.mesh & INSTANCE_LIVE) != 0 && (instance.layers & view.layers) != 0
         && ((view.flags & VIEW_CASTERS_ONLY) == 0 || (instance.mesh & INSTANCE_CASTS_SHADOWS) != 0)
-        && ((view.flags & VIEW_HIGHLIGHTED_ONLY) == 0
-            || id < view.highlightCount && ((view.highlights[id >> 4] >> ((id & 15) * 2)) & 3) != 0);
+        && ((view.flags & (VIEW_HIGHLIGHTED_ONLY | VIEW_UNHIGHLIGHTED_ONLY)) == 0
+            || (id < view.highlightCount && ((view.highlights[id >> 4] >> ((id & 15) * 2)) & 3) != 0)
+                == ((view.flags & VIEW_HIGHLIGHTED_ONLY) != 0));
 }
 
 /**
@@ -129,13 +133,15 @@ public struct View
     public ViewLists lists;        // where culling lists what the view draws
     public uint* visibility;       // per instance: 1 if the view saw it the last time its late phase looked; or null
     public uint binIndices;        // the indexed path's room in each raster bin but the first, after maxIndices
-    public uint highlightCount;    // VIEW_HIGHLIGHTED_ONLY: how many instance ids the flags hold
+    public uint highlightCount;    // VIEW_(UN)HIGHLIGHTED_ONLY: how many instance ids the flags hold
     public float4x4 previousViewProjection; // the frame before's, from positions relative to this frame's camera
     public float2 jitter;          // the projection's subpixel offset, in pixels (temporal antialiasing)
     public float2 previousJitter;  // the frame before's
     public uint2 outputSize;       // the pixels it renders to
-    public uint* highlights;       // VIEW_HIGHLIGHTED_ONLY: the highlight flags (2 bits per instance id); 448 bytes
-                                   // in all: views lie in one array, one after another
+    public uint* highlights;       // VIEW_(UN)HIGHLIGHTED_ONLY: the highlight flags (2 bits per instance id)
+    public uint* ids;              // or null: the instances it culls, by id, instead of every one (a shadow tile's movers)
+    public uint idCount;           // how many ids there are
+    public uint pad2;              // 464 bytes in all: views lie in one array, one after another
 };
 
 /**
@@ -507,9 +513,9 @@ public bool meshletVisible(View view, Instance instance, uint m, uint* meshlets,
         return false;
     }
     float4 cone = decodeSnorm8(meshlets[w + 7]);
-    // Back faces as seen from the eye; orthographic views (shadow maps) keep them.
+    // Back faces as seen from the eye; orthographic views and views of casters drawn two-sided keep them.
     float3 fromEye = center - view.eye;
-    return doubleSided || view.orthographic != 0 || cone.w >= 1
+    return doubleSided || view.orthographic != 0 || (view.flags & VIEW_BOTH_SIDES) != 0 || cone.w >= 1
         || dot(fromEye, normalToWorld(instance, cone.xyz)) < cone.w * length(fromEye) + radius;
 }
 
@@ -797,12 +803,12 @@ public Surface typedSurface<M : IMaterial>(MaterialRef ref, SurfaceInput input, 
  * type: by the lights `lights` gives it (the frame's light list) and the sky or, without a light list (null), by the
  * sun and the sky. Shadow rays are traced by `rays` (NoRays: none).
  */
-public float4 shadeMaterial<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in, Material* materials,
+public float4 shadeMaterial<M : IMaterial>(View view, VertexOut in, Material* materials,
     float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features, Background behind,
     IndirectLight* indirect)
 {
     SurfaceOut surface;
-    return shadeMaterialSurface<M, R>(rays, view, in, materials, dx, dy, lights, pixel, features, behind, indirect,
+    return shadeMaterialSurface<M>(view, in, materials, dx, dy, lights, pixel, features, behind, indirect,
         surface);
 }
 
@@ -814,7 +820,7 @@ public static const float3 SKY_REFLECTED = SKY_IRRADIANCE * 0.5 / 3.14159265;
  * the weight of the environment's reflection (the view's indirect-light table's specularLight, or SKY_REFLECTED
  * without a table) in the color returned.
  */
-public float4 shadeMaterialSurface<M : IMaterial, R : IShadowRays>(R rays, View view, VertexOut in,
+public float4 shadeMaterialSurface<M : IMaterial>(View view, VertexOut in,
     Material* materials, float4 dx, float4 dy, LightListHeader* lights, uint2 pixel, uint features,
     Background behind, IndirectLight* indirect, out SurfaceOut surface)
 {
@@ -845,7 +851,7 @@ public float4 shadeMaterialSurface<M : IMaterial, R : IShadowRays>(R rays, View 
     else
     {
         float depth = mul(view.viewProjection, float4(in.world, 1)).w; // along the view direction
-        color += lightList(rays, lights, s, in.world, toViewer, pixel, depth);
+        color += lightList(lights, s, in.world, toViewer, pixel, depth);
     }
     if ((features & FEATURE_TRANSMISSION) != 0 && s.transmission > 0)
     {

@@ -6,9 +6,8 @@
 // By material type and features: classify.slang sorts the screen's 8x8 tiles into a list per bin (type and feature
 // combination) present in them (a tile of several goes into each), and each bin's pass shades its tiles' pixels of
 // its bin, with its type's IMaterial and only its features' code (FEATURES, a specialization constant). Pixels
-// showing nothing count as type 0, metallic-roughness, which writes the clear color there. Each type's entry points,
-// calling shadeTiles with NoRays() or (with inline ray shadows) QueryRays(), are generated from its
-// [MaterialType] struct by the build (materials.slang).
+// showing nothing count as type 0, metallic-roughness, which writes the clear color there. Each type's entry point,
+// calling shadeTiles, is generated from its [MaterialType] struct by the build (materials.slang).
 module resolve;
 
 __exported import bindless;
@@ -158,7 +157,7 @@ public void classifyTile(uint3 group, uint3 thread)
  * Shades the pixels of material type M with features FEATURES (bin push.bin) in this pass's tiles: one group of 8x8
  * threads per tile, the groups as the tile list's indirect dispatch has them. Shadow rays are traced by `rays`.
  */
-public void shadeTiles<M : IMaterial, R : IShadowRays>(R rays, uint3 group, uint3 thread)
+public void shadeTiles<M : IMaterial>(uint3 group, uint3 thread)
 {
     uint index = group.y * TILE_ROW + group.x;
     if (index >= push.tiles[3])
@@ -169,12 +168,12 @@ public void shadeTiles<M : IMaterial, R : IShadowRays>(R rays, uint3 group, uint
     uint3 id = uint3((tile & 0xffff) * 8 + thread.x, (tile >> 16) * 8 + thread.y, 0);
     if (id.x < width() && id.y < height() && pixelBin(uintImages[push.ids][id.xy]) == push.bin)
     {
-        shadePixel<M, R>(rays, id);
+        shadePixel<M>(id);
     }
 }
 
 /** Shades pixel `id` with material type M, shadow rays traced by `rays`. */
-public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
+public void shadePixel<M : IMaterial>(uint3 id)
 {
     uint2 ids = uintImages[push.ids][id.xy];
     if (ids.x == 0)
@@ -245,7 +244,7 @@ public void shadePixel<M : IMaterial, R : IShadowRays>(R rays, uint3 id)
     float4 uvY = baryY.x * float4(v[0].uv, v[0].uv1) + baryY.y * float4(v[1].uv, v[1].uv1)
         + baryY.z * float4(v[2].uv, v[2].uv1);
     SurfaceOut surface;
-    images[push.color][id.xy] = shadeMaterialSurface<M, R>(rays, view, s, push.scene[0].materials, uvX - uvs,
+    images[push.color][id.xy] = shadeMaterialSurface<M>(view, s, push.scene[0].materials, uvX - uvs,
         uvY - uvs, push.lights, id.xy, FEATURES, Background.none(), push.indirect, surface); // transmissive: blended
     if (SURFACES != 0)
     {

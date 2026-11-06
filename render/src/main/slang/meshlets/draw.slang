@@ -27,3 +27,13 @@ void maskedDepthMain(VertexOut in, bool front : SV_IsFrontFace)
 {
     discardMasked(push.scene[0].materials, in, front);
 }
+
+/**
+ * The masked bin's shadow casters (shadow atlas tiles): the masked texels discarded, back faces kept whatever the
+ * material, as shadow rays meet every face.
+ */
+[shader("fragment")]
+void maskedShadowMain(VertexOut in)
+{
+    discardMasked(push.scene[0].materials, in, true);
+}

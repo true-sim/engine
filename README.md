@@ -767,7 +767,7 @@ try (GeometryPool pool = new GeometryPool(device, slots);              // starts
   ones freed once their frames are done; `bytes()` and `MeshletRenderer.viewBytes()` say what views cost. `cullViews` culls any number at once: one instance pass
   with a row per view (in dispatches of up to 65,535 rows), and one cull pass over all their chunks, each meshlet into
   its view's list; `drawView` then draws each. Through the frame graph, the `MeshletCulling` request gathers every
-  view the techniques draw (the scene's camera, `ShadowMapShadows`' sun, the cascades) into one culling pass.
+  view the techniques draw (the scene's camera, the shadow atlas's tile views) into one culling pass.
 
 Measured with `MeshletBenchmark` (`TRUESIM_BENCHMARK=true`) on an AMD Radeon RX 9070 XT at 1920 x 1080 with 1 pixel
 of error allowed, GPU time of the whole frame (instance pass, culling, drawing), median per frame of batches of 32
@@ -926,8 +926,9 @@ port.add(new ClusteredLights(lights, main));                         // provides
   `ClusterLightList` implements it; a new layout (tiles, depth bins) is a struct implementing it and a case in
   `lightList()`'s dispatch on the header's layout.
 - **Shadows, single or many per light:** a light names consecutive shadow table entries, each of a kind (a shadow
-  map with its filter, a mask, an inline ray). A spot light uses one; a directional light one per cascade, chosen by
-  view depth; a point light six cube faces, chosen by direction. See "Shadows per light" below.
+  map with its filter, a mask). A spot light uses one; a directional light one per cascade, chosen by
+  view depth; a point light six cube faces, chosen by direction. See "Shadows as data" below: one owner draws every
+  light by its `ShadowSpec`.
 - **Fixed slots per cluster** (128 by default): no atomics, a deterministic order, and overflow reported (the most
   lights any cluster wanted is in the header).
 - Tested against the same cluster boxes computed on the CPU.
@@ -989,8 +990,7 @@ SceneView main = geometry.createView(port, camera, ViewOptions.of(1 << 20, 1 << 
     .set(1, MeshletRenderer.MODE_LIT);
 port.add(new ClusteredForwardShading(geometry, main, colorFormat, depthFormat))
     .add(new ClusteredLights(lights, main))
-    .add(new ShadowMapShadows(geometry, lights, 0, 0, sunCamera, 2048,
-        geometry.createView(ViewOptions.shadow(1 << 18, 1 << 22)), bias))
+    .add(shadows.view(main))                          // every light's shadows (Shadows, below)
     .output(Keys.SCENE_COLOR, target);
 port.replace(new VisibilityBufferShading(geometry, main, colorFormat, depthFormat));
 port.size(newWidth, newHeight);                       // a resized window: the graph rebuilds at the new size
@@ -1399,71 +1399,222 @@ try (RayTracing rayTracing = new RayTracing(device, pool, 100_000)) { // at most
   per segment visiting every triangle on it, and reads back the nearest 8 crossings of each (instance, facing,
   material id) a frame or more later; `collect(ticket, words)` hands them over. Allocation-free per batch.
 
-### Shadows per light
+### Shadows as data: the `Shadows` owner
 
-Every light chooses its own shadow technique, and lights of one frame may mix them. A light names consecutive entries
-of the shadow table; each entry has a **kind**, evaluated in shading by an implementation of `lights.slang`'s `IShadow`
-interface:
+Which lights cast shadows, and how, is per-light data (engine#120, frame graph v2 §4.15): each light carries a
+`ShadowSpec` (scene-core; on a `LightSource` component, which `LightSync` hands to `Lights.shadow(id, spec)`), and one
+owner draws every light's shadows by it. Giving a light shadows, switching its method, size or softness, or turning
+them off takes effect from the next frame without a graph build.
 
-| Kind | Technique | Evaluated by |
+```java
+Shadows shadows = new Shadows(geometry, lights).rayTracing(rayTracing); // rayTracing: optional
+views.addPerView(shadows::view);                                         // or port.add(shadows.view(main))
+sun.shadow(ShadowSpec.cascades(ShadowSpec.AUTO, ShadowSpec.AUTO, 300)); // on the LightSource component
+lamp.shadow(ShadowSpec.maps(ShadowSpec.AUTO).auto(128, 1024));
+torch.shadow(ShadowSpec.softRayTraced(0.05));                            // a 5 cm sphere: soft, denoised
+lights.shadow(id, ShadowSpec.rayTraced());                               // or straight on the engine's lights
+```
+
+| Method | Spot, point lights | Directional lights | Evaluated by |
+|---|---|---|---|
+| `NONE` | - | - | - |
+| `MAPS` | a tile of the shadow atlas; six (cube faces) for a point light; perspective, depth compared at view depth less a bias that grows with distance | one map fitted around each view's camera to `distance` | `PcfShadow` in the tile |
+| `CASCADES` | as `MAPS` | `cascades` per view (practical splits, snapped to world texels), tiles of the atlas | `PcfShadow`, the cascade by view depth |
+| `RAY_TRACED` | a mask per view: one ray per pixel to the light | one ray per pixel along the light | `MaskShadow` |
+| `SOFT_RAY_TRACED` | rays to points of a sphere of radius `softness`, denoised | rays in a cone of angular radius `softness` (the sun: 0.0047), denoised | `MaskShadow` (the denoised value) |
+
+- **One atlas for every map** (`shadows.atlas.size`, 8192 by default: 256 MiB of 32-bit depth, made the first time a
+  light uses maps). Tiles are powers of two allocated in a quadtree; a light keeps its tile while its size stays.
+  Tiles are drawn in one pass, each through a view of its own culled with the frame's other views (`DepthDraws`:
+  geometry hooks too), into its rectangle (cleared, then viewport and scissor).
+- **Drawn only when something changed.** A tile is drawn again when its light moved or its spec changed, a caster
+  within its frustum moved, was added or removed (the scene's changes before they upload: `GpuScene.changedId`, against
+  the instance's bounding sphere before and after), the materials' shapes changed (`Materials.shapesVersion`: masks and
+  geometry hooks' fields updated in place), or the caster detail setting changed. A still light over a still scene
+  keeps its tile, drawn once; a still camera keeps its cascades. Deformed copies dirty the tiles around them every
+  frame; instances moved on the GPU (interpolated motion, mesh particles) dirty every tile while there are any.
+  Which changed tiles a frame draws is `shadows.atlas.updates` (their light keeps its last map, or casts none, until
+  drawn): `IMPORTANCE` (the default) draws a tile the frame it changes where its light shows at least
+  `shadows.atlas.urgent` pixels (256: its reach's radius in the view showing it largest, times the spec's importance
+  and its brightness against the brightest mapped light's; a light whose reach holds a view and every cascade always),
+  and any tile that waited `shadows.atlas.lag` frames (2); the rest, most important and longest waiting first, take
+  `shadows.atlas.draws` (64) a frame, or an even share of the waiting over the lag's frames where that is more (no
+  burst of late tiles every few frames). `ALL` draws every changed tile; `CAPPED` at most `shadows.atlas.draws`, the
+  rest waiting however long. `Shadows.stats()` and the profiler's counters (`Shadows.counters()`:
+  `shadows.atlas.drawn`, `waiting`, `forced`, `maxWait`, `meanLag`) say what was drawn and how late.
+- **AUTO sizes** (`ShadowSpec.AUTO`, within the spec's `minSize` and `maxSize`): a spot or point light's maps from how
+  many pixels its reach covers in the views (`shadows.auto.scale` texels per pixel, times the spec's `importance`), a
+  cascade's from the screen's pixel size at its start; rounded to powers of two, changed only past
+  `shadows.auto.hysteresis` octaves from the halfway point, so tiles stay as the camera moves. Beyond
+  `shadows.auto.cutoff` units from every view (0: no cutoff) an AUTO light casts none.
+- **Budget:** over the atlas, the least important light's tiles halve first (not below its `minSize`), then the least
+  important lights cast none (`Shadows.stats()`: shrunk, dropped).
+- **Rays** (where a `RayTracing` is given; else those lights take maps): every traced light of a view is traced in one
+  dispatch from the view's depth (the visibility buffer's own IDs draw; for forward shading a depth draw of its own),
+  on the async queue. Soft lights take `shadows.soft.rays` rays a pixel (1) and the engine's denoiser
+  (`shadows.soft.denoiser`: SVGF or REBLUR, both kept), its history restarting when a slot changes light. A light
+  keeps its mask while traced; more traced lights than ever before in a view build the graph once more.
+- **Shadow rays respect materials' shapes:** alpha masks as before, and **geometry hooks' holes** (`keep()`): instances
+  of such types enter the top level non-opaque; a ray whose nearest candidate is of a hooked type waits in a queue
+  (`shadows.rays.queue`), that type's generated keep entry point (`material-types/entryShadowKeep`) tests the point,
+  and the ray goes on beyond a hole, up to `shadows.rays.keepRounds` holes (3); then it counts as blocked.
+- **The graph's part:** `PassBuilder.when(supplier)` and `GraphBuilder.masked(supplier, build)` skip passes from data
+  each frame (barriers kept, no build): the atlas pass while no tile is drawn, a soft slot's denoiser while unused,
+  the traced passes while no light is traced. The atlas, more draw views and more traced slots are structure: they
+  only ever grow, each growth one build.
+- **The reference** (`ReferencePathTracer`) samples a light's size too: a light's `radius` (its spec's softness) turns
+  its shadow rays to points of its disc or sphere, so soft shadows are checked against path-traced penumbras
+  (`ShadowOwnerTest.softShadowsMatchThePathTracedReference`).
+- **What it costs** (`ShadowsBenchmark`, RX 9070 XT, 2026-11-05, JaCoCo off; 30,000 rocks on the terrain, the
+  visibility buffer; GPU time of the whole frame, and of the shadows' passes alone, medians of 60 frames, ranges of 3
+  rounds; "before": the single techniques, in the same run):
+
+  | Sun's shadows | 1920 x 1080 still | 1920 x 1080 turning | 3840 x 2160 still | 3840 x 2160 turning |
+  |---|---|---|---|---|
+  | unshadowed | 0.88 ms | 0.87 ms | 2.00 ms | 1.99 ms |
+  | maps: one 4096 to 300 | 0.90 (0.00) | 2.33 (1.37) | 2.08 (0.00) | 3.56 (1.44) |
+  | maps: one 4096 to 300, front faces | 0.90 (0.00) | 1.69 (0.72) | 2.08 (0.00) | 2.87 (0.75) |
+  | cascades: 3 of 2048 to 300 | 0.90 (0.00) | 2.22 (1.28) | 2.06 (0.00) | 3.40 (1.29) |
+  | cascades: 3 of 2048 to 300, front faces | 0.89 (0.00) | 1.65 (0.69) | 2.06 (0.00) | 2.81 (0.69) |
+  | cascades: AUTO to 300 (4 cascades, 2048 at 1080p, 4096 at 2160p) | 0.89 (0.00) | 2.55 (1.60) | 2.09 (0.00) | 5.88 (3.72) |
+  | before (removed since): `CascadedShadowMaps` 3 of 2048 | 1.58 (0.61) | 1.64 (0.68) | 2.76 (0.63) | 2.81 (0.69) |
+  | ray traced | 1.15 (0.27) | 1.16 (0.28) | 3.10 (1.00) | 3.12 (1.02) |
+  | before (removed since): `RayTracedShadows` | 1.13 (0.23) | 1.12 (0.24) | 2.96 (0.85) | 2.98 (0.88) |
+  | soft ray traced, sun 0.0047, SVGF (2 steps) | 2.06 (1.16) | 2.08 (1.18) | 7.15 (4.82) | 7.26 (4.95) |
+  | soft ray traced, REBLUR | 2.04 (1.14) | 2.05 (1.15) | 7.91 (5.71) | 8.04 (5.85) |
+  | soft ray traced, 4 rays, SVGF | 2.85 (1.90) | 2.91 (1.97) | 9.95 (7.61) | 10.25 (7.89) |
+
+  A still camera keeps its cascades (no draw at all). Casters drawn two-sided (`shadows.casters.faces` `BOTH`, the
+  default: as rays meet them) take about twice the tiles' drawing of front faces alone (`FRONT`, as the technique
+  before drew them, which cost the same: 0.68 against 0.69 ms); `FRONT` stays a choice: exact for closed meshes lit from
+  outside (every sun), but a light inside a mesh leaks and one-sided surfaces seen from behind cast nothing.
+  The owner's traced mask was 0.04 ms (1080p) to 0.15 ms (2160p) slower than `RayTracedShadows`' (its pass 0.27
+  against 0.23 ms, in the same runs); the cause was not found (pitfalls.md: what was ruled out). Soft shadows cost the
+  denoiser above all (1 ray: trace 0.29 ms, SVGF's temporal pass 0.18 ms and 0.33 ms per a-trous step at 1080p); 2
+  steps are also closer to the reference than 4 (`softShadowsMatchThePathTracedReference`: mean penumbra error 0.018
+  against 0.024; REBLUR 0.035; hard rays 0.141). AUTO cascades take a texel per pixel at each cascade's end: at 2160p
+  four 4096 maps; `shadows.auto.scale` trades that for less.
+
+  200 point lights (ranges 6 to 15) over the rocks, the camera flying over them at 1920 x 1080: unshadowed 0.93 ms;
+  AUTO maps 0.97 to 0.98 ms (61 M atlas texels, the shadow atlas pass 0.002 ms in the median frame: tiles stay; at
+  most 12 drawn in a frame as sizes change); fixed 256 maps 0.96 to 0.98 ms; with 29 lights' specs switched every
+  frame 1.7 to 2.2 ms (64 tiles drawn a frame). No graph build in any of them after the first frames.
+
+  **Moving** (`ShadowsBenchmark`, 2026-11-06, the same 200 lights and flight; rocks circling through the lights'
+  ranges, lights circling 4 units wide; GPU time of the frame (shadow passes), tiles drawn a frame, no graph build):
+
+  | AUTO maps | `CAPPED`, 64 draws (before the modes) | tiles waiting | draws 1,200 (none waits) | tiles drawn |
+  |---|---|---|---|---|
+  | all still | 0.97 ms (0.00) | 0 | 1.29 ms (0.01) | 1.7 |
+  | 100 rocks moving | 2.13-2.62 (0.68-0.80) | 1,012 | 4.17-4.20 (1.53) | 437 |
+  | 500 rocks moving | 3.13 (1.33) | 1,114 | 4.62 (2.28) | 926 |
+  | 2,000 rocks moving | 3.29-3.32 (1.49) | 1,120 | 7.05-7.22 (3.40) | 1,001 |
+  | 10% of the lights moving | 1.47 (0.38) | 550 | 2.06-2.13 (0.58-0.61) | 121 |
+  | 50% of the lights moving | 1.85-1.92 (0.74-0.77) | 1,080 | 5.05-5.12 (2.36) | 601 |
+  | 500 rocks, 10% of the lights | 3.15 (1.35) | 1,117 | 4.63-4.68 (2.30) | 953 |
+  | 2,000 rocks, 50% of the lights | 3.31-3.35 (1.52) | 1,131 | 5.60-5.64 (2.83) | 1,101 |
+
+  **Update modes** (2026-11-06, the same flight, one queue; shadow GPU: the shadow passes and the tiles' culling;
+  lag: frames the changed tiles' shadows are late, mean over every changed tile / most):
+
+  | Scene | `CAPPED` (64) | `ALL` | `IMPORTANCE` 256 / lag 2 (default) | `IMPORTANCE` 1024 / lag 4 |
+  |---|---|---|---|---|
+  | 100 rocks moving | 0.78 ms, 64 drawn, lag 60 / 94 | 2.38 ms, 437, lag 0 | 1.33 ms, 212, lag 0.71 / 2 | 1.12 ms, 132, lag 1.60 / 4 |
+  | 500 rocks moving | 1.47 ms, 64, lag 60 / 94 | 4.08 ms, 926, lag 0 | 2.25 ms, 429, lag 0.77 / 2 | 1.65 ms, 242, lag 1.75 / 4 |
+  | 2,000 rocks moving | 1.64 ms, 64, lag 60 / 94 | 5.42 ms, 1,001, lag 0 | 2.46 ms, 464, lag 0.77 / 2 | 1.62 ms, 264, lag 1.74 / 4 |
+  | 300 rocks, 10% of the lights (the video's) | 1.31 ms, 64, lag 60 / 94 | 4.21 ms, 839, lag 0 | 2.29 ms, 390, lag 0.76 / 2 | 1.54 ms, 221, lag 1.74 / 4 |
+
+  `CAPPED` starves tiles: the least important are never drawn (late since the first frame: 94 frames, the whole run),
+  not "waiting / 64" frames as assumed before. More slots grown once (`IMPORTANCE` and `ALL` draw every tile at the
+  start) cost about 0.1 ms a frame with nothing drawn.
+
+  A tile costs about 2.5 µs to draw and 2 µs to cull (1,200 tiles: the atlas pass 2.6 ms, culling 2.1 ms), whatever
+  moved: so a few hundred moving rocks redraw nearly every tile (each reaches 4 or so of the 1,136). With the default
+  64 draws a frame (`CAPPED`) the rest wait; more draws keep them in step at that cost (more draw views also cost
+  0.3 ms with nothing drawn). **Caster layers** (`shadows.casters.layers`, on by default): still casters kept in a layer of their
+  own (a second atlas), a tile that only moving casters changed drawn as its layer's depth (a triangle over the tile,
+  written untested: no clear first) and the moving casters on top, culled from a list of the moving ids instead of every
+  instance. Where a tile's cost goes (`ALL`, one queue, 500 rocks moving, 926 tiles): culling 1.9 ms (2 µs a view, a
+  third of it the instance pass over all 30,000 instances), the atlas pass 2.6 ms, of which the casters themselves
+  about 0.25 ms; a tile's clear and the layer's depth write about 1 ms each. Before the clear went and the movers were
+  culled alone, layers were slower (500 rocks 5.4 against 4.5 ms of culling and atlas); now (culling + layers + atlas):
+
+  | Scene (`ALL`) | every caster | caster layers | finer casters (`casterDetail` 0.25): every caster | layers |
+  |---|---|---|---|---|
+  | 10 rocks moving (mostly still) | 0.79 ms | 0.54 ms | 0.88 ms | 0.56 ms |
+  | 100 rocks moving | 2.44 | 1.83 | 2.76 | 1.83 |
+  | 500 rocks moving | 4.87 | 3.60 | 4.68 | 3.90 |
+  | 2,000 rocks moving | 6.54 | 6.05 | 6.66 | 6.30 |
+  | 300 rocks, 10% of the lights | 4.48 | 3.93 | 4.36 | 3.45 |
+
+  Layers cost a second atlas (256 MiB at 8192), so they stay a choice; they pay most with few movers among many
+  still casters.
+
+  Ray-traced point lights: a mask per light over the view's pixels, so at most `shadows.rays.lights` (16) spot and
+  point lights are traced a frame, the most important (how big their reach shows, times their importance; those
+  traced last frame kept a little longer), the rest take AUTO maps; at most `shadows.soft.lights` (4) of them soft,
+  the rest traced hard; no ray beyond a light's range. All 200 traced took 220 to 236 ms a frame (hard) and 915 to
+  936 ms (soft). Now (`CAPPED`, 64 draws, before the update modes):
+
+  | 200 lights, rocks and lights moving | hard rays (16 traced) | soft rays (4 soft, 12 hard) |
+  |---|---|---|
+  | all still | 2.77-2.91 ms (1.82-1.92) | 6.88-7.08 ms (5.87-5.96) |
+  | 100 rocks moving | 1.92-2.01 (1.00-1.06) | 5.41-5.71 (4.43-4.70) |
+  | 500 rocks moving | 2.73-2.88 (1.47-1.67) | 5.50-5.62 (4.58-4.69) |
+  | 2,000 rocks moving | 3.76-3.77 (2.10-2.11) | 7.70-7.86 (6.54-6.69) |
+  | 10% of the lights moving | 2.89-3.20 (1.84-2.14) | 6.82-7.24 (5.69-6.04) |
+  | 50% of the lights moving | 2.99-3.21 (1.93-2.18) | 6.98-7.28 (5.83-6.17) |
+  | 500 rocks, 10% of the lights | 2.75-2.97 (1.51-1.62) | 5.55-5.82 (4.62-4.81) |
+  | 2,000 rocks, 50% of the lights | 3.75-3.77 (2.07-2.11) | 7.73-7.88 (6.59-6.70) |
+
+  `ShadowsVideo` renders the scene as PNG frames on a fixed 60 fps timeline, per method, with each frame's measures.
+- **Checked** (screenshots of every method, `Screenshots.renderShadowOwner`): with lights above the rocks, AUTO point
+  light maps and hard rays differ in 195 pixels darker and 165 brighter of 2 million.
+- **Casters drawn two-sided:** tiles draw every face of a caster, both sides (back faces kept by meshlet culling, the
+  rasterizer, masked bins and geometry hooks' own entry points), as rays meet every face: a light inside a closed mesh
+  is shut in by its maps as by rays (`aLightInsideAClosedMeshIsShutInByMapsAsByRays`: 149 lit before, dark after).
+  Classic LOD geometry casts into the atlas too, through its own selection per tile view.
+- **What moves on the GPU:** instances drawn between two steps' poses (`InstanceMotion`) redraw only the tiles around
+  their way (their poses are known on the CPU); mesh particles (instances the GPU writes) redraw every tile while
+  there are any, as where they are is not known here. A material's mask or hook fields updated, or a texture reaching a
+  material late (as loading sets the material), redraws the tiles (`Materials.shapesVersion`).
+- **Inline ray shadows are gone** (`InlineRayShadows`, the visibility buffer's traced variant, `SHADOW_RAY`): shading
+  one material type cannot run another type's `keep()`, so they let light stop at holes; the owner's traced masks cost
+  the same (1.15 against 1.17 ms in the table they were measured in) and respect them.
+- **Not yet:** variance or moments maps, virtual maps, far cascades shared between views at a distance (near eyes
+  share all of them: `shadows.view(right, leftPart, margin)`), AUTO rays (fewer, or hard for soft far away: no
+  correct rule per light without knowing where the blocker is).
+
+### The shadow table
+
+The owner writes each view's shadow table, which shading reads; plugins can write it too. A light names consecutive
+entries; each entry has a **kind**, evaluated in shading by an implementation of `lights.slang`'s `IShadow`:
+
+| Kind | Written by | Evaluated by |
 |---|---|---|
-| shadow map (filter: PCF; PCSS, VSM, ESM fit the same slot) | `ShadowMapShadows`: the scene's depth from the light's camera, a `SceneDraw` of its own view, culled with the camera | `PcfShadow`: 3 x 3 percentage-closer filtering |
-| shadow maps, cascaded (directional lights) | `CascadedShadowMaps`: practical splits, each cascade fitted to its slice's sphere and snapped to world texels (stable), a `SceneDraw` per cascade | `PcfShadow`, the cascade chosen by view depth, looked up from a normal offset of about a texel |
-| screen-space mask | `RayTracedShadows`: a ray query per pixel of the camera's depth, on the async queue | `MaskShadow`: the mask's texel |
-| inline ray | `InlineRayShadows`: nothing but the frame's top level | `RayShadow`: a ray query while shading |
+| shadow map (filter: PCF; PCSS, VSM, ESM fit the same slot) | the owner's atlas tiles (`ShadowTable.atlasMap`): orthographic (cascades) or perspective (spot, point faces: bias and normal offset growing with the distance from the light) | `PcfShadow`: 3 x 3 percentage-closer filtering within the tile |
+| screen-space mask | the owner's traced masks, or a plugin's own (`ShadowTable.shadowMask`) | `MaskShadow`: the mask's texel |
 
-- **Shadow techniques modify `Keys.LIGHT_LIST`**, so they go in the shading's view and run whenever shading requires
-  the light list. They put what shading must read into the view's shared `ShadowInputs` (images to sample, buffers to
-  wait for) with a setup that fills their lights' entries when the frame records. A new technique is one class; shading needs no change.
-- **Each view has a shadow table of its own** (`lights.shadowTable(view)`), with the same entry numbers: a light names
-  its entries once, and each view's techniques fill them in its table, which its light list points shading at. So each
-  view's cascades fit its own camera (`new CascadedShadowMaps(geometry, lights, light, entry, sceneView, ...)`, one per
-  view through `addPerView`, each `update()`d every frame), and a ray-traced mask is of its view's pixels. An entry no
-  technique of the view filled reads as lit. A view's table and its cascades' views go with the view, freed once no
-  frame in flight reads them. Views close together, such as a headset's eyes, share one set: cascades fitted to one
-  eye with a `margin(units)` covering the other, added to its view and `cascades.share()` to the other. Their maps draw
-  once a frame and both tables point at them: half the cascade work of a stereo frame (`StereoBench --args=shared`).
-  A technique instance belongs to one view (or the frame): adding it to a second is refused. Casters choose detail
-  for `shadows.casterDetail` pixels of error (1, as a camera): coarser casters draw far fewer triangles (20,000 rocks,
-  two eyes: cascades 0.92 ms at 1, 0.56 at 2, 0.41 at 4); they sit up to so many texels off the finer surfaces they
-  shadow, so cascades add that much depth bias and those surfaces do not shadow themselves in spots. At 2 a sparse
-  scene looks the same (0.004 % of pixels change) and a dense one changes which rocks shadow which here and there.
-- **Ray tracing is a generic parameter** (`IShadowRays`): shading pipelines that cannot trace use `NoRays`, so only the
-  visibility buffer's traced variant (`shadeTraced.slang`) needs ray queries. Forward shading counts inline ray
-  shadows as lit; a ray-traced mask works with any shading.
+- **Shadow parts modify `Keys.LIGHT_LIST`**, so they go in the shading's view and run whenever shading requires the
+  light list. They put what shading must read into the view's shared `ShadowInputs` (images to sample, buffers to wait
+  for) with a setup that fills their lights' entries when the frame records; a plugin's shadows (contact shadows, a
+  game's own trick) are a mask written the same way, with no shader change.
+- **Each view has a shadow table of its own** (`lights.shadowTable(view)`): each view's cascades fit its own camera and
+  a traced mask is of its view's pixels. An entry nothing of the view filled reads as lit. A view's table goes with
+  the view, freed once no frame in flight reads it. Casters choose detail for `shadows.casterDetail` pixels of error (1,
+  as a camera): coarser casters draw far fewer triangles; cascades add that much depth bias.
 - **One top level per frame** (`TopLevel`, a shared request) serves every ray-traced technique of every view: VR's two
   eyes, a mirror, a second player. It is built relative to a world position, `rayTracing.origin(x, y, z)` (0, 0, 0 at
   first), not to a camera: each view moves its rays by its camera less the origin. Its transforms are floats, so the
   app keeps the origin within a few kilometres of the cameras, moving it when they have gone far (at 7,000 km floats
-  are 0.5 m apart). Rendering stays relative to each camera; the top level's records are only for its build.
-  Its build is skipped while no instance changed (`GpuScene.version()`), no bottom level was added and the origin
-  stayed: a still scene builds it once.
+  are 0.5 m apart). Its build is skipped while no instance changed (`GpuScene.version()`), no bottom level was added
+  and the origin stayed: a still scene builds it once.
 - A mask needs the camera's depth before shading: for the visibility buffer that is its own IDs' draw (shared); for
-  forward shading, a depth-only draw of the camera as a view of its own, for now.
+  forward shading, a depth-only draw of the camera as a view of its own.
 
-30,000 rocks on the terrain, 1920 x 1080, the sun's shadows over a 600-unit square, GPU time of the whole frame:
-
-| | Forward | Visibility buffer |
-|---|---|---|
-| the sun, unshadowed | 1.32 ms | 0.89 ms |
-| shadow map 2048 x 2048 | 1.76 ms | 1.32 ms |
-| shadow map 4096 x 4096 | 2.23 ms | 1.81 ms |
-| 3 cascades of 2048 x 2048 to 300 units | 2.14 ms | 1.70 ms |
-| ray-traced mask | 1.97 ms (with its own depth draw) | 1.17 ms |
-| inline rays | (not traced) | 1.15 ms |
-
-The scene stands still, so the top level is built once and stands (it was 0.31 ms a frame rebuilt; the ray rows were
-1.34 and 1.31 ms then). With the visibility buffer, exact ray-traced shadows cost about 0.22 ms, half what a 2048 x 2048
-shadow map does. Ray
-tracing gives crisp contact shadows, thin details, and no acne or peter-panning at any distance. Even at 2048 x 2048
-over a 150-unit square, the shadow map shows texel steps along shadow edges and acne where the sun grazes. The shadow
-map needs no ray tracing and no memory beyond itself; ray tracing needs bottom levels (103 MiB here, mostly the
-terrain's 2.1 M triangles at full detail).
-
-`Screenshots.renderShadows` renders the sun's shadows through the visibility buffer by one map, by three cascades and
-by inline rays (`shadows-mapped.png`, `shadows-cascaded.png`, `shadows-traced.png`), a close-up of the nearest rocks
-side by side, and where rays and the single map differ. Cascades put the detail near the camera: there they come close
-to the traced shadows, where one map over the whole area shows texel steps.
+`Screenshots.renderShadowOwner` renders every method on 3,000 rocks (`owner-*.png`): the sun by one map, cascades,
+AUTO cascades, hard and soft rays and the soft sun path traced; 24 point lights at dusk by AUTO maps, hard and soft
+rays.
 
 ### Global illumination: foundations
 
@@ -1499,8 +1650,9 @@ view.port().add(new ReferencePathTracer(geometry, rayTracing, view, Format.R32G3
   | 1920 x 1080 | one shader switching | - | 2.75-3.34 ms | 2.75-3.34 ms |
 
   Binning costs its passes and still wins at both sizes: the switch's shading alone takes longer than binning and
-  shading by type. It is not offered. A type's geometry hook (`keep()`) makes holes at hits as in every pass (shadow
-  rays still stop at them: occlusion tests only alpha masks).
+  shading by type. It is not offered. A type's geometry hook (`keep()`) makes holes at hits as in every pass, and
+  shadow rays go through them: a next-event shadow ray meeting such a type waits with the light it brings for the
+  type's keep test, then goes on (`LightRays`; the probe volume and radiance cascades too).
 - **Light transport:** the BRDF shading uses (`reflected()`), sampled by its lobes (Lambert by the cosine, GGX and the
   clear coat by their visible normals, diffuse transmission behind), every light of the list by a shadow ray
   (next-event estimation), emission and the environment where paths meet them, transmission refracted through thin

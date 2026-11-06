@@ -72,6 +72,20 @@ in `submit` the bytes come from was not found.
 
 ## Frame graph
 
+**Thousands of barriers overflowed the memory stack.** A pass's barriers were laid out on LWJGL's thread stack (64 KiB)
+in one array: a shadow atlas drawing 1,200 tiles (a view each, its lists' buffers barriered) had about 9,700 barriers,
+and the Gradle test executor died with "Out of stack space" (the error escaped the test).
+- Proof: `ShadowsBenchmark` with `shadows.atlas.draws` 1,200 failed so; with `-Dorg.lwjgl.system.stackSize=8192` it
+  ran; with barriers recorded in batches of 256 (`PassCommands.barriers`) it runs at the default stack.
+- Rule: native arrays sized by the scene (views, tiles, barriers) go in fixed-size batches, or off the stack.
+
+**A single frame slot counts no frames.** `FrameSlots.frames()` stays put when the graph records with one slot
+(`submitAndWait(graph::record)`, as tests do), so a "frames since" measure based on it never advanced: moving casters
+never settled into the still layers.
+- Proof: `ShadowOwnerTest.movingCastersDrawnOverTheStillLayerMatchEveryCasterDrawn` printed every caster still flagged
+  moving 12 frames after its last move; counting frames prepared (`Shadows.prepare`) fixed it.
+- Rule: count your own frames for anything timed in frames.
+
 **A write is visible to nothing until a barrier.** The compiler once marked a write's own stage and access visible, so
 a storage write followed by a read in the same stage got no barrier (the depth pyramid read zeros).
 - Proof: [#133](https://github.com/true-sim/engine/pull/133).
@@ -122,6 +136,15 @@ frame before and drew the newly visible twice.
   techniques). A first frame alone does not show it: with no history everything is late.
 - Rule: a bin drawn after the late phase accumulates both phases' lists; a test of anything culled in two phases runs
   three frames or more.
+
+**Shadow tiles with lists of a fixed size dropped casters without a word.** The `Shadows` owner's tile views were made
+with room for 16,384 meshlets; the sun's map and cascades over 3,000 detailed rocks wanted more, and what did not fit
+was not drawn: most rocks cast no shadow by maps while hard rays showed them, and every test (a quad over a floor)
+passed.
+- Proof: `Screenshots.renderShadowOwner`'s maps and cascades against its rays, before and after; the views now double
+  when `RenderView.overflowed()` says so, and every tile is drawn again (true-sim/engine, shadows as data).
+- Rule: views whose lists a technique sizes follow `overflowed()` and grow; a screenshot of a dense scene against a
+  method with no lists (rays) is part of checking a shadow technique.
 
 ## Shaders and the GPU
 
@@ -236,6 +259,17 @@ for concurrent sharing.
 - Proof: [#132](https://github.com/true-sim/engine/pull/132); the device enables `imageCubeArray` where present, and
   `GpuImage` lists each family once.
 - Rule: run the tests with validation (they fail on any validation error), on lavapipe too.
+
+**New host-visible memory is not zeroed.** A `RenderView`'s draw counts (host-visible, read back by `overflowed()`)
+were never cleared when made. The atlas's first use makes its tile views while the graph builds; with one frame slot
+`Shadows.prepare` runs again as the graph reads the owner's version after the build, and read the new views' counts
+before they had culled. On CI's lavapipe `ShadowOwnerTest.lightsCastByHardAndSoftRaysUnderBothShadings` got one build
+too many (4 against 3); on the RX 9070 XT, whose new memory read as zeros, it passed.
+- Proof: with the new views' counts filled with `0x7f` the RX 9070 XT failed the same way (4 against 3): the six tile
+  views "overflowed", grew, and their lists' new buffers rebuilt the graph a frame later.
+  `ShadowOwnerTest.firstMapsReadNoOverflowFromNewViewsMemory` frees host buffers full of large counts first: 6 views
+  grown without the fix, none with the counts zeroed as the view is made (true-sim/engine#434).
+- Rule: clear any host-visible buffer the CPU reads before the GPU first writes it; zeros on one driver prove nothing.
 
 **Waiting on a fence just made took 8 ms.** `VulkanDevice.submitAndWait` made a command pool and a fence per call.
 On an RX 9070 XT (Windows, AMD driver) the wait on the new fence took 8 to 11 ms for a 64 KiB fill, against 0.06 ms
@@ -392,6 +426,49 @@ each other did not help; the white furnace lost 4 to 7 % of its light to the sam
   of where the ray it continues ended.
 
 ## Tests and measurements
+
+**A still scene's benchmark hides what motion costs.** 200 shadowed point lights over the rocks cost 0.98 ms against
+0.93 unshadowed with the camera flying, as every tile stayed; with 100 rocks moving through the lights nearly every
+tile was dirty (each rock reaches 4 or so), and with the default 64 draws a frame 1,012 tiles waited: shadows up to 18
+frames late, while the frame time looked fine (2.1 ms).
+- Proof: `ShadowsBenchmark` dynamic tables (README, 2026-11-06): tiles waiting 1,012 to 1,131 at 64 draws; 437 to 1,101
+  drawn and 4.2 to 7.2 ms with 1,200.
+- Rule: benchmark caching with things moving, and report what waits (`Shadows.stats().waiting()`), not only time.
+
+**A strict cap starved tiles: "waiting / cap" was not the lag.** With `shadows.atlas.draws` 64 and about 1,100 tiles
+changing every frame, the README said shadows were "up to 18 frames late" (1,100 / 64). The cap always drew the most
+important first, so the least important tiles were never drawn: late by the whole run.
+- Proof: `ShadowsBenchmark` dynamic maps, `TRUESIM_SHADOWS_UPDATES=capped`, 2026-11-06: `Shadows.stats().maxWait()` 94
+  frames (every frame since the graph's first), the mean lateness of the changed tiles 60 frames.
+- Rule: measure lag as frames a change waited (`maxWait`, `late`), never derive it from counts; a budget needs ageing
+  (`shadows.atlas.updates` `IMPORTANCE`: a lag past which tiles are drawn).
+
+**Copying regions of a depth atlas cost the whole image.** Copying 1,000 tiles from the layer atlas into the shadow
+atlas (`vkCmdCopyImage2`, one command, 8192 x 8192 D32 each) took 5.6 ms: the copy needs both whole images in transfer
+layouts, from and back to depth attachment, every frame.
+- Proof: `ShadowsBenchmark` with `TRUESIM_SHADOWS_PASSES`, 2,000 rocks moving: "shadow layer copies" 5.595 ms; a
+  triangle per tile writing the layer's depth in the atlas pass instead: the copies gone, the atlas pass 4.8 ms.
+- Rule: move depth between atlases inside the rendering (a depth write), not by transfer.
+
+**Keeping still casters apart did not pay over cheap casters.** Drawing only moving casters over a tile's layer of
+still ones (a depth write per texel first) was slower than drawing every caster for rocks: 500 moving 7.03 against 4.62
+ms; per tile the cost is in culling and drawing at all, not in the casters drawn.
+- Proof: `ShadowsBenchmark`, `TRUESIM_SHADOWS_AB`, draws 1,200, both in turns in one run (README).
+- Rule: measure a cache against the redraw it saves on the scenes at hand; `shadows.casters.layers` stayed off until the fix below; it is now on by default.
+- Later (2026-11-06): the cause was per-view costs the split did not touch, not the casters. Per tile, culling every
+  one of the 30,000 instances (the instance pass, a third of 2 µs) and the tile's clear (about 1 µs) cost as much as
+  the layer's depth write (about 1 µs) and far more than the still casters saved (about 0.25 µs). Proof:
+  `ShadowsBenchmark`, `TRUESIM_SHADOWS_AB`, `TRUESIM_SHADOWS_PASSES`, `ALL` updates, 500 rocks: the atlas pass 3.45 ms
+  with layers, 2.36 without the clear, 2.43 without the depth write, 1.57 without both; the instance pass reduced to
+  a workgroup a view took culling from 1.91 to 1.29 ms. With the clear dropped (the depth written untested) and the
+  movers culled from their id list, layers took 3.60 against 4.87 ms (README).
+- Rule: before caching what a pass draws, measure what the pass costs with nothing drawn.
+
+**A mask per traced light does not scale to many lights.** 200 ray-traced point lights took 220 ms a frame (soft: 915
+ms) at 1920 x 1080: each light traced and (soft) denoised over every pixel of the view.
+- Proof: `ShadowsBenchmark` dynamic, ray traced, before `shadows.rays.lights`; 2.8 ms with 16 traced and the rest
+  mapped, 6.9 ms with 4 of them soft.
+- Rule: trace a budget of lights, most important first; every light past it takes maps.
 
 **A GPU time per frame that left out the frame start.** `GpuTimings` timed passes only; textures' copies and mip
 chains are recorded in the frame start (`FrameSlots.recordStart`), before every pass, so `StreamBench`'s "GPU per
@@ -620,6 +697,33 @@ Fresnel, of a band of Footprint Court of radiance about 10 behind the camera. Th
   the 2.0 quad and the 1.5 quad's top-right corner, where they are (`predict.py`, PBR fixes work).
 - Rule: before calling a difference from a reference a bug, check what the reference's camera and environment would
   show; reflections depend on both.
+
+**The owner's ray-traced mask is slower than the single technique's, and why was not found.** The `Shadows` owner's
+trace pass took 0.27 ms against `RayTracedShadows`' 0.23 at 1920 x 1080 (0.96-1.01 against 0.81-0.86 ms at 3840 x
+2160) on an RX 9070 XT, the same scene and frames, the two alternating in one run. Each of these was tried in turn and
+changed nothing: a variant without the keep() path (no hooked types: the queue code compiled out), the plain
+`occluded()` query in place of `traceShadow`, every pass on the graphics queue (no async overlap), the depth's matrix
+loaded once per thread instead of through the trace record's pointer; reading the slot through `WaveReadLaneFirst`
+made it slower (0.29 ms). Left untried: the slot's and light's records in push constants as the old pass had them.
+- Proof: `ShadowsBenchmark` with `TRUESIM_SHADOWS_ONLY=aced TRUESIM_SHADOWS_PASSES=1` (per-pass times), each variant
+  in its own run beside the old technique (true-sim/engine, shadows as data).
+- Rule: compare a merged pass with the one it replaces in one run, per pass; a gap whose cause is not found is
+  written down as measured, not explained.
+
+**Shadow maps and rays differed where lights sat inside rocks.** Comparing 24 point lights' AUTO maps with hard rays
+over the rocks, 52,000 pixels were brighter by maps and the maps showed blotches of acne; the lights stood 2 to 5 units
+over the terrain, among rocks up to 4 high, so many were inside one. A light inside a closed mesh sees its back faces,
+which depth draws cull: no caster, light leaks; rays meet every face. Raising the bias to 4 texels removed the blotches.
+With the lights 4.5 to 7 units up, maps and rays differ in 195 darker and 165 brighter pixels of 2 million, at the
+default bias (1.5 texels) as at 3.
+- Proof: the screenshots and counts of `Screenshots.renderShadowOwner` with the lights at both heights and both
+  biases (true-sim/engine, shadows as data).
+- Then: the owner's tiles draw casters two-sided (both faces, as rays meet them), and a light inside a closed rock is
+  shut in by its maps too (`ShadowOwnerTest.aLightInsideAClosedMeshIsShutInByMapsAsByRays`: 149 lit before, under 74
+  after); at about twice the tiles' drawing (`ShadowsBenchmark`: 3 cascades turning 1.28 against 0.69 ms), so
+  front faces alone stay a setting, `shadows.casters.faces`.
+- Rule: compare shadow maps with rays for lights outside geometry first; where they differ inside geometry, the maps
+  draw what rays meet (every face), rather than the bias being tuned.
 
 ## Audio
 

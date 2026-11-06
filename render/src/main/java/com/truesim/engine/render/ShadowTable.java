@@ -23,7 +23,6 @@ public final class ShadowTable implements AutoCloseable {
     static final int SHADOW_BYTES = 128;
     private static final int SHADOW_MAP = LightsConstants.SHADOW_MAP;
     private static final int SHADOW_MASK = LightsConstants.SHADOW_MASK;
-    private static final int SHADOW_RAY = LightsConstants.SHADOW_RAY;
     private static final int SHADOW_NONE = LightsConstants.SHADOW_NONE;
     private static final int PCF = LightsConstants.PCF;
 
@@ -136,27 +135,31 @@ public final class ShadowTable implements AutoCloseable {
     }
 
     /**
+     * Entry {@code entry}, a tile of a shadow atlas filtered by 3 x 3 PCF: {@code size} texels per side at
+     * ({@code x}, {@code y}) of the depth atlas in sampled slot {@code atlas}, {@code atlasSize} texels per side, drawn
+     * from {@code camera} (its view-projection and world position). An orthographic camera's tile is compared with
+     * {@code bias} in its depth units and looked up {@code normalOffset} units along the surface's normal, as
+     * {@link #shadowMap(int, Camera, int, int, float, float, float)}; a perspective one's (reverse depth from
+     * {@code near}) with {@code bias} and {@code normalOffset} per unit of distance from the camera, as its texels grow
+     * with it. A cascade covers view depths up to {@code split}. Allocates nothing.
+     */
+    public ShadowTable atlasMap(int entry, Camera camera, int atlas, int atlasSize, int x, int y, int size, float bias,
+        float split, float normalOffset, float near) {
+        shadowMap(entry, camera, atlas, size, bias, split, normalOffset);
+        long o = (long) SHADOW_BYTES * entry;
+        shadows.putFloat(o + 92, near);
+        shadows.putInt(o + 108, x | y << 16);
+        shadows.putInt(o + 124, atlasSize);
+        return this;
+    }
+
+    /**
      * Entry {@code entry}, a screen-space mask: channel {@code channel} of the image in sampled slot {@code mask}, the
      * size of the shaded image, 1 lit and 0 in shadow per pixel. Allocates nothing.
      */
     public ShadowTable shadowMask(int entry, int mask, int channel) {
         long o = shadow(entry, SHADOW_MASK, 0, mask);
         shadows.putFloat(o + 88, channel);
-        return this;
-    }
-
-    /**
-     * Entry {@code entry}, an inline ray query into the top level whose {@code RayScene} lies at address {@code scene}
-     * ({@link RayTracing#sceneAddress}: its slot, and what alpha-tests masked triangles), built
-     * relative to world position ({@code x}, {@code y}, {@code z}), from {@code offset} per unit of distance off the
-     * surface (the drawn surface may be a detail level within a pixel of the traced one). Shading that cannot trace
-     * counts it as lit. Allocates nothing.
-     */
-    public ShadowTable shadowRay(int entry, long scene, float offset, double x, double y, double z) {
-        long o = shadow(entry, SHADOW_RAY, 0, (int) scene);
-        shadows.putInt(o + 76, (int) (scene >>> 32)); // the address's high half, where maps keep their size
-        shadows.putFloat(o + 88, offset);
-        Lights.putPosition(shadows, o + 96, 16, x, y, z);
         return this;
     }
 
@@ -176,6 +179,8 @@ public final class ShadowTable implements AutoCloseable {
         shadows.putFloat(o + 84, Float.MAX_VALUE); // covers every depth, unless a cascade's split says otherwise
         shadows.putFloat(o + 88, 0);
         shadows.putFloat(o + 92, 0);
+        shadows.putInt(o + 108, 0); // not in an atlas
+        shadows.putInt(o + 124, 0);
         return o;
     }
 

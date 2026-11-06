@@ -388,6 +388,20 @@ public final class RecordBuffer implements AutoCloseable, DeviceBuffer {
         }
     }
 
+    /**
+     * The record index of pending entry {@code entry} (below {@link #pendingCount}): which record it changes, for readers
+     * following the changes before the upload (its new contents at {@link #offset} of {@link #changes(int)}). Allocates
+     * nothing.
+     */
+    public int pendingIndex(int entry) {
+        Objects.checkIndex(entry, pending);
+        if (list == ChangeList.DIRECT) {
+            int c = entry / chunkEntries;
+            return open[c].memory.getAtIndex(ValueLayout.JAVA_INT, entry - c * chunkEntries);
+        }
+        return indices.getAtIndex(ValueLayout.JAVA_INT, entry);
+    }
+
     /** How many records changed since the last upload: what the next one scatters. */
     public int pendingCount() {
         return pending;

@@ -26,9 +26,10 @@ import java.util.Objects;
  * @param depth the format of the depth attachment (reverse depth, tested and written), or null
  * @param pushBytes the push constant bytes
  * @param doubleSided whether back faces are drawn too; otherwise counter-clockwise triangles are front faces
+ * @param depthOverwrites whether its depth is written without a test, over whatever was there (a depth copy)
  */
 public record GraphicsProgram(List<Stage> stages, List<Format> colors, Format depth, int pushBytes,
-    boolean doubleSided) {
+    boolean doubleSided, boolean depthOverwrites) {
 
     /** A shader stage of a graphics program. */
     public enum Kind {
@@ -71,7 +72,7 @@ public record GraphicsProgram(List<Stage> stages, List<Format> colors, Format de
 
     /** No stages yet, with {@code pushBytes} of push constants. */
     public static GraphicsProgram of(int pushBytes) {
-        return new GraphicsProgram(List.of(), List.of(), null, pushBytes, false);
+        return new GraphicsProgram(List.of(), List.of(), null, pushBytes, false, false);
     }
 
     /** With a vertex stage. */
@@ -103,23 +104,32 @@ public record GraphicsProgram(List<Stage> stages, List<Format> colors, Format de
         }
         List<Stage> more = new ArrayList<>(stages);
         more.add(new Stage(kind, shader, entry));
-        return new GraphicsProgram(more, colors, depth, pushBytes, doubleSided);
+        return new GraphicsProgram(more, colors, depth, pushBytes, doubleSided, depthOverwrites);
     }
 
     /** With another color attachment, of {@code format}. */
     public GraphicsProgram color(Format format) {
         List<Format> more = new ArrayList<>(colors);
         more.add(Objects.requireNonNull(format, "format"));
-        return new GraphicsProgram(stages, more, depth, pushBytes, doubleSided);
+        return new GraphicsProgram(stages, more, depth, pushBytes, doubleSided, depthOverwrites);
     }
 
     /** With a depth attachment of {@code format}. */
     public GraphicsProgram depth(Format format) {
-        return new GraphicsProgram(stages, colors, Objects.requireNonNull(format, "format"), pushBytes, doubleSided);
+        return new GraphicsProgram(stages, colors, Objects.requireNonNull(format, "format"), pushBytes, doubleSided,
+            depthOverwrites);
+    }
+
+    /**
+     * Writing its depth whatever was there (no depth test): a pass that writes every texel of a region needs no clear
+     * before it.
+     */
+    public GraphicsProgram overwriteDepth() {
+        return new GraphicsProgram(stages, colors, depth, pushBytes, doubleSided, true);
     }
 
     /** Drawing back faces too. */
     public GraphicsProgram drawBackFaces() {
-        return new GraphicsProgram(stages, colors, depth, pushBytes, true);
+        return new GraphicsProgram(stages, colors, depth, pushBytes, true, depthOverwrites);
     }
 }

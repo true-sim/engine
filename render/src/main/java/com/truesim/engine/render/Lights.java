@@ -11,6 +11,7 @@ import com.truesim.engine.vulkan.FrameBuffer;
 import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.Retiring;
 import com.truesim.engine.vulkan.VulkanDevice;
+import com.truesim.scene.core.ShadowSpec;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -64,6 +65,8 @@ public final class Lights implements AutoCloseable {
     private final int shadowCapacity;
     private int count;
     private boolean[] taken; // ids add() handed out and remove() did not take back
+    private ShadowSpec[] specs; // how each casts shadows (for the Shadows owner); NONE until set
+    private long shadowVersion; // changes with every spec set
     // Lights the GPU writes each frame (particle lights, effects.md §2.5): a count, three words, then the lights; the
     // keys whose producers write them, built before the lights are binned
     private com.truesim.engine.vulkan.GpuBuffer written;
@@ -90,6 +93,8 @@ public final class Lights implements AutoCloseable {
         this.capacity = capacity;
         this.shadowCapacity = shadowCapacity;
         this.taken = new boolean[capacity];
+        this.specs = new ShadowSpec[capacity];
+        java.util.Arrays.fill(specs, ShadowSpec.NONE);
         int usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
         // Read by the graphics queue and by async compute (light clusters, ray-traced shadows): shared by both.
         int graphics = device.graphics().family();
@@ -220,6 +225,27 @@ public final class Lights implements AutoCloseable {
         return (double) lights.getFloat(o) + lights.getFloat(o + 64);
     }
 
+    /** Light {@code index}'s kind: 0 point, 1 spot, 2 directional ({@code lights.slang}'s numbers). */
+    public int type(int index) {
+        return lights.getInt(light(index) + 28);
+    }
+
+    /** Light {@code index}'s range ({@link #NO_RANGE}: none; directional lights: 0), as set. */
+    public float range(int index) {
+        return lights.getFloat(light(index) + 12);
+    }
+
+    /** The cosine of spot light {@code index}'s outer cone, as set (others: -1). */
+    public float cosOuter(int index) {
+        return lights.getFloat(light(index) + 44);
+    }
+
+    /** Light {@code index}'s brightest channel: its irradiance at 1 unit (directional: anywhere); 0: it is off. */
+    public float brightness(int index) {
+        long o = light(index);
+        return Math.max(lights.getFloat(o + 16), Math.max(lights.getFloat(o + 20), lights.getFloat(o + 24)));
+    }
+
     /** Light {@code index}'s direction (where it shines; unit length) into {@code out}. Allocates nothing. */
     public void direction(int index, double[] out) {
         long o = light(index);
@@ -255,6 +281,7 @@ public final class Lights implements AutoCloseable {
         }
         taken[id] = false;
         off(id);
+        shadow(id, ShadowSpec.NONE);
         while (count > 0 && !taken[count - 1]) {
             count--;
         }
@@ -275,7 +302,37 @@ public final class Lights implements AutoCloseable {
             table.growLights(more, retiring);
         }
         taken = java.util.Arrays.copyOf(taken, more);
+        specs = java.util.Arrays.copyOf(specs, more);
+        java.util.Arrays.fill(specs, capacity, more, ShadowSpec.NONE);
         capacity = more;
+    }
+
+    /**
+     * How light {@code index} casts shadows ({@link ShadowSpec}, scene's per-light shadow data): read each frame by the
+     * {@link com.truesim.engine.render.shadows.Shadows} owner, so a change takes effect from the next frame without a
+     * rebuild. Its softness becomes the light's size ({@code lights.slang}'s {@code radius}), which soft shadows and
+     * the reference path tracer sample. {@link ShadowSpec#NONE} until set, and again once removed. Allocates nothing.
+     */
+    public Lights shadow(int index, ShadowSpec spec) {
+        long o = light(index);
+        Objects.requireNonNull(spec, "spec");
+        if (specs[index] != spec) {
+            specs[index] = spec;
+            shadowVersion++;
+        }
+        lights.putFloat(o + 60, (float) spec.softness());
+        return this;
+    }
+
+    /** How light {@code index} casts shadows, as last set. */
+    public ShadowSpec shadow(int index) {
+        light(index);
+        return specs[index];
+    }
+
+    /** A number that changes whenever a light's {@link #shadow shadow spec} does. */
+    public long shadowVersion() {
+        return shadowVersion;
     }
 
     /** How many lights there is room for now: it grows as lights are added ({@link #add}). */

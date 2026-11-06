@@ -45,7 +45,7 @@ import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.VisibilityBufferShading;
 import com.truesim.engine.render.ChosenTransparency;
-import com.truesim.engine.render.shadows.CascadedShadowMaps;
+import com.truesim.engine.render.shadows.Shadows;
 import com.truesim.engine.scene.Animation;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.vulkan.PresentMode;
@@ -74,7 +74,6 @@ public final class Demo implements Application, PlatformListener {
     private static final int COLOR = VK_FORMAT_R16G16B16A16_SFLOAT;
     private static final int DEPTH = VK_FORMAT_D32_SFLOAT;
     private static final ViewOptions CAMERA = ViewOptions.of(1 << 14, 1 << 22).withOcclusion(true);
-    private static final ViewOptions CASCADES = ViewOptions.shadow(1 << 16, 1 << 22);
     private static final String HELP = """
         Keys (actions: rebind them in the settings file, input.demo.*):
           W A S D, Q E      move (Shift: faster); hold the right mouse button to look around
@@ -121,7 +120,7 @@ public final class Demo implements Application, PlatformListener {
     private KnockingRocks knocks;
     private FoxFootsteps footsteps;
     private final List<SceneView> shaded = new ArrayList<>(); // every view drawing the scene: shading swaps in all
-    private final List<CascadedShadowMaps> cascades = new ArrayList<>(); // fitted to their cameras every frame
+    private Shadows shadows; // every light's shadows by its spec (the sun's cascades: DemoScene), each view a part
     private boolean visibility;
     private Presenter.Target mainTarget;
     private DynamicResolution automatic;
@@ -230,9 +229,6 @@ public final class Demo implements Application, PlatformListener {
         if (knocks != null) {
             knocks.update(dt, eye, yaw);
         }
-        for (CascadedShadowMaps sun : cascades) {
-            sun.update();
-        }
         if (automatic != null) {
             automatic.update();
         }
@@ -274,6 +270,9 @@ public final class Demo implements Application, PlatformListener {
             System.out.println("Audio: " + footsteps.played() + " footsteps");
             footsteps.close();
         }
+        if (shadows != null) {
+            shadows.close();
+        }
         if (world != null) {
             world.close();
         }
@@ -285,22 +284,33 @@ public final class Demo implements Application, PlatformListener {
     /** A view of the scene through {@code through} on {@code port}: shading, lights and the sun's shadows. */
     private SceneView sceneView(ViewPort port, Camera through) {
         SceneView view = world.geometry().createView(port, through, CAMERA).set(1, MeshletRenderer.MODE_LIT);
-        CascadedShadowMaps sun = new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0, view, 3, 2048,
-            CASCADES, 150);
-        cascades.add(sun);
-        port.add(shading(view)).add(new ClusteredLights(world.lights(), view)).add(sun)
+        port.add(shading(view)).add(new ClusteredLights(world.lights(), view)).add(shadows().view(view))
             .add(new ChosenTransparency(world.geometry(), view));
         shaded.add(view);
         return view;
     }
 
-    /** A view of the scene for an eye: shading and lights, with the sun's cascades both eyes share. */
-    private SceneView eyeView(ViewPort port, Camera through, Technique sun) {
+    /** The owner of every light's shadows, made with the first view. */
+    private Shadows shadows() {
+        if (shadows == null) {
+            shadows = new Shadows(world.geometry(), world.lights());
+        }
+        return shadows;
+    }
+
+    /**
+     * A view of the scene for an eye: shading and lights, its shadows' part sharing the sun's cascades of
+     * {@code left}'s (null: its own, the left eye's); returns the part.
+     */
+    private Technique eyeView(ViewPort port, Camera through, Technique left) {
         SceneView view = world.geometry().createView(port, through, CAMERA).set(1, MeshletRenderer.MODE_LIT);
-        port.add(shading(view)).add(new ClusteredLights(world.lights(), view)).add(sun)
+        // One set of cascades for both eyes, fitted to the left one: the margin covers the other eye and how far the
+        // head moves in a frame (the eyes are located just before the frame records).
+        Technique part = left == null ? shadows().view(view) : shadows().view(view, left, 0.25);
+        port.add(shading(view)).add(new ClusteredLights(world.lights(), view)).add(part)
             .add(new ChosenTransparency(world.geometry(), view));
         shaded.add(view);
-        return view;
+        return part;
     }
 
     private Technique shading(SceneView view) {
@@ -312,14 +322,11 @@ public final class Demo implements Application, PlatformListener {
     private void startHeadset() {
         origin[1] = DemoMeshes.height(0, 0);
         headset.origin(origin[0], origin[1], origin[2]); // its session started with the graph, by the plugin
-        // One set of sun cascades for both eyes, fitted to the left one: the margin covers the other eye and how far the
-        // head moves in a frame (the eyes are located just before the frame records).
-        CascadedShadowMaps sun = new CascadedShadowMaps(world.geometry(), world.lights(), 0, 0,
-            headset.camera(Eye.LEFT), 3, 2048, CASCADES, 150).margin(0.25f);
-        cascades.add(sun);
+        Technique left = null;
         for (Eye e : Eye.values()) {
             ViewPort port = graph.addView(e.name().toLowerCase(Locale.ROOT) + " eye");
-            eyeView(port, headset.camera(e), e == Eye.LEFT ? sun : sun.share());
+            Technique part = eyeView(port, headset.camera(e), left);
+            left = left == null ? part : left;
             headset.present(e, port, Keys.SCENE_COLOR);
             eyes[e.ordinal()] = port;
         }

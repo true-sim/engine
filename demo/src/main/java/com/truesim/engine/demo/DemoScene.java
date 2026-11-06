@@ -28,6 +28,10 @@ import java.util.SplittableRandom;
  */
 final class DemoScene implements AutoCloseable {
 
+    /** The sun's shadows: three cascades of 2048 x 2048 to 150 m. */
+    static final com.truesim.scene.core.ShadowSpec SUN_SHADOWS = com.truesim.scene.core.ShadowSpec.cascades(3, 2048,
+        150);
+
     /**
      * A showcase's arena ({@link Showcase}): rocks cleared from a circle of {@code radius} about ({@code x}, {@code z}),
      * {@code foxes} foxes from {@code fox} roaming in it ({@link FoxCrowd}), at dusk: the sun low, dim and orange, the
@@ -154,6 +158,7 @@ final class DemoScene implements AutoCloseable {
             rockMaterials[i] = palette[i % 23 == 0 ? 0 : random.nextInt(4)]; // every 23rd stone: the others as they were
         }
         lights = new Lights(device, POINT_LIGHTS + 1, 8, slots);
+        lights.shadow(0, SUN_SHADOWS); // the sun: drawn by the views' Shadows parts
         String file = System.getProperty("truesim.demo.character");
         try {
             character = file == null ? null : new DemoCharacter(device, slots, pool, materials, scene,

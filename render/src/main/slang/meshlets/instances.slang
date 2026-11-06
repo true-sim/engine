@@ -29,12 +29,22 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     CulledView row = push.rows[push.firstRow + id.y];
     uint v = row.view;
     View view = push.views[v];
-    if (id.x >= view.instanceCount)
+    // A view listing its instances culls those alone (the rest of the row's threads leave at once)
+    uint instanceId = id.x;
+    if (view.ids != nullptr)
+    {
+        if (id.x >= view.idCount)
+        {
+            return;
+        }
+        instanceId = view.ids[id.x];
+    }
+    if (instanceId >= view.instanceCount)
     {
         return;
     }
-    Instance stored = push.instances[id.x];
-    if (!drawnIn(stored, id.x, view))
+    Instance stored = push.instances[instanceId];
+    if (!drawnIn(stored, instanceId, view))
     {
         return; // a hole, on other layers, or casting no shadow in a shadow view
     }
@@ -44,7 +54,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     float radius = mesh.sphere.w * maxScale(instance);
     uint phase = row.phase;
     bool inView = inFrustum(view, center, radius);
-    if (phase == PHASE_EARLY && (!inView || view.visibility[id.x] == 0))
+    if (phase == PHASE_EARLY && (!inView || view.visibility[instanceId] == 0))
     {
         return; // the early phase draws what was visible last frame
     }
@@ -52,9 +62,9 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     {
         // Every instance in view is tested against the pyramid of what the early phase drew; the late phase draws
         // those now visible that the early phase did not.
-        bool drawnEarly = view.visibility[id.x] != 0;
+        bool drawnEarly = view.visibility[instanceId] != 0;
         bool visible = inView && unoccluded(view, push.occlusion, center, radius);
-        view.visibility[id.x] = visible ? 1 : 0;
+        view.visibility[instanceId] = visible ? 1 : 0;
         if (!visible || drawnEarly)
         {
             return;
@@ -88,7 +98,7 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     InterlockedAdd(push.chunkCommand[3], chunks, first);
     for (uint i = 0; i < chunks && first + i < push.maxChunks; i++)
     {
-        push.chunks[first + i] = Chunk(id.x, i * 64, v, phase);
+        push.chunks[first + i] = Chunk(instanceId, i * 64, v, phase);
     }
     // The cull dispatch: rows of 65,535 workgroups, as many as the chunks written; and how many those are, for the
     // workgroups of the last row past them. Past the room, the chunks wanted, for the CPU to grow the room to.

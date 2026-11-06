@@ -75,6 +75,8 @@ public final class MeshletRenderer implements AutoCloseable {
     /** The visibility buffer's IDs: instance + 1 (0: nothing), and meshlet << 7 | triangle. */
     public static final int ID_FORMAT = org.lwjgl.vulkan.VK10.VK_FORMAT_R32G32_UINT;
 
+    private final VulkanDevice device;
+    private final int depthFormat;
     private final GpuScene scene;
     private final GeometryPool pool;
     private final RenderViews views; // the open views, their constants array and culled rows
@@ -87,7 +89,7 @@ public final class MeshletRenderer implements AutoCloseable {
     private Materials immediateTable;
     private long immediateVersion;
     // ... and their depth and IDs where types have geometry hooks (by the same split, per shading bin); null: none.
-    private final RasterPipelines.Geometry[] immediateGeometry = new RasterPipelines.Geometry[3];
+    private final RasterPipelines.Geometry[] immediateGeometry = new RasterPipelines.Geometry[4];
     private final Retiring retiring; // the old tables, rows and view lists, until no frame reads them
     private final Runnable followScene = this::followScene;
     // Pipelines made ahead: the scene's table followed, each shading bin's pipelines made as its materials are written.
@@ -131,6 +133,8 @@ public final class MeshletRenderer implements AutoCloseable {
                 + "with the same frames in flight");
         }
         this.retiring = new Retiring(slots);
+        this.device = Objects.requireNonNull(device, "device");
+        this.depthFormat = depthFormat;
         shading = new ShadingPipelines(device, colorFormat, depthFormat);
         raster = new RasterPipelines(device, shading, depthFormat);
         views = new RenderViews(device, slots, retiring);
@@ -361,6 +365,7 @@ public final class MeshletRenderer implements AutoCloseable {
             immediate = raster.typed(materials, path() == Path.MESH_SHADERS);
             immediateGeometry[RasterPipelines.DEPTH] = null;
             immediateGeometry[RasterPipelines.IDS] = null;
+            immediateGeometry[RasterPipelines.SHADOW] = null;
         }
         return immediate;
     }
@@ -630,6 +635,15 @@ public final class MeshletRenderer implements AutoCloseable {
         }
     }
 
+    /**
+     * Draws {@code view}'s shadow casters' depth into the rendering scope open on {@code commands}: as
+     * {@link #drawAttached} depth only, every face drawn, both sides (a light inside a closed mesh sees its inside, as
+     * shadow rays do). Allocates nothing.
+     */
+    public void drawCastersAttached(VkCommandBuffer commands, RenderView view) {
+        drawRole(commands, own(view), RasterPipelines.SHADOW, false);
+    }
+
     /** Like {@link #drawAttached}, into a visibility buffer ({@link #drawIds}) and its depth. */
     public void drawIdsAttached(VkCommandBuffer commands, RenderView view, boolean late) {
         raster.checkIds();
@@ -714,6 +728,16 @@ public final class MeshletRenderer implements AutoCloseable {
         long behind, long indirect, RasterPipelines.Typed pipelines) {
         raster.drawBlendedTyped(commands, scene, own(view), path() == Path.MESH_SHADERS, kind, clusters, behind,
             indirect, pipelines);
+    }
+
+    /** The device it draws on. */
+    public VulkanDevice device() {
+        return device;
+    }
+
+    /** The depth format its pipelines draw into ({@code VK_FORMAT_*}). */
+    public int depthFormat() {
+        return depthFormat;
     }
 
     /** The scene it draws. */

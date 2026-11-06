@@ -110,6 +110,32 @@ public final class Denoiser {
     @AllowAllocation("building the graph, when it changes")
     static Signal build(GraphBuilder g, String name, SceneView view, Image depth, Image normal, Image motion,
         Signal input, Mode mode, boolean temporal, int shift) {
+        return build(g, name, view, depth, normal, motion, input, mode, temporal, shift, null, -1);
+    }
+
+    /**
+     * A value of a view denoised: {@code a}'s alpha (its rgb filtered alike), {@code b} zeros to start from (its alpha
+     * the variance written), both {@code FORMAT} (RGBA16F) images of the view's size; the history restarts in frames
+     * where {@code restart} says so (null: never), as when the value is another light's from then on. Returns the image
+     * holding the result in its alpha. {@code normal}: packed view-space normals ({@link SurfaceOutputs#NORMAL_FORMAT});
+     * {@code motion} may be null (the camera's reprojection). SVGF filters in {@code passes} a-trous steps (-1: as
+     * {@link #PASSES} says).
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public static Image denoiseValue(GraphBuilder g, String name, SceneView view, Image depth, Image normal,
+        Image motion, Image a, Image b, Mode mode, java.util.function.BooleanSupplier restart, int passes) {
+        return build(g, name, view, depth, normal, motion, new Signal(a, b), mode, true, 0, restart, passes).a();
+    }
+
+    /** The format of a denoised signal's images (RGBA16F). */
+    public static Format format() {
+        return FORMAT;
+    }
+
+    @AllowAllocation("building the graph, when it changes")
+    private static Signal build(GraphBuilder g, String name, SceneView view, Image depth, Image normal, Image motion,
+        Signal input, Mode mode, boolean temporal, int shift, java.util.function.BooleanSupplier restart,
+        int atrousPasses) {
         String shader = "shaders/denoise/denoise.spv";
         Pipeline atrous = g.computeProgram(shader, "atrousMain", DenoisePush.BYTES);
         Pipeline temporalPass = g.computeProgram(shader, "temporalMain", DenoisePush.BYTES);
@@ -121,7 +147,7 @@ public final class Denoiser {
         ImageDesc signal = ImageDesc.of(FORMAT, width, height);
         Image[] scratch = {g.create(name + " filtered A", signal), g.create(name + " filtered B", signal),
             g.create(name + " filtered A'", signal), g.create(name + " filtered B'", signal)};
-        int passes = g.setting(PASSES);
+        int passes = atrousPasses >= 0 ? atrousPasses : g.setting(PASSES);
         if (!temporal) {
             return atrous(g, name, view, atrous, depth, normal, input, scratch, g.setting(SPATIAL_PASSES), 0, settings,
                 region, shift);
@@ -153,7 +179,8 @@ public final class Denoiser {
             pass.region(region);
         }
         pass.record(ctx -> {
-            boolean valid = ctx.historyValid(historyA) && ctx.historyValid(moments) && ctx.historyValid(geometry);
+            boolean valid = ctx.historyValid(historyA) && ctx.historyValid(moments) && ctx.historyValid(geometry)
+                && (restart == null || !restart.getAsBoolean());
             common(push, ctx, view, depth, normal, accumulated.a(), shift)
                 .motion(motion == null ? 0 : ctx.storage(motion))
                 .inputA(ctx.storage(from.a())).inputB(ctx.storage(from.b()))

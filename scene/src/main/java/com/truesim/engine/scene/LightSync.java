@@ -16,9 +16,9 @@ import java.util.Objects;
  * The scene's light components placed in the renderer's {@link Lights} (application-api.md D46): each node with a
  * {@link LightSource} takes a light id while it has one, set from the node's world transform (point and spot lights at
  * its origin, spot and directional lights along its -Z) and the light's colour times intensity (candela, or lux for a
- * directional light: the irradiance at 1 m), range and cone. Following moves (the scene's versions) and changes made in
- * place (the light's version); a node hidden (on no layer) or removed turns its light off. Shadows are the shadow
- * techniques' to give.
+ * directional light: the irradiance at 1 m), range and cone, and its {@link com.truesim.scene.core.ShadowSpec} (how
+ * it casts shadows, which the engine's {@code Shadows} owner draws). Following moves (the scene's versions) and changes
+ * made in place (the light's version); a node hidden (on no layer) or removed turns its light off.
  *
  * <pre>{@code
  * LightSync lightSync = new LightSync(scene, lights);
@@ -120,6 +120,7 @@ public final class LightSync {
             case SPOT -> lights.spot(id, x, y, z, range, r, g, b, dx, dy, dz, light.innerCone(), light.outerCone());
             case DIRECTIONAL -> lights.directional(id, dx, dy, dz, r, g, b);
         }
+        lights.shadow(id, light.shadow());
     }
 
     @AllowAllocation("growing with the scene")

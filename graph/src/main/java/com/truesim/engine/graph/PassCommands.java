@@ -129,6 +129,17 @@ final class PassCommands {
      */
     static void barriers(VkCommandBuffer commands, CompiledGraph.BarrierList barriers, int from, int to,
         boolean skipped, FrameGraph graph) {
+        // In batches: thousands of barriers (a shadow atlas's draw views) would not fit the thread's memory stack
+        for (int first = from; first < to; first += BARRIER_BATCH) {
+            batch(commands, barriers, first, Math.min(to, first + BARRIER_BATCH), skipped, graph);
+        }
+    }
+
+    /** The most barriers one {@code vkCmdPipelineBarrier2} takes here: about 22 KiB of the memory stack. */
+    private static final int BARRIER_BATCH = 256;
+
+    private static void batch(VkCommandBuffer commands, CompiledGraph.BarrierList barriers, int from, int to,
+        boolean skipped, FrameGraph graph) {
         if (from == to) {
             return;
         }

@@ -90,6 +90,14 @@ class CameraAndLightSyncTest {
             lights.direction(sync.idOf(sun), direction);
             assertThat(direction[1]).isCloseTo(-1, within(1e-6));
             assertThat(sync.idOf(NodeHandle.of(99, 1))).isEqualTo(-1);
+            // shadows: the spec as set on the component, changed in place; none at first
+            assertThat(lights.shadow(id)).isSameAs(com.truesim.scene.core.ShadowSpec.NONE);
+            com.truesim.scene.core.ShadowSpec soft = com.truesim.scene.core.ShadowSpec.softRayTraced(0.05);
+            scene.components().get(lamp, LightSource.TYPE).shadow(soft);
+            long specs = lights.shadowVersion();
+            sync.update();
+            assertThat(lights.shadow(id)).isSameAs(soft);
+            assertThat(lights.shadowVersion()).isGreaterThan(specs);
             // moved, changed in place, hidden, removed
             scene.setTranslation(lamp, 5, 2, 3);
             scene.update();
@@ -98,11 +106,16 @@ class CameraAndLightSyncTest {
             scene.update();
             sync.update();
             assertThat(lights.position(id, 0)).isEqualTo(5);
+            int sunId = sync.idOf(sun);
+            scene.components().get(sun, LightSource.TYPE).shadow(com.truesim.scene.core.ShadowSpec.rayTraced());
+            sync.update();
+            assertThat(lights.shadow(sunId).method()).isEqualTo(com.truesim.scene.core.ShadowMethod.RAY_TRACED);
             scene.components().remove(sun, LightSource.TYPE);
             scene.remove(torch);
             sync.update();
             assertThat(sync.count()).isOne();
             assertThat(sync.idOf(sun)).isEqualTo(-1);
+            assertThat(lights.shadow(sunId)).as("removed: none").isSameAs(com.truesim.scene.core.ShadowSpec.NONE);
             // many: the ids grow
             for (int i = 0; i < 10; i++) {
                 long node = scene.create();

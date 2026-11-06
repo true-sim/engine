@@ -68,9 +68,10 @@ void instancesMain(uint3 id : SV_DispatchThreadID)
     bool masked = false;
     for (uint s = 0; s < level.submeshes && mask != 0; s++) // holes name mesh 0 and no materials
     {
-        masked = masked || materialMasked(push.materials[instance.materialBase + s]);
+        Material m = push.materials[instance.materialBase + s];
+        masked = masked || materialMasked(m) || materialGeometry(m) != 0; // a hook's holes are tested at hits too
     }
-    // Triangle facing cull disable, and force opaque or (masked) force no opaque.
+    // Triangle facing cull disable, and force opaque or (masked, or a type with a geometry hook) force no opaque.
     push.records[w + 13] = (masked ? 0x9u : 0x5u) << 24;
     uint64_t reference = mask != 0 ? bottom : push.empty;
     push.records[w + 14] = uint(reference);

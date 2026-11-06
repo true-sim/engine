@@ -215,7 +215,14 @@ public final class ReferencePathTracer implements Technique {
         long tableWords = ((6L * bins + 3) / 4) * 4;
         long tablesBytes = 4 * tableWords * bounces;
         Buffer binTables = g.createBuffer("reference bins", tablesBytes + 4 * capacity);
-        Buffer counts = g.createBuffer("reference counts", 4L * (bounces + 1));
+        // The counts, then where the material table has types with geometry hooks, the shadow rays waiting for keep()
+        LightRays light = LightRays.of(g, renderer, rayTracing, view.view(), width, height);
+        long countsBytes = (4L * (bounces + 1) + 15) / 16 * 16;
+        Buffer counts = g.createBuffer("reference counts", countsBytes + (light == null ? 0 : light.bytes()));
+        if (light != null) {
+            light.place(counts, countsBytes);
+        }
+        int lightWords = light == null ? 0 : light.words();
         Image accumulation = g.persistent("reference accumulation", ImageDesc.of(Format.of(ACCUMULATION), width,
             height));
         Image color = g.create("scene color", ImageDesc.of(Format.of(colorFormat), width, height));
@@ -226,6 +233,9 @@ public final class ReferencePathTracer implements Technique {
         }
         g.pass("reference start").write(counts, BufferAccess.TRANSFER_DST).write(binTables, BufferAccess.TRANSFER_DST)
             .record(ctx -> {
+                if (light != null) {
+                    light.reset(ctx); // every frame: no light rays waiting in one that takes no sample
+                }
                 if (!tracing(ctx, color, settings)) {
                     return;
                 }
@@ -302,17 +312,22 @@ public final class ReferencePathTracer implements Technique {
                 if (single != null) { // every hit by one shader
                     ctx.dispatch(single, push(shadePush, ctx, color, accumulation, current, next, binTables, counts,
                         lights, indirect, table, tablesBytes, bounce, bins, 0, settings)
-                        .world(world == null ? 0 : ctx.address(world.grid())), ROW, groupRows(ctx, color), 1);
+                        .world(world == null ? 0 : ctx.address(world.grid())).lightRays(lightWords), ROW,
+                        groupRows(ctx, color), 1);
                     return;
                 }
                 for (int bin = 0; bin < shade.length; bin++) {
                     if (shade[bin] != null) {
                         ctx.dispatchIndirect(shade[bin], push(shadePush, ctx, color, accumulation, current, next,
                             binTables, counts, lights, indirect, table, tablesBytes, bounce, bins, bin, settings)
-                            .world(world == null ? 0 : ctx.address(world.grid())), binTables, table + 16L * bin);
+                            .world(world == null ? 0 : ctx.address(world.grid())).lightRays(lightWords), binTables,
+                            table + 16L * bin);
                     }
                 }
             });
+        }
+        if (light != null) {
+            light.resolve(g, "reference", g::pass, topLevel, accumulation);
         }
         PathPush resolvePush = push[pushes - 1];
         g.pass("reference resolve").read(accumulation, Access.STORAGE_READ).write(color, Access.STORAGE_WRITE)

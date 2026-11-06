@@ -71,6 +71,15 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
          * when recording.
          */
         public Views add(RenderView view, boolean early, Runnable before) {
+            return add(view, early, before, null);
+        }
+
+        /**
+         * Like {@link #add(RenderView, boolean, Runnable)}, culled only in frames where {@code active} says so (read
+         * when the culling records; null: always), besides its adder running: a view drawn only some frames (a shadow
+         * tile that changed), its lists kept as they were otherwise. {@code active} must not allocate.
+         */
+        public Views add(RenderView view, boolean early, Runnable before, BooleanSupplier active) {
             if (view.renderer() != renderer) {
                 throw new IllegalArgumentException("A view of another renderer");
             }
@@ -85,7 +94,8 @@ public record MeshletCulling(MeshletRenderer renderer) implements Request<Meshle
             this.early = Arrays.copyOf(this.early, this.early.length + 1);
             this.early[this.early.length - 1] = early;
             running = Arrays.copyOf(running, running.length + 1);
-            running[running.length - 1] = g.running();
+            BooleanSupplier runs = g.running();
+            running[running.length - 1] = active == null ? runs : () -> runs.getAsBoolean() && active.getAsBoolean();
             culled = new RenderView[views.length];
             culledEarly = new boolean[views.length];
             this.before = Arrays.copyOf(this.before, this.before.length + 1);

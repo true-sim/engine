@@ -1,0 +1,15 @@
+// The material type's keep() test at the hits of shadow rays (shadows/rays.slang): the Shadows owner's traced masks
+// queue the rays whose nearest triangle is of a type with a geometry hook, and each such type's entry point says whether
+// its points there exist; the rays go on through holes. Types without hooks never run it.
+import shadows.rays;
+import {module};
+
+[[vk::push_constant]]
+ConstantBuffer<ShadowMasksPush> push;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void {name}ShadowKeepMain(uint3 id : SV_DispatchThreadID)
+{
+    shadowKeep<{struct}>(push, id.x);
+}

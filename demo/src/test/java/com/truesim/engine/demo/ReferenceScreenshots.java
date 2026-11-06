@@ -24,7 +24,6 @@ import com.truesim.engine.render.ReferencePathTracer;
 import com.truesim.engine.render.SceneView;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.VisibilityBufferShading;
-import com.truesim.engine.render.shadows.InlineRayShadows;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
@@ -92,17 +91,20 @@ class ReferenceScreenshots {
             assertThat(reference.samples()).isEqualTo(SAMPLES);
             System.out.printf("The demo's scene path traced: %d x %d, %d samples in %.1f s (%.1f ms a sample)%n",
                 WIDTH, HEIGHT, SAMPLES, seconds, seconds * 1000 / SAMPLES);
-            // The real-time image of the same view: the visibility buffer, the sun's shadows traced inline.
+            // The real-time image of the same view: the visibility buffer, the sun's shadows traced.
             port.replace(new VisibilityBufferShading(world.geometry(), view, VK_FORMAT_R32G32B32A32_SFLOAT,
                 VK_FORMAT_D32_SFLOAT).clearColor(0.2405f, 0.2405f, 0.2405f));
             port.remove(reference);
-            port.add(new InlineRayShadows(world.rayTracing(), view.view(), world.lights(), 0, 0));
+            com.truesim.engine.render.shadows.Shadows shadows = new com.truesim.engine.render.shadows.Shadows(
+                world.geometry(), world.lights()).rayTracing(world.rayTracing());
+            world.lights().shadow(0, com.truesim.scene.core.ShadowSpec.rayTraced());
+            port.add(shadows.view(view));
             for (int frame = 0; frame < 4; frame++) {
                 graph.beginFrame();
                 graph.submit(0, 0);
             }
             device.waitIdle();
-            write(device, target, pixels, out.resolve("raster-demo.png"));
+            write(device, target, pixels, out.resolve("raster-demo.png")); // its views close with the renderer
             assertThat(instance.validationErrors()).isZero();
         }
     }

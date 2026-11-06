@@ -117,7 +117,7 @@ class ClusteredLightsTest {
             .spot(3, -3, 1, -30, 5, 10, 10, 10, 0, 0, -1, 0.3, 0.5)
             .point(4, 0.2f, 0.1f, -3, 0.5f, 1, 1, 1);
         lights.shadowTable(null).shadowMap(0, camera, 0, 1024, 1e-3f, 0).shadowMask(1, 0, 0)
-            .shadowRay(2, 0, 2e-3f, 0, 0, 0).clear(3).light(3, 0, 1);
+            .atlasMap(2, camera, 0, 2048, 0, 0, 1024, 1e-3f, Float.MAX_VALUE, 0, 0).clear(3).light(3, 0, 1);
         assertThat(lights.shadowTable(null).capacity()).isEqualTo(4);
         // Many small lights in one spot: more than a cluster holds.
         for (int i = 5; i < 16; i++) {

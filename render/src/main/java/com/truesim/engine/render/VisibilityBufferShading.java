@@ -113,6 +113,17 @@ public final class VisibilityBufferShading implements Technique {
             + 31 * (materials.graphBuffersVersion() + 31L * materials.drawnVersion());
     }
 
+    /**
+     * The draw of the view's IDs and depth it shades from, as {@code g} would build it: other techniques of the view
+     * needing the camera's depth before shading (ray-traced shadow masks) request the same draw, drawn once.
+     */
+    @AllowAllocation("building the graph, when it changes")
+    public SceneDraw idsDraw(GraphBuilder g) {
+        return new SceneDraw(geometry, view.view(), null, SurfaceOutput.ids(), depthFormat, view.width(),
+            view.height(), (occlusion != null ? occlusion : g.setting(RenderSettings.OCCLUSION))
+                && view.view().options().occlusion());
+    }
+
     @Override
     @AllowAllocation("building the graph, when it changes")
     public void build(GraphBuilder g) {
@@ -123,26 +134,20 @@ public final class VisibilityBufferShading implements Technique {
             throw new IllegalStateException("The visibility buffer shades up to 65,535 pixels per side: " + width
                 + " x " + height);
         }
-        SceneDraw draw = new SceneDraw(geometry, view.view(), null, SurfaceOutput.ids(), depthFormat, width, height,
-            (occlusion != null ? occlusion : g.setting(RenderSettings.OCCLUSION)) && view.view().options().occlusion());
-        SceneDraw.Targets targets = g.request(draw);
+        SceneDraw.Targets targets = g.request(idsDraw(g));
         Buffer lights = g.optional(Keys.LIGHT_LIST);
         ShadowInputs.Set shadows = lights == null ? null : g.request(new ShadowInputs(g.view()));
         IndirectInputs.Set indirect = IndirectInputs.of(g);
         // The surface outputs, written by the shading passes' variants with SURFACES where a technique asks for them
         SurfaceOutputs.Images surfaces = SurfaceOutputs.wanted(g) ? SurfaceOutputs.create(g, "scene", width, height)
             : null;
-        // With inline ray shadows, the variant tracing them, where the device can.
-        boolean traced = shadows != null && shadows.traced() && g.capabilities().rayTracing();
         // A variant per bin: a type, and the features its materials show; made for the combinations in use only.
         Materials materials = renderer.scene().materials();
         Pipeline[] shade = new Pipeline[materials.binCount()];
         for (int bin = 0; bin < shade.length; bin++) {
             MaterialType type = materials.binType(bin);
             int features = materials.binFeatures(bin);
-            boolean rays = traced && type.tracedShader() != null;
-            shade[bin] = compute(g, rays ? type.tracedShader() : type.shader(), rays ? type.tracedEntry() : type.entry(),
-                features, surfaces != null ? 1 : 0);
+            shade[bin] = compute(g, type.shader(), type.entry(), features, surfaces != null ? 1 : 0);
         }
         Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain", 0, 0);
         Image ids = targets.color();
@@ -196,7 +201,7 @@ public final class VisibilityBufferShading implements Technique {
             pass.read(lights, BufferAccess.STORAGE_READ);
         }
         if (shadows != null) {
-            shadows.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ, traced);
+            shadows.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);
         }
         if (indirect != null) {
             indirect.readBy(pass, Access.SAMPLED_COMPUTE, BufferAccess.STORAGE_READ);

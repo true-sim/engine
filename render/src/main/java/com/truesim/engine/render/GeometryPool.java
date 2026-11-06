@@ -560,6 +560,21 @@ public final class GeometryPool implements AutoCloseable {
         return id;
     }
 
+    /**
+     * Mesh {@code mesh}'s bounding sphere, in its own space, into {@code out}: center x, y, z, radius (a deformed copy's
+     * as its source's, before posing). Allocates nothing.
+     */
+    public void bounds(int mesh, float[] out) {
+        if (!contains(mesh)) {
+            throw new IllegalArgumentException("No mesh " + mesh);
+        }
+        MemorySegment table = meshTable.memory();
+        long o = (long) MESH_ENTRY_BYTES * mesh + 32;
+        for (int i = 0; i < 4; i++) {
+            out[i] = table.get(F32, o + 4L * i);
+        }
+    }
+
     /** The mesh {@code mesh} is a deformed copy of, or -1 if it is not one. */
     public int deformedFrom(int mesh) {
         if (!contains(mesh)) {

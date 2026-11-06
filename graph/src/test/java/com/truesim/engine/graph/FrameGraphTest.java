@@ -2236,6 +2236,47 @@ class FrameGraphTest {
     }
 
     @Test
+    void passesMaskedFromDataAreSkippedWithoutARebuild() {
+        // A paint pass running only while its data says so (when), and one added in a masked scope: skipped, the
+        // result is as the provider left it; nothing rebuilds.
+        boolean[] paint = {true};
+        boolean[] scope = {true};
+        int[] painted = {0};
+        graph.add(new Fill(OUT, SIZE, 1, 0, 0, 1)).add(new Technique() {
+            @Override
+            public List<Key<?>> provides() {
+                return List.of();
+            }
+
+            @Override
+            public List<Key<?>> modifies() {
+                return List.of(OUT);
+            }
+
+            @Override
+            public void build(GraphBuilder g) {
+                Image out = g.modify(OUT);
+                g.masked(() -> scope[0], () -> g.pass("masked paint").write(out, Access.TRANSFER_DST)
+                    .when(() -> paint[0]).record(ctx -> {
+                        painted[0]++;
+                        clear(ctx, out, 0, 0, 1, 1);
+                    }));
+            }
+        }).output(OUT, output);
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        int builds = graph.builds();
+        paint[0] = false;
+        assertThat(frame()[0]).as("its own mask off").isEqualTo(RED);
+        paint[0] = true;
+        scope[0] = false;
+        assertThat(frame()[0]).as("the scope's mask off").isEqualTo(RED);
+        scope[0] = true;
+        assertThat(frame()[0]).isEqualTo(BLUE);
+        assertThat(painted[0]).isEqualTo(2);
+        assertThat(graph.builds()).as("never rebuilt").isEqualTo(builds);
+    }
+
+    @Test
     void historiesWrittenFirstOnTheComputeQueueAreJoinedAhead() {
         int[] frames = {0};
         graph.asyncCompute(true).add(new Lambda(List.of(OUT), g -> {

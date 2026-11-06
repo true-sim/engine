@@ -121,6 +121,9 @@ public final class RenderView implements AutoCloseable {
         drawCommand = GpuBuffer.deviceLocal(device, 24L * MeshletRenderer.BINS, commandUsage);
         // Per bin the early and late counts, then per bin the most indices a phase wanted.
         drawCount = GpuBuffer.hostVisible(device, 12L * MeshletRenderer.BINS, commandUsage); // common.slang's
+        // Read before the first cull (overflowed(), wanted...()): new memory holds anything, a freed buffer's on
+        // lavapipe; nothing wanted yet.
+        drawCount.memory().fill((byte) 0);
         int instances = renderer.scene().capacity();
         visibility = options.occlusion()
             ? GpuBuffer.deviceLocal(device, 4L * instances, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT) : null;
@@ -385,20 +388,61 @@ public final class RenderView implements AutoCloseable {
      * a frame slot's copy: set it in each frame it is read. Allocates nothing.
      */
     public RenderView highlightedOnly(long flags, int count) {
+        return highlights(flags, count, 2);
+    }
+
+    /**
+     * Draws only the instances not highlighted in the flags at device address {@code flags} (as
+     * {@link #highlightedOnly}: ids past {@code count} are not highlighted), or every instance (address 0): a shadow
+     * tile's static casters, the moving ones flagged. Set in each frame it is read. Allocates nothing.
+     */
+    public RenderView unhighlightedOnly(long flags, int count) {
+        return highlights(flags, count, 8);
+    }
+
+    /**
+     * Culls only the {@code count} instances whose ids lie at device address {@code ids} (32-bit each), or every instance
+     * (address 0): a view drawing few known instances (a shadow tile's moving casters) then costs as they do, not as
+     * the scene's every instance. The address names a frame slot's copy: set it in each frame it is read. Allocates
+     * nothing.
+     */
+    public RenderView instances(long ids, int count) {
+        checkOpen();
+        putLong(ViewLayout.IDS, ids);
+        putInt(ViewLayout.ID_COUNT, ids == 0 ? 0 : count);
+        return this;
+    }
+
+    private RenderView highlights(long flags, int count, int mode) {
         checkOpen();
         putLong(ViewLayout.HIGHLIGHTS, flags);
         putInt(ViewLayout.HIGHLIGHT_COUNT, flags == 0 ? 0 : count);
-        highlightedOnly = flags != 0;
+        highlightMode = flags != 0 ? mode : 0;
         putInt(ViewLayout.FLAGS, flags());
         return this;
     }
 
     private int flags() {
-        return (castersOnly ? 1 : 0) | (highlightedOnly ? 2 : 0);
+        return (castersOnly ? 1 : 0) | highlightMode | (bothSides ? 4 : 0);
     }
 
+    /**
+     * Keeps meshlets facing away from the eye (shadow casters drawn two-sided, as rays meet every face); off by default:
+     * a camera's view culls them. Allocates nothing.
+     */
+    public RenderView bothSides(boolean on) {
+        checkOpen();
+        if (on != bothSides) {
+            bothSides = on;
+            putInt(ViewLayout.FLAGS, flags());
+        }
+        return this;
+    }
+
+    private boolean bothSides;
+
     private boolean castersOnly;
-    private boolean highlightedOnly;
+    private int highlightMode; // 2: highlighted only, 8: unhighlighted only
 
     /**
      * How many meshlets the view found visible in the last finished frame, every raster bin and both phases of
@@ -437,7 +481,7 @@ public final class RenderView implements AutoCloseable {
     /**
      * Whether the last finished frame wanted more than the view's lists hold: more meshlets in a phase of a raster bin
      * than it holds ({@link ViewOptions#draws()}, {@link ViewOptions#binDraws()}), or on the indexed path more
-     * triangles. What did not fit was not drawn; {@link #resize} the view.
+     * triangles. What did not fit was not drawn; {@link #resize} the view. False until the view has culled.
      */
     public boolean overflowed() {
         for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {

@@ -1590,7 +1590,7 @@ void lightsWriteMain(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID)
     l.cosInner = 0;
     l.shadowFirst = -1;
     l.shadowCount = 0;
-    l.pad = 0;
+    l.radius = 0;
     l.pad1 = 0;
     Light* written = (Light*) (lights + 4);
     written[slot] = l;

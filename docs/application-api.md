@@ -554,6 +554,12 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   with `nearest`); ray-traced reflections (#379) join as another value, writing the same hit image.
 - **D137** (new) Checked against the Khronos glTF sample models: an optional sweep (`-PgltfSamples=...`) imports every
   model with all its parts.
+- **D140** (decided 2026-11-05, built) Shadows are per light: each `LightSource` carries a `ShadowSpec` (scene-core:
+  method `NONE`, `MAPS`, `CASCADES`, `RAY_TRACED` or `SOFT_RAY_TRACED`; resolution or `AUTO` within bounds; cascades;
+  distance; bias; softness as the sun's angular radius or a light's radius; importance), which replaces the unwired
+  `castsShadows` flag (now `shadow().casts()`). `LightSync` hands it to `Lights.shadow(id, spec)`, and one engine owner
+  (`Shadows`, its part added to each view) draws every light by it, changes taking effect without a graph build. No
+  "every N frames" updates (they lag): maps are drawn again only when what they show changed. engine#120, #33.
 
 ## Scene interaction and selection (built 2026-11-04)
 

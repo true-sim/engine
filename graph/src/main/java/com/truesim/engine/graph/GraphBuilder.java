@@ -110,6 +110,7 @@ public final class GraphBuilder {
         ExternalImage into; // an output's copy: its target, skipped while held; else null
         boolean region; // renders within its view's render region (PassBuilder.region())
         ViewPort view; // the view whose region it renders within, set when the graph is built; null: the frame's
+        java.util.function.BooleanSupplier active; // PassBuilder.when: skipped in frames it says false; null: never
 
         PassInfo(String name, String owner, Object scope, int[] images, Access[] accesses, int[] ranges,
             boolean[] discards, Attachment[] attachments, int[] buffers, BufferAccess[] bufferAccesses,
@@ -138,6 +139,7 @@ public final class GraphBuilder {
     private final Set<String> persistentKeys = new HashSet<>();
     final List<PassInfo> passes = new ArrayList<>();
     private final List<PassBuilder> openPasses = new ArrayList<>();
+    private BooleanSupplier mask; // masked(): what passes added now run by
     final List<ReadbackPlan> readbacks = new ArrayList<>();
     private final Resolution<Object, Technique> resolution;
     private final List<ViewPort> views;
@@ -457,6 +459,9 @@ public final class GraphBuilder {
                 }
                 if (program.doubleSided()) {
                     graphics.doubleSided();
+                }
+                if (program.depthOverwrites()) {
+                    graphics.depthTest(org.lwjgl.vulkan.VK10.VK_COMPARE_OP_ALWAYS, true);
                 }
                 return graphics.build();
             } finally {
@@ -847,9 +852,11 @@ public final class GraphBuilder {
         private String owner;
         private Object scope;
         private boolean scoped; // its scope set by in(), not by who records it
+        private BooleanSupplier active; // when(): read as each frame starts
 
         private PassBuilder(String name) {
             this.name = name;
+            this.active = mask;
         }
 
         /** The pass reads all of {@code image}. */
@@ -1106,6 +1113,19 @@ public final class GraphBuilder {
             return this;
         }
 
+        /**
+         * Runs the pass only in frames where {@code active} says so, read as each frame starts (before its passes
+         * record), as a switched-off technique's passes are skipped: its barriers kept, its body left out, so
+         * attachments it loads keep their contents and nothing rebuilds. A mask from data: a technique leaving out
+         * work no light, view or slot needs this frame. {@code active} must not allocate.
+         */
+        public PassBuilder when(BooleanSupplier active) {
+            Objects.requireNonNull(active, "active");
+            BooleanSupplier outer = this.active;
+            this.active = outer == null ? active : () -> outer.getAsBoolean() && active.getAsBoolean();
+            return this;
+        }
+
         /** Adds the pass, recording with {@code body}. */
         public void record(PassBody body) {
             if (index >= 0) {
@@ -1160,7 +1180,24 @@ public final class GraphBuilder {
                 sideEffects, async, body);
             info.region = region;
             info.view = regionView;
+            info.active = active;
             return info;
+        }
+    }
+
+    /**
+     * Runs {@code build}, every pass it adds running only in frames where {@code active} says so
+     * ({@link PassBuilder#when}): for work made by code that knows nothing of the mask (a denoiser's passes for a slot
+     * no light uses this frame). Masks nest.
+     */
+    public void masked(BooleanSupplier active, Runnable build) {
+        Objects.requireNonNull(active, "active");
+        BooleanSupplier outer = mask;
+        mask = outer == null ? active : () -> outer.getAsBoolean() && active.getAsBoolean();
+        try {
+            build.run();
+        } finally {
+            mask = outer;
         }
     }
 

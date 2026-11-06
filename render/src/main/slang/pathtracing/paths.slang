@@ -18,6 +18,7 @@ module paths;
 __exported import meshlets.common;
 __exported import raytracing;
 __exported import lights.world;
+import shadows.rays;
 
 /** One path between bounces: 80 bytes. Positions relative to the view's camera. */
 public struct PathState
@@ -87,6 +88,9 @@ public struct PathPush
     public uint sample;                // samples taken before this frame's (0: the accumulation starts anew)
     public uint limits;                // the bounce limit (bits 0-7), Russian roulette's first bounce (bits 8-15)
     public uint list;                  // words from the bin table to the slot list
+    public uint lightRays;             // words from counts to the light rays' trace record (shadows/rays.slang's
+                                       // ShadowTrace, LightRays): shadow rays meeting a type with a geometry hook wait
+                                       // there for its keep(); 0: none (no such type: they never do)
 };
 
 [[vk::push_constant]]
@@ -264,6 +268,14 @@ public float3 environment(float3 direction)
         * intensity;
 }
 
+/**
+ * What the light a shadow ray of next-event estimation tests is weighed by (the path's throughput), and the pixel it
+ * goes to: set by the hit's shading before it lights it, so a shadow ray waiting for a keep() test brings its light
+ * there later.
+ */
+static float3 lightWeight;
+static uint lightPixel;
+
 /** Whether nothing lies between camera-relative `p` and `p + direction * distance`. */
 public bool visible(float3 p, float3 direction, float distance)
 {
@@ -305,15 +317,40 @@ float3 lightUnshadowed(Light light, Surface s, float3 p, float3 v, out float3 to
     return reflected(s, v, toLight, irradiance);
 }
 
-/** Whether nothing lies between `p` (geometric normal `ng`) and a light `distance` away along `toLight`. */
-bool lightVisible(float3 p, float3 ng, float3 toLight, float distance, bool directional)
+/**
+ * Whether nothing lies between `p` (geometric normal `ng`) and a light `distance` away along `toLight`. A ray meeting
+ * a triangle of a type with a geometry hook (keep()) first waits for its type's test: false now, and `light` (what
+ * the light adds) brought to the pixel later if it goes through (LightRays).
+ */
+bool lightVisible(float3 p, float3 ng, float3 toLight, float distance, bool directional, float3 light)
 {
     float3 from = offsetRay(p, dot(ng, toLight) >= 0 ? ng : -ng);
-    return visible(from, toLight, directional ? 1.0e30 : distance * (1 - 1.0e-4));
+    float tMax = directional ? 1.0e30 : distance * (1 - 1.0e-4);
+    if (push.lightRays == 0)
+    {
+        return visible(from, toLight, tMax);
+    }
+    ShadowRay hit;
+    uint way = traceShadow((RayScene*)push.rays, from + push.offset, toLight, 0, tMax, hit);
+    if (way == PENDING)
+    {
+        ShadowTrace* trace = (ShadowTrace*)(push.counts + push.lightRays);
+        LightRay waiting;
+        waiting.hit = hit;
+        waiting.origin = from + push.offset;
+        waiting.tMax = tMax;
+        waiting.direction = toLight;
+        waiting.pixel = lightPixel;
+        waiting.contribution = light * lightWeight;
+        waiting.pad = 0;
+        enqueueLight((uint*)(trace + 1), trace.capacity, waiting); // queue A: right after the record
+        return false;
+    }
+    return way == CLEAR;
 }
 
 /** What one light adds at `p` (geometric normal `ng`) on surface `s` seen from `v`, its shadow traced. */
-float3 lightOne(Light light, Surface s, float3 p, float3 ng, float3 v)
+float3 lightOne(Light light, Surface s, float3 p, float3 ng, float3 v, inout uint rng)
 {
     float3 toLight;
     float distance;
@@ -322,7 +359,30 @@ float3 lightOne(Light light, Surface s, float3 p, float3 ng, float3 v)
     {
         return 0;
     }
-    return lightVisible(p, ng, toLight, distance, light.type == DIRECTIONAL) ? c : float3(0);
+    if (light.radius > 0)
+    {
+        // A light of a size (its ShadowSpec's softness): the shadow ray towards a point of it, uniform over the sun's
+        // disc (a cone of its angular radius) or a sphere's disc facing the point, so its shadows have penumbras.
+        float u = random01(rng);
+        float w = random01(rng);
+        float phi = 6.2831853 * w;
+        float3 a = normalize(abs(toLight.y) < 0.99 ? cross(toLight, float3(0, 1, 0))
+            : cross(toLight, float3(1, 0, 0)));
+        float3 b = cross(toLight, a);
+        if (light.type == DIRECTIONAL)
+        {
+            float cosTheta = 1 - u * (1 - cos(light.radius));
+            float sinTheta = sqrt(max(0, 1 - cosTheta * cosTheta));
+            toLight = normalize(toLight * cosTheta + (a * cos(phi) + b * sin(phi)) * sinTheta);
+        }
+        else
+        {
+            float3 d = light.position + (a * cos(phi) + b * sin(phi)) * (light.radius * sqrt(u)) - p;
+            distance = length(d);
+            toLight = d / max(distance, 1.0e-6);
+        }
+    }
+    return lightVisible(p, ng, toLight, distance, light.type == DIRECTIONAL, c) ? c : float3(0);
 }
 
 /**
@@ -338,7 +398,7 @@ float3 worldLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uin
     uint4 directional = g[0].directional;
     for (uint i = 0; i < directionalCount; i++)
     {
-        sum += lightOne(gridLightRelative(g, directional[i], view.position, view.positionLow), s, p, ng, v);
+        sum += lightOne(gridLightRelative(g, directional[i], view.position, view.positionLow), s, p, ng, v, rng);
     }
     float3 toGrid = lessCamera(view.position, view.positionLow, g[0].origin, g[0].originLow);
     int cell = gridCell(g, p + toGrid);
@@ -350,7 +410,7 @@ float3 worldLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uin
             Light l = gridLightRelative(g, i, view.position, view.positionLow);
             if (l.type != DIRECTIONAL)
             {
-                sum += lightOne(l, s, p, ng, v);
+                sum += lightOne(l, s, p, ng, v, rng);
             }
         }
         return sum;
@@ -362,7 +422,7 @@ float3 worldLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uin
         uint listed = min(list[0], slots); // past the slots: overflowed (noted in the header)
         for (uint k = 0; k < listed; k++)
         {
-            sum += lightOne(gridLightRelative(g, list[1 + k], view.position, view.positionLow), s, p, ng, v);
+            sum += lightOne(gridLightRelative(g, list[1 + k], view.position, view.positionLow), s, p, ng, v, rng);
         }
         return sum;
     }
@@ -376,7 +436,7 @@ float3 worldLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uin
             Light l = gridLightRelative(g, i, view.position, view.positionLow);
             if (l.type != DIRECTIONAL)
             {
-                sum += lightOne(l, s, p, ng, v);
+                sum += lightOne(l, s, p, ng, v, rng);
             }
         }
         return sum;
@@ -409,9 +469,13 @@ float3 worldLight(Surface s, float3 p, float3 ng, float3 v, View view, inout uin
             chosenDistance = distance;
         }
     }
-    if (chosenTarget > 0 && lightVisible(p, ng, chosenWay, chosenDistance, false))
+    if (chosenTarget > 0)
     {
-        sum += chosen * (weights / (float(slots) * chosenTarget));
+        float3 brought = chosen * (weights / (float(slots) * chosenTarget));
+        if (lightVisible(p, ng, chosenWay, chosenDistance, false, brought))
+        {
+            sum += brought;
+        }
     }
     return sum;
 }
@@ -440,19 +504,19 @@ public float3 directLight(Surface s, float3 p, float3 ng, float3 v, View view, i
         sun.cosInner = 0;
         sun.shadowFirst = -1;
         sun.shadowCount = 0;
-        sun.pad = 0;
+        sun.radius = 0;
         sun.pad1 = 0;
-        return lightOne(sun, s, p, ng, v);
+        return lightOne(sun, s, p, ng, v, rng);
     }
     LightListHeader h = loadHeader(list);
     float3 sum = 0;
     for (uint i = 0; i < h.lightCount; i++)
     {
-        sum += lightOne(h.relativeTo(h.lights[i]), s, p, ng, v);
+        sum += lightOne(h.relativeTo(h.lights[i]), s, p, ng, v, rng);
     }
     for (uint i = 0; i < h.extraCount; i++)
     {
-        sum += lightOne(h.relativeTo(h.extra[i]), s, p, ng, v);
+        sum += lightOne(h.relativeTo(h.extra[i]), s, p, ng, v, rng);
     }
     return sum;
 }
@@ -701,6 +765,8 @@ public void shadeHit<M : IMaterial>(uint index, uint features)
     radiance += throughput * emissive * (1 - unlit) + throughput * s.albedo * unlit;
     throughput *= 1 - unlit;
     // The lights, each by a shadow ray
+    lightWeight = throughput; // what a shadow ray waiting for a keep() test brings later is weighed by
+    lightPixel = path.pixel;
     radiance += throughput * directLight(s, p, side, v, view, rng);
     path.rng = rng;
     accumulate(path.pixel, radiance);
@@ -928,6 +994,8 @@ public void shadeProbeHit<M : IMaterial>(uint index, uint features)
     float3 reflectance;
     float3 diffuseWeight;
     float3 around = indirectLightWeights(push.indirect, s, v, p, reflectance, diffuseWeight);
+    lightWeight = 1 - unlit;
+    lightPixel = path.pixel;
     float3 radiance = emissive * (1 - unlit) + s.albedo * unlit
         + (1 - unlit) * (directLight(s, p, side, v, view, rng) + around);
     recordProbeRay(path.pixel, radiance, travelled);

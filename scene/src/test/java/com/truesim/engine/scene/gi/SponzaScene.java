@@ -39,7 +39,7 @@ import com.truesim.engine.render.SkyBackground;
 import com.truesim.engine.render.Textures;
 import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.render.VisibilityBufferShading;
-import com.truesim.engine.render.shadows.InlineRayShadows;
+import com.truesim.engine.render.shadows.Shadows;
 import com.truesim.engine.scene.SceneResources;
 import com.truesim.engine.scene.SceneSync;
 import com.truesim.engine.vulkan.Format;
@@ -138,6 +138,7 @@ final class SponzaScene implements AutoCloseable {
         main = geometry.createView(port, camera, ViewOptions.of(1 << 14, 1 << 22));
         lights = new Lights(device, 1, 1, graph.frameSlots());
         lights.directional(0, -0.2f, -1, 0.28f, 12, 11, 9.5f).setCount(1);
+        lights.shadow(0, com.truesim.scene.core.ShadowSpec.rayTraced());
         int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         target = new GpuImage(device, width, height, VK_FORMAT_R32G32B32A32_SFLOAT, usage, VK_IMAGE_ASPECT_COLOR_BIT);
         pixels = GpuBuffer.hostVisible(device, (long) width * height * 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -164,9 +165,21 @@ final class SponzaScene implements AutoCloseable {
     void realtime() {
         use(new VisibilityBufferShading(geometry, main, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_D32_SFLOAT),
             new ClusteredLights(lights, main), new EnvironmentLighting(sky, main), new SkyBackground(sky, main),
-            new InlineRayShadows(rayTracing, main.view(), lights, 0, 0), new AmbientOcclusion(main, rayTracing),
+            sunShadows(), new AmbientOcclusion(main, rayTracing),
             new ProbeVolumeLighting(main, new ProbeVolume(rayTracing, renderer, lights, sky, main)));
     }
+
+    /** The sun's shadows' part in the view, made once: the owner traces them. */
+    private Technique sunShadows() {
+        if (sunShadows == null) {
+            shadows = new Shadows(geometry, lights).rayTracing(rayTracing);
+            sunShadows = shadows.view(main);
+        }
+        return sunShadows;
+    }
+
+    private Shadows shadows;
+    private Technique sunShadows;
 
     private void use(Technique... techniques) {
         for (Technique t : added) {
@@ -237,6 +250,9 @@ final class SponzaScene implements AutoCloseable {
         pixels.close();
         target.close();
         lights.close();
+        if (shadows != null) {
+            shadows.close();
+        }
         renderer.close();
         sync.close();
         gpu.close();

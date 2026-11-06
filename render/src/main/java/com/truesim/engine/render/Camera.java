@@ -309,6 +309,21 @@ public final class Camera {
         planes[4 * index + 3] = (float) (d / length);
     }
 
+    /**
+     * Gives a perspective view a far plane for culling at {@code distance} along its view (its depth stays infinite):
+     * a light's shadow map, which nothing beyond its range shadows. Until the next {@link #set}. Allocates nothing.
+     */
+    public Camera farPlane(double distance) {
+        if (orthographic) {
+            throw new IllegalStateException("An orthographic view has its depth");
+        }
+        planes[20] = -viewProjection[3];
+        planes[21] = -viewProjection[7];
+        planes[22] = -viewProjection[11];
+        planes[23] = (float) (distance - viewProjection[15]);
+        return this;
+    }
+
     /** The view-projection matrix, column-major. */
     public float[] viewProjection() {
         return viewProjection;

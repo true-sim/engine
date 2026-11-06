@@ -94,6 +94,12 @@ public final class InstanceMotion implements AutoCloseable {
     private long[] lastTick;
     // This upload's claims: per claim its entries in the current and previous buffers (-1: none)
     private int[] currentEntry;
+    // Per claim its slot; per slot its instance (-1: none written) and the poses of its last write, for what follows
+    // moving instances on the CPU (shadow tiles they cross): from, to (x, y, z each), its largest scale
+    private int[] claimSlot;
+    private int[] slotInstance;
+    private double[] slotPoses;
+    private float[] slotScale;
     private int[] previousEntry;
     private int claims;
     // The change lists of the buffers, made and to be made
@@ -115,6 +121,11 @@ public final class InstanceMotion implements AutoCloseable {
         used = new long[(capacity + 63) / 64];
         lastTick = new long[capacity];
         currentEntry = new int[capacity];
+        claimSlot = new int[capacity];
+        slotInstance = new int[capacity];
+        Arrays.fill(slotInstance, -1);
+        slotPoses = new double[6 * capacity];
+        slotScale = new float[capacity];
         previousEntry = new int[capacity];
     }
 
@@ -216,6 +227,11 @@ public final class InstanceMotion implements AutoCloseable {
         lastTick = Arrays.copyOf(lastTick, grown);
         Arrays.fill(lastTick, capacity, grown, Long.MIN_VALUE);
         currentEntry = Arrays.copyOf(currentEntry, grown);
+        claimSlot = Arrays.copyOf(claimSlot, grown);
+        slotInstance = Arrays.copyOf(slotInstance, grown);
+        Arrays.fill(slotInstance, capacity, grown, -1);
+        slotPoses = Arrays.copyOf(slotPoses, 6 * grown);
+        slotScale = Arrays.copyOf(slotScale, grown);
         previousEntry = Arrays.copyOf(previousEntry, grown);
         capacity = grown;
     }
@@ -242,6 +258,7 @@ public final class InstanceMotion implements AutoCloseable {
         }
         RecordBuffer[] made = buffers[layout.ordinal()];
         int c = claims++;
+        claimSlot[c] = slot;
         currentEntry[c] = made[parity].claim(slot);
         previousEntry[c] = lastTick[slot] == tick - 1 && !restart ? -1 : made[parity ^ 1].claim(slot);
         lastTick[slot] = tick;
@@ -260,6 +277,17 @@ public final class InstanceMotion implements AutoCloseable {
         RecordBuffer current = made[parity];
         RecordBuffer previous = made[parity ^ 1];
         int before = previousEntry[claim];
+        int slot = claimSlot[claim];
+        slotInstance[slot] = instance;
+        double[] poses = slotPoses;
+        poses[6 * slot] = fx;
+        poses[6 * slot + 1] = fy;
+        poses[6 * slot + 2] = fz;
+        poses[6 * slot + 3] = tx;
+        poses[6 * slot + 4] = ty;
+        poses[6 * slot + 5] = tz;
+        slotScale[slot] = Math.max(Math.max(Math.max(Math.abs(fsx), Math.abs(fsy)), Math.max(Math.abs(fsz),
+            Math.abs(tsx))), Math.max(Math.abs(tsy), Math.abs(tsz)));
         if (layout == Layout.PRECISE) {
             pose(current, currentEntry[claim], instance, tx, ty, tz, tqx, tqy, tqz, tqw, tsx, tsy, tsz);
             if (before >= 0) {
@@ -331,11 +359,28 @@ public final class InstanceMotion implements AutoCloseable {
         RecordBuffer[] made = buffers[layout.ordinal()];
         made[0].clear(slot);
         made[1].clear(slot);
+        slotInstance[slot] = -1;
         used[slot >>> 6] &= ~(1L << slot);
         count--;
         while (highWater > 0 && (used[(highWater - 1) >>> 6] & 1L << (highWater - 1)) == 0) {
             highWater--;
         }
+    }
+
+    /**
+     * The instance slot {@code slot} last wrote, or -1 (free, or not written yet): with {@link #slotPose} what follows
+     * moving instances on the CPU, such as shadow tiles they cross. Allocates nothing.
+     */
+    public int slotInstance(int slot) {
+        return slot < highWater && (used[slot >>> 6] & 1L << slot) != 0 ? slotInstance[slot] : -1;
+    }
+
+    /**
+     * Slot {@code slot}'s last write: its instance's position at the step before ({@code i} 0 to 2: x, y, z) and at the
+     * last step (3 to 5); {@code i} 6: its largest scale of either. Where it is drawn lies between. Allocates nothing.
+     */
+    public double slotPose(int slot, int i) {
+        return i == 6 ? slotScale[slot] : slotPoses[6 * slot + i];
     }
 
     /** Draws every slot's instance {@code factor} of the way from its pose at the step before to the last (0 to 1). */
