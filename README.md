@@ -277,7 +277,8 @@ Capture capture = input.capture(one, JUMP);   // the next input becomes a bindin
 Scene nodes take pointers as UI elements do, without the UI toolkit (application-api.md, "Scene interaction and
 selection"). Picking is scene data (scene-core's `Pickable`, `Selected`, `Hovered` and `ScenePicker`); the
 `SceneInteraction` plugin (engine-interaction) runs it each frame, at the frame's start, for every pointer (mouse,
-fingers, pen, XR rays, a gamepad's virtual cursor) through this frame's camera, and routes the events:
+fingers, pen, a gamepad's virtual cursor, and any `ScenePointerSource`: engine-xr's `XrSceneRays` adds XR rays)
+through this frame's camera, and routes the events:
 
 ```java
 SceneInteraction interaction = engine.get(SceneInteraction.KEY);
@@ -2609,6 +2610,8 @@ frame as the desktop windows, so an eye can also be shown on the desktop for peo
   hands (`XR_EXT_hand_interaction`), so the same names work on each. With `Input` installed the headset is a device
   of the engine's actions (`XrControls`: `xr:RIGHT_TRIGGER`, `xr:LEFT_THUMBSTICK_Y_AXIS`, `xr:RIGHT_AIM_POSE`,
   `xr:HEAD_POSE`), sampled after `beginFrame` with the other devices, rebound and saved like them.
+  With `SceneInteraction` installed too, `Xr` adds the controllers' aim rays as scene pointers (`XrSceneRays`, a
+  `ScenePointerSource`, binding the `scene.pointer` aim and select actions): engine-interaction knows no XR.
 - **Settings:** `XrSettings` (resolution scale, the eyes' near plane, seated or room-scale tracking space).
 - **Testing:** `HeadsetTest` needs a headset connected and starts the runtime: it runs with `TRUESIM_XR=true`.
 

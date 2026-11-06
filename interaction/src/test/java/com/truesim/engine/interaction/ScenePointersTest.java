@@ -135,7 +135,7 @@ class ScenePointersTest {
         boolean[] cursorOn = {false};
         ScenePointers.VirtualCursor cursor = new ScenePointers.VirtualCursor(input, () -> cursorOn[0], () -> 1000, null)
             .size(800, 600);
-        interaction.pointers(touch).pointers(pen).pointers(cursor).pointers(new ScenePointers.XrRays(input));
+        interaction.pointers(touch).pointers(pen).pointers(cursor);
         touch.touch(0, 1, 7, 1, TouchPhase.DOWN, 0.5f, 0.5f, 0, 0, 1);
         frame();
         touch.touch(0, 1, 7, 1, TouchPhase.UP, 0.5f, 0.5f, 0, 0, 0);

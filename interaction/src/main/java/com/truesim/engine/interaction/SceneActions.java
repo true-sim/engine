@@ -1,6 +1,5 @@
 package com.truesim.engine.interaction;
 
-import com.truesim.annotations.AllowAllocation;
 import com.truesim.engine.input.ActionGroup;
 import com.truesim.engine.input.Axis2Action;
 import com.truesim.engine.input.BinaryAction;
@@ -11,17 +10,13 @@ import com.truesim.engine.input.PoseAction;
 import com.truesim.engine.platform.GamepadButton;
 import com.truesim.engine.platform.Key;
 import com.truesim.engine.platform.MouseButton;
-import com.truesim.engine.xr.Hand;
-import com.truesim.engine.xr.XrButton;
-import com.truesim.engine.xr.XrControls;
-import com.truesim.engine.xr.XrPose;
 import java.util.Locale;
 
 /**
  * The scene interaction's input actions: the {@code scene} group, its bindings settings like any action's
  * ({@code input.scene.pointer.press}), rebound and saved by players (application-api.md D58). Pointer positions come
- * from the platform (the mouse, fingers, pens), XR rays from their aim poses; buttons, the selection's modifiers and
- * commands are actions.
+ * from the platform (the mouse, fingers, pens), rays from aim poses (the xr module binds its controllers to
+ * {@link #AIM_LEFT} and the others and adds their rays); buttons, the selection's modifiers and commands are actions.
  *
  * <pre>{@code
  * input.rebind(player, SceneActions.PRESS, 0, Binding.mouse(MouseButton.RIGHT));     // a left-handed player
@@ -50,7 +45,7 @@ public final class SceneActions {
     public static final Axis2Action CURSOR = POINTER.axis2("cursor", Binding.stick(true));
     /** A gamepad's virtual cursor's primary button: south. */
     public static final BinaryAction CURSOR_PRESS = POINTER.binary("cursorPress", Binding.pad(GamepadButton.SOUTH));
-    /** The left XR ray: bound to the controller's aim pose when a headset is there. */
+    /** The left XR ray: bound to the controller's aim pose by the xr module when a headset is there. */
     public static final PoseAction AIM_LEFT = POINTER.pose("aimLeft");
     /** The right XR ray. */
     public static final PoseAction AIM_RIGHT = POINTER.pose("aimRight");
@@ -69,14 +64,5 @@ public final class SceneActions {
     public static final BinaryAction NONE = SELECTION.binary("none", Binding.key(Key.ESCAPE));
 
     private SceneActions() {
-    }
-
-    /** The game's default bindings of the XR actions (a headset's input added): the aim poses and the triggers. */
-    @AllowAllocation("set up")
-    public static void xrDefaults(Input input) {
-        input.defaults(AIM_LEFT, Binding.of(XrControls.pose(Hand.LEFT, XrPose.AIM)));
-        input.defaults(AIM_RIGHT, Binding.of(XrControls.pose(Hand.RIGHT, XrPose.AIM)));
-        input.defaults(SELECT_LEFT, Binding.of(XrControls.button(Hand.LEFT, XrButton.TRIGGER)));
-        input.defaults(SELECT_RIGHT, Binding.of(XrControls.button(Hand.RIGHT, XrButton.TRIGGER)));
     }
 }
