@@ -70,6 +70,7 @@ final class TextureUpdates implements AutoCloseable {
     private long uploaded; // bytes recorded so far, for tests and statistics
     private boolean registered;
 
+    @AllowAllocation("made once")
     TextureUpdates(VulkanDevice device, FrameSlots slots, long budget) {
         this.device = device;
         this.slots = slots;
