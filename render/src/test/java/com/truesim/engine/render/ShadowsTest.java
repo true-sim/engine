@@ -344,6 +344,7 @@ class ShadowsTest {
             lights.shadow(0, ShadowSpec.rayTraced());
             expectShadow(visibility(geometry), "the first build", shadow, lights);
             assertThat(rayTracing.topLevelBuilds()).as("nothing changed after the first frame").isEqualTo(1);
+            assertThat(rayTracing.topLevelInstances(scene)).as("the floor and the quad").isEqualTo(2);
             frame(colorTarget, 4);
             frame(colorTarget, 4);
             assertThat(rayTracing.topLevelBuilds()).as("a still scene").isEqualTo(1);
@@ -357,6 +358,17 @@ class ShadowsTest {
             expectShadow(visibility(geometry), "the origin moved", new double[] {shadow[0] + 1, shadow[1]}, lights);
             assertThat(rayTracing.topLevelBuilds()).isEqualTo(3);
             assertThat(rayTracing.topLevelRefits()).as("not refitted across a new origin").isEqualTo(1);
+            // The quad stops casting shadows: out of the top level (not in it inactive), built anew, never refitted;
+            // and back in the same way.
+            scene.set(1, quad, 0, 1, false, 1, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            frame(colorTarget, 4);
+            assertThat(rayTracing.topLevelInstances(scene)).as("the floor").isEqualTo(1);
+            assertThat(rayTracing.topLevelBuilds()).isEqualTo(4);
+            scene.set(1, quad, 0, 1, true, 1, -3, -5, 0, 0, 0, 1, 1, 1, 1);
+            frame(colorTarget, 4);
+            assertThat(rayTracing.topLevelInstances(scene)).as("the quad again").isEqualTo(2);
+            assertThat(rayTracing.topLevelBuilds()).isEqualTo(5);
+            assertThat(rayTracing.topLevelRefits()).as("a change of who is in it is a build").isEqualTo(1);
         }
         scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
     }

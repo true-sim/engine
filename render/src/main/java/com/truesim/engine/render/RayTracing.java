@@ -492,6 +492,12 @@ public final class RayTracing implements AutoCloseable {
         return topLevelRefits;
     }
 
+    /** How many instances {@code scene}'s top level held at its last build: those rays trace, 0 before any. */
+    public int topLevelInstances(GpuScene scene) {
+        SceneTop t = tops.get(scene);
+        return t == null ? 0 : t.builtCount;
+    }
+
     /** How many times top levels were built, of all scenes: one whose instances, origin and bottom levels stayed, none. */
     public long topLevelBuilds() {
         return topLevelBuilds;
