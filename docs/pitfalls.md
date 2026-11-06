@@ -416,6 +416,33 @@ each other did not help; the white furnace lost 4 to 7 % of its light to the sam
 
 ## Tests and measurements
 
+**A still scene's benchmark hides what motion costs.** 200 shadowed point lights over the rocks cost 0.98 ms against
+0.93 unshadowed with the camera flying, as every tile stayed; with 100 rocks moving through the lights nearly every
+tile was dirty (each rock reaches 4 or so), and with the default 64 draws a frame 1,012 tiles waited: shadows up to 18
+frames late, while the frame time looked fine (2.1 ms).
+- Proof: `ShadowsBenchmark` dynamic tables (README, 2026-11-06): tiles waiting 1,012 to 1,131 at 64 draws; 437 to 1,101
+  drawn and 4.2 to 7.2 ms with 1,200.
+- Rule: benchmark caching with things moving, and report what waits (`Shadows.stats().waiting()`), not only time.
+
+**Copying regions of a depth atlas cost the whole image.** Copying 1,000 tiles from the layer atlas into the shadow
+atlas (`vkCmdCopyImage2`, one command, 8192 x 8192 D32 each) took 5.6 ms: the copy needs both whole images in transfer
+layouts, from and back to depth attachment, every frame.
+- Proof: `ShadowsBenchmark` with `TRUESIM_SHADOWS_PASSES`, 2,000 rocks moving: "shadow layer copies" 5.595 ms; a
+  triangle per tile writing the layer's depth in the atlas pass instead: the copies gone, the atlas pass 4.8 ms.
+- Rule: move depth between atlases inside the rendering (a depth write), not by transfer.
+
+**Keeping still casters apart did not pay over cheap casters.** Drawing only moving casters over a tile's layer of
+still ones (a depth write per texel first) was slower than drawing every caster for rocks: 500 moving 7.03 against 4.62
+ms; per tile the cost is in culling and drawing at all, not in the casters drawn.
+- Proof: `ShadowsBenchmark`, `TRUESIM_SHADOWS_AB`, draws 1,200, both in turns in one run (README).
+- Rule: measure a cache against the redraw it saves on the scenes at hand; `shadows.casters.layers` stays off.
+
+**A mask per traced light does not scale to many lights.** 200 ray-traced point lights took 220 ms a frame (soft: 915
+ms) at 1920 x 1080: each light traced and (soft) denoised over every pixel of the view.
+- Proof: `ShadowsBenchmark` dynamic, ray traced, before `shadows.rays.lights`; 2.8 ms with 16 traced and the rest
+  mapped, 6.9 ms with 4 of them soft.
+- Rule: trace a budget of lights, most important first; every light past it takes maps.
+
 **A GPU time per frame that left out the frame start.** `GpuTimings` timed passes only; textures' copies and mip
 chains are recorded in the frame start (`FrameSlots.recordStart`), before every pass, so `StreamBench`'s "GPU per
 frame" (1.78 ms at worst for frames streaming a 2048 x 2048 texture) left them out.

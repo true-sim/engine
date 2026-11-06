@@ -1492,6 +1492,48 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   AUTO maps 0.97 to 0.98 ms (61 M atlas texels, the shadow atlas pass 0.002 ms in the median frame: tiles stay; at
   most 12 drawn in a frame as sizes change); fixed 256 maps 0.96 to 0.98 ms; with 29 lights' specs switched every
   frame 1.7 to 2.2 ms (64 tiles drawn a frame). No graph build in any of them after the first frames.
+
+  **Moving** (`ShadowsBenchmark`, 2026-11-06, the same 200 lights and flight; rocks circling through the lights'
+  ranges, lights circling 4 units wide; GPU time of the frame (shadow passes), tiles drawn a frame, no graph build):
+
+  | AUTO maps | `shadows.atlas.draws` 64 (default) | tiles waiting | draws 1,200 (none waits) | tiles drawn |
+  |---|---|---|---|---|
+  | all still | 0.97 ms (0.00) | 0 | 1.29 ms (0.01) | 1.7 |
+  | 100 rocks moving | 2.13-2.62 (0.68-0.80) | 1,012 | 4.17-4.20 (1.53) | 437 |
+  | 500 rocks moving | 3.13 (1.33) | 1,114 | 4.62 (2.28) | 926 |
+  | 2,000 rocks moving | 3.29-3.32 (1.49) | 1,120 | 7.05-7.22 (3.40) | 1,001 |
+  | 10% of the lights moving | 1.47 (0.38) | 550 | 2.06-2.13 (0.58-0.61) | 121 |
+  | 50% of the lights moving | 1.85-1.92 (0.74-0.77) | 1,080 | 5.05-5.12 (2.36) | 601 |
+  | 500 rocks, 10% of the lights | 3.15 (1.35) | 1,117 | 4.63-4.68 (2.30) | 953 |
+  | 2,000 rocks, 50% of the lights | 3.31-3.35 (1.52) | 1,131 | 5.60-5.64 (2.83) | 1,101 |
+
+  A tile costs about 2.5 µs to draw and 2 µs to cull (1,200 tiles: the atlas pass 2.6 ms, culling 2.1 ms), whatever
+  moved: so a few hundred moving rocks redraw nearly every tile (each reaches 4 or so of the 1,136). With the default
+  64 draws a frame the rest wait, their shadows late by up to 18 frames; more draws a frame keep them in step at that
+  cost (more draw views also cost 0.3 ms with nothing drawn). **Caster layers** (`shadows.casters.layers`, off):
+  still casters kept in a layer of their own (a second atlas), a tile that only moving casters changed drawn as its
+  layer's depth (a triangle over the tile) and the moving casters on top. Over the rocks it was slower: 100 rocks
+  4.07 against 4.17 ms, 500 rocks 7.03 against 4.62, 2,000 rocks 8.53 against 7.05 (draws 1,200, same run): a rock
+  tile's still casters are cheaper to draw than its texels to write. It stays a choice for costly still casters.
+
+  Ray-traced point lights: a mask per light over the view's pixels, so at most `shadows.rays.lights` (16) spot and
+  point lights are traced a frame, the most important (how big their reach shows, times their importance; those
+  traced last frame kept a little longer), the rest take AUTO maps; at most `shadows.soft.lights` (4) of them soft,
+  the rest traced hard; no ray beyond a light's range. All 200 traced took 220 to 236 ms a frame (hard) and 915 to
+  936 ms (soft). Now (draws 64):
+
+  | 200 lights, rocks and lights moving | hard rays (16 traced) | soft rays (4 soft, 12 hard) |
+  |---|---|---|
+  | all still | 2.77-2.91 ms (1.82-1.92) | 6.88-7.08 ms (5.87-5.96) |
+  | 100 rocks moving | 1.92-2.01 (1.00-1.06) | 5.41-5.71 (4.43-4.70) |
+  | 500 rocks moving | 2.73-2.88 (1.47-1.67) | 5.50-5.62 (4.58-4.69) |
+  | 2,000 rocks moving | 3.76-3.77 (2.10-2.11) | 7.70-7.86 (6.54-6.69) |
+  | 10% of the lights moving | 2.89-3.20 (1.84-2.14) | 6.82-7.24 (5.69-6.04) |
+  | 50% of the lights moving | 2.99-3.21 (1.93-2.18) | 6.98-7.28 (5.83-6.17) |
+  | 500 rocks, 10% of the lights | 2.75-2.97 (1.51-1.62) | 5.55-5.82 (4.62-4.81) |
+  | 2,000 rocks, 50% of the lights | 3.75-3.77 (2.07-2.11) | 7.73-7.88 (6.59-6.70) |
+
+  `ShadowsVideo` renders the scene as PNG frames on a fixed 60 fps timeline, per method, with each frame's measures.
 - **Checked** (screenshots of every method, `Screenshots.renderShadowOwner`): with lights above the rocks, AUTO point
   light maps and hard rays differ in 195 pixels darker and 165 brighter of 2 million.
 - **Casters drawn two-sided:** tiles draw every face of a caster, both sides (back faces kept by meshlet culling, the
