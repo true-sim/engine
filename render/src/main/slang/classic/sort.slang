@@ -2,7 +2,7 @@
 // draw list (a shading bin, unmirrored or mirrored), each part still drawn by one indirect draw of its own pipeline,
 // so the order across parts is the parts' (see SortedTransparency). classicSortArgsMain finds where each part's draws
 // start among all of them and sizes the radix sort; classicSortKeysMain writes each draw's key (its part above 24 bits
-// of its instance's squared distance, inverted: farthest first) and its slot; the radix sort is particles/sort.slang's,
+// of its instance's squared distance, inverted: farthest first) and its slot; the radix sort is blocks/sort.slang's,
 // 8 passes; classicSortPlaceMain copies each draw's command into its part's range of the sorted commands, in order.
 import meshlets.common;
 

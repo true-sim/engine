@@ -16,6 +16,7 @@ import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.layout.IndirectConstants;
 import com.truesim.engine.render.layout.IndirectLightLayout;
 import com.truesim.engine.settings.Setting;
+import com.truesim.engine.settings.SettingRegistry;
 import com.truesim.engine.settings.TechniqueConfig;
 import com.truesim.engine.settings.TechniqueConfig.Tunable;
 import com.truesim.engine.settings.TechniqueKind;
@@ -251,5 +252,15 @@ public final class ProbeVolumeLighting implements Technique {
             Commands.updateBuffer(ctx.unsafe().commands(), handle, IndirectLightLayout.FLAGS, 4, flags);
             Commands.updateBuffer(ctx.unsafe().commands(), handle, IndirectLightLayout.RESERVED, bytes, section);
         }
+    }
+
+    /**
+     * Registers the indirect light's settings in {@code registry} for discovery ({@link SettingRegistry#all(String)}):
+     * this slot, the world lights' slot (their kinds' tunables with them), the probe volume's and the radiance
+     * cascades' settings, hidden. The plugin of the module holding them calls this.
+     */
+    public static void register(SettingRegistry registry) {
+        registry.addHiddenSlots(SLOT, WorldLights.SLOT).addHidden(ProbeVolume.ALL.toArray(new Setting<?>[0]))
+            .addHidden(RadianceCascades.ALL.toArray(new Setting<?>[0]));
     }
 }

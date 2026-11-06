@@ -26,6 +26,7 @@ import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.graph.ViewPort;
+import com.truesim.engine.settings.SettingRegistry;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
@@ -235,7 +236,10 @@ class ClusteredLightsTest {
             device.submitAndWait(device.graphics(), graph::record);
             assertThat(graph.builds()).as("rebuilt for the new tiles").isEqualTo(builds + 1);
             assertThat(clustered.tilesAcross()).isEqualTo((WIDTH + 127) / 128);
-            assertThat(RenderSettings.ALL).containsAll(ClusteredLights.ALL).contains(RenderSettings.OCCLUSION);
+            SettingRegistry registry = new SettingRegistry();
+            RenderSettings.register(registry);
+            assertThat(registry.all("lights")).containsAll(ClusteredLights.ALL);
+            assertThat(registry.all()).contains(RenderSettings.OCCLUSION);
         }
     }
 

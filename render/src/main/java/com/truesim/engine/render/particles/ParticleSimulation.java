@@ -8,6 +8,7 @@ import com.truesim.common.graph.Id;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Technique;
+import com.truesim.engine.render.RadixSort;
 import com.truesim.engine.render.SceneData;
 import com.truesim.engine.render.layout.ParticleConstants;
 import com.truesim.engine.render.layout.ParticlePush;
@@ -288,46 +289,14 @@ public final class ParticleSimulation implements Technique {
     }
 
     /**
-     * A radix sort of the frame's event keys in place: 8 passes of 4 bits, with the particle sort's programs; recorded
+     * A radix sort of the frame's event keys in place: 8 passes of 4 bits, with the core's RadixSort; recorded
      * while recent frames sent many events.
      */
     @AllowAllocation("building the graph, when it changes")
     private void sort(GraphBuilder g, Particles.Buffers b, String name) {
         Particles p = particles;
-        Pipeline count = g.computeProgram(SORT_SHADER, "sortCountMain", ParticleSortPush.BYTES);
-        Pipeline scan = g.computeProgram(SORT_SHADER, "sortScanMain", ParticleSortPush.BYTES);
-        Pipeline scatter = g.computeProgram(SORT_SHADER, "sortScatterMain", ParticleSortPush.BYTES);
-        for (int pass = 0; pass < 8; pass++) {
-            Buffer source = pass % 2 == 0 ? b.eventKeys() : b.eventKeysOther();
-            Buffer target = pass % 2 == 0 ? b.eventKeysOther() : b.eventKeys();
-            long from = pass % 2 == 0 ? p.eventKeysAddress() : p.eventKeysOtherAddress();
-            long to = pass % 2 == 0 ? p.eventKeysOtherAddress() : p.eventKeysAddress();
-            ParticleSortPush countPush = new ParticleSortPush().shift(4 * pass).args(p.eventArgsAddress())
-                .histogram(p.eventCountsAddress()).source(from).target(to);
-            q(g.pass(name + ", count " + pass)).read(source, BufferAccess.STORAGE_READ)
-                .read(b.eventArgs(), BufferAccess.INDIRECT).read(b.eventArgs(), BufferAccess.STORAGE_READ)
-                .write(b.eventCounts(), BufferAccess.STORAGE_WRITE)
-                .record(ctx -> {
-                    if (p.simulating() && p.sendsEvents() && p.radixEvents()) {
-                        ctx.dispatchIndirect(count, countPush, b.eventArgs(), 0);
-                    }
-                });
-            q(g.pass(name + ", scan " + pass)).read(b.eventArgs(), BufferAccess.STORAGE_READ)
-                .write(b.eventCounts(), BufferAccess.STORAGE_WRITE)
-                .record(ctx -> {
-                    if (p.simulating() && p.sendsEvents() && p.radixEvents()) {
-                        ctx.dispatch(scan, countPush, 1);
-                    }
-                });
-            q(g.pass(name + ", scatter " + pass)).read(source, BufferAccess.STORAGE_READ)
-                .read(b.eventCounts(), BufferAccess.STORAGE_READ).read(b.eventArgs(), BufferAccess.INDIRECT)
-                .read(b.eventArgs(), BufferAccess.STORAGE_READ).write(target, BufferAccess.STORAGE_WRITE)
-                .record(ctx -> {
-                    if (p.simulating() && p.sendsEvents() && p.radixEvents()) {
-                        ctx.dispatchIndirect(scatter, countPush, b.eventArgs(), 0);
-                    }
-                });
-        }
+        RadixSort.add(g, name + ",", b.eventArgs(), b.eventKeys(), b.eventKeysOther(), b.eventCounts(),
+            RadixSort.MAX_PASSES, async && p.asyncAllowed(), pass -> p.simulating() && p.sendsEvents() && p.radixEvents());
     }
 
     /**
@@ -386,16 +355,12 @@ public final class ParticleSimulation implements Technique {
     private void parentRibbons(GraphBuilder g, Particles.Buffers b) {
         Particles p = particles;
         int slots = p.pool().slots();
-        long groups = (slots + ParticleConstants.SORT_GROUP - 1) / ParticleConstants.SORT_GROUP;
         Buffer keys = g.createBuffer("particle ribbon keys", 8L * slots);
         Buffer other = g.createBuffer("particle ribbon keys, other", 8L * slots);
         Buffer args = g.createBuffer("particle ribbon args", 4L * (4 + 64));
-        Buffer histogram = g.createBuffer("particle ribbon counts", 4L * 16 * groups);
+        Buffer histogram = g.createBuffer("particle ribbon counts", RadixSort.histogramBytes(slots));
         Pipeline argsProgram = g.computeProgram(SORT_SHADER, "sortArgsMain", ParticleSortPush.BYTES);
         Pipeline keysProgram = g.computeProgram(SORT_SHADER, "ribbonKeysMain", ParticleSortPush.BYTES);
-        Pipeline count = g.computeProgram(SORT_SHADER, "sortCountMain", ParticleSortPush.BYTES);
-        Pipeline scan = g.computeProgram(SORT_SHADER, "sortScanMain", ParticleSortPush.BYTES);
-        Pipeline scatter = g.computeProgram(SORT_SHADER, "sortScatterMain", ParticleSortPush.BYTES);
         Pipeline orderProgram = g.computeProgram(SORT_SHADER, "ribbonOrderMain", ParticleSortPush.BYTES);
         ParticleSortPush argsPush = new ParticleSortPush();
         q(g.pass("particle ribbon args")).read(b.state(), BufferAccess.STORAGE_READ)
@@ -416,42 +381,8 @@ public final class ParticleSimulation implements Technique {
                         .args(ctx.address(args)).target(ctx.address(keys)), p.parentRibbonChunks());
                 }
             });
-        for (int pass = 0; pass < 8; pass++) {
-            Buffer source = pass % 2 == 0 ? keys : other;
-            Buffer target = pass % 2 == 0 ? other : keys;
-            int index = pass;
-            ParticleSortPush countPush = new ParticleSortPush().shift(4 * pass);
-            q(g.pass("particle ribbon sort, count " + pass)).read(source, BufferAccess.STORAGE_READ)
-                .read(args, BufferAccess.INDIRECT).read(args, BufferAccess.STORAGE_READ)
-                .write(histogram, BufferAccess.STORAGE_WRITE)
-                .record(ctx -> {
-                    if (p.simulating() && index < ParticleSort.passes(p.parentRibbonCount())) {
-                        ctx.dispatchIndirect(count, ribbonPush(countPush, p.stateAddress(), slots)
-                            .args(ctx.address(args)).histogram(ctx.address(histogram)).source(ctx.address(source)),
-                            args, 0);
-                    }
-                });
-            ParticleSortPush scanPush = new ParticleSortPush();
-            q(g.pass("particle ribbon sort, scan " + pass)).read(args, BufferAccess.STORAGE_READ)
-                .write(histogram, BufferAccess.STORAGE_WRITE)
-                .record(ctx -> {
-                    if (p.simulating() && index < ParticleSort.passes(p.parentRibbonCount())) {
-                        ctx.dispatch(scan, ribbonPush(scanPush, p.stateAddress(), slots)
-                            .args(ctx.address(args)).histogram(ctx.address(histogram)), 1);
-                    }
-                });
-            ParticleSortPush scatterPush = new ParticleSortPush().shift(4 * pass);
-            q(g.pass("particle ribbon sort, scatter " + pass)).read(source, BufferAccess.STORAGE_READ)
-                .read(histogram, BufferAccess.STORAGE_READ).read(args, BufferAccess.INDIRECT)
-                .read(args, BufferAccess.STORAGE_READ).write(target, BufferAccess.STORAGE_WRITE)
-                .record(ctx -> {
-                    if (p.simulating() && index < ParticleSort.passes(p.parentRibbonCount())) {
-                        ctx.dispatchIndirect(scatter, ribbonPush(scatterPush, p.stateAddress(), slots)
-                            .args(ctx.address(args)).histogram(ctx.address(histogram)).source(ctx.address(source))
-                            .target(ctx.address(target)), args, 0);
-                    }
-                });
-        }
+        RadixSort.add(g, "particle ribbon sort,", args, keys, other, histogram, RadixSort.MAX_PASSES,
+            async && p.asyncAllowed(), pass -> p.simulating() && pass < ParticleSort.passes(p.parentRibbonCount()));
         ParticleSortPush orderPush = new ParticleSortPush();
         q(g.pass("particle ribbon order")).read(keys, BufferAccess.STORAGE_READ).read(args, BufferAccess.INDIRECT)
             .read(args, BufferAccess.STORAGE_READ).write(b.order(), BufferAccess.STORAGE_WRITE)

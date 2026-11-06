@@ -539,7 +539,7 @@ predecessors only. `JobSystem` runs one `parallelFor` at a time, and one called 
   `EnvironmentMaps` filters it into graph-persistent cubes (radiance with a mip chain, GGX levels by roughness, Charlie
   for sheen) and spherical harmonics, again only when its version changes or its images are new (`PassContext.fresh`),
   so views and eyes share one filtering; `EnvironmentMaps.BrdfTable` is made once per graph. `SkyBackground` shows an
-  environment behind a view at `Anchor.OPAQUE`, chosen apart from the lighting (AR passthrough shows none, a product
+  environment behind a view at `Order.SKY` (in `Anchor.OPAQUE`'s span), chosen apart from the lighting (AR passthrough shows none, a product
   viewer a plain color). The graph's persistent images gained cube faces and mip chains with a slot per level, and the
   bindless set cube and 2D-array views. HDR panoramas come from scene's `RadianceImporter` as half-float `TextureData`.
 - **D139** (built) Surface outputs and screen-space reflections (README, "Surface outputs and screen-space

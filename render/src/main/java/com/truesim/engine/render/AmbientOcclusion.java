@@ -3,7 +3,6 @@ package com.truesim.engine.render;
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.graph.Id;
 import com.truesim.engine.graph.Access;
-import com.truesim.engine.graph.Anchor;
 import com.truesim.engine.graph.Buffer;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
@@ -20,6 +19,7 @@ import com.truesim.engine.render.shadows.ShadowSettings;
 import com.truesim.engine.render.shadows.TopLevel;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
+import com.truesim.engine.settings.SettingRegistry;
 import com.truesim.engine.settings.TechniqueConfig;
 import com.truesim.engine.settings.TechniqueConfig.Tunable;
 import com.truesim.engine.settings.TechniqueKind;
@@ -58,7 +58,7 @@ import java.util.Objects;
  * <p>The screen-space ones are single-frame by default (a noise pattern fixed in time, then the spatial filter: no
  * lag); with {@code temporal}, and always for rays, the kind's {@code denoiser} accumulates over frames, the
  * history found through the view's motion vectors ({@link Keys#MOTION}, or the camera's reprojection without a
- * {@link MotionVectors}). It modifies {@link Keys#SCENE_COLOR} at {@link Anchor#OPAQUE}, after the background, before
+ * {@link MotionVectors}). It modifies {@link Keys#SCENE_COLOR} at {@link Order#SCREEN_SPACE_OCCLUSION}, after the background, before
  * the reflections; per view, within its render region. Needs a shading technique providing the surface outputs.
  *
  * <p>A game's own kind ({@link Techniques#register}) makes a {@link Technique} built in this one's place, given this
@@ -300,10 +300,10 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
         return List.of(Keys.SCENE_DEPTH);
     }
 
-    /** At {@link Anchor#OPAQUE}, after the background, before screen-space reflections. */
+    /** At {@link Order#SCREEN_SPACE_OCCLUSION}: after the background, before screen-space reflections. */
     @Override
     public Order order() {
-        return Order.at(Anchor.OPAQUE).after(SkyBackground.ID).before(ScreenSpaceReflections.ID);
+        return Order.at(Order.SCREEN_SPACE_OCCLUSION);
     }
 
     @Override
@@ -555,5 +555,13 @@ public final class AmbientOcclusion implements Technique, SurfaceOutputs.Consume
                     (float) (view.view().position(2) - rayTracing.origin(2)));
         }
         return push;
+    }
+
+    /**
+     * Registers its settings in {@code registry} for discovery ({@link SettingRegistry#all(String)}): the slot (its
+     * kinds' tunables with it) and the debug view, hidden. The plugin of the module holding it calls this.
+     */
+    public static void register(SettingRegistry registry) {
+        registry.addHiddenSlots(SLOT).addHidden(DEBUG);
     }
 }

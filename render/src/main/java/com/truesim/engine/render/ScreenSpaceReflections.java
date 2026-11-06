@@ -3,7 +3,6 @@ package com.truesim.engine.render;
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.graph.Id;
 import com.truesim.engine.graph.Access;
-import com.truesim.engine.graph.Anchor;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
@@ -17,6 +16,7 @@ import com.truesim.engine.render.blocks.DepthPyramid;
 import com.truesim.engine.render.layout.ReflectPush;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
+import com.truesim.engine.settings.SettingRegistry;
 import com.truesim.engine.settings.TechniqueConfig;
 import com.truesim.engine.settings.TechniqueConfig.Tunable;
 import com.truesim.engine.settings.TechniqueKind;
@@ -42,7 +42,7 @@ import java.util.Objects;
  * smoothly at the image's edges ({@code edgeFade}), the distance's end and the cutoff. No history: each frame's
  * reflections are its own (no latency, no ghosting).
  *
- * <p>It modifies {@link Keys#SCENE_COLOR} at {@link Anchor#OPAQUE}, after the background ({@link SkyBackground}),
+ * <p>It modifies {@link Keys#SCENE_COLOR} at {@link Order#SCREEN_SPACE_LIGHTING}, after the background ({@link SkyBackground}),
  * before transparency: blended and transmissive surfaces get none, and are not seen in reflections. Per view (each eye,
  * each window), within the view's render region (dynamic resolution); one per view under {@link #ID}, as transparency
  * is, where ray-traced reflections will be another kind (#379). Needs a shading technique providing the surface outputs
@@ -175,10 +175,10 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
         return List.of(Keys.SCENE_DEPTH);
     }
 
-    /** At {@link Anchor#OPAQUE}, after the background, so glossy reflections blur the sky too. */
+    /** At {@link Order#SCREEN_SPACE_LIGHTING}: after the background, so glossy reflections blur the sky too. */
     @Override
     public Order order() {
-        return Order.at(Anchor.OPAQUE).after(SkyBackground.ID);
+        return Order.at(Order.SCREEN_SPACE_LIGHTING);
     }
 
     /** While the slot is not off. */
@@ -322,5 +322,13 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
             .cutoff(config.roughnessCutoff())
             .edgeFade(config.edgeFade())
             .scale(scale);
+    }
+
+    /**
+     * Registers its settings in {@code registry} for discovery ({@link SettingRegistry#all(String)}): the slot, its
+     * kinds' tunables with it, hidden. The plugin of the module holding it calls this.
+     */
+    public static void register(SettingRegistry registry) {
+        registry.addHiddenSlots(SLOT);
     }
 }

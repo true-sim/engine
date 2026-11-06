@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
+import com.truesim.engine.settings.SettingRegistry;
 import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.settings.TechniqueSlot;
 import java.util.List;
@@ -77,15 +78,26 @@ class TechniqueSettingsTest {
     }
 
     @Test
-    void everySlotsSettingsAreListed() {
-        List<Setting<?>> all = RenderSettings.ALL;
+    void everySlotsSettingsAreDiscovered() {
         EngineSettings settings = new EngineSettings();
+        SettingRegistry registry = new SettingRegistry().techniques(settings.techniques());
+        RenderSettings.register(registry);
+        AmbientOcclusion.register(registry);
+        ScreenSpaceReflections.register(registry);
+        ProbeVolumeLighting.register(registry);
+        ReferencePathTracer.register(registry);
+        List<Setting<?>> all = registry.all();
         for (TechniqueSlot<?, ?> slot : List.of(AmbientOcclusion.SLOT, ScreenSpaceReflections.SLOT,
             ProbeVolumeLighting.SLOT, WorldLights.SLOT)) {
             assertThat(all).containsAll(settings.techniques().settings(slot));
         }
         assertThat(all).contains(Transparency.SLOT.setting(), Transparency.SORTED_RUNS);
         assertThat(all).doesNotHaveDuplicates();
+        assertThat(registry.all("render")).contains(RenderSettings.OCCLUSION, AmbientOcclusion.DEBUG)
+            .containsAll(settings.techniques().settings(AmbientOcclusion.SLOT)).doesNotContain(DisplayTransform.EXPOSURE);
+        assertThat(registry.all("display")).contains(DisplayTransform.CURVE, DisplayTransform.EXPOSURE);
+        assertThat(registry.all()).containsAll(DisplayTransform.ALL);
+        assertThat(registry.setting("render.ao.bitmask.radius")).isNotNull();
     }
 
     @Test

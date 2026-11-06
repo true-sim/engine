@@ -22,14 +22,22 @@ import java.util.Set;
  * registry.add(DEBUG, SettingTier.DEVELOPER, GraphSettings.VALIDATION);        // with a tier
  * registry.addScoped("window.main", MAIN_WINDOW, WindowSettings.MODE);         // one window's own, its own group
  * registry.addHidden(Internal.CACHE_SIZE);                                     // not for players: no group
+ * registry.addSlots(GRAPHICS, AmbientOcclusion.SLOT);                          // its choice, its kinds' tunables
+ * registry.all("render");                                                      // every render.* setting declared
  * registry.tiers(SettingTier.BASIC, SettingTier.ADVANCED, SettingTier.DEVELOPER).hide(SettingTier.DEVELOPER);
  * registry.check();                                                            // at startup
  * for (SettingGroup group : registry.groups(null, SettingTier.ADVANCED)) { ... registry.settings(group, ...) }
  * }</pre>
  *
- * <p>A full name (scope and name) can be registered once; a second registration throws. {@link #check} fails on what
- * cannot be shown: a player-visible setting without a group, a tier not declared, two groups with one id. Tiers are
- * optional: with none declared, no setting may have one, and queries filter nothing.
+ * <p>A full name (scope and name) is registered once: registering it again the same way (two plugins sharing a setting)
+ * does nothing, another way throws. {@link #check} fails on what cannot be shown: a player-visible setting without a
+ * group, a tier not declared, two groups with one id. Tiers are optional: with none declared, no setting may have one,
+ * and queries filter nothing.
+ *
+ * <p>It is also how settings are discovered: every plugin and library registers what it declares, so {@link #all()}
+ * and {@link #all(String)} list every setting the app has (a library's along with the engine's) without a hard list.
+ * Technique slots registered with {@link #addSlots} list their choice and, through the {@link Techniques} given to
+ * {@link #techniques}, the tunables of every kind registered for them, a game's or a mod's too.
  */
 @AllowAllocation("set up once, queried by options screens")
 public final class SettingRegistry {
@@ -61,6 +69,8 @@ public final class SettingRegistry {
     }
 
     private final Map<String, Entry> entries = new LinkedHashMap<>(); // by full name, in registration order
+    private final Map<String, TechniqueSlot<?, ?>> slots = new LinkedHashMap<>(); // by name, in registration order
+    private Techniques techniques;
     private final Set<SettingTier> tiers = new LinkedHashSet<>();
     private final Set<SettingTier> hidden = new HashSet<>();
     private boolean revealed;
@@ -102,17 +112,113 @@ public final class SettingRegistry {
         return this;
     }
 
-    /** Registers {@code entry}; throws if its full name is registered already. */
+    /**
+     * Registers {@code entry}; nothing if it is registered already the same way, and throws if its full name is
+     * registered otherwise (another setting, group or tier).
+     */
     public SettingRegistry add(Entry entry) {
         Objects.requireNonNull(entry.setting(), "setting");
         if (entry.scope() != null && (entry.scope().isBlank() || entry.scope().endsWith("."))) {
             throw new IllegalArgumentException("A scope is a word or dotted words: '" + entry.scope() + "'");
         }
         Entry before = entries.putIfAbsent(entry.fullName(), entry);
-        if (before != null) {
+        if (before != null && !before.equals(entry)) {
             throw new IllegalArgumentException(entry.fullName() + " is registered twice");
         }
         return this;
+    }
+
+    /**
+     * Registers technique slots, shown in {@code group}: each one's choice as a setting, and its kinds' tunables in
+     * {@link #all()} (with {@link #techniques}). Declares each slot in those techniques, so its own kinds register.
+     */
+    public SettingRegistry addSlots(SettingGroup group, TechniqueSlot<?, ?>... declared) {
+        return addSlots(group, null, declared);
+    }
+
+    /** Registers technique slots, shown in {@code group} at {@code tier} (null: none). */
+    public SettingRegistry addSlots(SettingGroup group, SettingTier tier, TechniqueSlot<?, ?>... declared) {
+        Objects.requireNonNull(group, "group");
+        for (TechniqueSlot<?, ?> slot : declared) {
+            add(new Entry(slot.setting(), null, group, tier));
+            slot(slot);
+        }
+        return this;
+    }
+
+    /** Registers technique slots not shown to players, as {@link #addHidden} does settings. */
+    public SettingRegistry addHiddenSlots(TechniqueSlot<?, ?>... declared) {
+        for (TechniqueSlot<?, ?> slot : declared) {
+            add(new Entry(slot.setting(), null, null, null));
+            slot(slot);
+        }
+        return this;
+    }
+
+    private void slot(TechniqueSlot<?, ?> slot) {
+        TechniqueSlot<?, ?> before = slots.putIfAbsent(slot.name(), slot);
+        if (before != null && before != slot) {
+            throw new IllegalArgumentException("Two slots are named " + slot.name());
+        }
+        if (techniques != null) {
+            techniques.slot(slot);
+        }
+    }
+
+    /**
+     * The kinds of technique the slots' tunables are listed from: the app's ({@link EngineSettings#techniques()}).
+     * Declares the slots registered so far in them. Returns this.
+     */
+    public SettingRegistry techniques(Techniques kinds) {
+        techniques = Objects.requireNonNull(kinds, "kinds");
+        for (TechniqueSlot<?, ?> slot : slots.values()) {
+            kinds.slot(slot);
+        }
+        return this;
+    }
+
+    /** The technique slots registered, in registration order. */
+    public List<TechniqueSlot<?, ?>> slots() {
+        return List.copyOf(slots.values());
+    }
+
+    /**
+     * Every setting the app declared: each registered one (unscoped and scoped alike, shown or hidden), in registration
+     * order, each slot's choice followed by its kinds' tunables (with {@link #techniques}). What a console or a
+     * settings dump lists.
+     */
+    public List<Setting<?>> all() {
+        return all("");
+    }
+
+    /**
+     * The settings of {@link #all()} whose name (without scope) is {@code prefix} or starts with it and a dot
+     * ({@code "render"}: {@code render.ao} and {@code render.ao.bitmask.radius}, not {@code renderer.x}); all of them
+     * for {@code ""}. Each setting once.
+     */
+    public List<Setting<?>> all(String prefix) {
+        Objects.requireNonNull(prefix, "prefix");
+        Set<Setting<?>> found = new LinkedHashSet<>();
+        for (Entry entry : entries.values()) {
+            Setting<?> setting = entry.setting();
+            if (under(setting.name(), prefix)) {
+                found.add(setting);
+            }
+            TechniqueSlot<?, ?> slot = slots.get(setting.name());
+            if (slot != null && slot.setting() == setting && techniques != null) {
+                for (Setting<?> tunable : techniques.settings(slot)) {
+                    if (under(tunable.name(), prefix)) {
+                        found.add(tunable);
+                    }
+                }
+            }
+        }
+        return List.copyOf(found);
+    }
+
+    private static boolean under(String name, String prefix) {
+        return prefix.isEmpty() || name.equals(prefix)
+            || name.length() > prefix.length() && name.startsWith(prefix) && name.charAt(prefix.length()) == '.';
     }
 
     /** The tiers this app uses; replaces those declared before. */
@@ -174,6 +280,28 @@ public final class SettingRegistry {
     /** The setting registered by {@code fullName} (scope and name), or null. */
     public Entry find(String fullName) {
         return entries.get(fullName);
+    }
+
+    /**
+     * The setting named {@code name} among {@link #all()}: a registered unscoped one or a tunable of a registered
+     * slot's kind ({@code render.ao.bitmask.radius}); null if none. For consoles and the command line.
+     */
+    public Setting<?> setting(String name) {
+        Entry entry = entries.get(name);
+        if (entry != null && entry.scope() == null) {
+            return entry.setting();
+        }
+        if (techniques != null) {
+            for (TechniqueSlot<?, ?> slot : slots.values()) {
+                if (name.startsWith(slot.name() + ".")) {
+                    Setting<?> found = techniques.find(name);
+                    if (found != null) {
+                        return found;
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     /**

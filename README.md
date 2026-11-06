@@ -156,7 +156,10 @@ graph's settings or a view it is given (`Target.displaySettings(view)`: a window
 tuning values are settings too, read from the graph's settings unless a technique is given its own: light clusters (`ClusteredLights.ALL`:
 tiles, slices, range, lights per cluster, and the irradiance where lights without a range end, `Lights.NO_RANGE`),
 occlusion culling (`RenderSettings.OCCLUSION`), cascades and ray offsets (`ShadowSettings.ALL`), and the display
-transform (`DisplayTransform.ALL`); `RenderSettings.ALL` lists them all for an options screen.
+transform (`DisplayTransform.ALL`). No hard list holds them all: `RenderPlugin` registers the renderer's settings and
+slots in the engine's `SettingRegistry`, a library's plugin registers its own the same way, and consoles and settings
+screens discover every one with `registry.all()` or `registry.all("render")` (a slot's kinds' tunables included,
+a mod's too).
 
 **Techniques and their tunables** (`TechniqueSlot`, `TechniqueKind`, `Techniques`): every switchable technique is a
 slot, a place a technique plugs into, whose one setting holds the chosen kind's id or `off` (`render.ao=bitmask`). A
@@ -1178,7 +1181,7 @@ Transparency.SLOT.choose(graph.settings(), Transparency.WEIGHTED);      // or So
   glass bowl draws before its near wall (CompareTransmission's bowl, doubled under weighted blending, is clean). After
   the culling's split (and before the indexed path's expansion, which then writes indices in the sorted order),
   `meshlets/sort.slang` keys each blended meshlet by the squared distance of its bounding sphere's center from the eye
-  (24 bits, farthest first) and sorts with the particles' radix sort (`particles/sort.slang`, 6 passes); the sorted
+  (24 bits, farthest first) and sorts with the core's radix sort (`blocks/sort.slang`, `RadixSort`, 6 passes); the sorted
   list is cut into runs of one shading bin, and each run is a (run slot, shading bin) entry of the split lists'
   header, drawn by its type's pipeline, so the order holds across material types.
   `render.transparency.sorted.runs` (`Transparency.SORTED_RUNS`, 16) run slots are drawn, each an indirect draw per shading bin drawing blended; a view
@@ -1252,7 +1255,7 @@ and fail a build that reads them). Post materials (decals, fog by normal, outlin
 technique implementing the consumer interface and requiring the keys. Blended and transmissive surfaces write none.
 
 **Screen-space reflections** (`ScreenSpaceReflections`, one per view under `ScreenSpaceReflections.ID`, at
-`Anchor.OPAQUE` after the background, before transparency), as the kind `render.ssr` (`ScreenSpaceReflections.SLOT`)
+`Order.SCREEN_SPACE_LIGHTING`: after the background and ambient occlusion, before transparency), as the kind `render.ssr` (`ScreenSpaceReflections.SLOT`)
 names:
 
 - `off`: the environment's reflections alone; the surface outputs are not written for it.
@@ -1762,8 +1765,8 @@ reference's tests are small (32 x 32 pixels) for a CPU's ray tracing.
 The second and third stages (S1, S2): occlusion at small scale and diffuse light that bounces, each a slot that can
 be `off`, replacing exactly what shading added through the surface outputs or the indirect-light table.
 
-**Ambient occlusion** (`AmbientOcclusion`, one per view at `Anchor.OPAQUE` after the background, before
-reflections; `render.ao`, `AmbientOcclusion.SLOT`): the cosine-weighted share of the hemisphere open within the
+**Ambient occlusion** (`AmbientOcclusion`, one per view at `Order.SCREEN_SPACE_OCCLUSION`: after the background,
+before reflections; `render.ao`, `AmbientOcclusion.SLOT`): the cosine-weighted share of the hemisphere open within the
 kind's `radius` (0.5 m). Each kind's tunables are its record (`AmbientOcclusion.Gtao`, `Bitmask`, `Rays`), under
 `render.ao.<kind>.*`; a game's own kind builds in its place (`docs/custom-techniques.md`).
 
@@ -2132,8 +2135,9 @@ try (Presenter presenter = new Presenter(graph, instance)) {
   bases, by device address, for a game's own passes and shaders.
 - **Modifiers:** a technique listing a key in `modifies()` takes it after its provider with `g.modify(key)` and
   writes it in place (transparency over the scene, decals) or provides a new version (a post effect). Modifiers of a
-  key run in their `order()`: at an `Anchor` (`OPAQUE`, `TRANSPARENT`, `POST`, `TONE_MAP`, `UI`), then after or
-  before other techniques by `id()` (ids of techniques not in the graph are ignored), else in the order added. So a
+  key run in their `order()`: at an `Anchor` (`OPAQUE`, `TRANSPARENT`, `POST`, `TONE_MAP`, `UI`) or a named order
+  point inside one (`Order.SKY`, `Order.SCREEN_SPACE_OCCLUSION`, `Order.SCREEN_SPACE_LIGHTING`: libraries place
+  themselves by what they do, never by another library's ids), then after or before other techniques by `id()` (ids of techniques not in the graph are ignored), else in the order added. So a
   chain such as exposure, bloom, tone mapping needs no rewiring when an effect is added or removed, and a plugin can
   place its own effect in it; whoever requires the key gets its last version. A modifier nothing needs is never built.
   `graph.remove(id)` removes a technique by its id.

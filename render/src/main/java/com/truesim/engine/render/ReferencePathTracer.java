@@ -14,6 +14,7 @@ import com.truesim.engine.render.layout.PathPush;
 import com.truesim.engine.render.shadows.TopLevel;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
+import com.truesim.engine.settings.SettingRegistry;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.Pipeline;
 import java.util.List;
@@ -426,5 +427,13 @@ public final class ReferencePathTracer implements Technique {
             .bounce(bounce).binCount(bins).bin(bin).sample(Math.max(index, 0))
             .limits(settings.get(BOUNCES) & 0xff | (settings.get(ROULETTE) & 0xff) << 8)
             .list((int) ((tablesBytes - table) / 4)); // the slot list follows every bounce's table
+    }
+
+    /**
+     * Registers its settings in {@code registry} for discovery ({@link SettingRegistry#all(String)}), hidden. The
+     * plugin of the module holding it calls this.
+     */
+    public static void register(SettingRegistry registry) {
+        registry.addHidden(ALL.toArray(new Setting<?>[0]));
     }
 }
