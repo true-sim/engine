@@ -145,11 +145,18 @@ public final class ShadowSettings {
      */
     public static final Setting<Integer> RAY_LIGHTS = Setting.integer("shadows.rays.lights", 16, 0, 256,
         "spot and point lights traced in a frame at most, the most important; the rest take maps");
+    /**
+     * Soft ray-traced spot and point lights traced soft in a frame, at most (of those {@link #RAY_LIGHTS} traces, the
+     * most important); the rest are traced hard. Each soft light is denoised over the view's pixels: about 1 ms each at
+     * 1920 x 1080 (README). Directional lights stay soft.
+     */
+    public static final Setting<Integer> SOFT_LIGHTS = Setting.integer("shadows.soft.lights", 4, 0, 256,
+        "soft spot and point lights traced soft in a frame at most, the most important; the rest traced hard");
     /** Every shadow setting. */
     public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, RAY_OFFSET,
         CASTER_DETAIL, ATLAS_SIZE, ATLAS_DRAWS, TILE_DRAWS, TILE_TRIANGLES, AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF,
         MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, CASTER_FACES, CASTER_LAYERS, CASTER_SETTLE, SOFT_RAYS, SOFT_DENOISER,
-        SOFT_PASSES, RAY_QUEUE, KEEP_ROUNDS, RAY_LIGHTS);
+        SOFT_PASSES, RAY_QUEUE, KEEP_ROUNDS, RAY_LIGHTS, SOFT_LIGHTS);
 
     private ShadowSettings() {
     }

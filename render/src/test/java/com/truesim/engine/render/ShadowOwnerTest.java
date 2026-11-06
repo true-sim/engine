@@ -570,7 +570,7 @@ class ShadowOwnerTest {
      * Past {@link ShadowSettings#RAY_LIGHTS} traced lights, the least important take maps: two point lights over the
      * quad (the camera within both: equally important) with room for one; the first traced, the second mapped, and the
      * quad's shadow cast by the bright one either way; the traced one stays traced (no flicker); room for both traces
-     * both.
+     * both; a soft one past {@link ShadowSettings#SOFT_LIGHTS} is traced hard.
      */
     @Test
     void tracedLightsOverTheBudgetTakeMaps() {
@@ -593,6 +593,11 @@ class ShadowOwnerTest {
         frame();
         assertThat(shadows.stats().traced()).as("room for both").isEqualTo(2);
         assertThat(shadows.stats().rayFallbacks()).isZero();
+        // Past the soft budget a soft light is traced hard: still the quad's shadow
+        graph.settings().set(ShadowSettings.SOFT_LIGHTS, 0);
+        lights.shadow(1, ShadowSpec.softRayTraced(0.05));
+        expectShadow("the bright light, soft traced hard", new double[] {1.4, -5.6, 1.8, -6.0}, new double[] {3, -2});
+        assertThat(shadows.stats().hardened()).as("traced hard").isEqualTo(1);
     }
 
     @Test

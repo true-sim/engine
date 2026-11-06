@@ -95,6 +95,8 @@ public final class Shadows implements AutoCloseable {
     private double[] candidateRank = new double[16];
     private int candidateCount;
     private boolean[] wasTraced = new boolean[0];
+    private ShadowSpec[] hardFrom = new ShadowSpec[0]; // per light: the soft spec its hard one was made from
+    private ShadowSpec[] hard = new ShadowSpec[0];
     private double tracedKeep;
 
     // Spot and point lights' maps, shared by every view: per light id.
@@ -181,6 +183,7 @@ public final class Shadows implements AutoCloseable {
         int shrunk;
         int dropped;
         int rayFallbacks;
+        int hardened;
         int layered;
         int moving;
         int overflowed;
@@ -216,6 +219,11 @@ public final class Shadows implements AutoCloseable {
         /** Ray-traced lights mapped instead this frame: more than {@link ShadowSettings#RAY_LIGHTS}. */
         public int rayFallbacks() {
             return rayFallbacks;
+        }
+
+        /** Soft ray-traced lights traced hard this frame: more than {@link ShadowSettings#SOFT_LIGHTS}. */
+        public int hardened() {
+            return hardened;
         }
 
         /** Of the tiles drawn, those whose layer of still casters was drawn again first. */
@@ -424,6 +432,7 @@ public final class Shadows implements AutoCloseable {
         groupCount = 0;
         tracedKeep = Maths.pow(2, settings.get(ShadowSettings.AUTO_HYSTERESIS));
         stats.rayFallbacks = 0;
+        stats.hardened = 0;
         stats.lights = 0;
         stats.mapped = 0;
         stats.traced = 0;
@@ -511,6 +520,8 @@ public final class Shadows implements AutoCloseable {
         }
         Arrays.fill(wasTraced, false);
         int budget = settings.get(ShadowSettings.RAY_LIGHTS);
+        int softBudget = settings.get(ShadowSettings.SOFT_LIGHTS);
+        int soft = 0;
         for (int i = 0; i < candidateCount; i++) {
             int light = candidates[i];
             ShadowSpec spec = lights.shadow(light);
@@ -518,6 +529,10 @@ public final class Shadows implements AutoCloseable {
             if (i < budget || type == 2) {
                 stats.traced++;
                 wasTraced[light] = true;
+                if (spec.method() == ShadowMethod.SOFT_RAY_TRACED && type != 2 && soft++ >= softBudget) {
+                    spec = hardOf(light, spec); // past the soft budget: traced hard
+                    stats.hardened++;
+                }
                 for (int v3 = 0; v3 < views.size(); v3++) {
                     View view = views.get(v3);
                     view.traced(light, spec);
@@ -548,6 +563,20 @@ public final class Shadows implements AutoCloseable {
             pixels = Math.max(pixels, d <= reach ? MANY : camera.projectionScale() * reach / (d - reach));
         }
         return pixels;
+    }
+
+    /** {@code spec} traced hard: made once per spec, kept per light. */
+    private ShadowSpec hardOf(int light, ShadowSpec spec) {
+        if (hardFrom[light] != spec) {
+            hardFrom[light] = spec;
+            hard[light] = hardened(spec);
+        }
+        return hard[light];
+    }
+
+    @AllowAllocation("once per spec traced hard")
+    private static ShadowSpec hardened(ShadowSpec spec) {
+        return spec.method(ShadowMethod.RAY_TRACED);
     }
 
     @AllowAllocation("growing with the lights")
@@ -606,6 +635,8 @@ public final class Shadows implements AutoCloseable {
     private void grow() {
         shared = Arrays.copyOf(shared, lights.capacity());
         wasTraced = Arrays.copyOf(wasTraced, lights.capacity());
+        hardFrom = Arrays.copyOf(hardFrom, lights.capacity());
+        hard = Arrays.copyOf(hard, lights.capacity());
         for (int v6 = 0; v6 < views.size(); v6++) {
             View view = views.get(v6);
             view.grow(lights.capacity());
