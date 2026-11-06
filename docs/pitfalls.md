@@ -443,7 +443,7 @@ layouts, from and back to depth attachment, every frame.
 still ones (a depth write per texel first) was slower than drawing every caster for rocks: 500 moving 7.03 against 4.62
 ms; per tile the cost is in culling and drawing at all, not in the casters drawn.
 - Proof: `ShadowsBenchmark`, `TRUESIM_SHADOWS_AB`, draws 1,200, both in turns in one run (README).
-- Rule: measure a cache against the redraw it saves on the scenes at hand; `shadows.casters.layers` stays off.
+- Rule: measure a cache against the redraw it saves on the scenes at hand; `shadows.casters.layers` stayed off until the fix below; it is now on by default.
 - Later (2026-11-06): the cause was per-view costs the split did not touch, not the casters. Per tile, culling every
   one of the 30,000 instances (the instance pass, a third of 2 µs) and the tile's clear (about 1 µs) cost as much as
   the layer's depth write (about 1 µs) and far more than the still casters saved (about 0.25 µs). Proof:

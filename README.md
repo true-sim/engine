@@ -1531,7 +1531,7 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   A tile costs about 2.5 µs to draw and 2 µs to cull (1,200 tiles: the atlas pass 2.6 ms, culling 2.1 ms), whatever
   moved: so a few hundred moving rocks redraw nearly every tile (each reaches 4 or so of the 1,136). With the default
   64 draws a frame (`CAPPED`) the rest wait; more draws keep them in step at that cost (more draw views also cost
-  0.3 ms with nothing drawn). **Caster layers** (`shadows.casters.layers`, off): still casters kept in a layer of their
+  0.3 ms with nothing drawn). **Caster layers** (`shadows.casters.layers`, on by default): still casters kept in a layer of their
   own (a second atlas), a tile that only moving casters changed drawn as its layer's depth (a triangle over the tile,
   written untested: no clear first) and the moving casters on top, culled from a list of the moving ids instead of every
   instance. Where a tile's cost goes (`ALL`, one queue, 500 rocks moving, 926 tiles): culling 1.9 ms (2 µs a view, a

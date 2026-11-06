@@ -164,9 +164,9 @@ public final class ShadowSettings {
      * casters on top (culled from a list of the moving ids, not every instance), instead of every caster. Costs the
      * second atlas's memory (256 MiB at 8192) and a depth write per texel of each such tile, which replaces the tile's
      * clear. Over ShadowsBenchmark's rock field it took 5 to 37 % less culling and drawing than every caster (README);
-     * off by default for its memory.
+     * on by default; turn it off to save the second atlas's memory.
      */
-    public static final Setting<Boolean> CASTER_LAYERS = Setting.bool("shadows.casters.layers", false,
+    public static final Setting<Boolean> CASTER_LAYERS = Setting.bool("shadows.casters.layers", true,
         "maps keep still casters in a layer of their own and draw only moving ones again (a second atlas's memory)");
     /**
      * Frames a caster stays moving after its last move, before it joins its tiles' still layers (which are then drawn
