@@ -14,7 +14,8 @@ import java.util.Objects;
 
 /**
  * The engine's settings as console variables (design 5.10): every setting of the {@link SettingRegistry} by its full
- * name, read from and written to the player's layer of {@link EngineSettings}, through the constraint overlay. Typing
+ * name, the tunables of every kind of its technique slots too ({@link SettingRegistry#all()}: a library's or a mod's
+ * kinds as the engine's), read from and written to the player's layer of {@link EngineSettings}, through the constraint overlay. Typing
  * {@code render.ssr} prints the value, its default, its range or choices and its availability; {@code render.ssr OFF}
  * sets it, or says why not: the setting is unavailable (unsupported, depends on another, locked by the game) or a
  * constraint would not give the value asked for (the hardware allows less). Asked on events (a command run, a key
@@ -38,6 +39,11 @@ public final class SettingVariables implements ConsoleVariables {
         for (SettingRegistry.Entry entry : registry.entries()) {
             names.add(entry.fullName());
         }
+        for (Setting<?> setting : registry.all()) { // the slots' kinds' tunables, discovered
+            if (registry.find(setting.name()) == null) {
+                names.add(setting.name());
+            }
+        }
         names.sort(null);
         return names;
     }
@@ -46,6 +52,10 @@ public final class SettingVariables implements ConsoleVariables {
     @AllowAllocation("asked on events")
     public ConsoleVariable find(String name) {
         SettingRegistry.Entry entry = registry.find(name);
+        if (entry == null) { // a tunable of a slot's kind, discovered: unscoped, not shown in a group
+            Setting<?> tunable = registry.setting(name);
+            entry = tunable == null ? null : new SettingRegistry.Entry(tunable, null, null, null);
+        }
         return entry == null ? null : new Variable<>(entry, entry.setting(), entry.view(settings));
     }
 

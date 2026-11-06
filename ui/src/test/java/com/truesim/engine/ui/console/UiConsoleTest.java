@@ -114,6 +114,20 @@ class UiConsoleTest {
     }
 
     @Test
+    void settingVariablesListTheSlotsKindsTunablesAsDiscovered() {
+        EngineSettings settings = new EngineSettings();
+        com.truesim.engine.settings.SettingRegistry registry = new com.truesim.engine.settings.SettingRegistry()
+            .techniques(settings.techniques());
+        com.truesim.engine.render.AmbientOcclusion.register(registry);
+        SettingVariables variables = new SettingVariables(registry, settings);
+        assertThat(variables.names()).contains("render.ao", "render.ao.bitmask.radius");
+        var radius = variables.find("render.ao.bitmask.radius");
+        assertThat(radius.kind()).isEqualTo(com.truesim.ui.console.ConsoleVariable.Kind.DECIMAL);
+        assertThat(radius.set("0.75")).isNull();
+        assertThat(radius.value()).contains("0.75");
+    }
+
+    @Test
     void settingVariablesDescribeAvailabilityWithoutAnEngine() {
         com.truesim.engine.settings.SettingRegistry registry = new com.truesim.engine.settings.SettingRegistry();
         EngineSettings settings = new EngineSettings();
