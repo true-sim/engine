@@ -37,8 +37,13 @@ class ShadowsBenchmark {
 
     private static final int ROUNDS = 3;
     private static final int FRAMES = 60;
+    private static final ManyLights MOVING = new ManyLights(40);
 
-    private record Config(String name, Consumer<Setup> setup) {
+    /** A configuration: {@code rocks} rocks and {@code share} of the lights of {@link ManyLights} moving. */
+    private record Config(String name, Consumer<Setup> setup, int rocks, double share) {
+        Config(String name, Consumer<Setup> setup) {
+            this(name, setup, 0, 0);
+        }
     }
 
     /** What a configuration sets up in a graph. */
@@ -46,7 +51,7 @@ class ShadowsBenchmark {
         List<Technique> added, Shadows[] owner) {
     }
 
-    private record Sample(double frame, double shadows, int drawn, long texels, int builds) {
+    private record Sample(double frame, double shadows, double drawn, double waiting, long texels, int builds) {
     }
 
     @Test
@@ -73,7 +78,8 @@ class ShadowsBenchmark {
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
             System.out.printf(Locale.ROOT, "Shadows on %s (%s), 30,000 rocks on the terrain, the visibility buffer:%n",
                 device.gpu().name(), rayTracing != null ? "ray tracing" : "no ray tracing");
-            boolean pointsOnly = "points".equals(System.getenv("TRUESIM_SHADOWS_ONLY"));
+            String part = System.getenv("TRUESIM_SHADOWS_ONLY");
+            boolean pointsOnly = part != null && (part.equals("points") || part.startsWith("dynamic"));
             for (int[] size : pointsOnly ? new int[0][] : new int[][] {{1920, 1080}, {3840, 2160}}) {
                 List<Config> configs = sunConfigs(rayTracing != null);
                 String only = System.getenv("TRUESIM_SHADOWS_ONLY");
@@ -93,9 +99,56 @@ class ShadowsBenchmark {
             many.add(new Config("200 point lights, 256 maps", s -> points(s, ShadowSpec.maps(256))));
             many.add(new Config("200 point lights, AUTO maps, specs switched every frame",
                 s -> points(s, ShadowSpec.maps(ShadowSpec.AUTO))));
-            run(device, renderer, view, geometry, lights, rayTracing, 1920, 1080, true, many,
-                "1920 x 1080, flying over 200 point lights", true);
+            String only = System.getenv("TRUESIM_SHADOWS_ONLY");
+            if (only == null || "points".equals(only)) {
+                run(device, renderer, view, geometry, lights, rayTracing, 1920, 1080, true, many,
+                    "1920 x 1080, flying over 200 point lights", true);
+            }
+            if (only == null || only.startsWith("dynamic")) {
+                ShadowsBenchmark.rockMesh = rock;
+                groundMesh = ground;
+                ShadowSpec[] methods = rayTracing != null
+                    ? new ShadowSpec[] {ShadowSpec.maps(ShadowSpec.AUTO), ShadowSpec.rayTraced(),
+                        ShadowSpec.softRayTraced(0.3)}
+                    : new ShadowSpec[] {ShadowSpec.maps(ShadowSpec.AUTO)};
+                for (ShadowSpec method : methods) {
+                    String name = method.method().name().toLowerCase(Locale.ROOT);
+                    if (only != null && only.length() > 8 && !name.equals(only.substring(8))) {
+                        continue; // TRUESIM_SHADOWS_ONLY="dynamic maps": one method
+                    }
+                    run(device, renderer, view, geometry, lights, rayTracing, 1920, 1080, true,
+                        dynamicConfigs(method),
+                        "1920 x 1080, flying over 200 point lights (" + name + "), rocks and lights moving", false);
+                }
+            }
         }
+    }
+
+    /** The rock mesh, for moving rocks. */
+    private static int rockMesh = -1;
+    private static int groundMesh = -1;
+
+    /** 200 point lights shadowed by {@code method}: still, rocks moving, lights moving, both. */
+    private static List<Config> dynamicConfigs(ShadowSpec method) {
+        List<Config> configs = new ArrayList<>();
+        Consumer<Setup> setup = s -> {
+            if (System.getenv("TRUESIM_SHADOWS_DRAWS") != null) {
+                s.graph().settings().set(ShadowSettings.ATLAS_DRAWS,
+                    Integer.parseInt(System.getenv("TRUESIM_SHADOWS_DRAWS")));
+            }
+            MOVING.place(s.lights(), 0, method);
+            s.owner()[0] = new Shadows(s.geometry(), s.lights()).rayTracing(s.rays());
+            s.added().add(s.owner()[0].view(s.main()));
+        };
+        configs.add(new Config("all still", setup, 0, 0));
+        for (int rocks : new int[] {100, 500, 2000}) {
+            configs.add(new Config(String.format(Locale.ROOT, "%,d rocks moving", rocks), setup, rocks, 0));
+        }
+        configs.add(new Config("10% of the lights moving", setup, 0, 0.1));
+        configs.add(new Config("50% of the lights moving", setup, 0, 0.5));
+        configs.add(new Config("500 rocks and 10% of the lights moving", setup, 500, 0.1));
+        configs.add(new Config("2,000 rocks and 50% of the lights moving", setup, 2000, 0.5));
+        return configs;
     }
 
     private static List<Config> sunConfigs(boolean rays) {
@@ -166,12 +219,13 @@ class ShadowsBenchmark {
             }
         }
         System.out.println(title + ":");
-        System.out.println("| Shadows | Frame (GPU) | Shadow passes | Tiles drawn a frame | Atlas texels | Builds |");
-        System.out.println("|---|---|---|---|---|---|");
+        System.out.println("| Shadows | Frame (GPU) | Shadow passes | Tiles drawn a frame | Tiles waiting | Atlas texels | Builds |");
+        System.out.println("|---|---|---|---|---|---|---|");
         for (int c = 0; c < configs.size(); c++) {
             Sample[] all = samples[c];
-            System.out.printf(Locale.ROOT, "| %s | %s | %s | %d | %,d | %d |%n", configs.get(c).name(),
-                range(all, true), range(all, false), all[0].drawn(), all[0].texels(), all[0].builds());
+            System.out.printf(Locale.ROOT, "| %s | %s | %s | %.1f | %.1f | %,d | %d |%n", configs.get(c).name(),
+                range(all, true), range(all, false), all[0].drawn(), all[0].waiting(), all[0].texels(),
+                all[0].builds());
         }
     }
 
@@ -199,14 +253,17 @@ class ShadowsBenchmark {
             int frame = 0;
             graph.timings(true); // before the warm-up: turning timings on builds the graph again
             for (int i = 0; i < 30; i++) {
-                frame = step(device, graph, camera, width, height, moving, lights, switching, specs, frame);
+                frame = step(device, graph, camera, width, height, moving, lights, switching, specs, frame, config,
+                    renderer.scene());
             }
             int builds = graph.builds();
             double[] frames = new double[FRAMES];
             double[] shadow = new double[FRAMES];
-            int drawn = 0;
+            double drawn = 0;
+            double waiting = 0;
             for (int i = -4; i < FRAMES; i++) {
-                frame = step(device, graph, camera, width, height, moving, lights, switching, specs, frame);
+                frame = step(device, graph, camera, width, height, moving, lights, switching, specs, frame, config,
+                    renderer.scene());
                 GpuTimings timings = graph.timings();
                 if (i < 0 || timings == null) {
                     continue;
@@ -233,7 +290,8 @@ class ShadowsBenchmark {
                     }
                 }
                 frames[i] = total;
-                drawn = Math.max(drawn, owner[0] == null ? 0 : owner[0].stats().drawn());
+                drawn += owner[0] == null ? 0 : owner[0].stats().drawn() / (double) FRAMES;
+                waiting += owner[0] == null ? 0 : owner[0].stats().waiting() / (double) FRAMES;
             }
             graph.timings(false);
             device.waitIdle();
@@ -242,15 +300,22 @@ class ShadowsBenchmark {
             if (owner[0] != null) {
                 owner[0].close();
             }
-            return new Sample(median(frames), median(shadow), drawn, texels, built);
+            if (config.rocks() > 0) {
+                MeshletBenchmark.rocksOnTerrain(renderer, rockMesh, groundMesh, 30_000, 600, -12); // where they were
+            }
+            return new Sample(median(frames), median(shadow), drawn, waiting, texels, built);
         }
     }
 
     /** A frame: the camera placed (turning, or still), specs switched where asked. */
     private static int step(VulkanDevice device, FrameGraph graph, Camera camera, int width, int height,
-        boolean moving, Lights lights, boolean switching, ShadowSpec[] specs, int frame) {
+        boolean moving, Lights lights, boolean switching, ShadowSpec[] specs, int frame, Config config,
+        GpuScene scene) {
         if (moving) {
             place(camera, frame, width, height);
+        }
+        if (config.rocks() > 0 || config.share() > 0) {
+            MOVING.move(scene, rockMesh, config.rocks(), lights, 0, config.share(), frame / 60.0);
         }
         if (switching) {
             for (int i = 0; i < 200; i += 7) {
