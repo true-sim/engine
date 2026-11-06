@@ -300,6 +300,14 @@ structure update rules); the validation layers reported nothing; the RX 9070 XT 
   first: no inactive instances for drivers' builders to handle); anything that changes which instances the build holds
   rebuilds the top level instead of refitting it.
 
+**A change-list entry is not an instance id.** `GpuScene.write(entry, ...)` takes the entry `claim(id)` returned,
+its place among this upload's changes; the host copy of the instances' mesh words (which ray tracing lists top levels
+from) was first indexed by it. Ids and entries agree while instances are set in id order from an empty change list, so
+most tests passed; `SegmentTracingTest`, setting walls 3 to 11 after earlier frames, traced wall 3's material where
+wall 4's was due (23 for 24) on lavapipe and on the RX 9070 XT alike.
+- Proof: CI run 42257932243 (shard 2); passes indexed by `instances.pendingIndex(entry)`.
+- Rule: anything kept per instance from `write` is indexed by `pendingIndex(entry)`, never by the entry.
+
 **CI's lavapipe 26.0.8 crashed in its own code on some AMD runners; it was not ours.** Ray-traced tests
 (`GiScenesTest`, `ShadowOwnerTest`, the probe volume, the reference path tracer) killed their JVM with SIGSEGV in
 lavapipe's JIT'd code on its worker threads: always the same AVX-512 gather of three dwords through per-lane pointers
@@ -321,6 +329,16 @@ validation layers were clean. What decides it is the runner's CPU, and Mesa's ve
 - Rule: a crash inside the driver that follows the runner's CPU model is measured per CPU (print it in the job) and
   per driver version, with our code held fixed in the same job, before more of our code is changed for it. CI's Mesa is
   pinned in setup-vulkan; bump it there, and rerun the ray-traced tests on several runners when it changes.
+
+**Lavapipe 26.2 reports 20 bytes of pipeline cache data for the 32-byte header it writes.**
+`lvp_GetPipelineCacheData` in Mesa 26.2.6 writes the whole `VkPipelineCacheHeaderVersionOne` (headerSize 32) and sets
+`*pDataSize = 5 * sizeof(uint32_t)` (26.0.8 left the 32 it asked for). `PipelineCache.data()` keeps what the driver
+says it wrote, so the saved cache is 20 bytes, which `fits` rightly rejects; `PipelineCacheTest` expected every
+driver's data to round-trip and failed on CI the day CI moved to 26.2.6 (run 42257932243, `modules`).
+- Proof: on the local Mesa 26.2.6 lavapipe the test failed with `saved.length == 20` and a header claiming 32 bytes;
+  lavapipe's source (`src/gallium/frontends/lavapipe/lvp_pipeline_cache.c`, 26.0.8 against 26.2.6).
+- Rule: the cache keeps trusting the size the driver reports; tests check a round trip only when the driver returns a
+  whole header, and that a cut-short one is rejected.
 
 **A cluster hierarchy's finest level is not all of the mesh.** Bottom levels were built from one detail level's
 meshlet range (the last, "finest"). In a cluster hierarchy the levels are the DAG's depths: parts that simplify no

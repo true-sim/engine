@@ -29,6 +29,7 @@ class PipelineCacheTest {
         try (instance) {
             assumeThat(instance.gpus()).as("no Vulkan 1.3 GPU").isNotEmpty();
             byte[] saved;
+            boolean whole;
             try (VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
                 PipelineCache cache = device.pipelineCache();
                 assertThat(cache.handle()).isNotZero();
@@ -38,26 +39,30 @@ class PipelineCacheTest {
                     assertThat(pipeline.handle()).isNotZero();
                 }
                 saved = cache.data();
-                assertThat(cache.fits(saved)).isTrue();
-                assertThat(cache.load(saved)).isTrue();
-                // Another GPU's, or damaged: ignored.
-                byte[] other = saved.clone();
-                ByteBuffer.wrap(other).order(ByteOrder.LITTLE_ENDIAN).putInt(8, ~ByteBuffer.wrap(saved)
-                    .order(ByteOrder.LITTLE_ENDIAN).getInt(8));
-                assertThat(cache.load(other)).isFalse();
-                other = saved.clone();
-                other[20] ^= 1; // the cache UUID
-                assertThat(cache.load(other)).isFalse();
+                // Lavapipe 26.2 writes its 32-byte header but reports 20 bytes written (lvp_GetPipelineCacheData), so
+                // what it returns is no cache: rejected like any other. Lavapipe caches nothing anyway.
+                whole = saved.length >= 32;
+                assertThat(cache.fits(saved)).isEqualTo(whole);
+                assertThat(cache.load(saved)).isEqualTo(whole);
                 assertThat(cache.load(new byte[8])).isFalse();
-                other = saved.clone();
-                other[4] = 2; // a header version not known
-                assertThat(cache.load(other)).isFalse();
+                if (whole) { // another GPU's, or damaged: ignored
+                    byte[] other = saved.clone();
+                    ByteBuffer.wrap(other).order(ByteOrder.LITTLE_ENDIAN).putInt(8, ~ByteBuffer.wrap(saved)
+                        .order(ByteOrder.LITTLE_ENDIAN).getInt(8));
+                    assertThat(cache.load(other)).isFalse();
+                    other = saved.clone();
+                    other[20] ^= 1; // the cache UUID
+                    assertThat(cache.load(other)).isFalse();
+                    other = saved.clone();
+                    other[4] = 2; // a header version not known
+                    assertThat(cache.load(other)).isFalse();
+                }
             } // saved on close
             assertThat(Files.size(file)).isPositive();
             assertThat(Files.list(file.getParent())).containsExactly(file); // no temporary file left
             try (VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
                 device.pipelineCache().persist(file); // loads it
-                assertThat(device.pipelineCache().fits(Files.readAllBytes(file))).isTrue();
+                assertThat(device.pipelineCache().fits(Files.readAllBytes(file))).isEqualTo(whole);
                 Files.write(file, new byte[] {1, 2, 3}); // replaced on close
             }
             assertThat(Files.size(file)).isGreaterThan(3);

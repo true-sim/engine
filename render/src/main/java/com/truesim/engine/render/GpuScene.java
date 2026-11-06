@@ -464,7 +464,7 @@ public final class GpuScene implements AutoCloseable {
         m.set(FLOAT, o + InstanceLayout.POSITION + 8, hz);
         int word = mesh | LIVE | (castsShadows ? CASTS_SHADOWS : 0);
         m.set(INT, o + InstanceLayout.MESH, word);
-        meshWords[entry] = word;
+        meshWords[instances.pendingIndex(entry)] = word; // by id: the entry is its place among the changes
         m.set(FLOAT, o + InstanceLayout.SCALE, sx);
         m.set(FLOAT, o + InstanceLayout.SCALE + 4, sy);
         m.set(FLOAT, o + InstanceLayout.SCALE + 8, sz);
