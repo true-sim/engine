@@ -9,13 +9,13 @@ description = "Engine renderer for true-sim: GPU-driven meshlet rendering of sce
 
 dependencies {
     api(project(":engine-graph"))
-    api("com.truesim.scene:scene-assets:0.66.0")
-    api("com.truesim.scene:scene-core:0.66.0") // lights' shadow specs (ShadowSpec, ShadowMethod)
+    api("com.truesim.scene:scene-assets:0.68.0")
+    api("com.truesim.scene:scene-core:0.68.0") // lights' shadow specs (ShadowSpec, ShadowMethod)
     api("com.truesim.common:common-math:0.6.0") // the material records' colors and vectors
-    testImplementation("com.truesim.scene:scene-meshbuild:0.66.0")
+    testImplementation("com.truesim.scene:scene-meshbuild:0.68.0")
     // TestRenderer and TestMeshes: the renderer set up for GPU tests, for libraries' tests as for the engine's
     testFixturesApi(testFixtures(project(":engine-graph")))
-    testFixturesApi("com.truesim.scene:scene-meshbuild:0.66.0")
+    testFixturesApi("com.truesim.scene:scene-meshbuild:0.68.0")
     testImplementation(testFixtures(project(":engine-graph")))
 }
 

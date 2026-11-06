@@ -71,6 +71,13 @@ public final class RenderSettings {
     public static final Setting<Integer> STREAM_BUDGET = Setting.integer("render.streamBudget", 64, 0, 4096,
         "MiB a frame of streamed meshes and textures copied on the transfer queue (0: in the frame)");
 
+    /**
+     * MiB a frame of dynamic textures' changed regions staged and copied at the frame's start
+     * ({@link Textures#update}); regions past it wait for a later frame.
+     */
+    public static final Setting<Integer> TEXTURE_UPDATE_BUDGET = Setting.integer("render.textureUpdateBudget", 8, 1,
+        1024, "MiB a frame of dynamic textures' changed texels uploaded");
+
     private RenderSettings() {
     }
 
@@ -98,7 +105,8 @@ public final class RenderSettings {
      */
     public static void register(SettingRegistry registry) {
         registry.addHiddenSlots(INTERPOLATION_SLOT, Transparency.SLOT, SelectionOutline.SLOT, DisplayTransform.SLOT)
-            .addHidden(OCCLUSION, CHANGE_LIST, CHANGE_LIST_CHUNK, STREAM_BUDGET, Transparency.SORTED_RUNS)
+            .addHidden(OCCLUSION, CHANGE_LIST, CHANGE_LIST_CHUNK, STREAM_BUDGET, TEXTURE_UPDATE_BUDGET,
+                Transparency.SORTED_RUNS)
             .addHidden(ClusteredLights.ALL.toArray(new Setting<?>[0]))
             .addHidden(ShadowSettings.ALL.toArray(new Setting<?>[0]))
             .addHidden(Denoiser.ALL.toArray(new Setting<?>[0]))

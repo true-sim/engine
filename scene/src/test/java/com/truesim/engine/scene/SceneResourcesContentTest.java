@@ -17,9 +17,12 @@ import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.AssetType;
 import com.truesim.scene.assets.Generator;
+import com.truesim.scene.render.DynamicTexture;
 import com.truesim.scene.render.MaterialData;
 import com.truesim.scene.render.RenderAssets;
 import com.truesim.scene.render.TextureData;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -55,6 +58,7 @@ class SceneResourcesContentTest {
     private TaskScheduler tasks;
     private AssetCache assets;
     private SceneResources resources;
+    private long frames;
 
     @BeforeEach
     void start() {
@@ -157,6 +161,76 @@ class SceneResourcesContentTest {
         assertThatIllegalArgumentException().isThrownBy(() -> resources.releaseMaterials(first));
         assertThatIllegalArgumentException().isThrownBy(() -> resources.releaseMaterials(-1));
         assertThatIllegalArgumentException().isThrownBy(() -> resources.holdMaterials(List.of(), 0));
+    }
+
+    /** A frame of the resources' slots: its start recorded (uploads, dynamic textures' regions), waited for. */
+    private void frame() {
+        resources.flush();
+        slots.begin((int) (frames++ % slots.count()));
+        device.submitAndWait(device.graphics(), slots::recordStart);
+        slots.end();
+    }
+
+    @Test
+    void dynamicTexturesGoUpWholeThenTheirChangedBoxesWithinFrames() {
+        MemorySegment texels = Arena.ofAuto().allocate(4L * 8 * 8 * 2);
+        DynamicTexture painted = DynamicTexture.of(new TextureData(8, 8, TextureData.ColorSpace.LINEAR,
+            TextureData.Format.RGBA8, texels, 2));
+        AssetRef<DynamicTexture> ref = AssetRef.generated(RenderAssets.DYNAMIC_TEXTURE,
+            (String name, long seed) -> painted, "painted", 1);
+        AssetRef<TextureData> volume = AssetRef.generated(RenderAssets.TEXTURE, (String name, long seed) ->
+            new TextureData(4, 4, TextureData.ColorSpace.LINEAR, TextureData.Format.RGBA8,
+                Arena.ofAuto().allocate(4L * 4 * 4 * 4), 4), "volume", 1);
+        long before = resources.residency();
+        resources.hold(ref);
+        resources.hold(volume);
+        assertThat(resources.texture(ref)).isEqualTo(-1);
+        load();
+        assertThat(resources.texture(ref)).isNotNegative();
+        assertThat(resources.texture(volume)).as("a 3D texture").isNotNegative();
+        assertThat(resources.storage(ref)).as("written on the CPU: no storage").isEqualTo(-1);
+        assertThat(resources.residency()).isNotEqualTo(before);
+        resources.flush();
+        assertThat(textures.pendingUpdates()).as("the whole texture, a slice at a time").isEqualTo(2);
+        frame();
+        assertThat(textures.pendingUpdates()).isZero();
+        frame();
+        assertThat(textures.pendingUpdates()).as("nothing changed").isZero();
+        painted.changed(1, 1, 1, 2, 2, 1);
+        painted.changed(0, 0, 0, 1, 1, 1);
+        resources.flush();
+        assertThat(textures.pendingUpdates()).isEqualTo(2);
+        frame();
+        // Fallen behind the ring of changes: the whole texture again
+        for (int i = 0; i < DynamicTexture.KEPT + 4; i++) {
+            painted.changed(0, 0, 0, 1, 1, 1);
+        }
+        resources.flush();
+        assertThat(textures.pendingUpdates()).as("the whole texture again, covering the changes").isEqualTo(2);
+        frame();
+        frame();
+        resources.release(ref);
+        resources.release(volume);
+        assertThat(resources.texture(ref)).isEqualTo(-1);
+        assertThat(resources.storage(ref)).isEqualTo(-1);
+        assertThatIllegalStateException().isThrownBy(() -> resources.release(ref));
+        frame();
+        frame();
+    }
+
+    @Test
+    void gpuWrittenDynamicTexturesHaveAStorageSlot() {
+        assumeThat(textures.supportsStorage(com.truesim.engine.render.TextureFormat.RGBA8)).isTrue();
+        AssetRef<DynamicTexture> ref = AssetRef.generated(RenderAssets.DYNAMIC_TEXTURE, (String name, long seed) ->
+            DynamicTexture.gpuWritten(new TextureData(4, 4, TextureData.ColorSpace.LINEAR,
+                Arena.ofAuto().allocate(64))), "written", 1);
+        resources.hold(ref);
+        load();
+        assertThat(resources.storage(ref)).isNotNegative();
+        frame();
+        resources.release(ref);
+        frame();
+        frame();
     }
 
     @Test
