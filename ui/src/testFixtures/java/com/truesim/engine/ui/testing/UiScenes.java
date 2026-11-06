@@ -1,4 +1,4 @@
-package com.truesim.engine.bench;
+package com.truesim.engine.ui.testing;
 
 import com.truesim.common.math.Maths;
 import com.truesim.ui.core.draw.DrawList;
@@ -8,8 +8,8 @@ import com.truesim.ui.core.draw.UiTextures;
 
 /**
  * The UI renderer's benchmark scenes at 4K, as draw lists (design section 11): a HUD of 500 elements and 5,000 glyphs
- * and a flood of 100,000 glyphs, over a synthetic glyph atlas, an image and a nine-slice skin. Shared by
- * {@link UiBench} and engine-ui's batching benchmark.
+ * and a flood of 100,000 glyphs, over a synthetic glyph atlas, an image and a nine-slice skin. Published with
+ * engine-ui's test fixtures: shared by its batching benchmark (UiBenchmark) and the samples' UI suite (UiBench).
  */
 public final class UiScenes {
 
