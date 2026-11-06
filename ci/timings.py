@@ -4,20 +4,24 @@ import glob, os, re, sys, xml.etree.ElementTree as ET
 SPLIT = 240
 ADJUST = {}  # name or name#method -> seconds to use instead (tests cut since the run)
 root, out = sys.argv[1], sys.argv[2]
-rows = []
+suites = {}  # (module, class) -> {method: seconds}, summed over the files (a class split across shards)
 for f in glob.glob(root + '/**/TEST-*.xml', recursive=True):
     parts = os.path.normpath(f).replace(os.sep, '/').split('/')
     module = 'engine-' + parts[parts.index('build') - 1]
     if module in ('engine-demo', 'engine-bench'):
         continue
     suite = ET.parse(f).getroot()
-    name = suite.get('name')
-    total = float(suite.get('time'))
+    cases = suites.setdefault((module, suite.get('name')), {})
+    for case in suite.iter('testcase'):
+        method = re.sub(r'\(.*\)$', '', case.get('name'))
+        cases[method] = cases.get(method, 0) + float(case.get('time'))
+rows = []
+for (module, name), cases in suites.items():
+    total = sum(cases.values())
     if total > SPLIT:
-        for case in suite.iter('testcase'):
-            method = re.sub(r'\(.*\)$', '', case.get('name'))
+        for method, seconds in cases.items():
             key = name + '#' + method
-            rows.append((ADJUST.get(key, float(case.get('time'))), module, key))
+            rows.append((ADJUST.get(key, seconds), module, key))
     else:
         rows.append((ADJUST.get(name, total), module, name))
 rows.sort(key=lambda r: (r[1], -r[0]))

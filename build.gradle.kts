@@ -6,7 +6,8 @@ val lwjglNatives by extra(
 
 // Test shards (CI): -Ptruesim.shard=i/n -Ptruesim.shardModules=engine-render,engine-scene runs shard i of n of those
 // modules' tests, the shards balanced by ci/test-timings.txt (seconds per test class, per test method for the long
-// classes, as CI measured them): the longest first, each to the shard with the least so far. A class the file does not
+// classes, as CI measured them): the longest first, each to a shard already running its package while that stays
+// under an even share (they share shaders lavapipe compiles once per shard), else to the shard with the least so far. A class the file does not
 // know goes to shard hash(name) % n, as do a split class's tests the file does not know. Without the property every
 // test runs, as always.
 val shard = providers.gradleProperty("truesim.shard").orNull
@@ -26,10 +27,17 @@ fun shardParts(index: Int, count: Int): Map<String, ShardPart> {
         .map { Triple(it[0].toDouble(), it[1], it[2]) }
     val load = DoubleArray(count) // seconds per shard, as timed
     val shardOf = mutableMapOf<String, Int>() // unit (class or class#method) -> shard
+    // Tests of one package share shaders, which lavapipe compiles once per shard (its disk cache): a unit goes where
+    // its package already is while that shard stays under its even share, else to the least loaded shard
+    val share = timings.sumOf { it.first } / count * 1.05
+    val packagesIn = Array(count) { mutableSetOf<String>() }
     for ((seconds, _, unit) in timings.sortedWith(compareBy({ -it.first }, { it.third }))) {
-        val least = load.indices.minBy { load[it] }
-        load[least] += seconds
-        shardOf[unit] = least
+        val pkg = unit.substringBefore('#').substringBeforeLast('.')
+        val together = load.indices.filter { pkg in packagesIn[it] && load[it] + seconds <= share }.minByOrNull { load[it] }
+        val shard = together ?: load.indices.minBy { load[it] }
+        load[shard] += seconds
+        packagesIn[shard] += pkg
+        shardOf[unit] = shard
     }
     fun hashed(name: String) = Math.floorMod(name.hashCode(), count)
     val parts = mutableMapOf<String, ShardPart>()

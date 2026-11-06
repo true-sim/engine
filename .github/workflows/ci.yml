@@ -127,6 +127,7 @@ jobs:
           path: |
             */build/reports
             */build/test-results
+            */hs_err_pid*.log
 
   build:
     needs: [changes, modules, shard]
