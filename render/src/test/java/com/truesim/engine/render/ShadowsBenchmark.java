@@ -173,7 +173,7 @@ class ShadowsBenchmark {
         // TRUESIM_SHADOWS_AB: each case with caster layers on too, in turns
         boolean ab = System.getenv("TRUESIM_SHADOWS_AB") != null && method.method() == ShadowMethod.MAPS;
         // TRUESIM_SHADOWS_MOBILITY: each case with the scene's hints (the moving rocks and lights dynamic, the rest
-        // static) used, and ignored (DETECT), in turns; with cases of rocks pausing
+        // static) used both ways (USE_HINT), and ignored (DETECT), in turns; with cases of rocks pausing
         boolean mobility = System.getenv("TRUESIM_SHADOWS_MOBILITY") != null;
         Consumer<Setup> layered = s -> {
             s.graph().settings().set(ShadowSettings.CASTER_LAYERS, true);
@@ -197,11 +197,13 @@ class ShadowsBenchmark {
             if (mobility) {
                 int moving = rocks[i];
                 double share = shares[i];
-                configs.add(new Config(names[i] + ", hints", s -> {
+                configs.add(new Config(names[i] + ", USE_HINT", s -> {
                     hint(s, moving, share);
+                    s.graph().settings().set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.USE_HINT)
+                        .set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
                     setup.accept(s);
                 }, rocks[i], shares[i], pausing));
-                configs.add(new Config(names[i] + ", detected", s -> {
+                configs.add(new Config(names[i] + ", DETECT", s -> {
                     hint(s, moving, share);
                     s.graph().settings().set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.DETECT)
                         .set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.DETECT);

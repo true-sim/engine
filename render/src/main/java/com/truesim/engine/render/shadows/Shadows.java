@@ -70,8 +70,9 @@ import java.util.Objects;
  * casters changed it is that layer's depth written into it, the moving casters drawn on top (the depth test merges
  * them). The scene's {@link com.truesim.scene.core.Mobility} is a hint ({@link ShadowSettings#CASTER_MOBILITY},
  * {@link ShadowSettings#LIGHT_MOBILITY}; {@link GpuScene#setMobility}, {@link Lights#mobility}): a static caster joins
- * the still layers at once, a dynamic one never does; a static light's own change tests are skipped while nothing
- * writes it, and a dynamic light's tiles are updated first. A static caster or light that changes all the same is
+ * the still layers at once and a static light's own change tests are skipped while nothing writes it; by default the
+ * rest is detected ({@code STATIC_ONLY}: unmarked nodes are dynamic), with {@code USE_HINT} a dynamic caster never
+ * joins the layers and a dynamic light's tiles are updated first. A static caster or light that changes all the same is
  * drawn where it is now, as detection would have it. {@link ShadowSpec#AUTO} sizes come each frame from how big the light's reach shows in the views
  * ({@link ShadowSettings#AUTO_SCALE}), within the spec's bounds, with hysteresis; over the atlas, the least important
  * lights' tiles shrink first, then the least important lights cast none.
@@ -139,7 +140,7 @@ public final class Shadows implements AutoCloseable {
     // settling); the policies as last applied; whether every instance's hint is to be applied again
     private byte[] hintSeen = new byte[0];
     private ShadowSettings.MobilityUse casterUse;
-    private ShadowSettings.MobilityUse lightUse = ShadowSettings.MobilityUse.USE_HINT;
+    private ShadowSettings.MobilityUse lightUse = ShadowSettings.MobilityUse.STATIC_ONLY;
     private float movingLightWeight = 1;
     private boolean rehint = true;
     private int settleFrames;
