@@ -11,7 +11,7 @@ dependencies {
     api(project(":engine-render"))
     api(project(":engine-input"))
     api(project(":engine-interaction")) // the scene interaction the UI hands its pointers to
-    api("com.truesim.scene:scene-render:0.66.0") // pick meshes of mesh assets
+    api("com.truesim.scene:scene-render:0.68.0") // pick meshes of mesh assets
     implementation(project(":engine-xr")) // the headset's controls, for the XR rays' default bindings
     api("com.truesim.ui:ui-core:0.10.0")
     api("com.truesim.ui:ui-controls:0.10.0") // the Ui the plugin runs
@@ -29,7 +29,7 @@ dependencies {
     testImplementation(testFixtures("com.truesim.ui:ui-profiler:0.10.0")) // the profiler gallery
     testImplementation(testFixtures("com.truesim.ui:ui-gizmo:0.10.0"))
     testImplementation(testFixtures("com.truesim.ui:ui-scene:0.10.0")) // the scene rig and fake camera source
-    testImplementation("com.truesim.scene:scene-meshbuild:0.66.0") // meshes for picking and panels
+    testImplementation("com.truesim.scene:scene-meshbuild:0.68.0") // meshes for picking and panels
     testImplementation("com.truesim.ui:ui-text-native:0.10.0")
     testImplementation("com.truesim.ui:ui-fonts-cjk:0.10.0") // bundled fonts: the same text on every machine
     testImplementation("com.truesim.ui:ui-fonts-emoji:0.10.0") // colour emoji in the text field test

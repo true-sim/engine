@@ -94,6 +94,15 @@ public final class GpuImage implements AutoCloseable {
             mips, queueFamilies);
     }
 
+    /**
+     * An image of {@code format} (a {@code VK_FORMAT_*}), {@code width} by {@code height} by {@code depth} texels, one
+     * mip level: 3D when {@code depth} is more than 1, its views then 3D; shared by {@code queueFamilies} as above.
+     */
+    public static GpuImage volume(VulkanDevice device, int width, int height, int depth, int format, int usage,
+        int aspect, int... queueFamilies) {
+        return new GpuImage(device, width, height, depth, 1, false, 1, format, usage, aspect, 1, queueFamilies);
+    }
+
     /** How many mip levels a {@code width} by {@code height} image has, down to 1 x 1. */
     public static int fullMipCount(int width, int height) {
         return 32 - Integer.numberOfLeadingZeros(Math.max(width, height));

@@ -9,6 +9,9 @@ import static org.lwjgl.vulkan.VK10.VK_FORMAT_FEATURE_BLIT_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_FEATURE_BLIT_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_GENERAL;
+import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_STORAGE_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -95,6 +98,13 @@ public final class Textures implements AutoCloseable {
     private final Map<Integer, boolean[]> freed = new HashMap<>();
     private final Retiring retiring;
     private final java.util.List<Materials> namers = new java.util.ArrayList<>(); // checked before a texture goes
+    // Dynamic textures by sampled slot, looked up without boxing (update runs every frame): their image, storage slot
+    // (or -1), whether they stay in the general layout, and their texel's bytes
+    private GpuImage[] dynamicImages = new GpuImage[0];
+    private int[] dynamicStorage = new int[0];
+    private boolean[] dynamicGeneral = new boolean[0];
+    private int[] dynamicTexel = new int[0];
+    private final TextureUpdates updates;
     private long bytes;
     private boolean closed;
 
@@ -111,6 +121,8 @@ public final class Textures implements AutoCloseable {
         this.retiring = new Retiring(slots);
         this.stream = com.truesim.engine.vulkan.StreamQueue.open(device, slots,
             (long) RenderSettings.STREAM_BUDGET.defaultValue() << 20);
+        this.updates = new TextureUpdates(device, slots,
+            (long) RenderSettings.TEXTURE_UPDATE_BUDGET.defaultValue() << 20);
         TextureFormat[] formats = TextureFormat.values();
         formatFeatures = new int[formats.length];
         try (MemoryStack stack = stackPush()) {
@@ -338,6 +350,179 @@ public final class Textures implements AutoCloseable {
         return register(upload, gone);
     }
 
+    // ---------------------------------------------------------------- 3D and dynamic textures (7.9)
+
+    /**
+     * A 3D texture of {@code format}, {@code width} x {@code height} x {@code depth} texels (one mip level), from
+     * {@code texels} (x fastest, then y, then z, tightly packed); its sampled slot, read through bindless
+     * {@code volumes[]}. Uploaded at the next frame's start, as {@link #add} (a vector field, a noise volume).
+     */
+    public int volume(TextureFormat format, int width, int height, int depth, MemorySegment texels) {
+        checkOpen();
+        if (!supports(format) || format.compressed()) {
+            throw new IllegalArgumentException("This GPU does not sample " + format + " volumes");
+        }
+        long bytes = format.levelBytes(width, height) * depth;
+        if (texels.byteSize() != bytes) {
+            throw new IllegalArgumentException("A " + width + " x " + height + " x " + depth + " " + format
+                + " volume takes " + bytes + " bytes: " + texels.byteSize());
+        }
+        GpuImage image = GpuImage.volume(device, width, height, depth, format.vulkan(),
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+        boolean[] gone = new boolean[1];
+        try {
+            uploads.record(texels, (commands, staging, offset) -> {
+                if (!gone[0]) {
+                    volumeUpload(commands, staging, offset, image, width, height, depth);
+                }
+            });
+        } catch (RuntimeException e) {
+            image.close();
+            throw e;
+        }
+        return register(new Upload(image, format, width, height, 1, false, TextureSampler.REPEAT), gone, bytes);
+    }
+
+    private static void volumeUpload(VkCommandBuffer commands, GpuBuffer staging, long offset, GpuImage image,
+        int width, int height, int depth) {
+        try (MemoryStack stack = stackPush()) {
+            barrier(commands, stack, image, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            long region = stack.ncalloc(VkBufferImageCopy.ALIGNOF, 1, VkBufferImageCopy.SIZEOF);
+            memPutLong(region + VkBufferImageCopy.BUFFEROFFSET, offset);
+            layers(region + VkBufferImageCopy.IMAGESUBRESOURCE, 0);
+            memPutInt(region + VkBufferImageCopy.IMAGEEXTENT, width);
+            memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 4, height);
+            memPutInt(region + VkBufferImageCopy.IMAGEEXTENT + 8, depth);
+            nvkCmdCopyBufferToImage(commands, staging.handle(), image.handle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                region);
+            barrier(commands, stack, image, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        }
+    }
+
+    /** Whether GPU passes may write textures of {@code format} as storage images ({@link #dynamic} with storage). */
+    public boolean supportsStorage(TextureFormat format) {
+        return supports(format) && !format.compressed()
+            && (formatFeatures[format.ordinal()] & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+    }
+
+    /**
+     * A dynamic texture: {@code width} x {@code height} x {@code depth} texels of {@code format} (3D when
+     * {@code depth} is more than 1), one mip level, cleared to 0 at the next frame's start; its sampled slot. Its texels
+     * change while it is used: regions written on the CPU go up with {@link #update}, within frames. With
+     * {@code storage}, GPU passes write it too, through its storage slot ({@link #storageSlot}, bindless
+     * {@code images[]}, or {@code volumeImages[]} in 3D): it stays in the general layout, and a pass writing it
+     * places its own barrier before the frame's readers.
+     */
+    public int dynamic(TextureFormat format, int width, int height, int depth, boolean storage) {
+        checkOpen();
+        if (storage ? !supportsStorage(format) : !supports(format) || format.compressed()) {
+            throw new IllegalArgumentException("This GPU does not " + (storage ? "write" : "sample") + " dynamic "
+                + format + " textures");
+        }
+        int usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+            | (storage ? VK_IMAGE_USAGE_STORAGE_BIT : 0); // a source too: copied, read back
+        GpuImage image = GpuImage.volume(device, width, height, depth, format.vulkan(), usage,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+        int layout = storage ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        boolean[] gone = new boolean[1];
+        uploads.recordCommands(commands -> {
+            if (!gone[0]) {
+                cleared(commands, image, layout);
+            }
+        });
+        long bytes = format.levelBytes(width, height) * depth;
+        int texture = register(new Upload(image, format, width, height, 1, false, TextureSampler.REPEAT), gone,
+            bytes);
+        int storageSlot = storage ? device.bindless().addStorage(image.view()) : -1;
+        int slot = texture & 0xffff;
+        if (slot >= dynamicImages.length) {
+            int length = Math.max(slot + 1, 2 * dynamicImages.length);
+            dynamicImages = java.util.Arrays.copyOf(dynamicImages, length);
+            dynamicStorage = java.util.Arrays.copyOf(dynamicStorage, length);
+            dynamicGeneral = java.util.Arrays.copyOf(dynamicGeneral, length);
+            dynamicTexel = java.util.Arrays.copyOf(dynamicTexel, length);
+        }
+        dynamicImages[slot] = image;
+        dynamicStorage[slot] = storageSlot;
+        dynamicGeneral[slot] = storage;
+        dynamicTexel[slot] = (int) format.levelBytes(1, 1);
+        return texture;
+    }
+
+    /** {@code image} from undefined to {@code layout}, cleared to 0 on the way. */
+    private static void cleared(VkCommandBuffer commands, GpuImage image, int layout) {
+        try (MemoryStack stack = stackPush()) {
+            barrier(commands, stack, image, 0, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            long color = stack.ncalloc(16, 1, 16);
+            long range = stack.ncalloc(VkImageSubresourceRange.ALIGNOF, 1, VkImageSubresourceRange.SIZEOF);
+            memPutInt(range + VkImageSubresourceRange.ASPECTMASK, VK_IMAGE_ASPECT_COLOR_BIT);
+            memPutInt(range + VkImageSubresourceRange.LEVELCOUNT, 1);
+            memPutInt(range + VkImageSubresourceRange.LAYERCOUNT, 1);
+            Commands.clearColorImage(commands, image.handle(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, color, 1, range);
+            barrier(commands, stack, image, 0, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, layout,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        }
+    }
+
+    /** The storage slot of dynamic texture {@code texture} made with storage, or -1. */
+    public int storageSlot(int texture) {
+        int slot = texture & 0xffff;
+        return texture >= 0 && slot < dynamicImages.length && dynamicImages[slot] != null ? dynamicStorage[slot] : -1;
+    }
+
+    /** Whether {@code texture} is a dynamic texture ({@link #dynamic}). */
+    public boolean isDynamic(int texture) {
+        int slot = texture & 0xffff;
+        return texture >= 0 && slot < dynamicImages.length && dynamicImages[slot] != null;
+    }
+
+    /**
+     * Uploads a changed region of dynamic texture {@code texture}: the box at ({@code x}, {@code y}, {@code z}) of
+     * {@code width} x {@code height} x {@code depth} texels, read from {@code source} with its first texel at
+     * {@code from}, rows {@code rowBytes} apart and slices {@code sliceBytes}. Staged now and copied at the next frame's
+     * start; returns false when this frame's budget ({@code render.textureUpdateBudget}) has no room left: give it
+     * again next frame. Allocates nothing.
+     */
+    public boolean update(int texture, int x, int y, int z, int width, int height, int depth, MemorySegment source,
+        long from, long rowBytes, long sliceBytes) {
+        if (!isDynamic(texture)) {
+            throw new IllegalArgumentException("Not a dynamic texture: " + texture);
+        }
+        int slot = texture & 0xffff;
+        GpuImage image = dynamicImages[slot];
+        if (x < 0 || y < 0 || z < 0 || width < 1 || height < 1 || depth < 1 || x + width > image.width()
+            || y + height > image.height() || z + depth > image.depth()) {
+            throw new IllegalArgumentException("A region outside the texture: " + x + ", " + y + ", " + z + " + "
+                + width + " x " + height + " x " + depth);
+        }
+        return updates.stage(image.handle(), dynamicGeneral[slot], x, y, z, width, height, depth, dynamicTexel[slot],
+            source, from, rowBytes, sliceBytes);
+    }
+
+    /** The bytes of texels a frame stages for dynamic textures ({@code render.textureUpdateBudget}). */
+    public void updateBudget(long bytes) {
+        updates.budget(bytes);
+    }
+
+    /** The bytes of texels a frame stages for dynamic textures. */
+    public long updateBudget() {
+        return updates.budget();
+    }
+
+    /** Regions of dynamic textures waiting for the next frame. */
+    public int pendingUpdates() {
+        return updates.pending();
+    }
+
     /** {@link GeometryPool#streamBudget}: the budget of the transfer queue these textures share. */
     public void streamBudget(long bytes) {
         if (stream != null) {
@@ -414,10 +599,13 @@ public final class Textures implements AutoCloseable {
 
     /** {@code upload}'s sampled slot and bookkeeping, once it is queued. */
     private int register(Upload upload, boolean[] gone) {
+        return register(upload, gone, upload.bytes());
+    }
+
+    private int register(Upload upload, boolean[] gone, long size) {
         retiring.release();
         GpuImage image = upload.image;
         int slot = device.bindless().addSampled(image.view());
-        long size = upload.bytes();
         images.put(slot, image);
         sizes.put(slot, size);
         freed.put(slot, gone);
@@ -582,13 +770,26 @@ public final class Textures implements AutoCloseable {
         GpuImage image = images.remove(slot);
         bytes -= sizes.remove(slot);
         boolean[] gone = freed.remove(slot);
+        int storageSlot = storageSlot(texture);
+        if (isDynamic(texture)) {
+            updates.forget(image.handle());
+            dynamicImages[slot] = null;
+        }
         Bindless bindless = device.bindless();
         retiring.add(() -> {
             gone[0] = true;
             bindless.removeSampled(slot);
+            if (storageSlot >= 0) {
+                bindless.removeStorage(storageSlot);
+            }
             image.close();
         });
         retiring.release();
+    }
+
+    /** {@code texture}'s image, for tests reading it back; null if it is not one of these textures. */
+    GpuImage image(int texture) {
+        return texture < 0 ? null : images.get(texture & 0xffff);
     }
 
     /** Whether {@code texture} (with any sampler) is one of these textures. */
@@ -615,8 +816,13 @@ public final class Textures implements AutoCloseable {
             if (stream != null) {
                 stream.close();
             }
+            updates.close();
             for (Map.Entry<Integer, GpuImage> entry : images.entrySet()) {
                 device.bindless().removeSampled(entry.getKey());
+                int storageSlot = storageSlot(entry.getKey());
+                if (storageSlot >= 0) {
+                    device.bindless().removeStorage(storageSlot);
+                }
                 entry.getValue().close();
             }
             retiring.close();

@@ -26,6 +26,7 @@ import com.truesim.scene.animation.Animators;
 import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.mesh.MeshData;
+import com.truesim.scene.render.DynamicTexture;
 import com.truesim.scene.render.MaterialData;
 import com.truesim.scene.render.RenderAssets;
 import com.truesim.scene.render.TextureData;
@@ -119,6 +120,7 @@ public final class SceneResources implements AutoCloseable {
 
     private com.truesim.engine.settings.EngineSettings settings; // followed by the syncs, or null
     private com.truesim.engine.settings.EngineSettings.Subscription budgetWatch; // render.streamBudget, or null
+    private com.truesim.engine.settings.EngineSettings.Subscription updateWatch; // render.textureUpdateBudget, or null
     private final AssetCache assets;
     private final GeometryPool pool;
     private final Materials materials;
@@ -144,6 +146,9 @@ public final class SceneResources implements AutoCloseable {
     // registered uploaders
     private final Map<com.truesim.scene.assets.AssetType<?>, SampledUploader<?>> uploaders = new HashMap<>();
     private final Map<AssetRef<?>, ContentEntry> contents = new HashMap<>();
+    private final Map<AssetRef<?>, DynamicEntry> dynamics = new HashMap<>();
+    private final List<DynamicEntry> dynamicList = new ArrayList<>(); // by index: uploaded each frame
+    private final int[] box = new int[6]; // a dynamic texture's change, read
     private long residency; // changes whenever held content comes onto the GPU or leaves it
     private final MeshUser heldMeshes = mesh -> { }; // the techniques' holds: placed() counts the arrival
 
@@ -607,6 +612,8 @@ public final class SceneResources implements AutoCloseable {
         if (followed != null) { // render.streamBudget: the transfer queue's share of each frame, as set
             followBudget();
             budgetWatch = followed.onChange(com.truesim.engine.render.RenderSettings.STREAM_BUDGET, this::followBudget);
+            updateWatch = followed.onChange(com.truesim.engine.render.RenderSettings.TEXTURE_UPDATE_BUDGET,
+                this::followBudget);
         }
         return this;
     }
@@ -615,6 +622,8 @@ public final class SceneResources implements AutoCloseable {
         long bytes = (long) settings.get(com.truesim.engine.render.RenderSettings.STREAM_BUDGET) << 20;
         pool.streamBudget(bytes);
         textures.streamBudget(bytes);
+        textures.updateBudget((long) settings.get(com.truesim.engine.render.RenderSettings.TEXTURE_UPDATE_BUDGET)
+            << 20);
     }
 
     /** The settings scenes drawing these resources follow, or null. */
@@ -713,6 +722,9 @@ public final class SceneResources implements AutoCloseable {
             count += !counts || entry.slot != NONE || entry.failed ? 0 : 1;
         }
         for (ContentEntry entry : contents.values()) {
+            count += waitedForOnly || entry.slot != NONE || entry.failed ? 0 : 1;
+        }
+        for (DynamicEntry entry : dynamics.values()) {
             count += waitedForOnly || entry.slot != NONE || entry.failed ? 0 : 1;
         }
         return count;
@@ -979,6 +991,20 @@ public final class SceneResources implements AutoCloseable {
             } else {
                 entry.held++;
             }
+        } else if (ref.type() == RenderAssets.DYNAMIC_TEXTURE) {
+            DynamicEntry entry = dynamics.get(ref);
+            if (entry == null) {
+                assets.acquire(ref); // first: a ref no loader can load throws before anything is put in
+                entry = new DynamicEntry(ref);
+                dynamics.put(ref, entry);
+                DynamicTexture data = (DynamicTexture) assets.get(ref);
+                if (data != null) {
+                    dynamicLoaded(entry, data);
+                } else if (failedAlready(ref)) {
+                    entry.failed = true;
+                }
+            }
+            entry.held++;
         } else if (ref.type() == RenderAssets.MESH) {
             @SuppressWarnings("unchecked")
             AssetRef<MeshData> mesh = (AssetRef<MeshData>) ref;
@@ -1019,6 +1045,20 @@ public final class SceneResources implements AutoCloseable {
             if (--entry.held == 0 && entry.users.isEmpty()) {
                 dropTexture(entry);
             }
+        } else if (ref.type() == RenderAssets.DYNAMIC_TEXTURE) {
+            DynamicEntry entry = dynamics.get(ref);
+            if (entry == null) {
+                throw new IllegalStateException(ref + " is not held");
+            }
+            if (--entry.held == 0) {
+                dynamics.remove(ref);
+                dynamicList.remove(entry);
+                if (entry.slot != NONE) {
+                    textures.remove(entry.slot);
+                    residency++;
+                }
+                assets.release(ref);
+            }
         } else if (ref.type() == RenderAssets.MESH) {
             Mesh mesh = meshes.get(ref);
             if (mesh == null || mesh.held == 0) {
@@ -1058,8 +1098,22 @@ public final class SceneResources implements AutoCloseable {
             TextureEntry entry = textureEntries.get(ref);
             return entry == null ? NONE : entry.slot;
         }
+        if (ref.type() == RenderAssets.DYNAMIC_TEXTURE) {
+            DynamicEntry entry = dynamics.get(ref);
+            return entry == null ? NONE : entry.slot;
+        }
         ContentEntry entry = contents.get(ref);
         return entry == null ? NONE : entry.slot;
+    }
+
+    /**
+     * The storage slot of {@code ref}, a held dynamic texture GPU passes write ({@code DynamicTexture.gpuWritten}), for
+     * a pass writing it (bindless {@code images[]}, {@code volumeImages[]} in 3D); -1 while it is not on the GPU or for
+     * one written on the CPU. Allocates nothing.
+     */
+    public int storage(AssetRef<?> ref) {
+        DynamicEntry entry = ref == null ? null : dynamics.get(ref);
+        return entry == null || entry.slot == NONE ? NONE : textures.storageSlot(entry.slot);
     }
 
     /** The pool mesh of {@code ref}, held or drawn by a scene; -1 while it is not on the GPU. Allocates nothing. */
@@ -1107,6 +1161,103 @@ public final class SceneResources implements AutoCloseable {
             entry.failed = true; // not thrown into the cache's delivery
             LOG.warn("Could not put {} on the GPU", entry.ref, e);
             diagnostics.assetFailed(entry.ref, e);
+        }
+    }
+
+    /** The engine's texture format of {@code data}: 8-bit sRGB or linear, or half floats. */
+    private static com.truesim.engine.render.TextureFormat format(TextureData data) {
+        return data.format() == TextureData.Format.RGBA16F ? com.truesim.engine.render.TextureFormat.RGBA16F
+            : data.colorSpace() == TextureData.ColorSpace.SRGB ? com.truesim.engine.render.TextureFormat.RGBA8_SRGB
+            : com.truesim.engine.render.TextureFormat.RGBA8;
+    }
+
+    /** {@code entry}'s data arrived: a dynamic texture made, its texels uploaded over the next frames. */
+    @AllowAllocation("a dynamic texture arrived")
+    private void dynamicLoaded(DynamicEntry entry, DynamicTexture data) {
+        TextureData texels = data.texels();
+        try {
+            entry.slot = textures.dynamic(format(texels), texels.width(), texels.height(), texels.depth(),
+                data.gpuWritten());
+        } catch (RuntimeException e) {
+            entry.failed = true;
+            LOG.warn("Could not put {} on the GPU", entry.ref, e);
+            diagnostics.assetFailed(entry.ref, e);
+            return;
+        }
+        entry.data = data;
+        entry.taken = data.changes(); // what changed so far is in the whole upload
+        entry.wholeSlice = 0;
+        entry.wholeRow = 0;
+        dynamicList.add(entry);
+        residency++;
+    }
+
+    /**
+     * Uploads what changed of {@code entry} since it last did, within the textures' budget a frame: the whole texture
+     * first (in bands of rows that fit), then each box marked changed; what finds no room waits for the next frame. A
+     * reader that fell behind the texture's ring of changes takes it all again. Allocates nothing.
+     */
+    private void upload(DynamicEntry entry) {
+        DynamicTexture data = entry.data;
+        TextureData texels = data.texels();
+        int texel = texels.format().bytes();
+        long row = (long) texels.width() * texel;
+        long slice = row * texels.height();
+        while (true) {
+            if (entry.wholeSlice >= 0) { // the whole texture, a band of rows at a time
+                int rows = (int) Math.max(1, Math.min(texels.height() - entry.wholeRow,
+                    textures.updateBudget() / 2 / row));
+                if (!textures.update(entry.slot, 0, entry.wholeRow, entry.wholeSlice, texels.width(), rows, 1,
+                    texels.texels(), entry.wholeSlice * slice + entry.wholeRow * row, row, slice)) {
+                    return;
+                }
+                entry.wholeRow += rows;
+                if (entry.wholeRow == texels.height()) {
+                    entry.wholeRow = 0;
+                    entry.wholeSlice++;
+                    if (entry.wholeSlice == texels.depth()) {
+                        entry.wholeSlice = -1;
+                    }
+                }
+                continue;
+            }
+            if (entry.taken == data.changes()) {
+                return;
+            }
+            if (!data.change(entry.taken, box)) { // fell behind the ring: all of it again
+                entry.taken = data.changes();
+                entry.wholeSlice = 0;
+                entry.wholeRow = 0;
+                continue;
+            }
+            long bytes = (long) box[3] * box[4] * box[5] * texel;
+            if (bytes > textures.updateBudget() / 2) { // too big for a frame: as the whole texture, in bands
+                entry.taken++;
+                entry.wholeSlice = 0;
+                entry.wholeRow = 0;
+                continue;
+            }
+            if (!textures.update(entry.slot, box[0], box[1], box[2], box[3], box[4], box[5], texels.texels(),
+                box[2] * slice + box[1] * row + (long) box[0] * texel, row, slice)) {
+                return;
+            }
+            entry.taken++;
+        }
+    }
+
+    /** A dynamic texture techniques hold: its texture once made, and how far its uploads got. */
+    private static final class DynamicEntry {
+        final AssetRef<?> ref;
+        DynamicTexture data;
+        int slot = NONE;
+        int held;
+        boolean failed;
+        long taken; // the texture's changes uploaded (or covered by the whole upload)
+        int wholeSlice = -1; // the whole upload's slice and row, or -1: none under way
+        int wholeRow;
+
+        DynamicEntry(AssetRef<?> ref) {
+            this.ref = ref;
         }
     }
 
@@ -1220,6 +1371,9 @@ public final class SceneResources implements AutoCloseable {
      * nothing.
      */
     public void flush() {
+        for (int i = 0; i < dynamicList.size(); i++) {
+            upload(dynamicList.get(i));
+        }
         for (int i = 0; i < dirtySets.size(); i++) {
             MaterialSet set = dirtySets.get(i);
             set.dirty = false;
@@ -1333,6 +1487,16 @@ public final class SceneResources implements AutoCloseable {
     private void textureLoaded(TextureEntry entry, TextureData data) {
         boolean srgb = data.colorSpace() == TextureData.ColorSpace.SRGB;
         boolean hdr = data.format() == TextureData.Format.RGBA16F; // light: an environment's panorama
+        if (data.volume()) { // a 3D texture: one level, uploaded in the next frame on this thread
+            try {
+                entry.slot = textures.volume(format(data), data.width(), data.height(), data.depth(), data.texels());
+            } catch (RuntimeException e) {
+                failed(entry, e);
+                return;
+            }
+            textureArrived(entry);
+            return;
+        }
         if (workers == null) {
             try {
                 entry.slot = hdr ? textures.add(com.truesim.engine.render.TextureFormat.RGBA16F, data.width(),
@@ -1724,6 +1888,11 @@ public final class SceneResources implements AutoCloseable {
                 if (entry != null && entry.slot == NONE) {
                     textureLoaded(entry, (TextureData) data);
                 }
+            } else if (ref.type() == RenderAssets.DYNAMIC_TEXTURE) {
+                DynamicEntry entry = dynamics.get(ref);
+                if (entry != null && entry.slot == NONE) {
+                    dynamicLoaded(entry, (DynamicTexture) data);
+                }
             } else {
                 ContentEntry entry = contents.get(ref);
                 if (entry != null && entry.slot == NONE) {
@@ -1748,6 +1917,11 @@ public final class SceneResources implements AutoCloseable {
             }
             if (content != null) {
                 content.failed = true;
+                diagnostics.assetFailed(ref, cause);
+            }
+            DynamicEntry dynamic = dynamics.get(ref);
+            if (dynamic != null) {
+                dynamic.failed = true;
                 diagnostics.assetFailed(ref, cause);
             }
             if (material != null) {
@@ -1781,6 +1955,9 @@ public final class SceneResources implements AutoCloseable {
             assets.removeListener(listener);
             if (budgetWatch != null) {
                 budgetWatch.close();
+            }
+            if (updateWatch != null) {
+                updateWatch.close();
             }
         }
     }
