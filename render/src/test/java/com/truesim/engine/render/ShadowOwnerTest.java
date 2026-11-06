@@ -680,7 +680,8 @@ class ShadowOwnerTest {
             lights.shadow(1, spec);
             frame();
         }
-        assertThat(graph.builds()).as("the atlas, first used: one build").isEqualTo(builds + 1);
+        assertThat(graph.builds()).as("the atlas, first used: one build (last changed by %s; tile views grown %d)",
+            shadows.stats().structureChange(), shadows.stats().grown()).isEqualTo(builds + 1);
         builds = graph.builds();
         for (int round = 0; round < 3; round++) {
             for (ShadowSpec spec : specs) {
@@ -689,6 +690,41 @@ class ShadowOwnerTest {
             }
         }
         assertThat(graph.builds()).as("methods switched without a build").isEqualTo(builds);
+    }
+
+    /**
+     * The tile views the atlas's first use makes are asked whether they overflowed before they ever culled (the build
+     * reads the owner's version once more): new memory holds whatever it held, here freed buffers' counts beyond any
+     * list, as lavapipe's does. They read no overflow: one build, and no view grown.
+     */
+    @Test
+    void firstMapsReadNoOverflowFromNewViewsMemory() {
+        newGraph(visibility());
+        frame();
+        frame();
+        int builds = graph.builds();
+        // Host memory freed full of large counts, where the views' counts are made next
+        int usage = org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+            | org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+            | org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        GpuBuffer[] freed = new GpuBuffer[256];
+        for (int i = 0; i < freed.length; i++) {
+            freed[i] = GpuBuffer.hostVisible(device, 12L * MeshletRenderer.BINS, usage);
+            freed[i].memory().fill((byte) 0x7f);
+        }
+        for (GpuBuffer buffer : freed) {
+            buffer.close();
+        }
+        lights.point(0, 0, -1, -5, 20, 60, 60, 60);
+        lights.shadow(0, ShadowSpec.maps(256)).setCount(1);
+        for (int i = 0; i < 3; i++) {
+            frame();
+        }
+        assertThat(shadows.stats().mapped()).isEqualTo(1);
+        assertThat(shadows.stats().grown()).as("tile views grown").isZero();
+        assertThat(graph.builds()).as("the atlas, first used: one build (last changed by %s)",
+            shadows.stats().structureChange()).isEqualTo(builds + 1);
+        assertThat(shadows.stats().structureChange()).isEqualTo("more draw slots");
     }
 
     /**

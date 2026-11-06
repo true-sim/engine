@@ -154,6 +154,7 @@ final class TracedMasks implements AutoCloseable {
                         slot = hardWanted - 1;
                     }
                     structure++;
+                    owner.stats().structureChange = "more traced slots";
                 }
                 if (soft) {
                     softLight[slot] = light;

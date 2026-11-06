@@ -121,6 +121,9 @@ public final class RenderView implements AutoCloseable {
         drawCommand = GpuBuffer.deviceLocal(device, 24L * MeshletRenderer.BINS, commandUsage);
         // Per bin the early and late counts, then per bin the most indices a phase wanted.
         drawCount = GpuBuffer.hostVisible(device, 12L * MeshletRenderer.BINS, commandUsage); // common.slang's
+        // Read before the first cull (overflowed(), wanted...()): new memory holds anything, a freed buffer's on
+        // lavapipe; nothing wanted yet.
+        drawCount.memory().fill((byte) 0);
         int instances = renderer.scene().capacity();
         visibility = options.occlusion()
             ? GpuBuffer.deviceLocal(device, 4L * instances, storage | VK_BUFFER_USAGE_TRANSFER_DST_BIT) : null;
@@ -478,7 +481,7 @@ public final class RenderView implements AutoCloseable {
     /**
      * Whether the last finished frame wanted more than the view's lists hold: more meshlets in a phase of a raster bin
      * than it holds ({@link ViewOptions#draws()}, {@link ViewOptions#binDraws()}), or on the indexed path more
-     * triangles. What did not fit was not drawn; {@link #resize} the view.
+     * triangles. What did not fit was not drawn; {@link #resize} the view. False until the view has culled.
      */
     public boolean overflowed() {
         for (int bin = 0; bin < MeshletRenderer.BINS; bin++) {

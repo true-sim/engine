@@ -240,6 +240,7 @@ public final class Shadows implements AutoCloseable {
         long late;
         int shrunk;
         int dropped;
+        String structureChange = "none";
         int rayFallbacks;
         int hardened;
         int layered;
@@ -335,6 +336,14 @@ public final class Shadows implements AutoCloseable {
         /** Lights casting no shadow in some view for want of shadow table entries. */
         public int overflowed() {
             return overflowed;
+        }
+
+        /**
+         * What last changed what the graph is built for (each change, a build): "maps first used", "more draw slots",
+         * "more traced slots", ...; "none" yet. For tests and tools.
+         */
+        public String structureChange() {
+            return structureChange;
         }
 
         /** How many times a tile view's lists overflowed and grew (each, a build and every tile drawn again). */
@@ -484,6 +493,7 @@ public final class Shadows implements AutoCloseable {
         if (layersOn != layering) {
             layering = layersOn;
             structure++; // the layer atlas and its draws in the graph, or not
+            stats.structureChange = "caster layers switched";
             allDirty = true;
             forgetMoving();
         }
@@ -492,6 +502,7 @@ public final class Shadows implements AutoCloseable {
             atlas = new AtlasAllocator(atlasSize, MIN_TILE);
             forgetTiles();
             structure++;
+            stats.structureChange = "a new atlas size";
         }
         float detail = settings.get(ShadowSettings.CASTER_DETAIL);
         if (detail != casterDetail) {
@@ -711,6 +722,7 @@ public final class Shadows implements AutoCloseable {
         if (!mapsUsed) {
             mapsUsed = true;
             structure++;
+            stats.structureChange = "maps first used";
         }
     }
 
@@ -1420,6 +1432,7 @@ public final class Shadows implements AutoCloseable {
         if (wanted > slotsWanted) {
             slotsWanted = Math.max(wanted, Math.min(limit, 2 * slotsWanted));
             structure++;
+            stats.structureChange = "more draw slots";
         }
         int slots = slotViews.length;
         int drawn = Math.min(toDraw, slots);

@@ -260,6 +260,17 @@ for concurrent sharing.
   `GpuImage` lists each family once.
 - Rule: run the tests with validation (they fail on any validation error), on lavapipe too.
 
+**New host-visible memory is not zeroed.** A `RenderView`'s draw counts (host-visible, read back by `overflowed()`)
+were never cleared when made. The atlas's first use makes its tile views while the graph builds; with one frame slot
+`Shadows.prepare` runs again as the graph reads the owner's version after the build, and read the new views' counts
+before they had culled. On CI's lavapipe `ShadowOwnerTest.lightsCastByHardAndSoftRaysUnderBothShadings` got one build
+too many (4 against 3); on the RX 9070 XT, whose new memory read as zeros, it passed.
+- Proof: with the new views' counts filled with `0x7f` the RX 9070 XT failed the same way (4 against 3): the six tile
+  views "overflowed", grew, and their lists' new buffers rebuilt the graph a frame later.
+  `ShadowOwnerTest.firstMapsReadNoOverflowFromNewViewsMemory` frees host buffers full of large counts first: 6 views
+  grown without the fix, none with the counts zeroed as the view is made (true-sim/engine#434).
+- Rule: clear any host-visible buffer the CPU reads before the GPU first writes it; zeros on one driver prove nothing.
+
 **Waiting on a fence just made took 8 ms.** `VulkanDevice.submitAndWait` made a command pool and a fence per call.
 On an RX 9070 XT (Windows, AMD driver) the wait on the new fence took 8 to 11 ms for a 64 KiB fill, against 0.06 ms
 on a reused fence reset each time; every texture, persistent resource and ray-traced mesh set up paid it, 3 to 4 times
