@@ -3,6 +3,15 @@ package com.truesim.engine.render;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
+import static org.lwjgl.vulkan.VK10.VK_QUEUE_FAMILY_IGNORED;
+import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_READ_BIT;
+import static org.lwjgl.vulkan.VK13.VK_ACCESS_2_TRANSFER_WRITE_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+import static org.lwjgl.vulkan.VK13.VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+import static org.lwjgl.vulkan.VK13.vkCmdPipelineBarrier2;
 
 import com.truesim.engine.graph.ExternalImage;
 import com.truesim.engine.graph.FrameGraph;
@@ -11,6 +20,7 @@ import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.shadows.ShadowSettings;
 import com.truesim.engine.render.shadows.Shadows;
 import com.truesim.engine.vulkan.Format;
+import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanInstance;
@@ -18,13 +28,23 @@ import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.core.Mobility;
 import com.truesim.scene.core.ShadowMethod;
 import com.truesim.scene.core.ShadowSpec;
+import java.lang.foreign.ValueLayout;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.SplittableRandom;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkBufferImageCopy;
+import org.lwjgl.vulkan.VkDependencyInfo;
+import org.lwjgl.vulkan.VkImageMemoryBarrier2;
 
 /**
  * The {@link Shadows} owner's methods, timed (TRUESIM_BENCHMARK=true): 30,000 rocks on the terrain, the visibility
@@ -32,7 +52,9 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  * camera keeps its cascades' tiles); then 200 point lights with AUTO maps as
  * the camera flies over them (cost, tiles drawn, atlas use, graph builds), and specs switched every frame. GPU time per
  * frame (every pass and the frame start) and the shadows' passes alone, medians over frames, ranges over rounds taken
- * in turns after a warm-up round.
+ * in turns after a warm-up round. TRUESIM_SHADOWS_ONLY=static: what the scene's static hints buy as static geometry
+ * appears and changes (cells streamed in and out, props placed, a static rock moved once, and with rocks moving among
+ * them), each mobility mode in turns, the images compared once everything stood.
  */
 @EnabledIfEnvironmentVariable(named = "TRUESIM_BENCHMARK", matches = "true")
 class ShadowsBenchmark {
@@ -45,15 +67,28 @@ class ShadowsBenchmark {
      * A configuration: {@code rocks} rocks and {@code share} of the lights of {@link ManyLights} moving ({@code pausing}:
      * the rocks standing every other {@link #PAUSE} frames, as characters pausing).
      */
-    private record Config(String name, Consumer<Setup> setup, int rocks, double share, boolean pausing) {
+    private record Config(String name, Consumer<Setup> setup, int rocks, double share, boolean pausing,
+        Supplier<Stage> stage) {
         Config(String name, Consumer<Setup> setup) {
-            this(name, setup, 0, 0, false);
+            this(name, setup, 0, 0, false, null);
         }
 
         Config(String name, Consumer<Setup> setup, int rocks, double share) {
-            this(name, setup, rocks, share, false);
+            this(name, setup, rocks, share, false, null);
+        }
+
+        Config(String name, Consumer<Setup> setup, int rocks, double share, boolean pausing) {
+            this(name, setup, rocks, share, pausing, null);
         }
     }
+
+    /** What a configuration changes in the scene each frame besides its moving rocks (made afresh for each run). */
+    private interface Stage {
+        void frame(GpuScene scene, int frame);
+    }
+
+    /** Whether runs read back their image once everything stood, to compare the modes of a scene. */
+    private static boolean checkImages;
 
     /** Frames pausing rocks move, then stand. */
     private static final int PAUSE = 40;
@@ -65,7 +100,8 @@ class ShadowsBenchmark {
 
     private record Sample(double frame, double shadows, double drawn, double waiting, long texels, int builds,
         double[] frames, double[] shadowFrames, double forced, long waited, long drawnTotal, int maxWait, long late,
-        long changed, double culling, double prepare, double movingCasters) {
+        long changed, double culling, double prepare, double movingCasters, double fromLayers, double layersDrawn,
+        int[] image) {
     }
 
     @Test
@@ -93,7 +129,8 @@ class ShadowsBenchmark {
             System.out.printf(Locale.ROOT, "Shadows on %s (%s), 30,000 rocks on the terrain, the visibility buffer:%n",
                 device.gpu().name(), rayTracing != null ? "ray tracing" : "no ray tracing");
             String part = System.getenv("TRUESIM_SHADOWS_ONLY");
-            boolean pointsOnly = part != null && (part.equals("points") || part.startsWith("dynamic"));
+            boolean pointsOnly = part != null && (part.equals("points") || part.startsWith("dynamic")
+                || part.equals("static"));
             for (int[] size : pointsOnly ? new int[0][] : new int[][] {{1920, 1080}, {3840, 2160}}) {
                 List<Config> configs = sunConfigs(rayTracing != null);
                 String only = System.getenv("TRUESIM_SHADOWS_ONLY");
@@ -117,6 +154,15 @@ class ShadowsBenchmark {
             if (only == null || "points".equals(only)) {
                 run(device, renderer, view, geometry, lights, rayTracing, 1920, 1080, true, many,
                     "1920 x 1080, flying over 200 point lights", true);
+            }
+            ShadowsBenchmark.rockMesh = rock;
+            groundMesh = ground;
+            if (only == null || "static".equals(only)) {
+                checkImages = true;
+                run(device, renderer, view, geometry, lights, rayTracing, 1920, 1080, true, staticConfigs(),
+                    "1920 x 1080, flying over 200 point lights (maps, AUTO), static geometry appearing and changing",
+                    false);
+                checkImages = false;
             }
             if (only == null || only.startsWith("dynamic")) {
                 ShadowsBenchmark.rockMesh = rock;
@@ -235,6 +281,193 @@ class ShadowsBenchmark {
         }
     }
 
+    /**
+     * Static geometry appearing and changing among the 200 AUTO-mapped lights as the camera flies (0.5 units a frame):
+     * each case with casters' and lights' hints taken as static only (the default), and ignored (motion detected: a
+     * new or moved caster counts as moving for {@link ShadowSettings#CASTER_SETTLE} frames); the mixed case also with
+     * the hints used both ways, its moving rocks marked dynamic. Everything streamed or placed is marked static.
+     * TRUESIM_SHADOWS_CASES: names, separated by ';', those alone.
+     */
+    private static List<Config> staticConfigs() {
+        List<Config> configs = new ArrayList<>();
+        String cases = System.getenv("TRUESIM_SHADOWS_CASES");
+        String[] names = {"cells: a row of 100 rocks every 10 frames", "cells: a row of 20 rocks every 2 frames",
+            "props: one placed every 5 frames", "one static rock moved once",
+            "mixed: cells (100 every 10 frames), props, 100 rocks circling, 100 circling and pausing",
+            "100 rocks circling, nothing static changing"};
+        for (int i = 0; i < names.length; i++) {
+            if (cases != null && !Arrays.asList(cases.split(";")).contains(names[i])) {
+                continue;
+            }
+            int which = i;
+            Supplier<Stage> stage = switch (which) {
+                case 0 -> () -> new Cells(100, 10);
+                case 1 -> () -> new Cells(20, 2);
+                case 2 -> Props::new;
+                case 3 -> MovedOnce::new;
+                case 4 -> () -> new Mixed(100, 100);
+                default -> () -> (scene, frame) -> { };
+            };
+            boolean mixed = which >= 4;
+            int moving = mixed ? 100 : 0;
+            ShadowSettings.MobilityUse[] uses = mixed
+                ? new ShadowSettings.MobilityUse[] {ShadowSettings.MobilityUse.STATIC_ONLY,
+                    ShadowSettings.MobilityUse.DETECT, ShadowSettings.MobilityUse.USE_HINT}
+                : new ShadowSettings.MobilityUse[] {ShadowSettings.MobilityUse.STATIC_ONLY,
+                    ShadowSettings.MobilityUse.DETECT};
+            // First, the images' reference: every changed tile drawn with every caster (no layers, so no mobility);
+            // TRUESIM_SHADOWS_REPEAT: twice, how alike two runs of one mode are
+            for (String again : System.getenv("TRUESIM_SHADOWS_REPEAT") != null ? new String[] {"", " again"}
+                : new String[] {""}) {
+                configs.add(new Config(names[i] + ", no caster layers (the images' reference)" + again, s -> {
+                    hint(s, mixed ? 200 : 0, 0);
+                    s.graph().settings().set(ShadowSettings.CASTER_LAYERS, false);
+                    MOVING.place(s.lights(), 0, ShadowSpec.maps(ShadowSpec.AUTO));
+                    s.owner()[0] = new Shadows(s.geometry(), s.lights()).rayTracing(s.rays());
+                    s.added().add(s.owner()[0].view(s.main()));
+                }, moving, 0, false, stage));
+            }
+            for (ShadowSettings.MobilityUse use : uses) {
+                configs.add(new Config(names[i] + ", " + use, s -> {
+                    hint(s, mixed ? 200 : 0, 0); // the circling rocks (and the pausing) dynamic, the rest static
+                    s.graph().settings().set(ShadowSettings.CASTER_MOBILITY, use)
+                        .set(ShadowSettings.LIGHT_MOBILITY, use);
+                    MOVING.place(s.lights(), 0, ShadowSpec.maps(ShadowSpec.AUTO));
+                    s.owner()[0] = new Shadows(s.geometry(), s.lights()).rayTracing(s.rays());
+                    s.added().add(s.owner()[0].view(s.main()));
+                }, moving, 0, false, stage));
+            }
+        }
+        return configs;
+    }
+
+    /** The camera's z at {@code frame} ({@link #place}). */
+    private static double cameraZ(int frame) {
+        return -0.5 * frame;
+    }
+
+    /** Adds a static rock of {@code scale} at ({@code x}, {@code z}) on the terrain, turned by {@code turn}. */
+    private static int addRock(GpuScene scene, double x, double z, float scale, double turn) {
+        int id = scene.add(rockMesh, 0, 1, true, x, ManyLights.GROUND_Y + MeshletBenchmark.terrainHeight(x, z)
+            + 0.4 * scale, z, 0, (float) Math.sin(turn / 2), 0, (float) Math.cos(turn / 2), scale, scale, scale);
+        scene.setMobility(id, Mobility.STATIC);
+        return id;
+    }
+
+    /**
+     * Level cells streamed along the flight: rows 200 units wide across the path and as deep as the camera flies in
+     * {@code every} frames, each of {@code perRow} static rocks (about the field's density), loaded from 20 units
+     * behind the camera to 80 ahead; a row in ahead and one out behind every {@code every} frames, each in one batch.
+     */
+    private static final class Cells implements Stage {
+        private final int perRow;
+        private final double depth;
+        private final ArrayDeque<int[]> rows = new ArrayDeque<>();
+        private int next; // the next row to load: from z = 20 - next * depth to one depth further
+        private int first; // the oldest row loaded
+
+        Cells(int perRow, int every) {
+            this.perRow = perRow;
+            this.depth = 0.5 * every;
+        }
+
+        @Override
+        public void frame(GpuScene scene, int frame) {
+            double z = cameraZ(frame);
+            while (20 - next * depth > z - 80) {
+                SplittableRandom random = new SplittableRandom(1000 + next);
+                int[] ids = new int[perRow];
+                for (int k = 0; k < perRow; k++) {
+                    ids[k] = addRock(scene, random.nextDouble(-100, 100),
+                        20 - (next + random.nextDouble()) * depth, (float) random.nextDouble(0.5, 3),
+                        random.nextDouble(0, 2 * Math.PI));
+                }
+                rows.addLast(ids);
+                next++;
+            }
+            while (!rows.isEmpty() && 20 - (first + 1) * depth > z + 20) {
+                int[] ids = rows.removeFirst();
+                scene.remove(ids, 0, ids.length);
+                first++;
+            }
+        }
+    }
+
+    /** Lights ordered by how near they stand to the point 25 units ahead of the camera at {@code frame}. */
+    private static Integer[] lightsAhead(int frame) {
+        double z = cameraZ(frame) - 25;
+        Integer[] order = new Integer[ManyLights.COUNT];
+        for (int i = 0; i < order.length; i++) {
+            order[i] = i;
+        }
+        Arrays.sort(order, java.util.Comparator.comparingDouble(i -> {
+            double[] at = MOVING.at(i);
+            return at[0] * at[0] + (at[2] - z) * (at[2] - z);
+        }));
+        return order;
+    }
+
+    /** Props placed one at a time, every 5 frames, each static, beside one of the lights 25 units or so ahead. */
+    private static final class Props implements Stage {
+        private int placed;
+
+        @Override
+        public void frame(GpuScene scene, int frame) {
+            if (frame % 5 != 0) {
+                return;
+            }
+            double[] at = MOVING.at(lightsAhead(frame)[placed % 4]);
+            double angle = 2.399963 * placed;
+            addRock(scene, at[0] + 2.5 * Math.cos(angle), at[2] + 2.5 * Math.sin(angle), 1.5f, angle);
+            placed++;
+        }
+    }
+
+    /** A static rock (of scale 3) beside a light ahead, placed at the start and moved once (3.6 units), at frame 50. */
+    private static final class MovedOnce implements Stage {
+        private int id = -1;
+        private double[] at;
+
+        @Override
+        public void frame(GpuScene scene, int frame) {
+            if (id < 0) {
+                at = MOVING.at(lightsAhead(50)[0]);
+                id = addRock(scene, at[0] + 2, at[2], 3, 0);
+            } else if (frame == 50) {
+                double x = at[0] - 1;
+                double z = at[2] + 2;
+                scene.set(id, rockMesh, 0, 1, true, x, ManyLights.GROUND_Y + MeshletBenchmark.terrainHeight(x, z)
+                    + 1.2, z, 0, 0.3f, 0, (float) Math.sqrt(1 - 0.09), 3, 3, 3);
+            }
+        }
+    }
+
+    /**
+     * The static level streamed as {@link Cells} (100 rocks every 10 frames) with {@link Props} placed, rocks 1 to
+     * {@code circling} circling the lights all the time (the configuration's moving rocks), and the next
+     * {@code pausing} circling 40 frames, then standing 40, as characters pausing.
+     */
+    private static final class Mixed implements Stage {
+        private final Cells cells = new Cells(100, 10);
+        private final Props props = new Props();
+        private final int circling;
+        private final int pausing;
+
+        Mixed(int circling, int pausing) {
+            this.circling = circling;
+            this.pausing = pausing;
+        }
+
+        @Override
+        public void frame(GpuScene scene, int frame) {
+            cells.frame(scene, frame);
+            props.frame(scene, frame);
+            if (frame / PAUSE % 2 == 0) {
+                MOVING.move(scene, rockMesh, circling, circling + pausing, null, 0, 0, frame / 60.0);
+            }
+        }
+    }
+
     private static List<Config> sunConfigs(boolean rays) {
         List<Config> configs = new ArrayList<>();
         configs.add(new Config("unshadowed", s -> sun(s, null)));
@@ -287,17 +520,49 @@ class ShadowsBenchmark {
         Lights lights, RayTracing rayTracing, int width, int height, boolean moving, List<Config> configs,
         String title, boolean switching) {
         Sample[][] samples = new Sample[configs.size()][ROUNDS];
+        long[] differing = new long[configs.size()]; // pixels unlike the scene's first mode's, the most of any round
+        int[] largest = new int[configs.size()]; // the largest difference of a channel, of any round
         try (GpuImage shaded = new GpuImage(device, width, height, VK_FORMAT_R8G8B8A8_UNORM,
             org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT)) {
             ExternalImage target = new ExternalImage("shaded", width, height, Format.R8G8B8A8_UNORM,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                 org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL).set(shaded.handle(), 0);
             for (int round = -1; round < ROUNDS; round++) {
+                Map<String, int[]> firsts = new HashMap<>(); // each scene's first mode's image this round
                 for (int c = 0; c < configs.size(); c++) {
                     Sample sample = measure(device, renderer, view, geometry, lights, rayTracing, width, height,
-                        moving, configs.get(c), target, switching && configs.get(c).name().contains("switched"));
+                        moving, configs.get(c), target, switching && configs.get(c).name().contains("switched"),
+                        shaded);
+                    if (sample.image() != null) {
+                        String name = configs.get(c).name();
+                        int[] first = firsts.putIfAbsent(name.substring(0, name.lastIndexOf(", ")), sample.image());
+                        if (first != null) {
+                            long count = 0;
+                            int most = 0;
+                            for (int p = 0; p < first.length; p++) {
+                                int a = first[p];
+                                int b = sample.image()[p];
+                                int d = 0;
+                                for (int shift = 0; shift < 24; shift += 8) {
+                                    d = Math.max(d, Math.abs((a >>> shift & 0xff) - (b >>> shift & 0xff)));
+                                }
+                                count += d > 0 ? 1 : 0;
+                                most = Math.max(most, d);
+                            }
+                            differing[c] = Math.max(differing[c], count);
+                            String dump = System.getenv("TRUESIM_SHADOWS_DUMP"); // a folder: unlike images saved
+                            if (dump != null && count > 0) {
+                                dumpImages(dump, c + "-" + round, first, sample.image(), width, height);
+                            }
+                            largest[c] = Math.max(largest[c], most);
+                        }
+                    }
                     if (round >= 0) {
-                        samples[c][round] = sample;
+                        samples[c][round] = new Sample(sample.frame(), sample.shadows(), sample.drawn(),
+                            sample.waiting(), sample.texels(), sample.builds(), sample.frames(), sample.shadowFrames(),
+                            sample.forced(), sample.waited(), sample.drawnTotal(), sample.maxWait(), sample.late(),
+                            sample.changed(), sample.culling(), sample.prepare(), sample.movingCasters(),
+                            sample.fromLayers(), sample.layersDrawn(), null); // the image not kept
                     }
                 }
             }
@@ -306,8 +571,10 @@ class ShadowsBenchmark {
         System.out.println("| Shadows | Frame (GPU) | Frame p99 | Shadow passes | Shadow p99 | Culling"
             + " | Tiles drawn a frame"
             + " | Of them forced | Tiles waiting | Lag drawn mean / changed mean / max (frames) | Atlas texels"
-            + " | Builds | Prepare (CPU) | Moving casters | Shadow mean |");
-        System.out.println("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+            + " | Builds | Prepare (CPU) | Moving casters | Shadow mean"
+            + " | Drawn with every caster / over their layer / layers drawn"
+            + " | Image: pixels unlike the first mode's / most |");
+        System.out.println("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
         for (int c = 0; c < configs.size(); c++) {
             Sample[] all = samples[c];
             long waited = 0;
@@ -321,7 +588,11 @@ class ShadowsBenchmark {
             double culling = 0;
             double prepare = 0;
             double movers = 0;
+            double fromLayers = 0;
+            double layersDrawn = 0;
             for (Sample sample : all) {
+                fromLayers += sample.fromLayers() / all.length;
+                layersDrawn += sample.layersDrawn() / all.length;
                 culling += sample.culling() / all.length;
                 prepare += sample.prepare() / all.length;
                 movers += sample.movingCasters() / all.length;
@@ -335,17 +606,21 @@ class ShadowsBenchmark {
                 waiting += sample.waiting() / all.length;
             }
             System.out.printf(Locale.ROOT, "| %s | %s | %.2f ms | %s | %.2f ms | %.2f ms | %.1f | %.1f | %.1f"
-                    + " | %.2f / %.2f / %d | %,d | %d | %.3f ms | %.0f | %.3f ms |%n", configs.get(c).name(), range(all, true),
+                    + " | %.2f / %.2f / %d | %,d | %d | %.3f ms | %.0f | %.3f ms | %.1f / %.1f / %.1f | %s |%n",
+                configs.get(c).name(), range(all, true),
                 p99(all, true),
                 range(all, false), p99(all, false), culling, drawnMean, forced, waiting, drawn == 0 ? 0 : waited / (double) drawn,
-                changed == 0 ? 0 : late / (double) changed, maxWait, all[0].texels(), all[0].builds(), prepare, movers, mean(all));
+                changed == 0 ? 0 : late / (double) changed, maxWait, all[0].texels(), all[0].builds(), prepare, movers,
+                mean(all), drawnMean - fromLayers, fromLayers, layersDrawn,
+                checkImages ? String.format(Locale.ROOT, "%,d / %d", differing[c], largest[c]) : "-");
         }
     }
 
     private static Sample measure(VulkanDevice device, MeshletRenderer renderer, RenderView view,
         SceneGeometry geometry, Lights lights, RayTracing rayTracing, int width, int height, boolean moving,
-        Config config, ExternalImage target, boolean switching) {
+        Config config, ExternalImage target, boolean switching, GpuImage shaded) {
         Camera camera = new Camera();
+        Stage stage = config.stage() == null ? null : config.stage().get();
         place(camera, 0, width, height);
         view.set(camera, 1, MeshletRenderer.MODE_LIT);
         try (FrameGraph graph = new FrameGraph(device, 2)) {
@@ -367,7 +642,7 @@ class ShadowsBenchmark {
             graph.timings(true); // before the warm-up: turning timings on builds the graph again
             for (int i = 0; i < 30; i++) {
                 frame = step(device, graph, camera, width, height, moving, lights, switching, specs, frame, config,
-                    renderer.scene());
+                    renderer.scene(), stage);
             }
             int builds = graph.builds();
             double[] frames = new double[FRAMES];
@@ -385,9 +660,11 @@ class ShadowsBenchmark {
             long changed = 0;
             double[] prepare = new double[FRAMES];
             double movers = 0;
+            double fromLayers = 0;
+            double layersDrawn = 0;
             for (int i = -4; i < FRAMES; i++) {
                 frame = step(device, graph, camera, width, height, moving, lights, switching, specs, frame, config,
-                    renderer.scene());
+                    renderer.scene(), stage);
                 GpuTimings timings = graph.timings();
                 if (i < 0 || timings == null) {
                     continue;
@@ -433,9 +710,19 @@ class ShadowsBenchmark {
                     changed += stats.drawn() + stats.waiting();
                     prepare[i] = stats.prepareNanos() / 1.0e6;
                     movers += stats.movingCasters() / (double) FRAMES;
+                    fromLayers += stats.moving() / (double) FRAMES;
+                    layersDrawn += stats.layered() / (double) FRAMES;
                 }
             }
             graph.timings(false);
+            int[] image = null;
+            if (checkImages) { // everything standing a few frames (the late tiles drawn), then the image read back
+                String stand = System.getenv("TRUESIM_SHADOWS_STAND"); // frames standing first (12)
+                for (int i = 0, n = stand == null ? 12 : Integer.parseInt(stand); i < n; i++) {
+                    device.submitAndWait(device.graphics(), graph::record);
+                }
+                image = readBack(device, shaded);
+            }
             if (passes != null) {
                 StringBuilder line = new StringBuilder(config.name() + " (per frame):");
                 passes.forEach((pass, sum) -> line.append(String.format(Locale.ROOT, " %s %.3f;", pass,
@@ -448,24 +735,28 @@ class ShadowsBenchmark {
             if (owner[0] != null) {
                 owner[0].close();
             }
-            if (config.rocks() > 0) {
+            if (config.rocks() > 0 || stage != null) { // the rocks back, those added removed
                 MeshletBenchmark.rocksOnTerrain(renderer, rockMesh, groundMesh, 30_000, 600, -12); // where they were
             }
             return new Sample(median(frames), median(shadow), drawn, waiting, texels, built, frames, shadow, forced,
-                waited, drawnTotal, maxWait, late, changed, median(culling), median(prepare), movers);
+                waited, drawnTotal, maxWait, late, changed, median(culling), median(prepare), movers, fromLayers,
+                layersDrawn, image);
         }
     }
 
     /** A frame: the camera placed (turning, or still), specs switched where asked. */
     private static int step(VulkanDevice device, FrameGraph graph, Camera camera, int width, int height,
         boolean moving, Lights lights, boolean switching, ShadowSpec[] specs, int frame, Config config,
-        GpuScene scene) {
+        GpuScene scene, Stage stage) {
         if (moving) {
             place(camera, frame, width, height);
         }
         boolean standing = config.pausing() && frame / PAUSE % 2 == 1;
         if ((config.rocks() > 0 || config.share() > 0) && !standing) {
             MOVING.move(scene, rockMesh, config.rocks(), lights, 0, config.share(), frame / 60.0);
+        }
+        if (stage != null) {
+            stage.frame(scene, frame);
         }
         if (switching) {
             for (int i = 0; i < 200; i += 7) {
@@ -474,6 +765,67 @@ class ShadowsBenchmark {
         }
         device.submitAndWait(device.graphics(), graph::record);
         return frame + 1;
+    }
+
+    /** Saves {@code a}, {@code b} and where they differ as PNG files in {@code folder}, named from {@code name}. */
+    private static void dumpImages(String folder, String name, int[] a, int[] b, int width, int height) {
+        java.awt.image.BufferedImage[] images = new java.awt.image.BufferedImage[3];
+        for (int k = 0; k < 3; k++) {
+            images[k] = new java.awt.image.BufferedImage(width, height, java.awt.image.BufferedImage.TYPE_INT_RGB);
+        }
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int p = y * width + x;
+                images[0].setRGB(x, y, rgb(a[p]));
+                images[1].setRGB(x, y, rgb(b[p]));
+                images[2].setRGB(x, y, a[p] == b[p] ? 0 : 0xffffff);
+            }
+        }
+        try {
+            String[] parts = {"a", "b", "diff"};
+            for (int k = 0; k < 3; k++) {
+                javax.imageio.ImageIO.write(images[k], "png", new java.io.File(folder, name + "-" + parts[k] + ".png"));
+            }
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
+    /** An RGBA8 pixel (red in the low byte) as 0xRRGGBB. */
+    private static int rgb(int rgba) {
+        return (rgba & 0xff) << 16 | (rgba >>> 8 & 0xff) << 8 | rgba >>> 16 & 0xff;
+    }
+
+    /** The image's pixels (RGBA8, one int each), copied out once the frames finished. */
+    private static int[] readBack(VulkanDevice device, GpuImage image) {
+        int pixels = image.width() * image.height();
+        try (GpuBuffer out = GpuBuffer.hostVisible(device, 4L * pixels,
+            org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+            device.submitAndWait(device.graphics(), commands -> {
+                try (MemoryStack stack = MemoryStack.stackPush()) {
+                    VkImageMemoryBarrier2.Buffer barrier = VkImageMemoryBarrier2.calloc(1, stack)
+                        .sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2)
+                        .srcStageMask(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
+                        .srcAccessMask(VK_ACCESS_2_TRANSFER_WRITE_BIT)
+                        .dstStageMask(VK_PIPELINE_STAGE_2_TRANSFER_BIT).dstAccessMask(VK_ACCESS_2_TRANSFER_READ_BIT)
+                        .oldLayout(org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+                        .newLayout(org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+                        .srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+                        .image(image.handle());
+                    barrier.subresourceRange().aspectMask(org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+                        .levelCount(1).layerCount(1);
+                    vkCmdPipelineBarrier2(commands, VkDependencyInfo.calloc(stack)
+                        .sType(VK_STRUCTURE_TYPE_DEPENDENCY_INFO).pImageMemoryBarriers(barrier));
+                    VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
+                    region.imageSubresource().aspectMask(org.lwjgl.vulkan.VK10.VK_IMAGE_ASPECT_COLOR_BIT)
+                        .layerCount(1);
+                    region.imageExtent().set(image.width(), image.height(), 1);
+                    vkCmdCopyImageToBuffer(commands, image.handle(),
+                        org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, out.handle(), region);
+                }
+            });
+            return out.memory().toArray(ValueLayout.JAVA_INT);
+        }
     }
 
     /** The camera over the rocks, turning a little each frame and moving along. */
