@@ -53,7 +53,9 @@ import org.lwjgl.vulkan.VkBufferImageCopy;
  * (hard), {@code soft} (soft, sphere radius 0.3). Next to the frames, {@code frames.csv}: each frame's GPU time (every
  * pass and the frame start), its shadow passes, tiles drawn and waiting, atlas texels used and bytes allocated; then
  * the same path once more without capture, frames in flight, the scene stepped by the clock ({@code realtime.csv}), as
- * capturing (a readback a frame) slows frames. The summaries print as a table.
+ * capturing (a readback a frame) slows frames; and with the default atlas draws a frame
+ * ({@code realtime-default-draws.csv}), where most tiles the rocks reach wait. The video draws up to 2,048 tiles a
+ * frame: none waits. The summaries print as a table (and {@code summary.md}).
  */
 @EnabledIfEnvironmentVariable(named = "TRUESIM_SHADOWS_VIDEO", matches = ".+")
 class ShadowsVideo {
@@ -64,6 +66,8 @@ class ShadowsVideo {
     private static final double SECONDS = 10;
     private static final int ROCKS = 300;
     private static final double LIGHTS_MOVING = 0.1;
+    /** Atlas tiles drawn a frame at most in the video: every tile the moving rocks reach, in its frame. */
+    private static final int DRAWS = 2048;
 
     /** A frame's measures. */
     private record Measure(double frame, double shadows, int drawn, int waiting, long texels, long allocated) {
@@ -107,8 +111,8 @@ class ShadowsVideo {
             StringBuilder table = new StringBuilder(String.format(Locale.ROOT,
                 "Shadows video on %s: 200 point lights, %d rocks and %d%% of the lights moving, %d x %d%n"
                     + "| Method | Run | Frames | Frame median / p95 / p99 / max (GPU) | Shadows median / p95 / p99 / max"
-                    + " | Tiles drawn a frame (mean / max) | Atlas texels | Builds | Frames allocating |%n"
-                    + "|---|---|---|---|---|---|---|---|---|%n",
+                    + " | Tiles drawn a frame (mean / max) | Tiles waiting (mean) | Atlas texels | Builds"
+                    + " | Frames allocating |%n|---|---|---|---|---|---|---|---|---|---|%n",
                 device.gpu().name(), ROCKS, Math.round(100 * LIGHTS_MOVING), WIDTH, HEIGHT));
             ExecutorService writers = Executors.newFixedThreadPool(Math.max(2,
                 Runtime.getRuntime().availableProcessors() - 2));
@@ -119,16 +123,21 @@ class ShadowsVideo {
                         continue;
                     }
                     ShadowSpec spec = (ShadowSpec) method[1];
-                    for (boolean capture : new boolean[] {true, false}) {
+                    // Captured and clock-paced with every changed tile drawn in its frame; clock-paced with the
+                    // default draws a frame too (tiles over it wait: shadows late)
+                    for (int run = 0; run < 3; run++) {
+                        boolean capture = run == 0;
+                        int draws = run < 2 ? DRAWS : 0;
                         MeshletBenchmark.rocksOnTerrain(renderer, rock, ground, 30_000, 600, ManyLights.GROUND_Y);
                         field.place(lights, 1, spec);
                         lights.directional(0, -Keys.SUN_X, -Keys.SUN_Y, -Keys.SUN_Z, 0.04f, 0.045f, 0.07f);
                         lights.shadow(0, ShadowSpec.NONE); // moonlight: the rocks' shapes, no shadows
                         Path folder = Files.createDirectories(root.resolve(name));
                         String row = run(device, slots, renderer, view, geometry, lights, rayTracing, scene, rock,
-                            field, target, pixels, capture ? folder : null, folder, writers);
-                        table.append(String.format(Locale.ROOT, "| %s | %s %s%n", name,
-                            capture ? "fixed 60 fps, captured" : "clock-paced, no capture", row));
+                            field, target, pixels, capture ? folder : null, folder, writers, draws);
+                        table.append(String.format(Locale.ROOT, "| %s | %s, %s %s%n", name,
+                            capture ? "fixed 60 fps, captured" : "clock-paced, no capture",
+                            draws > 0 ? "atlas draws " + draws : "default atlas draws", row));
                     }
                 }
             } finally {
@@ -146,7 +155,8 @@ class ShadowsVideo {
      */
     private static String run(VulkanDevice device, FrameSlots slots, MeshletRenderer renderer, RenderView view,
         SceneGeometry geometry, Lights lights, RayTracing rayTracing, GpuScene scene, int rock, ManyLights field,
-        GpuImage target, GpuBuffer pixels, Path frames, Path folder, ExecutorService writers) throws Exception {
+        GpuImage target, GpuBuffer pixels, Path frames, Path folder, ExecutorService writers, int draws)
+        throws Exception {
         boolean capture = frames != null;
         Camera camera = new Camera();
         place(camera, 0);
@@ -157,6 +167,9 @@ class ShadowsVideo {
             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), 0);
         try (FrameGraph graph = new FrameGraph(device, slots)) {
+            if (draws > 0) {
+                graph.settings().set(com.truesim.engine.render.shadows.ShadowSettings.ATLAS_DRAWS, draws);
+            }
             SceneView main = new SceneView(graph.addView("main").size(WIDTH, HEIGHT), view, camera);
             Shadows shadows = new Shadows(geometry, lights).rayTracing(rayTracing);
             main.port().add(new VisibilityBufferShading(geometry, main, VK_FORMAT_R8G8B8A8_UNORM,
@@ -219,7 +232,8 @@ class ShadowsVideo {
             for (Future<?> w : written) {
                 w.get();
             }
-            try (Writer csv = Files.newBufferedWriter(folder.resolve(capture ? "frames.csv" : "realtime.csv"),
+            try (Writer csv = Files.newBufferedWriter(folder.resolve(capture ? "frames.csv"
+                : draws > 0 ? "realtime.csv" : "realtime-default-draws.csv"),
                 StandardCharsets.UTF_8)) {
                 csv.write("frame,seconds,gpu_ms,shadow_ms,tiles_drawn,tiles_waiting,atlas_texels,allocated_bytes\n");
                 for (int f = 0; f < count; f++) {
@@ -229,16 +243,19 @@ class ShadowsVideo {
             }
             int allocating = 0;
             double drawnSum = 0;
+            double waitingSum = 0;
             int drawnMax = 0;
             long texelsMax = 0;
             for (int f = 0; f < count; f++) {
                 allocating += allocated[f] > 0 ? 1 : 0;
                 drawnSum += drawn[f];
+                waitingSum += waiting[f];
                 drawnMax = Math.max(drawnMax, drawn[f]);
                 texelsMax = Math.max(texelsMax, texels[f]);
             }
-            return String.format(Locale.ROOT, "| %d | %s | %s | %.1f / %d | %,d | %d | %d |", count,
-                stats(gpu, count), stats(shadow, count), drawnSum / count, drawnMax, texelsMax, built, allocating);
+            return String.format(Locale.ROOT, "| %d | %s | %s | %.1f / %d | %.1f | %,d | %d | %d |", count,
+                stats(gpu, count), stats(shadow, count), drawnSum / count, drawnMax, waitingSum / count, texelsMax,
+                built, allocating);
         }
     }
 
@@ -299,15 +316,15 @@ class ShadowsVideo {
     }
 
     /**
-     * The camera's path at {@code seconds}: 12 units over the field's middle, from its near edge 140 units along it
-     * in 10 s, looking ahead and down, swaying left and right.
+     * The camera's path at {@code seconds}: 26 units over the ground, from the field's near edge 140 units along it in
+     * 10 s, looking ahead and well down, swaying left and right.
      */
     static void place(Camera camera, double seconds) {
         double z = -2 - 14 * seconds;
         double x = 20 * Math.sin(seconds * 0.45);
         double yaw = 0.25 * Math.sin(seconds * 0.45 + 0.8);
-        camera.position(x, 0, z);
-        camera.set(Math.sin(yaw), -0.42, -Math.cos(yaw), 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
+        camera.position(x, 14, z);
+        camera.set(Math.sin(yaw), -1.1, -Math.cos(yaw), 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
     }
 
     private static int[] readback(VulkanDevice device, GpuImage target, GpuBuffer pixels) {
