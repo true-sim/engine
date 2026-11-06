@@ -1,3 +1,0 @@
-// A kernel variant of the simulation with these modules: particles/simulate.slang's entry points ([shader("compute")]
-// countMain, updateMain, spawnMain, ...) and the dispatch generated beside this file.
-#include "particles/simulate.slang"
