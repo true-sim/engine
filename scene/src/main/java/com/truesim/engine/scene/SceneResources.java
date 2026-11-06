@@ -82,6 +82,18 @@ import org.slf4j.LoggerFactory;
  * // a loading screen instead keeps drawing frames, updating the scenes, until resources.loaded()
  * }</pre>
  *
+ * <p>Techniques hold content of their own through it too (core prerequisite 7.5: a particle's texture or mesh, a
+ * vector field, a decal), so everything a frame draws loads through the asset cache and lives on the GPU while used:
+ * {@link #hold} and {@link #release} by ref, {@link #texture} and {@link #mesh} say where it is (-1 while it is not),
+ * {@link #residency()} when that may have changed; types these resources do not know go through an uploader
+ * ({@link #sampled}).
+ *
+ * <pre>{@code
+ * resources.sampled(EffectAssets.VECTOR_FIELD, vectorFields);    // a library's own content type
+ * resources.hold(sparkTexture);                                   // while an effect naming it is encoded
+ * int slot = resources.texture(sparkTexture);                     // -1 until it is on the GPU
+ * }</pre>
+ *
  * <p>Given a {@link RayTracing} over its pool ({@link #rayTracing}), every mesh it uploads gets a bottom level, built in
  * frames, and every deformed copy a scene draws (skinned or morphing renderables) one of its own, refitted as it is
  * posed: the scenes' instances are traced as they are drawn. Each leaves with its mesh.
@@ -128,6 +140,12 @@ public final class SceneResources implements AutoCloseable {
     private RayTracing rayTracing; // or null: no bottom levels
     private java.util.function.ToIntFunction<MeshData> rayLevel;
     private final Map<Integer, MeshData> copies = new HashMap<>(); // the scenes' deformed copies, by pool mesh
+    // Content techniques hold (hold/release): textures and meshes share the entries above; other types go to their
+    // registered uploaders
+    private final Map<com.truesim.scene.assets.AssetType<?>, SampledUploader<?>> uploaders = new HashMap<>();
+    private final Map<AssetRef<?>, ContentEntry> contents = new HashMap<>();
+    private long residency; // changes whenever held content comes onto the GPU or leaves it
+    private final MeshUser heldMeshes = mesh -> { }; // the techniques' holds: placed() counts the arrival
 
     /**
      * Hears what keeps a scene from drawing as its data says, which is otherwise only logged: games show it, count it
@@ -171,6 +189,7 @@ public final class SceneResources implements AutoCloseable {
         boolean preparing; // being made ready on the workers: its data stays held until it is
         boolean dropped; // let go of while preparing
         boolean failed; // it could not load or be placed: never drawn
+        int held; // holds by techniques (hold), beside the users
 
         Mesh(AssetRef<MeshData> ref) {
             this.ref = ref;
@@ -328,6 +347,7 @@ public final class SceneResources implements AutoCloseable {
         boolean failed;
         boolean preparing; // being made ready on the workers: its data stays held until it is
         boolean dropped; // let go of while preparing
+        int held; // holds by techniques (hold), beside the materials using it
 
         TextureEntry(AssetRef<TextureData> ref) {
             this.ref = ref;
@@ -692,6 +712,9 @@ public final class SceneResources implements AutoCloseable {
             boolean counts = !waitedForOnly || loadingOf(entry.ref) == Loading.WHOLE;
             count += !counts || entry.slot != NONE || entry.failed ? 0 : 1;
         }
+        for (ContentEntry entry : contents.values()) {
+            count += waitedForOnly || entry.slot != NONE || entry.failed ? 0 : 1;
+        }
         return count;
     }
 
@@ -895,9 +918,209 @@ public final class SceneResources implements AutoCloseable {
             return;
         }
         mesh.id = id;
+        residency++;
         trace(id, mesh.data);
         for (int i = 0; i < mesh.users.size(); i++) {
             mesh.users.get(i).uploaded(mesh);
+        }
+    }
+
+    // ---------------------------------------------------------------- content for techniques
+
+    /**
+     * Puts assets of a type these resources do not know on the GPU: a technique's content (a particle library's vector
+     * fields, an atmosphere's lookup tables), held through {@link #hold} and read by {@link #texture} as any texture.
+     */
+    public interface SampledUploader<T> {
+
+        /** Uploads {@code data} and returns its sampled slot in the device's bindless set. On the main thread. */
+        int upload(T data);
+
+        /** Frees sampled slot {@code slot}, made by {@link #upload}, once no frame in flight reads it. */
+        void remove(int slot);
+    }
+
+    /**
+     * Has {@code uploader} put held assets of {@code type} on the GPU ({@link #hold}), from now on: textures and meshes
+     * need none. Once per type.
+     */
+    @AllowAllocation("set up once")
+    public <T> SceneResources sampled(com.truesim.scene.assets.AssetType<T> type, SampledUploader<T> uploader) {
+        Objects.requireNonNull(type, "type");
+        if (type == RenderAssets.TEXTURE || type == RenderAssets.MESH || type == RenderAssets.MATERIAL) {
+            throw new IllegalArgumentException("The resources upload " + type + " themselves");
+        }
+        Objects.requireNonNull(uploader, "uploader");
+        if (uploaders.containsKey(type)) {
+            throw new IllegalStateException("An uploader of " + type + " is set already");
+        }
+        uploaders.put(type, uploader);
+        return this;
+    }
+
+    /**
+     * Holds {@code ref} for a technique (a particle's texture or mesh, a vector field, a decal's texture): acquired in
+     * the cache, put on the GPU once loaded, and kept there until each hold is {@link #release}d, shared with the
+     * scenes' own use of it. A texture, a mesh, or an asset of a type with an uploader ({@link #sampled}); where it is
+     * comes from {@link #texture} and {@link #mesh}, and {@link #residency()} says when that may have changed.
+     */
+    @AllowAllocation("content held anew")
+    public void hold(AssetRef<?> ref) {
+        checkOpen();
+        Objects.requireNonNull(ref, "ref");
+        if (ref.type() == RenderAssets.TEXTURE) {
+            @SuppressWarnings("unchecked")
+            AssetRef<TextureData> texture = (AssetRef<TextureData>) ref;
+            TextureEntry entry = textureEntries.get(texture);
+            if (entry == null) {
+                entry = newTexture(texture);
+                entry.held++;
+                loadTexture(entry);
+            } else {
+                entry.held++;
+            }
+        } else if (ref.type() == RenderAssets.MESH) {
+            @SuppressWarnings("unchecked")
+            AssetRef<MeshData> mesh = (AssetRef<MeshData>) ref;
+            Mesh held = meshes.get(mesh);
+            if (held == null || held.held == 0) {
+                held = acquireMesh(mesh, heldMeshes);
+            }
+            held.held++;
+        } else {
+            SampledUploader<?> uploader = uploaders.get(ref.type());
+            if (uploader == null) {
+                throw new IllegalArgumentException("No uploader for " + ref.type() + ": SceneResources.sampled");
+            }
+            ContentEntry entry = contents.get(ref);
+            if (entry == null) {
+                assets.acquire(ref); // first: a ref no loader can load throws before anything is put in
+                entry = new ContentEntry(ref, uploader);
+                contents.put(ref, entry);
+                Object data = assets.get(ref);
+                if (data != null) {
+                    contentLoaded(entry, data);
+                } else if (failedAlready(ref)) {
+                    entry.failed = true;
+                }
+            }
+            entry.held++;
+        }
+    }
+
+    /** Lets go of one {@link #hold} of {@code ref}: at none, and no scene using it, it leaves the GPU. */
+    public void release(AssetRef<?> ref) {
+        Objects.requireNonNull(ref, "ref");
+        if (ref.type() == RenderAssets.TEXTURE) {
+            TextureEntry entry = textureEntries.get(ref);
+            if (entry == null || entry.held == 0) {
+                throw new IllegalStateException(ref + " is not held");
+            }
+            if (--entry.held == 0 && entry.users.isEmpty()) {
+                dropTexture(entry);
+            }
+        } else if (ref.type() == RenderAssets.MESH) {
+            Mesh mesh = meshes.get(ref);
+            if (mesh == null || mesh.held == 0) {
+                throw new IllegalStateException(ref + " is not held");
+            }
+            if (--mesh.held == 0) {
+                if (mesh.uploaded()) {
+                    residency++;
+                }
+                releaseMesh(mesh, heldMeshes);
+            }
+        } else {
+            ContentEntry entry = contents.get(ref);
+            if (entry == null) {
+                throw new IllegalStateException(ref + " is not held");
+            }
+            if (--entry.held == 0) {
+                contents.remove(ref);
+                if (entry.slot != NONE) {
+                    entry.uploader.remove(entry.slot);
+                    residency++;
+                }
+                assets.release(ref);
+            }
+        }
+    }
+
+    /**
+     * The sampled slot of {@code ref}, a held texture or asset of an uploaded type, or of a texture a scene's material
+     * uses; -1 while it is not on the GPU (loading, failed, not held). Allocates nothing.
+     */
+    public int texture(AssetRef<?> ref) {
+        if (ref == null) {
+            return NONE;
+        }
+        if (ref.type() == RenderAssets.TEXTURE) {
+            TextureEntry entry = textureEntries.get(ref);
+            return entry == null ? NONE : entry.slot;
+        }
+        ContentEntry entry = contents.get(ref);
+        return entry == null ? NONE : entry.slot;
+    }
+
+    /** The pool mesh of {@code ref}, held or drawn by a scene; -1 while it is not on the GPU. Allocates nothing. */
+    public int mesh(AssetRef<?> ref) {
+        Mesh mesh = ref == null ? null : meshes.get(ref);
+        return mesh == null ? NONE : mesh.id;
+    }
+
+    /**
+     * Holds a block of material ids for {@code materials} on a mesh of {@code slots} submeshes, for a technique's own
+     * instances (mesh particles): shared with the scenes' renderables of the same materials, each drawn as the default
+     * until it loads. Returns the block's first id; {@link #releaseMaterials} lets go of it.
+     */
+    public int holdMaterials(List<AssetRef<MaterialData>> materials, int slots) {
+        if (slots < 1) {
+            throw new IllegalArgumentException("Not a submesh count: " + slots);
+        }
+        return acquireSet(Objects.requireNonNull(materials, "materials"), slots).first;
+    }
+
+    /** Lets go of the block of material ids starting at {@code first}, held by {@link #holdMaterials}. */
+    public void releaseMaterials(int first) {
+        MaterialSet set = first >= 0 && first < setById.length ? setById[first] : null;
+        if (set == null || set.first != first) {
+            throw new IllegalArgumentException("No block of materials starts at " + first);
+        }
+        releaseSet(set);
+    }
+
+    /**
+     * A count that changes whenever held content ({@link #hold}) comes onto the GPU or leaves it: a technique caching
+     * what {@link #texture} or {@link #mesh} said looks again when it differs. Allocates nothing.
+     */
+    public long residency() {
+        return residency;
+    }
+
+    /** {@code entry}'s data arrived: uploaded through its type's uploader. */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private void contentLoaded(ContentEntry entry, Object data) {
+        try {
+            entry.slot = ((SampledUploader) entry.uploader).upload(data);
+            residency++;
+        } catch (RuntimeException e) {
+            entry.failed = true; // not thrown into the cache's delivery
+            LOG.warn("Could not put {} on the GPU", entry.ref, e);
+            diagnostics.assetFailed(entry.ref, e);
+        }
+    }
+
+    /** Content of a type with an uploader that techniques hold: its sampled slot once uploaded. */
+    private static final class ContentEntry {
+        final AssetRef<?> ref;
+        final SampledUploader<?> uploader;
+        int slot = NONE;
+        int held;
+        boolean failed;
+
+        ContentEntry(AssetRef<?> ref, SampledUploader<?> uploader) {
+            this.ref = ref;
+            this.uploader = uploader;
         }
     }
 
@@ -1038,16 +1261,8 @@ public final class SceneResources implements AutoCloseable {
         materialEntries.remove(entry.ref);
         for (TextureEntry texture : entry.textures) {
             // A texture the material names twice is in its list twice, its users once: let go of once.
-            if (texture.users.remove(entry) && texture.users.isEmpty()) {
-                textureEntries.remove(texture.ref);
-                if (texture.slot != NONE) {
-                    textures.remove(texture.slot);
-                }
-                if (texture.preparing) {
-                    texture.dropped = true; // released once the workers are done with its texels
-                } else {
-                    assets.release(texture.ref);
-                }
+            if (texture.users.remove(entry) && texture.users.isEmpty() && texture.held == 0) {
+                dropTexture(texture);
             }
         }
         assets.release(entry.ref);
@@ -1060,28 +1275,54 @@ public final class SceneResources implements AutoCloseable {
             TextureEntry texture = textureEntries.get(ref);
             if (texture == null) {
                 try {
-                    assets.acquire(ref); // first: a ref no loader can load throws before anything is put in
+                    texture = newTexture(ref);
                 } catch (RuntimeException e) {
                     LOG.warn("Could not ask for {}: drawn untextured", ref, e);
                     diagnostics.assetFailed(ref, e);
                     continue;
                 }
-                texture = new TextureEntry(ref);
-                textureEntries.put(ref, texture);
                 texture.users.add(entry);
                 entry.textures.add(texture);
-                TextureData texels = assets.get(ref);
-                if (texels != null) {
-                    textureLoaded(texture, texels);
-                } else if (failedAlready(ref)) {
-                    texture.failed = true;
-                }
+                loadTexture(texture);
                 continue;
             }
             texture.users.add(entry);
             entry.textures.add(texture);
         }
         markDirty(entry);
+    }
+
+    /** A texture entry for {@code ref}, acquired in the cache; throws if no loader can load it. */
+    @AllowAllocation("a texture used anew")
+    private TextureEntry newTexture(AssetRef<TextureData> ref) {
+        assets.acquire(ref); // first: a ref no loader can load throws before anything is put in
+        TextureEntry texture = new TextureEntry(ref);
+        textureEntries.put(ref, texture);
+        return texture;
+    }
+
+    /** Uploads {@code texture} if the cache has it already, or notes its failure. */
+    private void loadTexture(TextureEntry texture) {
+        TextureData texels = assets.get(texture.ref);
+        if (texels != null) {
+            textureLoaded(texture, texels);
+        } else if (failedAlready(texture.ref)) {
+            texture.failed = true;
+        }
+    }
+
+    /** Takes {@code texture}, used by nothing any more, off the GPU and releases it in the cache. */
+    private void dropTexture(TextureEntry texture) {
+        textureEntries.remove(texture.ref);
+        if (texture.slot != NONE) {
+            textures.remove(texture.slot);
+            residency++;
+        }
+        if (texture.preparing) {
+            texture.dropped = true; // released once the workers are done with its texels
+        } else {
+            assets.release(texture.ref);
+        }
     }
 
     @AllowAllocation("a texture arrived")
@@ -1140,6 +1381,7 @@ public final class SceneResources implements AutoCloseable {
     }
 
     private void textureArrived(TextureEntry entry) {
+        residency++;
         for (MaterialEntry material : entry.users) {
             markDirty(material);
         }
@@ -1478,6 +1720,11 @@ public final class SceneResources implements AutoCloseable {
                 if (entry != null && entry.slot == NONE) {
                     textureLoaded(entry, (TextureData) data);
                 }
+            } else {
+                ContentEntry entry = contents.get(ref);
+                if (entry != null && entry.slot == NONE) {
+                    contentLoaded(entry, data);
+                }
             }
         }
 
@@ -1491,8 +1738,13 @@ public final class SceneResources implements AutoCloseable {
             MaterialEntry material = materialEntries.get(ref);
             TextureEntry texture = textureEntries.get(ref);
             Mesh mesh = meshes.get(ref);
+            ContentEntry content = contents.get(ref);
             if (mesh != null) {
                 mesh.failed = true;
+            }
+            if (content != null) {
+                content.failed = true;
+                diagnostics.assetFailed(ref, cause);
             }
             if (material != null) {
                 material.failed = true; // not waited for
