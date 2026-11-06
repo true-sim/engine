@@ -84,8 +84,8 @@ public final class RenderSettings {
      * blocks, meshes, the cache's hold); the rest waits for the next frames, so no frame takes all of a cell at once.
      * 0: all in the frame it comes or goes. Removed renderables stop drawing at once either way. It runs from the
      * frame's start ({@code SceneResources.beginFrame}), the scene syncs' own work in it counted. 0.1 ms by default:
-     * the samples' stream benchmark's frames taking cells out then cost what the hand-written path's do (0.72 against
-     * 0.69 to 0.76 ms over two minutes; 0.85 with 0.25 ms), and a row of cells still arrives within a second.
+     * the samples' stream benchmark's frames taking cells out then cost what the hand-written path's do (0.74 to 0.76
+     * against 0.71 to 0.76 ms over two-minute runs, interleaved), and a row of cells still arrives within a second.
      */
     public static final Setting<Float> STREAM_FRAME_BUDGET = Setting.decimal("render.streamFrameBudget", 0.1f, 0,
         100, "ms a frame spent taking in and letting go of streamed content (0: all at once)");
