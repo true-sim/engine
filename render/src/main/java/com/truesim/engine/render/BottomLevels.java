@@ -92,6 +92,10 @@ final class BottomLevels {
     private final java.util.function.IntConsumer forgetMesh = this::remove;
     private final DeformedBottomLevels deformed; // the pool's deformed copies'
     private final Structure empty; // one degenerate triangle: what instances without a level name
+    // Whether built levels are compacted (copied into structures of their compacted size, the built ones freed). Not on
+    // Mesa's lavapipe: tracing through compacted levels there crashed test JVMs once the built ones were freed
+    // (pitfalls.md); its structures live in host memory, where the bytes compaction saves matter little.
+    private final boolean compaction;
     private boolean closed;
 
     /** A bottom level on its way: inputs staged; built at a frame's start; compacted at a later one; then in place. */
@@ -133,6 +137,7 @@ final class BottomLevels {
 
     BottomLevels(VulkanDevice device, GeometryPool pool, AccelerationStructures structures) {
         this.device = device;
+        this.compaction = !device.gpu().name().toLowerCase(java.util.Locale.ROOT).startsWith("llvmpipe");
         this.pool = pool;
         this.structures = structures;
         this.slots = pool.frameSlots();
@@ -714,6 +719,13 @@ final class BottomLevels {
         }
         setBottom(p.mesh, p.built.address());
         version++; // its instances enter top levels at their next build
+        if (!compaction) { // the built level stays: traced through from now on
+            pending.remove(p);
+            pendingOf[p.mesh] = null;
+            bottom[p.mesh] = p.built;
+            bytes += p.built.buffer().size();
+            return;
+        }
         p.compacted = structures.create(size, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
         try (MemoryStack stack = stackPush()) {
             vkCmdCopyAccelerationStructureKHR(commands, VkCopyAccelerationStructureInfoKHR.calloc(stack)

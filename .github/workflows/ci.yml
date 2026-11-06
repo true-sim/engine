@@ -87,8 +87,6 @@ jobs:
       # lavapipe compiles shaders through LLVM, minutes for the largest; its disk cache keeps them for this PR's reruns
       MESA_SHADER_CACHE_DIR: ${{ github.workspace }}/.mesa-shader-cache
       MESA_SHADER_CACHE_MAX_SIZE: 4G
-      # DIAGNOSTIC (to be removed): GPU-assisted validation of every shader's reads and writes on lavapipe
-      TRUESIM_GPU_ASSISTED_VALIDATION: true
     steps:
       - uses: actions/checkout@v7
       - uses: true-sim/build-logic/.github/actions/setup-vulkan@61314fb2c79472f89f95c8ffd001ee53e904b02a # main, 2026-10-27
