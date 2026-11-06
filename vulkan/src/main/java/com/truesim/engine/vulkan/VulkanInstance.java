@@ -90,6 +90,11 @@ public final class VulkanInstance implements AutoCloseable {
      * test's shaders' reads and writes, which a GPU tolerating stray reads hides and lavapipe crashes on.
      */
     public static final String GPU_ASSISTED_VARIABLE = "TRUESIM_GPU_ASSISTED_VALIDATION";
+    /**
+     * The environment variable that turns synchronization validation on for every instance with validation
+     * ({@link Builder#synchronizationValidation}): missing barriers and hazards between queues, on any driver.
+     */
+    public static final String SYNCHRONIZATION_VARIABLE = "TRUESIM_SYNCHRONIZATION_VALIDATION";
 
     private final VkInstance handle;
     private final int apiVersion;
@@ -170,9 +175,11 @@ public final class VulkanInstance implements AutoCloseable {
                 info.pNext(messengerInfo.address()); // also covers instance creation and destruction
             }
             boolean gpuAssisted = builder.gpuAssisted || "true".equals(System.getenv(GPU_ASSISTED_VARIABLE));
-            if (layer && (builder.synchronization || gpuAssisted)) {
+            boolean synchronization = builder.synchronization
+                || "true".equals(System.getenv(SYNCHRONIZATION_VARIABLE));
+            if (layer && (synchronization || gpuAssisted)) {
                 IntBuffer enabled = stack.mallocInt(2);
-                if (builder.synchronization) {
+                if (synchronization) {
                     enabled.put(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
                 }
                 if (gpuAssisted) {
