@@ -218,6 +218,9 @@ public final class GiHarness implements AutoCloseable {
         for (int i = 0; i < count; i++) {
             graph.beginFrame();
             graph.submit(0, 0);
+            if (System.getenv("TRUESIM_WAIT_EACH_FRAME") != null) { // TEMPORARY (repro): no frame overlaps another
+                device.waitIdle();
+            }
         }
         device.waitIdle();
     }
