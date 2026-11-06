@@ -1214,8 +1214,12 @@ public final class SceneResources implements AutoCloseable {
         return false;
     }
 
-    /** Brings the GPU up to date, called by views as they update: blocks whose materials or textures came are written. */
-    void flush() {
+    /**
+     * Brings the GPU up to date: blocks of material ids whose materials or textures came are written. Scene syncs call
+     * it as they update; a technique holding materials ({@link #holdMaterials}) calls it once a frame too. Allocates
+     * nothing.
+     */
+    public void flush() {
         for (int i = 0; i < dirtySets.size(); i++) {
             MaterialSet set = dirtySets.get(i);
             set.dirty = false;
