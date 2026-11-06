@@ -12,6 +12,7 @@ import com.truesim.engine.app.Startup;
 import com.truesim.engine.app.StartupFailure;
 import com.truesim.engine.graph.Rendering;
 import com.truesim.engine.input.Input;
+import com.truesim.engine.interaction.SceneInteraction;
 import java.util.List;
 
 /**
@@ -85,6 +86,11 @@ public final class Xr implements Plugin {
                 startup.driveFrames(new HeadsetFrames());
                 // The headset's input as a device for the engine's actions, sampled with the others (D64)
                 startup.find(Input.KEY).ifPresent(input -> input.addSource(new XrSource(headset)));
+                // The controllers' rays as scene pointers, where the scene interaction is installed
+                startup.find(Input.KEY).ifPresent(input -> startup.find(SceneInteraction.KEY).ifPresent(scene -> {
+                    XrSceneRays.defaults(input);
+                    scene.pointers(new XrSceneRays(input));
+                }));
             }
             default -> {
                 // nothing of its own in the other stages

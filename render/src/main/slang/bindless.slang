@@ -17,7 +17,7 @@ public TextureCube<float4> cubes[];
 [[vk::binding(0, 0)]]
 public Texture2DArray<float4> textureArrays[];
 
-// And for 3D textures (particles' vector fields).
+// And for 3D textures (Textures.volume and 3D dynamic textures: vector fields, noise volumes).
 [[vk::binding(0, 0)]]
 public Texture3D<float4> volumes[];
 
@@ -36,6 +36,10 @@ public RWTexture2D<uint2> uintImages[];
 // The same storage images, for 2D arrays: a cube's level, its six faces as layers.
 [[vk::binding(2, 0)]]
 public RWTexture2DArray<float4> imageArrays[];
+
+// The same storage images, for 3D ones (dynamic 3D textures GPU passes write: Textures.dynamic).
+[[vk::binding(2, 0)]]
+public RWTexture3D<float4> volumeImages[];
 
 /** Sampler slots. */
 public static const uint LINEAR_CLAMP = 0;

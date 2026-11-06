@@ -70,6 +70,28 @@ in `submit` the bytes come from was not found.
 - Rule: an allocation maximum that moves between scenarios from run to run is compared with the base in the same
   session before it is called a regression.
 
+**Code run for bursts stays lukewarm, and a `MemorySegment` write there costs microseconds.** Removing a streamed
+column of cells (287 instances at once, a dozen times in 30 seconds) in the samples' `StreamBench`, `GpuScene.remove`
+took 2.8 µs per instance on average and 12 µs in one burst; only in the run's last bursts did it fall to 0.06 µs. It
+zeroed each record with a `MemorySegment.set` per 8 bytes, and a method called some 3,400 times a run never reaches
+the optimizing compiler. One `MemorySegment.copy` of a zero record per instance: 0.9 µs; the burst's records zeroed and
+their indices written in a few bulk copies (`RecordBuffer.clear(int[], ...)`, `GpuScene.remove(int[], ...)`, which
+`SceneSync` calls once per batch torn down): about 0.03 µs.
+- Proof: the per-burst cost of `gpu.remove` timed inside `SceneSync` over a whole `StreamBench` run, before and after
+  each change (true-sim/engine split-2, scene batch spawning).
+- Rule: work that comes in bursts (cells streamed in or out, a model spawned or despawned) takes the burst in one call
+  and writes memory in bulk; time it per item over a whole run, not once warm.
+
+**A frame budget that started at its own call ignored the frame's work before it.** `render.streamFrameBudget` ran from
+`SceneResources.flush`, which `SceneSync.update` calls after it has followed the renderables: a frame tearing down a
+column of cells (0.2 to 0.5 ms in the sync) still placed arrivals and released assets for the whole budget after it,
+so the frames removing cells took the most streaming work of all.
+- Proof: `StreamBench`'s frames taking cells out, per stage of the frame (true-sim/engine split-2, scene batch
+  spawning): the flush took 0.25 to 0.28 ms of them; with the budget from the update's start and a frame that spent
+  it deferring the rest, 0.001 ms in most of them.
+- Rule: a per-frame budget runs from the start of the work it bounds, the caller's included, and a frame that spent it
+  defers what remains (never twice in a row).
+
 ## Frame graph
 
 **Thousands of barriers overflowed the memory stack.** A pass's barriers were laid out on LWJGL's thread stack (64 KiB)
@@ -525,6 +547,17 @@ free (a shared arena's close and VMA's free of 2.5 to 16 MB) took up to 2.4 ms.
 - Proof: timings inside `StreamQueue.release`; with the frees on a thread of their own, the worst `pool.add` fell to
   1.3-3.0 ms and frames over 4 ms from 2-5 to 0 (true-sim/engine#101).
 - Rule: free large staging memory off the frame's thread once the GPU is done with it.
+
+**The asset cache freed generated meshes on the frame's thread.** Streaming through the scene (the samples'
+`StreamBench`, its scene way), frames removing cells took about 4.2 ms against 0.9 by the hand-written baseline: the
+cache keeps no unused assets there (budget 0), so each cell's generated meshes were evicted as its renderables left,
+in the frame's update, and the cache closed them where it evicted them; a mesh's shared arena takes milliseconds to
+close (see "Freeing a staging buffer on the frame's thread" above).
+- Proof: interleaved runs of the scene way, three each before and after scene's `AssetCache` closed generated assets
+  on a task of the type's lane: frames removing cells 3.9 to 4.4 ms before, 1.7 to 2.1 ms after (true-sim/engine,
+  engine split group 2; true-sim/scene#140).
+- Rule: whatever frees content a frame let go of (evictions, unloads) frees large native memory off the frame's
+  thread.
 
 **A chunk size derived from the capacity at construction stayed after growth.** The change list prototype sized its
 chunks by `min(capacity, chunk bytes / record)`; instance motion's buffers start with 64 records and grow, so their

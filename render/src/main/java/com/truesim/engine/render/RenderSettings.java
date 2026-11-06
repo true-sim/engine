@@ -71,6 +71,31 @@ public final class RenderSettings {
     public static final Setting<Integer> STREAM_BUDGET = Setting.integer("render.streamBudget", 64, 0, 4096,
         "MiB a frame of streamed meshes and textures copied on the transfer queue (0: in the frame)");
 
+    /**
+     * MiB a frame of dynamic textures' changed regions staged and copied at the frame's start
+     * ({@link Textures#update}); regions past it wait for a later frame.
+     */
+    public static final Setting<Integer> TEXTURE_UPDATE_BUDGET = Setting.integer("render.textureUpdateBudget", 8, 1,
+        1024, "MiB a frame of dynamic textures' changed texels uploaded");
+
+    /**
+     * Milliseconds a frame the scene path spends taking in streamed content made ready on workers (meshes placed in the
+     * pool and their renderables shown, textures added) and letting go of what removed renderables used (material
+     * blocks, meshes, the cache's hold); the rest waits for the next frames, so no frame takes all of a cell at once.
+     * 0: all in the frame it comes or goes. Removed renderables stop drawing at once either way.
+     */
+    public static final Setting<Float> STREAM_FRAME_BUDGET = Setting.decimal("render.streamFrameBudget", 0.25f, 0,
+        100, "ms a frame spent taking in and letting go of streamed content (0: all at once)");
+
+    /**
+     * Meshes removed whose ranges of the geometry pool are kept for a mesh of the same sizes to take whole
+     * ({@link GeometryPool#spares}): streaming content that comes and goes in equal sizes (generated tiles, rocks)
+     * places and removes meshes without allocating and freeing their ranges. The memory they hold is given back before
+     * the pool grows. 0: none kept.
+     */
+    public static final Setting<Integer> MESH_SPARES = Setting.integer("render.meshSpares", 64, 0, 65536,
+        "removed meshes' pool ranges kept for meshes of the same sizes (0: none)");
+
     private RenderSettings() {
     }
 
@@ -98,7 +123,8 @@ public final class RenderSettings {
      */
     public static void register(SettingRegistry registry) {
         registry.addHiddenSlots(INTERPOLATION_SLOT, Transparency.SLOT, SelectionOutline.SLOT, DisplayTransform.SLOT)
-            .addHidden(OCCLUSION, CHANGE_LIST, CHANGE_LIST_CHUNK, STREAM_BUDGET, Transparency.SORTED_RUNS)
+            .addHidden(OCCLUSION, CHANGE_LIST, CHANGE_LIST_CHUNK, STREAM_BUDGET, TEXTURE_UPDATE_BUDGET, STREAM_FRAME_BUDGET,
+                MESH_SPARES, Transparency.SORTED_RUNS)
             .addHidden(ClusteredLights.ALL.toArray(new Setting<?>[0]))
             .addHidden(ShadowSettings.ALL.toArray(new Setting<?>[0]))
             .addHidden(Denoiser.ALL.toArray(new Setting<?>[0]))

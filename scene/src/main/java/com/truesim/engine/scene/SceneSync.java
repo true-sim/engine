@@ -12,6 +12,7 @@ import com.truesim.engine.render.Interpolation;
 import com.truesim.engine.render.RenderSettings;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.mesh.MeshData;
+import com.truesim.scene.core.ChangeBatch;
 import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.NodeChange;
 import com.truesim.scene.core.NodeHandle;
@@ -100,8 +101,28 @@ public final class SceneSync implements AutoCloseable {
     private final JobSystem.RangeTask writeMotions = this::writeMotions;
     private final JobSystem.RangeTask writeBlended = this::writeBlended;
     private final JobSystem.RangeTask writeJoints = this::writeJoints;
-    private final ComponentStore.Visitor onRenderableChange = (node, changes) -> reconcile(node);
-    private final NodeChange.Visitor onSceneChange = this::sceneChanged;
+    private final NodeChange.Visitor onRenderableChange = new NodeChange.Visitor() {
+        @Override
+        public void changed(long node, int changes) {
+            reconcile(node);
+        }
+
+        @Override
+        public void changed(ChangeBatch batch) { // renderables attached or removed together: one pass
+            reconcileAll(batch);
+        }
+    };
+    private final NodeChange.Visitor onSceneChange = new NodeChange.Visitor() {
+        @Override
+        public void changed(long node, int changes) {
+            sceneChanged(node, changes);
+        }
+
+        @Override
+        public void changed(ChangeBatch batch) {
+            sceneChangedAll(batch);
+        }
+    };
     private long seen;
     private boolean started;
     private boolean closed;
@@ -233,6 +254,12 @@ public final class SceneSync implements AutoCloseable {
     private double jointFactor;                     // the frame's, for the CPU's blends
 
     private final Map<AssetRef<MeshData>, ViewMesh> meshes = new HashMap<>();
+    private AssetRef<MeshData> lastRef; // the mesh last held, by identity, while a batch is reconciled
+    private ViewMesh lastEntry;
+    // While a batch is reconciled: instance ids of items torn down, removed from the GPU scene at once after it
+    private boolean gathering;
+    private int[] gone = new int[64];
+    private int goneCount;
 
     /** A mesh this scene's renderables use: the shared upload, and the list of this scene's items using it. */
     private final class ViewMesh implements SceneResources.MeshUser {
@@ -381,6 +408,7 @@ public final class SceneSync implements AutoCloseable {
      * changed.
      */
     public void update() {
+        long begun = System.nanoTime(); // this update's work counts toward the frame's streaming budget
         checkOpen();
         followPickables(); // pickables bounded by their meshes: from the next scene.update() on, picking finds them
         if (listChanged) {
@@ -425,7 +453,7 @@ public final class SceneSync implements AutoCloseable {
                 }
             }
         }
-        resources.flush();
+        resources.flush(begun); // within the frame budget, this update's own work counted
         finishSwaps();
         drawWaiting();
         if (stepClock != null) {
@@ -525,7 +553,8 @@ public final class SceneSync implements AutoCloseable {
 
     /**
      * The pool mesh {@code node}'s renderable draws as: its deformed copy where it has one (posed as drawn), else its
-     * mesh; -1 while it is not on the GPU. What particles' mesh shapes emit from.
+     * mesh; -1 while it is not on the GPU. What a technique reads a node's drawn mesh through (a particle library's
+     * mesh shapes).
      */
     public int drawnMeshOf(long node) {
         int item = NodeHandle.index(node);
@@ -594,6 +623,53 @@ public final class SceneSync implements AutoCloseable {
         waitingCount = 0;
     }
 
+    /**
+     * {@link #reconcile} for the nodes of a batch (a subtree attached or removed, many set at once), in one pass: the
+     * items' arrays grown once for the batch, and a mesh shared by neighbours of the batch looked up once.
+     */
+    private void reconcileAll(ChangeBatch batch) {
+        int highest = 0;
+        for (int i = 0; i < batch.size(); i++) {
+            highest = Math.max(highest, NodeHandle.index(batch.node(i)));
+        }
+        if (highest >= itemNode.length) {
+            grow(Math.max(highest + 1, itemNode.length * 2));
+        }
+        gathering = true; // instances of items torn down leave the GPU scene together, after the loop
+        for (int i = 0; i < batch.size(); i++) {
+            long node = batch.node(i);
+            if (batch.changes(i) == ComponentStore.REMOVED) { // gone: torn down without looking it up again
+                int item = NodeHandle.index(node);
+                if (itemNode[item] == node) {
+                    destroy(item);
+                }
+            } else {
+                reconcile(node);
+            }
+        }
+        gathering = false;
+        if (goneCount > 0) {
+            gpu.remove(gone, 0, goneCount);
+            goneCount = 0;
+        }
+        lastRef = null; // the memo lives for the batch: an entry let go of later must not be found again
+        lastEntry = null;
+    }
+
+    /** {@link #sceneChanged} for the nodes of a batch, in one pass: removals of nodes drawn by nothing skip at once. */
+    private void sceneChangedAll(ChangeBatch batch) {
+        for (int i = 0; i < batch.size(); i++) {
+            long node = batch.node(i);
+            int changes = batch.changes(i);
+            int item = NodeHandle.index(node);
+            if (changes == NodeChange.REMOVED && (item >= itemNode.length || itemNode[item] != node)
+                && item >= watchHead.length) {
+                continue; // drawn by nothing (its renderable went first) and watched by no copy
+            }
+            sceneChanged(node, changes);
+        }
+    }
+
     /** Makes {@code node}'s item match its renderable now, whatever the logged change was. */
     @AllowAllocation("renderables changing: entries for new meshes and materials")
     private void reconcile(long node) {
@@ -645,6 +721,10 @@ public final class SceneSync implements AutoCloseable {
     /** {@code ref}'s entry, held once more: made, and the mesh acquired, the first time (before anything is put in). */
     @AllowAllocation("a mesh used anew")
     private ViewMesh holdMesh(AssetRef<MeshData> ref) {
+        if (ref == lastRef && lastEntry.holders > 0) { // a batch's nodes drawing the same mesh: one lookup
+            lastEntry.holders++;
+            return lastEntry;
+        }
         ViewMesh entry = meshes.get(ref);
         if (entry == null) {
             entry = new ViewMesh();
@@ -652,7 +732,17 @@ public final class SceneSync implements AutoCloseable {
             meshes.put(ref, entry);
         }
         entry.holders++;
+        lastRef = ref;
+        lastEntry = entry;
         return entry;
+    }
+
+    /** {@link #releaseMesh}, the resources' part within the frame budget (render.streamFrameBudget). */
+    private void releaseMeshLater(ViewMesh entry) {
+        if (--entry.holders == 0) {
+            meshes.remove(entry.mesh.ref);
+            resources.releaseMeshLater(entry.mesh, entry);
+        }
     }
 
     /** Lets go of {@code entry} once: at no holders, of its mesh. */
@@ -901,7 +991,7 @@ public final class SceneSync implements AutoCloseable {
         itemNode[item] = NodeHandle.NONE;
         itemBounded[item] = false; // the node keeps its bounds; a node made in its place is not ours
         itemCount--;
-        releaseMesh(entry);
+        releaseMeshLater(entry);
     }
 
     private void link(ViewMesh entry, int item) {
@@ -1025,15 +1115,27 @@ public final class SceneSync implements AutoCloseable {
         }
         int slot = itemSlot[item];
         if (slot != NONE) {
-            gpu.remove(slot);
+            if (gathering) {
+                if (goneCount == gone.length) {
+                    growGone();
+                }
+                gone[goneCount++] = slot;
+            } else {
+                gpu.remove(slot);
+            }
             instanceCount--;
             instanceVersion++;
             itemSlot[item] = NONE;
         }
         if (itemSet[item] != null) { // drawn, or waiting for its assets
-            resources.releaseSet(itemSet[item]);
+            resources.releaseSetLater(itemSet[item]); // within the frame budget: drawn no more already
             itemSet[item] = null;
         }
+    }
+
+    @AllowAllocation("growing with the most instances torn down at once")
+    private void growGone() {
+        gone = Arrays.copyOf(gone, 2 * gone.length);
     }
 
     /** Has {@code item} drawn at the end of the update, once. */
@@ -1856,6 +1958,7 @@ public final class SceneSync implements AutoCloseable {
     public void close() {
         if (!closed) {
             destroyAll();
+            resources.releaseAllQueued(); // what it held leaves now, not in later frames
             if (settingWatch != null) {
                 settingWatch.close();
                 listWatch.close();

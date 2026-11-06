@@ -190,7 +190,7 @@ built-in `Filters`; `ActionFilter`; `Player`, `Device`, `DeviceIdentity`, `Input
 `InputContext`, `MouseMode`, `TextListener`; `Capture`, `Conflict`; `InputSettings` (`input.holdTime`,
 `input.pressThreshold`, `input.releaseThreshold`). engine-platform: `InputDevice.guid()`, `serial()`, `path()`,
 `Controller.guid()`. engine-xr: `XrControls` (the headset as a kind of device) and its source, added by `Xr` when input
-is installed. The demo's keys, mouse look, gamepad and headset walking are actions (`DemoActions`). Measured
+is installed; with the scene interaction installed, `Xr` adds the controllers' rays as its pointers (`XrSceneRays`). The demo's keys, mouse look, gamepad and headset walking are actions (`DemoActions`). Measured
 (`InputBenchmarkTest`, Ryzen 9 9950X3D under load from other work, without JaCoCo): 200 actions for 4 players with
 events every frame, about 40 to 60 us a frame, 0 bytes allocated (the allocation check over whole engine frames, a
 world stepping); readying a fixed step's edges (two copies of 800 counts), well under a microsecond. Choices made

@@ -3,6 +3,7 @@ package com.truesim.engine.render;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.assertj.core.api.Assertions.assertThatIndexOutOfBoundsException;
 import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -669,6 +670,29 @@ class MeshletRendererTest {
     }
 
     @Test
+    void manyInstancesRemovedAtOnceLeaveHolesAsRemovedEach() {
+        try (GpuScene small = new GpuScene(device, pool, 8)) {
+            for (int i = 0; i < 8; i++) {
+                small.add(quad, 0, 1, true, i, 0, -5, 0, 0, 0, 1, 1, 1, 1);
+            }
+            long version = small.version();
+            small.remove(new int[] {9, 9, 7, 5, 6, 6, 2}, 2, 4); // 7, 5, 6 and 6 again: three holes, the top ones
+            assertThat(small.count()).isEqualTo(5);
+            assertThat(small.highWater()).isEqualTo(5);
+            assertThat(small.version()).isGreaterThan(version);
+            assertThat(small.freeId()).isEqualTo(5);
+            version = small.version();
+            small.remove(new int[] {7}, 0, 1); // a hole already: nothing changes
+            assertThat(small.version()).isEqualTo(version);
+            small.remove(new int[] {0, 1}, 0, 2);
+            assertThat(small.freeId()).as("the lowest hole").isZero();
+            assertThat(small.highWater()).isEqualTo(5);
+            assertThatIndexOutOfBoundsException().isThrownBy(() -> small.remove(new int[] {1}, 0, 2));
+            assertThatIndexOutOfBoundsException().isThrownBy(() -> small.remove(new int[] {99}, 0, 1));
+        }
+    }
+
+    @Test
     void changesUploadOncePerIdAndScatterOnTheGpu() {
         com.truesim.engine.vulkan.FrameSlots slots = new com.truesim.engine.vulkan.FrameSlots(2);
         try (GpuScene small = new GpuScene(device, pool, 3, slots);
@@ -1189,6 +1213,55 @@ class MeshletRendererTest {
             assertThat(own.add(square)).isEqualTo(first);
             slots.end();
             assertThat(own.meshCount()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void removedMeshesRangesAreTakenWholeByMeshesOfTheSameSizes() {
+        MeshData square = grid(1, 2, false, VertexFormat.POSITIONS_ONLY);
+        MeshData other = grid(1, 3, false, VertexFormat.POSITIONS_ONLY); // the same sizes, other positions
+        MeshData hill = grid(4, 0.2f, true, VertexFormat.POSITIONS_ONLY);
+        com.truesim.engine.vulkan.FrameSlots slots = new com.truesim.engine.vulkan.FrameSlots(2);
+        try (GeometryPool own = new GeometryPool(device, GeometryPool.Capacity.of(64, 8, 8), slots)) {
+            assertThatIllegalArgumentException().isThrownBy(() -> own.spares(-1));
+            own.spares(2);
+            int first = own.add(square);
+            int base = own.vertexBase(first);
+            int second = own.add(hill);
+            slots.begin(0);
+            own.remove(first);
+            own.remove(second);
+            slots.end();
+            slots.begin(1);
+            slots.end();
+            slots.begin(0); // nothing in flight draws them: kept as spares when the next is added
+            int taken = own.add(other);
+            slots.end();
+            assertThat(own.reusedCount()).isEqualTo(1);
+            assertThat(own.vertexBase(taken)).isEqualTo(base);
+            assertThat(own.spareCount()).isEqualTo(1); // the hill's, of other sizes
+            own.spares(0); // its room back
+            assertThat(own.spareCount()).isZero();
+            // More spares than kept: the oldest goes; and spares give their room back before the pool grows
+            own.spares(1);
+            int a = own.add(square);
+            int b = own.add(square);
+            slots.begin(1);
+            own.remove(a);
+            own.remove(b);
+            own.remove(taken);
+            slots.end();
+            slots.begin(0);
+            slots.end();
+            slots.begin(1);
+            int vertices = own.capacity().vertices();
+            for (int i = 0; i < 4; i++) {
+                own.add(hill); // other sizes: placed anew, the spare's room taken back when it is needed
+            }
+            slots.end();
+            assertThat(own.spareCount()).isZero();
+            assertThat(own.reusedCount()).isEqualTo(1);
+            assertThat(own.capacity().vertices()).isGreaterThanOrEqualTo(vertices);
         }
     }
 
