@@ -462,8 +462,11 @@ public final class SceneSync implements AutoCloseable {
         int count = 0;
         if (rewriteAll) {
             for (int item = 0; item < itemNode.length; item++) {
-                if (itemSlot[item] != NONE && !steppedOnly(item)) {
-                    fillItems[count++] = item;
+                if (itemSlot[item] != NONE) {
+                    gpu.setMobility(itemSlot[item], scene.mobility(itemNode[item])); // changes not followed one by one
+                    if (!steppedOnly(item)) {
+                        fillItems[count++] = item;
+                    }
                 }
             }
             rewriteAll = false;
@@ -884,6 +887,10 @@ public final class SceneSync implements AutoCloseable {
         if (NodeChange.has(changes, NodeChange.TRANSFORM) && item < watchHead.length) {
             watched(node, item);
         }
+        if (NodeChange.has(changes, NodeChange.MOBILITY) && item < itemNode.length && itemNode[item] == node
+            && itemSlot[item] != NONE) {
+            gpu.setMobility(itemSlot[item], scene.mobility(node)); // a hint: nothing uploads
+        }
     }
 
     /**
@@ -1090,6 +1097,7 @@ public final class SceneSync implements AutoCloseable {
         itemSlot[item] = slot;
         refreshCopy(item);
         write(gpu.claim(slot), item); // takes the id
+        gpu.setMobility(slot, scene.mobility(itemNode[item])); // the node's hint: shadow maps cache by it
         bound(item);
         return true;
     }

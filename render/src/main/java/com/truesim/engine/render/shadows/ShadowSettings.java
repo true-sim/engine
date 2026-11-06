@@ -175,6 +175,42 @@ public final class ShadowSettings {
     public static final Setting<Integer> CASTER_SETTLE = Setting.integer("shadows.casters.settle", 30, 1, 100_000,
         "frames a caster counts as moving after its last move, before maps draw it with the still ones");
     /**
+     * How the owner takes the scene's {@link com.truesim.scene.core.Mobility} (a node's, carried to its instance or
+     * light): a hint, never a promise. Whatever it says, a caster or light that changes is drawn where it is now.
+     */
+    public enum MobilityUse {
+        /**
+         * Static and dynamic both: a static caster joins its tiles' still layers at once (no settle wait), a dynamic
+         * one never does (none of the churn of one pausing); a static light skips its own change tests while nothing
+         * writes it, a dynamic one's tiles rank {@link #LIGHT_MOVING_WEIGHT} times as urgent. Instances and lights
+         * without a hint (made outside the scene) are detected. Note the scene's default is dynamic: a scene that
+         * never marks its static nodes keeps every caster out of the still layers.
+         */
+        USE_HINT,
+        /** Static only: static casters and lights as {@link #USE_HINT}; dynamic ones as if nothing was said. */
+        STATIC_ONLY,
+        /** No hint: every caster's motion detected ({@link #CASTER_SETTLE}), every light tested each frame. */
+        DETECT
+    }
+
+    /**
+     * How shadow maps' caster layers take the casters' mobility ({@link MobilityUse}): a caster marked static that
+     * moves twice within {@link #CASTER_SETTLE} frames counts as moving, as detection has it, until it settles.
+     */
+    public static final Setting<MobilityUse> CASTER_MOBILITY = Setting.choice("shadows.casters.mobility",
+        MobilityUse.USE_HINT, "how shadow maps take casters' mobility: USE_HINT (static casters join the still "
+            + "layers at once, dynamic ones never), STATIC_ONLY (dynamic ones detected) or DETECT (ignore it)");
+    /** How shadow maps take their lights' mobility ({@link MobilityUse}). */
+    public static final Setting<MobilityUse> LIGHT_MOBILITY = Setting.choice("shadows.lights.mobility",
+        MobilityUse.USE_HINT, "how shadow maps take lights' mobility: USE_HINT (static lights skip their change "
+            + "tests, dynamic ones' tiles updated first), STATIC_ONLY (static only) or DETECT (ignore it)");
+    /**
+     * {@link MobilityUse#USE_HINT}: how many times as important a changed tile of a dynamic spot or point light is in
+     * the update order ({@link #ATLAS_UPDATES}) as one of a light not marked dynamic: 1 ranks them alike.
+     */
+    public static final Setting<Float> LIGHT_MOVING_WEIGHT = Setting.decimal("shadows.lights.movingWeight", 4, 1,
+        1000, "how many times as urgent a changed shadow tile of a dynamic light is in the update order");
+    /**
      * Ray-traced spot and point lights traced in a frame, at most: the most important (by how big their reach shows,
      * times their importance); the rest take maps (AUTO within their spec's bounds). Each traced light is a mask per
      * view, traced over the view's pixels (and soft ones denoised over them): 200 traced point lights took 220 ms a
@@ -193,7 +229,7 @@ public final class ShadowSettings {
     public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, RAY_OFFSET,
         CASTER_DETAIL, ATLAS_SIZE, ATLAS_UPDATES, ATLAS_DRAWS, ATLAS_URGENT, ATLAS_LAG, TILE_DRAWS, TILE_TRIANGLES,
         AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF, MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, CASTER_FACES, CASTER_LAYERS,
-        CASTER_SETTLE, SOFT_RAYS, SOFT_DENOISER, SOFT_PASSES, RAY_QUEUE, KEEP_ROUNDS, RAY_LIGHTS, SOFT_LIGHTS);
+        CASTER_SETTLE, CASTER_MOBILITY, LIGHT_MOBILITY, LIGHT_MOVING_WEIGHT, SOFT_RAYS, SOFT_DENOISER, SOFT_PASSES, RAY_QUEUE, KEEP_ROUNDS, RAY_LIGHTS, SOFT_LIGHTS);
 
     private ShadowSettings() {
     }

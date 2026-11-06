@@ -505,6 +505,38 @@ class SceneSyncTest {
     static final AssetRef<MeshData> SKINNED = AssetRef.generated(RenderAssets.MESH,
         (Generator<Integer, MeshData>) (unused, seed) -> skinnedSquare(), 0, 1);
 
+    /**
+     * Instances carry their nodes' {@link com.truesim.scene.core.Mobility} (a hint for shadow maps' caches): as drawn,
+     * changed at runtime without a move (followed from the scene's log, nothing uploaded), and gone with the instance.
+     */
+    @Test
+    void instancesCarryTheirNodesMobility() throws InterruptedException {
+        SceneGraph scene = new SceneGraph(new ChangeClock());
+        ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
+        SceneSync sync = closing(new SceneSync(resources, scene, gpu()));
+        FrameGraph graph = graph(sync, false, new GpuBuffer[] {readback(), readback()});
+        long still = facing(scene, -1, 0, -3);
+        long mover = facing(scene, 1, 0, -3);
+        scene.setMobility(still, com.truesim.scene.core.Mobility.STATIC);
+        renderables.set(still, Renderable.of(SQUARE, List.of(RED)));
+        renderables.set(mover, Renderable.of(SQUARE, List.of(RED)));
+        settle(List.of(graph), List.of(sync));
+        GpuScene gpu = sync.gpu();
+        assertThat(gpu.mobility(sync.slotOf(still))).isEqualTo(com.truesim.scene.core.Mobility.STATIC);
+        assertThat(gpu.mobility(sync.slotOf(mover))).as("the scene's default").isEqualTo(
+            com.truesim.scene.core.Mobility.DYNAMIC);
+        scene.setMobility(still, com.truesim.scene.core.Mobility.DYNAMIC);
+        scene.setMobility(mover, com.truesim.scene.core.Mobility.STATIC);
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(gpu.mobility(sync.slotOf(still))).isEqualTo(com.truesim.scene.core.Mobility.DYNAMIC);
+        assertThat(gpu.mobility(sync.slotOf(mover))).isEqualTo(com.truesim.scene.core.Mobility.STATIC);
+        assertThat(gpu.mobilityChangedCount()).as("seen by the frame's upload").isZero();
+        int slot = sync.slotOf(mover);
+        renderables.remove(mover);
+        frame(List.of(graph), List.of(sync), camera);
+        assertThat(gpu.mobility(slot)).as("removed: not known").isNull();
+    }
+
     @Test
     void skinnedRenderablesDrawCopiesPosedByTheirJoints() throws InterruptedException {
         SceneGraph scene = new SceneGraph(new ChangeClock());

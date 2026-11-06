@@ -68,7 +68,11 @@ import java.util.Objects;
  * tile, drawn once. Casters that moved lately ({@link ShadowSettings#CASTER_SETTLE}) are drawn apart: a tile keeps its
  * still casters in a layer of its own (a second atlas, {@link ShadowSettings#CASTER_LAYERS}), and when only moving
  * casters changed it is that layer's depth written into it, the moving casters drawn on top (the depth test merges
- * them). {@link ShadowSpec#AUTO} sizes come each frame from how big the light's reach shows in the views
+ * them). The scene's {@link com.truesim.scene.core.Mobility} is a hint ({@link ShadowSettings#CASTER_MOBILITY},
+ * {@link ShadowSettings#LIGHT_MOBILITY}; {@link GpuScene#setMobility}, {@link Lights#mobility}): a static caster joins
+ * the still layers at once, a dynamic one never does; a static light's own change tests are skipped while nothing
+ * writes it, and a dynamic light's tiles are updated first. A static caster or light that changes all the same is
+ * drawn where it is now, as detection would have it. {@link ShadowSpec#AUTO} sizes come each frame from how big the light's reach shows in the views
  * ({@link ShadowSettings#AUTO_SCALE}), within the spec's bounds, with hysteresis; over the atlas, the least important
  * lights' tiles shrink first, then the least important lights cast none.
  *
@@ -131,6 +135,19 @@ public final class Shadows implements AutoCloseable {
     private int[] movingIds = new int[16];
     private MemorySegment movingIdSegment = MemorySegment.ofArray(movingIds);
     private int movingCount;
+    // Mobility hints (GpuScene's numbers): per instance the hint as last applied (MOVING: kept moving, never
+    // settling); the policies as last applied; whether every instance's hint is to be applied again
+    private byte[] hintSeen = new byte[0];
+    private ShadowSettings.MobilityUse casterUse;
+    private ShadowSettings.MobilityUse lightUse = ShadowSettings.MobilityUse.USE_HINT;
+    private float movingLightWeight = 1;
+    private boolean rehint = true;
+    private int settleFrames;
+    // What spot and point lights' parameters take from settings, as last read: their change counts as the lights'
+    private float paramNear = Float.NaN;
+    private float paramBias = Float.NaN;
+    private float paramCutoff = Float.NaN;
+    private long paramEpoch;
     private FrameBuffer movingUpload;
     private final List<FrameBuffer> outgrown = new ArrayList<>(); // freed with the owner: frames in flight read them
     private long frameNow; // frames prepared
@@ -247,6 +264,10 @@ public final class Shadows implements AutoCloseable {
         int moving;
         int overflowed;
         int grown;
+        int stillLights;
+        int movingCasters;
+        int drawnMovingLight;
+        long prepareNanos;
         long texels;
         long atlasTexels;
 
@@ -293,6 +314,29 @@ public final class Shadows implements AutoCloseable {
         /** Of the tiles drawn, those drawing only their moving casters, over their layer's depth. */
         public int moving() {
             return moving;
+        }
+
+        /** Spot and point lights marked static whose own change tests were skipped this frame (nothing wrote them). */
+        public int stillLights() {
+            return stillLights;
+        }
+
+        /**
+         * Casters counting as moving this frame (caster layers on): drawn over the still layers, never in them; those
+         * marked dynamic always count.
+         */
+        public int movingCasters() {
+            return movingCasters;
+        }
+
+        /** Of the tiles drawn, those of lights marked dynamic. */
+        public int drawnMovingLight() {
+            return drawnMovingLight;
+        }
+
+        /** The CPU time the frame's preparation took (which lights cast how, which tiles change and draw), in ns. */
+        public long prepareNanos() {
+            return prepareNanos;
         }
 
         /** Changed tiles left for a later frame ({@link ShadowSettings#ATLAS_UPDATES}): their light keeps its map. */
@@ -437,6 +481,8 @@ public final class Shadows implements AutoCloseable {
         boolean droppedNow;
         boolean shrunkNow;
         ShadowSpec spec;
+        long lightVersion = -1; // its light's version (Lights.version) when its params were last taken
+        long epoch = -1; // paramEpoch then
         final double[] params = new double[12];
         final float[] splits = new float[ShadowSpec.MAX_CASCADES];
 
@@ -465,6 +511,7 @@ public final class Shadows implements AutoCloseable {
         boolean usedNow;
         double priority;
         double brightness = Double.NaN; // its light's, for the update order (directional: NaN, not compared)
+        boolean movingLight; // its light is marked dynamic: ranked LIGHT_MOVING_WEIGHT times as important
         long waitFrom = -1; // the frame (frameNow) it was first found changed and not drawn since; -1: drawn
         float bias;
         float normalOffset;
@@ -488,6 +535,7 @@ public final class Shadows implements AutoCloseable {
         if (views.isEmpty()) {
             return;
         }
+        long began = System.nanoTime();
         EngineSettings settings = views.get(0).port.settings();
         boolean layersOn = settings.get(ShadowSettings.CASTER_LAYERS);
         if (layersOn != layering) {
@@ -496,6 +544,26 @@ public final class Shadows implements AutoCloseable {
             stats.structureChange = "caster layers switched";
             allDirty = true;
             forgetMoving();
+            Arrays.fill(hintSeen, GpuScene.UNKNOWN); // pinned no more: applied again
+            rehint = true;
+        }
+        ShadowSettings.MobilityUse casters = settings.get(ShadowSettings.CASTER_MOBILITY);
+        if (casters != casterUse) {
+            casterUse = casters;
+            rehint = true;
+        }
+        lightUse = settings.get(ShadowSettings.LIGHT_MOBILITY);
+        movingLightWeight = lightUse == ShadowSettings.MobilityUse.USE_HINT
+            ? settings.get(ShadowSettings.LIGHT_MOVING_WEIGHT) : 1;
+        settleFrames = settings.get(ShadowSettings.CASTER_SETTLE);
+        float near = settings.get(ShadowSettings.MAP_NEAR);
+        float bias = settings.get(ShadowSettings.CASCADE_BIAS);
+        float cutoff = settings.get(ClusteredLights.CUTOFF);
+        if (near != paramNear || bias != paramBias || cutoff != paramCutoff) {
+            paramNear = near;
+            paramBias = bias;
+            paramCutoff = cutoff;
+            paramEpoch++; // every light's parameters taken again
         }
         int atlasSize = Integer.highestOneBit(settings.get(ShadowSettings.ATLAS_SIZE));
         if (atlas == null || atlas.size() != atlasSize) {
@@ -508,6 +576,7 @@ public final class Shadows implements AutoCloseable {
         if (detail != casterDetail) {
             casterDetail = detail;
             allDirty = true;
+            paramEpoch++; // in every light's parameters
         }
         growOverflowed(frame);
         long shapesNow = scene.materials().shapesVersion();
@@ -532,6 +601,7 @@ public final class Shadows implements AutoCloseable {
         stats.traced = 0;
         stats.shrunk = 0;
         stats.dropped = 0;
+        stats.stillLights = 0;
         boolean tracing = rayTracing != null; // made only where the device traces rays
         for (int v2 = 0; v2 < views.size(); v2++) {
             View view = views.get(v2);
@@ -576,6 +646,7 @@ public final class Shadows implements AutoCloseable {
             view.releaseUnused();
         }
         afterLights(atlasSize, settings);
+        stats.prepareNanos = System.nanoTime() - began;
     }
 
     /** Light {@code light}'s maps: the sun's cascades in each view, a spot or point light's tiles. */
@@ -755,7 +826,11 @@ public final class Shadows implements AutoCloseable {
         }
     }
 
-    /** A spot or point light's maps: one tile, or six cube faces. */
+    /**
+     * A spot or point light's maps: one tile, or six cube faces. A light marked static ({@link
+     * ShadowSettings#LIGHT_MOBILITY}) that nothing wrote since its parameters were taken keeps them without reading or
+     * comparing them again; any write ({@link Lights#version}) has them taken and compared as for every light.
+     */
     private void localMaps(int light, ShadowSpec spec, int type, EngineSettings settings) {
         Group group = shared[light];
         if (group == null) {
@@ -764,12 +839,29 @@ public final class Shadows implements AutoCloseable {
         }
         boolean point = type == 0;
         int faces = point ? 6 : 1;
-        double x = lights.position(light, 0);
-        double y = lights.position(light, 1);
-        double z = lights.position(light, 2);
-        float range = lights.range(light);
-        double reach = Float.isInfinite(range) ? Math.sqrt(lights.brightness(light)
-            / settings.get(ClusteredLights.CUTOFF)) : range;
+        byte hint = hint(lightUse, lights.mobilityHint(light));
+        long version = lights.version(light);
+        // Static, unwritten, nothing in its parameters' settings changed: its parameters stand
+        boolean known = hint == GpuScene.STILL && group.spec == spec && group.count == faces
+            && group.lightVersion == version && group.epoch == paramEpoch;
+        double[] p = known ? group.params : lightParams;
+        double x;
+        double y;
+        double z;
+        double reach;
+        if (known) {
+            x = p[0];
+            y = p[1];
+            z = p[2];
+            reach = p[6];
+            stats.stillLights++;
+        } else {
+            x = lights.position(light, 0);
+            y = lights.position(light, 1);
+            z = lights.position(light, 2);
+            float range = lights.range(light);
+            reach = Float.isInfinite(range) ? Math.sqrt(lights.brightness(light) / paramCutoff) : range;
+        }
         // How big its reach shows: the most pixels across in any view.
         double pixels = 0;
         double nearest = Double.MAX_VALUE;
@@ -788,39 +880,41 @@ public final class Shadows implements AutoCloseable {
         if (auto && cutoff > 0 && nearest - reach > cutoff) {
             return; // too far from every view: none
         }
-        double dx = 0;
-        double dy = 0;
-        double dz = 0;
-        float cosOuter = lights.cosOuter(light);
-        if (!point) {
-            double[] d = lightParams;
-            lights.direction(light, d);
-            dx = d[0];
-            dy = d[1];
-            dz = d[2];
-        }
-        float near = settings.get(ShadowSettings.MAP_NEAR);
-        float bias = Float.isNaN(spec.bias()) ? settings.get(ShadowSettings.CASCADE_BIAS) : spec.bias();
-        double[] p = lightParams;
-        p[0] = x;
-        p[1] = y;
-        p[2] = z;
-        p[3] = dx;
-        p[4] = dy;
-        p[5] = dz;
-        p[6] = reach;
-        p[7] = cosOuter;
-        p[8] = type;
-        p[9] = near;
-        p[10] = bias;
-        p[11] = casterDetail;
         for (int f = faces; f < group.count; f++) {
             release(group.tiles[f]);
         }
-        boolean changed = group.spec != spec || !Arrays.equals(p, group.params) || group.count != faces;
-        if (changed) {
-            System.arraycopy(p, 0, group.params, 0, p.length);
-            group.spec = spec;
+        boolean changed = false;
+        if (!known) {
+            double dx = 0;
+            double dy = 0;
+            double dz = 0;
+            float cosOuter = lights.cosOuter(light);
+            if (!point) {
+                lights.direction(light, p);
+                dx = p[0];
+                dy = p[1];
+                dz = p[2];
+            }
+            float bias = Float.isNaN(spec.bias()) ? paramBias : spec.bias();
+            p[0] = x;
+            p[1] = y;
+            p[2] = z;
+            p[3] = dx;
+            p[4] = dy;
+            p[5] = dz;
+            p[6] = reach;
+            p[7] = cosOuter;
+            p[8] = type;
+            p[9] = paramNear;
+            p[10] = bias;
+            p[11] = casterDetail;
+            changed = group.spec != spec || !Arrays.equals(p, group.params) || group.count != faces;
+            if (changed) {
+                System.arraycopy(p, 0, group.params, 0, p.length);
+                group.spec = spec;
+            }
+            group.lightVersion = version;
+            group.epoch = paramEpoch;
         }
         group.light = light;
         group.count = faces;
@@ -833,18 +927,29 @@ public final class Shadows implements AutoCloseable {
         int min = auto ? spec.minSize() : MIN_TILE;
         int max = auto ? spec.maxSize() : spec.resolution();
         float hysteresis = settings.get(ShadowSettings.AUTO_HYSTERESIS);
+        boolean movingLight = hint == GpuScene.MOVING;
         for (int f = 0; f < faces; f++) {
             Tile tile = group.tiles[f];
             tile.wanted = sized(tile, wanted, min, max, hysteresis);
             tile.priority = group.priority;
             tile.brightness = brightness;
             tile.range = reach;
+            tile.movingLight = movingLight;
             if (changed) {
                 tile.dirty = true;
             }
             use(tile);
         }
         addGroup(group);
+    }
+
+    /** {@code hint} (GpuScene's numbers) as {@code use} takes it: UNKNOWN where it is not to be used. */
+    private static byte hint(ShadowSettings.MobilityUse use, byte hint) {
+        return switch (use) {
+            case USE_HINT -> hint;
+            case STATIC_ONLY -> hint == GpuScene.STILL ? GpuScene.STILL : GpuScene.UNKNOWN;
+            case DETECT -> GpuScene.UNKNOWN;
+        };
     }
 
     /** A power-of-two size near {@code wanted}, within bounds, changed from the tile's only past the hysteresis. */
@@ -936,6 +1041,7 @@ public final class Shadows implements AutoCloseable {
             release(tile);
         }
         group.spec = null;
+        group.lightVersion = -1;
     }
 
     private void release(Tile tile) {
@@ -1093,6 +1199,8 @@ public final class Shadows implements AutoCloseable {
     private static final int RELAYER = 2;
     /** The still casters changed, the moving drawn as they are (a caster that stopped joins them): the layer stale. */
     private static final int UNLAYER = 3;
+    /** A frame long before any: never moved. */
+    private static final long NEVER = Long.MIN_VALUE / 4;
 
     /**
      * Marks the tiles a moved, added or removed caster shows (before and after its move) to be drawn again, from the
@@ -1106,6 +1214,14 @@ public final class Shadows implements AutoCloseable {
             growSpheres(capacity);
         }
         boolean split = layering;
+        if (rehint) {
+            rehint = false;
+            for (int id = 0, high = scene.highWater(); id < high; id++) {
+                if (scene.contains(id)) {
+                    applyHint(id, split);
+                }
+            }
+        }
         int changes = scene.pendingCount();
         com.truesim.engine.render.InstanceMotion motion = scene.motion();
         long tests = (2L * changes + motion.count()) * groupCount;
@@ -1121,9 +1237,19 @@ public final class Shadows implements AutoCloseable {
             int id = scene.changedId(c);
             int o = 4 * id;
             boolean was = split && moving(id);
-            if (split) {
+            // Marked static and not moved lately: straight into the still layers where it was and is (no settle
+            // wait); moved again within the settle frames, it is detected moving as any caster
+            byte hint = hint(casterUse, scene.mobilityHint(id));
+            boolean still = split && hint == GpuScene.STILL && frameNow - movedAt[id] >= settleFrames;
+            if (still) {
+                movedAt[id] = frameNow;
+                if (was) {
+                    unmarkMoving(id);
+                }
+            } else if (split) {
                 markMoving(id);
             }
+            hintSeen[id] = hint;
             for (int pass = 0; pass < 2; pass++) {
                 double r = spheres[o + 3];
                 if (r == -2) {
@@ -1140,12 +1266,24 @@ public final class Shadows implements AutoCloseable {
                     } else {
                         // Where it was: a still caster leaves the still layers there
                         dirtyAround(spheres[o], spheres[o + 1], spheres[o + 2], r,
-                            !split ? FULL : pass == 0 && !was ? RELAYER : MOVED);
+                            !split ? FULL : still ? (pass == 0 && was ? MOVED : RELAYER)
+                                : pass == 0 && !was ? RELAYER : MOVED);
                     }
                 }
                 if (pass == 0) {
                     sphereOf(c, id);
                 }
+            }
+            if (spheres[o + 3] == -1) { // gone: the next instance under its id starts afresh
+                hintSeen[id] = GpuScene.UNKNOWN;
+                movedAt[id] = NEVER;
+            }
+        }
+        // Hints changed without a move: a caster marked dynamic leaves the still layers, one marked static joins them
+        for (int i = 0, n = scene.mobilityChangedCount(); i < n; i++) {
+            int id = scene.mobilityChangedId(i);
+            if (scene.contains(id)) {
+                applyHint(id, split);
             }
         }
         // Instances drawn between two steps' poses move on the GPU every frame: the tiles around the way between
@@ -1210,8 +1348,9 @@ public final class Shadows implements AutoCloseable {
             }
         }
         if (split) {
-            settle(settings.get(ShadowSettings.CASTER_SETTLE));
+            settle(settleFrames);
         }
+        stats.movingCasters = movingCount;
         if (allDirty) {
             for (int i = 0; i < usedCount; i++) {
                 used[i].dirty = true;
@@ -1248,8 +1387,8 @@ public final class Shadows implements AutoCloseable {
     private void settle(int frames) {
         for (int i = movingCount - 1; i >= 0; i--) {
             int id = movingIds[i];
-            if (frameNow - movedAt[id] < frames) {
-                continue;
+            if (hintSeen[id] == GpuScene.MOVING || frameNow - movedAt[id] < frames) {
+                continue; // marked dynamic: never settles
             }
             movingFlags[id >> 4] &= ~(3 << ((id & 15) * 2));
             movingIds[i] = movingIds[--movingCount];
@@ -1257,6 +1396,49 @@ public final class Shadows implements AutoCloseable {
             if (spheres[o + 3] >= 0) {
                 dirtyAround(spheres[o], spheres[o + 1], spheres[o + 2], spheres[o + 3], UNLAYER);
             }
+        }
+    }
+
+    /** Instance {@code id} counts as still from now on (a hint changed: rare, so a search of the moving ids). */
+    private void unmarkMoving(int id) {
+        movingFlags[id >> 4] &= ~(3 << ((id & 15) * 2));
+        for (int i = 0; i < movingCount; i++) {
+            if (movingIds[i] == id) {
+                movingIds[i] = movingIds[--movingCount];
+                return;
+            }
+        }
+    }
+
+    /**
+     * Applies instance {@code id}'s hint as it is now, where it differs from the one applied: marked dynamic, it counts
+     * as moving for good (its tiles' still layers drawn again without it, when next needed); marked static, a moving
+     * caster joins the still ones at once (likewise); no longer dynamic, it settles as detected. Its tiles' images
+     * stay right either way: only which layer holds it changes.
+     */
+    private void applyHint(int id, boolean split) {
+        byte now = hint(casterUse, scene.mobilityHint(id));
+        byte before = hintSeen[id];
+        if (now == before) {
+            return;
+        }
+        hintSeen[id] = now;
+        if (!split) {
+            return;
+        }
+        int o = 4 * id;
+        if (now == GpuScene.MOVING && !moving(id)) {
+            markMoving(id);
+        } else if (now == GpuScene.STILL && moving(id)) {
+            unmarkMoving(id);
+            movedAt[id] = NEVER;
+        } else {
+            return;
+        }
+        if (spheres[o + 3] >= 0) {
+            dirtyAround(spheres[o], spheres[o + 1], spheres[o + 2], spheres[o + 3], UNLAYER);
+        } else if (spheres[o + 3] == -2) {
+            allDirty = true; // where it is is not known
         }
     }
 
@@ -1276,6 +1458,9 @@ public final class Shadows implements AutoCloseable {
         deformed = Arrays.copyOf(deformed, capacity);
         reach = Arrays.copyOf(reach, capacity);
         movedAt = Arrays.copyOf(movedAt, capacity);
+        Arrays.fill(movedAt, had, capacity, NEVER);
+        hintSeen = Arrays.copyOf(hintSeen, capacity);
+        rehint = true; // instances already there: their hints applied
         movingFlags = Arrays.copyOf(movingFlags, (capacity + 15) / 16);
         movingSegment = MemorySegment.ofArray(movingFlags);
         Arrays.fill(reach, had, capacity, Double.NaN);
@@ -1419,7 +1604,8 @@ public final class Shadows implements AutoCloseable {
                 // the brighter of the lights first: relative to the brightest mapped light (cascades: as they are)
                 double relative = tile.brightness >= 0 && brightest > 0 ? tile.brightness / brightest : 1;
                 dirty[dirtyCount] = tile;
-                dirtyImportance[dirtyCount] = tile.priority * relative;
+                // a dynamic light's tiles first: what moves with it shows its lag most (LIGHT_MOVING_WEIGHT)
+                dirtyImportance[dirtyCount] = tile.priority * relative * (tile.movingLight ? movingLightWeight : 1);
                 dirtyWaited[dirtyCount++] = waited;
                 maxWait = Math.max(maxWait, waited);
                 late += waited;
@@ -1446,12 +1632,14 @@ public final class Shadows implements AutoCloseable {
         }
         int layerSlots = 0;
         movingDrawn = 0;
+        int movingLightDrawn = 0;
         long waitedSum = 0;
         for (int i = 0; i < drawn; i++) {
             int d = schedule.order(i);
             Tile tile = dirty[d];
             waitedSum += dirtyWaited[d];
             tile.waitFrom = -1; // drawn this frame
+            movingLightDrawn += tile.movingLight ? 1 : 0;
             boolean full = tile.dirty || !split;
             if (!full && !tile.layered) {
                 if (layerSlots < layerViews.length) {
@@ -1474,6 +1662,7 @@ public final class Shadows implements AutoCloseable {
         stats.drawn = drawn;
         stats.layered = layerSlots;
         stats.moving = movingDrawn;
+        stats.drawnMovingLight = movingLightDrawn;
         stats.waiting = dirtyCount - drawn;
         stats.forced = Math.min(schedule.forced(), drawn);
         stats.maxWait = maxWait;
