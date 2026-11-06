@@ -180,7 +180,8 @@ public final class Shadows implements AutoCloseable {
     /**
      * The atlas's update counters for the profiler ({@code profiling.counters().add(shadows.counters())}), from the
      * last frame: {@code shadows.atlas.drawn} and {@code shadows.atlas.waiting} tiles, {@code shadows.atlas.forced}
-     * (drawn beyond the budget), {@code shadows.atlas.maxWait} and {@code shadows.atlas.meanLag} in frames.
+     * (drawn beyond the budget), {@code shadows.atlas.maxWait} and {@code shadows.atlas.meanLag} (of every changed
+     * tile, the waiting too) in frames.
      */
     @AllowAllocation("made once")
     public Counters.Source counters() {
@@ -219,7 +220,8 @@ public final class Shadows implements AutoCloseable {
             into.set(waiting, stats.waiting);
             into.set(forced, stats.forced);
             into.set(maxWait, stats.maxWait);
-            into.set(meanLag, d == 0 ? 0 : stats.waited / (double) d);
+            int changed = d + stats.waiting;
+            into.set(meanLag, changed == 0 ? 0 : stats.late / (double) changed);
         }
     }
 
@@ -234,6 +236,7 @@ public final class Shadows implements AutoCloseable {
         int forced;
         int maxWait;
         long waited;
+        long late;
         int shrunk;
         int dropped;
         int rayFallbacks;
@@ -308,6 +311,14 @@ public final class Shadows implements AutoCloseable {
         /** The frames the tiles drawn this frame waited, summed: over {@link #drawn()}, their mean lag. */
         public long waited() {
             return waited;
+        }
+
+        /**
+         * The frames every changed tile, drawn or waiting, has waited, summed: over {@link #drawn()} and
+         * {@link #waiting()}, how many frames late the changed tiles' shadows are on average (the waiting included).
+         */
+        public long late() {
+            return late;
         }
 
         /** Lights whose maps were made smaller than they wanted, for the atlas's budget. */
@@ -1380,6 +1391,7 @@ public final class Shadows implements AutoCloseable {
             }
         }
         int maxWait = 0;
+        long late = 0;
         for (int i = 0; i < usedCount; i++) {
             Tile tile = used[i];
             if (tile.usedNow && tile.node >= 0 && (tile.dirty || tile.moved)) {
@@ -1396,6 +1408,7 @@ public final class Shadows implements AutoCloseable {
                 dirtyImportance[dirtyCount] = tile.priority * relative;
                 dirtyWaited[dirtyCount++] = waited;
                 maxWait = Math.max(maxWait, waited);
+                late += waited;
             }
         }
         int toDraw = schedule.schedule(updates, dirtyCount, dirtyImportance, dirtyWaited, cap,
@@ -1448,6 +1461,7 @@ public final class Shadows implements AutoCloseable {
         stats.forced = Math.min(schedule.forced(), drawn);
         stats.maxWait = maxWait;
         stats.waited = waitedSum;
+        stats.late = late;
     }
 
     @AllowAllocation("growing with the tiles")
