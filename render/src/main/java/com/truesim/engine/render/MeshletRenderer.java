@@ -75,6 +75,7 @@ public final class MeshletRenderer implements AutoCloseable {
     /** The visibility buffer's IDs: instance + 1 (0: nothing), and meshlet << 7 | triangle. */
     public static final int ID_FORMAT = org.lwjgl.vulkan.VK10.VK_FORMAT_R32G32_UINT;
 
+    private final VulkanDevice device;
     private final int depthFormat;
     private final GpuScene scene;
     private final GeometryPool pool;
@@ -132,6 +133,7 @@ public final class MeshletRenderer implements AutoCloseable {
                 + "with the same frames in flight");
         }
         this.retiring = new Retiring(slots);
+        this.device = Objects.requireNonNull(device, "device");
         this.depthFormat = depthFormat;
         shading = new ShadingPipelines(device, colorFormat, depthFormat);
         raster = new RasterPipelines(device, shading, depthFormat);
@@ -726,6 +728,11 @@ public final class MeshletRenderer implements AutoCloseable {
         long behind, long indirect, RasterPipelines.Typed pipelines) {
         raster.drawBlendedTyped(commands, scene, own(view), path() == Path.MESH_SHADERS, kind, clusters, behind,
             indirect, pipelines);
+    }
+
+    /** The device it draws on. */
+    public VulkanDevice device() {
+        return device;
     }
 
     /** The depth format its pipelines draw into ({@code VK_FORMAT_*}). */

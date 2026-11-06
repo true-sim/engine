@@ -122,11 +122,24 @@ public final class ShadowSettings {
     /** Which faces of casters shadow maps draw ({@link Faces}). */
     public static final Setting<Faces> CASTER_FACES = Setting.choice("shadows.casters.faces", Faces.BOTH,
         "faces of casters shadow maps draw: BOTH (as rays meet them) or FRONT (cheaper; lights inside meshes leak)");
+    /**
+     * Whether maps keep their still casters apart from the moving ones: a tile a moving caster reaches is drawn again
+     * from a copy of its still casters' layer (a second atlas, as large, drawn when that layer changes) and only the
+     * moving casters on top, instead of every caster. Costs the second atlas's memory; off: every caster each time.
+     */
+    public static final Setting<Boolean> CASTER_LAYERS = Setting.bool("shadows.casters.layers", true,
+        "maps keep still casters in a layer of their own and draw only moving ones again (a second atlas's memory)");
+    /**
+     * Frames a caster stays moving after its last move, before it joins its tiles' still layers (which are then drawn
+     * again when next needed): fewer for casters that stop for good, more for those that pause.
+     */
+    public static final Setting<Integer> CASTER_SETTLE = Setting.integer("shadows.casters.settle", 30, 1, 100_000,
+        "frames a caster counts as moving after its last move, before maps draw it with the still ones");
     /** Every shadow setting. */
     public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, RAY_OFFSET,
         CASTER_DETAIL, ATLAS_SIZE, ATLAS_DRAWS, TILE_DRAWS, TILE_TRIANGLES, AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF,
-        MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, CASTER_FACES, SOFT_RAYS, SOFT_DENOISER, SOFT_PASSES, RAY_QUEUE,
-        KEEP_ROUNDS);
+        MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, CASTER_FACES, CASTER_LAYERS, CASTER_SETTLE, SOFT_RAYS, SOFT_DENOISER,
+        SOFT_PASSES, RAY_QUEUE, KEEP_ROUNDS);
 
     private ShadowSettings() {
     }

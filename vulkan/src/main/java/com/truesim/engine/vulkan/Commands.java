@@ -68,8 +68,9 @@ public final class Commands {
     private static final int BEGIN_QUERY = 37;
     private static final int END_QUERY = 38;
     private static final int ACQUIRE = 39;
+    private static final int COPY_IMAGE = 40;
     // Immutable entries: a thread seeing an older one only wraps the address again.
-    private static final Fn[] FUNCTIONS = new Fn[40];
+    private static final Fn[] FUNCTIONS = new Fn[41];
 
     static {
         java.util.Arrays.fill(FUNCTIONS, NONE);
@@ -369,6 +370,15 @@ public final class Commands {
         try {
             H_ONE_POINTER.invokeExact(function(COPY_IMAGE_TO_BUFFER, of(commands).vkCmdCopyImageToBuffer2),
                 commands.address(), info);
+        } catch (Throwable e) {
+            throw failed(e);
+        }
+    }
+
+    /** {@code vkCmdCopyImage2} with the {@code VkCopyImageInfo2} at {@code info}. */
+    public static void copyImage2(VkCommandBuffer commands, long info) {
+        try {
+            H_ONE_POINTER.invokeExact(function(COPY_IMAGE, of(commands).vkCmdCopyImage2), commands.address(), info);
         } catch (Throwable e) {
             throw failed(e);
         }

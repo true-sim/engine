@@ -385,16 +385,29 @@ public final class RenderView implements AutoCloseable {
      * a frame slot's copy: set it in each frame it is read. Allocates nothing.
      */
     public RenderView highlightedOnly(long flags, int count) {
+        return highlights(flags, count, 2);
+    }
+
+    /**
+     * Draws only the instances not highlighted in the flags at device address {@code flags} (as
+     * {@link #highlightedOnly}: ids past {@code count} are not highlighted), or every instance (address 0): a shadow
+     * tile's static casters, the moving ones flagged. Set in each frame it is read. Allocates nothing.
+     */
+    public RenderView unhighlightedOnly(long flags, int count) {
+        return highlights(flags, count, 8);
+    }
+
+    private RenderView highlights(long flags, int count, int mode) {
         checkOpen();
         putLong(ViewLayout.HIGHLIGHTS, flags);
         putInt(ViewLayout.HIGHLIGHT_COUNT, flags == 0 ? 0 : count);
-        highlightedOnly = flags != 0;
+        highlightMode = flags != 0 ? mode : 0;
         putInt(ViewLayout.FLAGS, flags());
         return this;
     }
 
     private int flags() {
-        return (castersOnly ? 1 : 0) | (highlightedOnly ? 2 : 0) | (bothSides ? 4 : 0);
+        return (castersOnly ? 1 : 0) | highlightMode | (bothSides ? 4 : 0);
     }
 
     /**
@@ -413,7 +426,7 @@ public final class RenderView implements AutoCloseable {
     private boolean bothSides;
 
     private boolean castersOnly;
-    private boolean highlightedOnly;
+    private int highlightMode; // 2: highlighted only, 8: unhighlighted only
 
     /**
      * How many meshlets the view found visible in the last finished frame, every raster bin and both phases of
