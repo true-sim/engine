@@ -22,14 +22,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: path-tracer
-            tests: ":engine-render:test --tests *ReferencePathTracerTest"
-          - name: shadow-owner
-            tests: ":engine-render:test --tests *ShadowOwnerTest"
-          - name: probe-volume
-            tests: ":engine-render:test --tests *ProbeVolumeTest"
-          - name: gi-scenes
-            tests: ":engine-scene:test --tests *GiScenesTest"
+          - name: shard-9
+            tests: ":engine-render:test :engine-scene:test :engine-ui:test -Ptruesim.shard=9/10 -Ptruesim.shardModules=engine-render,engine-scene,engine-ui"
+          - name: shard-9-render-only
+            tests: ":engine-render:test -Ptruesim.shard=9/10 -Ptruesim.shardModules=engine-render,engine-scene,engine-ui"
+          - name: shard-5
+            tests: ":engine-render:test :engine-scene:test :engine-ui:test -Ptruesim.shard=5/10 -Ptruesim.shardModules=engine-render,engine-scene,engine-ui"
+          - name: shard-8
+            tests: ":engine-render:test :engine-scene:test :engine-ui:test -Ptruesim.shard=8/10 -Ptruesim.shardModules=engine-render,engine-scene,engine-ui"
     name: repro (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v7
@@ -43,7 +43,7 @@ jobs:
       - name: The class again and again
         run: |
           crashes=0
-          for i in 1 2 3 4 5 6 7 8; do
+          for i in 1 2 3; do
             if ! ./gradlew ${{ matrix.tests }} --rerun -q > run-$i.log 2>&1; then
               echo "iteration $i failed"; grep -E "SIGSEGV|FAILED|Problematic" -A2 run-$i.log | head -12
               crashes=$((crashes + 1))
@@ -53,7 +53,7 @@ jobs:
               echo "iteration $i passed"
             fi
           done
-          echo "crashes: $crashes of 8"
+          echo "crashes: $crashes of 3"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
