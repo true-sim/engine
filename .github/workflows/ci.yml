@@ -19,7 +19,7 @@ permissions:
 
 env:
   SHARD_MODULES: engine-render,engine-scene,engine-ui
-  SHARDS: 10 # keep in step with the matrix below
+  SHARDS: 6 # keep in step with the matrix below; ci/test-timings.txt: at most about 400 s of tests each
   GITHUB_ACTOR: ${{ github.actor }}
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -82,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        shard: [1, 2, 3, 4, 5, 6]
     env:
       # lavapipe compiles shaders through LLVM, minutes for the largest; its disk cache keeps them for this PR's reruns
       MESA_SHADER_CACHE_DIR: ${{ github.workspace }}/.mesa-shader-cache
