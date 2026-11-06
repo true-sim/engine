@@ -1509,10 +1509,20 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   200 point lights (ranges 6 to 15) over the rocks, the camera flying over them at 1920 x 1080: unshadowed 0.93 ms;
   AUTO maps 0.97 to 0.98 ms (61 M atlas texels, the shadow atlas pass 0.002 ms in the median frame: tiles stay; at
   most 12 drawn in a frame as sizes change); fixed 256 maps 0.96 to 0.98 ms; with 29 lights' specs switched every
-  frame 1.7 to 2.2 ms (64 tiles drawn a frame). No graph build in any of them after the first frames.
+  frame 1.7 to 2.2 ms (64 tiles drawn a frame). No graph build in any of them after the first frames. Measured again
+  with room for every caster (2026-11-07, `IMPORTANCE` updates, two runs): unshadowed 0.92-0.94 ms, AUTO maps 1.50-1.75
+  ms (shadow passes 0.01-0.02), 256 maps 1.31-1.41 ms, specs switched 2.30-2.54 ms (shadow passes 0.31-0.36, 99 tiles
+  drawn a frame). Where the frame's other 0.5 ms with maps went was not established; not the room itself (600,000 and
+  2,097,152 chunks timed alike), and not the shadow passes.
 
   **Moving** (`ShadowsBenchmark`, 2026-11-06, the same 200 lights and flight; rocks circling through the lights'
-  ranges, lights circling 4 units wide; GPU time of the frame (shadow passes), tiles drawn a frame, no graph build):
+  ranges, lights circling 4 units wide; GPU time of the frame (shadow passes), tiles drawn a frame, no graph build).
+  This table, the update modes' and the caster layers' below were measured while the benchmark's culling had room for
+  65,535 chunks of 64 meshlets and frames drawing hundreds of tiles wanted up to 525,000: casters were left out of
+  those tiles, so they understate what drawing tiles costs (pitfalls.md). With room for every caster (2026-11-07, the
+  defaults: `IMPORTANCE`, caster layers on) 10 / 100 / 500 / 2,000 rocks moving take 0.25 / 0.68 / 1.43 / 1.92 ms of
+  shadow passes and 0.23 / 0.40 / 0.61 / 0.66 ms of culling a frame, 10 % of the lights moving 0.66-0.76 and 0.41 ms;
+  the tiles drawn and the lag are as below:
 
   | AUTO maps | `CAPPED`, 64 draws (before the modes) | tiles waiting | draws 1,200 (none waits) | tiles drawn |
   |---|---|---|---|---|
@@ -1563,7 +1573,8 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
 
   **Mobility** (the scene's `Mobility`, per instance and light: a hint, never a promise). `shadows.casters.mobility`
   (`STATIC_ONLY` by default, `USE_HINT`, `DETECT`): a caster marked static joins its tiles' still layers the frame it
-  is placed or moved (no `shadows.casters.settle` wait; its tiles' layers drawn again where it was and is); the rest is
+  is placed or moved (no `shadows.casters.settle` wait; moved or taken out, its tiles' layers drawn again where it was
+  and is; new to the scene, it alone is drawn into the current layers it reaches, over what they hold); the rest is
   detected as before. Static only, because the scene makes every node it is not told otherwise dynamic: taking that at
   its word would keep every caster of an application that never marks its nodes out of the still layers. With
   `USE_HINT`, for applications that mark both ways, a caster marked dynamic counts as moving for good (never in a
@@ -1575,67 +1586,78 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   `USE_HINT`). With `USE_HINT` a dynamic light's changed tiles also rank `shadows.lights.movingWeight` (4) times as
   important in the update order.
 
-  Measured (`ShadowsBenchmark`, `TRUESIM_SHADOWS_MOBILITY`, RX 9070 XT, 2026-11-06, JaCoCo off; the flight over 200
+  Measured (`ShadowsBenchmark`, `TRUESIM_SHADOWS_MOBILITY`, RX 9070 XT, 2026-11-07, JaCoCo off; the flight over 200
   AUTO-mapped lights, `IMPORTANCE` updates, caster layers on; the moving rocks and lights marked dynamic and everything
-  else static, used both ways (`USE_HINT`) against ignored (`DETECT`), in turns in one run; two runs, another agent's benchmark
-  sharing the GPU in parts of them, the quieter one here; shadow GPU: median (mean) of the shadow passes; prepare: the
-  owner's CPU time a frame, median):
+  else static, used both ways (`USE_HINT`) against ignored (`DETECT`), in turns in one run; two runs, ranges over both;
+  shadow GPU: median (mean) of the shadow passes; prepare: the owner's CPU time a frame, median; measured again since
+  the culling has room for every caster, see above):
 
   | Scene | Shadow GPU, `USE_HINT` / `DETECT` | Tiles drawn | Lag mean / max (frames) | Prepare (CPU) | Casters moving |
   |---|---|---|---|---|---|
-  | all still | 0.01 (0.03) / 0.01 (0.03) ms | 1.7 / 1.7 | 0 / 0 | 0.18 / 0.18 ms | 0 / 0 |
-  | 10 rocks moving | 0.20 (0.21) / 0.20 (0.21) | 49.5 / 49.5 | 0 / 0 | 0.20 / 0.22 | 10 / 10 |
-  | 100 rocks moving | 0.44 (0.43) / 0.44 (0.43) | 212 / 212 | 0.71 / 2, the same | 0.41 / 0.39 | 100 / 100 |
-  | 500 rocks moving | 0.94 (0.93) / 0.94 (0.93) | 430 / 430 | 0.76 / 2, the same | 1.14 / 1.12 | 500 / 500 |
-  | 2,000 rocks moving | 1.19 (1.22) / 1.19 (1.22) | 461 / 461 | 0.77 / 2, the same | 3.69 / 3.70 | 2,000 / 2,000 |
-  | 10% of the lights moving | 0.45 (0.47) / 0.41 (0.43) | 121 / 91 | 0 / 0, against 0.29 / 2 | 0.21 / 0.20 | 0 / 0 |
-  | 300 rocks, 10% of the lights | 1.01 (1.02) / 1.08 (1.08) | 431 / 393 | 0.68 / 2, against 0.76 / 2 | 0.79 / 0.78 | 300 / 300 |
-  | 100 rocks moving 40 frames, standing 40 | 0.01 (0.18) / 0.01 (0.20) | 79 / 79 | 0.66 / 2, the same | 0.18 / 0.19 | 100 / 82 |
-  | 500 rocks moving 40 frames, standing 40 | 0.01 (0.35) / 0.01 (0.33) | 157 / 157 | 0.73 / 2, the same | 0.19 / 0.18 | 500 / 408 |
+  | all still | 0.02 (0.05) / 0.01 (0.05) ms | 1.7 / 1.7 | 0 / 0 | 0.18 / 0.18 ms | 0 / 0 |
+  | 10 rocks moving | 0.25-0.26 (0.27) / 0.26-0.27 (0.28) | 49.5 / 49.5 | 0 / 0 | 0.20-0.23 / 0.20 | 10 / 10 |
+  | 100 rocks moving | 0.68-0.73 (0.70-0.72) / 0.68-0.73 (0.70-0.72) | 212 / 212 | 0.71 / 2, the same | 0.39 / 0.38-0.39 | 100 / 100 |
+  | 500 rocks moving | 1.43-1.44 (1.47) / 1.43-1.44 (1.46-1.47) | 430 / 430 | 0.76 / 2, the same | 1.12-1.33 / 1.09-1.26 | 500 / 500 |
+  | 2,000 rocks moving | 1.91-1.97 (2.03) / 1.92-1.94 (2.02) | 461 / 461 | 0.77 / 2, the same | 3.64-3.70 / 3.55-3.68 | 2,000 / 2,000 |
+  | 10% of the lights moving | 0.81-0.93 (0.89) / 0.68-0.80 (0.73-0.76) | 121 / 91 | 0 / 0, against 0.29 / 2 | 0.21 / 0.20-0.23 | 0 / 0 |
+  | 50% of the lights moving | 3.01-3.05 (3.01-3.07) / 1.78-1.88 (1.88-1.89) | 501 / 290 | 0.20 / 2, against 0.73 / 2 | 0.31-0.32 / 0.28-0.29 | 0 / 0 |
+  | 300 rocks, 10% of the lights | 1.94-1.97 (1.94-1.95) / 1.67-1.95 (1.77-1.78) | 431 / 393 | 0.68 / 2, against 0.76 / 2 | 0.78-0.80 / 0.77 | 300 / 300 |
+  | 100 rocks moving 40 frames, standing 40 | 0.02 (0.29-0.30) / 0.02 (0.33) | 79 / 79 | 0.66 / 2, the same | 0.18-0.19 / 0.18-0.22 | 100 / 82 |
+  | 500 rocks moving 40 frames, standing 40 | 0.02 (0.56) / 0.02 (0.65) | 157 / 157 | 0.73 / 2, the same | 0.19-0.22 / 0.19-0.20 | 500 / 408 |
 
   Where things move steadily, detection ends where the hints start: the same tiles, time and lag. The hints change
-  transients (the dynamic marks only with `USE_HINT`): a dynamic light's tiles are drawn the frame it moves (no lag, about 30 more tiles and 0.04 ms a frame with
-  20 lights moving); pausing rocks stay out of the layers (no layers drawn again as they start), which in these scenes
-  neither saved nor cost measurably (the movers, culled from their own list, are cheap to draw over a layer). Skipping
-  200 static lights' tests did not show in the owner's CPU time (0.18 ms either way); 2,000 moving rocks cost it 3.7 ms
-  either way (their tests against every light).
+  transients (the dynamic marks only with `USE_HINT`): a dynamic light's tiles are drawn the frame it moves (no lag),
+  which costs what those tiles cost: about 30 more tiles and 0.15 ms a frame with 20 lights moving, 210 more and 1.2 ms
+  with 100; pausing rocks stay out of the layers (no layers drawn again as they start): 12 to 14 % less shadow time
+  over the pauses (mean 0.29 against 0.33 ms with 100, 0.56 against 0.65 with 500). Skipping 200 static lights' tests
+  did not show in the owner's CPU time (0.18 ms either way); 2,000 moving rocks cost it 3.6 to 3.7 ms either way (their
+  tests against every light).
 
-  Static geometry appearing and changing (`ShadowsBenchmark`, `TRUESIM_SHADOWS_ONLY=static`, RX 9070 XT, 2026-11-06,
+  Static geometry appearing and changing (`ShadowsBenchmark`, `TRUESIM_SHADOWS_ONLY=static`, RX 9070 XT, 2026-11-07,
   JaCoCo off; the same flight and 200 AUTO-mapped lights, `IMPORTANCE` updates, caster layers on; everything streamed
   or placed marked static, the circling rocks dynamic; the modes in turns in one run, three runs of three rounds, ranges
-  over the runs; shadow GPU: median / mean / p99 of the shadow passes; tiles: drawn a frame over their layer (with
-  every caster: 1.7 in each, the AUTO sizes changing) / layers drawn again; lag and the tiles drawn the same in each mode;
-  prepare: the owner's CPU time, median). Cells: rows 200 units wide across the path, as deep as the camera flies between
-  them, loaded from 20 units behind to 80 ahead, a row in and one out in one batch each; props beside the lights ahead;
-  mixed: those cells and props with 100 rocks circling and 100 circling 40 frames, standing 40:
+  over the runs (the last two rows: one run); shadow GPU: median / mean / p99 of the shadow passes; tiles: drawn a
+  frame over their layer (with every caster: 1.7 in each, the AUTO sizes changing) / layers drawn again / layers static
+  newcomers were drawn into; lag and the tiles drawn the same in each mode; prepare: the owner's CPU time, median;
+  "before": static newcomers' layers drawn again at once, in the same session). Cells: rows 200 units wide across the
+  path, as deep as the camera flies between them, loaded from 20 units behind to 80 ahead, a row in and one out in one
+  batch each; props beside the lights ahead; mixed: those cells and props with 100 rocks circling and 100 circling 40
+  frames, standing 40. Measured again since the culling has room for every caster (earlier numbers here were taken
+  while it left casters out of busy frames' tiles: pitfalls.md):
 
-  | Scene | Mode | Shadow GPU median | mean | p99 | Tiles over layer / layers drawn | Casters moving | Prepare |
+  | Scene | Mode | Shadow GPU median | mean | p99 | Tiles over layer / layers drawn / added to | Casters moving | Prepare |
   |---|---|---|---|---|---|---|---|
-  | mixed (cells, props, rocks moving) | `STATIC_ONLY` | 1.06-1.13 ms | 1.16-1.18 ms | 2.58-2.68 ms | 257.5 / 23.6 | 182 | 0.46-0.50 ms |
-  | | `DETECT` | 1.28-1.37 | 1.33-1.35 | 2.97-2.99 | 257.5 / 22.7 | 488 | 0.42-0.48 |
-  | | `USE_HINT` (movers dynamic) | 1.01-1.10 | 1.11-1.14 | 2.58-2.72 | 257.5 / 15.9 | 200 | 0.42-0.65 |
-  | | no caster layers | 1.49-1.52 | 1.62-1.63 | 3.15-3.16 | 0 / 0 (259.2 with every caster) | 0 | 0.47-0.53 |
-  | cells, 100 rocks every 10 frames | `STATIC_ONLY` | 0.02 | 0.20-0.21 | 1.61-1.93 | 12.2 / 12.2 | 0 | 0.18-0.19 |
-  | | `DETECT` | 0.02 | 0.18 | 1.68-1.91 | 12.2 / 8.3 | 300 | 0.18 |
-  | cells, 20 rocks every 2 frames | `STATIC_ONLY` | 0.36-0.52 | 0.46-0.48 | 1.74 | 33.4 / 33.4 | 0 | 0.20-0.25 |
-  | | `DETECT` | 0.29-0.36 | 0.37-0.38 | 1.47-1.60 | 33.4 / 17.1 | 300 | 0.22-0.23 |
-  | props, one every 5 frames | `STATIC_ONLY` | 0.02 | 0.08 | 0.63-0.83 | 1.4 / 1.4 | 0 | 0.18-0.19 |
-  | | `DETECT` | 0.02 | 0.08 | 0.64-0.86 | 1.4 / 1.0 | 6 | 0.17-0.18 |
-  | one static rock moved once | `STATIC_ONLY` | 0.01-0.02 | 0.05 | 0.54-0.55 | 0.2 / 0.2 | 0 | 0.18 |
-  | | `DETECT` | 0.02 | 0.05 | 0.55 | 0.2 / 0.2 | 1 | 0.18-0.19 |
-  | 100 rocks circling, nothing static changing | any of the three | 0.66-0.70 | 0.69-0.71 | 1.25-1.28 | 210.5 / 2.1 | 100-200 | 0.39-0.47 |
+  | mixed (cells, props, rocks moving) | `STATIC_ONLY` | 0.95-0.97 ms | 1.13-1.14 ms | 3.30-3.33 ms | 257.5 / 16.5 / 7.2 | 182 | 0.45-0.53 ms |
+  | | before | 1.06-1.07 | 1.21-1.22 | 3.30-3.31 | 257.5 / 23.6 / 0 | 182 | 0.42-0.48 |
+  | | `DETECT` | 1.27-1.31 | 1.37-1.38 | 3.49-3.55 | 257.5 / 22.7 / 0 | 488 | 0.41-0.56 |
+  | | `USE_HINT` (movers dynamic) | 0.93-0.95 | 1.05-1.06 | 2.85-2.87 | 257.5 / 8.1 / 7.8 | 200 | 0.43-0.50 |
+  | | before | 1.01-1.04 | 1.13-1.16 | 2.98-3.03 | 257.5 / 15.9 / 0 | 200 | 0.41-0.52 |
+  | | no caster layers | 1.88-2.31 | 2.27-2.33 | 4.00-5.39 | 0 / 0 / 0 (259.2 with every caster) | 0 | 0.45-0.49 |
+  | cells, 100 rocks every 10 frames | `STATIC_ONLY` | 0.02 | 0.17 | 2.00-2.22 | 12.2 / 6.9 / 5.3 | 0 | 0.18 |
+  | | before | 0.01-0.02 | 0.20-0.21 | 2.14-2.40 | 12.2 / 12.2 / 0 | 0 | 0.18 |
+  | | `DETECT` | 0.02 | 0.18-0.19 | 1.92-2.12 | 12.2 / 8.3 / 0 | 300 | 0.18-0.20 |
+  | cells, 20 rocks every 2 frames | `STATIC_ONLY` | 0.25-0.36 | 0.34-0.35 | 1.62-1.91 | 33.4 / 15.4 / 18.0 | 0 | 0.20-0.22 |
+  | | before | 0.39-0.53 | 0.45-0.46 | 1.57-1.83 | 33.4 / 33.4 / 0 | 0 | 0.20-0.21 |
+  | | `DETECT` | 0.27-0.37 | 0.38-0.39 | 1.61-1.96 | 33.4 / 17.1 / 0 | 300 | 0.23-0.27 |
+  | props, one every 5 frames | `STATIC_ONLY` | 0.02 | 0.07 | 0.63-0.64 | 1.4 / 0.7 / 0.7 | 0 | 0.17-0.22 |
+  | | before | 0.02 | 0.08 | 0.63-0.64 | 1.4 / 1.4 / 0 | 0 | 0.17-0.20 |
+  | | `DETECT` | 0.02 | 0.08 | 0.64-0.82 | 1.4 / 1.0 / 0 | 6 | 0.17-0.18 |
+  | one static rock moved once | `STATIC_ONLY` | 0.01-0.02 | 0.05 | 0.54 | 0.2 / 0.2 / 0 | 0 | 0.17 |
+  | | `DETECT` | 0.01 | 0.05 | 0.54 | 0.2 / 0.2 / 0 | 1 | 0.17 |
+  | 100 rocks circling, nothing static changing | any of the three | 0.68-0.70 | 0.69-0.71 | 1.25-1.26 | 210.5 / 2.1 / 0 | 100-200 | 0.38-0.39 |
 
-  Where static geometry changes among moving casters, the hint pays: the mixed scene's shadows take 13 % less GPU time
-  than with detection (mean 1.17 against 1.34 ms, p99 2.6 against 3.0 ms), `USE_HINT` a little less again. Detected,
+  Where static geometry changes among moving casters, the hint pays: the mixed scene's shadows take 18 % less GPU time
+  than with detection (mean 1.13 against 1.37 ms, p99 3.3 against 3.5 ms), `USE_HINT` a little less again. Detected,
   every streamed or placed rock counts as moving for its 30 settle frames (488 casters moving against 182), and every
-  tile drawn over its layer for the movers culls and draws those too. With nothing moving, streamed cells cost more with
-  the hint (0.02 to 0.03 ms a frame more at a row of 100 every 10 frames, 0.09 ms at 20 every 2 frames): a static newcomer's
-  tiles draw their layer again at once, where detection draws it over the old layer and leaves the layer stale until a
-  later change needs it (33.4 layers a frame against 17.1). Props one at a time and a rock moved once cost the same either
-  way. The images, once everything stood 12 frames, match the reference without layers as closely as that reference
-  matches itself in another run (scenes without moving rocks: at most 1 pixel, by at most 3 levels; with moving rocks
-  every mode, the reference included, differs from run to run in one place, 400 to 5,900 pixels by up to 116 levels:
-  pitfalls.md).
+  tile drawn over its layer for the movers culls and draws those too. A static newcomer (a cell's rocks, a prop) is
+  drawn alone into the current layers it reaches, over what they hold (no clear: the depth test keeps the nearest, as a
+  layer drawn again would), its tiles' layers culling only the newcomers' ids; a stale layer is drawn whole, and a
+  static caster moved or taken out (cells leaving behind the camera) still has its tiles' layers drawn again at once,
+  as depth cannot be taken out. So streamed cells with nothing moving now cost no more than detection (mean 0.34
+  against 0.38 ms at a row of 20 every 2 frames, before 0.45; 0.17 against 0.18 at 100 every 10, before 0.20-0.21), and
+  the mixed scene 7 % less than before. Props one at a time and a rock moved once cost the same either way. The images,
+  once everything stood 12 frames, match the reference without layers exactly in every mode and round, and the
+  reference matches itself in another run (0 pixels).
 
   Ray-traced point lights: a mask per light over the view's pixels, so at most `shadows.rays.lights` (16) spot and
   point lights are traced a frame, the most important (how big their reach shows, times their importance; those
