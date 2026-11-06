@@ -4,7 +4,6 @@ import com.truesim.engine.input.BinaryAction;
 import com.truesim.engine.input.Controls;
 import com.truesim.engine.input.Input;
 import com.truesim.engine.input.Player;
-import com.truesim.engine.input.PoseAction;
 import com.truesim.engine.platform.PenState;
 import com.truesim.engine.platform.PlatformListener;
 import com.truesim.engine.platform.TouchPhase;
@@ -12,10 +11,11 @@ import com.truesim.engine.platform.Window;
 import java.util.function.BooleanSupplier;
 
 /**
- * The scene interaction's pointer sources: the mouse, fingers, a pen, XR controllers' rays and a gamepad's virtual
- * cursor. Positions come from the platform's events (in window pixels: the mouse's and pen's points scaled by the
- * window's pixel density), buttons of the mouse, the rays and the cursor from {@link SceneActions}, fingers and the pen
- * from their own contact. The plugin makes them; tests make pointers of their own. Polling allocates nothing.
+ * The scene interaction's pointer sources: the mouse, fingers, a pen and a gamepad's virtual cursor (XR controllers'
+ * rays come from the xr module, {@code XrSceneRays}, under {@link #LEFT_RAY_ID} and {@link #RIGHT_RAY_ID}). Positions
+ * come from the platform's events (in window pixels: the mouse's and pen's points scaled by the window's pixel
+ * density), buttons of the mouse and the cursor from {@link SceneActions}, fingers and the pen from their own contact.
+ * The plugin makes them; tests make pointers of their own. Polling allocates nothing.
  */
 public final class ScenePointers {
 
@@ -38,8 +38,11 @@ public final class ScenePointers {
     private ScenePointers() {
     }
 
-    /** The modifiers held, as {@link ScenePointer#SHIFT} and the others, read from the keyboard directly. */
-    static int modifiers(Input input) {
+    /**
+     * The modifiers held, as {@link ScenePointer#SHIFT} and the others, read from the keyboard directly (0 without
+     * input): for pointer sources of other modules too.
+     */
+    public static int modifiers(Input input) {
         if (input == null) {
             return 0;
         }
@@ -242,42 +245,6 @@ public final class ScenePointers {
                     .buttons(buttons);
             }
             tapped = false;
-        }
-    }
-
-    /** XR controllers' aim rays, from {@link SceneActions#AIM_LEFT} and {@link SceneActions#AIM_RIGHT}. */
-    public static final class XrRays implements ScenePointerSource {
-
-        private final Input input;
-        private final double[] position = new double[3];
-        private final float[] orientation = new float[4];
-
-        /** The rays of {@code input}'s first player. */
-        public XrRays(Input input) {
-            this.input = input;
-        }
-
-        @Override
-        public void poll(SceneInteraction pointers) {
-            Player player = input.player(0);
-            hand(pointers, player, LEFT_RAY_ID, SceneActions.AIM_LEFT, SceneActions.SELECT_LEFT);
-            hand(pointers, player, RIGHT_RAY_ID, SceneActions.AIM_RIGHT, SceneActions.SELECT_RIGHT);
-        }
-
-        private void hand(SceneInteraction pointers, Player player, int id, PoseAction aim, BinaryAction select) {
-            if (!player.pose(aim, position, orientation)) {
-                return; // untracked: the pointer leaves
-            }
-            float qx = orientation[0];
-            float qy = orientation[1];
-            float qz = orientation[2];
-            float qw = orientation[3];
-            // -Z turned by the orientation: the negated third column of its rotation matrix
-            double fx = -2 * (qx * qz + qw * qy);
-            double fy = -2 * (qy * qz - qw * qx);
-            double fz = -(1 - 2 * (qx * qx + qy * qy));
-            pointers.pointer(id, PointerKind.XR_RAY).ray(position[0], position[1], position[2], fx, fy, fz, null)
-                .buttons(player.down(select) ? ScenePointer.PRIMARY : 0).modifiers(modifiers(input));
         }
     }
 

@@ -14,8 +14,6 @@ import com.truesim.engine.platform.Window;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
 import com.truesim.engine.settings.SettingGroup;
-import com.truesim.engine.xr.Xr;
-import com.truesim.engine.xr.XrControls;
 import com.truesim.scene.core.NodeEvent;
 import com.truesim.scene.core.NodeHandle;
 import com.truesim.scene.core.PickHits;
@@ -178,7 +176,7 @@ public final class SceneInteraction implements Plugin {
 
     @Override
     public List<PluginKey<?>> after() {
-        return List.of(Desktop.KEY, Xr.KEY, Rendering.KEY);
+        return List.of(Desktop.KEY, Rendering.KEY);
     }
 
     @Override
@@ -218,11 +216,6 @@ public final class SceneInteraction implements Plugin {
         }
         pointers(new ScenePointers.VirtualCursor(input, this::virtualCursorOn, () -> setting(VIRTUAL_CURSOR_SPEED),
             window));
-        if (startup.find(Xr.KEY).isPresent()) {
-            input.addDeviceClass(XrControls.XR);
-            SceneActions.xrDefaults(input);
-            pointers(new ScenePointers.XrRays(input));
-        }
         selection.input(SceneSelection.Input.of(input));
     }
 
