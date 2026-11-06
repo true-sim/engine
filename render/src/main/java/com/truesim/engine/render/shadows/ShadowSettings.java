@@ -183,11 +183,14 @@ public final class ShadowSettings {
          * Static and dynamic both: a static caster joins its tiles' still layers at once (no settle wait), a dynamic
          * one never does (none of the churn of one pausing); a static light skips its own change tests while nothing
          * writes it, a dynamic one's tiles rank {@link #LIGHT_MOVING_WEIGHT} times as urgent. Instances and lights
-         * without a hint (made outside the scene) are detected. Note the scene's default is dynamic: a scene that
-         * never marks its static nodes keeps every caster out of the still layers.
+         * without a hint (made outside the scene) are detected. For applications that mark both ways: the scene's
+         * default is dynamic, so a scene that never marks its static nodes keeps every caster out of the still layers.
          */
         USE_HINT,
-        /** Static only: static casters and lights as {@link #USE_HINT}; dynamic ones as if nothing was said. */
+        /**
+         * Static only, the default: static casters and lights as {@link #USE_HINT}; the rest, unmarked nodes (dynamic by
+         * the scene's default) among them, detected as if nothing was said.
+         */
         STATIC_ONLY,
         /** No hint: every caster's motion detected ({@link #CASTER_SETTLE}), every light tested each frame. */
         DETECT
@@ -198,12 +201,12 @@ public final class ShadowSettings {
      * moves twice within {@link #CASTER_SETTLE} frames counts as moving, as detection has it, until it settles.
      */
     public static final Setting<MobilityUse> CASTER_MOBILITY = Setting.choice("shadows.casters.mobility",
-        MobilityUse.USE_HINT, "how shadow maps take casters' mobility: USE_HINT (static casters join the still "
-            + "layers at once, dynamic ones never), STATIC_ONLY (dynamic ones detected) or DETECT (ignore it)");
+        MobilityUse.STATIC_ONLY, "how shadow maps take casters' mobility: STATIC_ONLY (static casters join the "
+            + "still layers at once, the rest detected), USE_HINT (dynamic ones never join) or DETECT (ignore it)");
     /** How shadow maps take their lights' mobility ({@link MobilityUse}). */
     public static final Setting<MobilityUse> LIGHT_MOBILITY = Setting.choice("shadows.lights.mobility",
-        MobilityUse.USE_HINT, "how shadow maps take lights' mobility: USE_HINT (static lights skip their change "
-            + "tests, dynamic ones' tiles updated first), STATIC_ONLY (static only) or DETECT (ignore it)");
+        MobilityUse.STATIC_ONLY, "how shadow maps take lights' mobility: STATIC_ONLY (static lights skip their "
+            + "change tests), USE_HINT (dynamic ones' tiles updated first too) or DETECT (ignore it)");
     /**
      * {@link MobilityUse#USE_HINT}: how many times as important a changed tile of a dynamic spot or point light is in
      * the update order ({@link #ATLAS_UPDATES}) as one of a light not marked dynamic: 1 ranks them alike.

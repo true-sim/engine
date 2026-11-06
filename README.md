@@ -1562,25 +1562,26 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   still casters.
 
   **Mobility** (the scene's `Mobility`, per instance and light: a hint, never a promise). `shadows.casters.mobility`
-  (`USE_HINT` by default, `STATIC_ONLY`, `DETECT`): a caster marked static joins its tiles' still layers the frame it is
-  placed or moved (no `shadows.casters.settle` wait; its tiles' layers drawn again where it was and is), one marked
-  dynamic counts as moving for good (never in a layer: no layers drawn again when it pauses), and one without a hint
-  (made outside the scene) is detected as before. A static caster moved again within the settle frames is detected
+  (`STATIC_ONLY` by default, `USE_HINT`, `DETECT`): a caster marked static joins its tiles' still layers the frame it
+  is placed or moved (no `shadows.casters.settle` wait; its tiles' layers drawn again where it was and is); the rest is
+  detected as before. Static only, because the scene makes every node it is not told otherwise dynamic: taking that at
+  its word would keep every caster of an application that never marks its nodes out of the still layers. With
+  `USE_HINT`, for applications that mark both ways, a caster marked dynamic counts as moving for good (never in a
+  layer: no layers drawn again when it pauses). Instances without a hint (made outside the scene) are detected. A static caster moved again within the settle frames is detected
   moving as any caster, so one that moves anyway costs what detection costs and is shadowed where it is. A hint changed
   without a move only marks its tiles' layers stale. `shadows.lights.mobility`: a static spot or point light that
   nothing wrote (`Lights.version`) keeps its parameters without reading or comparing them (`Shadows.stats().stillLights()`);
-  written, it is compared as any; its tiles redraw only when casters change. A dynamic light's changed tiles rank
-  `shadows.lights.movingWeight` (4) times as important in the update order. Mind the scene's default: nodes are
-  dynamic unless marked, so a scene that never marks its static nodes keeps every caster out of the still layers
-  (`STATIC_ONLY` uses the static marks alone).
+  written, it is compared as any; its tiles redraw only when casters change (`STATIC_ONLY`, the default, as
+  `USE_HINT`). With `USE_HINT` a dynamic light's changed tiles also rank `shadows.lights.movingWeight` (4) times as
+  important in the update order.
 
   Measured (`ShadowsBenchmark`, `TRUESIM_SHADOWS_MOBILITY`, RX 9070 XT, 2026-11-06, JaCoCo off; the flight over 200
   AUTO-mapped lights, `IMPORTANCE` updates, caster layers on; the moving rocks and lights marked dynamic and everything
-  else static, against the same hints ignored (`DETECT`), in turns in one run; two runs, another agent's benchmark
+  else static, used both ways (`USE_HINT`) against ignored (`DETECT`), in turns in one run; two runs, another agent's benchmark
   sharing the GPU in parts of them, the quieter one here; shadow GPU: median (mean) of the shadow passes; prepare: the
   owner's CPU time a frame, median):
 
-  | Scene | Shadow GPU, hints / detected | Tiles drawn | Lag mean / max (frames) | Prepare (CPU) | Casters moving |
+  | Scene | Shadow GPU, `USE_HINT` / `DETECT` | Tiles drawn | Lag mean / max (frames) | Prepare (CPU) | Casters moving |
   |---|---|---|---|---|---|
   | all still | 0.01 (0.03) / 0.01 (0.03) ms | 1.7 / 1.7 | 0 / 0 | 0.18 / 0.18 ms | 0 / 0 |
   | 10 rocks moving | 0.20 (0.21) / 0.20 (0.21) | 49.5 / 49.5 | 0 / 0 | 0.20 / 0.22 | 10 / 10 |
@@ -1593,7 +1594,7 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   | 500 rocks moving 40 frames, standing 40 | 0.01 (0.35) / 0.01 (0.33) | 157 / 157 | 0.73 / 2, the same | 0.19 / 0.18 | 500 / 408 |
 
   Where things move steadily, detection ends where the hints start: the same tiles, time and lag. The hints change
-  transients: a dynamic light's tiles are drawn the frame it moves (no lag, about 30 more tiles and 0.04 ms a frame with
+  transients (the dynamic marks only with `USE_HINT`): a dynamic light's tiles are drawn the frame it moves (no lag, about 30 more tiles and 0.04 ms a frame with
   20 lights moving); pausing rocks stay out of the layers (no layers drawn again as they start), which in these scenes
   neither saved nor cost measurably (the movers, culled from their own list, are cheap to draw over a layer). Skipping
   200 static lights' tests did not show in the owner's CPU time (0.18 ms either way); 2,000 moving rocks cost it 3.7 ms

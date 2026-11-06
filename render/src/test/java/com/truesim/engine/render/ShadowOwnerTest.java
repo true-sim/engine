@@ -591,7 +591,11 @@ class ShadowOwnerTest {
     @Test
     void castersMarkedStaticJoinTheStillLayersAtOnceAndDynamicOnesNever() {
         newGraph(visibility());
-        graph.settings().set(ShadowSettings.CASTER_LAYERS, true).set(ShadowSettings.CASTER_SETTLE, 5);
+        // static only by default (unmarked nodes are dynamic): both ways for an application marking both
+        assertThat(ShadowSettings.CASTER_MOBILITY.defaultValue()).isEqualTo(ShadowSettings.MobilityUse.STATIC_ONLY);
+        assertThat(ShadowSettings.LIGHT_MOBILITY.defaultValue()).isEqualTo(ShadowSettings.MobilityUse.STATIC_ONLY);
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, true).set(ShadowSettings.CASTER_SETTLE, 5)
+            .set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
         lights.point(0, 0, 0, -5, 16, 60, 60, 60);
         lights.shadow(0, ShadowSpec.maps(256)).setCount(1);
         for (int i = 0; i < 8; i++) {
@@ -632,8 +636,8 @@ class ShadowOwnerTest {
         for (int i = 0; i < 8; i++) {
             frame();
         }
-        assertThat(shadows.stats().movingCasters()).as("static only: the dynamic one detected").isZero();
-        graph.settings().set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
+        assertThat(shadows.stats().movingCasters()).as("static only (the default): the dynamic one detected")
+            .isZero();
         scene.remove(2);
         scene.remove(4);
     }
@@ -682,7 +686,8 @@ class ShadowOwnerTest {
     @Test
     void hintsChangedAtRuntimeAreFollowed() {
         newGraph(visibility());
-        graph.settings().set(ShadowSettings.CASTER_LAYERS, true).set(ShadowSettings.CASTER_SETTLE, 5);
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, true).set(ShadowSettings.CASTER_SETTLE, 5)
+            .set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
         lights.point(0, 0, 0, -5, 16, 60, 60, 60);
         lights.shadow(0, ShadowSpec.maps(256)).setCount(1);
         quadAt(2, -2, -5, 0.5f, null);
@@ -759,7 +764,7 @@ class ShadowOwnerTest {
         frame();
         assertThat(shadows.stats().stillLights()).as("detected").isZero();
         assertThat(shadows.stats().drawn()).isZero();
-        graph.settings().set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
+        graph.settings().set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.STATIC_ONLY);
         scene.set(1, quad, 0, -3, -5, 0, 0, 0, 1, 1, 1, 1);
     }
 
@@ -772,7 +777,8 @@ class ShadowOwnerTest {
     void dynamicLightsTilesAreUpdatedFirst() {
         newGraph(visibility());
         graph.settings().set(ShadowSettings.ATLAS_UPDATES, ShadowSettings.Updates.CAPPED)
-            .set(ShadowSettings.ATLAS_DRAWS, 1);
+            .set(ShadowSettings.ATLAS_DRAWS, 1)
+            .set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
         lights.shadow(0, ShadowSpec.maps(64)).mobility(0, Mobility.DYNAMIC);
         lights.shadow(1, ShadowSpec.maps(64)).setCount(2);
         int[] drawn = new int[2];
@@ -792,6 +798,16 @@ class ShadowOwnerTest {
         }
         assertThat(drawn[0]).as("weighted: the dynamic light's tiles every frame").isEqualTo(8);
         assertThat(drawn[1]).as("alike: the nearer light's first").isZero();
+        graph.settings().set(ShadowSettings.LIGHT_MOVING_WEIGHT, 4f)
+            .set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.STATIC_ONLY);
+        int byDefault = 0;
+        for (int f = 0; f < 6; f++) {
+            lights.point(0, -8 + 0.01 * (f % 2), -1, -6, 6, 60, 60, 60);
+            lights.point(1, 6 + 0.01 * (f % 2), -1, -5, 6, 60, 60, 60);
+            frame();
+            byDefault += f >= 2 ? shadows.stats().drawnMovingLight() : 0;
+        }
+        assertThat(byDefault).as("static only (the default): the dynamic mark not used").isZero();
         graph.settings().set(ShadowSettings.ATLAS_UPDATES, ShadowSettings.Updates.IMPORTANCE)
             .set(ShadowSettings.ATLAS_DRAWS, 64);
     }
@@ -803,7 +819,9 @@ class ShadowOwnerTest {
     @Test
     void framesWithMobilityHintsAllocateNothing() {
         newGraph(visibility());
-        graph.settings().set(ShadowSettings.CASTER_LAYERS, true).set(ShadowSettings.CASTER_SETTLE, 5);
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, true).set(ShadowSettings.CASTER_SETTLE, 5)
+            .set(ShadowSettings.CASTER_MOBILITY, ShadowSettings.MobilityUse.USE_HINT)
+            .set(ShadowSettings.LIGHT_MOBILITY, ShadowSettings.MobilityUse.USE_HINT);
         lights.point(0, 0, 0, -5, 16, 60, 60, 60);
         lights.shadow(0, ShadowSpec.maps(256)).mobility(0, Mobility.STATIC).setCount(1);
         quadAt(2, -2, -5, 0.5f, Mobility.STATIC);
