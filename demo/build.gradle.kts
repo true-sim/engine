@@ -8,8 +8,8 @@ dependencies {
     implementation(project(":engine-xr"))
     implementation(project(":engine-scene"))
     implementation(project(":engine-audio"))
-    implementation("com.truesim.scene:scene-meshbuild:0.64.1")
-    implementation("com.truesim.scene:scene-gltf:0.64.1")
+    implementation("com.truesim.scene:scene-meshbuild:0.65.0")
+    implementation("com.truesim.scene:scene-gltf:0.65.0")
     // The UI gallery (UiGallery): the engine's UI over the galleries of ui's test fixtures
     implementation(project(":engine-ui")) // the UI gallery, and the stream benchmark's window (the profiler, a line of text)
     implementation("com.truesim.ui:ui-charts:0.10.0")

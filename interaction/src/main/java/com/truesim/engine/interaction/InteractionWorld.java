@@ -23,7 +23,7 @@ import java.util.Objects;
  * <pre>{@code
  * InteractionWorld world = interaction.world(scene, index);
  * world.view(camera).port(mainView);
- * world.picker().resolver(new RenderablePicking(renderables, cache::get));    // meshes by their triangles
+ * world.picker().resolver(new RenderablePicking(scene, cache::get));          // meshes by their triangles
  * scene.components().set(door, Pickable.TYPE, Pickable.mesh());
  * world.on(door, SceneEventType.CLICK, e -> open(e.currentNode()));
  * world.on(level, SceneEventType.CLICK.bit() | SceneEventType.CONTEXT.bit(), e -> ...); // its doors' too, bubbled

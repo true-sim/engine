@@ -34,10 +34,11 @@ import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.Generator;
 import com.truesim.scene.assets.mesh.MeshData;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.render.MaterialData;
 import com.truesim.scene.render.RenderAssets;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import com.truesim.scene.render.TextureData;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -153,17 +154,17 @@ class SceneLoadingBenchmark {
                         .set("roughness", 0.7f).build(), new Painted(m), seed + m));
             }
             SceneGraph scene = new SceneGraph(new ChangeClock(), NODES + 64, SceneGraph.DEFAULT_LOG_CAPACITY);
-            Renderables renderables = new Renderables(scene);
+            ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
             SplittableRandom random = new SplittableRandom(5);
             double[] placed = new double[3 * NODES];
             for (int i = 0; i < NODES; i++) {
                 long node = scene.create();
                 SceneBenchmark.place(scene, node, random, placed, i, FAR);
-                renderables.set(node, meshes.get(i % MESHES), List.of(painted.get(random.nextInt(MATERIALS))));
+                renderables.set(node, Renderable.of(meshes.get(i % MESHES), List.of(painted.get(random.nextInt(MATERIALS)))));
             }
             Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
             camera.position(FAR, 0, FAR);
-            SceneSync sync = new SceneSync(resources, renderables, gpu, null);
+            SceneSync sync = new SceneSync(resources, scene, gpu, null);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
             ViewPort port = graph.addView("main").size(WIDTH, HEIGHT);
             SceneView main = geometry.createView(port, camera, ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
@@ -199,7 +200,6 @@ class SceneLoadingBenchmark {
                     worstShown = sync.instanceCount() - shownBefore;
                 }
                 scene.update();
-                renderables.update();
                 sync.update();
                 view.set(camera, 1, MeshletRenderer.MODE_LIT);
                 graph.submit(0, 0);

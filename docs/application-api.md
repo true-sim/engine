@@ -127,8 +127,14 @@ sugar, settings files per app id (D7), plugins registering their lists (D8).
   place), followed by engine-scene's `CameraSync` and `LightSync`; `ModelData.spawn` gives models' nodes their
   cameras, lights and pickables. Per-node stores migrated: scene-audio's listeners and reverb zones
   (`AudioListener`, `ReverbZone`, read by `AudioSync` from the store) and sound emitters (`SoundEmitter`),
-  scene-effects' colliders and emitters (`EffectCollider`, `EffectEmitter`). `Renderables` stays a store of its own
-  (its change flags feed `SceneSync`; not migrated in this work).
+  scene-effects' colliders and emitters (`EffectCollider`, `EffectEmitter`). **Renderables (2026-11-05):**
+  scene-render's `Renderable` (`truesim.renderable`: mesh, per-submesh materials, shadows, skin; immutable values) and
+  `MorphWeights` (`truesim.morph-weights`, written in place, not logged) replace the `Renderables` store. Component
+  types may declare their fields (`ComponentType.of(name, class, fields)`): a set logs `CHANGED` with the bits of the
+  fields that changed (`Renderable.MESH`, `MATERIALS`, `SHADOWS`, `SKIN`) and nothing when none did, so per-field
+  change granularity stays. `Renderable.setMaterials`, `setCastsShadows`, `setMesh` and `setSkin` change one field
+  without allocating once warm (each node reuses its last 8 values). `SceneSync`, `RenderableBounds`, `RenderablePicking` and `ModelData.spawn` read and set
+  the stores; a removed node loses its renderable at once (no `renderables.update()`).
 
 ## 4. Assets
 
@@ -144,8 +150,8 @@ and resources, no path), `AssetSource` (directory, gzip, `firstOf`), async on jo
   path → new path) so renames don't break saved references. Generated `GameAssets` constants are optional
   compile-time-checked paths.
 - **D17** (revised) A `MODEL` asset type: a node tree plus the references to meshes, materials and textures it uses.
-- **D18** (revised) Ownership: a spawned node holds its model (and through it the model's references); `Renderables`
-  keep holding meshes and materials as today. `Asset<T>` handles (closeable) hold without placing.
+- **D18** (revised) Ownership: a spawned node holds its model (and through it the model's references); renderables
+  (`Renderable` components) keep holding meshes and materials as today. `Asset<T>` handles (closeable) hold without placing.
 - **D19** (revised) Nothing blocks in the engine; callbacks on the main thread at frame start, drained within a time
   budget so a burst of finished loads spreads over frames. Loading screens poll a `LoadProgress` (renamed: `Loading`
   is `SceneResources`' mode). Tools may `await`.

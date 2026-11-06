@@ -261,7 +261,7 @@ public final class UiGallery implements Application {
     /** The scene bridge, the interaction and selection, the gizmo, the view cube, the minimap, the world panel. */
     private void sceneWorld() {
         scene = uiPlugin.scene(world.graph, world.index).camera(world.camera);
-        scene.world().picker().resolver(new RenderablePicking(world.renderables, world.assets::get));
+        scene.world().picker().resolver(new RenderablePicking(world.graph, world.assets::get));
         interaction.selection().enabled(true);
         gizmo = new Gizmo(scene.picking(), scene.mainView(), null);
         scene.followSelection(gizmo);

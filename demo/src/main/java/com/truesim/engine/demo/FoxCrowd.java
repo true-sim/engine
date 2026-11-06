@@ -28,12 +28,13 @@ import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.PathAssets;
 import com.truesim.scene.assets.PathSource;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.gltf.Gltf;
 import com.truesim.scene.render.ImageImporter;
 import com.truesim.scene.render.ModelData;
 import com.truesim.scene.render.RenderAssets;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.SplittableRandom;
@@ -61,7 +62,7 @@ final class FoxCrowd implements AutoCloseable {
     private final Textures textures;
     private final SceneResources resources;
     private final SceneGraph scene = new SceneGraph(new ChangeClock());
-    private final Renderables renderables = new Renderables(scene);
+    private final ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
     private final Animators animators;
     private final SceneSync sync;
     private final GeometryPool pool;
@@ -119,7 +120,7 @@ final class FoxCrowd implements AutoCloseable {
         if (rayTracing != null) {
             resources.rayTracing(rayTracing); // its meshes and skinned copies traced
         }
-        sync = new SceneSync(resources, renderables, gpu, jobs);
+        sync = new SceneSync(resources, scene, gpu, jobs);
         this.animation = animation;
         animators = animation.animators(scene); // sampled in parallel on the plugin's threads
         PathAssets paths = new PathAssets(cache);
@@ -193,9 +194,9 @@ final class FoxCrowd implements AutoCloseable {
             scene.setTranslation(holder, x, DemoMeshes.height(x, z), z);
             scene.setRotation(holder, 0, Maths.sin(yaw / 2), 0, Maths.cos(yaw / 2));
             scene.setScale(holder, 0.012, 0.012, 0.012);
-            long[] nodes = model.spawn(scene, renderables, holder);
+            long[] nodes = model.spawn(scene, holder);
             for (long node : nodes) {
-                if (bodies[i] == 0 && renderables.has(node) && renderables.skin(node) != null) {
+                if (bodies[i] == 0 && renderables.has(node) && renderables.get(node).skin() != null) {
                     bodies[i] = node;
                 }
             }
@@ -288,7 +289,6 @@ final class FoxCrowd implements AutoCloseable {
         boolean time = ++updates > 30; // after a warm-up
         long animated = animation.lastNanos(animators);
         long start = System.nanoTime();
-        renderables.update();
         sync.update();
         long synced = System.nanoTime();
         lastAnimation = animated;

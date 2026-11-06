@@ -39,12 +39,13 @@ import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.Generator;
 import com.truesim.scene.assets.mesh.MeshData;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.Pickable;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.core.SpatialIndex;
 import com.truesim.scene.render.MaterialData;
 import com.truesim.scene.render.RenderAssets;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import java.util.List;
 import java.util.SplittableRandom;
 
@@ -91,7 +92,7 @@ final class GalleryWorld implements Plugin {
     final Camera camera = new Camera();
     final SceneGraph graph = new SceneGraph(new ChangeClock(), ROCKS + 64, SceneGraph.DEFAULT_LOG_CAPACITY);
     final SpatialIndex index = new SpatialIndex(graph);
-    final Renderables renderables = new Renderables(graph);
+    final ComponentStore<Renderable> renderables = graph.components().store(Renderable.TYPE);
     final long[] rocks = new long[ROCKS];
     Window window;
     ViewPort port;
@@ -148,14 +149,14 @@ final class GalleryWorld implements Plugin {
         port.add(new ClusteredForwardShading(geometry, view, COLOR, DEPTH).clearColor(0.45f, 0.6f, 0.8f)).add(outline);
         rendering.presenter().outputTransform(new DisplayTransform()).present(port, Keys.SCENE_COLOR, window);
         build();
-        sync = new SceneSync(resources, renderables, gpu);
+        sync = new SceneSync(resources, graph, gpu);
         highlights = new SceneHighlights(sync, flags);
     }
 
     /** The ground and the rocks on it, each pickable by its triangles. */
     private void build() {
         long ground = graph.create();
-        renderables.set(ground, GROUND, List.of(GRASS));
+        renderables.set(ground, Renderable.of(GROUND, List.of(GRASS)));
         SplittableRandom random = new SplittableRandom(5);
         double extent = GROUND_SIZE / 2.0 - 6;
         for (int i = 0; i < ROCKS; i++) {
@@ -167,7 +168,8 @@ final class GalleryWorld implements Plugin {
             graph.setTranslation(rock, x, DemoMeshes.height(x, z) + 0.6 * scale, z);
             graph.setRotation(rock, 0, Maths.sin(a), 0, Maths.cos(a));
             graph.setScale(rock, scale, scale * random.nextDouble(0.7, 1.2), scale);
-            renderables.set(rock, ROCK, List.of(STONE_COLORS.get(random.nextInt(STONE_COLORS.size()))));
+            renderables.set(rock,
+                Renderable.of(ROCK, List.of(STONE_COLORS.get(random.nextInt(STONE_COLORS.size())))));
             graph.components().set(rock, Pickable.TYPE, Pickable.mesh());
             rocks[i] = rock;
         }
@@ -178,7 +180,6 @@ final class GalleryWorld implements Plugin {
     /** After the frame's changes (gizmos, selection): the scene's transforms, instances and highlights to the GPU. */
     void sync() {
         graph.update();
-        renderables.update();
         sync.update();
         highlights.update();
         view.set(1, MeshletRenderer.MODE_LIT);

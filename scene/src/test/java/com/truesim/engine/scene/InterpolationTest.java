@@ -54,8 +54,9 @@ import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanException;
 import com.truesim.engine.vulkan.VulkanInstance;
 import com.truesim.scene.assets.AssetCache;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.SceneGraph;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
@@ -180,10 +181,10 @@ class InterpolationTest {
     /** A world of one square moving 1 m along x per step and turning 0.2 rad about y, at 10 steps a second. */
     private final class World implements Application {
         final SceneGraph scene = new SceneGraph(new ChangeClock());
-        final Renderables renderables = new Renderables(scene);
+        final ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
         final long node = scene.create();
         final GpuScene gpu = closing(new GpuScene(device, pool, 4, slots));
-        final SceneSync sync = closing(new SceneSync(resources, renderables, gpu));
+        final SceneSync sync = closing(new SceneSync(resources, scene, gpu));
         final GpuBuffer[] readbacks = {readback(), readback()};
         int lastSlot;
         final FrameGraph graph;
@@ -198,12 +199,12 @@ class InterpolationTest {
 
         World(boolean second) {
             scene.setTranslation(node, FAR, 0, FAR);
-            renderables.set(node, SceneSyncTest.SQUARE, List.of(SceneSyncTest.RED));
+            renderables.set(node, Renderable.of(SceneSyncTest.SQUARE, List.of(SceneSyncTest.RED)));
             if (second) {
                 far = scene.create();
                 scene.setTranslation(far, FAR + FAR_AWAY, 0, FAR);
                 scene.setScale(far, FAR_SCALE[0], FAR_SCALE[1], FAR_SCALE[2]);
-                renderables.set(far, SceneSyncTest.SQUARE, List.of(SceneSyncTest.RED));
+                renderables.set(far, Renderable.of(SceneSyncTest.SQUARE, List.of(SceneSyncTest.RED)));
             }
             graph = closing(new FrameGraph(device, slots));
             MeshletRenderer renderer = closing(new MeshletRenderer(device, gpu, VK_FORMAT_R8G8B8A8_UNORM,
@@ -259,7 +260,6 @@ class InterpolationTest {
             slots.begin(slot);
             tasks.drainCompleted();
             scene.update();
-            renderables.update();
             sync.update();
             graph.submit(0, 0);
             slots.end();
@@ -486,7 +486,6 @@ class InterpolationTest {
             world.lastSlot = slot;
             slots.begin(slot);
             world.scene.update();
-            world.renderables.update();
             world.sync.update();
             assertThat(world.gpu.pendingCount()).as("instances written").isZero();
             assertThat(world.gpu.motion().pendingCount()).as("motion records written").isZero();

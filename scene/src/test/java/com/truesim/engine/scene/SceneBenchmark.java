@@ -38,12 +38,13 @@ import com.truesim.scene.assets.Generator;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.assets.mesh.VertexAttribute;
 import com.truesim.scene.assets.mesh.VertexFormat;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.effects.Effects;
 import com.truesim.scene.meshbuild.MeshBuilder;
 import com.truesim.scene.render.MaterialData;
 import com.truesim.scene.render.RenderAssets;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import com.truesim.engine.vulkan.Format;
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
@@ -60,7 +61,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  * The meshlet benchmark's 30,000 rocks on the terrain, through the whole scene path: the rock and terrain meshes
  * generated in the asset cache, 30,001 scene nodes with renderables, a {@link SceneSync} on shared
  * {@link SceneResources}, drawn by a frame graph with two frames in flight at 1920 x 1080. Prints the time to load
- * and upload, and per frame the time of each stage (scene, renderables, sync, the graph's recording and submission),
+ * and upload, and per frame the time of each stage (scene, sync, the graph's recording and submission),
  * the whole frame and what the main thread allocated, for a still scene, a moving camera, moving rocks, rocks
  * coming and going, and torches burning on 100 rocks through an {@link EffectSync} (in the sync's column). Run with {@code TRUESIM_BENCHMARK=true ./gradlew :engine-scene:test --tests '*SceneBenchmark'}.
  */
@@ -109,11 +110,11 @@ class SceneBenchmark {
 
     /** Per-frame timings of one scenario, in nanoseconds, and bytes allocated. */
     private static final class Stats {
-        final long[][] stages = new long[6][FRAMES]; // drain, scene, renderables, sync, graph, frame
+        final long[][] stages = new long[5][FRAMES]; // drain, scene, sync, graph, frame
         final long[] allocated = new long[FRAMES];
 
         void print(String scenario) {
-            String[] names = {"drain", "scene", "renderables", "sync", "graph", "frame"};
+            String[] names = {"drain", "scene", "sync", "graph", "frame"};
             StringBuilder line = new StringBuilder(String.format(Locale.ROOT, "  %-34s", scenario));
             for (int s = 0; s < names.length; s++) {
                 long[] sorted = stages[s].clone();
@@ -160,23 +161,23 @@ class SceneBenchmark {
             // The scene: the terrain and the rocks resting on it, far from the world's origin.
             ChangeClock clock = new ChangeClock();
             SceneGraph scene = new SceneGraph(clock, ROCKS + 1024, SceneGraph.DEFAULT_LOG_CAPACITY);
-            Renderables renderables = new Renderables(scene);
+            ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
             long start = System.nanoTime();
             long ground = scene.create();
             scene.setTranslation(ground, FAR, GROUND_Y, FAR);
-            renderables.set(ground, GROUND, List.of(GRASS));
+            renderables.set(ground, Renderable.of(GROUND, List.of(GRASS)));
             long[] rocks = new long[ROCKS];
             double[] placed = new double[ROCKS * 3];
             SplittableRandom random = new SplittableRandom(11);
             for (int i = 0; i < ROCKS; i++) {
                 rocks[i] = scene.create();
                 place(scene, rocks[i], random, placed, i);
-                renderables.set(rocks[i], ROCK, List.of(GRANITE));
+                renderables.set(rocks[i], Renderable.of(ROCK, List.of(GRANITE)));
             }
             System.out.printf(Locale.ROOT, "  building the scene: %.1f ms%n", (System.nanoTime() - start) / 1e6);
 
             Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-            SceneSync sync = new SceneSync(resources, renderables, gpu, WRITERS > 1 ? jobs : null);
+            SceneSync sync = new SceneSync(resources, scene, gpu, WRITERS > 1 ? jobs : null);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
             ViewPort port = graph.addView("main").size(WIDTH, HEIGHT);
             SceneView main = geometry.createView(port, camera, ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
@@ -195,7 +196,7 @@ class SceneBenchmark {
             // Loading: the meshes are generated in the background, uploaded as they arrive at frame boundaries.
             start = System.nanoTime();
             frame(graph, slots, tasks, scene, renderables, sync, cameraView, camera, unused, 0);
-            long firstUpdate = unused.stages[3][0];
+            long firstUpdate = unused.stages[2][0];
             int frames = 1;
             while (resources.uploadedMeshCount() < 2) {
                 Thread.sleep(1);
@@ -203,7 +204,7 @@ class SceneBenchmark {
                 frames++;
             }
             long loaded = System.nanoTime() - start;
-            long uploadFrame = unused.stages[0][0] + unused.stages[3][0]; // uploads and shows land in the drain
+            long uploadFrame = unused.stages[0][0] + unused.stages[2][0]; // uploads and shows land in the drain
             System.out.printf(Locale.ROOT, "  loading: %.1f ms over %d frames to generate and upload the rock "
                 + "(%,d meshlets) and the terrain (%,d meshlets); first sync update (%,d renderables waiting) %.3f ms,"
                 + " the frame they arrived (uploads, %,d shown and written) %.1f ms%n", loaded / 1e6, frames,
@@ -259,14 +260,14 @@ class SceneBenchmark {
                     scene.remove(rocks[r]);
                     rocks[r] = scene.create();
                     place(scene, rocks[r], churn, placed, r);
-                    renderables.set(rocks[r], ROCK, List.of(GRANITE));
+                    renderables.set(rocks[r], Renderable.of(ROCK, List.of(GRANITE)));
                 }
             });
             run("100 rocks changing material", graph, slots, tasks, scene, renderables, sync, cameraView, camera, frame -> {
                 for (int i = 0; i < 100; i++) {
                     int r = churn.nextInt(ROCKS);
-                    renderables.setMaterials(rocks[r],
-                        List.of(renderables.materials(rocks[r]).getFirst() == GRANITE ? GRASS : GRANITE));
+                    Renderable.setMaterials(scene, rocks[r],
+                        List.of(renderables.get(rocks[r]).material(0) == GRANITE ? GRASS : GRANITE));
                 }
             });
             fixedSteps(graph, slots, tasks, scene, renderables, sync, cameraView, camera, rocks, placed);
@@ -331,20 +332,20 @@ class SceneBenchmark {
                 System.getenv().getOrDefault("TRUESIM_CHANGE_LIST_CHUNK", "1024"));
             ChangeClock clock = new ChangeClock();
             SceneGraph scene = new SceneGraph(clock, MANY + 1024, SceneGraph.DEFAULT_LOG_CAPACITY);
-            Renderables renderables = new Renderables(scene);
+            ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
             long ground = scene.create();
             scene.setTranslation(ground, FAR, GROUND_Y, FAR);
-            renderables.set(ground, GROUND, List.of(GRASS));
+            renderables.set(ground, Renderable.of(GROUND, List.of(GRASS)));
             long[] rocks = new long[MANY];
             double[] placed = new double[MANY * 3];
             SplittableRandom random = new SplittableRandom(11);
             for (int i = 0; i < MANY; i++) {
                 rocks[i] = scene.create();
                 place(scene, rocks[i], random, placed, i);
-                renderables.set(rocks[i], ROCK, List.of(GRANITE));
+                renderables.set(rocks[i], Renderable.of(ROCK, List.of(GRANITE)));
             }
             Camera camera = new Camera().set(0, -0.35, -1, 0, 1, 0, Math.PI / 3, WIDTH, HEIGHT, 0.1);
-            SceneSync sync = new SceneSync(resources, renderables, gpu, WRITERS > 1 ? jobs : null);
+            SceneSync sync = new SceneSync(resources, scene, gpu, WRITERS > 1 ? jobs : null);
             sync.interpolation(com.truesim.engine.render.Interpolation.OFF);
             SceneGeometry geometry = SceneGeometry.meshlets(renderer);
             ViewPort port = graph.addView("main").size(WIDTH, HEIGHT);
@@ -403,7 +404,7 @@ class SceneBenchmark {
 
     /** One change-list scenario: {@code moving} rocks moved every frame (or every fixed step). */
     private static void changeRun(String mode, int moving, boolean stepped, Object[] stepping, FrameGraph graph,
-        FrameSlots slots, TaskScheduler tasks, SceneGraph scene, Renderables renderables, SceneSync sync,
+        FrameSlots slots, TaskScheduler tasks, SceneGraph scene, ComponentStore<Renderable> renderables, SceneSync sync,
         RenderView cameraView, Camera camera, long[] rocks, double[] placed) {
         com.truesim.engine.app.Engine engine = stepping == null ? null : (com.truesim.engine.app.Engine) stepping[0];
         com.truesim.engine.app.Clock steps = stepping == null ? null : (com.truesim.engine.app.Clock) stepping[1];
@@ -440,7 +441,6 @@ class SceneBenchmark {
                 }
             }
             scene.update();
-            renderables.update();
             long t1 = System.nanoTime();
             sync.update();
             long t2 = System.nanoTime();
@@ -498,7 +498,8 @@ class SceneBenchmark {
      * instance, and what the main thread allocated.
      */
     private static void fixedSteps(FrameGraph graph, FrameSlots slots, TaskScheduler tasks, SceneGraph scene,
-        Renderables renderables, SceneSync sync, RenderView cameraView, Camera camera, long[] rocks, double[] placed) {
+        ComponentStore<Renderable> renderables, SceneSync sync, RenderView cameraView, Camera camera, long[] rocks,
+        double[] placed) {
         if (!"30,000 rocks in fixed steps".contains(SCENARIO) && !SCENARIO.contains("fixed steps")) {
             return;
         }
@@ -545,7 +546,6 @@ class SceneBenchmark {
                     engine.stepAt(now[0]); // FIXED: the rocks moved, the transforms, the moves captured
                     long t1 = System.nanoTime();
                     scene.update();
-                    renderables.update();
                     sync.update();
                     long t2 = System.nanoTime();
                     long upload = (long) sync.gpu().pendingCount() * (GpuScene.INSTANCE_BYTES + 4)
@@ -631,13 +631,13 @@ class SceneBenchmark {
     }
 
     private static void run(String scenario, FrameGraph graph, FrameSlots slots, TaskScheduler tasks,
-        SceneGraph scene, Renderables renderables, SceneSync sync, RenderView cameraView, Camera camera, Change change) {
+        SceneGraph scene, ComponentStore<Renderable> renderables, SceneSync sync, RenderView cameraView, Camera camera, Change change) {
         run(scenario, 2, graph, slots, tasks, scene, renderables, sync, cameraView, camera, change);
     }
 
     /** A scenario measured over {@code FRAMES} frames after {@code warmup} frames not measured. */
     private static void run(String scenario, int warmup, FrameGraph graph, FrameSlots slots, TaskScheduler tasks,
-        SceneGraph scene, Renderables renderables, SceneSync sync, RenderView cameraView, Camera camera, Change change) {
+        SceneGraph scene, ComponentStore<Renderable> renderables, SceneSync sync, RenderView cameraView, Camera camera, Change change) {
         if (!scenario.contains(SCENARIO)) {
             return;
         }
@@ -651,7 +651,8 @@ class SceneBenchmark {
 
     /** One frame as an application runs it, timed by stage into {@code stats} at {@code index}. */
     private static void frame(FrameGraph graph, FrameSlots slots, TaskScheduler tasks, SceneGraph scene,
-        Renderables renderables, SceneSync sync, RenderView cameraView, Camera camera, Stats stats, int index) {
+        ComponentStore<Renderable> renderables, SceneSync sync, RenderView cameraView, Camera camera, Stats stats,
+        int index) {
         long allocated = THREADS.getCurrentThreadAllocatedBytes();
         long t0 = System.nanoTime();
         int slot = graph.beginFrame();
@@ -660,8 +661,6 @@ class SceneBenchmark {
         tasks.drainCompleted(); // loads arrive: uploads, and renderables waiting for them shown
         long t1b = System.nanoTime();
         scene.update();
-        long t2 = System.nanoTime();
-        renderables.update();
         long t3 = System.nanoTime();
         sync.update();
         if (fires != null) {
@@ -673,11 +672,10 @@ class SceneBenchmark {
         slots.end();
         long t5 = System.nanoTime();
         stats.stages[0][index] = t1b - t1;
-        stats.stages[1][index] = t2 - t1b;
-        stats.stages[2][index] = t3 - t2;
-        stats.stages[3][index] = t4 - t3;
-        stats.stages[4][index] = t5 - t4;
-        stats.stages[5][index] = t5 - t0; // with the wait for the frame two back: GPU-bound frames show here
+        stats.stages[1][index] = t3 - t1b;
+        stats.stages[2][index] = t4 - t3;
+        stats.stages[3][index] = t5 - t4;
+        stats.stages[4][index] = t5 - t0; // with the wait for the frame two back: GPU-bound frames show here
         stats.allocated[index] = THREADS.getCurrentThreadAllocatedBytes() - allocated;
     }
 

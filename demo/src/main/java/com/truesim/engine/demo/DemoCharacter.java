@@ -29,12 +29,14 @@ import com.truesim.scene.assets.AssetCache;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.PathAssets;
 import com.truesim.scene.assets.PathSource;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.gltf.Gltf;
 import com.truesim.scene.render.ImageImporter;
 import com.truesim.scene.render.ModelData;
+import com.truesim.scene.render.MorphWeights;
 import com.truesim.scene.render.RenderAssets;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -68,7 +70,7 @@ final class DemoCharacter implements AutoCloseable {
     private final Textures textures;
     private final SceneResources resources;
     private final SceneGraph scene = new SceneGraph(new ChangeClock());
-    private final Renderables renderables = new Renderables(scene);
+    private final ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
     private final Animators animators; // run by the animation plugin, in ANIMATE
     private final SceneSync sync;
     private final long holder;
@@ -100,7 +102,7 @@ final class DemoCharacter implements AutoCloseable {
         if (rayTracing != null) {
             resources.rayTracing(rayTracing); // its meshes and skinned copies traced
         }
-        sync = new SceneSync(resources, renderables, gpu);
+        sync = new SceneSync(resources, scene, gpu);
         PathAssets paths = new PathAssets(cache);
         paths.mounts().add("character", PathSource.folder(file.getParent()));
         new Gltf(paths).register();
@@ -111,13 +113,13 @@ final class DemoCharacter implements AutoCloseable {
         // The fox is about 80 units tall: a small dog's size, facing the camera.
         holder = scene.create();
         scene.setScale(holder, 0.012, 0.012, 0.012);
-        long[] nodes = model.spawn(scene, renderables, holder);
+        long[] nodes = model.spawn(scene, holder);
         for (long node : nodes) {
-            if (body == 0 && renderables.has(node) && renderables.skin(node) != null) {
+            if (body == 0 && renderables.has(node) && renderables.get(node).skin() != null) {
                 body = node;
             }
         }
-        animators.morphSink(renderables::setMorphWeights);
+        animators.morphSink((node, weights, offset, count) -> MorphWeights.write(scene, node, weights, offset, count));
 
         Rig.Builder r = Rig.builder(model.skeleton());
         survey = r.clip(await(model.animation("Survey")));
@@ -240,7 +242,6 @@ final class DemoCharacter implements AutoCloseable {
     /** Draws the fox as animation posed it: after the frame's ANIMATE (the animation plugin's), before it records. */
     void draw() {
         tasks.drainCompleted(); // meshes and textures arriving
-        renderables.update();
         sync.update();
     }
 

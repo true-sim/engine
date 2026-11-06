@@ -42,10 +42,11 @@ import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanException;
 import com.truesim.engine.vulkan.VulkanInstance;
 import com.truesim.scene.assets.AssetCache;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.Hovered;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.core.Selected;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.Renderable;
 import java.awt.image.BufferedImage;
 import java.lang.foreign.ValueLayout;
 import java.nio.file.Files;
@@ -168,31 +169,31 @@ class SelectionOutlineTest {
             ViewPort port = graph.addView("main").size(width, height);
             SceneView view = geometry.createView(port, camera, ViewOptions.of(1 << 20, 80_000_000).withOcclusion(true));
             SceneGraph scene = new SceneGraph(new ChangeClock(), rocks + 64, SceneGraph.DEFAULT_LOG_CAPACITY);
-            Renderables renderables = new Renderables(scene);
+            ComponentStore<Renderable> renderables = scene.components().store(Renderable.TYPE);
             long ground = scene.create();
             scene.setTranslation(ground, 0, -12, 0);
-            renderables.set(ground, SceneBenchmark.GROUND, List.of(SceneBenchmark.GRASS));
+            renderables.set(ground, Renderable.of(SceneBenchmark.GROUND, List.of(SceneBenchmark.GRASS)));
             long[] nodes = new long[rocks];
             if (rocks == 3) {
                 for (int i = 0; i < 3; i++) {
                     nodes[i] = scene.create();
                     scene.setTranslation(nodes[i], -9 + 9 * i, -6, -26);
                     scene.setScale(nodes[i], 3, 3, 3);
-                    renderables.set(nodes[i], SceneBenchmark.ROCK, List.of(SceneBenchmark.GRANITE));
+                    renderables.set(nodes[i], Renderable.of(SceneBenchmark.ROCK, List.of(SceneBenchmark.GRANITE)));
                 }
                 scene.components().set(nodes[0], Selected.TYPE, Selected.YES);
                 scene.components().set(nodes[2], Hovered.TYPE, Hovered.YES);
                 long front = scene.create(); // hides part of the selected rock: only what shows is highlighted
                 scene.setTranslation(front, -5.5, -5, -17);
                 scene.setScale(front, 2, 2, 2);
-                renderables.set(front, SceneBenchmark.ROCK, List.of(SceneBenchmark.GRANITE));
+                renderables.set(front, Renderable.of(SceneBenchmark.ROCK, List.of(SceneBenchmark.GRANITE)));
             } else {
                 SplittableRandom random = new SplittableRandom(11);
                 double[] placed = new double[3 * rocks];
                 for (int i = 0; i < rocks; i++) {
                     nodes[i] = scene.create();
                     SceneBenchmark.place(scene, nodes[i], random, placed, i, 0);
-                    renderables.set(nodes[i], SceneBenchmark.ROCK, List.of(SceneBenchmark.GRANITE));
+                    renderables.set(nodes[i], Renderable.of(SceneBenchmark.ROCK, List.of(SceneBenchmark.GRANITE)));
                     if (highlighted == 300 && i % 100 == 0 || highlighted == 3000 && i % 10 == 0
                         || highlighted == 1 && i == 0) {
                         scene.components().set(nodes[i], Selected.TYPE, Selected.YES);
@@ -202,7 +203,7 @@ class SelectionOutlineTest {
                     scene.components().set(nodes[1], Hovered.TYPE, Hovered.YES);
                 }
             }
-            SceneSync sync = new SceneSync(resources, renderables, gpu);
+            SceneSync sync = new SceneSync(resources, scene, gpu);
             SelectionHighlights highlights = new SelectionHighlights();
             SceneHighlights fill = new SceneHighlights(sync, highlights);
             Technique shading = visibility
@@ -228,7 +229,6 @@ class SelectionOutlineTest {
                 slots.begin(slot);
                 tasks.drainCompleted();
                 scene.update();
-                renderables.update();
                 sync.update();
                 fill.update();
                 boolean loaded = resources.uploadedMeshCount() == 2;

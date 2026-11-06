@@ -12,11 +12,13 @@ import com.truesim.engine.render.Interpolation;
 import com.truesim.engine.render.RenderSettings;
 import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.mesh.MeshData;
+import com.truesim.scene.core.ComponentStore;
 import com.truesim.scene.core.NodeChange;
 import com.truesim.scene.core.NodeHandle;
 import com.truesim.scene.core.SceneGraph;
 import com.truesim.scene.render.MaterialData;
-import com.truesim.scene.render.Renderables;
+import com.truesim.scene.render.MorphWeights;
+import com.truesim.scene.render.Renderable;
 import com.truesim.scene.render.SkinBinding;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -27,21 +29,21 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * A scene kept on the GPU: its {@link Renderables} as instances of a {@link GpuScene}, at their world positions, from
- * shared {@link SceneResources}, following the scene's and the renderables' change logs. What draws the instances is
+ * A scene kept on the GPU: its {@link Renderable} components as instances of a {@link GpuScene}, at their world
+ * positions, from shared {@link SceneResources}, following the scene's and the renderables' change logs. What draws the instances is
  * the renderers' business: any number of {@link com.truesim.engine.render.RenderView}s (cameras, shadow maps,
  * mirrors), each at its own world position, all culled in one pass; moving a camera rewrites no instance.
  *
  * <pre>{@code
  * GpuScene gpu = new GpuScene(device, resources.pool(), 100_000, slots);
- * SceneSync sync = new SceneSync(resources, renderables, gpu);
+ * SceneSync sync = new SceneSync(resources, scene, gpu);
  * MeshletRenderer renderer = new MeshletRenderer(device, gpu, colorFormat, depthFormat, slots);
  * SceneGeometry geometry = SceneGeometry.meshlets(renderer);
  * ViewPort port = graph.addView("main").size(width, height);
  * SceneView view = geometry.createView(port, camera, ViewOptions.of(1 << 18, 1 << 22).withOcclusion(true));
  * port.add(new ClusteredForwardShading(geometry, view, colorFormat, depthFormat));
  *
- * // every frame, after the frame boundary (tasks.drainCompleted()), scene.update() and renderables.update():
+ * // every frame, after the frame boundary (tasks.drainCompleted()) and scene.update():
  * sync.update();                               // the instances that changed
  * camera.position(cameraX, cameraY, cameraZ);
  * view.set(1, MeshletRenderer.MODE_LIT);
@@ -58,15 +60,16 @@ import java.util.Objects;
  *   <li><b>Materials per submesh:</b> a renderable's materials take consecutive ids in the material table, one per
  *       submesh of its mesh, shared by every renderable of every scene with the same materials and mesh layout.</li>
  *   <li><b>Changes, not the whole scene:</b> renderables added, changed or removed, and nodes moved, are found in the
- *       change logs. Only moved instances are written, or every one when most nodes moved.</li>
+ *       change logs. Only moved instances are written, or every one when most nodes moved; a renderable's change
+ *       redoes only the fields that changed (a material swap takes materials, the mesh stays).</li>
  *   <li><b>Stable ids:</b> a renderable keeps its instance id while drawn; a removed one leaves a hole the next takes
  *       (the lowest free id), so what the GPU keeps per instance stays with it. Deterministic: the same changes give the
  *       same ids. A new renderable may take an id freed the same frame, and then starts with what the GPU kept for the
  *       id (seen or hidden by occlusion culling) for its first frame.</li>
- *   <li><b>Skins and morph targets:</b> a renderable with a skin ({@link Renderables#setSkin}) whose mesh has joints,
+ *   <li><b>Skins and morph targets:</b> a renderable with a skin ({@link Renderable#skin}) whose mesh has joints,
  *       or whose mesh has morph targets, draws a copy of its own ({@code GeometryPool.addDeformed}), posed each update
  *       from its joints' world transforms relative to its node, in doubles, and its morph weights
- *       ({@link Renderables#setMorphWeights}), and deformed on the GPU before anything draws.</li>
+ *       ({@link MorphWeights}), and deformed on the GPU before anything draws.</li>
  *   <li><b>Layers and shadows:</b> instances are on their nodes' layers ({@code SceneGraph.setLayers}), drawn in views
  *       of any of them ({@link com.truesim.engine.render.RenderView#filter}), and cast shadows as their renderables
  *       say: shadow maps and shadow rays leave out those that do not.</li>
@@ -87,7 +90,8 @@ public final class SceneSync implements AutoCloseable {
     private static final int POSE_PARALLEL = 4 * POSE_GRAIN;
 
     private final SceneResources resources;
-    private final Renderables renderables;
+    private final ComponentStore<Renderable> renderables;
+    private final ComponentStore<MorphWeights> morphs;
     private final SceneGraph scene;
     private final ChangeClock clock;
     private final GpuScene gpu;
@@ -96,7 +100,7 @@ public final class SceneSync implements AutoCloseable {
     private final JobSystem.RangeTask writeMotions = this::writeMotions;
     private final JobSystem.RangeTask writeBlended = this::writeBlended;
     private final JobSystem.RangeTask writeJoints = this::writeJoints;
-    private final Renderables.Visitor onRenderableChange = (node, changes) -> reconcile(node);
+    private final ComponentStore.Visitor onRenderableChange = (node, changes) -> reconcile(node);
     private final NodeChange.Visitor onSceneChange = this::sceneChanged;
     private long seen;
     private boolean started;
@@ -106,6 +110,7 @@ public final class SceneSync implements AutoCloseable {
     private long[] itemNode = new long[64];
     private ViewMesh[] itemMesh = new ViewMesh[64];
     private SceneResources.MaterialSet[] itemSet = new SceneResources.MaterialSet[64];
+    private boolean[] itemCasts = new boolean[64]; // whether its renderable casts shadows, as last reconciled
     private int[] itemSlot = filled(64);
     private int[] itemNext = filled(64); // the next item of the same mesh
     private int[] itemPrevious = filled(64);
@@ -247,27 +252,28 @@ public final class SceneSync implements AutoCloseable {
     }
 
     /**
-     * Keeps {@code renderables} as instances of {@code gpu}, which holds meshes of {@code resources}' pool and is given
-     * its material table (scenes sharing a {@link GpuScene} share their resources too).
+     * Keeps the {@link Renderable}s of {@code scene} as instances of {@code gpu}, which holds meshes of
+     * {@code resources}' pool and is given its material table (scenes sharing a {@link GpuScene} share their resources
+     * too).
      */
-    public SceneSync(SceneResources resources, Renderables renderables, GpuScene gpu) {
-        this(resources, renderables, gpu, null);
+    public SceneSync(SceneResources resources, SceneGraph scene, GpuScene gpu) {
+        this(resources, scene, gpu, null);
     }
 
     /**
-     * Like {@link #SceneSync(SceneResources, Renderables, GpuScene)}, writing many instances at once (most nodes moved,
+     * Like {@link #SceneSync(SceneResources, SceneGraph, GpuScene)}, writing many instances at once (most nodes moved,
      * say) on {@code jobs}' threads: each instance is claimed in order on the calling thread and its record written
      * on any, so the ids and the result do not depend on the threads.
      */
     @AllowAllocation("created rarely")
-    public SceneSync(SceneResources resources, Renderables renderables, GpuScene gpu, JobSystem jobs) {
+    public SceneSync(SceneResources resources, SceneGraph scene, GpuScene gpu, JobSystem jobs) {
         this.jobs = jobs;
         scratches = new Scratch[jobs == null ? 1 : jobs.threads()];
         for (int i = 0; i < scratches.length; i++) {
             scratches[i] = new Scratch();
         }
         this.resources = Objects.requireNonNull(resources, "resources");
-        this.renderables = Objects.requireNonNull(renderables, "renderables");
+        this.scene = Objects.requireNonNull(scene, "scene");
         this.gpu = Objects.requireNonNull(gpu, "gpu");
         if (gpu.pool() != resources.pool()) {
             throw new IllegalArgumentException("The GPU scene holds another geometry pool's meshes than the resources "
@@ -276,8 +282,9 @@ public final class SceneSync implements AutoCloseable {
         if (gpu.drawsMaterials() && gpu.materials() != resources.materials()) {
             throw new IllegalArgumentException("The GPU scene draws another material table than the resources fill");
         }
-        this.scene = renderables.scene();
         this.clock = scene.clock();
+        renderables = scene.components().store(Renderable.TYPE);
+        morphs = scene.components().store(MorphWeights.TYPE);
         pickables = scene.components().store(com.truesim.scene.core.Pickable.TYPE);
         gpu.setMaterials(resources.materials()); // the resources' table: instances name its ids
         com.truesim.engine.settings.EngineSettings followed = resources.settings();
@@ -359,8 +366,9 @@ public final class SceneSync implements AutoCloseable {
         return gpu;
     }
 
-    public Renderables renderables() {
-        return renderables;
+    /** The scene whose renderables it keeps. */
+    public SceneGraph scene() {
+        return scene;
     }
 
     public SceneResources resources() {
@@ -369,8 +377,7 @@ public final class SceneSync implements AutoCloseable {
 
     /**
      * Brings the instances up to date: renderables added, changed or removed since the last update, and nodes moved.
-     * Call after the frame boundary, {@code scene.update()} and
-     * {@code renderables.update()}, before the frame graph records. Allocates nothing once warm when only transforms
+     * Call after the frame boundary and {@code scene.update()}, before the frame graph records. Allocates nothing once warm when only transforms
      * changed.
      */
     public void update() {
@@ -410,8 +417,8 @@ public final class SceneSync implements AutoCloseable {
             }
         }
         if (rewriteAll) {
-            // Not following the scene's log: nodes removed after the renderables' update (which drops their renderables
-            // next frame) go now, before anything reads them.
+            // Not following the scene's log: nodes removed since (their renderables went with them) go now, before
+            // anything reads them.
             for (int item = 0; item < itemNode.length; item++) {
                 if (itemNode[item] != NodeHandle.NONE && !scene.contains(itemNode[item])) {
                     destroy(item);
@@ -569,7 +576,9 @@ public final class SceneSync implements AutoCloseable {
                 destroy(item);
             }
         }
-        renderables.forEach(this::reconcile);
+        for (int i = 0; i < renderables.size(); i++) {
+            reconcile(renderables.node(i));
+        }
         rewriteAll = true;
     }
 
@@ -595,14 +604,16 @@ public final class SceneSync implements AutoCloseable {
         if (itemNode[item] != NodeHandle.NONE && itemNode[item] != node) {
             destroy(item); // a removed node's, whose slot the scene reused
         }
-        if (!renderables.has(node) || !scene.contains(node)) { // gone, or its node is: the renderables see it later
+        Renderable renderable = renderables.get(node);
+        if (renderable == null) { // gone, or its node is
             if (itemNode[item] == node) {
                 destroy(item);
             }
             return;
         }
-        AssetRef<MeshData> ref = renderables.mesh(node);
-        List<AssetRef<MaterialData>> list = renderables.materials(node);
+        AssetRef<MeshData> ref = renderable.mesh();
+        List<AssetRef<MaterialData>> list = renderable.materials();
+        itemCasts[item] = renderable.castsShadows();
         if (itemNode[item] == node) {
             if (itemMesh[item].mesh.ref.equals(ref)) {
                 cancelPendingMesh(item); // changed back before the new one came
@@ -730,7 +741,7 @@ public final class SceneSync implements AutoCloseable {
             return false;
         }
         if (pendingSet[item] == null) {
-            pendingSet[item] = resources.acquireSet(renderables.materials(itemNode[item]),
+            pendingSet[item] = resources.acquireSet(renderables.get(itemNode[item]).materials(),
                 mesh.mesh.data.materialSlots());
         }
         if (!resources.ready(pendingSet[item])) {
@@ -769,8 +780,7 @@ public final class SceneSync implements AutoCloseable {
     private void sceneChanged(long node, int changes) {
         int item = NodeHandle.index(node);
         if (NodeChange.has(changes, NodeChange.REMOVED)) {
-            // Removed after the renderables' update, which drops its renderable next frame: its instance goes now, and
-            // nothing reads the node again.
+            // Removed with its renderable: its instance goes now, and nothing reads the node again.
             if (item < itemNode.length && itemNode[item] == node) {
                 destroy(item);
             }
@@ -922,6 +932,7 @@ public final class SceneSync implements AutoCloseable {
         itemNode = Arrays.copyOf(itemNode, length);
         itemMesh = Arrays.copyOf(itemMesh, length);
         itemSet = Arrays.copyOf(itemSet, length);
+        itemCasts = Arrays.copyOf(itemCasts, length);
         itemSlot = Arrays.copyOf(itemSlot, length);
         itemNext = Arrays.copyOf(itemNext, length);
         itemBounded = Arrays.copyOf(itemBounded, length);
@@ -998,8 +1009,9 @@ public final class SceneSync implements AutoCloseable {
      * textures load. Whether it holds one: not once its renderable is gone.
      */
     private boolean holdMaterials(int item) {
-        if (itemSet[item] == null && renderables.has(itemNode[item])) {
-            itemSet[item] = resources.acquireSet(renderables.materials(itemNode[item]),
+        Renderable renderable = itemSet[item] == null ? renderables.get(itemNode[item]) : null;
+        if (renderable != null) {
+            itemSet[item] = resources.acquireSet(renderable.materials(),
                 itemMesh[item].mesh.data.materialSlots());
         }
         return itemSet[item] != null;
@@ -1065,7 +1077,8 @@ public final class SceneSync implements AutoCloseable {
      */
     @AllowAllocation("a skinned renderable drawn or changed")
     private void refreshCopy(int item) {
-        SkinBinding skin = renderables.has(itemNode[item]) ? renderables.skin(itemNode[item]) : null;
+        Renderable renderable = renderables.get(itemNode[item]);
+        SkinBinding skin = renderable != null ? renderable.skin() : null;
         MeshData data = itemMesh[item].mesh.data;
         boolean skinning = skin != null && data.jointCount() > 0;
         boolean wanted = skinning || data.morphTargetCount() > 0;
@@ -1145,8 +1158,9 @@ public final class SceneSync implements AutoCloseable {
         int copy = itemCopy[item];
         var deformation = resources.pool().deformation();
         double morph = 0; // the farthest the morphs move a vertex
+        MorphWeights weights = data.morphTargetCount() > 0 ? morphs.get(node) : null;
         for (int t = 0; t < data.morphTargetCount(); t++) {
-            float weight = renderables.morphWeight(node, t);
+            float weight = weights != null ? weights.weight(t) : 0;
             deformation.weight(copy, t, weight);
             morph += Math.abs(weight) * data.morphMaxDisplacement(t);
         }
@@ -1187,7 +1201,7 @@ public final class SceneSync implements AutoCloseable {
         double[] jointWorld = scratch.jointWorld;
         double[] matrix = scratch.matrix;
         double[] box = scratch.box;
-        SkinBinding skin = renderables.skin(node);
+        SkinBinding skin = renderables.get(node).skin();
         world(node, matrix);
         invert(matrix, relative);
         double growth = 0;
@@ -1747,7 +1761,7 @@ public final class SceneSync implements AutoCloseable {
             double length = Math.sqrt(rx * rx + ry * ry + rz * rz + rw * rw);
             long node = itemNode[item];
             gpu.write(fillEntries[i], itemCopy[item] != NONE ? itemCopy[item] : itemMesh[item].mesh.id,
-                itemSet[item].first, scene.layers(node), renderables.castsShadows(node),
+                itemSet[item].first, scene.layers(node), itemCasts[item],
                 b * p[f] + a * q[f], b * p[f + 1] + a * q[f + 1], b * p[f + 2] + a * q[f + 2],
                 (float) (rx / length), (float) (ry / length), (float) (rz / length), (float) (rw / length),
                 (float) (b * p[f + 7] + a * q[f + 7]), (float) (b * p[f + 8] + a * q[f + 8]),
@@ -1818,7 +1832,7 @@ public final class SceneSync implements AutoCloseable {
         long o = NodeHandle.index(itemNode[item]) * world.stride();
         long node = itemNode[item];
         gpu.write(entry, itemCopy[item] != NONE ? itemCopy[item] : itemMesh[item].mesh.id, itemSet[item].first, scene.layers(node),
-            renderables.castsShadows(node), s.get(DOUBLE, o), s.get(DOUBLE, o + 8), s.get(DOUBLE, o + 16),
+            itemCasts[item], s.get(DOUBLE, o), s.get(DOUBLE, o + 8), s.get(DOUBLE, o + 16),
             (float) s.get(DOUBLE, o + 24), (float) s.get(DOUBLE, o + 32), (float) s.get(DOUBLE, o + 40),
             (float) s.get(DOUBLE, o + 48),
             (float) s.get(DOUBLE, o + 56), (float) s.get(DOUBLE, o + 64), (float) s.get(DOUBLE, o + 72));
