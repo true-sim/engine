@@ -74,11 +74,11 @@ public final class ShadowSettings {
     public static final Setting<Float> MAP_DISTANCE = Setting.decimal("shadows.maps.distance", 100, 0.1f, 1.0e7f,
         "how far a directional light's maps reach where its spec gives no distance, in units");
     /**
-     * The most tests of moved casters against tiles a frame (moved instances times tiles); past it, the tiles meeting
+     * The most tests of moved casters against lights a frame (moved instances times lights); past it, the tiles meeting
      * the box around every moved caster are drawn again.
      */
     public static final Setting<Integer> CHANGE_TESTS = Setting.integer("shadows.atlas.changeTests", 1 << 20, 0,
-        1 << 30, "the most moved-caster-against-tile tests a frame before testing their box as one");
+        1 << 30, "the most moved-caster-against-light tests a frame before testing their box as one");
     /** Soft ray-traced shadows: rays per pixel and light, before the denoiser. */
     public static final Setting<Integer> SOFT_RAYS = Setting.integer("shadows.soft.rays", 1, 1, 64,
         "soft ray-traced shadows: rays per pixel and light, before denoising");

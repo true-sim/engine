@@ -455,6 +455,64 @@ class ShadowOwnerTest {
     }
 
     /**
+     * Caster layers: a quad moving every frame under a point light is drawn over a copy of its tiles' layer of still
+     * casters (the other quad, the floor), the layer drawn once; each frame's image is that of every caster drawn
+     * (layers off), and the quad, once still for CASTER_SETTLE frames, joins the layers: another drawn over them keeps
+     * its shadow.
+     */
+    @Test
+    void movingCastersDrawnOverTheStillLayerMatchEveryCasterDrawn() {
+        newGraph(visibility());
+        graph.settings().set(ShadowSettings.CASTER_SETTLE, 5);
+        lights.point(0, 0, 0, -5, 16, 60, 60, 60);
+        lights.shadow(0, ShadowSpec.maps(256)).setCount(1);
+        scene.set(2, quad, -2, -2, -5, 0, 0, 0, 1, 0.5f, 1, 0.5f);
+        for (int i = 0; i < 4; i++) {
+            frame();
+        }
+        int moving = 0;
+        int layered = 0;
+        byte[][] withLayers = new byte[6][];
+        for (int i = 0; i < 12; i++) {
+            scene.set(2, quad, (float) (-2 + 0.3 * i), -2, -5, 0, 0, 0, 1, 0.5f, 1, 0.5f);
+            byte[] color = frame();
+            moving += shadows.stats().moving();
+            layered += shadows.stats().layered();
+            if (i >= 6) {
+                withLayers[i - 6] = color;
+            }
+        }
+        assertThat(moving).as("tiles drawing only the moving quad").isGreaterThan(0);
+        assertThat(layered).as("layers drawn: once per tile the quad reaches, not every frame").isLessThan(moving);
+        assertThat(graph.builds()).as("built once").isEqualTo(1);
+        for (int i = 0; i < 10; i++) {
+            frame(); // the quad still: it settles into the layers
+        }
+        scene.set(3, quad, -1.5f, -1.5f, -5, 0, 0, 0, 1, 0.3f, 1, 0.3f); // drawn over layers holding the settled quad
+        byte[] settled = frame();
+        assertThat(shadows.stats().moving()).as("the new quad over the layers").isGreaterThan(0);
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, false);
+        assertThat(maxDifference(settled, frame())).as("settled into the layer").isLessThanOrEqualTo(2);
+        scene.remove(3);
+        for (int i = 0; i < 6; i++) {
+            scene.set(2, quad, (float) (-2 + 0.3 * (i + 6)), -2, -5, 0, 0, 0, 1, 0.5f, 1, 0.5f);
+            byte[] every = frame();
+            assertThat(maxDifference(withLayers[i], every)).as("frame %d: layered as every caster drawn", i)
+                .isLessThanOrEqualTo(2);
+        }
+        expectShadow("the still quad's shadow", new double[] {0, -5}, new double[] {-2, -3});
+        scene.remove(2);
+    }
+
+    private static int maxDifference(byte[] a, byte[] b) {
+        int most = 0;
+        for (int i = 0; i < a.length; i++) {
+            most = Math.max(most, Math.abs((a[i] & 0xff) - (b[i] & 0xff)));
+        }
+        return most;
+    }
+
+    /**
      * The path-traced reference's shadow rays go through the holes of keep() too (light rays waiting for the type's
      * test): under the checkerboard-cut quad, the floor below a hole is lit, below a kept cell dark.
      */

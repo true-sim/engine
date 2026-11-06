@@ -107,7 +107,6 @@ public final class Shadows implements AutoCloseable {
     // Caster layers: draw slots of the still casters' layer, the copies of layers into the atlas
     private RenderView[] layerViews = new RenderView[0];
     private final Tile[] layerTiles = new Tile[4096];
-    private int layersWanted; // grows: the graph builds again
     private boolean anyLayered;
     private final int[] copies = new int[6 * 4096];
     private int copyCount;
@@ -121,7 +120,7 @@ public final class Shadows implements AutoCloseable {
     private int movingCount;
     private FrameBuffer movingUpload;
     private final List<FrameBuffer> outgrown = new ArrayList<>(); // freed with the owner: frames in flight read them
-    private long frameNow;
+    private long frameNow; // frames prepared
     private long[] checkFrom = new long[0]; // per draw view: the frame from which its overflow is read again
     private Tile[] dirty = new Tile[64];
     // Change tracking
@@ -370,7 +369,7 @@ public final class Shadows implements AutoCloseable {
             return;
         }
         preparedFrame = frame;
-        frameNow = frame;
+        frameNow++; // frames prepared (a single frame slot counts no frames)
         if (views.isEmpty()) {
             return;
         }
@@ -1202,13 +1201,11 @@ public final class Shadows implements AutoCloseable {
             flags = uploadMoving();
         }
         int layerSlots = 0;
-        int layersNeeded = 0;
         copyCount = 0;
         for (int i = 0; i < drawn; i++) {
             Tile tile = dirty[i];
             boolean full = tile.dirty || !split;
             if (!full && !tile.layered) {
-                layersNeeded++;
                 if (layerSlots < layerViews.length) {
                     layerTiles[layerSlots] = tile;
                     layerViews[layerSlots++].camera(tile.camera, detail).unhighlightedOnly(flags, flagged);
@@ -1229,11 +1226,6 @@ public final class Shadows implements AutoCloseable {
                 copies[c + 4] = tile.size;
                 copies[c + 5] = tile.size;
             }
-        }
-        int layerWanted = Math.min(Math.min(cap, layersNeeded), layerTiles.length);
-        if (split && layerWanted > layersWanted) {
-            layersWanted = Math.max(layerWanted, Math.min(Math.min(cap, layerTiles.length), 2 * layersWanted));
-            structure++;
         }
         anyDrawn = drawn > 0;
         anyLayered = layerSlots > 0;
@@ -1295,10 +1287,10 @@ public final class Shadows implements AutoCloseable {
             }
         }
         boolean split = layering;
-        if (split && layerViews.length < layersWanted) {
+        if (split && layerViews.length < slotsWanted) { // a layer slot per draw slot: moving casters build nothing
             int had = layerViews.length;
-            layerViews = Arrays.copyOf(layerViews, layersWanted);
-            for (int i = had; i < layersWanted; i++) {
+            layerViews = Arrays.copyOf(layerViews, slotsWanted);
+            for (int i = had; i < slotsWanted; i++) {
                 layerViews[i] = renderer.createView(options);
             }
         }
