@@ -2642,6 +2642,11 @@ optional locally. Tests open hidden windows. Without a display, set `SDL_VIDEO_D
 
 CI does that on Mesa's lavapipe through build-logic's `setup-vulkan` action. The action pins and caches the Vulkan
 packages and sets `TRUESIM_REQUIRE_VALIDATION=true`, so the Vulkan tests fail when the validation layer is not active.
+On pull requests the longest modules' tests (engine-render, engine-scene, engine-ui) run in ten parallel shards,
+balanced by the seconds each test class took on CI (`ci/test-timings.txt`, refreshed with `ci/timings.py` from a
+run's reports): `./gradlew :engine-render:test -Ptruesim.shard=3/10 -Ptruesim.shardModules=engine-render` runs one
+shard locally, `./gradlew testShards` with the same properties prints what it holds. The last job, `build`, checks
+those modules' coverage from every shard's data together (`-Ptruesim.mergedCoverage=true`).
 
 Exclusive fullscreen is only tested when `TRUESIM_TEST_FULLSCREEN` is set, because it changes the monitor's mode.
 

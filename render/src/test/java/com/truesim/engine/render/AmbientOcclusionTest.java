@@ -511,6 +511,9 @@ class AmbientOcclusionTest {
             floor(white);
             block(1, white, 0);
             main(slanted(), this::visibilityBuffer);
+            // A quarter of the size: what a frame allocates does not depend on its pixels, and on CI's software GPU
+            // the 6 x 9,000 frames at full size took 24 minutes
+            graph.settings().set(com.truesim.engine.graph.ResolutionSettings.SCALE, 0.25f);
             for (TechniqueKind<?, AmbientOcclusion, Technique> mode : modes()) {
                 for (Denoiser.Mode denoiser : Denoiser.Mode.values()) {
                     choose(mode);
