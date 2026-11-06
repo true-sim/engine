@@ -296,9 +296,31 @@ transition between the active and inactive states requires a full acceleration s
 structure update rules); the validation layers reported nothing; the RX 9070 XT faulted reading address 0.
 - Proof: `SceneSyncTest.rayTracingTracesTheScenesMeshesAndPosedCopies` lost the device in four runs of four
   ("invalid read at 0x0 ... in no buffer"), and passes with the fix (true-sim/engine, scene ray tracing PR).
-- Rule: an instance left out of a top level is not in its build at all (superseded the empty bottom level with mask 0
-  used first; see the lavapipe crash below); anything that changes which instances the build holds rebuilds the top
-  level instead of refitting it.
+- Rule: an instance left out of a top level is not in its build at all (no empty bottom level with mask 0, as used
+  first: no inactive instances for drivers' builders to handle); anything that changes which instances the build holds
+  rebuilds the top level instead of refitting it.
+
+**CI's lavapipe 26.0.8 crashed in its own code on some AMD runners; it was not ours.** Ray-traced tests
+(`GiScenesTest`, `ShadowOwnerTest`, the probe volume, the reference path tracer) killed their JVM with SIGSEGV in
+lavapipe's JIT'd code on its worker threads: always the same AVX-512 gather of three dwords through per-lane pointers
+(pc ending ...3a0), at addresses not 8-byte aligned, in a lavapipe-internal shader shared by all tests. Hours went into
+our side first: compaction off, sync validation, GPU-assisted validation, the bottom levels' lifetimes, frames in
+flight waited for, the empty bottom level degenerate, inactive (NaN) or tiny: none of it changed anything, and the
+validation layers were clean. What decides it is the runner's CPU, and Mesa's version:
+- Mesa 26.0.8 (Ubuntu 26.04's), `GiScenesTest` six times a runner under CPU load: every AMD EPYC 9V45 and 9V74
+  runner but one crashed every time; Intel Xeon Platinum 8573C, 8370C, Xeon 6973P-C (all AVX-512) and EPYC 7763 never.
+  On the same 9V runners, the code before and after leaving untraced instances out of top levels crashed 3 of 3 each;
+  lavapipe capped at AVX (`GALLIUM_OVERRIDE_CPU_CAPS=avx`) 0 of 2. Frames waited for one by one crashed too.
+- Mesa 26.2.6 (kisak-mesa's build, LLVM 21.1.8) on 9V45 and 9V74 runners: the same old and new code, 0 of 3 each.
+- Mesa 26.2.6 changed the common BVH builder's leaf code (`src/vulkan/runtime/bvh/leaf.h`): 26.0.8 folds inactive
+  leaves' never-written `bounds` into the header's scene bounds (lavapipe counts mask-0 instances as inactive), 26.2.6
+  only active ones; and it builds with signed-zero/inf/NaN preservation. Which change, or which code generation fix,
+  ended the crash is not known.
+- Proof: true-sim/engine#436 repro runs 42252070623 (CPU table), 42253900564 (A/B and the AVX cap, 26.0.8) and
+  42256365931 (26.2.6); the build-logic setup-vulkan action pins 26.2.6 since true-sim/build-logic#31.
+- Rule: a crash inside the driver that follows the runner's CPU model is measured per CPU (print it in the job) and
+  per driver version, with our code held fixed in the same job, before more of our code is changed for it. CI's Mesa is
+  pinned in setup-vulkan; bump it there, and rerun the ray-traced tests on several runners when it changes.
 
 **A cluster hierarchy's finest level is not all of the mesh.** Bottom levels were built from one detail level's
 meshlet range (the last, "finest"). In a cluster hierarchy the levels are the DAG's depths: parts that simplify no
