@@ -526,6 +526,17 @@ free (a shared arena's close and VMA's free of 2.5 to 16 MB) took up to 2.4 ms.
   1.3-3.0 ms and frames over 4 ms from 2-5 to 0 (true-sim/engine#101).
 - Rule: free large staging memory off the frame's thread once the GPU is done with it.
 
+**The asset cache freed generated meshes on the frame's thread.** Streaming through the scene (the samples'
+`StreamBench`, its scene way), frames removing cells took about 4.2 ms against 0.9 by the hand-written baseline: the
+cache keeps no unused assets there (budget 0), so each cell's generated meshes were evicted as its renderables left,
+in the frame's update, and the cache closed them where it evicted them; a mesh's shared arena takes milliseconds to
+close (see "Freeing a staging buffer on the frame's thread" above).
+- Proof: interleaved runs of the scene way, three each before and after scene's `AssetCache` closed generated assets
+  on a task of the type's lane: frames removing cells 3.9 to 4.4 ms before, 1.7 to 2.1 ms after (true-sim/engine,
+  engine split group 2; true-sim/scene#140).
+- Rule: whatever frees content a frame let go of (evictions, unloads) frees large native memory off the frame's
+  thread.
+
 **A chunk size derived from the capacity at construction stayed after growth.** The change list prototype sized its
 chunks by `min(capacity, chunk bytes / record)`; instance motion's buffers start with 64 records and grow, so their
 chunks stayed at 64 records: 469 chunks (and dispatches) for 30,000 motion records, 0.1 ms of uploads that looked like
