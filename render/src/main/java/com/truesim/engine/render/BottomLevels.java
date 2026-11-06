@@ -206,6 +206,10 @@ final class BottomLevels {
 
     /** The address of the level instances without one of their own name: it holds nothing they could hit. */
     long emptyAddress() {
+        // TEMPORARY (repro): "absent" names no level at all (inactive instances) instead of the placeholder
+        if (System.getenv().getOrDefault("TRUESIM_EMPTY_LEVEL", "degenerate").equals("absent")) {
+            return 0;
+        }
         return empty.address();
     }
 

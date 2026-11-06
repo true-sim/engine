@@ -1,7 +1,7 @@
 name: Repro
 
-# TEMPORARY (removed before merge): the lavapipe crash in ray-traced tests, reproduced fast. Each job runs one class
-# again and again with normal lavapipe settings and keeps the JVM crash logs.
+# TEMPORARY (removed before merge): the lavapipe crash in ray-traced tests, reproduced fast. Each job runs GiScenesTest
+# again and again under CPU load (as the other test JVMs of a shard put on it) and keeps the JVM crash logs.
 on:
   push:
     branches: [split-1]
@@ -21,9 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        level: [degenerate, nan, tiny]
-        shard: [5, 8, 9]
-    name: repro (${{ matrix.level }}, shard ${{ matrix.shard }})
+        level: [degenerate, tiny, absent]
+        copy: [1, 2, 3]
+    name: repro (${{ matrix.level }}, ${{ matrix.copy }})
     env:
       TRUESIM_EMPTY_LEVEL: ${{ matrix.level }}
     steps:
@@ -34,25 +34,25 @@ jobs:
           distribution: temurin
           java-version: 27
       - uses: gradle/actions/setup-gradle@v6
-      - name: The class again and again
+      - name: GiScenesTest again and again, under load
         run: |
           mkdir -p crashes
-          (while true; do echo "$(date +%T) $(free -m | awk '/Mem:/ {print "used " $3 " free " $4 " available " $7}')"; sleep 5; done) > crashes/memory.log &
+          ./gradlew :engine-scene:testClasses -q
+          for c in 1 2 3; do (while true; do :; done) & done
           crashes=0
-          for i in 1 2; do
-            if ! ./gradlew :engine-render:test :engine-scene:test :engine-ui:test -Ptruesim.shard=${{ matrix.shard }}/10 -Ptruesim.shardModules=engine-render,engine-scene,engine-ui --rerun -q > run-$i.log 2>&1; then
+          for i in 1 2 3 4 5 6; do
+            if ! ./gradlew :engine-scene:test --tests '*.GiScenesTest' --rerun -q > run-$i.log 2>&1; then
               echo "iteration $i failed"; grep -E "SIGSEGV|FAILED|Problematic" -A2 run-$i.log | head -12
               crashes=$((crashes + 1))
               mkdir -p crashes/$i; cp run-$i.log crashes/$i/; cp */hs_err_pid*.log crashes/$i/ 2>/dev/null; rm -f */hs_err_pid*.log
-              cp -r */build/test-results crashes/$i/ 2>/dev/null || true
             else
               echo "iteration $i passed"
             fi
           done
-          echo "crashes: $crashes of 2"
+          echo "crashes: $crashes of 6"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: repro-${{ matrix.level }}-${{ matrix.shard }}
+          name: repro-${{ matrix.level }}-${{ matrix.copy }}
           path: crashes
           if-no-files-found: ignore
