@@ -7,6 +7,7 @@ import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.Camera;
+import com.truesim.engine.render.RadixSort;
 import com.truesim.engine.render.layout.ParticleConstants;
 import com.truesim.engine.render.layout.ParticleSortPush;
 import com.truesim.engine.vulkan.Pipeline;
@@ -16,9 +17,8 @@ import java.util.Objects;
  * The particles of the frame's sorted emitters, back to front as seen from {@code center} (effects.md §2.4, E7, E19):
  * each emitter's alive particles in a run of their own, farthest first, which {@link ParticleDraw} draws its sorted
  * billboards in. Keys are the emitter's place among the frame's sorted emitters (at most {@code SORT_EMITTERS}) above
- * the top 20 bits of the particle's squared distance from the center, sorted by an indirect radix sort of 4 bits a
- * pass (FidelityFX-style: count, scan, scatter; {@code SORT_GROUP} keys a group, each ranked among its digit's in the
- * group with wave ballots and written straight to its place), as many passes as the keys' bits need, even, at most 8.
+ * the top 20 bits of the particle's squared distance from the center, sorted by the core's indirect radix sort
+ * ({@link RadixSort}), as many passes as the keys' bits need, even, at most 8.
  * A request: equal requests share one sort, so both eyes of a pair, drawn with the pair's center camera, sort once.
  * Additive renderers (and those {@code sorted(false)}) are not sorted; emitters draw as wholes back to front either
  * way.
@@ -64,16 +64,12 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
     @AllowAllocation("building the graph, when it changes")
     public Order build(GraphBuilder g) {
         int slots = particles.sortSlots();
-        long groups = (slots + ParticleConstants.SORT_GROUP - 1) / ParticleConstants.SORT_GROUP;
         Buffer a = g.createBuffer("particle sort keys", 8L * slots);
         Buffer b = g.createBuffer("particle sort keys, other", 8L * slots);
         Buffer args = g.createBuffer("particle sort args", 4L * (4 + ParticleConstants.SORT_EMITTERS));
-        Buffer histogram = g.createBuffer("particle sort counts", 4L * 16 * groups);
+        Buffer histogram = g.createBuffer("particle sort counts", RadixSort.histogramBytes(slots));
         Pipeline argsProgram = g.computeProgram(SHADER, "sortArgsMain", ParticleSortPush.BYTES);
         Pipeline keys = g.computeProgram(SHADER, "sortKeysMain", ParticleSortPush.BYTES);
-        Pipeline count = g.computeProgram(SHADER, "sortCountMain", ParticleSortPush.BYTES);
-        Pipeline scan = g.computeProgram(SHADER, "sortScanMain", ParticleSortPush.BYTES);
-        Pipeline scatter = g.computeProgram(SHADER, "sortScatterMain", ParticleSortPush.BYTES);
         Particles p = particles;
         Camera camera = center;
         ParticleSortPush argsPush = new ParticleSortPush();
@@ -94,41 +90,8 @@ public record ParticleSort(Particles particles, Camera center, Buffer pool, Buff
                             / PassContext.MAX_GROUPS, 1);
                 }
             });
-        for (int pass = 0; pass < 8; pass++) {
-            Buffer source = pass % 2 == 0 ? a : b;
-            Buffer target = pass % 2 == 0 ? b : a;
-            int index = pass;
-            ParticleSortPush countPush = new ParticleSortPush().shift(4 * pass);
-            g.pass("particle sort count " + pass).read(source, BufferAccess.STORAGE_READ)
-                .read(args, BufferAccess.INDIRECT).read(args, BufferAccess.STORAGE_READ)
-                .write(histogram, BufferAccess.STORAGE_WRITE)
-                .record(ctx -> {
-                    if (index < passes(p.sortedCount()) && p.sortedCount() > 0) {
-                        ctx.dispatchIndirect(count, common(countPush, p, camera, slots).args(ctx.address(args))
-                            .histogram(ctx.address(histogram)).source(ctx.address(source)), args, 0);
-                    }
-                });
-            ParticleSortPush scanPush = new ParticleSortPush();
-            g.pass("particle sort scan " + pass).read(args, BufferAccess.STORAGE_READ)
-                .write(histogram, BufferAccess.STORAGE_WRITE)
-                .record(ctx -> {
-                    if (index < passes(p.sortedCount()) && p.sortedCount() > 0) {
-                        ctx.dispatch(scan, common(scanPush, p, camera, slots).args(ctx.address(args))
-                            .histogram(ctx.address(histogram)), 1);
-                    }
-                });
-            ParticleSortPush scatterPush = new ParticleSortPush().shift(4 * pass);
-            g.pass("particle sort scatter " + pass).read(source, BufferAccess.STORAGE_READ)
-                .read(histogram, BufferAccess.STORAGE_READ).read(args, BufferAccess.INDIRECT)
-                .read(args, BufferAccess.STORAGE_READ).write(target, BufferAccess.STORAGE_WRITE)
-                .record(ctx -> {
-                    if (index < passes(p.sortedCount()) && p.sortedCount() > 0) {
-                        ctx.dispatchIndirect(scatter, common(scatterPush, p, camera, slots).args(ctx.address(args))
-                            .histogram(ctx.address(histogram)).source(ctx.address(source)).target(ctx.address(target)),
-                            args, 0);
-                    }
-                });
-        }
+        RadixSort.add(g, "particle sort", args, a, b, histogram, RadixSort.MAX_PASSES, false,
+            pass -> pass < passes(p.sortedCount()) && p.sortedCount() > 0);
         return new Order(a, args);
     }
 

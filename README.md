@@ -156,7 +156,10 @@ graph's settings or a view it is given (`Target.displaySettings(view)`: a window
 tuning values are settings too, read from the graph's settings unless a technique is given its own: light clusters (`ClusteredLights.ALL`:
 tiles, slices, range, lights per cluster, and the irradiance where lights without a range end, `Lights.NO_RANGE`),
 occlusion culling (`RenderSettings.OCCLUSION`), cascades and ray offsets (`ShadowSettings.ALL`), and the display
-transform (`DisplayTransform.ALL`); `RenderSettings.ALL` lists them all for an options screen.
+transform (`DisplayTransform.ALL`). No hard list holds them all: `RenderPlugin` registers the renderer's settings and
+slots in the engine's `SettingRegistry`, a library's plugin registers its own the same way, and consoles and settings
+screens discover every one with `registry.all()` or `registry.all("render")` (a slot's kinds' tunables included,
+a mod's too).
 
 **Techniques and their tunables** (`TechniqueSlot`, `TechniqueKind`, `Techniques`): every switchable technique is a
 slot, a place a technique plugs into, whose one setting holds the chosen kind's id or `off` (`render.ao=bitmask`). A
@@ -463,9 +466,9 @@ validation; RX 9070 XT, 2026-11-03; GPU time of the UI pass and the frame start 
 | 100,000 glyphs | 0.28-0.30 ms | 0.27-0.29 ms | 0.29 ms | 0.4 ms |
 | 100,000 glyphs over a full-screen translucent backdrop | 0.40-0.45 ms | 0.39-0.43 ms | 0.44 ms | (0.4 ms) |
 
-Section 11's targets as one suite: `./gradlew :engine-bench:uiBench` (module `engine-bench`, a program: the GPU
+Section 11's targets as one suite: `./gradlew :samples-bench:uiBench` (in [true-sim/samples](https://github.com/true-sim/samples), a program: the GPU
 scenes above, a chart streaming 1,000,000 samples as a line and as a filled area, 10,000,000 samples zoomed, the
-controls gallery idle, the console flooded) writes [docs/benchmarks-ui.md](docs/benchmarks-ui.md) with p50 and p99.
+controls gallery idle, the console flooded) writes the samples' `docs/benchmarks-ui.md` with p50 and p99.
 
 Submitting an unchanged HUD takes 0.1 us and uploads nothing; with 50 elements re-recorded a frame, 3 us (one dirty
 range spanning them: 400 KB). Numbers vary by a few percent between sessions sharing the GPU; compare within a run.
@@ -526,7 +529,7 @@ Profiler.begin(PHYSICS); try { step(); } finally { Profiler.end(PHYSICS); }
   What a machine lacks is reported once (`profiler.counters` in the console) instead of assumed.
   `VK_KHR_performance_query` is detected (`VulkanDevice.performanceQuery()`) but not collected.
 
-Overhead (`./gradlew :engine-bench:profilerBench`, [docs/benchmarks-profiler.md](docs/benchmarks-profiler.md); Ryzen 9
+Overhead (the samples' `./gradlew :samples-bench:profilerBench`, `docs/benchmarks-profiler.md` there; Ryzen 9
 9950X3D, RX 9070 XT, 2026-11-04, no JaCoCo): a zone off 0.16 ns, on 38 ns; the frame graph's data path 0.14 us a
 frame; the frame graph view 7.9 us a frame of CPU (its lines stream: appended and scrolled by a drawn offset,
 ui-charts' streaming); engine frames (headless, an idle UI) +0.008 to +0.011 ms p50 with the overlay, +0.12 to
@@ -1178,7 +1181,7 @@ Transparency.SLOT.choose(graph.settings(), Transparency.WEIGHTED);      // or So
   glass bowl draws before its near wall (CompareTransmission's bowl, doubled under weighted blending, is clean). After
   the culling's split (and before the indexed path's expansion, which then writes indices in the sorted order),
   `meshlets/sort.slang` keys each blended meshlet by the squared distance of its bounding sphere's center from the eye
-  (24 bits, farthest first) and sorts with the particles' radix sort (`particles/sort.slang`, 6 passes); the sorted
+  (24 bits, farthest first) and sorts with the core's radix sort (`blocks/sort.slang`, `RadixSort`, 6 passes); the sorted
   list is cut into runs of one shading bin, and each run is a (run slot, shading bin) entry of the split lists'
   header, drawn by its type's pipeline, so the order holds across material types.
   `render.transparency.sorted.runs` (`Transparency.SORTED_RUNS`, 16) run slots are drawn, each an indirect draw per shading bin drawing blended; a view
@@ -1252,7 +1255,7 @@ and fail a build that reads them). Post materials (decals, fog by normal, outlin
 technique implementing the consumer interface and requiring the keys. Blended and transmissive surfaces write none.
 
 **Screen-space reflections** (`ScreenSpaceReflections`, one per view under `ScreenSpaceReflections.ID`, at
-`Anchor.OPAQUE` after the background, before transparency), as the kind `render.ssr` (`ScreenSpaceReflections.SLOT`)
+`Order.SCREEN_SPACE_LIGHTING`: after the background and ambient occlusion, before transparency), as the kind `render.ssr` (`ScreenSpaceReflections.SLOT`)
 names:
 
 - `off`: the environment's reflections alone; the surface outputs are not written for it.
@@ -1390,8 +1393,10 @@ try (RayTracing rayTracing = new RayTracing(device, pool, 100_000)) { // at most
   one built), so copies are not rebuilt unless asked (`rayTracing.rebuildEvery(refits)`): with a build every 120
   refits, 1000 foxes' refits went from 0.30 to 0.37 ms a frame to 0.57 to 0.63, and tracing changed less than noise.
   Devices whose bottom levels cannot read the quantized positions leave copies out.
-- **Instances without a bottom level** are left out (mask 0) through an empty bottom level, never a null reference:
-  an instance turning inactive or active between a top level's build and its refit is not allowed, and lost the device.
+- **Instances rays do not trace** (holes, casting no shadows, the GPU's own ids, a mesh without a bottom level) are
+  not in the top level at all: the CPU lists the rest for each build (`RayTracing`), with the bottom level each names,
+  and the build holds only those. A refit keeps the very list of its build; any change to it builds anew (an instance
+  turning inactive or active between a build and its refit is not allowed, and lost the device).
 - **Shaders** import `raytracing.slang` for `occluded(scene, origin, direction, tMin, tMax)`, a ray query that stops at
   the first hit, and `triangleMaterial(scene, instance, primitive)`, the material id of a triangle hit.
 - **Segments in batches** (`SegmentTracing`, for audio occlusion): a technique in the main view (it modifies
@@ -1669,7 +1674,7 @@ view.port().add(new ReferencePathTracer(geometry, rayTracing, view, Format.R32G3
   flakes at hits.
 - **Images:** `TRUESIM_SCREENSHOTS=true` renders the Cornell box (`reference-cornell.png`, 512 x 512, 4,096 samples in
   23 s on an RX 9070 XT; 1.3 % noise left in 4 x 4 pixel means) and the demo's scene from where the demo starts
-  (engine-demo's `ReferenceScreenshots`: `reference-demo.png` beside the visibility buffer's `raster-demo.png`; 1280 x
+  (the samples' `ReferenceScreenshots`: `reference-demo.png` beside the visibility buffer's `raster-demo.png`; 1280 x
   720, 1,024 samples, 2.0 ms a sample).
 
 **The diffuse weight** (`Keys.SURFACE_DIFFUSE`, a fourth surface output beside screen-space reflections' three,
@@ -1762,8 +1767,8 @@ reference's tests are small (32 x 32 pixels) for a CPU's ray tracing.
 The second and third stages (S1, S2): occlusion at small scale and diffuse light that bounces, each a slot that can
 be `off`, replacing exactly what shading added through the surface outputs or the indirect-light table.
 
-**Ambient occlusion** (`AmbientOcclusion`, one per view at `Anchor.OPAQUE` after the background, before
-reflections; `render.ao`, `AmbientOcclusion.SLOT`): the cosine-weighted share of the hemisphere open within the
+**Ambient occlusion** (`AmbientOcclusion`, one per view at `Order.SCREEN_SPACE_OCCLUSION`: after the background,
+before reflections; `render.ao`, `AmbientOcclusion.SLOT`): the cosine-weighted share of the hemisphere open within the
 kind's `radius` (0.5 m). Each kind's tunables are its record (`AmbientOcclusion.Gtao`, `Bitmask`, `Rays`), under
 `render.ao.<kind>.*`; a game's own kind builds in its place (`docs/custom-techniques.md`).
 
@@ -2132,8 +2137,9 @@ try (Presenter presenter = new Presenter(graph, instance)) {
   bases, by device address, for a game's own passes and shaders.
 - **Modifiers:** a technique listing a key in `modifies()` takes it after its provider with `g.modify(key)` and
   writes it in place (transparency over the scene, decals) or provides a new version (a post effect). Modifiers of a
-  key run in their `order()`: at an `Anchor` (`OPAQUE`, `TRANSPARENT`, `POST`, `TONE_MAP`, `UI`), then after or
-  before other techniques by `id()` (ids of techniques not in the graph are ignored), else in the order added. So a
+  key run in their `order()`: at an `Anchor` (`OPAQUE`, `TRANSPARENT`, `POST`, `TONE_MAP`, `UI`) or a named order
+  point inside one (`Order.SKY`, `Order.SCREEN_SPACE_OCCLUSION`, `Order.SCREEN_SPACE_LIGHTING`: libraries place
+  themselves by what they do, never by another library's ids), then after or before other techniques by `id()` (ids of techniques not in the graph are ignored), else in the order added. So a
   chain such as exposure, bloom, tone mapping needs no rewiring when an effect is added or removed, and a plugin can
   place its own effect in it; whoever requires the key gets its last version. A modifier nothing needs is never built.
   `graph.remove(id)` removes a technique by its id.
@@ -2624,78 +2630,12 @@ try (Headset headset = Headset.connect("true-sim")) {
 }
 ```
 
-## Demo
+## Samples
 
-`./gradlew :engine-demo:run` opens rolling terrain with 800 rocks (some spinning, some glowing), the sun with cascaded
-shadows and colored lights circling the middle, to try what the engine does live: the keys print at start and the
-title shows the frame rate, GPU time, render size and display encoding. Settings persist in
-`~/.truesim/demo.properties`.
-
-- With a sound device, six rocks drop ahead of the camera and knock where they land (the `Audio` plugin; without a
-  device it plays silently).
-- `-Pcharacter=<glTF-Sample-Assets>/Models/Fox/glTF/Fox.gltf` puts the Khronos fox in a clearing at (26, 26), through
-  the whole animation path: surveying, cross-fading into a walk that speeds up into a run (a blend space) and back, its
-  head looking at a circling light, its tail after a wagging point (FABRIK with limits), its four feet on the terrain
-  (foot placement), skinned on the GPU; its animator runs in the `Animation` plugin. The stereo bench takes it too,
-  with `-Peye=x,y,z,tx,ty,tz` for a camera of its own (`g+h` for heights above the ground), `-Pframes=780` and
-  `-PpngFrames=108,612 -Ppng=fox.png` for images.
-- `-Peffect=x,y,z` (`g+h` for heights above the ground) plays the demo's particle effects there in the stereo bench:
-  a fountain of sparks and trailed streaks over a column of smoke, an orb circling it with a ribbon, and a beam.
-- `./gradlew :engine-demo:stereoBench -Pfoxes=1000 -Pcrowd=<path to Fox.gltf> [-PfoxLod=true]` adds a crowd of foxes,
-  each with the whole rig and a GPU-skinned copy, and reports what animating them costs per frame. On a Ryzen 9
-  9950X3D and RX 9070 XT (2026-11-02), 1000 foxes: CPU 1.75 ms in the animators and 1.69 ms in the scene sync, GPU
-  0.27 ms skinning 1000 copies; with level of detail by distance (every frame within 15 m, every second to 40 m, every
-  fourth beyond) 0.77 ms and 0.70 ms, GPU 0.12 ms skinning 350. The scene sync poses only the copies whose joints
-  moved, found in the scene's log (or every copy, when most of what they watch moved). With `--args="rays"` (the sun's
-  shadows ray-traced inline, visibility buffer shading) every copy's bottom level is refitted as it is skinned: 1000
-  foxes 0.30 to 0.37 ms a frame on the GPU ("bottom level refits"; the top level 0.04 ms), with level of detail 0.13 ms
-  for 350 (2026-11-02). `-PrebuildEvery=n` rebuilds each copy's level every n refits.
-- `--args="--vr"` adds a headset through OpenXR (SteamVR, Quest Link, ...): both eyes render the scene, the left
-  thumbstick walks, triggers buzz, `P` shows the left eye on the desktop for people watching.
-- `--args="--validation"` turns Vulkan validation on and prints the error count at exit; `--seconds=10` quits by
-  itself; `--probe` prints what the main view's scene color holds now and then.
-- `./gradlew :engine-demo:streamBench` flies over a grid of cells for 30 s at 90 Hz: cells coming into range (3 each
-  way, 7 x 7; `-Prange=n` for n) get meshes built on worker threads (three rocks and the cell's ground tile, 24 x 24
-  quads at the world's heights, so the ground stays put under the rocks), a texture, materials and instances, those
-  leaving lose them. It reports frame work percentiles, GPU time per frame and the slowest frames with what happened
-  in them (`--args=rays` builds bottom levels too, `large` streams 131,000-triangle ground tiles and 2048 x 2048
-  textures, `heavy` 295,000-triangle tiles and 4096 x 4096 textures, `direct` stages them on the frame's thread
-  instead of preparing them on the loaders', `inframe` copies them in the frame instead of on the transfer queue). GPU
-  time per frame includes the frame start, where textures' copies and mip chains are recorded
-  (`GpuTimings.frameStartMillis`). `--args=window` (with any of the others, e.g. `--args="window large"`) shows the
-  same fly-over, camera path and streaming in a resizable window instead, 10 cells each way (21 x 21, the ground 250
-  m ahead) unless `-Prange` says otherwise, at 60 m/s rather than 10 (`-Pspeed=n` sets either; + and - change it
-  live, Space pauses: the `stream` actions, rebindable in the settings), paced by the display, until the window is closed (`-Pseconds=n`: for n
-  seconds), with the profiler's frame graph overlay on (F3 toggles it, Shift+F3 the detailed profiler) and a line at
-  the bottom: cells in range, meshes and textures added and removed in the last second, what is on the GPU, the
-  speed; it prints no report. `-Pmemory=n` prints memory by kind every n frames (GPU by category, VMA's heaps, LWJGL's
-  native memory, direct buffers, the heap, the process); `-Pframes=n` runs n frames instead of 2,700.
-- `./gradlew :engine-demo:stereoBench` times the scene drawn for two eyes at a Quest 3's eye size, offscreen, pass by
-  pass and grouped by kind (`--args="visibility"` for the visibility buffer, `-Procks=20000` for more rocks,
-  `shared` for one set of shadow cascades, `rebuild` for what rebuilds and resizes cost the render thread, `noshadows`
-  without the sun's cascades, `-Ppng=<file>` to write the left eye as a window shows it: through `DisplayTransform`'s
-  exposure and ACES curve on the GPU, sRGB-encoded). `capture` writes frame 100 for RenderDoc through its
-  in-application API, offscreen; launch the benchmark's `java` with `renderdoccmd capture -c <file>`.
-- `./gradlew :engine-demo:showcase -Pcrowd=<path to Fox.gltf>` is the effects showcase: 100 foxes roaming an arena at
-  dusk (a third surveying, the rest walking and running on rings, animation level of detail by distance), every one
-  kicking up dust where its feet come down and ten of them burning over their skinned meshes (upward-facing skin the
-  most, through a mask baked from the mesh); a bonfire and eight swaying torches; a fireworks show of twelve launchers
-  firing in waves, each burst a flash lighting the ground and the foxes; blasts throwing rocks that bounce and cast
-  shadows, hail and sparks settling, swirls, a dust devil and gusting wind, ribbons and beams circling above. Fire is
-  content only: flipbooks of flame tongues, embers and smoke puffs (with normals) made from noise when it starts, in
-  layers (a hot core, tongues cooling from white to red as they rise, embers, lit smoke, a flickering particle light).
-  `-Pout=<folder> -Pframes=900 -Pfirst=300 -Pevery=2 [-Psize=1920x1080] [-Pcamera=orbit|keys:t,x,y,z,tx,ty,tz;...|
-  follow:fox,distance,height,side] [-Pstills=360,720]` writes tone-mapped PNG frames (60 Hz simulated, every second
-  frame: 30 fps). `--args=measure` gives complete frame times in stereo at 2064 x 2208 per eye, offscreen without
-  present: on a Ryzen 9 9950X3D and RX 9070 XT (2026-11-02), about 12,000 particles alive, a frame takes 2.79 ms from
-  start to start (99th percentile 3.94, worst 4.08); the main thread 2.14 ms (scene update 0.24, animation 0.21,
-  effects sync 0.28, recording and submitting the graph 1.42), the GPU 2.61 ms from its first pass to its last; 401 of
-  1080 frames waited for the GPU.
-- Keys, all input actions (`DemoActions`, rebound in the settings file as `input.demo.*`): `1`/`2` forward or
-  visibility buffer shading, `H` HDR, `T` tone curve, `[`/`]` exposure, `V` present mode, `F`/`F11` window mode, `R`
-  dynamic resolution, `-`/`=` render scale, `G` GPU-timed dynamic resolution (`,`/`.` its target), `O` occlusion
-  culling, `N` a second window, `F5` or `Ctrl+S` save, `Escape` quit. A gamepad moves and looks with its sticks,
-  rises and sinks with its shoulders and switches HDR, the tone curve, exposure and the render scale.
+The demo, the effects showcase, the stream and stereo benchmarks, the UI gallery and the UI and profiler benchmark
+suites live in [true-sim/samples](https://github.com/true-sim/samples): programs built on the published engine
+modules, everything loaded through the scene's asset manager and drawn through the scene. The engine's own CI runs
+the engine's tests only.
 
 ## Building
 
@@ -2704,6 +2644,11 @@ optional locally. Tests open hidden windows. Without a display, set `SDL_VIDEO_D
 
 CI does that on Mesa's lavapipe through build-logic's `setup-vulkan` action. The action pins and caches the Vulkan
 packages and sets `TRUESIM_REQUIRE_VALIDATION=true`, so the Vulkan tests fail when the validation layer is not active.
+On pull requests the longest modules' tests (engine-render, engine-scene, engine-ui) run in ten parallel shards,
+balanced by the seconds each test class took on CI (`ci/test-timings.txt`, refreshed with `ci/timings.py` from a
+run's reports): `./gradlew :engine-render:test -Ptruesim.shard=3/10 -Ptruesim.shardModules=engine-render` runs one
+shard locally, `./gradlew testShards` with the same properties prints what it holds. The last job, `build`, checks
+those modules' coverage from every shard's data together (`-Ptruesim.mergedCoverage=true`).
 
 Exclusive fullscreen is only tested when `TRUESIM_TEST_FULLSCREEN` is set, because it changes the monitor's mode.
 
@@ -2714,6 +2659,22 @@ system property `truesim.gpu`) chooses another, for the tests too: a type (`disc
 A lost device's `DeviceLostException` says what the driver saw, where the GPU has `VK_EXT_device_fault`: the kind of
 fault, its address and the buffer that holds it. To have the validation layer check shader reads and writes as they
 run, build the instance with `gpuAssistedValidation(true)` (much slower).
+
+**GPU test fixtures** are published with the modules (Gradle `testFixtures`), for the tests of any repo building on the
+engine (effects-*, plugins-*, samples) as for the engine's own:
+
+- `engine-vulkan`: `TestGpu` (a headless, validated device; the test is skipped without a Vulkan 1.3 GPU, fails on
+  validation errors, and with `TRUESIM_REQUIRE_VALIDATION=true` without the layer), `Readback` (RGBA8 pixels back on
+  the CPU) and `ReferenceImages` (screenshots against PNGs kept with the tests, within a tolerance per channel and a
+  share of pixels; differences written to `build/reference-diffs`, `TRUESIM_UPDATE_REFERENCES=true` writes the
+  references).
+- `engine-graph`: `TestTarget`, a frame graph output read back after each frame.
+- `engine-render`: `TestRenderer` (pool, scene, meshlet renderer, render view, graph and target set up as the engine's
+  tests do) and `TestMeshes` (quad, box, walls, rock, terrain, built in code).
+
+```kotlin
+testImplementation(testFixtures("com.truesim.engine:engine-render:<version>"))
+```
 
 Mistakes made here once, each with its evidence and the rule that follows, are in [docs/pitfalls.md](docs/pitfalls.md);
 add to it what is verified, nothing else.

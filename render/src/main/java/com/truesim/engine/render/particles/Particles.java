@@ -20,6 +20,7 @@ import com.truesim.engine.render.layout.ParticlePush;
 import com.truesim.engine.render.layout.ParticleSpawnLayout;
 import com.truesim.engine.render.layout.ParticleSourceLayout;
 import com.truesim.engine.render.GeometryPool;
+import com.truesim.engine.render.RadixSort;
 import com.truesim.engine.render.GpuScene;
 import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.engine.render.MeshletRenderer;
@@ -407,7 +408,7 @@ public final class Particles implements AutoCloseable {
             made[7] = GpuBuffer.deviceLocal(device, 8 * events, GPU_USAGE, Particles.queues(device));
             made[8] = GpuBuffer.deviceLocal(device, 8 * events, GPU_USAGE, Particles.queues(device));
             made[9] = GpuBuffer.deviceLocal(device, 32, GPU_USAGE | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, Particles.queues(device));
-            made[10] = GpuBuffer.deviceLocal(device, 4L * 16 * (events / ParticleConstants.SORT_GROUP), GPU_USAGE, Particles.queues(device));
+            made[10] = GpuBuffer.deviceLocal(device, RadixSort.histogramBytes(events), GPU_USAGE, Particles.queues(device));
             made[11] = GpuBuffer.deviceLocal(device, 4 * events, GPU_USAGE, Particles.queues(device));
             made[12] = GpuBuffer.deviceLocal(device, 4L * ParticleConstants.LIGHT_STATE_WORDS
                 * (ParticleConstants.MAX_LIGHT_EMITTERS + 1), GPU_USAGE, Particles.queues(device));

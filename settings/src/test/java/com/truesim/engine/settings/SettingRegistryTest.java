@@ -101,4 +101,29 @@ class SettingRegistryTest {
             () -> new SettingRegistry().add(SHADOWS, SIZE).add(impostor, SOFT).check())
             .withMessageContaining("two groups have the id 'graphics'");
     }
+
+    @Test
+    void everyDeclaredSettingIsDiscoveredWithoutAHardList() {
+        EngineSettings settings = new EngineSettings();
+        SettingRegistry registry = new SettingRegistry().add(SHADOWS, SIZE, SOFT).addHidden(SCALE, CACHE)
+            .addSlots(GRAPHICS, TechniquesTest.SLOT);
+        assertThat(registry.slots()).containsExactly(TechniquesTest.SLOT);
+        assertThat(registry.all()).as("without the kinds, the slot's choice alone")
+            .containsExactly(SIZE, SOFT, SCALE, CACHE, TechniquesTest.SLOT.setting());
+        registry.techniques(settings.techniques());
+        settings.techniques().register(TechniquesTest.SLOT, TechniquesTest.GAME); // a mod's kind, registered later
+        assertThat(registry.all()).containsAll(settings.techniques().settings(TechniquesTest.SLOT))
+            .contains(TechniquesTest.HORIZONS.setting("radius")).doesNotHaveDuplicates();
+        assertThat(registry.all("shadows")).containsExactly(SIZE, SOFT);
+        assertThat(registry.all("test")).contains(TechniquesTest.SLOT.setting(), TechniquesTest.MASK.setting("quality"))
+            .doesNotContain(SIZE);
+        assertThat(registry.all("shadows.size")).containsExactly(SIZE);
+        assertThat(registry.all("shadow")).as("whole words only").isEmpty();
+        assertThat(registry.setting("test.ao.horizons.radius")).isSameAs(TechniquesTest.HORIZONS.setting("radius"));
+        assertThat(registry.setting("cache.size")).isSameAs(CACHE);
+        assertThat(registry.setting("nothing.here")).isNull();
+        // Two plugins registering one setting alike share it; another way still throws
+        registry.addHidden(CACHE).addSlots(GRAPHICS, TechniquesTest.SLOT);
+        assertThatIllegalArgumentException().isThrownBy(() -> registry.add(AUDIO, CACHE));
+    }
 }

@@ -690,14 +690,12 @@ public final class RenderView implements AutoCloseable {
      */
     long sortOffset(int part) {
         long keys = sortCapacity();
-        long groups = (keys + com.truesim.engine.render.layout.ParticleConstants.SORT_GROUP - 1)
-            / com.truesim.engine.render.layout.ParticleConstants.SORT_GROUP;
         long blocks = (keys + 1023) / 1024;
         long at = 0;
         for (int i = 0; i < part; i++) { // each part 256-byte aligned; allocates nothing
             long size = switch (i) {
                 case 0, 1 -> 8 * keys;
-                case 2 -> 64 * groups;
+                case 2 -> RadixSort.histogramBytes(keys);
                 case 3 -> 128;
                 case 4 -> 8 * blocks;
                 case 5 -> 12L * Materials.MAX_BINS;

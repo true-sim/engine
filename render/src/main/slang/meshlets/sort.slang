@@ -7,7 +7,7 @@
 //
 // sortArgsMain sizes the dispatches; sortKeysMain writes a key per listed meshlet (its shading bin above 24 bits of its
 // squared distance, inverted: farthest first; 0xffffffff for one not drawn, which sorts last) and its slot. The radix
-// sort is particles/sort.slang's (count, scan, scatter, 4 bits a pass): 6 passes over the distance, then, where the
+// sort is blocks/sort.slang's (count, scan, scatter, 4 bits a pass): 6 passes over the distance, then, where the
 // runs are more than the slots, 2 over the shading bin. sortBlocksMain counts the runs (a
 // new one where the shading bin changes) and indices of each block of SORT_BLOCK keys, sortScanMain scans the blocks,
 // sortPlaceMain writes each meshlet's slot into the split list in the sorted order, its first index (the indexed path)
@@ -33,7 +33,7 @@ struct BlendedSortPush
     uint room;                // shading bins the split lists have room for
     uint slots;               // run slots drawn
     uint indexed;             // 1: the indexed path, whose meshlets get index ranges in the sorted order
-    uint group;               // keys per group of the radix sort (particle.slang's SORT_GROUP)
+    uint group;               // keys per group of the radix sort (blocks/radix.slang's SORT_GROUP)
     uint final;               // sortScanMain: 0, the first count (whether the runs fit the slots); 1, the last
 };
 
@@ -43,7 +43,7 @@ ConstantBuffer<BlendedSortPush> push;
 /** Keys a block of sortBlocksMain and sortPlaceMain takes: 4 a thread. */
 static const uint SORT_BLOCK = 1024;
 static const uint BLOCK_THREADS = 256;
-/** The words of args: the radix sort's dispatch (and key count at 3), as particles/sort.slang reads them. */
+/** The words of args: the radix sort's dispatch (and key count at 3), as blocks/sort.slang reads them. */
 static const uint ARGS_SORT = 0;
 static const uint ARGS_KEYS = 4;      // a dispatch of 64-thread groups over the keys
 static const uint ARGS_DRAWN = 7;     // keys of meshlets drawn

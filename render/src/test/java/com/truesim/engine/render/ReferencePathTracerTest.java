@@ -469,6 +469,19 @@ class ReferencePathTracerTest {
         return frames(frames);
     }
 
+    /** Metallic-roughness (plain and clear-coated) and glow on quads: what test/singleHitPair.slang switches over. */
+    private void twoTypes() {
+        materials.register(Glow.TYPE);
+        int white = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.8f, 0.8f, 1))).feature(LAMBERT));
+        int coated = materials.add(new Material(MR.withBaseColor(new Color(0.2f, 0.4f, 0.9f, 1)).withRoughness(0.3f))
+            .feature(com.truesim.engine.render.materials.ClearcoatParameters.DEFAULTS));
+        int glow = materials.add(new Material(GlowParameters.DEFAULTS.withStrength(2)));
+        wall(0, white, 0, -1, -2, UP, 3);
+        wall(1, glow, -0.7f, 0, -2, DOWN, 0.4f);
+        wall(4, coated, 0.3f, -0.8f, -1.8f, UP, 0.3f);
+        camera.set(0, -0.5, -1, 0, 1, 0, Math.PI / 2, size, size, 0.01);
+    }
+
     /** The types test/singleHit.slang switches over, registered in its order; a material of each on quads. */
     private void everyType() {
         materials.register(Glow.TYPE);
@@ -587,12 +600,29 @@ class ReferencePathTracerTest {
 
     @Test
     void oneShaderSwitchingOverTheTypesShadesHitsAsTheirBinsDo() {
+        twoTypes();
+        assertSwitchedAsBinned("shaders/test/singleHitPair.spv");
+    }
+
+    /**
+     * The same over every type the hit shading benchmark registers (test/singleHit.slang): its shader is one function
+     * of five inlined type shadings, which Mesa's lavapipe (CI) takes 25 minutes to compile, so it runs with the
+     * benchmark's other checks.
+     */
+    @Test
+    @org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable(named = "TRUESIM_BENCHMARK", matches = "true")
+    void oneShaderSwitchingOverEveryTypeShadesHitsAsTheirBinsDo() {
         everyType();
+        assertSwitchedAsBinned("shaders/test/singleHit.spv");
+    }
+
+    /** Renders what is set up binned by shading bin, then with {@code shader} switching over the types: alike. */
+    private void assertSwitchedAsBinned(String shader) {
         traced(0, null);
         float[] binned = frames(16);
         graph.close();
         graph = new FrameGraph(device, 2);
-        traced(0, null).singleHitShader("shaders/test/singleHit.spv", "singleHitMain");
+        traced(0, null).singleHitShader(shader, "singleHitMain");
         float[] switched = frames(16);
         assertThat(graph.passes()).doesNotContain("reference bins 0", "reference scatter 0");
         double worst = 0;

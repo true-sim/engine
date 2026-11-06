@@ -158,18 +158,29 @@ class MusicRenderTest {
             .stinger(Stinger.of("hit"), ref(() -> Clips.constant(RATE, 0.1f, RATE / 2), "hit"), Quantize.NEXT_BEAT)
             .duck(-12).build();
         music.play(score, A);
-        play(BAR, false);
+        float[] first = play(BAR, true);
+        // The bed starts at the schedule point of the first update that finds its clip ready: the first update's, or
+        // a later one's when the generated clip was handed over after it. Its beats count from there (pitfalls.md)
+        int bed = first(first, 0, 0.5f * CENTRE);
+        assertThat(bed).as("the bed started").isNotNegative();
         // A game asks for a stinger long after its score primed it; here the bar went by in a second at most, so
         // wait for the clip and take it from the cache (ready means handed over, which drainCompleted does)
         long deadline = System.nanoTime() + 10_000_000_000L;
         while (cache.loadingCount() > 0 && System.nanoTime() < deadline) {
             Thread.sleep(1);
+            tasks.drainCompleted();
         }
-        tasks.drainCompleted();
+        long asked = renderer.clock().schedulePoint();
         music.stinger(Stinger.of("hit"));
         float[] out = play(RATE, true);
-        // ducked: the bed at -12 dB (0.125) plus the stinger's 0.1, centred
-        assertThat((double) out[2 * (RATE / 4)]).isCloseTo((0.125 + 0.1) * CENTRE, within(0.01));
+        // On the bed's next beat at or after the schedule point it was asked at, to the sample: the bed and the
+        // stinger's 0.1 together there, the duck only beginning
+        long beat = BAR / 4;
+        long expected = bed + (asked - bed + beat - 1) / beat * beat;
+        int start = (int) (expected - BAR);
+        assertThat(first(out, 0, (0.5f + 0.1f) * CENTRE)).as("the stinger on the bed's beat").isEqualTo(start);
+        // ducked once the duck's 50 ms ramp is done: the bed at -12 dB (0.125) plus the stinger's 0.1, centred
+        assertThat((double) out[2 * (start + RATE / 10)]).isCloseTo((0.125 + 0.1) * CENTRE, within(0.01));
         float[] later = play(RATE, true);
         assertThat((double) later[2 * (RATE - 1_000)]).as("back after it").isCloseTo(0.5 * CENTRE, within(0.01));
         music.stop(Quantize.IMMEDIATE, 0.01);

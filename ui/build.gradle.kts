@@ -2,6 +2,7 @@ plugins {
     id("truesim.java-library-conventions")
     id("truesim.allocation-free")
     id("truesim.slang")
+    `java-test-fixtures`
 }
 
 description = "Engine UI for true-sim: the UI's renderer (a frame graph technique), its input actions and pointers."
@@ -29,10 +30,10 @@ dependencies {
     testImplementation(testFixtures("com.truesim.ui:ui-gizmo:0.10.0"))
     testImplementation(testFixtures("com.truesim.ui:ui-scene:0.10.0")) // the scene rig and fake camera source
     testImplementation("com.truesim.scene:scene-meshbuild:0.66.0") // meshes for picking and panels
-    testImplementation(project(":engine-bench")) // the benchmark scenes (UiScenes) the batching benchmark compares
     testImplementation("com.truesim.ui:ui-text-native:0.10.0")
     testImplementation("com.truesim.ui:ui-fonts-cjk:0.10.0") // bundled fonts: the same text on every machine
     testImplementation("com.truesim.ui:ui-fonts-emoji:0.10.0") // colour emoji in the text field test
+    // UiScenes: the UI renderer's benchmark scenes, for the batching benchmark here and the samples' UI suite
 }
 
 // The UI shader's constants (ui/primitive.slang) as Java, checked against ui-core's Primitive by a test.

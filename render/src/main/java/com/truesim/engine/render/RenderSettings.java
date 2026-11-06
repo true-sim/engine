@@ -3,16 +3,15 @@ package com.truesim.engine.render;
 import com.truesim.engine.render.shadows.ShadowSettings;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.settings.Setting;
+import com.truesim.engine.settings.SettingRegistry;
 import com.truesim.engine.settings.TechniqueConfig;
 import com.truesim.engine.settings.TechniqueKind;
 import com.truesim.engine.settings.TechniqueSlot;
 import com.truesim.engine.vulkan.RecordBuffer;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
- * The render module's settings: those of no single technique, and every render setting together, for an options
- * screen or a console. Techniques read them from the frame graph's settings unless given their own value.
+ * The render module's settings: those of no single technique, and the core renderer's registration of its settings
+ * for discovery ({@link #register}). Techniques read them from the frame graph's settings unless given their own value.
  */
 public final class RenderSettings {
 
@@ -72,12 +71,6 @@ public final class RenderSettings {
     public static final Setting<Integer> STREAM_BUDGET = Setting.integer("render.streamBudget", 64, 0, 4096,
         "MiB a frame of streamed meshes and textures copied on the transfer queue (0: in the frame)");
 
-    /**
-     * Every render setting: these, transparency's and screen-space reflections', the light clusters', the world
-     * light grid's, the reference path tracer's, the shadows' and the display transform's.
-     */
-    public static final List<Setting<?>> ALL = all();
-
     private RenderSettings() {
     }
 
@@ -97,27 +90,18 @@ public final class RenderSettings {
         });
     }
 
-    private static List<Setting<?>> all() {
-        List<Setting<?>> all = new ArrayList<>();
-        all.add(OCCLUSION);
-        all.add(INTERPOLATION);
-        all.add(CHANGE_LIST);
-        all.add(CHANGE_LIST_CHUNK);
-        all.add(STREAM_BUDGET);
-        all.add(Transparency.SLOT.setting());
-        all.add(Transparency.SORTED_RUNS);
-        all.addAll(ScreenSpaceReflections.ALL);
-        all.addAll(SelectionOutline.ALL);
-        all.addAll(AmbientOcclusion.ALL);
-        all.addAll(Denoiser.ALL);
-        all.add(ProbeVolumeLighting.SLOT.setting());
-        all.addAll(ProbeVolume.ALL);
-        all.addAll(RadianceCascades.ALL);
-        all.addAll(ClusteredLights.ALL);
-        all.addAll(WorldLights.ALL);
-        all.addAll(ReferencePathTracer.ALL);
-        all.addAll(ShadowSettings.ALL);
-        all.addAll(DisplayTransform.ALL);
-        return List.copyOf(all);
+    /**
+     * Registers the core renderer's settings in {@code registry} for discovery ({@link SettingRegistry#all(String)}):
+     * these, the transparency's, the selection's, the light clusters', the shadows', the denoiser's and the display
+     * transform's, slots with their kinds' tunables, hidden. {@link RenderPlugin} calls it; a library's plugin registers
+     * its own techniques' settings the same way, so nothing lists them by hand.
+     */
+    public static void register(SettingRegistry registry) {
+        registry.addHiddenSlots(INTERPOLATION_SLOT, Transparency.SLOT, SelectionOutline.SLOT, DisplayTransform.SLOT)
+            .addHidden(OCCLUSION, CHANGE_LIST, CHANGE_LIST_CHUNK, STREAM_BUDGET, Transparency.SORTED_RUNS)
+            .addHidden(ClusteredLights.ALL.toArray(new Setting<?>[0]))
+            .addHidden(ShadowSettings.ALL.toArray(new Setting<?>[0]))
+            .addHidden(Denoiser.ALL.toArray(new Setting<?>[0]))
+            .addHidden(DisplayTransform.ALL.toArray(new Setting<?>[0]));
     }
 }

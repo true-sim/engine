@@ -69,6 +69,9 @@ public final class GpuScene implements AutoCloseable {
     private final GeometryPool pool;
     private int capacity;
     private final RecordBuffer instances; // the GPU's, device-local, uploading at the start of each frame
+    // Per id, its mesh word as last written (mesh, live, casts shadows), 0 for a hole or an id the GPU writes: what
+    // ray tracing reads to leave out of its top level what has nothing to trace.
+    private int[] meshWords;
     private final ExternalBuffer graphBuffer; // the instances as a frame graph imports them, set anew as they grow
     private final List<Runnable> growth = new ArrayList<>(); // what follows the table's size: views' buffers
     private long[] used;
@@ -110,6 +113,7 @@ public final class GpuScene implements AutoCloseable {
         instances = new RecordBuffer(device, INSTANCE_BYTES, capacity, slots); // zeros: every id a hole
         graphBuffer = new ExternalBuffer("instances", instances.buffer());
         used = new long[(capacity + 63) / 64];
+        meshWords = new int[capacity];
         defaultMaterials = new Materials(device, 1);
         table = com.truesim.engine.vulkan.FrameBuffer.create(device, SceneTableLayout.BYTES,
             org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
@@ -266,6 +270,7 @@ public final class GpuScene implements AutoCloseable {
         int grown = (int) Math.min(Integer.MAX_VALUE - 64, Math.max(2L * capacity, atLeast));
         instances.grow(grown);
         used = Arrays.copyOf(used, (grown + 63) / 64);
+        meshWords = Arrays.copyOf(meshWords, grown);
         capacity = grown;
         graphBuffer.set(instances.buffer());
         for (Runnable follower : growth) {
@@ -457,7 +462,9 @@ public final class GpuScene implements AutoCloseable {
         m.set(FLOAT, o + InstanceLayout.POSITION, hx);
         m.set(FLOAT, o + InstanceLayout.POSITION + 4, hy);
         m.set(FLOAT, o + InstanceLayout.POSITION + 8, hz);
-        m.set(INT, o + InstanceLayout.MESH, mesh | LIVE | (castsShadows ? CASTS_SHADOWS : 0));
+        int word = mesh | LIVE | (castsShadows ? CASTS_SHADOWS : 0);
+        m.set(INT, o + InstanceLayout.MESH, word);
+        meshWords[instances.pendingIndex(entry)] = word; // by id: the entry is its place among the changes
         m.set(FLOAT, o + InstanceLayout.SCALE, sx);
         m.set(FLOAT, o + InstanceLayout.SCALE + 4, sy);
         m.set(FLOAT, o + InstanceLayout.SCALE + 8, sz);
@@ -485,6 +492,7 @@ public final class GpuScene implements AutoCloseable {
             return;
         }
         instances.clear(id); // a hole
+        meshWords[id] = 0;
         version++;
         used[id >>> 6] &= ~(1L << id);
         count--;
@@ -504,9 +512,8 @@ public final class GpuScene implements AutoCloseable {
     /**
      * Reserves {@code count} consecutive ids for the GPU to write (mesh particles, effects.md §3), the lowest run free,
      * the table grown if there is none: the CPU never writes them and the upload never scatters into them; they start
-     * as holes. They are below {@link #highWater()}, so culling and the top level count them; ray tracing leaves them
-     * out (mask 0, an empty bottom level), so the top level, which stands while {@link #version()} does, stays right
-     * while the GPU moves them. One range at a time; returns its first id.
+     * as holes. They are below {@link #highWater()}, so culling counts them; ray tracing leaves them out of its top
+     * level, which stands while {@link #version()} does, so it stays right while the GPU moves them. One range at a time; returns its first id.
      */
     public int reserveGpuRange(int count) {
         if (count < 1) {
@@ -531,6 +538,7 @@ public final class GpuScene implements AutoCloseable {
         for (int id = first; id < first + count; id++) {
             used[id >>> 6] |= 1L << id;
             instances.clear(id); // a hole until the GPU writes it
+            meshWords[id] = 0;
         }
         gpuFirst = first;
         gpuCount = count;
@@ -547,6 +555,7 @@ public final class GpuScene implements AutoCloseable {
         gpuFirst = 0;
         for (int id = first; id < first + count; id++) {
             instances.clear(id);
+            meshWords[id] = 0;
             used[id >>> 6] &= ~(1L << id);
         }
         firstFreeWord = Math.min(firstFreeWord, first >>> 6);
@@ -554,6 +563,15 @@ public final class GpuScene implements AutoCloseable {
             highWater--;
         }
         version++;
+    }
+
+    /**
+     * The mesh of instance {@code id} if it casts shadows (what rays trace), else -1: a hole, an id the GPU writes, an
+     * instance casting none. As written last, before the upload. Allocates nothing.
+     */
+    public int tracedMesh(int id) {
+        int word = id < meshWords.length ? meshWords[id] : 0;
+        return (word & LIVE) != 0 && (word & CASTS_SHADOWS) != 0 ? word & MESH_BITS : -1;
     }
 
     /** The first id of the range the GPU writes. */

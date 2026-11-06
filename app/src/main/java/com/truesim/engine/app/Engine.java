@@ -85,7 +85,7 @@ public final class Engine implements AutoCloseable {
 
     private final Application app;
     private final EngineSettings settings = new EngineSettings();
-    private final SettingRegistry registry = new SettingRegistry();
+    private final SettingRegistry registry = new SettingRegistry().techniques(settings.techniques()); // slots' tunables
     private final TaskScheduler tasks = new TaskScheduler();
     private final Frame frame = new Frame();
     private final Step fixedStep = new Step();
@@ -311,7 +311,7 @@ public final class Engine implements AutoCloseable {
         return settings;
     }
 
-    /** The settings registry, for options screens. */
+    /** The settings registry: every setting the plugins declared, for options screens, consoles and discovery. */
     public SettingRegistry registry() {
         return registry;
     }

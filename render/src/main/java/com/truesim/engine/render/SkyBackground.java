@@ -3,7 +3,6 @@ package com.truesim.engine.render;
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.common.graph.Id;
 import com.truesim.engine.graph.Access;
-import com.truesim.engine.graph.Anchor;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.Key;
@@ -17,7 +16,7 @@ import java.util.Objects;
 
 /**
  * An {@link Environment} shown behind a view's scene: every pixel no surface covers takes the environment along its
- * direction, turned and scaled as the environment is. It modifies {@link Keys#SCENE_COLOR} at {@link Anchor#OPAQUE},
+ * direction, turned and scaled as the environment is. It modifies {@link Keys#SCENE_COLOR} at {@link Order#SKY},
  * before transparency, so glass shows it; lighting by the environment is {@link EnvironmentLighting}'s, chosen apart
  * (a view may show one environment and be lit by another, or show none: AR passthrough, a product on a plain color).
  * One per view, under one id. Shares the environment's filtering with {@link EnvironmentLighting}.
@@ -86,7 +85,7 @@ public final class SkyBackground implements Technique {
 
     @Override
     public Order order() {
-        return Order.at(Anchor.OPAQUE);
+        return Order.at(Order.SKY);
     }
 
     @Override

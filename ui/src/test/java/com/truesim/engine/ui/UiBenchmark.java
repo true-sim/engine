@@ -1,6 +1,6 @@
 package com.truesim.engine.ui;
 
-import com.truesim.engine.bench.UiScenes;
+import com.truesim.engine.ui.testing.UiScenes;
 import com.truesim.engine.graph.GpuTimings;
 import com.truesim.engine.render.Keys;
 import com.truesim.ui.core.draw.DrawList;
@@ -16,8 +16,8 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  * of 100,000 glyphs, each drawn with both batchings (UI15: one draw per layer, or a draw per run of a kind), and the CPU
  * cost of submitting an unchanged frame. GPU time is the UI pass's plus the frame start's (uploads), from the graph's
  * timings; configurations take turns round after round, after warm-up rounds, and every round's median is printed
- * (pitfalls.md). The scenes are engine-bench's ({@link UiScenes}), whose suite ({@code :engine-bench:uiBench}) records
- * section 11's numbers; this compares the batchings. Run without validation and without JaCoCo:
+ * (pitfalls.md). The scenes are engine-ui's test fixtures' ({@link UiScenes}), whose suite (the samples'
+ * {@code :bench:uiBench}) records section 11's numbers; this compares the batchings. Run without validation and without JaCoCo:
  * {@code TRUESIM_BENCHMARK=true ./gradlew :engine-ui:test --tests '*UiBenchmark'}.
  */
 @EnabledIfEnvironmentVariable(named = "TRUESIM_BENCHMARK", matches = "true")

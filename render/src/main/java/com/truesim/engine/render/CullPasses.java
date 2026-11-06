@@ -33,8 +33,7 @@ import com.truesim.engine.render.layout.CommonConstants;
 import com.truesim.engine.render.layout.CullPush;
 import com.truesim.engine.render.layout.ExpandPush;
 import com.truesim.engine.render.layout.InstancePush;
-import com.truesim.engine.render.layout.ParticleConstants;
-import com.truesim.engine.render.layout.ParticleSortPush;
+import com.truesim.engine.render.layout.SortPush;
 import com.truesim.engine.render.layout.SplitPush;
 import com.truesim.engine.render.layout.ViewLayout;
 import com.truesim.engine.vulkan.Barriers;
@@ -94,8 +93,8 @@ final class CullPasses implements AutoCloseable {
     private final Pipeline splitLayout;
     private final Pipeline splitScatter;
     private final Pipeline[] splitStages; // the three in order, never written
-    // Sorting a view's split bin by distance (meshlets/sort.slang), with the particles' radix sort (count, scan,
-    // scatter: particles/sort.slang).
+    // Sorting a view's split bin by distance (meshlets/sort.slang), with the core's radix sort (count, scan,
+    // scatter: blocks/sort.slang, RadixSort).
     private final Pipeline sortArgs;
     private final Pipeline sortKeys;
     private final Pipeline sortBlocks;
@@ -137,16 +136,16 @@ final class CullPasses implements AutoCloseable {
             splitScatter = Pipeline.compute(device, splitShader, "splitScatterMain", SplitPush.BYTES);
         }
         try (ShaderModule sortShader = ShaderModule.load(device, "shaders/meshlets/sort.spv");
-             ShaderModule radixShader = ShaderModule.load(device, "shaders/particles/sort.spv")) {
+             ShaderModule radixShader = ShaderModule.load(device, RadixSort.SHADER)) {
             sortArgs = Pipeline.compute(device, sortShader, "sortArgsMain", BlendedSortPush.BYTES);
             sortKeys = Pipeline.compute(device, sortShader, "sortKeysMain", BlendedSortPush.BYTES);
             sortBlocks = Pipeline.compute(device, sortShader, "sortBlocksMain", BlendedSortPush.BYTES);
             sortScan = Pipeline.compute(device, sortShader, "sortScanMain", BlendedSortPush.BYTES);
             sortPlace = Pipeline.compute(device, sortShader, "sortPlaceMain", BlendedSortPush.BYTES);
             sortEntries = Pipeline.compute(device, sortShader, "sortEntriesMain", BlendedSortPush.BYTES);
-            radixCount = Pipeline.compute(device, radixShader, "sortCountMain", ParticleSortPush.BYTES);
-            radixScan = Pipeline.compute(device, radixShader, "sortScanMain", ParticleSortPush.BYTES);
-            radixScatter = Pipeline.compute(device, radixShader, "sortScatterMain", ParticleSortPush.BYTES);
+            radixCount = Pipeline.compute(device, radixShader, "sortCountMain", SortPush.BYTES);
+            radixScan = Pipeline.compute(device, radixShader, "sortScanMain", SortPush.BYTES);
+            radixScatter = Pipeline.compute(device, radixShader, "sortScatterMain", SortPush.BYTES);
         }
         splitStages = new Pipeline[] {splitCount, splitLayout, splitScatter};
         int storage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
@@ -440,9 +439,9 @@ final class CullPasses implements AutoCloseable {
             memPutInt(push + BlendedSortPush.ROOM, v.splitCategories());
             memPutInt(push + BlendedSortPush.SLOTS, Math.max(1, v.sortSlots()));
             memPutInt(push + BlendedSortPush.INDEXED, meshShading ? 0 : 1);
-            memPutInt(push + BlendedSortPush.GROUP, ParticleConstants.SORT_GROUP);
-            long radix = stack.ncalloc(8, 1, ParticleSortPush.BYTES);
-            memPutLong(radix + ParticleSortPush.HISTOGRAM, base + v.sortOffset(2));
+            memPutInt(push + BlendedSortPush.GROUP, RadixSort.GROUP);
+            long radix = stack.ncalloc(8, 1, SortPush.BYTES);
+            memPutLong(radix + SortPush.HISTOGRAM, base + v.sortOffset(2));
             sortStep(commands, sortArgs, push, -1, 0);
             sortStep(commands, sortKeys, push, handle, argsOffset + 16);
             // Over the distance's 24 bits, then (where the runs need it) the shading bin's 8:
@@ -484,28 +483,28 @@ final class CullPasses implements AutoCloseable {
     }
 
     /**
-     * {@code passes} passes of the particles' radix sort from digit {@code first} over the keys at {@code keys} (and
+     * {@code passes} passes of the core's radix sort from digit {@code first} over the keys at {@code keys} (and
      * {@code other}), its dispatch and key count at {@code argsOffset} of buffer {@code handle} ({@code args}).
      */
     private void radix(VkCommandBuffer commands, long push, long handle, long argsOffset, long args, long keys,
         long other, int first, int passes) {
-        memPutLong(push + ParticleSortPush.ARGS, args);
+        memPutLong(push + SortPush.ARGS, args);
         for (int pass = first; pass < first + passes; pass++) {
             boolean even = (pass - first) % 2 == 0;
-            memPutLong(push + ParticleSortPush.SOURCE, even ? keys : other);
-            memPutLong(push + ParticleSortPush.TARGET, even ? other : keys);
-            memPutInt(push + ParticleSortPush.SHIFT, 4 * pass);
+            memPutLong(push + SortPush.SOURCE, even ? keys : other);
+            memPutLong(push + SortPush.TARGET, even ? other : keys);
+            memPutInt(push + SortPush.SHIFT, 4 * pass);
             sortBarrier(commands);
             radixCount.bind(commands);
-            radixCount.push(commands, push, ParticleSortPush.BYTES);
+            radixCount.push(commands, push, SortPush.BYTES);
             Commands.dispatchIndirect(commands, handle, argsOffset);
             sortBarrier(commands);
             radixScan.bind(commands);
-            radixScan.push(commands, push, ParticleSortPush.BYTES);
+            radixScan.push(commands, push, SortPush.BYTES);
             Commands.dispatch(commands, 1, 1, 1);
             sortBarrier(commands);
             radixScatter.bind(commands);
-            radixScatter.push(commands, push, ParticleSortPush.BYTES);
+            radixScatter.push(commands, push, SortPush.BYTES);
             Commands.dispatchIndirect(commands, handle, argsOffset);
         }
     }

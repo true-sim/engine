@@ -15,6 +15,7 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
 import static org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
+import com.truesim.engine.render.RadixSort;
 import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.Buffer;
@@ -748,7 +749,7 @@ class ParticlesTest {
             frame(FRAME);
         }
         particles.eventSort(Particles.EVENTS_EITHER);
-        assertThat(sent).as("over a radix group, within the small sort").isGreaterThan(ParticleConstants.SORT_GROUP)
+        assertThat(sent).as("over a radix group, within the small sort").isGreaterThan(RadixSort.GROUP)
             .isLessThanOrEqualTo(ParticleConstants.EVENT_SMALL);
         assertThat(runs[0][0]).hasSizeGreaterThan(1000);
         assertThat(runs[0][1]).hasSize(700);

@@ -5,7 +5,9 @@ import java.util.Objects;
 /**
  * A named point in the order of the techniques that modify a result: techniques placed at an earlier anchor run first.
  * The built-in anchors follow the frame: the opaque scene, then what is drawn over it, post effects, tone mapping and
- * the UI. Plugins place their techniques at an anchor and, within it, after or before others by id ({@link Order}).
+ * the UI. Plugins place their techniques at an anchor, or at a named order point inside one ({@link Order#SKY} and the
+ * others: anchors of ranks between), and after or before others by id ({@link Order}). A library adding a point of its
+ * own makes an anchor of a rank inside the span it belongs to.
  *
  * @param name what it is called, for messages
  * @param rank where it is: lower runs first

@@ -3,7 +3,6 @@ package com.truesim.engine.render;
 import static com.truesim.testing.AllocationAssertions.assertAllocationFree;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
-import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_D32_SFLOAT;
@@ -18,6 +17,8 @@ import static org.lwjgl.vulkan.VK10.vkCmdCopyImageToBuffer;
 
 import com.truesim.common.math.color.Color;
 import com.truesim.engine.graph.ExternalImage;
+import com.truesim.engine.render.testing.TestMeshes;
+import com.truesim.engine.render.testing.TestRenderer;
 import com.truesim.engine.graph.FrameGraph;
 import com.truesim.engine.graph.Technique;
 import com.truesim.engine.render.materials.IorParameters;
@@ -27,12 +28,8 @@ import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
-import com.truesim.engine.vulkan.VulkanException;
-import com.truesim.engine.vulkan.VulkanInstance;
+import com.truesim.engine.vulkan.testing.TestGpu;
 import com.truesim.scene.assets.mesh.MeshData;
-import com.truesim.scene.assets.mesh.VertexAttribute;
-import com.truesim.scene.assets.mesh.VertexFormat;
-import com.truesim.scene.meshbuild.MeshBuilder;
 import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -56,7 +53,8 @@ class SortedTransparencyTest {
     private static final MetallicRoughnessParameters MR = MetallicRoughnessParameters.DEFAULTS;
     private static final int CENTER = (SIZE / 2) * SIZE + SIZE / 2;
 
-    private VulkanInstance instance;
+    private TestGpu gpu;
+    private TestRenderer rig;
     private VulkanDevice device;
     private GeometryPool pool;
     private GpuScene scene;
@@ -70,42 +68,24 @@ class SortedTransparencyTest {
 
     @BeforeEach
     void start() {
-        try {
-            instance = VulkanInstance.builder().applicationName("tests").validation(true)
-                .synchronizationValidation(true).surfaces(false).build();
-        } catch (VulkanException | UnsatisfiedLinkError e) {
-            assumeThat(e).as("no Vulkan available").isNull();
-            throw e;
-        }
-        assumeThat(instance.gpus()).as("no Vulkan 1.3 GPU").isNotEmpty();
-        device = VulkanDevice.createHeadless(instance.bestGpu());
-        pool = new GeometryPool(device, GeometryPool.Capacity.of(1 << 14, 256, 8));
-        quad = pool.add(quad());
-        scene = new GpuScene(device, pool, 1024);
-        renderer = new MeshletRenderer(device, scene, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT);
-        view = renderer.createView(ViewOptions.of(4096, 1 << 16).withOcclusion(true));
-        graph = new FrameGraph(device, 2);
-        target = image();
+        gpu = TestGpu.open(true); // synchronization validated too: the sorts' passes and barriers
+        device = gpu.device();
+        rig = gpu.closing(TestRenderer.of(device, SIZE, SIZE));
+        pool = rig.pool();
+        scene = rig.scene();
+        renderer = rig.renderer();
+        view = rig.view();
+        graph = rig.graph();
+        quad = rig.add(TestMeshes.quad());
+        target = gpu.closing(image());
         output = external(target);
-        pixels = GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        pixels = gpu.closing(GpuBuffer.hostVisible(device, SIZE * SIZE * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT));
     }
 
     @AfterEach
     void stop() {
-        if (device != null) {
-            device.waitIdle();
-            int errors = instance.validationErrors();
-            graph.close();
-            pixels.close();
-            target.close();
-            renderer.close();
-            scene.close();
-            pool.close();
-            device.close();
-            instance.close();
-            assertThat(errors).as("validation errors").isZero();
-        } else if (instance != null) {
-            instance.close();
+        if (gpu != null) {
+            gpu.close(); // fails on validation errors
         }
     }
 
@@ -120,47 +100,6 @@ class SortedTransparencyTest {
             | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         return new ExternalImage("target", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(image.handle(), image.view());
-    }
-
-    /** A 2 x 2 quad in the xy plane facing +z. */
-    private static MeshData quad() {
-        float[] positions = {-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0};
-        float[] normals = {0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1};
-        return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL), 4).positions(positions)
-            .attribute(VertexAttribute.NORMAL, normals).submesh(new int[] {0, 1, 2, 0, 2, 3}).buildFlat();
-    }
-
-    /**
-     * Two parallel walls of {@code n} x {@code n} quads, 2 x 2, at z = +0.5 (submesh 0) and z = -0.5 (submesh 1): many
-     * meshlets each, as the front and back walls of a glass bowl.
-     */
-    private static MeshData walls(int n) {
-        int side = (n + 1) * (n + 1);
-        float[] positions = new float[2 * side * 3];
-        float[] normals = new float[2 * side * 3];
-        int[][] indices = new int[2][n * n * 6];
-        for (int wall = 0; wall < 2; wall++) {
-            for (int y = 0; y <= n; y++) {
-                for (int x = 0; x <= n; x++) {
-                    int v = wall * side + y * (n + 1) + x;
-                    positions[3 * v] = 2f * x / n - 1;
-                    positions[3 * v + 1] = 2f * y / n - 1;
-                    positions[3 * v + 2] = wall == 0 ? 0.5f : -0.5f;
-                    normals[3 * v + 2] = 1;
-                }
-            }
-            int at = 0;
-            for (int y = 0; y < n; y++) {
-                for (int x = 0; x < n; x++) {
-                    int a = wall * side + y * (n + 1) + x;
-                    int[] q = {a, a + 1, a + n + 2, a, a + n + 2, a + n + 1};
-                    System.arraycopy(q, 0, indices[wall], at, 6);
-                    at += 6;
-                }
-            }
-        }
-        return new MeshBuilder(VertexFormat.of(VertexAttribute.NORMAL), 2 * side).positions(positions)
-            .attribute(VertexAttribute.NORMAL, normals).submesh(indices[0]).submesh(indices[1]).buildFlat();
     }
 
     /** Glowing glass of color (r, g, b) and {@code alpha}, double-sided; with {@code ior}, in a shading bin apart. */
@@ -298,7 +237,7 @@ class SortedTransparencyTest {
     @Test
     void aDoubleWallDrawsItsFarWallFirst() {
         // One instance, its two walls of many meshlets each: only sorting meshlets, not instances, orders them.
-        int walls = pool.add(walls(12));
+        int walls = pool.add(TestMeshes.walls(12));
         float[] red = {1, 0, 0, 0.6f};
         float[] blue = {0, 0, 1, 0.6f};
         try (Materials materials = new Materials(device, 8)) {
@@ -429,7 +368,7 @@ class SortedTransparencyTest {
     void classicLodSortsWithinAShadingBin() {
         float[] red = {1, 0, 0, 0.6f};
         float[] blue = {0, 0, 1, 0.6f};
-        MeshData mesh = quad();
+        MeshData mesh = TestMeshes.quad();
         try (Materials materials = new Materials(device, 8);
              ClassicLodGeometry classic = new ClassicLodGeometry(device, renderer, VK_FORMAT_R8G8B8A8_UNORM,
                  VK_FORMAT_D32_SFLOAT, 64)) {

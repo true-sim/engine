@@ -10,6 +10,7 @@ import static org.lwjgl.vulkan.VK10.VK_IMAGE_LAYOUT_UNDEFINED;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 import static org.lwjgl.vulkan.VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
+import com.truesim.engine.render.RadixSort;
 import com.truesim.common.state.ChangeClock;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.Buffer;
@@ -216,7 +217,7 @@ class ParticleSortTest {
         graph.close();
         particles.close();
         build(ParticlePool.SLOT_BYTES * 80_000L);
-        for (int n : new int[] {1, ParticleConstants.SORT_GROUP - 1, ParticleConstants.SORT_GROUP + 1, 70_000}) {
+        for (int n : new int[] {1, RadixSort.GROUP - 1, RadixSort.GROUP + 1, 70_000}) {
             // Two sorted emitters, the second's keys above the first's; many equal distances among 70,000 in a ball
             Effect small = effects.play(EffectData.builder().emitter("e", e -> e.capacity(5).spawn(Spawn.burst(0, 5))
                 .init(Shape.sphere(1), Init.lifetime(100)).render(Renderer.billboard(Renderer.Facing.POSITION)))

@@ -31,7 +31,6 @@ import com.truesim.engine.graph.Store;
 import com.truesim.engine.render.layout.ClassicPush;
 import com.truesim.engine.render.layout.ClassicSortPush;
 import com.truesim.engine.render.layout.CommonConstants;
-import com.truesim.engine.render.layout.ParticleConstants;
 import com.truesim.engine.render.layout.SelectPush;
 import com.truesim.engine.vulkan.Barriers;
 import com.truesim.engine.vulkan.Commands;
@@ -726,7 +725,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
 
     /**
      * The blended parts of view {@code view}'s draw list {@code list} sorted farthest first within each part
-     * (classic/sort.slang, with the particles' radix sort): per blended part (unmirrored, then mirrored, each shading
+     * (classic/sort.slang, with the core's radix sort): per blended part (unmirrored, then mirrored, each shading
      * bin) {@code maxDraws} commands, in order. Passes of this build.
      */
     @AllowAllocation("building the graph, when it changes")
@@ -740,8 +739,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         String name = "classic LOD blended sort, view " + view.index();
         Buffer keys = g.createBuffer(name + " keys", 8 * draws);
         Buffer other = g.createBuffer(name + " keys, other", 8 * draws);
-        long groups = (draws + ParticleConstants.SORT_GROUP - 1) / ParticleConstants.SORT_GROUP;
-        Buffer histogram = g.createBuffer(name + " counts", 64 * groups);
+        Buffer histogram = g.createBuffer(name + " counts", RadixSort.histogramBytes(draws));
         Buffer args = g.createBuffer(name + " args", 4L * (4 + 2 * categories));
         Buffer sorted = g.createBuffer(name + " commands", COMMAND_BYTES * draws);
         String shader = "shaders/classic/sort.spv";
@@ -760,7 +758,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
             .read(args, BufferAccess.STORAGE_READ).write(keys, BufferAccess.STORAGE_WRITE)
             .record(ctx -> ctx.dispatch(keysProgram, common(ctx, keysPush, view, list, categories)
                 .args(ctx.address(args)).keys(ctx.address(keys)), x, y, 1));
-        RadixPasses.add(g, name, args, keys, other, histogram, 8);
+        RadixSort.add(g, name, args, keys, other, histogram, 8);
         ClassicSortPush placePush = new ClassicSortPush();
         g.pass(name + " place").read(list, BufferAccess.STORAGE_READ).read(args, BufferAccess.STORAGE_READ)
             .read(keys, BufferAccess.STORAGE_READ).write(sorted, BufferAccess.STORAGE_WRITE)
@@ -774,7 +772,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         int categories) {
         return push.view(view.address()).scene(renderer.scene().tableAddress()).draws(ctx.address(list))
             .records(ctx.address(list) + recordsOffset(categories)).categories(categories).maxDraws(maxDraws)
-            .group(ParticleConstants.SORT_GROUP);
+            .group(RadixSort.GROUP);
     }
 
     /** Selects view {@code view}'s draws into the draw list at {@code list}. */
