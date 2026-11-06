@@ -84,9 +84,10 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     env:
-      # lavapipe compiles shaders through LLVM, minutes for the largest; its disk cache keeps them for this PR's reruns
-      MESA_SHADER_CACHE_DIR: ${{ github.workspace }}/.mesa-shader-cache
-      MESA_SHADER_CACHE_MAX_SIZE: 4G
+      # DIAGNOSTIC (to be removed): no shader disk cache (a stale entry would run wrong code), and lavapipe running
+      # shaders on the submitting thread, so a crash's log shows the Java stack: which test, pass and dispatch
+      MESA_SHADER_CACHE_DISABLE: "true"
+      LP_NUM_THREADS: "0"
     steps:
       - uses: actions/checkout@v7
       - uses: true-sim/build-logic/.github/actions/setup-vulkan@61314fb2c79472f89f95c8ffd001ee53e904b02a # main, 2026-10-27
@@ -95,11 +96,6 @@ jobs:
           distribution: temurin
           java-version: 27
       - uses: gradle/actions/setup-gradle@v6
-      - uses: actions/cache@v6
-        with:
-          path: .mesa-shader-cache
-          key: mesa-shaders-${{ matrix.shard }}-${{ github.sha }}
-          restore-keys: mesa-shaders-${{ matrix.shard }}-
       - name: Tests of shard ${{ matrix.shard }}
         run: |
           tasks=()
