@@ -90,6 +90,12 @@ public final class Shadows implements AutoCloseable {
     private RayTracing rayTracing;
     private final List<View> views = new ArrayList<>();
     private final Stats stats = new Stats();
+    // Ray-traced lights of the frame, ranked for the budget; which were traced last frame
+    private int[] candidates = new int[16];
+    private double[] candidateRank = new double[16];
+    private int candidateCount;
+    private boolean[] wasTraced = new boolean[0];
+    private double tracedKeep;
 
     // Spot and point lights' maps, shared by every view: per light id.
     private Group[] shared = new Group[0];
@@ -174,6 +180,7 @@ public final class Shadows implements AutoCloseable {
         int waiting;
         int shrunk;
         int dropped;
+        int rayFallbacks;
         int layered;
         int moving;
         int overflowed;
@@ -204,6 +211,11 @@ public final class Shadows implements AutoCloseable {
         /** Tiles drawn this frame (the rest were kept). */
         public int drawn() {
             return drawn;
+        }
+
+        /** Ray-traced lights mapped instead this frame: more than {@link ShadowSettings#RAY_LIGHTS}. */
+        public int rayFallbacks() {
+            return rayFallbacks;
         }
 
         /** Of the tiles drawn, those whose layer of still casters was drawn again first. */
@@ -410,6 +422,8 @@ public final class Shadows implements AutoCloseable {
         }
         usedCount = 0;
         groupCount = 0;
+        tracedKeep = Maths.pow(2, settings.get(ShadowSettings.AUTO_HYSTERESIS));
+        stats.rayFallbacks = 0;
         stats.lights = 0;
         stats.mapped = 0;
         stats.traced = 0;
@@ -434,25 +448,21 @@ public final class Shadows implements AutoCloseable {
             boolean directional = type == 2;
             ShadowMethod method = spec.method();
             if ((method == ShadowMethod.RAY_TRACED || method == ShadowMethod.SOFT_RAY_TRACED) && tracing) {
-                stats.traced++;
-                for (int v3 = 0; v3 < views.size(); v3++) {
-                    View view = views.get(v3);
-                    view.traced(light, spec);
+                // Ranked once every light is seen: the most important within the budget traced, the rest mapped
+                double rank = directional ? Double.MAX_VALUE : spec.importance() * coverage(light, settings);
+                if (wasTraced[light]) {
+                    rank *= tracedKeep;
                 }
+                if (candidateCount == candidates.length) {
+                    growCandidates();
+                }
+                candidates[candidateCount] = light;
+                candidateRank[candidateCount++] = rank;
                 continue;
             }
-            stats.mapped++;
-            if (directional) {
-                for (int v4 = 0; v4 < views.size(); v4++) {
-                    View view = views.get(v4);
-                    if (view.anchor == null) {
-                        view.cascades(light, spec, settings);
-                    }
-                }
-            } else {
-                localMaps(light, spec, type, settings);
-            }
+            mapped(light, spec, type, directional, settings);
         }
+        traceMostImportant(settings);
         for (int light = 0; light < shared.length; light++) {
             if (shared[light] != null && !shared[light].usedNow) {
                 releaseGroup(shared[light]);
@@ -462,6 +472,92 @@ public final class Shadows implements AutoCloseable {
             View view = views.get(v5);
             view.releaseUnused();
         }
+        afterLights(atlasSize, settings);
+    }
+
+    /** Light {@code light}'s maps: the sun's cascades in each view, a spot or point light's tiles. */
+    private void mapped(int light, ShadowSpec spec, int type, boolean directional, EngineSettings settings) {
+        stats.mapped++;
+        if (directional) {
+            for (int v4 = 0; v4 < views.size(); v4++) {
+                View view = views.get(v4);
+                if (view.anchor == null) {
+                    view.cascades(light, spec, settings);
+                }
+            }
+        } else {
+            localMaps(light, spec, type, settings);
+        }
+    }
+
+    /**
+     * Traces the most important of the frame's ray-traced lights, {@link ShadowSettings#RAY_LIGHTS} at most (directional
+     * ones first, then by how big their reach shows, those traced last frame kept a little longer: no flicker at the
+     * edge); the rest take maps (AUTO, their spec's bounds).
+     */
+    private void traceMostImportant(EngineSettings settings) {
+        // Most important first (an insertion sort: allocates nothing)
+        for (int i = 1; i < candidateCount; i++) {
+            int l = candidates[i];
+            double r = candidateRank[i];
+            int j = i - 1;
+            while (j >= 0 && candidateRank[j] < r) {
+                candidates[j + 1] = candidates[j];
+                candidateRank[j + 1] = candidateRank[j];
+                j--;
+            }
+            candidates[j + 1] = l;
+            candidateRank[j + 1] = r;
+        }
+        Arrays.fill(wasTraced, false);
+        int budget = settings.get(ShadowSettings.RAY_LIGHTS);
+        for (int i = 0; i < candidateCount; i++) {
+            int light = candidates[i];
+            ShadowSpec spec = lights.shadow(light);
+            int type = lights.type(light);
+            if (i < budget || type == 2) {
+                stats.traced++;
+                wasTraced[light] = true;
+                for (int v3 = 0; v3 < views.size(); v3++) {
+                    View view = views.get(v3);
+                    view.traced(light, spec);
+                }
+            } else {
+                stats.rayFallbacks++;
+                mapped(light, spec, type, false, settings);
+            }
+        }
+        candidateCount = 0;
+    }
+
+    /** How many pixels across a light's reach shows, the most of any view (many: a view within it). */
+    private double coverage(int light, EngineSettings settings) {
+        double x = lights.position(light, 0);
+        double y = lights.position(light, 1);
+        double z = lights.position(light, 2);
+        float range = lights.range(light);
+        double reach = Float.isInfinite(range) ? Math.sqrt(lights.brightness(light)
+            / settings.get(ClusteredLights.CUTOFF)) : range;
+        double pixels = 0;
+        for (int v = 0; v < views.size(); v++) {
+            Camera camera = views.get(v).view.camera();
+            double ex = x - camera.position(0);
+            double ey = y - camera.position(1);
+            double ez = z - camera.position(2);
+            double d = Math.sqrt(ex * ex + ey * ey + ez * ez);
+            pixels = Math.max(pixels, d <= reach ? MANY : camera.projectionScale() * reach / (d - reach));
+        }
+        return pixels;
+    }
+
+    @AllowAllocation("growing with the lights")
+    private void growCandidates() {
+        candidates = Arrays.copyOf(candidates, candidates.length * 2);
+        candidateRank = Arrays.copyOf(candidateRank, candidateRank.length * 2);
+    }
+
+    /** The rest of the frame's preparation, once every light's shadows are placed. */
+    private void afterLights(int atlasSize, EngineSettings settings) {
         if (usedCount > 0) {
             mapsUsedNow();
         }
@@ -509,6 +605,7 @@ public final class Shadows implements AutoCloseable {
     @AllowAllocation("growing with the lights")
     private void grow() {
         shared = Arrays.copyOf(shared, lights.capacity());
+        wasTraced = Arrays.copyOf(wasTraced, lights.capacity());
         for (int v6 = 0; v6 < views.size(); v6++) {
             View view = views.get(v6);
             view.grow(lights.capacity());

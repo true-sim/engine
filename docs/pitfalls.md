@@ -72,6 +72,20 @@ in `submit` the bytes come from was not found.
 
 ## Frame graph
 
+**Thousands of barriers overflowed the memory stack.** A pass's barriers were laid out on LWJGL's thread stack (64 KiB)
+in one array: a shadow atlas drawing 1,200 tiles (a view each, its lists' buffers barriered) had about 9,700 barriers,
+and the Gradle test executor died with "Out of stack space" (the error escaped the test).
+- Proof: `ShadowsBenchmark` with `shadows.atlas.draws` 1,200 failed so; with `-Dorg.lwjgl.system.stackSize=8192` it
+  ran; with barriers recorded in batches of 256 (`PassCommands.barriers`) it runs at the default stack.
+- Rule: native arrays sized by the scene (views, tiles, barriers) go in fixed-size batches, or off the stack.
+
+**A single frame slot counts no frames.** `FrameSlots.frames()` stays put when the graph records with one slot
+(`submitAndWait(graph::record)`, as tests do), so a "frames since" measure based on it never advanced: moving casters
+never settled into the still layers.
+- Proof: `ShadowOwnerTest.movingCastersDrawnOverTheStillLayerMatchEveryCasterDrawn` printed every caster still flagged
+  moving 12 frames after its last move; counting frames prepared (`Shadows.prepare`) fixed it.
+- Rule: count your own frames for anything timed in frames.
+
 **A write is visible to nothing until a barrier.** The compiler once marked a write's own stage and access visible, so
 a storage write followed by a read in the same stage got no barrier (the depth pyramid read zeros).
 - Proof: [#133](https://github.com/true-sim/engine/pull/133).

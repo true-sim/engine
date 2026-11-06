@@ -137,11 +137,19 @@ public final class ShadowSettings {
      */
     public static final Setting<Integer> CASTER_SETTLE = Setting.integer("shadows.casters.settle", 30, 1, 100_000,
         "frames a caster counts as moving after its last move, before maps draw it with the still ones");
+    /**
+     * Ray-traced spot and point lights traced in a frame, at most: the most important (by how big their reach shows,
+     * times their importance); the rest take maps (AUTO within their spec's bounds). Each traced light is a mask per
+     * view, traced over the view's pixels (and soft ones denoised over them): 200 traced point lights took 220 ms a
+     * frame at 1920 x 1080 (README). Directional lights are always traced.
+     */
+    public static final Setting<Integer> RAY_LIGHTS = Setting.integer("shadows.rays.lights", 16, 0, 256,
+        "spot and point lights traced in a frame at most, the most important; the rest take maps");
     /** Every shadow setting. */
     public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, RAY_OFFSET,
         CASTER_DETAIL, ATLAS_SIZE, ATLAS_DRAWS, TILE_DRAWS, TILE_TRIANGLES, AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF,
         MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, CASTER_FACES, CASTER_LAYERS, CASTER_SETTLE, SOFT_RAYS, SOFT_DENOISER,
-        SOFT_PASSES, RAY_QUEUE, KEEP_ROUNDS);
+        SOFT_PASSES, RAY_QUEUE, KEEP_ROUNDS, RAY_LIGHTS);
 
     private ShadowSettings() {
     }

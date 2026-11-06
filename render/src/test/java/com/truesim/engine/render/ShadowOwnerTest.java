@@ -566,6 +566,35 @@ class ShadowOwnerTest {
         return true;
     }
 
+    /**
+     * Past {@link ShadowSettings#RAY_LIGHTS} traced lights, the least important take maps: two point lights over the
+     * quad (the camera within both: equally important) with room for one; the first traced, the second mapped, and the
+     * quad's shadow cast by the bright one either way; the traced one stays traced (no flicker); room for both traces
+     * both.
+     */
+    @Test
+    void tracedLightsOverTheBudgetTakeMaps() {
+        assumeThat(rays()).as("no ray tracing").isTrue();
+        newGraph(visibility());
+        graph.settings().set(ShadowSettings.RAY_LIGHTS, 1);
+        lights.point(0, 0, -1, -5, 20, 60, 60, 60);
+        lights.shadow(0, ShadowSpec.rayTraced());
+        lights.point(1, 0, -1.2, -5.5, 20, 0.001f, 0.001f, 0.001f); // all but dark
+        lights.shadow(1, ShadowSpec.rayTraced()).setCount(2);
+        expectShadow("the bright light traced", new double[] {1.4, -5.6, 1.8, -6.0}, new double[] {3, -2});
+        assertThat(shadows.stats().traced()).as("traced").isEqualTo(1);
+        assertThat(shadows.stats().rayFallbacks()).as("mapped instead").isEqualTo(1);
+        assertThat(shadows.stats().mapped()).isEqualTo(1);
+        lights.point(0, 0, -1.2, -5.5, 20, 0.001f, 0.001f, 0.001f);
+        lights.point(1, 0, -1, -5, 20, 60, 60, 60);
+        expectShadow("the bright light mapped", new double[] {1.4, -5.6, 1.8, -6.0}, new double[] {3, -2});
+        assertThat(shadows.stats().mapped()).as("the second still mapped").isEqualTo(1);
+        graph.settings().set(ShadowSettings.RAY_LIGHTS, 16);
+        frame();
+        assertThat(shadows.stats().traced()).as("room for both").isEqualTo(2);
+        assertThat(shadows.stats().rayFallbacks()).isZero();
+    }
+
     @Test
     void lightsCastByHardAndSoftRaysUnderBothShadings() {
         assumeThat(rays()).as("no ray tracing").isTrue();

@@ -149,6 +149,15 @@ void trace(ShadowTrace* t, uint slot, uint2 pixel, Point p, uint first, uint lit
     TraceSlot s = ((TraceSlot*)t.traceSlots)[slot];
     Light light = ((Light*)t.lights)[s.light];
     light.position = lessCamera(light.position, light.positionLow, t.cameraHigh, t.cameraLow);
+    if (light.type != DIRECTIONAL && first == 0)
+    {
+        float3 apart = light.position - p.position;
+        if (dot(apart, apart) > light.range * light.range)
+        {
+            writeMask(t, s, pixel, 1); // beyond its reach: it lights nothing here, no ray needed
+            return;
+        }
+    }
     float offset = t.offset * length(p.position) + 1.0e-3;
     RayScene* scene = (RayScene*)t.scene;
     for (uint ray = first; ray < s.rays; ray++)
