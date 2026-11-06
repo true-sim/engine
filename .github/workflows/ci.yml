@@ -19,7 +19,7 @@ permissions:
 
 env:
   SHARD_MODULES: engine-render,engine-scene,engine-ui
-  SHARDS: 6 # keep in step with the matrix below; ci/test-timings.txt: at most about 400 s of tests each
+  SHARDS: 6 # keep in step with the matrix below; ci/test-timings.txt: about 300 s of tests each
   GITHUB_ACTOR: ${{ github.actor }}
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
