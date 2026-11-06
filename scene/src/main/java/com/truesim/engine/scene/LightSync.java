@@ -17,7 +17,8 @@ import java.util.Objects;
  * {@link LightSource} takes a light id while it has one, set from the node's world transform (point and spot lights at
  * its origin, spot and directional lights along its -Z) and the light's colour times intensity (candela, or lux for a
  * directional light: the irradiance at 1 m), range and cone, and its {@link com.truesim.scene.core.ShadowSpec} (how
- * it casts shadows, which the engine's {@code Shadows} owner draws). Following moves (the scene's versions) and changes
+ * it casts shadows, which the engine's {@code Shadows} owner draws), and the node's {@link
+ * com.truesim.scene.core.Mobility} as the light's hint ({@link Lights#mobility}). Following moves (the scene's versions) and changes
  * made in place (the light's version); a node hidden (on no layer) or removed turns its light off.
  *
  * <pre>{@code
@@ -90,6 +91,7 @@ public final class LightSync {
             boolean visible = scene.layers(node) != 0;
             if (light.version() != lightVersions[slot] || version != nodeVersions[slot] || visible != shown[slot]) {
                 write(ids[slot], light, world, slot, visible);
+                lights.mobility(ids[slot], scene.mobility(node)); // a change of it is a change of the node's version
                 lightVersions[slot] = light.version();
                 nodeVersions[slot] = version;
                 shown[slot] = visible;

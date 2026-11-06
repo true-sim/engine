@@ -9,6 +9,7 @@ import com.truesim.engine.vulkan.FrameSlots;
 import com.truesim.engine.vulkan.GpuBuffer;
 import com.truesim.engine.vulkan.RecordBuffer;
 import com.truesim.engine.vulkan.VulkanDevice;
+import com.truesim.scene.core.Mobility;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
@@ -72,6 +73,13 @@ public final class GpuScene implements AutoCloseable {
     // Per id, its mesh word as last written (mesh, live, casts shadows), 0 for a hole or an id the GPU writes: what
     // ray tracing reads to leave out of its top level what has nothing to trace.
     private int[] meshWords;
+    // Per id, its mobility hint (CPU only; UNKNOWN, STILL or MOVING): what shadow maps read to keep casters apart
+    private byte[] mobility;
+    // The ids whose hint changed since the last upload (each once: listed), for what follows hints between moves
+    private int[] mobilityChanged = new int[16];
+    private int mobilityChangedCount;
+    private long[] mobilityListed;
+    private volatile boolean uploadsInPasses;
     private final ExternalBuffer graphBuffer; // the instances as a frame graph imports them, set anew as they grow
     private final List<Runnable> growth = new ArrayList<>(); // what follows the table's size: views' buffers
     private long[] used;
@@ -115,6 +123,8 @@ public final class GpuScene implements AutoCloseable {
         graphBuffer = new ExternalBuffer("instances", instances.buffer());
         used = new long[(capacity + 63) / 64];
         meshWords = new int[capacity];
+        mobility = new byte[capacity];
+        mobilityListed = new long[used.length];
         defaultMaterials = new Materials(device, 1);
         table = com.truesim.engine.vulkan.FrameBuffer.create(device, SceneTableLayout.BYTES,
             org.lwjgl.vulkan.VK12.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
@@ -159,7 +169,7 @@ public final class GpuScene implements AutoCloseable {
      * What an instance is ({@link #add(Instance)}, {@link #set(int, Instance)}): its mesh, materials from
      * {@code material} on, layers, whether it casts shadows, world position (doubles), rotation and scale; by name, not
      * fifteen numbers in a row. Mutable and reused: setting it allocates nothing. By default material 0, layer 0,
-     * casting shadows, at the origin, not turned, scale 1.
+     * casting shadows, at the origin, not turned, scale 1, its mobility not known.
      */
     public static final class Instance {
         private int mesh = -1;
@@ -176,6 +186,7 @@ public final class GpuScene implements AutoCloseable {
         private float sx = 1;
         private float sy = 1;
         private float sz = 1;
+        private Mobility mobility;
 
         /** The pool's mesh it draws. */
         public Instance mesh(int mesh) {
@@ -230,6 +241,12 @@ public final class GpuScene implements AutoCloseable {
         public Instance scale(float s) {
             return scale(s, s, s);
         }
+
+        /** Whether it is expected to move (null: not known, the default): {@link GpuScene#setMobility}. */
+        public Instance mobility(Mobility mobility) {
+            this.mobility = mobility;
+            return this;
+        }
     }
 
     /** Adds an instance as {@code instance} describes, under the lowest free id, and returns it. Allocates nothing. */
@@ -243,6 +260,7 @@ public final class GpuScene implements AutoCloseable {
     public void set(int id, Instance instance) {
         set(id, instance.mesh, instance.material, instance.layers, instance.castsShadows, instance.x, instance.y,
             instance.z, instance.qx, instance.qy, instance.qz, instance.qw, instance.sx, instance.sy, instance.sz);
+        setMobility(id, instance.mobility);
     }
 
     /** Writes the instance of entry {@code entry} ({@link #claim}) as {@code instance} describes. */
@@ -272,6 +290,8 @@ public final class GpuScene implements AutoCloseable {
         instances.grow(grown);
         used = Arrays.copyOf(used, (grown + 63) / 64);
         meshWords = Arrays.copyOf(meshWords, grown);
+        mobility = Arrays.copyOf(mobility, grown);
+        mobilityListed = Arrays.copyOf(mobilityListed, used.length);
         capacity = grown;
         graphBuffer.set(instances.buffer());
         for (Runnable follower : growth) {
@@ -494,6 +514,7 @@ public final class GpuScene implements AutoCloseable {
         }
         instances.clear(id); // a hole
         meshWords[id] = 0;
+        mobility[id] = UNKNOWN; // the removal is a change of its own: no hint change listed
         version++;
         used[id >>> 6] &= ~(1L << id);
         count--;
@@ -521,6 +542,7 @@ public final class GpuScene implements AutoCloseable {
                 continue;
             }
             used[id >>> 6] &= ~(1L << id);
+            mobility[id] = UNKNOWN;
             clearing[removedNow++] = id;
             lowestWord = Math.min(lowestWord, id >>> 6);
         }
@@ -730,6 +752,9 @@ public final class GpuScene implements AutoCloseable {
      */
     public void upload(VkCommandBuffer commands) {
         followMaterialBuffers();
+        if (!uploadsInPasses) { // as the records: listed until they upload
+            clearMobilityChanges();
+        }
         instances.upload(commands);
     }
 
@@ -742,13 +767,86 @@ public final class GpuScene implements AutoCloseable {
 
     /** From now on a frame graph's scene upload pass ({@link SceneData}) uploads the instances, not frame starts. */
     void uploadInPasses() {
+        uploadsInPasses = true;
         instances.uploadInPasses();
     }
 
     /** Uploads the instances for that pass, which declares it writes them with compute. */
     void uploadInPass(VkCommandBuffer commands) {
         followMaterialBuffers();
+        clearMobilityChanges();
         instances.uploadInPass(commands);
+    }
+
+    /** A mobility not known ({@link #mobilityHint}): nothing was said, or the instance was removed. */
+    public static final byte UNKNOWN = 0;
+    /** {@link Mobility#STATIC} as {@link #mobilityHint} gives it. */
+    public static final byte STILL = 1;
+    /** {@link Mobility#DYNAMIC} as {@link #mobilityHint} gives it. */
+    public static final byte MOVING = 2;
+
+    /**
+     * Says whether instance {@code id} is expected to move ({@link Mobility}, the scene node's; null: not known): a hint
+     * for what caches the instances (shadow maps keep still casters in layers of their own), never a promise: an
+     * instance marked static that moves is still drawn where it is. Not part of the GPU's record, so setting it uploads
+     * nothing; it lasts until set again or the instance is removed. Changes are listed until the next upload
+     * ({@link #mobilityChangedCount}). Allocates nothing.
+     */
+    public void setMobility(int id, Mobility hint) {
+        if (!contains(id)) {
+            throw new IllegalArgumentException("No instance " + id);
+        }
+        byte value = hint == null ? UNKNOWN : hint == Mobility.STATIC ? STILL : MOVING;
+        if (mobility[id] == value) {
+            return;
+        }
+        mobility[id] = value;
+        if ((mobilityListed[id >>> 6] & 1L << id) == 0) {
+            mobilityListed[id >>> 6] |= 1L << id;
+            if (mobilityChangedCount == mobilityChanged.length) {
+                growMobilityChanged();
+            }
+            mobilityChanged[mobilityChangedCount++] = id;
+        }
+    }
+
+    @AllowAllocation("growing with the most hints changed in a frame")
+    private void growMobilityChanged() {
+        mobilityChanged = Arrays.copyOf(mobilityChanged, 2 * mobilityChanged.length);
+    }
+
+    /** Instance {@code id}'s mobility hint: null if not known ({@link #setMobility}). */
+    public Mobility mobility(int id) {
+        byte value = mobilityHint(id);
+        return value == STILL ? Mobility.STATIC : value == MOVING ? Mobility.DYNAMIC : null;
+    }
+
+    /** Instance {@code id}'s mobility hint as a number: {@link #UNKNOWN}, {@link #STILL} or {@link #MOVING}. */
+    public byte mobilityHint(int id) {
+        return id >= 0 && id < mobility.length ? mobility[id] : UNKNOWN;
+    }
+
+    /**
+     * How many instances' hints changed since the last upload ({@link #setMobility}), each counted once; read as
+     * {@link #pendingCount} is, on the thread that writes, between frames.
+     */
+    public int mobilityChangedCount() {
+        return mobilityChangedCount;
+    }
+
+    /** The id of the {@code i}-th instance whose hint changed since the last upload; its hint now may be as before. */
+    public int mobilityChangedId(int i) {
+        Objects.checkIndex(i, mobilityChangedCount);
+        return mobilityChanged[i];
+    }
+
+    /** The hints' changes are seen: those of the next frame are listed from none. */
+    private void clearMobilityChanges() {
+        for (int i = 0; i < mobilityChangedCount; i++) {
+            int id = mobilityChanged[i];
+            mobilityListed[id >>> 6] &= ~(1L << id);
+        }
+        mobilityChangedCount = 0;
     }
 
     /** The instances' device address, for shaders: id i's record at {@code instanceAddress() + i * INSTANCE_BYTES}. */
