@@ -165,6 +165,14 @@ final class BottomLevels {
         try (MemoryStack stack = stackPush();
              GpuBuffer vertices = GpuBuffer.hostVisible(device, 36, usage)) {
             vertices.memory().fill((byte) 0);
+            // TEMPORARY (repro): the placeholder's triangle; degenerate (the default), inactive (NaN x) or a tiny one
+            String variant = System.getenv().getOrDefault("TRUESIM_EMPTY_LEVEL", "degenerate");
+            if (variant.equals("nan")) {
+                vertices.memory().set(java.lang.foreign.ValueLayout.JAVA_FLOAT, 0, Float.NaN);
+            } else if (variant.equals("tiny")) {
+                vertices.memory().set(java.lang.foreign.ValueLayout.JAVA_FLOAT, 12, 1e-3f);
+                vertices.memory().set(java.lang.foreign.ValueLayout.JAVA_FLOAT, 28, 1e-3f);
+            }
             VkAccelerationStructureGeometryKHR.Buffer geometry = VkAccelerationStructureGeometryKHR.calloc(1, stack)
                 .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR)
                 .geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR)
