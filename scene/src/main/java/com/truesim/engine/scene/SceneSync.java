@@ -525,7 +525,8 @@ public final class SceneSync implements AutoCloseable {
 
     /**
      * The pool mesh {@code node}'s renderable draws as: its deformed copy where it has one (posed as drawn), else its
-     * mesh; -1 while it is not on the GPU. What particles' mesh shapes emit from.
+     * mesh; -1 while it is not on the GPU. What a technique reads a node's drawn mesh through (a particle library's
+     * mesh shapes).
      */
     public int drawnMeshOf(long node) {
         int item = NodeHandle.index(node);
