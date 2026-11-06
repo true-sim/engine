@@ -1,6 +1,7 @@
 plugins {
     id("truesim.java-library-conventions")
     id("truesim.allocation-free")
+    `java-test-fixtures`
 }
 
 description = "Engine frame graph for true-sim: techniques plugged together by the results they provide and need."
@@ -10,4 +11,6 @@ dependencies {
     api(project(":engine-app"))
     api("com.truesim.common:common-jobs:0.3.2")
     api("com.truesim.common:common-graph:0.1.0") // resolution by key, culling and order; ids in the API
+    testFixturesApi(testFixtures(project(":engine-vulkan"))) // TestTarget: a graph's output read back on a test GPU
+    testImplementation(testFixtures(project(":engine-vulkan")))
 }

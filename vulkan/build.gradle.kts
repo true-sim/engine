@@ -2,6 +2,7 @@ plugins {
     id("truesim.java-library-conventions")
     id("truesim.allocation-free")
     id("truesim.slang")
+    `java-test-fixtures`
 }
 
 description = "Engine Vulkan layer for true-sim: instances, GPUs, devices, memory, surfaces and swapchains."
@@ -25,4 +26,7 @@ dependencies {
     // The Vulkan loader comes with the GPU driver on Windows and Linux; macOS needs MoltenVK.
     runtimeOnly("org.lwjgl:lwjgl-vulkan::natives-macos")
     runtimeOnly("org.lwjgl:lwjgl-vulkan::natives-macos-arm64")
+    // GPU test fixtures for every repo's tests (TestGpu, Readback, ReferenceImages): skipping without a GPU is JUnit's
+    testFixturesApi(platform(truesim.junit.bom))
+    testFixturesApi("org.junit.jupiter:junit-jupiter-api")
 }

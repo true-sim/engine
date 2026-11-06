@@ -2719,6 +2719,22 @@ A lost device's `DeviceLostException` says what the driver saw, where the GPU ha
 fault, its address and the buffer that holds it. To have the validation layer check shader reads and writes as they
 run, build the instance with `gpuAssistedValidation(true)` (much slower).
 
+**GPU test fixtures** are published with the modules (Gradle `testFixtures`), for the tests of any repo building on the
+engine (effects-*, plugins-*, samples) as for the engine's own:
+
+- `engine-vulkan`: `TestGpu` (a headless, validated device; the test is skipped without a Vulkan 1.3 GPU, fails on
+  validation errors, and with `TRUESIM_REQUIRE_VALIDATION=true` without the layer), `Readback` (RGBA8 pixels back on
+  the CPU) and `ReferenceImages` (screenshots against PNGs kept with the tests, within a tolerance per channel and a
+  share of pixels; differences written to `build/reference-diffs`, `TRUESIM_UPDATE_REFERENCES=true` writes the
+  references).
+- `engine-graph`: `TestTarget`, a frame graph output read back after each frame.
+- `engine-render`: `TestRenderer` (pool, scene, meshlet renderer, render view, graph and target set up as the engine's
+  tests do) and `TestMeshes` (quad, box, walls, rock, terrain, built in code).
+
+```kotlin
+testImplementation(testFixtures("com.truesim.engine:engine-render:<version>"))
+```
+
 Mistakes made here once, each with its evidence and the rule that follows, are in [docs/pitfalls.md](docs/pitfalls.md);
 add to it what is verified, nothing else.
 
