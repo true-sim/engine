@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: true-sim/build-logic/.github/actions/setup-vulkan@47c6756c3483a67959a40f9f9a99410faa89dc28 # mesa-26.2: Mesa 26.2.6
+      - uses: true-sim/build-logic/.github/actions/setup-vulkan@e0a629d995ca2143e4a69cbf6555674a4be4b89a # mesa-26.2: Mesa 26.2.6
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
