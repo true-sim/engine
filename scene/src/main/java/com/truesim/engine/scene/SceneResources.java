@@ -150,6 +150,21 @@ public final class SceneResources implements AutoCloseable {
     private final List<DynamicEntry> dynamicList = new ArrayList<>(); // by index: uploaded each frame
     private final int[] box = new int[6]; // a dynamic texture's change, read
     private long residency; // changes whenever held content comes onto the GPU or leaves it
+    // Releases scenes let go of, done in flush() within the frame budget (render.streamFrameBudget): a ring of meshes
+    // (with their user) and material blocks
+    private Mesh[] releaseMeshes = new Mesh[64];
+    private MeshUser[] releaseUsers = new MeshUser[64];
+    private MaterialSet[] releaseSets = new MaterialSet[64];
+    private int releaseHead;
+    private int releaseCount;
+    private long releaseBudget; // nanoseconds a frame, 0: all at once
+    // Meshes and textures made ready on the workers, placed in flush() within the same budget: a ring of the entry
+    // (Mesh or TextureEntry) and its task
+    private Object[] arrivals = new Object[64];
+    private Task<?>[] arrivalTasks = new Task<?>[64];
+    private int arrivalHead;
+    private int arrivalCount;
+    private com.truesim.engine.settings.EngineSettings.Subscription releaseWatch;
     private final MeshUser heldMeshes = mesh -> { }; // the techniques' holds: placed() counts the arrival
 
     /**
@@ -612,6 +627,8 @@ public final class SceneResources implements AutoCloseable {
         if (followed != null) { // render.streamBudget: the transfer queue's share of each frame, as set
             followBudget();
             budgetWatch = followed.onChange(com.truesim.engine.render.RenderSettings.STREAM_BUDGET, this::followBudget);
+            releaseWatch = followed.onChange(com.truesim.engine.render.RenderSettings.STREAM_FRAME_BUDGET,
+                this::followBudget);
             updateWatch = followed.onChange(com.truesim.engine.render.RenderSettings.TEXTURE_UPDATE_BUDGET,
                 this::followBudget);
         }
@@ -624,6 +641,7 @@ public final class SceneResources implements AutoCloseable {
         textures.streamBudget(bytes);
         textures.updateBudget((long) settings.get(com.truesim.engine.render.RenderSettings.TEXTURE_UPDATE_BUDGET)
             << 20);
+        releaseBudget = (long) (settings.get(com.truesim.engine.render.RenderSettings.STREAM_FRAME_BUDGET) * 1e6);
     }
 
     /** The settings scenes drawing these resources follow, or null. */
@@ -838,6 +856,79 @@ public final class SceneResources implements AutoCloseable {
         return mesh;
     }
 
+    /** {@link #releaseMesh(Mesh, MeshUser)} in a later {@link #flush}, within the frame budget. Allocates nothing. */
+    void releaseMeshLater(Mesh mesh, MeshUser user) {
+        queueRelease(mesh, user, null);
+    }
+
+    /** {@link #releaseSet} in a later {@link #flush}, within the frame budget. Allocates nothing. */
+    void releaseSetLater(MaterialSet set) {
+        queueRelease(null, null, set);
+    }
+
+    private void queueRelease(Mesh mesh, MeshUser user, MaterialSet set) {
+        if (releaseCount == releaseMeshes.length) {
+            growReleases();
+        }
+        int at = (releaseHead + releaseCount++) % releaseMeshes.length;
+        releaseMeshes[at] = mesh;
+        releaseUsers[at] = user;
+        releaseSets[at] = set;
+    }
+
+    @AllowAllocation("more releases waiting than before")
+    private void growReleases() {
+        int n = releaseMeshes.length;
+        Mesh[] meshes2 = new Mesh[2 * n];
+        MeshUser[] users2 = new MeshUser[2 * n];
+        MaterialSet[] sets2 = new MaterialSet[2 * n];
+        for (int i = 0; i < releaseCount; i++) {
+            int from = (releaseHead + i) % n;
+            meshes2[i] = releaseMeshes[from];
+            users2[i] = releaseUsers[from];
+            sets2[i] = releaseSets[from];
+        }
+        releaseMeshes = meshes2;
+        releaseUsers = users2;
+        releaseSets = sets2;
+        releaseHead = 0;
+    }
+
+    /**
+     * Does the queued releases until {@code deadline} ({@link System#nanoTime()}), at least one. Allocates nothing.
+     */
+    private void releaseQueued(long deadline) {
+        while (releaseCount > 0) {
+            int at = releaseHead;
+            Mesh mesh = releaseMeshes[at];
+            MaterialSet set = releaseSets[at];
+            MeshUser user = releaseUsers[at];
+            releaseMeshes[at] = null;
+            releaseUsers[at] = null;
+            releaseSets[at] = null;
+            releaseHead = (releaseHead + 1) % releaseMeshes.length;
+            releaseCount--;
+            if (set != null) {
+                releaseSet(set);
+            } else {
+                releaseMesh(mesh, user);
+            }
+            if (System.nanoTime() - deadline > 0) {
+                return;
+            }
+        }
+    }
+
+    /** Does every queued release now: a scene closing. */
+    void releaseAllQueued() {
+        releaseQueued(Long.MAX_VALUE);
+    }
+
+    /** How many releases wait for a later frame. */
+    public int releasesWaiting() {
+        return releaseCount;
+    }
+
     /** Lets go of {@code mesh} for {@code user}: at no users it leaves the GPU and is released in the cache. */
     void releaseMesh(Mesh mesh, MeshUser user) {
         mesh.users.remove(user);
@@ -871,7 +962,71 @@ public final class SceneResources implements AutoCloseable {
         }
         mesh.preparing = true;
         preparing++;
-        workers.task(() -> pool.prepare(data)).deliver(done -> prepared(mesh, done)).submit();
+        workers.task(() -> pool.prepare(data)).deliver(done -> arrived(mesh, done)).submit();
+    }
+
+    /**
+     * {@code entry} (a mesh or a texture) made ready on the workers: placed now, or with a frame budget
+     * ({@code render.streamFrameBudget}) in a later {@link #flush} within it. Allocates nothing once the ring has grown.
+     */
+    private void arrived(Object entry, Task<?> done) {
+        preparing--;
+        if (releaseBudget == 0 && arrivalCount == 0) {
+            place(entry, done);
+            return;
+        }
+        if (arrivalCount == arrivals.length) {
+            growArrivals();
+        }
+        int at = (arrivalHead + arrivalCount++) % arrivals.length;
+        arrivals[at] = entry;
+        arrivalTasks[at] = done;
+    }
+
+    @AllowAllocation("more arrivals waiting than before")
+    private void growArrivals() {
+        int n = arrivals.length;
+        Object[] entries = new Object[2 * n];
+        Task<?>[] tasks = new Task<?>[2 * n];
+        for (int i = 0; i < arrivalCount; i++) {
+            entries[i] = arrivals[(arrivalHead + i) % n];
+            tasks[i] = arrivalTasks[(arrivalHead + i) % n];
+        }
+        arrivals = entries;
+        arrivalTasks = tasks;
+        arrivalHead = 0;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void place(Object entry, Task<?> done) {
+        preparing++; // prepared() and texturePrepared() count it done
+        if (entry instanceof Mesh mesh) {
+            prepared(mesh, (Task<GeometryPool.Prepared>) done);
+        } else {
+            texturePrepared((TextureEntry) entry, (Task<Textures.Prepared>) done);
+        }
+    }
+
+    /** Places what arrived until {@code deadline} ({@link System#nanoTime()}), at least one. Allocates nothing. */
+    private void placeArrived(long deadline) {
+        while (arrivalCount > 0) {
+            int at = arrivalHead;
+            Object entry = arrivals[at];
+            Task<?> done = arrivalTasks[at];
+            arrivals[at] = null;
+            arrivalTasks[at] = null;
+            arrivalHead = (arrivalHead + 1) % arrivals.length;
+            arrivalCount--;
+            place(entry, done);
+            if (System.nanoTime() - deadline > 0) {
+                return;
+            }
+        }
+    }
+
+    /** How many meshes and textures made ready wait for a later frame's budget to be placed. */
+    public int arrivalsWaiting() {
+        return arrivalCount;
     }
 
     /** {@code mesh} made ready on the workers: placed in the pool, unless it was let go of meanwhile. */
@@ -1371,6 +1526,11 @@ public final class SceneResources implements AutoCloseable {
      * nothing.
      */
     public void flush() {
+        if (arrivalCount > 0 || releaseCount > 0) {
+            long deadline = releaseBudget == 0 ? Long.MAX_VALUE : System.nanoTime() + releaseBudget;
+            placeArrived(deadline); // what came first, then what went, in the same budget: at least one of each
+            releaseQueued(deadline);
+        }
         for (int i = 0; i < dynamicList.size(); i++) {
             upload(dynamicList.get(i));
         }
@@ -1516,7 +1676,7 @@ public final class SceneResources implements AutoCloseable {
                 data.height(), com.truesim.engine.render.Textures.GENERATE, data.texels())
                 : srgb ? textures.prepareColor(data.width(), data.height(), data.texels())
                 : textures.prepareData(data.width(), data.height(), data.texels()))
-            .deliver(done -> texturePrepared(entry, done)).submit();
+            .deliver(done -> arrived(entry, done)).submit();
     }
 
     /** {@code entry} made ready on the workers: added, unless it was let go of meanwhile. */
@@ -1952,12 +2112,16 @@ public final class SceneResources implements AutoCloseable {
     public void close() {
         if (!closed) {
             closed = true;
+            placeArrived(Long.MAX_VALUE); // closed: their prepared data freed, not placed
             assets.removeListener(listener);
             if (budgetWatch != null) {
                 budgetWatch.close();
             }
             if (updateWatch != null) {
                 updateWatch.close();
+            }
+            if (releaseWatch != null) {
+                releaseWatch.close();
             }
         }
     }
