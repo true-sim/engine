@@ -42,6 +42,8 @@ jobs:
       - run: ./gradlew ${{ matrix.tests }} -x jacocoTestReport --dry-run >/dev/null
       - name: The class again and again
         run: |
+          mkdir -p crashes
+          (while true; do echo "$(date +%T) $(free -m | awk '/Mem:/ {print "used " $3 " free " $4 " available " $7}')"; sleep 5; done) > crashes/memory.log &
           crashes=0
           for i in 1 2 3; do
             if ! ./gradlew ${{ matrix.tests }} --rerun -q > run-$i.log 2>&1; then
