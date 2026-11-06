@@ -296,8 +296,9 @@ transition between the active and inactive states requires a full acceleration s
 structure update rules); the validation layers reported nothing; the RX 9070 XT faulted reading address 0.
 - Proof: `SceneSyncTest.rayTracingTracesTheScenesMeshesAndPosedCopies` lost the device in four runs of four
   ("invalid read at 0x0 ... in no buffer"), and passes with the fix (true-sim/engine, scene ray tracing PR).
-- Rule: an instance left out of a top level names an empty bottom level with mask 0, never reference 0; anything else
-  that changes which instances are active rebuilds the top level instead of refitting it.
+- Rule: an instance left out of a top level is not in its build at all (superseded the empty bottom level with mask 0
+  used first; see the lavapipe crash below); anything that changes which instances the build holds rebuilds the top
+  level instead of refitting it.
 
 **A cluster hierarchy's finest level is not all of the mesh.** Bottom levels were built from one detail level's
 meshlet range (the last, "finest"). In a cluster hierarchy the levels are the DAG's depths: parts that simplify no

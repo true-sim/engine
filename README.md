@@ -1393,8 +1393,10 @@ try (RayTracing rayTracing = new RayTracing(device, pool, 100_000)) { // at most
   one built), so copies are not rebuilt unless asked (`rayTracing.rebuildEvery(refits)`): with a build every 120
   refits, 1000 foxes' refits went from 0.30 to 0.37 ms a frame to 0.57 to 0.63, and tracing changed less than noise.
   Devices whose bottom levels cannot read the quantized positions leave copies out.
-- **Instances without a bottom level** are left out (mask 0) through an empty bottom level, never a null reference:
-  an instance turning inactive or active between a top level's build and its refit is not allowed, and lost the device.
+- **Instances rays do not trace** (holes, casting no shadows, the GPU's own ids, a mesh without a bottom level) are
+  not in the top level at all: the CPU lists the rest for each build (`RayTracing`), with the bottom level each names,
+  and the build holds only those. A refit keeps the very list of its build; any change to it builds anew (an instance
+  turning inactive or active between a build and its refit is not allowed, and lost the device).
 - **Shaders** import `raytracing.slang` for `occluded(scene, origin, direction, tMin, tMax)`, a ray query that stops at
   the first hit, and `triangleMaterial(scene, instance, primitive)`, the material id of a triangle hit.
 - **Segments in batches** (`SegmentTracing`, for audio occlusion): a technique in the main view (it modifies

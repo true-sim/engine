@@ -43,6 +43,9 @@ import com.truesim.engine.vulkan.Pipeline;
 import com.truesim.engine.vulkan.ShaderModule;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.scene.assets.mesh.MeshData;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.util.Arrays;
 import java.util.Objects;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkAccelerationStructureBuildGeometryInfoKHR;
@@ -78,6 +81,8 @@ public final class RayTracing implements AutoCloseable {
 
     private static final int AS_INSTANCE_BYTES = 64; // VkAccelerationStructureInstanceKHR
     private static final int PUSH_BYTES = InstancesPush.BYTES;
+    /** A listed instance as instances.slang's TracedInstance has it: its id, then its bottom level at 8. */
+    private static final int TRACED_BYTES = 16;
     /** The top level's build: fast to trace, and refittable as instances move. */
     private static final int TOP_FLAGS = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
         | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
@@ -128,6 +133,13 @@ public final class RayTracing implements AutoCloseable {
         long builtBottoms;
         long builtRefits; // the deformed copies' levels' changes
         int builtCount; // the instances of the last build: a refit keeps their number
+        // The instances rays trace, listed for a build (id, and the bottom level read then), per frame slot as the
+        // instance pass reads them; gathered here first, and as the last build had them: a refit has the very same.
+        GpuBuffer traced; // a part per frame slot
+        int[] ids;
+        long[] levels;
+        int[] builtIds;
+        long[] builtLevels;
         int refits; // since the last full build: refits loosen the tree, so a build comes every MAX_REFITS
         double builtX;
         double builtY;
@@ -176,6 +188,13 @@ public final class RayTracing implements AutoCloseable {
                 scratch = structures.scratch(Math.max(sizes.buildScratchSize(), sizes.updateScratchSize()));
             }
             slot = bindless.addAccelerationStructure(top.handle());
+            traced = GpuBuffer.hostWritten(device, (long) TRACED_BYTES * count * slots.count(),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                device.graphics().family(), device.compute().family()); // built by async compute too
+            ids = new int[count];
+            levels = new long[count];
+            builtIds = new int[count];
+            builtLevels = new long[count];
             maxInstances = count;
         }
 
@@ -205,11 +224,13 @@ public final class RayTracing implements AutoCloseable {
             Structure oldTop = top;
             GpuBuffer oldInstances = instances;
             GpuBuffer oldScratch = scratch;
+            GpuBuffer oldTraced = traced;
             int oldSlot = slot;
             return () -> {
                 bindless.removeAccelerationStructure(oldSlot);
                 structures.destroy(oldTop);
                 oldScratch.close();
+                oldTraced.close();
                 oldInstances.close();
             };
         }
@@ -510,13 +531,18 @@ public final class RayTracing implements AutoCloseable {
         if (same && scene.version() == t.builtVersion && refitted == t.builtRefits) {
             return; // nothing it was built from changed
         }
-        // Instances moved (or changed), or bottom levels were refitted, the same number of instances, the same bottom
-        // levels and origin: refitted, the tree kept, unless enough refits have loosened it. Else built anew.
-        boolean refit = same && count == t.builtCount && t.refits < MAX_REFITS;
+        // Instances moved (or changed), or bottom levels were refitted, the very instances of the last build with the
+        // same bottom levels and origin: refitted, the tree kept, unless enough refits have loosened it. Else built
+        // anew: an instance joining or leaving the list is a rebuild, never a refit.
+        int listed = list(t, count);
+        boolean refit = same && listed == t.builtCount && Arrays.equals(t.ids, 0, listed, t.builtIds, 0, listed)
+            && Arrays.equals(t.levels, 0, listed, t.builtLevels, 0, listed) && t.refits < MAX_REFITS;
         t.refits = refit ? t.refits + 1 : 0;
         topLevelRefits += refit ? 1 : 0;
         t.built = true;
-        t.builtCount = count;
+        t.builtCount = listed;
+        System.arraycopy(t.ids, 0, t.builtIds, 0, listed);
+        System.arraycopy(t.levels, 0, t.builtLevels, 0, listed);
         t.builtVersion = scene.version();
         t.builtBottoms = bottoms.version();
         t.builtRefits = refitted;
@@ -536,16 +562,14 @@ public final class RayTracing implements AutoCloseable {
             memPutLong(push + InstancesPush.BOTTOM, bottoms.tableAddress());
             memPutLong(push + InstancesPush.MATERIALS, scene.materialsAddress()); // masked instances are not opaque
             memPutLong(push + InstancesPush.RECORDS, t.instancesAddress);
-            memPutLong(push + InstancesPush.EMPTY, bottoms.emptyAddress()); // left out, yet active: refits stay valid
-            memPutInt(push + InstancesPush.COUNT, count);
-            memPutInt(push + InstancesPush.GPU_FIRST, scene.gpuFirst());
-            memPutInt(push + InstancesPush.GPU_COUNT, scene.gpuCount());
+            memPutLong(push + InstancesPush.TRACED, t.traced.deviceAddress() + tracedPart(t));
+            memPutInt(push + InstancesPush.COUNT, listed);
             putOrigin(push + InstancesPush.ORIGIN_X, push + InstancesPush.ORIGIN_LOW_X, originX);
             putOrigin(push + InstancesPush.ORIGIN_Y, push + InstancesPush.ORIGIN_LOW_Y, originY);
             putOrigin(push + InstancesPush.ORIGIN_Z, push + InstancesPush.ORIGIN_LOW_Z, originZ);
             instancePass.bind(commands);
             instancePass.push(commands, push, PUSH_BYTES);
-            Commands.dispatch(commands, (count + 63) / 64, 1, 1);
+            Commands.dispatch(commands, Math.max(1, (listed + 63) / 64), 1, 1);
         }
         Barriers.memory(commands, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_SHADER_READ_BIT
@@ -581,7 +605,7 @@ public final class RayTracing implements AutoCloseable {
                 structures.align(t.scratch.deviceAddress()));
             long range = stack.ncalloc(VkAccelerationStructureBuildRangeInfoKHR.ALIGNOF, 1,
                 VkAccelerationStructureBuildRangeInfoKHR.SIZEOF);
-            memPutInt(range + VkAccelerationStructureBuildRangeInfoKHR.PRIMITIVECOUNT, count);
+            memPutInt(range + VkAccelerationStructureBuildRangeInfoKHR.PRIMITIVECOUNT, listed);
             long ranges = stack.nmalloc(8, 8);
             memPutAddress(ranges, range);
             Commands.buildAccelerationStructures(commands, 1, info, ranges);
@@ -591,6 +615,46 @@ public final class RayTracing implements AutoCloseable {
                 VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
         }
+    }
+
+    /**
+     * Lists the instances of ids below {@code count} that rays trace into {@code t}'s list and this frame's copy of it:
+     * live, casting shadows, not written by the GPU, their mesh with a bottom level (its address read now, so the
+     * build names what was there when it was recorded, whatever the table holds by the time it runs). Returns how many.
+     * Allocates nothing.
+     */
+    private int list(SceneTop t, int count) {
+        GpuScene scene = t.scene;
+        int gpuFirst = scene.gpuFirst();
+        int gpuCount = scene.gpuCount();
+        MemorySegment memory = t.traced.memory();
+        long part = tracedPart(t);
+        int listed = 0;
+        for (int i = 0; i < count; i++) {
+            if (i >= gpuFirst && i - gpuFirst < gpuCount) {
+                continue; // the GPU moves them without a rebuild: never traced
+            }
+            int mesh = scene.tracedMesh(i);
+            long level = mesh < 0 ? 0 : bottoms.tracedAddress(mesh);
+            if (level == 0) {
+                continue;
+            }
+            t.ids[listed] = i;
+            t.levels[listed] = level;
+            memory.set(ValueLayout.JAVA_INT, part + (long) TRACED_BYTES * listed, i);
+            memory.set(ValueLayout.JAVA_LONG, part + (long) TRACED_BYTES * listed + 8, level);
+            listed++;
+        }
+        return listed;
+    }
+
+    /**
+     * Where in {@code t}'s list buffer the frame being recorded has its part: the open slot's (no frame in flight
+     * reads it), or outside frames, whose callers wait for the GPU, the one opened last.
+     */
+    private long tracedPart(SceneTop t) {
+        int slot = slots.current() >= 0 ? slots.current() : Math.max(slots.last(), 0);
+        return (long) TRACED_BYTES * t.maxInstances * slot;
     }
 
     /** {@code value} as a float at {@code high} and what it leaves at {@code low}: two floats, as instances hold. */

@@ -91,7 +91,6 @@ final class BottomLevels {
     private final FrameSlots.FrameStart start = this::recordStart;
     private final java.util.function.IntConsumer forgetMesh = this::remove;
     private final DeformedBottomLevels deformed; // the pool's deformed copies'
-    private final Structure empty; // one degenerate triangle: what instances without a level name
     private boolean closed;
 
     /** A bottom level on its way: inputs staged; built at a frame's start; compacted at a later one; then in place. */
@@ -146,7 +145,6 @@ final class BottomLevels {
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
         table.memory().fill((byte) 0);
         deformed = new DeformedBottomLevels(device, pool, structures, this);
-        empty = buildEmpty();
         pool.onRemove(forgetMesh);
         if (deferred) {
             slots.register(start);
@@ -154,63 +152,12 @@ final class BottomLevels {
     }
 
     /**
-     * A level of one degenerate triangle, built once at setup (waited for): top levels name it for instances left out,
-     * which are then never inactive, as an instance turning inactive or active between a build and a refit is not
-     * allowed ("Any transition between the active and inactive states requires a full acceleration structure
-     * rebuild", the spec's acceleration structure update rules).
+     * Mesh {@code mesh}'s bottom level's address as the table holds it now (what the instance pass reads), 0 for none:
+     * instances of a mesh without one are left out of top levels. Allocates nothing.
      */
-    private Structure buildEmpty() {
-        int usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
-            | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-        try (MemoryStack stack = stackPush();
-             GpuBuffer vertices = GpuBuffer.hostVisible(device, 36, usage)) {
-            vertices.memory().fill((byte) 0);
-            // TEMPORARY (repro): the placeholder's triangle; degenerate (the default), inactive (NaN x) or a tiny one
-            String variant = System.getenv().getOrDefault("TRUESIM_EMPTY_LEVEL", "degenerate");
-            if (variant.equals("nan")) {
-                vertices.memory().set(java.lang.foreign.ValueLayout.JAVA_FLOAT, 0, Float.NaN);
-            } else if (variant.equals("tiny")) {
-                vertices.memory().set(java.lang.foreign.ValueLayout.JAVA_FLOAT, 12, 1e-3f);
-                vertices.memory().set(java.lang.foreign.ValueLayout.JAVA_FLOAT, 28, 1e-3f);
-            }
-            VkAccelerationStructureGeometryKHR.Buffer geometry = VkAccelerationStructureGeometryKHR.calloc(1, stack)
-                .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR)
-                .geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR)
-                .flags(VK_GEOMETRY_OPAQUE_BIT_KHR);
-            geometry.geometry().triangles()
-                .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR)
-                .vertexFormat(VK_FORMAT_R32G32B32_SFLOAT)
-                .vertexStride(12)
-                .maxVertex(2)
-                .indexType(org.lwjgl.vulkan.KHRAccelerationStructure.VK_INDEX_TYPE_NONE_KHR);
-            geometry.geometry().triangles().vertexData().deviceAddress(vertices.deviceAddress());
-            VkAccelerationStructureBuildGeometryInfoKHR.Buffer info = VkAccelerationStructureBuildGeometryInfoKHR
-                .calloc(1, stack);
-            info.put(0, buildInfo(stack, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-                VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR, geometry));
-            VkAccelerationStructureBuildSizesInfoKHR sizes = structures.sizes(stack, info.get(0), 1);
-            Structure built = structures.create(sizes.accelerationStructureSize(),
-                VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
-            try (GpuBuffer scratch = structures.scratch(sizes.buildScratchSize())) {
-                info.get(0).dstAccelerationStructure(built.handle()).scratchData()
-                    .deviceAddress(structures.align(scratch.deviceAddress()));
-                VkAccelerationStructureBuildRangeInfoKHR.Buffer range = VkAccelerationStructureBuildRangeInfoKHR
-                    .calloc(1, stack).primitiveCount(1);
-                PointerBuffer ranges = stack.pointers(range.address());
-                device.submitAndWait(device.graphics(), commands ->
-                    vkCmdBuildAccelerationStructuresKHR(commands, info, ranges));
-            }
-            return built;
-        }
-    }
-
-    /** The address of the level instances without one of their own name: it holds nothing they could hit. */
-    long emptyAddress() {
-        // TEMPORARY (repro): "absent" names no level at all (inactive instances) instead of the placeholder
-        if (System.getenv().getOrDefault("TRUESIM_EMPTY_LEVEL", "degenerate").equals("absent")) {
-            return 0;
-        }
-        return empty.address();
+    long tracedAddress(int mesh) {
+        return mesh >= 0 && mesh < bottom.length ? table.memory().get(ValueLayout.JAVA_LONG_UNALIGNED,
+            (long) BottomLevelLayout.BYTES * mesh + BottomLevelLayout.ADDRESS) : 0;
     }
 
     /** The deformed copies' levels. */
@@ -787,7 +734,6 @@ final class BottomLevels {
         }
         pending.clear();
         deformed.close();
-        structures.destroy(empty);
         pool.stopFollowing(forgetMesh);
         for (Structure structure : bottom) {
             if (structure != null) {

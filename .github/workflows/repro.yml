@@ -1,7 +1,9 @@
 name: Repro
 
-# TEMPORARY (removed before merge): the lavapipe crash in ray-traced tests, reproduced fast. Each job runs GiScenesTest
-# again and again under CPU load (as the other test JVMs of a shard put on it) and keeps the JVM crash logs.
+# TEMPORARY (removed before merge): the lavapipe crash in ray-traced tests. Each runner runs GiScenesTest under CPU
+# load with the code before the fix (62cd6689: the empty bottom level, mask-0 instances) and with this commit's
+# (instances rays do not trace are not in the top level), interleaved, so both meet the same CPU; and the old code with
+# lavapipe's CPU features capped at AVX, as a diagnostic of the runner dependence.
 on:
   push:
     branches: [split-1]
@@ -21,40 +23,47 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [plain, tiny, width256, waitframes]
-        copy: [1, 2, 3, 4, 5, 6]
-    name: repro (${{ matrix.mode }}, ${{ matrix.copy }})
+        copy: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    name: repro (${{ matrix.copy }})
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: true-sim/build-logic/.github/actions/setup-vulkan@61314fb2c79472f89f95c8ffd001ee53e904b02a # main, 2026-10-27
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 27
       - uses: gradle/actions/setup-gradle@v6
-      - name: GiScenesTest again and again, under load
+      - name: Old and new code, interleaved, under load
         run: |
-          mkdir -p crashes
-          lscpu | grep -E "Model name|^CPU\(s\)"; if grep -q avx512f /proc/cpuinfo; then echo "has avx512f"; else echo "no avx512f"; fi
-          if [ "${{ matrix.mode }}" = width256 ]; then echo "LP_NATIVE_VECTOR_WIDTH=256" >> $GITHUB_ENV; export LP_NATIVE_VECTOR_WIDTH=256; fi
-          if [ "${{ matrix.mode }}" = waitframes ]; then export TRUESIM_WAIT_EACH_FRAME=1; fi
-          if [ "${{ matrix.mode }}" = tiny ]; then export TRUESIM_EMPTY_LEVEL=tiny; fi
+          lscpu | grep -E "Model name"
+          git worktree add ../old 62cd6689
           ./gradlew :engine-scene:testClasses -q
+          (cd ../old && ./gradlew :engine-scene:testClasses -q)
           for c in 1 2 3; do (while true; do :; done) & done
-          crashes=0
-          for i in 1 2 3 4 5 6; do
-            if ! ./gradlew :engine-scene:test --tests '*.GiScenesTest' --rerun -q > run-$i.log 2>&1; then
-              echo "iteration $i failed"; grep -E "SIGSEGV|FAILED|Problematic" -A2 run-$i.log | head -12
-              crashes=$((crashes + 1))
-              mkdir -p crashes/$i; cp run-$i.log crashes/$i/; cp */hs_err_pid*.log crashes/$i/ 2>/dev/null; rm -f */hs_err_pid*.log
-            else
-              echo "iteration $i passed"
+          mkdir -p crashes
+          old=0; new=0; avx=0
+          run() { # $1: label, $2: directory, then env
+            label=$1; dir=$2; shift 2
+            if ! (cd $dir && env "$@" ./gradlew :engine-scene:test --tests '*.GiScenesTest' --rerun -q > $GITHUB_WORKSPACE/run-$label.log 2>&1); then
+              echo "$label failed: $(grep -m1 -oE 'SIGSEGV|FAILED|AssertionError' $GITHUB_WORKSPACE/run-$label.log)"
+              mkdir -p crashes/$label; cp run-$label.log crashes/$label/; cp $dir/*/hs_err_pid*.log crashes/$label/ 2>/dev/null; rm -f $dir/*/hs_err_pid*.log
+              return 1
             fi
+            echo "$label passed"
+          }
+          for i in 1 2 3; do
+            run old-$i ../old TRUESIM_EMPTY_LEVEL=degenerate || old=$((old + 1))
+            run new-$i . TRUESIM_NONE=1 || new=$((new + 1))
           done
-          echo "crashes: $crashes of 6"
+          for i in 1 2; do
+            run avx-$i ../old GALLIUM_OVERRIDE_CPU_CAPS=avx || avx=$((avx + 1))
+          done
+          echo "result: old $old of 3, new $new of 3, old capped at AVX $avx of 2"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: repro-${{ matrix.mode }}-${{ matrix.copy }}
+          name: repro-${{ matrix.copy }}
           path: crashes
           if-no-files-found: ignore
