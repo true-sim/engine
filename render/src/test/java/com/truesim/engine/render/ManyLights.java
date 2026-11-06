@@ -45,6 +45,11 @@ final class ManyLights {
         lights.setCount(first + COUNT);
     }
 
+    /** Light {@code i}'s place where it stands: x, y, z and range. */
+    double[] at(int i) {
+        return new double[] {x[i], y[i], z[i], range[i]};
+    }
+
     /** Whether light {@code i} moves when {@code share} of them do (0.1: every tenth). */
     static boolean moves(int i, double share) {
         return share > 0 && i % Math.max(1, (int) Math.round(1 / share)) == 0;
@@ -55,7 +60,12 @@ final class ManyLights {
      * {@code share} circling 4 units wide where they stood (light {@code first} on).
      */
     void move(GpuScene scene, int rock, int rocks, Lights lights, int first, double share, double seconds) {
-        for (int k = 0; k < rocks; k++) {
+        move(scene, rock, 0, rocks, lights, first, share, seconds);
+    }
+
+    /** {@link #move}, of rocks {@code from + 1} to {@code to} alone (the rest standing where they are). */
+    void move(GpuScene scene, int rock, int from, int to, Lights lights, int first, double share, double seconds) {
+        for (int k = from; k < to; k++) {
             int light = k % COUNT;
             int ring = k / COUNT;
             double radius = range[light] * (0.25 + 0.5 * ((ring * 0.618034) % 1.0));

@@ -918,6 +918,14 @@ counting as loading once a drain hands it over: it either did not wait or waited
 - Rule: a test of quantized music reads where its segments actually started (or waits for their clips before playing)
   and checks the quantized frame from there; a loop waiting for an asset drains the tasks it waits on.
 
+**Shadowed images with moving rocks differ from run to run.** `ShadowsBenchmark`'s static part reads its image back
+after everything stood 12 frames (60 tried too) and compares the modes; the reference itself (caster layers off), run
+twice in turn, differed in one place of the frame (a light's shading around a few rocks, 400 to 5,900 pixels by up to
+116 levels) whenever rocks had moved, and by at most 1 pixel without moving rocks. Cause not found.
+- Proof: `TRUESIM_SHADOWS_ONLY=static TRUESIM_SHADOWS_REPEAT=1` (the reference twice; `TRUESIM_SHADOWS_DUMP` saves
+  both images and their difference), true-sim/engine `static-hint-bench`.
+- Rule: compare a mode's image against the reference's own run-to-run difference, not against zero.
+
 ## Java
 
 **A record's components are its accessors.** A method named like a component must return the component's type:

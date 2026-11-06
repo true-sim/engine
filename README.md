@@ -1600,6 +1600,43 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   200 static lights' tests did not show in the owner's CPU time (0.18 ms either way); 2,000 moving rocks cost it 3.7 ms
   either way (their tests against every light).
 
+  Static geometry appearing and changing (`ShadowsBenchmark`, `TRUESIM_SHADOWS_ONLY=static`, RX 9070 XT, 2026-11-06,
+  JaCoCo off; the same flight and 200 AUTO-mapped lights, `IMPORTANCE` updates, caster layers on; everything streamed
+  or placed marked static, the circling rocks dynamic; the modes in turns in one run, three runs of three rounds, ranges
+  over the runs; shadow GPU: median / mean / p99 of the shadow passes; tiles: drawn a frame over their layer (with
+  every caster: 1.7 in each, the AUTO sizes changing) / layers drawn again; lag and the tiles drawn the same in each mode;
+  prepare: the owner's CPU time, median). Cells: rows 200 units wide across the path, as deep as the camera flies between
+  them, loaded from 20 units behind to 80 ahead, a row in and one out in one batch each; props beside the lights ahead;
+  mixed: those cells and props with 100 rocks circling and 100 circling 40 frames, standing 40:
+
+  | Scene | Mode | Shadow GPU median | mean | p99 | Tiles over layer / layers drawn | Casters moving | Prepare |
+  |---|---|---|---|---|---|---|---|
+  | mixed (cells, props, rocks moving) | `STATIC_ONLY` | 1.06-1.13 ms | 1.16-1.18 ms | 2.58-2.68 ms | 257.5 / 23.6 | 182 | 0.46-0.50 ms |
+  | | `DETECT` | 1.28-1.37 | 1.33-1.35 | 2.97-2.99 | 257.5 / 22.7 | 488 | 0.42-0.48 |
+  | | `USE_HINT` (movers dynamic) | 1.01-1.10 | 1.11-1.14 | 2.58-2.72 | 257.5 / 15.9 | 200 | 0.42-0.65 |
+  | | no caster layers | 1.49-1.52 | 1.62-1.63 | 3.15-3.16 | 0 / 0 (259.2 with every caster) | 0 | 0.47-0.53 |
+  | cells, 100 rocks every 10 frames | `STATIC_ONLY` | 0.02 | 0.20-0.21 | 1.61-1.93 | 12.2 / 12.2 | 0 | 0.18-0.19 |
+  | | `DETECT` | 0.02 | 0.18 | 1.68-1.91 | 12.2 / 8.3 | 300 | 0.18 |
+  | cells, 20 rocks every 2 frames | `STATIC_ONLY` | 0.36-0.52 | 0.46-0.48 | 1.74 | 33.4 / 33.4 | 0 | 0.20-0.25 |
+  | | `DETECT` | 0.29-0.36 | 0.37-0.38 | 1.47-1.60 | 33.4 / 17.1 | 300 | 0.22-0.23 |
+  | props, one every 5 frames | `STATIC_ONLY` | 0.02 | 0.08 | 0.63-0.83 | 1.4 / 1.4 | 0 | 0.18-0.19 |
+  | | `DETECT` | 0.02 | 0.08 | 0.64-0.86 | 1.4 / 1.0 | 6 | 0.17-0.18 |
+  | one static rock moved once | `STATIC_ONLY` | 0.01-0.02 | 0.05 | 0.54-0.55 | 0.2 / 0.2 | 0 | 0.18 |
+  | | `DETECT` | 0.02 | 0.05 | 0.55 | 0.2 / 0.2 | 1 | 0.18-0.19 |
+  | 100 rocks circling, nothing static changing | any of the three | 0.66-0.70 | 0.69-0.71 | 1.25-1.28 | 210.5 / 2.1 | 100-200 | 0.39-0.47 |
+
+  Where static geometry changes among moving casters, the hint pays: the mixed scene's shadows take 13 % less GPU time
+  than with detection (mean 1.17 against 1.34 ms, p99 2.6 against 3.0 ms), `USE_HINT` a little less again. Detected,
+  every streamed or placed rock counts as moving for its 30 settle frames (488 casters moving against 182), and every
+  tile drawn over its layer for the movers culls and draws those too. With nothing moving, streamed cells cost more with
+  the hint (0.02 to 0.03 ms a frame more at a row of 100 every 10 frames, 0.09 ms at 20 every 2 frames): a static newcomer's
+  tiles draw their layer again at once, where detection draws it over the old layer and leaves the layer stale until a
+  later change needs it (33.4 layers a frame against 17.1). Props one at a time and a rock moved once cost the same either
+  way. The images, once everything stood 12 frames, match the reference without layers as closely as that reference
+  matches itself in another run (scenes without moving rocks: at most 1 pixel, by at most 3 levels; with moving rocks
+  every mode, the reference included, differs from run to run in one place, 400 to 5,900 pixels by up to 116 levels:
+  pitfalls.md).
+
   Ray-traced point lights: a mask per light over the view's pixels, so at most `shadows.rays.lights` (16) spot and
   point lights are traced a frame, the most important (how big their reach shows, times their importance; those
   traced last frame kept a little longer), the rest take AUTO maps; at most `shadows.soft.lights` (4) of them soft,
