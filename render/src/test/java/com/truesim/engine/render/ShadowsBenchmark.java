@@ -52,7 +52,8 @@ class ShadowsBenchmark {
         List<Technique> added, Shadows[] owner) {
     }
 
-    private record Sample(double frame, double shadows, double drawn, double waiting, long texels, int builds) {
+    private record Sample(double frame, double shadows, double drawn, double waiting, long texels, int builds,
+        double[] frames, double[] shadowFrames, double forced, long waited, long drawnTotal, int maxWait) {
     }
 
     @Test
@@ -137,6 +138,18 @@ class ShadowsBenchmark {
                 s.graph().settings().set(ShadowSettings.ATLAS_DRAWS,
                     Integer.parseInt(System.getenv("TRUESIM_SHADOWS_DRAWS")));
             }
+            if (System.getenv("TRUESIM_SHADOWS_UPDATES") != null) { // importance, all, capped
+                s.graph().settings().set(ShadowSettings.ATLAS_UPDATES, ShadowSettings.Updates.valueOf(
+                    System.getenv("TRUESIM_SHADOWS_UPDATES").toUpperCase(Locale.ROOT)));
+            }
+            if (System.getenv("TRUESIM_SHADOWS_URGENT") != null) {
+                s.graph().settings().set(ShadowSettings.ATLAS_URGENT,
+                    Float.parseFloat(System.getenv("TRUESIM_SHADOWS_URGENT")));
+            }
+            if (System.getenv("TRUESIM_SHADOWS_LAG") != null) {
+                s.graph().settings().set(ShadowSettings.ATLAS_LAG,
+                    Integer.parseInt(System.getenv("TRUESIM_SHADOWS_LAG")));
+            }
             MOVING.place(s.lights(), 0, method);
             s.owner()[0] = new Shadows(s.geometry(), s.lights()).rayTracing(s.rays());
             s.added().add(s.owner()[0].view(s.main()));
@@ -148,10 +161,10 @@ class ShadowsBenchmark {
             setup.accept(s);
         };
         String[] names = {"all still", "100 rocks moving", "500 rocks moving", "2,000 rocks moving",
-            "10% of the lights moving", "50% of the lights moving", "500 rocks and 10% of the lights moving",
-            "2,000 rocks and 50% of the lights moving"};
-        int[] rocks = {0, 100, 500, 2000, 0, 0, 500, 2000};
-        double[] shares = {0, 0, 0, 0, 0.1, 0.5, 0.1, 0.5};
+            "10% of the lights moving", "50% of the lights moving", "300 rocks and 10% of the lights moving (the video)",
+            "500 rocks and 10% of the lights moving", "2,000 rocks and 50% of the lights moving"};
+        int[] rocks = {0, 100, 500, 2000, 0, 0, 300, 500, 2000};
+        double[] shares = {0, 0, 0, 0, 0.1, 0.5, 0.1, 0.1, 0.5};
         for (int i = 0; i < names.length; i++) {
             configs.add(new Config(names[i], setup, rocks[i], shares[i]));
             if (ab) {
@@ -229,13 +242,29 @@ class ShadowsBenchmark {
             }
         }
         System.out.println(title + ":");
-        System.out.println("| Shadows | Frame (GPU) | Shadow passes | Tiles drawn a frame | Tiles waiting | Atlas texels | Builds |");
-        System.out.println("|---|---|---|---|---|---|---|");
+        System.out.println("| Shadows | Frame (GPU) | Frame p99 | Shadow passes | Shadow p99 | Tiles drawn a frame"
+            + " | Of them forced | Tiles waiting | Lag mean / max (frames) | Atlas texels | Builds |");
+        System.out.println("|---|---|---|---|---|---|---|---|---|---|---|");
         for (int c = 0; c < configs.size(); c++) {
             Sample[] all = samples[c];
-            System.out.printf(Locale.ROOT, "| %s | %s | %s | %.1f | %.1f | %,d | %d |%n", configs.get(c).name(),
-                range(all, true), range(all, false), all[0].drawn(), all[0].waiting(), all[0].texels(),
-                all[0].builds());
+            long waited = 0;
+            long drawn = 0;
+            int maxWait = 0;
+            double drawnMean = 0;
+            double forced = 0;
+            double waiting = 0;
+            for (Sample sample : all) {
+                waited += sample.waited();
+                drawn += sample.drawnTotal();
+                maxWait = Math.max(maxWait, sample.maxWait());
+                drawnMean += sample.drawn() / all.length;
+                forced += sample.forced() / all.length;
+                waiting += sample.waiting() / all.length;
+            }
+            System.out.printf(Locale.ROOT, "| %s | %s | %.2f ms | %s | %.2f ms | %.1f | %.1f | %.1f | %.2f / %d | %,d"
+                    + " | %d |%n", configs.get(c).name(), range(all, true), p99(all, true), range(all, false),
+                p99(all, false), drawnMean, forced, waiting, drawn == 0 ? 0 : waited / (double) drawn, maxWait,
+                all[0].texels(), all[0].builds());
         }
     }
 
@@ -271,6 +300,10 @@ class ShadowsBenchmark {
             double[] shadow = new double[FRAMES];
             double drawn = 0;
             double waiting = 0;
+            double forced = 0;
+            long waited = 0;
+            long drawnTotal = 0;
+            int maxWait = 0;
             for (int i = -4; i < FRAMES; i++) {
                 frame = step(device, graph, camera, width, height, moving, lights, switching, specs, frame, config,
                     renderer.scene());
@@ -302,6 +335,13 @@ class ShadowsBenchmark {
                 frames[i] = total;
                 drawn += owner[0] == null ? 0 : owner[0].stats().drawn() / (double) FRAMES;
                 waiting += owner[0] == null ? 0 : owner[0].stats().waiting() / (double) FRAMES;
+                if (owner[0] != null) {
+                    Shadows.Stats stats = owner[0].stats();
+                    forced += stats.forced() / (double) FRAMES;
+                    waited += stats.waited();
+                    drawnTotal += stats.drawn();
+                    maxWait = Math.max(maxWait, stats.maxWait());
+                }
             }
             graph.timings(false);
             device.waitIdle();
@@ -313,7 +353,8 @@ class ShadowsBenchmark {
             if (config.rocks() > 0) {
                 MeshletBenchmark.rocksOnTerrain(renderer, rockMesh, groundMesh, 30_000, 600, -12); // where they were
             }
-            return new Sample(median(frames), median(shadow), drawn, waiting, texels, built);
+            return new Sample(median(frames), median(shadow), drawn, waiting, texels, built, frames, shadow, forced,
+                waited, drawnTotal, maxWait);
         }
     }
 
@@ -347,6 +388,23 @@ class ShadowsBenchmark {
         double[] sorted = values.clone();
         Arrays.sort(sorted);
         return sorted[sorted.length / 2];
+    }
+
+    /** The 99th percentile of every round's frames together. */
+    private static double p99(Sample[] samples, boolean frame) {
+        int n = 0;
+        for (Sample s : samples) {
+            n += s.frames().length;
+        }
+        double[] all = new double[n];
+        int at = 0;
+        for (Sample s : samples) {
+            double[] values = frame ? s.frames() : s.shadowFrames();
+            System.arraycopy(values, 0, all, at, values.length);
+            at += values.length;
+        }
+        Arrays.sort(all);
+        return all[Math.min(n - 1, (int) Math.ceil(0.99 * n) - 1)];
     }
 
     private static String range(Sample[] samples, boolean frame) {

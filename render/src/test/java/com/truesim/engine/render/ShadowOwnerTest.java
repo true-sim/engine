@@ -424,6 +424,60 @@ class ShadowOwnerTest {
     }
 
     /**
+     * The atlas's update modes, four point lights moving every frame (24 tiles changed a frame) and one draw a frame:
+     * capped, tiles wait ever longer; all, none waits; by importance, none waits past the lag, and a light showing
+     * large enough is drawn the frame it moves (those the camera is within, always).
+     */
+    @Test
+    void updateModesBoundTheWait() {
+        newGraph(visibility());
+        graph.settings().set(ShadowSettings.ATLAS_DRAWS, 1);
+        for (int i = 0; i < 4; i++) {
+            lights.point(i, 6 * i - 9, -1, -5, 6, 60, 60, 60);
+            lights.shadow(i, ShadowSpec.maps(64));
+        }
+        lights.setCount(4);
+        int[] most = new int[3];
+        ShadowSettings.Updates[] modes = {ShadowSettings.Updates.CAPPED, ShadowSettings.Updates.ALL,
+            ShadowSettings.Updates.IMPORTANCE};
+        for (int m = 0; m < modes.length; m++) {
+            graph.settings().set(ShadowSettings.ATLAS_UPDATES, modes[m]).set(ShadowSettings.ATLAS_LAG, 2)
+                .set(ShadowSettings.ATLAS_URGENT, 1.0e9f);
+            for (int f = 0; f < 12; f++) {
+                for (int i = 0; i < 4; i++) {
+                    lights.point(i, 6 * i - 9 + 0.01 * ((m * 12 + f) % 2), -1, -5, 6, 60, 60, 60);
+                }
+                frame();
+                if (f >= 6) {
+                    most[m] = Math.max(most[m], shadows.stats().maxWait());
+                    switch (modes[m]) {
+                        case CAPPED -> assertThat(shadows.stats().drawn()).isLessThanOrEqualTo(1);
+                        case ALL -> assertThat(shadows.stats().waiting()).isZero();
+                        default -> assertThat(shadows.stats().drawn()).as("the two lights the camera is within, at "
+                            + "once (12 tiles), and a third of the rest's 12").isBetween(13, 18);
+                    }
+                }
+            }
+        }
+        assertThat(most[0]).as("capped: waits grow").isGreaterThan(4);
+        assertThat(most[1]).as("all: none waits").isZero();
+        assertThat(most[2]).as("importance: within the lag").isLessThanOrEqualTo(2);
+        // A light showing more pixels than the threshold: drawn every frame it moves, beyond the budget
+        graph.settings().set(ShadowSettings.ATLAS_URGENT, 0f).set(ShadowSettings.ATLAS_LAG, 1000);
+        for (int f = 0; f < 4; f++) {
+            for (int i = 0; i < 4; i++) {
+                lights.point(i, 6 * i - 9 + 0.01 * (f % 2), -1, -5, 6, 60, 60, 60);
+            }
+            frame();
+        }
+        assertThat(shadows.stats().waiting()).as("urgent").isZero();
+        assertThat(shadows.stats().forced()).isEqualTo(24);
+        graph.settings().set(ShadowSettings.ATLAS_UPDATES, ShadowSettings.Updates.IMPORTANCE)
+            .set(ShadowSettings.ATLAS_DRAWS, 64).set(ShadowSettings.ATLAS_LAG, 2)
+            .set(ShadowSettings.ATLAS_URGENT, 256f);
+    }
+
+    /**
      * The quad drawn between two steps' poses (instance motion, moved on the GPU each frame): only the tiles around its
      * way are drawn again, a point light's beside it, not those of a light far off; and its shadow follows it.
      */

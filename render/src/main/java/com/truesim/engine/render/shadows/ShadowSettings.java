@@ -40,12 +40,48 @@ public final class ShadowSettings {
      */
     public static final Setting<Integer> ATLAS_SIZE = Setting.integer("shadows.atlas.size", 8192, 512, 16384,
         "texels per side of the shadow atlas, every light's maps' budget (a power of two)");
+    /** How the owner chooses which changed tiles of the atlas a frame draws ({@link #ATLAS_UPDATES}). */
+    public enum Updates {
+        /**
+         * The important tiles the frame they change, the rest in turns: a tile whose light shows at least
+         * {@link #ATLAS_URGENT} pixels (its importance) is drawn at once, as is one that waited {@link #ATLAS_LAG}
+         * frames; the others, most important and longest waiting first, take {@link #ATLAS_DRAWS} a frame, or more
+         * where that many would leave tiles late all at once (an even share of the changed tiles over the lag's
+         * frames).
+         */
+        IMPORTANCE,
+        /** Every changed tile, every frame: no shadow late, at the cost of every change. */
+        ALL,
+        /** At most {@link #ATLAS_DRAWS} tiles a frame, the most important first; the rest wait, however long. */
+        CAPPED
+    }
+
+    /** How the owner chooses which changed atlas tiles a frame draws: {@link Updates}. */
+    public static final Setting<Updates> ATLAS_UPDATES = Setting.choice("shadows.atlas.updates", Updates.IMPORTANCE,
+        "which changed shadow atlas tiles a frame draws: IMPORTANCE (near and large lights at once, the rest within "
+            + "shadows.atlas.lag frames), ALL (every one) or CAPPED (shadows.atlas.draws, the rest wait)");
     /**
-     * The most tiles the owner draws in one frame: tiles kept from frames before cost nothing, and those over the
-     * count, least important first, wait for the next frame (their light keeps its last map, or casts none yet).
+     * The tiles drawn a frame beyond those that must be ({@link Updates#IMPORTANCE}), or at most
+     * ({@link Updates#CAPPED}); tiles kept from frames before cost nothing, and those over the count, least
+     * important first, wait (their light keeps its last map, or casts none yet).
      */
     public static final Setting<Integer> ATLAS_DRAWS = Setting.integer("shadows.atlas.draws", 64, 1, 4096,
-        "the most shadow atlas tiles drawn in one frame (tiles nothing changed in are kept)");
+        "shadow atlas tiles drawn in one frame beyond the urgent and late ones (CAPPED: at most)");
+    /**
+     * {@link Updates#IMPORTANCE}: a changed tile whose importance is at least this is drawn the frame it changed. Its
+     * importance: the pixels its light's reach shows across (radius, in the view showing it largest), times its spec's
+     * importance, times its brightness against the brightest mapped light's. A light whose reach holds a view, and a
+     * directional light's cascades, always count as urgent.
+     */
+    public static final Setting<Float> ATLAS_URGENT = Setting.decimal("shadows.atlas.urgent", 256, 0, 1.0e9f,
+        "IMPORTANCE updates: a changed tile whose light shows at least so many pixels (times importance and "
+            + "relative brightness) is drawn at once");
+    /**
+     * {@link Updates#IMPORTANCE}: the most frames a changed tile waits before it is drawn, whatever the budget (0: none
+     * waits, as {@link Updates#ALL}).
+     */
+    public static final Setting<Integer> ATLAS_LAG = Setting.integer("shadows.atlas.lag", 2, 0, 1000,
+        "IMPORTANCE updates: the most frames a changed shadow atlas tile waits before it is drawn");
     /**
      * The draws a tile's culling lists hold to start with; a list that overflows doubles (the graph builds again and
      * every tile is drawn again).
@@ -154,9 +190,9 @@ public final class ShadowSettings {
         "soft spot and point lights traced soft in a frame at most, the most important; the rest traced hard");
     /** Every shadow setting. */
     public static final List<Setting<?>> ALL = List.of(CASCADE_LAMBDA, CASCADE_BIAS, CASCADE_CASTERS, RAY_OFFSET,
-        CASTER_DETAIL, ATLAS_SIZE, ATLAS_DRAWS, TILE_DRAWS, TILE_TRIANGLES, AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF,
-        MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, CASTER_FACES, CASTER_LAYERS, CASTER_SETTLE, SOFT_RAYS, SOFT_DENOISER,
-        SOFT_PASSES, RAY_QUEUE, KEEP_ROUNDS, RAY_LIGHTS, SOFT_LIGHTS);
+        CASTER_DETAIL, ATLAS_SIZE, ATLAS_UPDATES, ATLAS_DRAWS, ATLAS_URGENT, ATLAS_LAG, TILE_DRAWS, TILE_TRIANGLES,
+        AUTO_SCALE, AUTO_HYSTERESIS, AUTO_CUTOFF, MAP_NEAR, MAP_DISTANCE, CHANGE_TESTS, CASTER_FACES, CASTER_LAYERS,
+        CASTER_SETTLE, SOFT_RAYS, SOFT_DENOISER, SOFT_PASSES, RAY_QUEUE, KEEP_ROUNDS, RAY_LIGHTS, SOFT_LIGHTS);
 
     private ShadowSettings() {
     }

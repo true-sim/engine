@@ -2,6 +2,7 @@ package com.truesim.engine.render.shadows;
 
 import com.truesim.annotations.AllowAllocation;
 import com.truesim.annotations.AllowImpure;
+import com.truesim.engine.app.profile.Counters;
 import com.truesim.common.math.Maths;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.BufferAccess;
@@ -134,6 +135,10 @@ public final class Shadows implements AutoCloseable {
     private long frameNow; // frames prepared
     private long[] checkFrom = new long[0]; // per draw view: the frame from which its overflow is read again
     private Tile[] dirty = new Tile[64];
+    private double[] dirtyImportance = new double[64];
+    private int[] dirtyWaited = new int[64];
+    private final TileSchedule schedule = new TileSchedule();
+    private Counters.Source counters;
     // Change tracking
     private double[] spheres = new double[0]; // per instance: world x, y, z, radius (< 0: none)
     private boolean[] deformed = new boolean[0];
@@ -172,6 +177,52 @@ public final class Shadows implements AutoCloseable {
         return stats;
     }
 
+    /**
+     * The atlas's update counters for the profiler ({@code profiling.counters().add(shadows.counters())}), from the
+     * last frame: {@code shadows.atlas.drawn} and {@code shadows.atlas.waiting} tiles, {@code shadows.atlas.forced}
+     * (drawn beyond the budget), {@code shadows.atlas.maxWait} and {@code shadows.atlas.meanLag} in frames.
+     */
+    @AllowAllocation("made once")
+    public Counters.Source counters() {
+        if (counters == null) {
+            counters = new AtlasCounters(stats);
+        }
+        return counters;
+    }
+
+    /** The atlas's update counters, read on the profiler's sampling thread (a frame's values, as last written). */
+    private static final class AtlasCounters implements Counters.Source {
+        private final Stats stats;
+        private int drawn;
+        private int waiting;
+        private int forced;
+        private int maxWait;
+        private int meanLag;
+
+        AtlasCounters(Stats stats) {
+            this.stats = stats;
+        }
+
+        @Override
+        public void declare(Counters into) {
+            drawn = into.counter("shadows.atlas.drawn", "tiles");
+            waiting = into.counter("shadows.atlas.waiting", "tiles");
+            forced = into.counter("shadows.atlas.forced", "tiles");
+            maxWait = into.counter("shadows.atlas.maxWait", "frames");
+            meanLag = into.counter("shadows.atlas.meanLag", "frames");
+        }
+
+        @Override
+        public void sample(Counters into) {
+            int d = stats.drawn;
+            into.set(drawn, d);
+            into.set(waiting, stats.waiting);
+            into.set(forced, stats.forced);
+            into.set(maxWait, stats.maxWait);
+            into.set(meanLag, d == 0 ? 0 : stats.waited / (double) d);
+        }
+    }
+
     /** What a frame's shadows took. */
     public static final class Stats {
         int lights;
@@ -180,6 +231,9 @@ public final class Shadows implements AutoCloseable {
         int tiles;
         int drawn;
         int waiting;
+        int forced;
+        int maxWait;
+        long waited;
         int shrunk;
         int dropped;
         int rayFallbacks;
@@ -236,9 +290,24 @@ public final class Shadows implements AutoCloseable {
             return moving;
         }
 
-        /** Tiles to draw that waited for a later frame: more than {@link ShadowSettings#ATLAS_DRAWS}. */
+        /** Changed tiles left for a later frame ({@link ShadowSettings#ATLAS_UPDATES}): their light keeps its map. */
         public int waiting() {
             return waiting;
+        }
+
+        /** Of the tiles drawn, those drawn beyond {@link ShadowSettings#ATLAS_DRAWS}: urgent, or waited the lag. */
+        public int forced() {
+            return forced;
+        }
+
+        /** The most frames a changed tile drawn or still waiting this frame has waited (0: none waited). */
+        public int maxWait() {
+            return maxWait;
+        }
+
+        /** The frames the tiles drawn this frame waited, summed: over {@link #drawn()}, their mean lag. */
+        public long waited() {
+            return waited;
         }
 
         /** Lights whose maps were made smaller than they wanted, for the atlas's budget. */
@@ -374,6 +443,8 @@ public final class Shadows implements AutoCloseable {
         boolean valid; // drawn since allocated
         boolean usedNow;
         double priority;
+        double brightness = Double.NaN; // its light's, for the update order (directional: NaN, not compared)
+        long waitFrom = -1; // the frame (frameNow) it was first found changed and not drawn since; -1: drawn
         float bias;
         float normalOffset;
         float near; // > 0: perspective
@@ -732,6 +803,7 @@ public final class Shadows implements AutoCloseable {
         group.usedNow = true;
         group.priority = spec.importance() * pixels;
         group.minimal = false;
+        float brightness = lights.brightness(light);
         double wanted = auto ? pixels * settings.get(ShadowSettings.AUTO_SCALE) * spec.importance()
             : spec.resolution();
         int min = auto ? spec.minSize() : MIN_TILE;
@@ -741,6 +813,7 @@ public final class Shadows implements AutoCloseable {
             Tile tile = group.tiles[f];
             tile.wanted = sized(tile, wanted, min, max, hysteresis);
             tile.priority = group.priority;
+            tile.brightness = brightness;
             tile.range = reach;
             if (changed) {
                 tile.dirty = true;
@@ -852,6 +925,7 @@ public final class Shadows implements AutoCloseable {
         tile.layered = false;
         tile.size = 0;
         tile.usedNow = false;
+        tile.waitFrom = -1;
     }
 
     /**
@@ -1294,35 +1368,46 @@ public final class Shadows implements AutoCloseable {
      * layer of still casters, drawn first where stale (a layer slot; without one free, every caster).
      */
     private void assignSlots(EngineSettings settings) {
+        ShadowSettings.Updates updates = settings.get(ShadowSettings.ATLAS_UPDATES);
         int cap = settings.get(ShadowSettings.ATLAS_DRAWS);
         boolean split = layering;
         int dirtyCount = 0;
+        double brightest = 0;
+        for (int i = 0; i < usedCount; i++) {
+            Tile tile = used[i];
+            if (tile.usedNow && tile.brightness > brightest) {
+                brightest = tile.brightness;
+            }
+        }
+        int maxWait = 0;
         for (int i = 0; i < usedCount; i++) {
             Tile tile = used[i];
             if (tile.usedNow && tile.node >= 0 && (tile.dirty || tile.moved)) {
                 if (dirtyCount == dirty.length) {
-                    dirty = Arrays.copyOf(dirty, dirty.length * 2);
+                    growDirty();
                 }
-                dirty[dirtyCount++] = tile;
+                if (tile.waitFrom < 0) {
+                    tile.waitFrom = frameNow;
+                }
+                int waited = (int) Math.min(Integer.MAX_VALUE, frameNow - tile.waitFrom);
+                // the brighter of the lights first: relative to the brightest mapped light (cascades: as they are)
+                double relative = tile.brightness >= 0 && brightest > 0 ? tile.brightness / brightest : 1;
+                dirty[dirtyCount] = tile;
+                dirtyImportance[dirtyCount] = tile.priority * relative;
+                dirtyWaited[dirtyCount++] = waited;
+                maxWait = Math.max(maxWait, waited);
             }
         }
-        // Most important first (an insertion sort: the list is short, and allocates nothing).
-        for (int i = 1; i < dirtyCount; i++) {
-            Tile t = dirty[i];
-            int j = i - 1;
-            while (j >= 0 && dirty[j].priority < t.priority) {
-                dirty[j + 1] = dirty[j];
-                j--;
-            }
-            dirty[j + 1] = t;
-        }
-        int wanted = Math.min(Math.min(cap, dirtyCount), slotTiles.length);
+        int toDraw = schedule.schedule(updates, dirtyCount, dirtyImportance, dirtyWaited, cap,
+            settings.get(ShadowSettings.ATLAS_URGENT), settings.get(ShadowSettings.ATLAS_LAG));
+        int limit = updates == ShadowSettings.Updates.CAPPED ? Math.min(cap, slotTiles.length) : slotTiles.length;
+        int wanted = Math.min(toDraw, slotTiles.length);
         if (wanted > slotsWanted) {
-            slotsWanted = Math.max(wanted, Math.min(Math.min(cap, slotTiles.length), 2 * slotsWanted));
+            slotsWanted = Math.max(wanted, Math.min(limit, 2 * slotsWanted));
             structure++;
         }
         int slots = slotViews.length;
-        int drawn = Math.min(dirtyCount, slots);
+        int drawn = Math.min(toDraw, slots);
         Arrays.fill(slotTiles, 0, slots, null);
         Arrays.fill(layerTiles, 0, layerViews.length, null);
         float detail = settings.get(ShadowSettings.CASTER_DETAIL);
@@ -1333,8 +1418,12 @@ public final class Shadows implements AutoCloseable {
         }
         int layerSlots = 0;
         movingDrawn = 0;
+        long waitedSum = 0;
         for (int i = 0; i < drawn; i++) {
-            Tile tile = dirty[i];
+            int d = schedule.order(i);
+            Tile tile = dirty[d];
+            waitedSum += dirtyWaited[d];
+            tile.waitFrom = -1; // drawn this frame
             boolean full = tile.dirty || !split;
             if (!full && !tile.layered) {
                 if (layerSlots < layerViews.length) {
@@ -1356,6 +1445,16 @@ public final class Shadows implements AutoCloseable {
         stats.layered = layerSlots;
         stats.moving = movingDrawn;
         stats.waiting = dirtyCount - drawn;
+        stats.forced = Math.min(schedule.forced(), drawn);
+        stats.maxWait = maxWait;
+        stats.waited = waitedSum;
+    }
+
+    @AllowAllocation("growing with the tiles")
+    private void growDirty() {
+        dirty = Arrays.copyOf(dirty, dirty.length * 2);
+        dirtyImportance = Arrays.copyOf(dirtyImportance, dirty.length);
+        dirtyWaited = Arrays.copyOf(dirtyWaited, dirty.length);
     }
 
     /** This frame's copy of the moving casters' flags; its device address. Allocates nothing, unless it grows. */
