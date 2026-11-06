@@ -2266,10 +2266,11 @@ material swap takes new materials and keeps the mesh and the instance id.
 - **Prepared on worker threads:** `resources.prepareOn(tasks, threads)` makes meshes and textures ready for the GPU
   (`GeometryPool.prepare`, `Textures.prepareColor`) on that many threads of the scheduler, handed over as it drains,
   so the main thread only places them: a frame of latency for milliseconds of main-thread time per large asset.
-- **Streamed content within a frame budget:** `render.streamFrameBudget` (0.25 ms) bounds what a frame spends taking
-  in content made ready on workers (meshes placed, textures added) and letting go of what removed renderables used;
-  the sync's own work in the frame (renderables attached or torn down) counts toward it, and a frame whose update spent
-  it leaves the rest to the next. Material blocks and meshes others still use are let go of at once (a count taken
+- **Streamed content within a frame budget:** `render.streamFrameBudget` (0.1 ms) bounds what a frame spends taking
+  in content made ready on workers (meshes placed, textures added) and letting go of what removed renderables used.
+  It runs from the frame's start (`SceneResources.beginFrame()`, which the assets plugin calls before each update), so
+  the frame's own streaming work (nodes attached or removed, renderables taken in or torn down) counts toward it, and a
+  frame that spent it leaves the rest to the next. Material blocks and meshes others still use are let go of at once (a count taken
   down); only the last user's release waits for the budget. `render.meshSpares` (64) keeps removed meshes' pool ranges
   for meshes of the same sizes (`GeometryPool.spares`), and the assets plugin's `assets.meshPool` (64) keeps evicted
   generated meshes' memory for generators building into it (`Assets.meshPool()`, scene's `MeshPool`): content that

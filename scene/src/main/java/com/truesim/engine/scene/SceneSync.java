@@ -641,7 +641,11 @@ public final class SceneSync implements AutoCloseable {
             if (batch.changes(i) == ComponentStore.REMOVED) { // gone: torn down without looking it up again
                 int item = NodeHandle.index(node);
                 if (itemNode[item] == node) {
-                    destroy(item);
+                    if (plain(item)) {
+                        tearDown(item);
+                    } else {
+                        destroy(item);
+                    }
                 }
             } else {
                 reconcile(node);
@@ -654,6 +658,40 @@ public final class SceneSync implements AutoCloseable {
         }
         lastRef = null; // the memo lives for the batch: an entry let go of later must not be found again
         lastEntry = null;
+    }
+
+    /** Whether {@code item} is drawn plainly: no deformed copy, nothing pending, not moving between steps. */
+    private boolean plain(int item) {
+        return itemCopy[item] == NONE && !isTracked[item] && pendingMesh[item] == null && pendingSet[item] == null;
+    }
+
+    /**
+     * {@link #destroy} of a {@link #plain} item while a batch is taken in: its instance gathered for the batch's one
+     * removal, its material block and mesh let go of, its links undone, in one go.
+     */
+    private void tearDown(int item) {
+        int slot = itemSlot[item];
+        if (slot != NONE) {
+            if (goneCount == gone.length) {
+                growGone();
+            }
+            gone[goneCount++] = slot;
+            instanceCount--;
+            instanceVersion++;
+            itemSlot[item] = NONE;
+        }
+        SceneResources.MaterialSet set = itemSet[item];
+        if (set != null) {
+            resources.releaseSetLater(set);
+            itemSet[item] = null;
+        }
+        ViewMesh entry = itemMesh[item];
+        unlink(entry, item);
+        itemMesh[item] = null;
+        itemNode[item] = NodeHandle.NONE;
+        itemBounded[item] = false;
+        itemCount--;
+        releaseMeshLater(entry);
     }
 
     /** {@link #sceneChanged} for the nodes of a batch, in one pass: removals of nodes drawn by nothing skip at once. */

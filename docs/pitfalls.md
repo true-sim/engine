@@ -736,6 +736,18 @@ conditions instead of adding to it; two results ("never fails") came from runs w
 - Proof: the rerun in [#151](https://github.com/true-sim/engine/issues/151) with a script that checks.
 - Rule: experiment scripts warn when a change changed nothing and when the setup is missing.
 
+**A benchmark that drew less than the one it was compared with.** The rewritten demo's `StereoBench` with 1,000
+foxes took 13 to 15 % longer per eye on its camera draws than engine v0.185.0's ("meshlets early" 0.36 against 0.30 ms),
+with the same rendering code and fewer meshlets visible (27,600 against 28,800 per eye). The old benchmark's left eye
+showed no terrain at all: rocks and foxes over black, no ground to shade or shadow. The rewrite draws the ground, which
+covers half of each eye. Without the foxes both draw the terrain and time the same (0.44 ms). Why the old one lost the
+terrain with the crowd was not established (its crowd had a scene sync of its own on the demo's instance table, where
+the terrain was set by hand).
+- Proof: the left eye of each (`-Ppng`), and the visible meshlets per eye and bin read from the views
+  (true-sim/engine split-2 follow-up, stereo investigation).
+- Rule: before comparing two versions of a benchmark, compare a frame of each: equal timings or not, they must draw
+  the same thing.
+
 **A benchmark that never fitted its cascades.** `StereoBench` added `CascadedShadowMaps` per eye without calling
 `update()` each frame, so the cascades kept their unfitted cameras and shading barely sampled them: with 20,000 rocks
 the camera draws read 0.06 ms an eye, cheaper than with 800, and the frame 0.34 ms instead of 2.4.

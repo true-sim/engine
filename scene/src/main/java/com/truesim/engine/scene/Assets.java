@@ -129,6 +129,13 @@ public final class Assets implements Plugin {
         }
     }
 
+    @Override
+    public void beforeUpdate(com.truesim.engine.app.Frame frame) {
+        if (resources != null) {
+            resources.beginFrame(); // the frame's streaming budget runs from here: the game's own update counts
+        }
+    }
+
     /** The asset cache: acquire, get, release; loads finish at the start of a frame. */
     public AssetCache cache() {
         return made(cache, Stage.BEFORE_INSTANCE);
