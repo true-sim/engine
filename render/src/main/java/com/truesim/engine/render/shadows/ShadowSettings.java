@@ -124,10 +124,12 @@ public final class ShadowSettings {
         "faces of casters shadow maps draw: BOTH (as rays meet them) or FRONT (cheaper; lights inside meshes leak)");
     /**
      * Whether maps keep their still casters apart from the moving ones: a tile a moving caster reaches is drawn again
-     * from a copy of its still casters' layer (a second atlas, as large, drawn when that layer changes) and only the
-     * moving casters on top, instead of every caster. Costs the second atlas's memory; off: every caster each time.
+     * from its still casters' layer (a second atlas, as large, drawn when that layer changes) and only the moving
+     * casters on top, instead of every caster. Costs the second atlas's memory and a depth write per texel of each such
+     * tile: it pays where still casters are costly to draw. Off by default: over ShadowsBenchmark's rock field (cheap
+     * casters, the cost per tile in culling and drawing) it was slower than drawing every caster (README, pitfalls).
      */
-    public static final Setting<Boolean> CASTER_LAYERS = Setting.bool("shadows.casters.layers", true,
+    public static final Setting<Boolean> CASTER_LAYERS = Setting.bool("shadows.casters.layers", false,
         "maps keep still casters in a layer of their own and draw only moving ones again (a second atlas's memory)");
     /**
      * Frames a caster stays moving after its last move, before it joins its tiles' still layers (which are then drawn

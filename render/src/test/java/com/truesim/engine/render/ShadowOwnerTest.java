@@ -463,7 +463,7 @@ class ShadowOwnerTest {
     @Test
     void movingCastersDrawnOverTheStillLayerMatchEveryCasterDrawn() {
         newGraph(visibility());
-        graph.settings().set(ShadowSettings.CASTER_SETTLE, 5);
+        graph.settings().set(ShadowSettings.CASTER_LAYERS, true).set(ShadowSettings.CASTER_SETTLE, 5);
         lights.point(0, 0, 0, -5, 16, 60, 60, 60);
         lights.shadow(0, ShadowSpec.maps(256)).setCount(1);
         scene.set(2, quad, -2, -2, -5, 0, 0, 0, 1, 0.5f, 1, 0.5f);

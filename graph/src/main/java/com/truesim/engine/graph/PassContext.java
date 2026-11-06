@@ -14,9 +14,7 @@ import static org.lwjgl.vulkan.VK10.VK_WHOLE_SIZE;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_COPY_IMAGE_INFO_2;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2;
-import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_IMAGE_COPY_2;
 import static org.lwjgl.vulkan.VK13.VK_STRUCTURE_TYPE_IMAGE_BLIT_2;
 
 import com.truesim.engine.vulkan.Bindless;
@@ -32,10 +30,8 @@ import org.lwjgl.vulkan.VkClearAttachment;
 import org.lwjgl.vulkan.VkClearRect;
 import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkCopyBufferToImageInfo2;
-import org.lwjgl.vulkan.VkCopyImageInfo2;
 import org.lwjgl.vulkan.VkCopyImageToBufferInfo2;
 import org.lwjgl.vulkan.VkImageBlit2;
-import org.lwjgl.vulkan.VkImageCopy2;
 import org.lwjgl.vulkan.VkImageSubresourceLayers;
 import org.lwjgl.vulkan.VkImageSubresourceRange;
 import org.lwjgl.vulkan.VkRect2D;
@@ -427,48 +423,6 @@ public final class PassContext {
             memPutAddress(info + VkBlitImageInfo2.PREGIONS, region);
             memPutInt(info + VkBlitImageInfo2.FILTER, linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
             Commands.blitImage2(commands, info);
-        }
-    }
-
-    /** The most regions {@link #copy(Subresource, Subresource, int[], int)} gives Vulkan in one command. */
-    private static final int COPY_BATCH = 256;
-
-    /**
-     * Copies {@code count} rectangles of {@code from} (as {@link Access#TRANSFER_SRC}) into {@code to} (as
-     * {@link Access#TRANSFER_DST}), texel for texel (same format, any aspect, depth too): rectangle i is
-     * {@code regions[6i..6i+5]} = from x, from y, to x, to y, width, height. Allocates nothing.
-     */
-    public void copy(Subresource from, Subresource to, int[] regions, int count) {
-        oneMip("Copying from", from);
-        oneMip("Copying into", to);
-        for (int first = 0; first < count; first += COPY_BATCH) {
-            int n = Math.min(COPY_BATCH, count - first);
-            try (MemoryStack stack = stackPush()) {
-                long all = stack.ncalloc(VkImageCopy2.ALIGNOF, n, VkImageCopy2.SIZEOF);
-                for (int i = 0; i < n; i++) {
-                    long region = all + (long) i * VkImageCopy2.SIZEOF;
-                    int r = 6 * (first + i);
-                    memPutInt(region + VkImageCopy2.STYPE, VK_STRUCTURE_TYPE_IMAGE_COPY_2);
-                    layers(region + VkImageCopy2.SRCSUBRESOURCE, from);
-                    memPutInt(region + VkImageCopy2.SRCOFFSET, regions[r]);
-                    memPutInt(region + VkImageCopy2.SRCOFFSET + 4, regions[r + 1]);
-                    layers(region + VkImageCopy2.DSTSUBRESOURCE, to);
-                    memPutInt(region + VkImageCopy2.DSTOFFSET, regions[r + 2]);
-                    memPutInt(region + VkImageCopy2.DSTOFFSET + 4, regions[r + 3]);
-                    memPutInt(region + VkImageCopy2.EXTENT, regions[r + 4]);
-                    memPutInt(region + VkImageCopy2.EXTENT + 4, regions[r + 5]);
-                    memPutInt(region + VkImageCopy2.EXTENT + 8, 1);
-                }
-                long info = stack.ncalloc(VkCopyImageInfo2.ALIGNOF, 1, VkCopyImageInfo2.SIZEOF);
-                memPutInt(info + VkCopyImageInfo2.STYPE, VK_STRUCTURE_TYPE_COPY_IMAGE_INFO_2);
-                memPutLong(info + VkCopyImageInfo2.SRCIMAGE, image(from.image()));
-                memPutInt(info + VkCopyImageInfo2.SRCIMAGELAYOUT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-                memPutLong(info + VkCopyImageInfo2.DSTIMAGE, image(to.image()));
-                memPutInt(info + VkCopyImageInfo2.DSTIMAGELAYOUT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-                memPutInt(info + VkCopyImageInfo2.REGIONCOUNT, n);
-                memPutAddress(info + VkCopyImageInfo2.PREGIONS, all);
-                Commands.copyImage2(commands, info);
-            }
         }
     }
 

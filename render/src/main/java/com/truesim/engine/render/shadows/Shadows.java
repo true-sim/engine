@@ -6,6 +6,7 @@ import com.truesim.common.math.Maths;
 import com.truesim.engine.graph.Access;
 import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
+import com.truesim.engine.graph.GraphicsProgram;
 import com.truesim.engine.graph.Image;
 import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.Key;
@@ -34,6 +35,8 @@ import com.truesim.engine.render.ViewOptions;
 import com.truesim.engine.settings.EngineSettings;
 import com.truesim.engine.vulkan.Format;
 import com.truesim.engine.vulkan.FrameBuffer;
+import com.truesim.engine.vulkan.Pipeline;
+import com.truesim.engine.render.layout.ShadowLayerPush;
 import com.truesim.scene.core.ShadowMethod;
 import com.truesim.scene.core.ShadowSpec;
 import java.lang.foreign.MemorySegment;
@@ -63,8 +66,8 @@ import java.util.Objects;
  * within it moved ({@link GpuScene}'s changes), materials' shapes changed; a still light over a still scene keeps its
  * tile, drawn once. Casters that moved lately ({@link ShadowSettings#CASTER_SETTLE}) are drawn apart: a tile keeps its
  * still casters in a layer of its own (a second atlas, {@link ShadowSettings#CASTER_LAYERS}), and when only moving
- * casters changed it is that layer copied, the moving casters drawn on top (the depth test merges them). {@link
- * ShadowSpec#AUTO} sizes come each frame from how big the light's reach shows in the views
+ * casters changed it is that layer's depth written into it, the moving casters drawn on top (the depth test merges
+ * them). {@link ShadowSpec#AUTO} sizes come each frame from how big the light's reach shows in the views
  * ({@link ShadowSettings#AUTO_SCALE}), within the spec's bounds, with hysteresis; over the atlas, the least important
  * lights' tiles shrink first, then the least important lights cast none.
  *
@@ -104,12 +107,12 @@ public final class Shadows implements AutoCloseable {
     private int slotsWanted; // grows: the graph builds again
     private boolean anyDrawn;
     private final boolean[] slotFull = new boolean[4096]; // per slot this frame: every caster, or the moving ones only
-    // Caster layers: draw slots of the still casters' layer, the copies of layers into the atlas
+    // Caster layers: draw slots of the still casters' layers
     private RenderView[] layerViews = new RenderView[0];
     private final Tile[] layerTiles = new Tile[4096];
     private boolean anyLayered;
-    private final int[] copies = new int[6 * 4096];
-    private int copyCount;
+    private int movingDrawn;
+    private final ShadowLayerPush layerPush = new ShadowLayerPush();
     private boolean layering; // CASTER_LAYERS as the graph was built
     // Moving casters: per instance the frame of its last move, and a flag while it counts as moving (two bits per id,
     // sixteen a word: the draw views' highlight flags), uploaded each frame; the moving ids
@@ -208,7 +211,7 @@ public final class Shadows implements AutoCloseable {
             return layered;
         }
 
-        /** Of the tiles drawn, those drawing only their moving casters, over a copy of their layer. */
+        /** Of the tiles drawn, those drawing only their moving casters, over their layer's depth. */
         public int moving() {
             return moving;
         }
@@ -1159,7 +1162,7 @@ public final class Shadows implements AutoCloseable {
 
     /**
      * Gives the frame's draw slots to the tiles to draw, most important first; more slots next build if wanted. A tile
-     * whose still casters changed draws every caster; one where only moving casters did draws them over a copy of its
+     * whose still casters changed draws every caster; one where only moving casters did draws them over the depth of its
      * layer of still casters, drawn first where stale (a layer slot; without one free, every caster).
      */
     private void assignSlots(EngineSettings settings) {
@@ -1201,7 +1204,7 @@ public final class Shadows implements AutoCloseable {
             flags = uploadMoving();
         }
         int layerSlots = 0;
-        copyCount = 0;
+        movingDrawn = 0;
         for (int i = 0; i < drawn; i++) {
             Tile tile = dirty[i];
             boolean full = tile.dirty || !split;
@@ -1217,21 +1220,13 @@ public final class Shadows implements AutoCloseable {
             slotFull[i] = full;
             slotViews[i].camera(tile.camera, detail); // before anything selects or culls it this frame
             slotViews[i].highlightedOnly(full ? 0 : flags, flagged);
-            if (!full) {
-                int c = 6 * copyCount++;
-                copies[c] = tile.x;
-                copies[c + 1] = tile.y;
-                copies[c + 2] = tile.x;
-                copies[c + 3] = tile.y;
-                copies[c + 4] = tile.size;
-                copies[c + 5] = tile.size;
-            }
+            movingDrawn += full ? 0 : 1;
         }
         anyDrawn = drawn > 0;
         anyLayered = layerSlots > 0;
         stats.drawn = drawn;
         stats.layered = layerSlots;
-        stats.moving = copyCount;
+        stats.moving = movingDrawn;
         stats.waiting = dirtyCount - drawn;
     }
 
@@ -1306,10 +1301,14 @@ public final class Shadows implements AutoCloseable {
         // Caster layers: the still casters of tiles whose layer is stale, then the layers copied into the atlas
         Image layers = null;
         GraphBuilder.PassBuilder layerPass = null;
+        Pipeline overLayer = null;
         if (split) {
             layers = g.persistent("shadow layers", ImageDesc.of(Format.of(renderer.depthFormat()), size, size));
             layerPass = data.read(g.pass("shadow layers"), BufferAccess.DRAW_READ)
                 .attachDepth(layers, Load.LOAD, Store.STORE).when(() -> anyLayered);
+            overLayer = g.graphicsProgram(GraphicsProgram.of(ShadowLayerPush.BYTES)
+                .vertex("shaders/shadows/layer.spv", "layerVertexMain").fragment("shaders/shadows/layer.spv", "layerMain")
+                .depth(Format.of(renderer.depthFormat())).drawBackFaces());
         }
         MeshletCulling.Views culling = meshlets ? g.request(new MeshletCulling(renderer)) : null;
         DepthDraws layerDraws = null;
@@ -1333,13 +1332,12 @@ public final class Shadows implements AutoCloseable {
         if (split) {
             DepthDraws draws = layerDraws;
             layerPass.record(ctx -> drawLayers(ctx, draws, layerSlots, layerCasters));
-            Image from = layers;
-            g.pass("shadow layer copies").read(layers, Access.TRANSFER_SRC).write(image, Access.TRANSFER_DST)
-                .when(() -> copyCount > 0)
-                .record(ctx -> ctx.copy(from.whole(), image.whole(), copies, copyCount));
         }
         GraphBuilder.PassBuilder pass = data.read(g.pass("shadow atlas"), BufferAccess.DRAW_READ)
             .attachDepth(image, Load.LOAD, Store.STORE).when(() -> anyDrawn);
+        if (split) {
+            pass.read(layers, Access.SAMPLED_FRAGMENT);
+        }
         DepthDraws draws = null;
         if (meshlets) { // culled with the frame's other views, while each draws a tile
             for (int i = 0; i < slotViews.length; i++) {
@@ -1353,7 +1351,9 @@ public final class Shadows implements AutoCloseable {
         RenderView[] views = slotViews;
         com.truesim.engine.render.ClassicLodGeometry.Casters[][] casters = classicCasters(g, classics, views,
             slotTiles, bothSides, pass);
-        pass.record(ctx -> drawTiles(ctx, meshletDraws, views, casters));
+        Image layerImage = layers;
+        Pipeline layerProgram = overLayer;
+        pass.record(ctx -> drawTiles(ctx, meshletDraws, views, casters, layerImage, layerProgram));
         return image;
     }
 
@@ -1397,22 +1397,26 @@ public final class Shadows implements AutoCloseable {
     }
 
     /**
-     * Draws the frame's tiles, each into its rectangle: every caster, or the moving ones over the layer copied there;
+     * Draws the frame's tiles, each into its rectangle: every caster, or the moving ones over the layer's depth;
      * and marks them drawn. Allocates nothing.
      */
     @AllowImpure("marks the tiles drawn when the frame records: what the next frame's prepare reads")
     private void drawTiles(com.truesim.engine.graph.PassContext ctx, DepthDraws draws, RenderView[] views,
-        com.truesim.engine.render.ClassicLodGeometry.Casters[][] casters) {
+        com.truesim.engine.render.ClassicLodGeometry.Casters[][] casters, Image layers, Pipeline overLayer) {
+        if (layers != null) {
+            layerPush.layer(ctx.sampled(layers));
+        }
         for (int i = 0; i < views.length; i++) {
             Tile tile = slotTiles[i];
             if (tile == null) {
                 continue;
             }
-            if (slotFull[i]) {
-                ctx.clearDepth(tile.x, tile.y, tile.size, tile.size, 0); // reverse depth: 0 is far
-            }
+            ctx.clearDepth(tile.x, tile.y, tile.size, tile.size, 0); // reverse depth: 0 is far
             ctx.viewport(tile.x, tile.y, tile.size, tile.size);
             ctx.scissor(tile.x, tile.y, tile.size, tile.size);
+            if (!slotFull[i]) {
+                ctx.draw(overLayer, layerPush, 3, 1); // the still casters' depth, the moving drawn over it
+            }
             if (draws != null) {
                 draws.draw(ctx, views[i]);
             }

@@ -15,6 +15,7 @@ import com.truesim.engine.vulkan.GpuImage;
 import com.truesim.engine.vulkan.VulkanDevice;
 import com.truesim.engine.vulkan.VulkanInstance;
 import com.truesim.scene.assets.mesh.MeshData;
+import com.truesim.scene.core.ShadowMethod;
 import com.truesim.scene.core.ShadowSpec;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -140,14 +141,23 @@ class ShadowsBenchmark {
             s.owner()[0] = new Shadows(s.geometry(), s.lights()).rayTracing(s.rays());
             s.added().add(s.owner()[0].view(s.main()));
         };
-        configs.add(new Config("all still", setup, 0, 0));
-        for (int rocks : new int[] {100, 500, 2000}) {
-            configs.add(new Config(String.format(Locale.ROOT, "%,d rocks moving", rocks), setup, rocks, 0));
+        // TRUESIM_SHADOWS_AB: each case with caster layers on too, in turns
+        boolean ab = System.getenv("TRUESIM_SHADOWS_AB") != null && method.method() == ShadowMethod.MAPS;
+        Consumer<Setup> layered = s -> {
+            s.graph().settings().set(ShadowSettings.CASTER_LAYERS, true);
+            setup.accept(s);
+        };
+        String[] names = {"all still", "100 rocks moving", "500 rocks moving", "2,000 rocks moving",
+            "10% of the lights moving", "50% of the lights moving", "500 rocks and 10% of the lights moving",
+            "2,000 rocks and 50% of the lights moving"};
+        int[] rocks = {0, 100, 500, 2000, 0, 0, 500, 2000};
+        double[] shares = {0, 0, 0, 0, 0.1, 0.5, 0.1, 0.5};
+        for (int i = 0; i < names.length; i++) {
+            configs.add(new Config(names[i], setup, rocks[i], shares[i]));
+            if (ab) {
+                configs.add(new Config(names[i] + ", caster layers", layered, rocks[i], shares[i]));
+            }
         }
-        configs.add(new Config("10% of the lights moving", setup, 0, 0.1));
-        configs.add(new Config("50% of the lights moving", setup, 0, 0.5));
-        configs.add(new Config("500 rocks and 10% of the lights moving", setup, 500, 0.1));
-        configs.add(new Config("2,000 rocks and 50% of the lights moving", setup, 2000, 0.5));
         return configs;
     }
 
