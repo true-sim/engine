@@ -21,10 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [plain, width256, waitframes]
-        copy: [1, 2, 3, 4]
+        mode: [plain, tiny, width256, waitframes]
+        copy: [1, 2, 3, 4, 5, 6]
     name: repro (${{ matrix.mode }}, ${{ matrix.copy }})
-    env:
     steps:
       - uses: actions/checkout@v7
       - uses: true-sim/build-logic/.github/actions/setup-vulkan@61314fb2c79472f89f95c8ffd001ee53e904b02a # main, 2026-10-27
@@ -39,6 +38,7 @@ jobs:
           lscpu | grep -E "Model name|^CPU\(s\)"; if grep -q avx512f /proc/cpuinfo; then echo "has avx512f"; else echo "no avx512f"; fi
           if [ "${{ matrix.mode }}" = width256 ]; then echo "LP_NATIVE_VECTOR_WIDTH=256" >> $GITHUB_ENV; export LP_NATIVE_VECTOR_WIDTH=256; fi
           if [ "${{ matrix.mode }}" = waitframes ]; then export TRUESIM_WAIT_EACH_FRAME=1; fi
+          if [ "${{ matrix.mode }}" = tiny ]; then export TRUESIM_EMPTY_LEVEL=tiny; fi
           ./gradlew :engine-scene:testClasses -q
           for c in 1 2 3; do (while true; do :; done) & done
           crashes=0
