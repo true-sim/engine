@@ -10,9 +10,7 @@ description = "Engine renderer for true-sim: GPU-driven meshlet rendering of sce
 dependencies {
     api(project(":engine-graph"))
     api("com.truesim.scene:scene-assets:0.66.0")
-    // The particles' alone (render.particles, moving to effects-particles; CoreBoundaryTest keeps the core off it):
-    // effects as data, their spawns and the Java reference
-    api("com.truesim.scene:scene-effects:0.66.0")
+    api("com.truesim.scene:scene-core:0.66.0") // lights' shadow specs (ShadowSpec, ShadowMethod)
     api("com.truesim.common:common-math:0.6.0") // the material records' colors and vectors
     testImplementation("com.truesim.scene:scene-meshbuild:0.66.0")
     // TestRenderer and TestMeshes: the renderer set up for GPU tests, for libraries' tests as for the engine's
@@ -26,8 +24,7 @@ slang {
     javaPackage = "com.truesim.engine.render.materials"
     pushPackage = "com.truesim.engine.render.layout"
     pushBase = "com.truesim.engine.vulkan.PushConstants" // push layouts are writers too
-    constantModules = listOf("bindless", "lights", "materials", "meshlets/common", "indirect", "blocks/radix", "particles/particle") // BindlessConstants and others
-    particleModules = "com.truesim.engine.render.particles.BuiltInModules" // the built-in particle modules
+    constantModules = listOf("bindless", "lights", "materials", "meshlets/common", "indirect", "blocks/radix") // BindlessConstants and others
 }
 
 // The benchmark (TRUESIM_BENCHMARK=true) builds and draws meshes of millions of triangles.
