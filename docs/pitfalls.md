@@ -24,6 +24,9 @@ the same `beginFrame` allocated in the scene benchmark: in the test, the JIT hap
 - Proof: [#141](https://github.com/true-sim/engine/pull/141).
 - Rule: also read the scene benchmark's "bytes allocated" column; when it is not 0, measure each stage of the frame to
   find the call.
+- Also: `VulkanDevice.submitAndWait` allocates 320 bytes a call itself, an empty recording too (measured around a
+  call with a no-op consumer in `ShadowOwnerTest.framesWithMobilityHintsAllocateNothing`, which takes an empty call's
+  bytes off each frame's): a test recording frames through it counts every frame as allocating otherwise.
 
 **A for-each over a list allocated its iterator in every depth and ID draw.** `Materials.drawsGeometry`, asked by
 every visibility buffer ID draw (both culling phases), looped `for (MaterialType type : geometryTypes)` over a
@@ -526,6 +529,17 @@ ms; per tile the cost is in culling and drawing at all, not in the casters drawn
   a workgroup a view took culling from 1.91 to 1.29 ms. With the clear dropped (the depth written untested) and the
   movers culled from their id list, layers took 3.60 against 4.87 ms (README).
 - Rule: before caching what a pass draws, measure what the pass costs with nothing drawn.
+
+**A cache test passed with the cached content wrong, because the cache was stale anyway.** The first tests of caster
+mobility hints passed with a static caster's change marking its tiles' layers as current (the caster left out of
+them), and with a hint change that left a layer holding a caster now drawn as moving: in both tests every tile's
+layer was already stale when the hint arrived (none drawn yet, or a caster settling had marked it), so the next draw
+rebuilt it and the image was right.
+- Proof: each fault put into `Shadows` by hand: `ShadowOwnerTest.castersMarkedStaticJoinTheStillLayersAtOnceAndDynamicOnesNever`
+  and `hintsChangedAtRuntimeAreFollowed` passed until each first drew the tiles' layers (a caster marked dynamic moved
+  beside them) before the change; then they failed (75 and 204 against at most 2) (true-sim/engine, shadow mobility).
+- Rule: a test of a cache sets the cache up valid before the change it tests, and is checked once with the fault put
+  in by hand.
 
 **A mask per traced light does not scale to many lights.** 200 ray-traced point lights took 220 ms a frame (soft: 915
 ms) at 1920 x 1080: each light traced and (soft) denoised over every pixel of the view.
