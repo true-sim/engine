@@ -10,7 +10,7 @@ description = "Engine scene interaction for true-sim: pointers on scene nodes (p
 dependencies {
     api(project(":engine-render")) // the frame's cameras and windows
     api(project(":engine-input")) // input actions
-    api("com.truesim.scene:scene-core:0.68.0") // components, Pickable, ScenePicker
+    api("com.truesim.scene:scene-core:0.70.0") // components, Pickable, ScenePicker
 }
 
 // The picking benchmark (TRUESIM_BENCHMARK=true): measure the code, not its coverage probes.
