@@ -805,6 +805,19 @@ a broadband ILD is dominated by the band with the most energy. Raising the order
   `AmbisonicsIldProbe` (true-sim/engine, ambisonics ILD).
 - Rule: judge a spatial decode per band and per ear level, not by one broadband ratio.
 
+**A stinger's test read the music on a frame its beats did not fall on.**
+`MusicRenderTest.aStingerPlaysOnTheBeatAndDucksTheMusic` read the output 12,000 frames into its second second and
+expected the stinger there, as if the bed had started on frame 0. Music starts a segment at the schedule point of the first update that finds its clips ready, and a stinger on
+`NEXT_BEAT` takes the bed's next beat from there. The generated bed was handed over before the first update in about 2 %
+of runs (the bed at frame 72, the stinger's beat after the schedule point at 60,072: the read frame showed the bed alone,
+0.3536) and after it in the rest (the bed at 1,096, the stinger at 49,096: the read frame happened to be inside it).
+Neither case checked the beat. The wait for the clip also slept without draining the tasks, and an asset only stops
+counting as loading once a drain hands it over: it either did not wait or waited the full 10 s.
+- Proof: CI run 42186259008 (0.3536 against 0.159); 300 repetitions locally failed 4 and 7 times, every failure with the
+  bed at frame 72; with the test reading the bed's start and its beat, 300 repetitions passed.
+- Rule: a test of quantized music reads where its segments actually started (or waits for their clips before playing)
+  and checks the quantized frame from there; a loop waiting for an asset drains the tasks it waits on.
+
 ## Java
 
 **A record's components are its accessors.** A method named like a component must return the component's type:
