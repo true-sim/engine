@@ -112,6 +112,42 @@ class RecordBufferTest {
     }
 
     @Test
+    void manyRecordsClearedAtOnceAreZerosAsIfClearedEach() {
+        try (VulkanInstance instance = instance(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
+            FrameSlots slots = new FrameSlots(2);
+            for (RecordBuffer.ChangeList list : RecordBuffer.ChangeList.values()) {
+                try (RecordBuffer records = new RecordBuffer(device, 32, 300, slots)) {
+                    records.changeList(list, 64 * 36); // in place: chunks of 64 records
+                    for (int i = 0; i < 300; i++) {
+                        fill(records, i, i + 1);
+                    }
+                    slots.begin(0);
+                    device.submitAndWait(device.graphics(), slots::recordStart);
+                    slots.end();
+                    fill(records, 7, 500); // claimed already in this upload: zeroed where it is
+                    int[] gone = new int[260];
+                    for (int i = 0; i < gone.length; i++) {
+                        gone[i] = i + 7; // 7 to 266, more than a block of zeros
+                    }
+                    records.clear(gone, 0, gone.length);
+                    assertThatIndexOutOfBoundsException().isThrownBy(() -> records.clear(gone, 250, 20));
+                    assertThatIndexOutOfBoundsException().isThrownBy(() -> records.clear(new int[] {300}, 0, 1));
+                    slots.begin(1);
+                    device.submitAndWait(device.graphics(), slots::recordStart);
+                    slots.end();
+                    int[] words = read(device, records);
+                    assertThat(words[8 * 6]).as(list + ": kept").isEqualTo(7);
+                    for (int i = 7; i < 267; i++) {
+                        assertThat(words[8 * i]).as(list + ": record " + i).isZero();
+                        assertThat(words[8 * i + 7]).isZero();
+                    }
+                    assertThat(words[8 * 267]).isEqualTo(268);
+                }
+            }
+        }
+    }
+
+    @Test
     void recordsGrowKeepingWhatTheyHold() {
         try (VulkanInstance instance = instance(); VulkanDevice device = VulkanDevice.createHeadless(instance.bestGpu())) {
             FrameSlots slots = new FrameSlots(2);

@@ -152,6 +152,16 @@ public final class GeometryPool implements AutoCloseable {
     private int vertexCount;
     private int meshletCount;
     private int meshCount;
+    private long added; // meshes added since the pool was made, deformed copies too
+    private long removed;
+    // Spares (spares(n)): the ranges of meshes removed and retired, kept for a mesh of the same sizes to take whole
+    // instead of five ranges freed and placed again; oldest first out when there are too many, all out before growing.
+    private int spareLimit;
+    private int spareCount;
+    private long[] spares = new long[0]; // SPARE_FIELDS per spare: lengths, then starts
+    private long spareAge;
+    private long reused;
+    private static final int SPARE_FIELDS = 11; // 5 lengths, 5 starts, the age
     private int unfit; // live meshes too large for the mesh shader path
     private boolean closed;
 
@@ -432,12 +442,31 @@ public final class GeometryPool implements AutoCloseable {
         if (freeIdCount == 0 && idCount == capacity.meshes()) {
             growMeshes();
         }
-        // Each kind of data in a range of its own; triangle bytes start on a word, so no word holds two meshes.
-        long vertexBase = place(vertexRanges, mesh.vertexCount(), 1);
-        long attributeBase = place(attributeRanges, mesh.attributes().byteSize(), 4);
-        long meshletVertexBase = place(meshletVertexRanges, meshletVertexTotal, 1);
-        long meshletBase = place(meshletRanges, mesh.meshletCount(), 1);
-        long indexBase = place(triangleRanges, indexRange, 4);
+        // Each kind of data in a range of its own; triangle bytes start on a word, so no word holds two meshes. A spare
+        // of the same sizes gives all five at once.
+        long vertexBase;
+        long attributeBase;
+        long meshletVertexBase;
+        long meshletBase;
+        long indexBase;
+        int spare = spareCount == 0 ? -1 : findSpare(mesh.vertexCount(), mesh.attributes().byteSize(),
+            meshletVertexTotal, mesh.meshletCount(), indexRange);
+        if (spare >= 0) {
+            int at = spare * SPARE_FIELDS;
+            vertexBase = spares[at + 5];
+            attributeBase = spares[at + 6];
+            meshletVertexBase = spares[at + 7];
+            meshletBase = spares[at + 8];
+            indexBase = spares[at + 9];
+            dropSpare(spare);
+            reused++;
+        } else {
+            vertexBase = place(vertexRanges, mesh.vertexCount(), 1);
+            attributeBase = place(attributeRanges, mesh.attributes().byteSize(), 4);
+            meshletVertexBase = place(meshletVertexRanges, meshletVertexTotal, 1);
+            meshletBase = place(meshletRanges, mesh.meshletCount(), 1);
+            indexBase = place(triangleRanges, indexRange, 4);
+        }
         Levels walked = prepared != null ? prepared.levels : Levels.of(mesh); // a prepared mesh's, walked already
         boolean fitsMesh = walked.fitsMeshShaders();
         int id = freeIdCount > 0 ? takeLowestFreeId() : idCount++;
@@ -490,6 +519,7 @@ public final class GeometryPool implements AutoCloseable {
         vertexCount += mesh.vertexCount();
         meshletCount += mesh.meshletCount();
         meshCount++;
+        added++;
         return id;
     }
 
@@ -557,6 +587,7 @@ public final class GeometryPool implements AutoCloseable {
         vertexCount += (int) vertices;
         meshletCount += (int) meshletRecords;
         meshCount++;
+        added++;
         return id;
     }
 
@@ -621,6 +652,7 @@ public final class GeometryPool implements AutoCloseable {
         vertexCount -= vertexLength[mesh];
         meshletCount -= meshletLength[mesh];
         meshCount--;
+        removed++;
         retiring[retiringCount] = mesh;
         retireAt[retiringCount++] = slots.retireAt();
     }
@@ -649,12 +681,16 @@ public final class GeometryPool implements AutoCloseable {
         for (int i = 0; i < retiringCount; i++) {
             int id = retiring[i];
             if (slots.isFinished(retireAt[i])) {
-                vertexRanges.release(vertexStart[id], vertexLength[id]);
-                attributeRanges.release(attributeStart[id], attributeLength[id]);
-                meshletRanges.release(meshletStart[id], meshletLength[id]);
-                if (deformedFrom[id] < 0) { // a deformed copy shares its source's
-                    meshletVertexRanges.release(meshletVertexStart[id], meshletVertexLength[id]);
-                    triangleRanges.release(triangleStart[id], triangleLength[id]);
+                if (deformedFrom[id] < 0 && spareLimit > 0) {
+                    keepSpare(id);
+                } else {
+                    vertexRanges.release(vertexStart[id], vertexLength[id]);
+                    attributeRanges.release(attributeStart[id], attributeLength[id]);
+                    meshletRanges.release(meshletStart[id], meshletLength[id]);
+                    if (deformedFrom[id] < 0) { // a deformed copy shares its source's
+                        meshletVertexRanges.release(meshletVertexStart[id], meshletVertexLength[id]);
+                        triangleRanges.release(triangleStart[id], triangleLength[id]);
+                    }
                 }
                 freeIds[freeIdCount++] = id;
             } else {
@@ -663,6 +699,102 @@ public final class GeometryPool implements AutoCloseable {
             }
         }
         retiringCount = kept;
+    }
+
+    // ---------------------------------------------------------------- spares
+
+    /**
+     * Keeps the ranges of up to {@code count} removed meshes (0, the default: none) for meshes of the same sizes to
+     * take whole: streaming content that comes and goes in equal sizes (generated tiles, a cell's rocks) then places a
+     * mesh without allocating its ranges, and removes one without freeing them. The oldest spare goes when there are
+     * more; every spare goes before the pool grows. Fewer than now lets the oldest go at once. Allocates only to grow
+     * its list.
+     */
+    public void spares(int count) {
+        if (count < 0) {
+            throw new IllegalArgumentException("Not a count of spares: " + count);
+        }
+        spareLimit = count;
+        while (spareCount > count) {
+            releaseSpare(oldestSpare());
+        }
+    }
+
+    /** How many removed meshes' ranges are kept as spares now. */
+    public int spareCount() {
+        return spareCount;
+    }
+
+    /** How many meshes were placed in a spare's ranges since the pool was made. */
+    public long reusedCount() {
+        return reused;
+    }
+
+    /** Keeps retired mesh {@code id}'s ranges as a spare, the oldest going if there are too many. */
+    private void keepSpare(int id) {
+        if (spareCount == spareLimit) {
+            releaseSpare(oldestSpare());
+        }
+        if ((spareCount + 1) * SPARE_FIELDS > spares.length) {
+            growSpares();
+        }
+        int at = spareCount++ * SPARE_FIELDS;
+        spares[at] = vertexLength[id];
+        spares[at + 1] = attributeLength[id];
+        spares[at + 2] = meshletVertexLength[id];
+        spares[at + 3] = meshletLength[id];
+        spares[at + 4] = triangleLength[id];
+        spares[at + 5] = vertexStart[id];
+        spares[at + 6] = attributeStart[id];
+        spares[at + 7] = meshletVertexStart[id];
+        spares[at + 8] = meshletStart[id];
+        spares[at + 9] = triangleStart[id];
+        spares[at + 10] = spareAge++;
+    }
+
+    @AllowAllocation("more spares than before")
+    private void growSpares() {
+        spares = Arrays.copyOf(spares, Math.max(SPARE_FIELDS * 8, 2 * spares.length));
+    }
+
+    private int oldestSpare() {
+        int oldest = 0;
+        for (int i = 1; i < spareCount; i++) {
+            if (spares[i * SPARE_FIELDS + 10] < spares[oldest * SPARE_FIELDS + 10]) {
+                oldest = i;
+            }
+        }
+        return oldest;
+    }
+
+    /** Gives spare {@code i}'s ranges back to the allocators. */
+    private void releaseSpare(int i) {
+        int at = i * SPARE_FIELDS;
+        vertexRanges.release(spares[at + 5], spares[at]);
+        attributeRanges.release(spares[at + 6], spares[at + 1]);
+        meshletVertexRanges.release(spares[at + 7], spares[at + 2]);
+        meshletRanges.release(spares[at + 8], spares[at + 3]);
+        triangleRanges.release(spares[at + 9], spares[at + 4]);
+        dropSpare(i);
+    }
+
+    private void dropSpare(int i) {
+        int last = --spareCount;
+        if (i != last) {
+            System.arraycopy(spares, last * SPARE_FIELDS, spares, i * SPARE_FIELDS, SPARE_FIELDS);
+        }
+    }
+
+    /** The spare of exactly these lengths, or -1. */
+    private int findSpare(long vertices, long attributeBytes, long meshletVertices, long meshletTotal, long indices) {
+        for (int i = 0; i < spareCount; i++) {
+            int at = i * SPARE_FIELDS;
+            if (spares[at] == vertices && spares[at + 1] == attributeBytes && spares[at + 2] == meshletVertices
+                && spares[at + 3] == meshletTotal && spares[at + 4] == indices) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /** The lowest free mesh number, taken: deterministic, whatever order meshes were removed in. */
@@ -689,6 +821,12 @@ public final class GeometryPool implements AutoCloseable {
     /** A range of {@code length} from {@code ranges}, grown (and its buffers with it) if it has none free. */
     private long place(RangeAllocator ranges, long length, long alignment) {
         long start = ranges.allocate(length, alignment);
+        if (start < 0 && spareCount > 0) { // spares give their room back before the pool grows
+            while (spareCount > 0) {
+                releaseSpare(spareCount - 1);
+            }
+            start = ranges.allocate(length, alignment);
+        }
         if (start < 0) {
             long limit = limit(ranges);
             if (ranges.capacity() + length + alignment > limit) {
@@ -908,6 +1046,16 @@ public final class GeometryPool implements AutoCloseable {
     /** How many meshes the pool holds now. */
     public int meshCount() {
         return meshCount;
+    }
+
+    /** How many meshes were added since the pool was made, deformed copies too: a stream's inflow. */
+    public long addedCount() {
+        return added;
+    }
+
+    /** How many meshes were removed since the pool was made. */
+    public long removedCount() {
+        return removed;
     }
 
     /** One past the highest mesh number handed out: numbers of meshes held are below it. */

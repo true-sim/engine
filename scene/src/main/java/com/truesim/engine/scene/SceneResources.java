@@ -165,6 +165,8 @@ public final class SceneResources implements AutoCloseable {
     private int arrivalHead;
     private int arrivalCount;
     private com.truesim.engine.settings.EngineSettings.Subscription releaseWatch;
+    private com.truesim.engine.settings.EngineSettings.Subscription sparesWatch; // render.meshSpares, or null
+    private boolean deferred; // the last flush placed and released nothing: its update had spent the budget
     private final MeshUser heldMeshes = mesh -> { }; // the techniques' holds: placed() counts the arrival
 
     /**
@@ -631,6 +633,7 @@ public final class SceneResources implements AutoCloseable {
                 this::followBudget);
             updateWatch = followed.onChange(com.truesim.engine.render.RenderSettings.TEXTURE_UPDATE_BUDGET,
                 this::followBudget);
+            sparesWatch = followed.onChange(com.truesim.engine.render.RenderSettings.MESH_SPARES, this::followBudget);
         }
         return this;
     }
@@ -642,6 +645,7 @@ public final class SceneResources implements AutoCloseable {
         textures.updateBudget((long) settings.get(com.truesim.engine.render.RenderSettings.TEXTURE_UPDATE_BUDGET)
             << 20);
         releaseBudget = (long) (settings.get(com.truesim.engine.render.RenderSettings.STREAM_FRAME_BUDGET) * 1e6);
+        pool.spares(settings.get(com.truesim.engine.render.RenderSettings.MESH_SPARES));
     }
 
     /** The settings scenes drawing these resources follow, or null. */
@@ -856,13 +860,27 @@ public final class SceneResources implements AutoCloseable {
         return mesh;
     }
 
-    /** {@link #releaseMesh(Mesh, MeshUser)} in a later {@link #flush}, within the frame budget. Allocates nothing. */
+    /**
+     * {@link #releaseMesh(Mesh, MeshUser)} in a later {@link #flush}, within the frame budget, when it is the mesh's last
+     * user (the mesh leaves); now when others stay, which costs nothing to defer. Allocates nothing.
+     */
     void releaseMeshLater(Mesh mesh, MeshUser user) {
+        if (mesh.users.size() > 1) {
+            mesh.users.remove(user);
+            return;
+        }
         queueRelease(mesh, user, null);
     }
 
-    /** {@link #releaseSet} in a later {@link #flush}, within the frame budget. Allocates nothing. */
+    /**
+     * {@link #releaseSet} in a later {@link #flush}, within the frame budget, when it is the set's last holder (its ids
+     * and materials go); now when others hold it, a count taken down. Allocates nothing.
+     */
     void releaseSetLater(MaterialSet set) {
+        if (set.holders > 1) {
+            set.holders--;
+            return;
+        }
         queueRelease(null, null, set);
     }
 
@@ -1526,10 +1544,29 @@ public final class SceneResources implements AutoCloseable {
      * nothing.
      */
     public void flush() {
+        flush(System.nanoTime(), false);
+    }
+
+    /**
+     * {@link #flush()} for streaming work that began at {@code since} ({@link System#nanoTime()}): a scene sync's
+     * update, whose own work (renderables attached or removed) counts toward the same frame budget
+     * ({@code render.streamFrameBudget}). A frame whose update spent the budget already places and releases nothing,
+     * the next at least one of each: what waits is never held two frames running. Allocates nothing.
+     */
+    void flush(long since) {
+        flush(since, true);
+    }
+
+    private void flush(long since, boolean mayDefer) {
         if (arrivalCount > 0 || releaseCount > 0) {
-            long deadline = releaseBudget == 0 ? Long.MAX_VALUE : System.nanoTime() + releaseBudget;
-            placeArrived(deadline); // what came first, then what went, in the same budget: at least one of each
-            releaseQueued(deadline);
+            long deadline = releaseBudget == 0 ? Long.MAX_VALUE : since + releaseBudget;
+            if (mayDefer && !deferred && System.nanoTime() - deadline > 0) {
+                deferred = true; // the update's own work took the frame's budget: what waits goes next frame, and
+            } else { // then at least one of each, so it never waits two
+                deferred = false;
+                placeArrived(deadline); // what came first, then what went, in the same budget: at least one of each
+                releaseQueued(deadline);
+            }
         }
         for (int i = 0; i < dynamicList.size(); i++) {
             upload(dynamicList.get(i));
@@ -2119,6 +2156,9 @@ public final class SceneResources implements AutoCloseable {
             }
             if (updateWatch != null) {
                 updateWatch.close();
+            }
+            if (sparesWatch != null) {
+                sparesWatch.close();
             }
             if (releaseWatch != null) {
                 releaseWatch.close();

@@ -79,6 +79,8 @@ public final class RecordBuffer implements AutoCloseable, DeviceBuffer {
 
     private final VulkanDevice device;
     private final int recordBytes;
+    private final MemorySegment zeros; // zeros, a whole number of records: clears copy them in bulk
+    private int[] fresh = new int[0]; // a bulk clear's records new to this upload
     private int capacity;
     private final FrameSlots slots;
     // The buffer the records were in before they grew, and its size: copied into the new one at the next upload.
@@ -169,6 +171,7 @@ public final class RecordBuffer implements AutoCloseable, DeviceBuffer {
         }
         this.device = Objects.requireNonNull(device, "device");
         this.recordBytes = recordBytes;
+        this.zeros = MemorySegment.ofArray(new long[Math.max(recordBytes, 4096) / 8]); // whole records
         this.capacity = capacity;
         this.slots = Objects.requireNonNull(slots, "slots");
         this.retiring = new Retiring(slots);
@@ -378,13 +381,53 @@ public final class RecordBuffer implements AutoCloseable, DeviceBuffer {
         return new Chunk(chunkEntries);
     }
 
-    /** Sets record {@code index} to zeros (at the next upload). Allocates nothing. */
+    /**
+     * Sets record {@code index} to zeros (at the next upload). One bulk copy, not a store per word: fast before the
+     * compiler has warmed to it (streaming removes many records now and then). Allocates nothing.
+     */
     public void clear(int index) {
         int entry = claim(index);
-        long at = offset(entry);
-        MemorySegment memory = changes(entry);
-        for (int word = 0; word < recordBytes; word += 8) {
-            memory.set(ValueLayout.JAVA_LONG_UNALIGNED, at + word, 0);
+        MemorySegment.copy(zeros, 0, changes(entry), offset(entry), recordBytes);
+    }
+
+    @AllowAllocation("growing with the most records cleared at once")
+    private void growFresh(int count) {
+        fresh = new int[Math.max(count, 2 * fresh.length)];
+    }
+
+    /**
+     * Sets records {@code indices[from]} to {@code indices[from + count - 1]} to zeros, as {@link #clear(int)} does
+     * each: records without an entry yet take consecutive new ones, their indices and zeros written in a few bulk
+     * copies instead of a write per record (a batch of instances removed at once). Allocates nothing once warm.
+     */
+    public void clear(int[] indices, int from, int count) {
+        Objects.checkFromIndexSize(from, count, indices.length);
+        if (list == ChangeList.DIRECT) {
+            for (int i = from; i < from + count; i++) {
+                clear(indices[i]);
+            }
+            return;
+        }
+        if (fresh.length < count) {
+            growFresh(count);
+        }
+        int first = pending;
+        int made = 0;
+        for (int i = from; i < from + count; i++) {
+            int index = Objects.checkIndex(indices[i], capacity);
+            int entry = entryOf[index];
+            if (entry >= 0) { // claimed already in this upload: zeroed where it is
+                MemorySegment.copy(zeros, 0, changes, (long) recordBytes * entry, recordBytes);
+            } else {
+                entryOf[index] = pending++;
+                fresh[made++] = index;
+            }
+        }
+        MemorySegment.copy(fresh, 0, this.indices, ValueLayout.JAVA_INT, 4L * first, made);
+        long bytes = (long) recordBytes * made;
+        for (long done = 0; done < bytes; done += zeros.byteSize()) {
+            MemorySegment.copy(zeros, 0, changes, (long) recordBytes * first + done, Math.min(zeros.byteSize(),
+                bytes - done));
         }
     }
 

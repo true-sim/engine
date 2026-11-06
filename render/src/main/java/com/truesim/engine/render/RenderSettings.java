@@ -87,6 +87,15 @@ public final class RenderSettings {
     public static final Setting<Float> STREAM_FRAME_BUDGET = Setting.decimal("render.streamFrameBudget", 0.25f, 0,
         100, "ms a frame spent taking in and letting go of streamed content (0: all at once)");
 
+    /**
+     * Meshes removed whose ranges of the geometry pool are kept for a mesh of the same sizes to take whole
+     * ({@link GeometryPool#spares}): streaming content that comes and goes in equal sizes (generated tiles, rocks)
+     * places and removes meshes without allocating and freeing their ranges. The memory they hold is given back before
+     * the pool grows. 0: none kept.
+     */
+    public static final Setting<Integer> MESH_SPARES = Setting.integer("render.meshSpares", 64, 0, 65536,
+        "removed meshes' pool ranges kept for meshes of the same sizes (0: none)");
+
     private RenderSettings() {
     }
 
@@ -115,7 +124,7 @@ public final class RenderSettings {
     public static void register(SettingRegistry registry) {
         registry.addHiddenSlots(INTERPOLATION_SLOT, Transparency.SLOT, SelectionOutline.SLOT, DisplayTransform.SLOT)
             .addHidden(OCCLUSION, CHANGE_LIST, CHANGE_LIST_CHUNK, STREAM_BUDGET, TEXTURE_UPDATE_BUDGET, STREAM_FRAME_BUDGET,
-                Transparency.SORTED_RUNS)
+                MESH_SPARES, Transparency.SORTED_RUNS)
             .addHidden(ClusteredLights.ALL.toArray(new Setting<?>[0]))
             .addHidden(ShadowSettings.ALL.toArray(new Setting<?>[0]))
             .addHidden(Denoiser.ALL.toArray(new Setting<?>[0]))

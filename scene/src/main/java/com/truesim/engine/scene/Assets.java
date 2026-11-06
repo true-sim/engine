@@ -17,6 +17,8 @@ import com.truesim.scene.assets.AssetRef;
 import com.truesim.scene.assets.AssetType;
 import com.truesim.scene.assets.PathAssets;
 import com.truesim.scene.assets.PathSource;
+import com.truesim.scene.assets.mesh.MeshPool;
+import com.truesim.scene.render.RenderAssets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -45,12 +47,20 @@ public final class Assets implements Plugin {
     public static final Setting<Integer> BUDGET =
         Setting.integer("assets.budgetMegabytes", 512, 0, 1 << 20, "megabytes of unused assets kept for later");
 
+    /**
+     * Generated meshes evicted from the cache kept for meshes of the same sizes to be built into
+     * ({@link #meshPool()}): their memory reused, not freed and allocated again. 0: none kept.
+     */
+    public static final Setting<Integer> MESH_POOL =
+        Setting.integer("assets.meshPool", 64, 0, 1 << 16, "generated meshes kept for meshes of the same sizes");
+
     private final List<String[]> mounts = new ArrayList<>(); // name, folder: added when it starts
     private GeometryPool.Capacity capacity = GeometryPool.Capacity.of(1 << 21, 1 << 16, 1 << 12);
     private int materialCapacity = 4096;
     private com.truesim.engine.app.Engine engine;
     private Rendering rendering;
     private AssetCache cache;
+    private MeshPool meshPool;
     private PathAssets paths;
     private GeometryPool pool;
     private Materials materials;
@@ -97,9 +107,12 @@ public final class Assets implements Plugin {
                 for (String[] mount : mounts) {
                     paths.mounts().add(mount[0], PathSource.folder(Path.of(mount[1])));
                 }
-                startup.registry().addHidden(BUDGET, RenderSettings.INTERPOLATION);
+                startup.registry().addHidden(BUDGET, MESH_POOL, RenderSettings.INTERPOLATION);
                 cache.setBudget((long) startup.settings().get(BUDGET) << 20);
                 startup.settings().onChange(BUDGET, () -> cache.setBudget((long) startup.settings().get(BUDGET) << 20));
+                meshPool = new MeshPool(startup.settings().get(MESH_POOL));
+                startup.settings().onChange(MESH_POOL, () -> meshPool.capacity(startup.settings().get(MESH_POOL)));
+                cache.recycler(RenderAssets.MESH, meshPool);
             }
             case DEVICE -> {
                 rendering = startup.get(Rendering.KEY);
@@ -119,6 +132,14 @@ public final class Assets implements Plugin {
     /** The asset cache: acquire, get, release; loads finish at the start of a frame. */
     public AssetCache cache() {
         return made(cache, Stage.BEFORE_INSTANCE);
+    }
+
+    /**
+     * Generated meshes the cache let go of, kept for meshes of the same sizes ({@link #MESH_POOL}): a generator builds
+     * into it ({@code MeshData.Builder.build(pool)}, {@code MeshBuilder.pool}) to reuse their memory.
+     */
+    public MeshPool meshPool() {
+        return made(meshPool, Stage.BEFORE_INSTANCE);
     }
 
     /** Assets by path: mounts and importers. */
@@ -165,6 +186,7 @@ public final class Assets implements Plugin {
         if (cache != null) {
             cache.close();
             cache = null;
+            meshPool.clear(); // what it kept, now the cache gives it no more
         }
     }
 }
