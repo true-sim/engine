@@ -129,6 +129,7 @@ public final class Shadows implements AutoCloseable {
     private int[] movingFlags = new int[0];
     private MemorySegment movingSegment = MemorySegment.NULL;
     private int[] movingIds = new int[16];
+    private MemorySegment movingIdSegment = MemorySegment.ofArray(movingIds);
     private int movingCount;
     private FrameBuffer movingUpload;
     private final List<FrameBuffer> outgrown = new ArrayList<>(); // freed with the owner: frames in flight read them
@@ -1228,6 +1229,7 @@ public final class Shadows implements AutoCloseable {
     @AllowAllocation("growing with the moving casters")
     private void growMoving() {
         movingIds = Arrays.copyOf(movingIds, movingIds.length * 2);
+        movingIdSegment = MemorySegment.ofArray(movingIds);
     }
 
     /** Casters that stopped {@code frames} frames ago join the still ones: the layers around them are stale. */
@@ -1450,6 +1452,8 @@ public final class Shadows implements AutoCloseable {
             slotFull[i] = full;
             slotViews[i].camera(tile.camera, detail); // before anything selects or culls it this frame
             slotViews[i].highlightedOnly(full ? 0 : flags, flagged);
+            // only the moving casters culled, not every instance: the moving ids follow the flags
+            slotViews[i].instances(full ? 0 : flags + 4L * movingFlags.length, movingCount);
             movingDrawn += full ? 0 : 1;
         }
         anyDrawn = drawn > 0;
@@ -1471,13 +1475,20 @@ public final class Shadows implements AutoCloseable {
         dirtyWaited = Arrays.copyOf(dirtyWaited, dirty.length);
     }
 
-    /** This frame's copy of the moving casters' flags; its device address. Allocates nothing, unless it grows. */
+    /**
+     * This frame's copy of the moving casters' flags, then their ids; its device address. Allocates nothing, unless it
+     * grows.
+     */
     private long uploadMoving() {
         long bytes = 4L * movingFlags.length;
-        if (movingUpload == null || movingUpload.size() < bytes) {
-            growUpload(bytes);
+        long ids = 4L * movingCount;
+        if (movingUpload == null || movingUpload.size() < bytes + ids) {
+            growUpload(2 * (bytes + ids));
         }
         movingUpload.put(0, movingSegment, 0, bytes);
+        if (ids > 0) {
+            movingUpload.put(bytes, movingIdSegment, 0, ids); // the moving ids after the flags
+        }
         return movingUpload.deviceAddress();
     }
 
@@ -1549,7 +1560,7 @@ public final class Shadows implements AutoCloseable {
                 .attachDepth(layers, Load.LOAD, Store.STORE).when(() -> anyLayered);
             overLayer = g.graphicsProgram(GraphicsProgram.of(ShadowLayerPush.BYTES)
                 .vertex("shaders/shadows/layer.spv", "layerVertexMain").fragment("shaders/shadows/layer.spv", "layerMain")
-                .depth(Format.of(renderer.depthFormat())).drawBackFaces());
+                .depth(Format.of(renderer.depthFormat())).drawBackFaces().overwriteDepth());
         }
         MeshletCulling.Views culling = meshlets ? g.request(new MeshletCulling(renderer)) : null;
         DepthDraws layerDraws = null;
@@ -1652,11 +1663,14 @@ public final class Shadows implements AutoCloseable {
             if (tile == null) {
                 continue;
             }
-            ctx.clearDepth(tile.x, tile.y, tile.size, tile.size, 0); // reverse depth: 0 is far
+            if (slotFull[i]) {
+                ctx.clearDepth(tile.x, tile.y, tile.size, tile.size, 0); // reverse depth: 0 is far
+            }
             ctx.viewport(tile.x, tile.y, tile.size, tile.size);
             ctx.scissor(tile.x, tile.y, tile.size, tile.size);
             if (!slotFull[i]) {
-                ctx.draw(overLayer, layerPush, 3, 1); // the still casters' depth, the moving drawn over it
+                // the still casters' depth over every texel (no clear first: as much again), the moving drawn over it
+                ctx.draw(overLayer, layerPush, 3, 1);
             }
             if (draws != null) {
                 draws.draw(ctx, views[i]);

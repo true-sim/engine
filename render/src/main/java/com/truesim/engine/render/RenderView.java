@@ -397,6 +397,19 @@ public final class RenderView implements AutoCloseable {
         return highlights(flags, count, 8);
     }
 
+    /**
+     * Culls only the {@code count} instances whose ids lie at device address {@code ids} (32-bit each), or every instance
+     * (address 0): a view drawing few known instances (a shadow tile's moving casters) then costs as they do, not as
+     * the scene's every instance. The address names a frame slot's copy: set it in each frame it is read. Allocates
+     * nothing.
+     */
+    public RenderView instances(long ids, int count) {
+        checkOpen();
+        putLong(ViewLayout.IDS, ids);
+        putInt(ViewLayout.ID_COUNT, ids == 0 ? 0 : count);
+        return this;
+    }
+
     private RenderView highlights(long flags, int count, int mode) {
         checkOpen();
         putLong(ViewLayout.HIGHLIGHTS, flags);

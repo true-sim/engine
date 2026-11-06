@@ -138,8 +138,10 @@ public struct View
     public float2 jitter;          // the projection's subpixel offset, in pixels (temporal antialiasing)
     public float2 previousJitter;  // the frame before's
     public uint2 outputSize;       // the pixels it renders to
-    public uint* highlights;       // VIEW_(UN)HIGHLIGHTED_ONLY: the highlight flags (2 bits per instance id); 448 bytes
-                                   // in all: views lie in one array, one after another
+    public uint* highlights;       // VIEW_(UN)HIGHLIGHTED_ONLY: the highlight flags (2 bits per instance id)
+    public uint* ids;              // or null: the instances it culls, by id, instead of every one (a shadow tile's movers)
+    public uint idCount;           // how many ids there are
+    public uint pad2;              // 464 bytes in all: views lie in one array, one after another
 };
 
 /**

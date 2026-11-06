@@ -460,6 +460,9 @@ public final class GraphBuilder {
                 if (program.doubleSided()) {
                     graphics.doubleSided();
                 }
+                if (program.depthOverwrites()) {
+                    graphics.depthTest(org.lwjgl.vulkan.VK10.VK_COMPARE_OP_ALWAYS, true);
+                }
                 return graphics.build();
             } finally {
                 modules.values().forEach(ShaderModule::close);

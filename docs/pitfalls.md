@@ -424,6 +424,14 @@ frames late, while the frame time looked fine (2.1 ms).
   drawn and 4.2 to 7.2 ms with 1,200.
 - Rule: benchmark caching with things moving, and report what waits (`Shadows.stats().waiting()`), not only time.
 
+**A strict cap starved tiles: "waiting / cap" was not the lag.** With `shadows.atlas.draws` 64 and about 1,100 tiles
+changing every frame, the README said shadows were "up to 18 frames late" (1,100 / 64). The cap always drew the most
+important first, so the least important tiles were never drawn: late by the whole run.
+- Proof: `ShadowsBenchmark` dynamic maps, `TRUESIM_SHADOWS_UPDATES=capped`, 2026-11-06: `Shadows.stats().maxWait()` 94
+  frames (every frame since the graph's first), the mean lateness of the changed tiles 60 frames.
+- Rule: measure lag as frames a change waited (`maxWait`, `late`), never derive it from counts; a budget needs ageing
+  (`shadows.atlas.updates` `IMPORTANCE`: a lag past which tiles are drawn).
+
 **Copying regions of a depth atlas cost the whole image.** Copying 1,000 tiles from the layer atlas into the shadow
 atlas (`vkCmdCopyImage2`, one command, 8192 x 8192 D32 each) took 5.6 ms: the copy needs both whole images in transfer
 layouts, from and back to depth attachment, every frame.
@@ -436,6 +444,14 @@ still ones (a depth write per texel first) was slower than drawing every caster 
 ms; per tile the cost is in culling and drawing at all, not in the casters drawn.
 - Proof: `ShadowsBenchmark`, `TRUESIM_SHADOWS_AB`, draws 1,200, both in turns in one run (README).
 - Rule: measure a cache against the redraw it saves on the scenes at hand; `shadows.casters.layers` stays off.
+- Later (2026-11-06): the cause was per-view costs the split did not touch, not the casters. Per tile, culling every
+  one of the 30,000 instances (the instance pass, a third of 2 µs) and the tile's clear (about 1 µs) cost as much as
+  the layer's depth write (about 1 µs) and far more than the still casters saved (about 0.25 µs). Proof:
+  `ShadowsBenchmark`, `TRUESIM_SHADOWS_AB`, `TRUESIM_SHADOWS_PASSES`, `ALL` updates, 500 rocks: the atlas pass 3.45 ms
+  with layers, 2.36 without the clear, 2.43 without the depth write, 1.57 without both; the instance pass reduced to
+  a workgroup a view took culling from 1.91 to 1.29 ms. With the clear dropped (the depth written untested) and the
+  movers culled from their id list, layers took 3.60 against 4.87 ms (README).
+- Rule: before caching what a pass draws, measure what the pass costs with nothing drawn.
 
 **A mask per traced light does not scale to many lights.** 200 ray-traced point lights took 220 ms a frame (soft: 915
 ms) at 1920 x 1080: each light traced and (soft) denoised over every pixel of the view.

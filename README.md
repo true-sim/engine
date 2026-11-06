@@ -1433,8 +1433,15 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   geometry hooks' fields updated in place), or the caster detail setting changed. A still light over a still scene
   keeps its tile, drawn once; a still camera keeps its cascades. Deformed copies dirty the tiles around them every
   frame; instances moved on the GPU (interpolated motion, mesh particles) dirty every tile while there are any.
-  At most `shadows.atlas.draws` tiles (64) are drawn a frame, the most important first; more wait a frame (their light
-  keeps its last map, or casts none until drawn). No "every N frames" for far lights: it would lag.
+  Which changed tiles a frame draws is `shadows.atlas.updates` (their light keeps its last map, or casts none, until
+  drawn): `IMPORTANCE` (the default) draws a tile the frame it changes where its light shows at least
+  `shadows.atlas.urgent` pixels (256: its reach's radius in the view showing it largest, times the spec's importance
+  and its brightness against the brightest mapped light's; a light whose reach holds a view and every cascade always),
+  and any tile that waited `shadows.atlas.lag` frames (2); the rest, most important and longest waiting first, take
+  `shadows.atlas.draws` (64) a frame, or an even share of the waiting over the lag's frames where that is more (no
+  burst of late tiles every few frames). `ALL` draws every changed tile; `CAPPED` at most `shadows.atlas.draws`, the
+  rest waiting however long. `Shadows.stats()` and the profiler's counters (`Shadows.counters()`:
+  `shadows.atlas.drawn`, `waiting`, `forced`, `maxWait`, `meanLag`) say what was drawn and how late.
 - **AUTO sizes** (`ShadowSpec.AUTO`, within the spec's `minSize` and `maxSize`): a spot or point light's maps from how
   many pixels its reach covers in the views (`shadows.auto.scale` texels per pixel, times the spec's `importance`), a
   cascade's from the screen's pixel size at its start; rounded to powers of two, changed only past
@@ -1496,7 +1503,7 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   **Moving** (`ShadowsBenchmark`, 2026-11-06, the same 200 lights and flight; rocks circling through the lights'
   ranges, lights circling 4 units wide; GPU time of the frame (shadow passes), tiles drawn a frame, no graph build):
 
-  | AUTO maps | `shadows.atlas.draws` 64 (default) | tiles waiting | draws 1,200 (none waits) | tiles drawn |
+  | AUTO maps | `CAPPED`, 64 draws (before the modes) | tiles waiting | draws 1,200 (none waits) | tiles drawn |
   |---|---|---|---|---|
   | all still | 0.97 ms (0.00) | 0 | 1.29 ms (0.01) | 1.7 |
   | 100 rocks moving | 2.13-2.62 (0.68-0.80) | 1,012 | 4.17-4.20 (1.53) | 437 |
@@ -1507,20 +1514,47 @@ lights.shadow(id, ShadowSpec.rayTraced());                               // or s
   | 500 rocks, 10% of the lights | 3.15 (1.35) | 1,117 | 4.63-4.68 (2.30) | 953 |
   | 2,000 rocks, 50% of the lights | 3.31-3.35 (1.52) | 1,131 | 5.60-5.64 (2.83) | 1,101 |
 
+  **Update modes** (2026-11-06, the same flight, one queue; shadow GPU: the shadow passes and the tiles' culling;
+  lag: frames the changed tiles' shadows are late, mean over every changed tile / most):
+
+  | Scene | `CAPPED` (64) | `ALL` | `IMPORTANCE` 256 / lag 2 (default) | `IMPORTANCE` 1024 / lag 4 |
+  |---|---|---|---|---|
+  | 100 rocks moving | 0.78 ms, 64 drawn, lag 60 / 94 | 2.38 ms, 437, lag 0 | 1.33 ms, 212, lag 0.71 / 2 | 1.12 ms, 132, lag 1.60 / 4 |
+  | 500 rocks moving | 1.47 ms, 64, lag 60 / 94 | 4.08 ms, 926, lag 0 | 2.25 ms, 429, lag 0.77 / 2 | 1.65 ms, 242, lag 1.75 / 4 |
+  | 2,000 rocks moving | 1.64 ms, 64, lag 60 / 94 | 5.42 ms, 1,001, lag 0 | 2.46 ms, 464, lag 0.77 / 2 | 1.62 ms, 264, lag 1.74 / 4 |
+  | 300 rocks, 10% of the lights (the video's) | 1.31 ms, 64, lag 60 / 94 | 4.21 ms, 839, lag 0 | 2.29 ms, 390, lag 0.76 / 2 | 1.54 ms, 221, lag 1.74 / 4 |
+
+  `CAPPED` starves tiles: the least important are never drawn (late since the first frame: 94 frames, the whole run),
+  not "waiting / 64" frames as assumed before. More slots grown once (`IMPORTANCE` and `ALL` draw every tile at the
+  start) cost about 0.1 ms a frame with nothing drawn.
+
   A tile costs about 2.5 µs to draw and 2 µs to cull (1,200 tiles: the atlas pass 2.6 ms, culling 2.1 ms), whatever
   moved: so a few hundred moving rocks redraw nearly every tile (each reaches 4 or so of the 1,136). With the default
-  64 draws a frame the rest wait, their shadows late by up to 18 frames; more draws a frame keep them in step at that
-  cost (more draw views also cost 0.3 ms with nothing drawn). **Caster layers** (`shadows.casters.layers`, off):
-  still casters kept in a layer of their own (a second atlas), a tile that only moving casters changed drawn as its
-  layer's depth (a triangle over the tile) and the moving casters on top. Over the rocks it was slower: 100 rocks
-  4.07 against 4.17 ms, 500 rocks 7.03 against 4.62, 2,000 rocks 8.53 against 7.05 (draws 1,200, same run): a rock
-  tile's still casters are cheaper to draw than its texels to write. It stays a choice for costly still casters.
+  64 draws a frame (`CAPPED`) the rest wait; more draws keep them in step at that cost (more draw views also cost
+  0.3 ms with nothing drawn). **Caster layers** (`shadows.casters.layers`, off): still casters kept in a layer of their
+  own (a second atlas), a tile that only moving casters changed drawn as its layer's depth (a triangle over the tile,
+  written untested: no clear first) and the moving casters on top, culled from a list of the moving ids instead of every
+  instance. Where a tile's cost goes (`ALL`, one queue, 500 rocks moving, 926 tiles): culling 1.9 ms (2 µs a view, a
+  third of it the instance pass over all 30,000 instances), the atlas pass 2.6 ms, of which the casters themselves
+  about 0.25 ms; a tile's clear and the layer's depth write about 1 ms each. Before the clear went and the movers were
+  culled alone, layers were slower (500 rocks 5.4 against 4.5 ms of culling and atlas); now (culling + layers + atlas):
+
+  | Scene (`ALL`) | every caster | caster layers | finer casters (`casterDetail` 0.25): every caster | layers |
+  |---|---|---|---|---|
+  | 10 rocks moving (mostly still) | 0.79 ms | 0.54 ms | 0.88 ms | 0.56 ms |
+  | 100 rocks moving | 2.44 | 1.83 | 2.76 | 1.83 |
+  | 500 rocks moving | 4.87 | 3.60 | 4.68 | 3.90 |
+  | 2,000 rocks moving | 6.54 | 6.05 | 6.66 | 6.30 |
+  | 300 rocks, 10% of the lights | 4.48 | 3.93 | 4.36 | 3.45 |
+
+  Layers cost a second atlas (256 MiB at 8192), so they stay a choice; they pay most with few movers among many
+  still casters.
 
   Ray-traced point lights: a mask per light over the view's pixels, so at most `shadows.rays.lights` (16) spot and
   point lights are traced a frame, the most important (how big their reach shows, times their importance; those
   traced last frame kept a little longer), the rest take AUTO maps; at most `shadows.soft.lights` (4) of them soft,
   the rest traced hard; no ray beyond a light's range. All 200 traced took 220 to 236 ms a frame (hard) and 915 to
-  936 ms (soft). Now (draws 64):
+  936 ms (soft). Now (`CAPPED`, 64 draws, before the update modes):
 
   | 200 lights, rocks and lights moving | hard rays (16 traced) | soft rays (4 soft, 12 hard) |
   |---|---|---|
