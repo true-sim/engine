@@ -656,6 +656,14 @@ public final class SceneSync implements AutoCloseable {
         return entry;
     }
 
+    /** {@link #releaseMesh}, the resources' part within the frame budget (render.streamFrameBudget). */
+    private void releaseMeshLater(ViewMesh entry) {
+        if (--entry.holders == 0) {
+            meshes.remove(entry.mesh.ref);
+            resources.releaseMeshLater(entry.mesh, entry);
+        }
+    }
+
     /** Lets go of {@code entry} once: at no holders, of its mesh. */
     private void releaseMesh(ViewMesh entry) {
         if (--entry.holders == 0) {
@@ -902,7 +910,7 @@ public final class SceneSync implements AutoCloseable {
         itemNode[item] = NodeHandle.NONE;
         itemBounded[item] = false; // the node keeps its bounds; a node made in its place is not ours
         itemCount--;
-        releaseMesh(entry);
+        releaseMeshLater(entry);
     }
 
     private void link(ViewMesh entry, int item) {
@@ -1032,7 +1040,7 @@ public final class SceneSync implements AutoCloseable {
             itemSlot[item] = NONE;
         }
         if (itemSet[item] != null) { // drawn, or waiting for its assets
-            resources.releaseSet(itemSet[item]);
+            resources.releaseSetLater(itemSet[item]); // within the frame budget: drawn no more already
             itemSet[item] = null;
         }
     }
@@ -1857,6 +1865,7 @@ public final class SceneSync implements AutoCloseable {
     public void close() {
         if (!closed) {
             destroyAll();
+            resources.releaseAllQueued(); // what it held leaves now, not in later frames
             if (settingWatch != null) {
                 settingWatch.close();
                 listWatch.close();

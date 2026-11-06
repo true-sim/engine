@@ -234,6 +234,52 @@ class SceneResourcesContentTest {
     }
 
     @Test
+    void releasesAndArrivalsSpreadOverFramesWithinTheStreamingBudget() {
+        com.truesim.engine.settings.EngineSettings settings = new com.truesim.engine.settings.EngineSettings();
+        settings.set(com.truesim.engine.settings.EngineSettings.Layer.GAME,
+            com.truesim.engine.render.RenderSettings.STREAM_FRAME_BUDGET, 0.0001f); // 100 ns: one at a time
+        resources.settings(settings).prepareOn(tasks, 1);
+        // Releases a scene let go of: one a flush
+        SceneResources.MaterialSet one = resources.acquireSet(List.of(), 1);
+        SceneResources.MaterialSet two = resources.acquireSet(List.of(), 2);
+        assertThat(resources.materialSetCount()).isEqualTo(2);
+        resources.releaseSetLater(one);
+        resources.releaseSetLater(two);
+        assertThat(resources.releasesWaiting()).isEqualTo(2);
+        resources.flush();
+        assertThat(resources.releasesWaiting()).isOne();
+        assertThat(resources.materialSetCount()).isOne();
+        resources.flush();
+        assertThat(resources.releasesWaiting()).isZero();
+        assertThat(resources.materialSetCount()).isZero();
+        // Meshes made ready on the workers: placed one a flush
+        resources.hold(SceneSyncTest.SQUARE);
+        resources.hold(SceneSyncTest.SMALL);
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        while (resources.arrivalsWaiting() < 2 && System.nanoTime() < deadline) {
+            tasks.drainCompleted();
+            Thread.onSpinWait();
+        }
+        assertThat(resources.arrivalsWaiting()).isEqualTo(2);
+        assertThat(resources.uploadedMeshCount()).isZero();
+        resources.flush();
+        assertThat(resources.uploadedMeshCount()).isOne();
+        resources.flush();
+        assertThat(resources.uploadedMeshCount()).isEqualTo(2);
+        assertThat(resources.arrivalsWaiting()).isZero();
+        // Many releases at no budget: all in one flush
+        settings.set(com.truesim.engine.settings.EngineSettings.Layer.GAME,
+            com.truesim.engine.render.RenderSettings.STREAM_FRAME_BUDGET, 0f);
+        for (int i = 0; i < 100; i++) {
+            resources.releaseSetLater(resources.acquireSet(List.of(), 1 + i % 3));
+        }
+        resources.flush();
+        assertThat(resources.releasesWaiting()).isZero();
+        resources.release(SceneSyncTest.SQUARE);
+        resources.release(SceneSyncTest.SMALL);
+    }
+
+    @Test
     void assetsOfOtherTypesGoThroughTheirUploader() {
         List<String> log = new ArrayList<>();
         SceneResources.SampledUploader<Table> uploader = new SceneResources.SampledUploader<>() {

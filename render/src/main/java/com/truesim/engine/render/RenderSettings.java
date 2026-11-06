@@ -78,6 +78,15 @@ public final class RenderSettings {
     public static final Setting<Integer> TEXTURE_UPDATE_BUDGET = Setting.integer("render.textureUpdateBudget", 8, 1,
         1024, "MiB a frame of dynamic textures' changed texels uploaded");
 
+    /**
+     * Milliseconds a frame the scene path spends taking in streamed content made ready on workers (meshes placed in the
+     * pool and their renderables shown, textures added) and letting go of what removed renderables used (material
+     * blocks, meshes, the cache's hold); the rest waits for the next frames, so no frame takes all of a cell at once.
+     * 0: all in the frame it comes or goes. Removed renderables stop drawing at once either way.
+     */
+    public static final Setting<Float> STREAM_FRAME_BUDGET = Setting.decimal("render.streamFrameBudget", 0.25f, 0,
+        100, "ms a frame spent taking in and letting go of streamed content (0: all at once)");
+
     private RenderSettings() {
     }
 
@@ -105,7 +114,7 @@ public final class RenderSettings {
      */
     public static void register(SettingRegistry registry) {
         registry.addHiddenSlots(INTERPOLATION_SLOT, Transparency.SLOT, SelectionOutline.SLOT, DisplayTransform.SLOT)
-            .addHidden(OCCLUSION, CHANGE_LIST, CHANGE_LIST_CHUNK, STREAM_BUDGET, TEXTURE_UPDATE_BUDGET,
+            .addHidden(OCCLUSION, CHANGE_LIST, CHANGE_LIST_CHUNK, STREAM_BUDGET, TEXTURE_UPDATE_BUDGET, STREAM_FRAME_BUDGET,
                 Transparency.SORTED_RUNS)
             .addHidden(ClusteredLights.ALL.toArray(new Setting<?>[0]))
             .addHidden(ShadowSettings.ALL.toArray(new Setting<?>[0]))
