@@ -493,6 +493,46 @@ class ProbeVolumeTest {
     }
 
     /**
+     * A floor 3 cm over a row of probes (they see its back: inside), lit through the volume by a small bright lamp
+     * (an emissive square 26 cm across, a black sky; its light noisy, update to update): relocation moves those probes
+     * up through it, and off it. Classified by the rays from where they had been, they were turned off as they moved
+     * out, turned on again with their relocation lost (back inside), and so on; moved back towards their grid points
+     * as far as the floor allowed, they were near it again and moved away again; each step restarted their histories.
+     * The image held NaNs. Settled, the floor is finite and as still with relocation as without it.
+     */
+    @Test
+    void probesRelocatedOffASurfaceSettleInsteadOfRestartingTheirLight() {
+        int floor = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.8f, 0.8f, 1))).feature(LAMBERT));
+        int lamp = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1))
+            .withEmissive(new Color(20, 20, 20, 1))).feature(LAMBERT));
+        wall(0, floor, 0, -0.72f, 0, ReferencePathTracerTest.UP, 8);
+        wall(1, lamp, 0.4f, -0.35f, -1.2f, ReferencePathTracerTest.DOWN, 0.13f);
+        lights.setCount(0);
+        camera.set(0, -1, -0.6, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.01);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        Environment black = Environment.uniform("black", 0, 0, 0);
+        SceneView main = new SceneView(graph.addView("main").size(SIZE, SIZE), view, camera);
+        main.port().add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_D32_SFLOAT)).add(new ClusteredLights(lights, main))
+            .add(new EnvironmentLighting(black, main, SMALL))
+            .add(new ProbeVolumeLighting(main, new ProbeVolume(rayTracing, renderer, lights, black, SMALL, main)))
+            .output(Keys.SCENE_COLOR, new ExternalImage("target", SIZE, SIZE, Format.R32G32B32A32_SFLOAT,
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT
+                    | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view()));
+        double relocated = flicker(60);
+        float[] image = frames(1);
+        for (float v : image) {
+            assertThat(v).as("every pixel finite").isFinite();
+        }
+        graph.settings().set(ProbeVolume.RELOCATE, false);
+        double fixed = flicker(60);
+        System.out.printf("a pixel's light off its neighbouring frames', relative: %.5f relocated, %.5f without"
+            + " relocation%n", relocated, fixed);
+        assertThat(relocated).as("with relocation against without (%s)", fixed).isLessThan(2 * fixed);
+    }
+
+    /**
      * After 90 frames to settle, {@code count} frames: each pixel's red off the mean of its frames before and after,
      * summed over pixels and frames, relative to the light summed.
      */
