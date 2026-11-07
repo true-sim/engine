@@ -67,7 +67,7 @@ struct ProbePush
     float sensitivity;        // adaptive hysteresis: deviations of the update's noise a texel may differ by
     float drift;              // and how far the updates' mean relative difference from the history may drift
     uint fresh;               // a probe whose history holds fewer updates updates every frame, budget or not
-    uint pad;
+    uint variances;           // storage slot: per irradiance texel, the mean variance of its updates (their noise)
     float4 rotation;          // this frame's rotation of the rays (a unit quaternion)
 };
 
@@ -272,6 +272,8 @@ groupshared float4 newIrradiance[36];
 groupshared float2 newDepth[196];
 groupshared uint changed;
 groupshared float2 relative[36];
+groupshared float noises[36];          // per irradiance texel: an update's variance, as the adaptive test took it
+groupshared float updated[36];         // per irradiance texel: this update's variance (of its luminance)
 groupshared uint stillActive;
 
 /** The octahedral direction of interior texel `t` of a tile of `n` interior texels a side. */
@@ -466,11 +468,18 @@ void blendMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         float now = luminance3(update.rgb);
         float was = luminance3(history.rgb);
         relative[t] = weights > 0 && frames > 0 ? float2(now, was) : float2(0, 0);
+        noises[t] = 0;
+        float mean = weights > 0 ? lum / weights : 0;
+        float variance = weights > 0 ? max(lum2 / weights - mean * mean, 0.0) * weights2 / (weights * weights) : 0;
+        updated[t] = variance;
         if (frames > 0 && weights > 0 && (push.flags & PROBES_ADAPTIVE) != 0)
         {
-            float mean = lum / weights;
-            float variance = max(lum2 / weights - mean * mean, 0.0) * weights2 / (weights * weights);
             float before = luminance3(history.rgb);
+            // An update's noise is also what the history's updates showed (the mean of their variances): one update's
+            // rays tell it badly where a rare ray brings much (a small bright light met in some updates only), and an
+            // update that missed it seemed far beyond its noise and restarted the history, again and again
+            variance = max(variance, images[push.variances][irradianceTile + 1 + texel].r);
+            noises[t] = variance;
             float difference = abs(mean - before);
             if (difference > push.sensitivity * sqrt(variance) + 0.05 * max(mean, before) + 1.0e-4
                 || abs(update.a - history.a) > 0.25)
@@ -486,16 +495,21 @@ void blendMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     if (t == 0 && blend && frames > 0 && (push.flags & PROBES_ADAPTIVE) != 0)
     {
         float2 sum = 0;
+        float variances = 0;
         for (uint k = 0; k < 36; k++)
         {
             sum += relative[k];
+            variances += noises[k];
         }
         // The relative difference of the texels' sums (unbiased where the updates' noise is), averaged over a few
         // updates with its square: a drift beyond the average's own noise (sensitivity deviations, at least the floor)
         float d = (sum.x - sum.y) / max(sum.y, 1.0e-4);
         float drift = lerp(states[index].drift, d, 0.25);
         float square = lerp(asfloat(states[index].pad0), d * d, 0.25);
-        float noise = sqrt(max(square - drift * drift, 0.0) * 0.25 / 1.75);
+        // Its noise: what the last few updates showed, and at least what the texels' noise gives one (as if they
+        // erred apart), the history's included: a rare bright ray, which a few updates may not have shown
+        float least = variances / max(sum.y * sum.y, 1.0e-8);
+        float noise = sqrt(max(square - drift * drift, least) * 0.25 / 1.75);
         if (frames >= 8 && abs(drift) > push.sensitivity * noise + push.drift)
         {
             changed = 1;
@@ -540,6 +554,10 @@ void blendMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
         uint2 texel = uint2(t % 6, t / 6);
         float4 history = images[push.irradiance][irradianceTile + 1 + texel];
         newIrradiance[t] = frames == 0 ? newIrradiance[t] : lerp(history, newIrradiance[t], w);
+        // The updates' mean variance, weighed as the history is
+        float before = images[push.variances][irradianceTile + 1 + texel].r;
+        images[push.variances][irradianceTile + 1 + texel] = float4(frames == 0 ? updated[t] : lerp(before, updated[t],
+            w), 0, 0, 0);
     }
     GroupMemoryBarrierWithGroupSync();
     if (blend)

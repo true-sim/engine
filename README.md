@@ -2097,8 +2097,9 @@ mean square (14 x 14 and a border), so a shaded point ignores probes that cannot
   Probes within `instanceMargin` (3) times a changed instance's bounding sphere (moved, changed or skinned: D91's
   records compared on the GPU with the frame before's) or `lightMargin` (2) times a changed light's reach restart at
   once (`invalidate`), all of them for a directional light or the environment; a probe whose update
-  differs from its history beyond its noise (`sensitivity`), or drifts from it over a few updates (`drift`), restarts
-  too (`adaptive`); probes that restarted update again within the frame (`iterations`, 2), a further bounce of the change each time.
+  differs from its history beyond its noise (`sensitivity`; the noise its own rays show, and at least the mean of what
+  its history's updates showed: a small bright light met by some updates only is noise, not a change), or drifts from
+  it over a few updates (`drift`), restarts too (`adaptive`); probes that restarted update again within the frame (`iterations`, 2), a further bounce of the change each time.
 
 Tested against closed forms (`ProbeVolumeTest`): the white furnace through the probes (E / (1 - rho) within 3 %, which
 only infinite bounces reach), a light changing color inside a box (90 % in 2 frames told, 2 found, more by the history

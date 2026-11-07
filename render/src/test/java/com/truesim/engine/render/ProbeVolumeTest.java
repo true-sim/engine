@@ -372,7 +372,7 @@ class ProbeVolumeTest {
      * A dim sky holding a small bright sun (10 degrees across, 320 times as bright as the sky: two thirds of what reaches
      * the ground), no lights: a floor seen from above, lit by the volume alone. The rays are turned anew each frame,
      * the same way for every probe; taken along their directions alone, the sun was met in a few frames by one of them
-     * (by every probe at once) and in the others by none: the floor's light jumped by more than half in those frames
+     * (by every probe at once) and in the others by none: the floor's light jumped by 380 to 660 % in those frames
      * (the film of effects-particles' ParticleHookScreenshots flashed so). Through the environment's level twice as wide
      * as each ray's share of the sphere (the default), every frame takes the sun by its share.
      */
@@ -397,14 +397,16 @@ class ProbeVolumeTest {
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT
                         | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view()));
-            double footprint = largestJump(means(60));
             // Along the rays' directions alone (the volume before): the sun met in some frames only
             graph.settings().set(ProbeVolume.SKY_FOOTPRINT, 0f);
             double alone = largestJump(means(60));
+            graph.settings().reset(ProbeVolume.SKY_FOOTPRINT);
+            double footprint = largestJump(means(60));
             System.out.printf("largest jump of a frame's mean from its neighbours': %.4f along the rays alone, %.4f"
                 + " through their footprints%n", alone, footprint);
             assertThat(alone).as("the test meets the sun along the rays alone").isGreaterThan(0.2);
-            assertThat(footprint).as("a frame's light against its neighbours'").isLessThan(0.01);
+            assertThat(footprint).as("a frame's light against its neighbours'").isLessThan(0.01)
+                .isLessThan(alone / 5);
         }
     }
 
@@ -451,6 +453,64 @@ class ProbeVolumeTest {
             }
         }
         return texels;
+    }
+
+    /**
+     * A floor lit only through the volume by a small bright lamp over it (an emissive square 26 cm across, a black
+     * sky): the probes' rays meet the lamp in some updates and not in others. The adaptive test took an update that
+     * missed it for a change (that update's rays showed little noise) and restarted the history, again and again, and
+     * the restarted probes' light, bounced, changed their neighbours' updates too: the floor's light flickered from frame
+     * to frame, 47 times as much as by the history alone (the dusk film of effects-particles' ParticleHookScreenshots,
+     * its lamp posts' bulbs). Against the noise its history's updates showed as well, 2.5 times (RX 9070 XT).
+     */
+    @Test
+    void aSmallBrightLampFlickersNoMoreWithTheAdaptiveTestThanWithout() {
+        int floor = materials.add(new Material(MR.withBaseColor(new Color(0.8f, 0.8f, 0.8f, 1))).feature(LAMBERT));
+        int lamp = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1))
+            .withEmissive(new Color(20, 20, 20, 1))).feature(LAMBERT));
+        wall(0, floor, 0, -1, 0, ReferencePathTracerTest.UP, 8);
+        wall(1, lamp, 0.4f, -0.35f, -1.2f, ReferencePathTracerTest.DOWN, 0.13f);
+        lights.setCount(0);
+        camera.set(0, -1, -0.6, 0, 1, 0, Math.PI / 3, SIZE, SIZE, 0.01);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        Environment black = Environment.uniform("black", 0, 0, 0);
+        SceneView main = new SceneView(graph.addView("main").size(SIZE, SIZE), view, camera);
+        main.port().add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), main,
+                VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_D32_SFLOAT)).add(new ClusteredLights(lights, main))
+            .add(new EnvironmentLighting(black, main, SMALL))
+            .add(new ProbeVolumeLighting(main, new ProbeVolume(rayTracing, renderer, lights, black, SMALL, main)))
+            .output(Keys.SCENE_COLOR, new ExternalImage("target", SIZE, SIZE, Format.R32G32B32A32_SFLOAT,
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT
+                    | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(), target.view()));
+        double adaptive = flicker(60);
+        graph.settings().set(ProbeVolume.ADAPTIVE, false);
+        double history = flicker(60);
+        System.out.printf("a pixel's light off its neighbouring frames', relative: %.4f with the adaptive test, %.4f"
+            + " by the history alone%n", adaptive, history);
+        assertThat(adaptive).as("the adaptive test against the history alone (%s)", history)
+            .isLessThan(4 * history);
+    }
+
+    /**
+     * After 90 frames to settle, {@code count} frames: each pixel's red off the mean of its frames before and after,
+     * summed over pixels and frames, relative to the light summed.
+     */
+    private double flicker(int count) {
+        frames(90); // the histories full (30 updates, in turns of two frames)
+        float[][] seen = new float[count][];
+        for (int f = 0; f < count; f++) {
+            seen[f] = frames(1);
+        }
+        double off = 0;
+        double light = 0;
+        for (int f = 1; f + 1 < count; f++) {
+            for (int p = 0; p < SIZE * SIZE; p++) {
+                off += Math.abs(seen[f][4 * p] - (seen[f - 1][4 * p] + seen[f + 1][4 * p]) / 2);
+                light += seen[f][4 * p];
+            }
+        }
+        return off / light;
     }
 
     @Test
