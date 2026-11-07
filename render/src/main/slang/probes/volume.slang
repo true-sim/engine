@@ -1,12 +1,12 @@
 // A probe volume as shading samples it (engine-render's ProbeVolume, design S2: DDGI, Majercik et al. 2019 and 2021;
-// RadianceCascades writes its first cascade the same way): its data, and the light it gives a point. Shading reaches it
-// through the shading hook of probes/hook.slang, never by name: the core's shading knows no probe format.
+// RadianceCascades writes each of its cascades the same way): its data, and the light it gives a point. Shading reaches
+// it through the shading hook of probes/hook.slang, never by name: the core's shading knows no probe format.
 module volume;
 
 import bindless;
 
-/** The most cascades a probe volume has. */
-public static const uint PROBE_CASCADES = 6;
+/** The most cascades a probe volume has: six, and radiance cascades' reach beyond theirs. */
+public static const uint PROBE_CASCADES = 7;
 /** Texels of a probe's irradiance (and sky visibility) along each side, its border of one texel included. */
 public static const uint PROBE_IRRADIANCE_TEXELS = 8;
 /** Texels of a probe's distance moments along each side, its border included. */
@@ -18,11 +18,12 @@ public static const uint PROBE_ACTIVE = 1;
 public static const uint PROBE_VALID = 2;
 
 /**
- * In a volume's flags: a point beyond the last cascade takes the probes at its border nearest to it (their light as
- * they see it, the bound of Chebyshev weighing them) rather than the environment's (radiance cascades, whose one
- * cascade ends where the scene may go on).
+ * In a volume's flags: each cascade lights the points within a box around the anchor camera (`anchor`, `inner`) that
+ * its probes enclose wherever the camera is, and blends into the next over a band at that box's edges, the last into
+ * the environment: a point's light follows the camera continuously, never the steps its grids snap by (radiance
+ * cascades). Otherwise a cascade blends from its grid's edges and the last lights every point within its grid.
  */
-public static const uint PROBE_VOLUME_CLAMP = 1;
+public static const uint PROBE_VOLUME_ANCHORED = 1;
 
 /** One probe's state: 48 bytes. */
 [HostLayout]
@@ -58,9 +59,26 @@ public struct ProbeVolumeData
     public float maxDistance;      // the longest distance moments hold
     public uint pad;
     public ProbeState* states;     // per probe: its relocation, its state
-    public float4 cascade[6];      // the cascade's lowest probe relative to the origin (xyz), its spacing (w)
-    public int4 base[6];           // that probe's world grid coordinate (xyz): slots are coordinates modulo probes
+    public float4 cascade[7];      // the cascade's lowest probe relative to the origin (xyz), its spacing (w)
+    public int4 base[7];           // that probe's world grid coordinate (xyz): slots are coordinates modulo its probes
+    public uint4 grid[7];          // the cascade's probes along each axis (xyz); its first tile in the atlases (w:
+                                   // column << 16 | row). A slot's tile is that plus (x + probes.x * z, y); its
+                                   // state is its tile's, tiles.x a row
+    public uint2 tiles;            // the atlases' size in tiles
+    public uint2 pad1;
+    public float4 anchor;          // PROBE_VOLUME_ANCHORED: the anchor camera relative to the origin (xyz)
+    public float4 inner[7];        // PROBE_VOLUME_ANCHORED: the cascade's half extents around the anchor that its
+                                   // probes enclose wherever it is (xyz); the band at their edges where it blends (w)
 };
+
+/** The atlases' tile of cascade `c`'s probe in slot `slot` (column, row), and in `state` its state's index. */
+public uint2 probeTile(ProbeVolumeData* volume, uint c, int3 slot, out uint state)
+{
+    uint4 grid = volume[0].grid[c];
+    uint2 tile = uint2((grid.w >> 16) + uint(slot.x) + grid.x * uint(slot.z), (grid.w & 0xffff) + uint(slot.y));
+    state = tile.x + volume[0].tiles.x * tile.y;
+    return tile;
+}
 
 /** The octahedral coordinate of unit `d` in [0, 1]. */
 public float2 octahedralUnit(float3 d)
@@ -93,22 +111,25 @@ public int3 wrapProbe(int3 a, int3 n)
  * irradiance / pi of the probes around the point, weighed by trilinear weights, how much each faces the surface and
  * whether it can see the point (the bound of Chebyshev on its distance moments), blended between cascades near their
  * edges; and in `sky` the fraction of the environment visible around `skyDirection` (the probes' rays that met
- * nothing), for specular occlusion. `found`: false outside every cascade.
+ * nothing), for specular occlusion. `coverage`: the share of the point's light the volume gives, the environment the
+ * rest (0 outside every cascade; with PROBE_VOLUME_ANCHORED below 1 where the last cascade blends into the
+ * environment).
  */
 public float3 probeLight(ProbeVolumeData* volume, float3 p, float3 n, float3 toViewer, float3 skyDirection,
-    out float sky, out bool found)
+    out float sky, out float coverage)
 {
     sky = 1;
-    found = false;
+    coverage = 0;
     uint cascades = volume[0].cascades;
-    int3 probes = int3(volume[0].probes);
+    bool anchored = (volume[0].flags & PROBE_VOLUME_ANCHORED) != 0;
+    float3 anchor = volume[0].anchor.xyz;
     float normalBias = volume[0].normalBias;
     float viewBias = volume[0].viewBias;
     float blend = volume[0].blend;
     uint irradianceSlot = volume[0].irradiance;
     uint depthSlot = volume[0].depth;
     ProbeState* states = volume[0].states;
-    float2 tiles = float2(probes.x * probes.z, probes.y * int(cascades));
+    float2 tiles = float2(volume[0].tiles);
     float2 irradianceAtlas = tiles * float(PROBE_IRRADIANCE_TEXELS);
     float2 depthAtlas = tiles * float(PROBE_DEPTH_TEXELS);
     float3 sum = 0;
@@ -117,23 +138,38 @@ public float3 probeLight(ProbeVolumeData* volume, float3 p, float3 n, float3 toV
     for (uint c = 0; c < cascades && remaining > 1.0e-4; c++)
     {
         float4 cascade = volume[0].cascade[c];
+        int3 probes = int3(volume[0].grid[c].xyz);
         float spacing = cascade.w;
         float3 biased = p + (n * normalBias + toViewer * viewBias) * spacing;
         float3 local = (biased - cascade.xyz) / spacing;
         float3 last = float3(probes - 1);
-        if (any(local < 0) || any(local > last))
+        float share;
+        if (anchored)
         {
-            if (c + 1 < cascades || (volume[0].flags & PROBE_VOLUME_CLAMP) == 0)
+            // Within the box its probes enclose wherever the camera is, blending at its edges: continuous in the
+            // camera's position, the last cascade fading into the environment
+            float4 inner = volume[0].inner[c];
+            float3 room = inner.xyz - abs(biased - anchor);
+            float edge = min(room.x, min(room.y, room.z));
+            if (edge <= 0)
             {
                 continue;
             }
-            local = clamp(local, float3(0), last);
+            share = saturate(edge / max(inner.w, 1.0e-6));
+            local = clamp(local, float3(0), last); // within by construction: rounding at its faces alone
         }
-        // Near its edge a cascade hands over to the next coarser one
-        float3 edge = min(local, last - local);
-        float share = c + 1 < cascades
-            ? saturate(min(edge.x, min(edge.y, edge.z)) / max(blend * min(last.x, min(last.y, last.z)), 1.0e-4))
-            : 1.0;
+        else
+        {
+            if (any(local < 0) || any(local > last))
+            {
+                continue;
+            }
+            // Near its edge a cascade hands over to the next coarser one
+            float3 edge = min(local, last - local);
+            share = c + 1 < cascades
+                ? saturate(min(edge.x, min(edge.y, edge.z)) / max(blend * min(last.x, min(last.y, last.z)), 1.0e-4))
+                : 1.0;
+        }
         int3 base = volume[0].base[c].xyz;
         int3 lower = clamp(int3(floor(local)), int3(0), probes - 2);
         float3 alpha = saturate(local - float3(lower));
@@ -145,7 +181,8 @@ public float3 probeLight(ProbeVolumeData* volume, float3 p, float3 n, float3 toV
             int3 o = int3(k & 1, (k >> 1) & 1, k >> 2);
             int3 i = lower + o;
             int3 slot = wrapProbe(base + i, probes);
-            uint index = uint(slot.x + probes.x * (slot.z + probes.z * (slot.y + probes.y * int(c))));
+            uint index;
+            uint2 tile = probeTile(volume, c, slot, index);
             uint flags = states[index].flags;
             if ((flags & (PROBE_ACTIVE | PROBE_VALID)) != (PROBE_ACTIVE | PROBE_VALID))
             {
@@ -158,10 +195,8 @@ public float3 probeLight(ProbeVolumeData* volume, float3 p, float3 n, float3 toV
             float3 trilinear = lerp(1 - alpha, alpha, float3(o));
             float w = (dot(direction, n) + 1) * 0.5;
             w = w * w + 0.2;
-            uint column = uint(slot.x + probes.x * slot.z);
-            uint row = uint(slot.y + probes.y * int(c));
             float2 moments = textures[depthSlot].SampleLevel(samplers[LINEAR_CLAMP],
-                atlasCoordinate(-direction, column, row, PROBE_DEPTH_TEXELS, depthAtlas), 0).rg;
+                atlasCoordinate(-direction, tile.x, tile.y, PROBE_DEPTH_TEXELS, depthAtlas), 0).rg;
             if (distance > moments.x)
             {
                 float variance = abs(moments.x * moments.x - moments.y);
@@ -176,9 +211,9 @@ public float3 probeLight(ProbeVolumeData* volume, float3 p, float3 n, float3 toV
             }
             w *= trilinear.x * trilinear.y * trilinear.z;
             float3 value = textures[irradianceSlot].SampleLevel(samplers[LINEAR_CLAMP],
-                atlasCoordinate(n, column, row, PROBE_IRRADIANCE_TEXELS, irradianceAtlas), 0).rgb;
+                atlasCoordinate(n, tile.x, tile.y, PROBE_IRRADIANCE_TEXELS, irradianceAtlas), 0).rgb;
             float skyValue = textures[irradianceSlot].SampleLevel(samplers[LINEAR_CLAMP],
-                atlasCoordinate(skyDirection, column, row, PROBE_IRRADIANCE_TEXELS, irradianceAtlas), 0).a;
+                atlasCoordinate(skyDirection, tile.x, tile.y, PROBE_IRRADIANCE_TEXELS, irradianceAtlas), 0).a;
             irradiance += w * value;
             visible += w * skyValue;
             weights += w;
@@ -191,13 +226,13 @@ public float3 probeLight(ProbeVolumeData* volume, float3 p, float3 n, float3 toV
         sum += take * irradiance / weights;
         skySum += take * visible / weights;
         remaining -= take;
-        found = true;
     }
-    if (!found)
+    float taken = 1 - remaining;
+    if (taken <= 0)
     {
         return 0;
     }
-    float taken = 1 - remaining;
+    coverage = anchored ? taken : 1;
     sky = skySum / taken;
     return sum / taken;
 }

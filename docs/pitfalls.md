@@ -536,6 +536,43 @@ each other did not help; the white furnace lost 4 to 7 % of its light to the sam
 - Rule: light continued from other rays is checked to continue the same path: the start of each continuation in sight
   of where the ray it continues ended.
 
+**Radiance cascades lit everything past their first grid with that grid's border probes.** Shading was handed the
+first cascade alone (32 x 16 x 32 probes 0.5 m apart, 16 x 8 x 16 m around the camera) with `PROBE_VOLUME_CLAMP`:
+`probeLight` clamped every point outside it to the probes at its border. That grid snaps to its spacing
+(`floor(camera / spacing)`), so outdoors whole areas took the light of one border probe (streaks along lines out of the
+box, a lamp's light spread far past its reach where a border probe sat near it), and stepped each time the camera
+crossed 0.5 m. Indoor scenes that fit in the box (the GI scenes, most of Sponza) hid it.
+- Proof: the dusk particle film with `render.gi` = `cascades` (effects-particles' `ParticleHookScreenshots`, 900
+  frames): the frames at which the camera crosses a 0.5 m step, 210, 214, 241, 266, 290, 304, 314, 337, 368 and 383,
+  are where the image's areas jumped (210, 214, 241, 266, 290, 304, 314, 337, 367, 383), and the signed change from
+  240 to 241 covers the ground outside the box. `RadianceCascadesTest`'s
+  `groundPastTheCascadesReachTakesTheEnvironmentNotTheBorderProbesLight` (ground 12 m away: 0.766 with the clamp,
+  0.100 the environment's) and `lightBeyondTheFirstCascadeMovesWithTheCameraWithoutStepsWhereTheGridsSnap` (2 cm of
+  camera motion across a step changed the ground 6.3 %, 2 cm elsewhere 0.0 %) fail without the fix.
+- Also: the coarser cascades all cover about the region of the first (each half as many probes per axis and two
+  more, as radiance cascades' cost requires): past the first grid they reach only 9.25 m horizontally and 5.25 m up.
+  With the environment past that, Sponza's views 2 and 3 came out at 119 % and 124 % mean error (+105 %, +78 % bias)
+  against 23 % and 54 % with the clamp, which had looked right there by chance. Hence `reach`: probes beyond the last
+  cascade, each tracing the first cascade's directions to the environment (28 %, 66 %; the probe volume 25 %, 69 %).
+- Rule: past the last level of a probe structure a point takes the environment, never its border probes; a level's
+  share follows the camera's position continuously (`PROBE_VOLUME_ANCHORED`), not its grid's snapped edge. Check GI
+  techniques outdoors and with the camera moving across their grids' steps, not only in rooms that fit in the first grid.
+
+**Probe rays started from camera-relative positions moved with the camera by rounding.** Radiance cascades' rays start
+at `probe + (volume origin - camera)`, and the tracer adds `camera - top level's origin`: the sum is the same point
+mathematically, but its float rounding changed with every camera position. With history-free probes tracing a few
+fixed directions (the reach's 8 x 8 on to the environment), a ray grazing a small bright lamp bulb met it in one frame
+and missed it in the next: a lit patch of ground 2 m across flashed for single frames (14 times in the dusk film's
+first 600 frames, about 20 of 255 luma).
+- Proof: the dusk film's camera held at frame 211 showed no flash; moved by up to 60 micrometers a frame it flashed every
+  13 frames (36 in 150), with the bulbs' emission off never. With both terms on a grid of 2^-17 m (exact as floats
+  within 128 m, so the sums are), the same jitter flashed in none of 40 frames (`RadianceCascades.cameraFromScene`).
+  A grid of 1/1024 m flashed none either but darkened the toggle room by 10 % (bias -5.8 % to -15.7 %): hits are
+  placed relative to the true camera, and their shadow rays, starting 0.1 mm off their surfaces through the snapped
+  frame, began up to 0.5 mm inside them.
+- Rule: rays of world-fixed probes start from positions computed exactly the same every frame; a camera-relative frame
+  is snapped to a grid on which the sums are exact, finer than the offsets rays start off surfaces by.
+
 **A generated file `#include`-ing a library shader of the same relative path includes itself.** A shading-hooks
 variant of a library's `lit.slang`, written as `shading-hooks/GameHooks/lit.slang` holding `#include "lit.slang"`,
 failed with E15302 "cyclic `#include`": slangc looks next to the including file first, and the variant's own name

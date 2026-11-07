@@ -33,6 +33,7 @@ import com.truesim.scene.assets.mesh.MeshData;
 import com.truesim.scene.assets.mesh.VertexFormat;
 import java.lang.foreign.ValueLayout;
 import java.util.Collections;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -98,7 +99,7 @@ class RadianceCascadesTest {
         pixels = GpuBuffer.hostVisible(device, (long) SIZE * SIZE * 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         ProbeVolumeLighting.SLOT.choose(graph.settings(), ProbeVolumeLighting.CASCADES);
         graph.settings().set(RadianceCascades.CASCADES, 3).set(RadianceCascades.PROBES, 8)
-            .set(RadianceCascades.PROBES_UP, 8).set(RadianceCascades.SPACING, 0.5f);
+            .set(RadianceCascades.PROBES_UP, 8).set(RadianceCascades.SPACING, 0.5f).set(RadianceCascades.REACH, 4f);
     }
 
     @AfterEach
@@ -284,6 +285,119 @@ class RadianceCascadesTest {
             second.close();
             otherView.close();
         }
+    }
+
+    /**
+     * Open ground: a floor 80 m wide a meter below the anchor camera, which looks along x from the origin into an image
+     * of its own, and a glowing panel 2 m wide facing down 2.5 m over the floor at ({@code glow}, 0): the ground around
+     * it is lit by it through global illumination alone. A view from {@code eye} looks straight down at the floor, lit by
+     * the anchor's cascades, into the image {@link #frames} reads back. Runs {@code body}, then closes what it made.
+     */
+    private void outdoors(Environment environment, double glow, double[] eye, Consumer<Camera> body) {
+        int grey = materials.add(new Material(MR.withBaseColor(new Color(0.5f, 0.5f, 0.5f, 1))).feature(LAMBERT));
+        int panel = materials.add(new Material(MR.withBaseColor(new Color(0, 0, 0, 1))
+            .withEmissive(new Color(8, 8, 8, 1))).feature(LAMBERT));
+        wall(0, grey, 0, -1, 0, ReferencePathTracerTest.UP, 40);
+        wall(1, panel, (float) glow, 1.5f, 0, ReferencePathTracerTest.DOWN, 1);
+        lights.setCount(0);
+        camera.position(0, 0, 0).set(1, 0, 0, 0, 1, 0, Math.PI / 2, SIZE, SIZE, 0.01);
+        view.set(camera, 1, MeshletRenderer.MODE_LIT);
+        int usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT
+            | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        SceneView anchor = new SceneView(graph.addView("anchor").size(SIZE, SIZE), view, camera);
+        GpuImage own = new GpuImage(device, SIZE, SIZE, VK_FORMAT_R8G8B8A8_UNORM, usage, VK_IMAGE_ASPECT_COLOR_BIT);
+        Camera down = new Camera().position(eye[0], eye[1], eye[2]).set(0, -1, 0, 0, 0, 1, Math.PI / 3, SIZE, SIZE,
+            0.01);
+        RenderView downView = renderer.createView(ViewOptions.of(256, 1 << 12));
+        downView.set(down, 1, MeshletRenderer.MODE_LIT);
+        SceneView fixed = new SceneView(graph.addView("down").size(SIZE, SIZE), downView, down);
+        try {
+            anchor.port().add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), anchor,
+                VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT)).add(new ClusteredLights(lights, anchor))
+                .add(new EnvironmentLighting(environment, anchor, SMALL))
+                .add(new ProbeVolumeLighting(anchor, new ProbeVolume(rayTracing, renderer, lights, environment, SMALL,
+                    anchor)))
+                .output(Keys.SCENE_COLOR, new ExternalImage("anchor", SIZE, SIZE, Format.R8G8B8A8_UNORM, usage,
+                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(own.handle(), own.view()));
+            fixed.port().add(new VisibilityBufferShading(SceneGeometry.meshlets(renderer), fixed,
+                VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_D32_SFLOAT)).add(new ClusteredLights(lights, fixed))
+                .add(new EnvironmentLighting(environment, fixed, SMALL))
+                .add(new ProbeVolumeLighting(fixed, new ProbeVolume(rayTracing, renderer, lights, environment, SMALL,
+                    anchor)))
+                .output(Keys.SCENE_COLOR, new ExternalImage("target", SIZE, SIZE, Format.R32G32B32A32_SFLOAT, usage,
+                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL).set(target.handle(),
+                    target.view()));
+            body.accept(camera);
+        } finally {
+            device.waitIdle();
+            graph.close();
+            graph = new FrameGraph(device, 2);
+            own.close();
+            downView.close();
+        }
+    }
+
+    /** The mean absolute difference of two images' red channels, of the first's mean. */
+    private static double change(float[] from, float[] to) {
+        double sum = 0;
+        for (int p = 0; p < SIZE * SIZE; p++) {
+            sum += Math.abs(to[4 * p] - from[4 * p]);
+        }
+        return sum / (SIZE * SIZE) / mean(from, 0);
+    }
+
+    /**
+     * Ground 12 m from the anchor camera, past every cascade and their reach (6 m), takes the environment's light
+     * alone: exactly what it has without global illumination. A glowing panel near the camera lights the ground around it;
+     * the probes at the cascades' borders see its light, and taking theirs for every point beyond (as the first
+     * cascade's border probes once lit everything past it) spreads it over the whole ground.
+     */
+    @Test
+    void groundPastTheCascadesReachTakesTheEnvironmentNotTheBorderProbesLight() {
+        graph.settings().set(RadianceCascades.REACH, 6f);
+        Environment sky = Environment.uniform("grey", 0.2f, 0.2f, 0.2f);
+        outdoors(sky, 1.5, new double[] {12, 1.5, 0}, anchor -> {
+            float[] lit = frames(20);
+            ProbeVolumeLighting.SLOT.choose(graph.settings(), null);
+            float[] environmentOnly = frames(3);
+            ProbeVolumeLighting.SLOT.choose(graph.settings(), ProbeVolumeLighting.CASCADES);
+            System.out.printf("PAST cascades %.5f environment %.5f%n", mean(lit, 0), mean(environmentOnly, 0));
+            assertThat(mean(lit, 0)).as("the ground's light past the cascades")
+                .isCloseTo(mean(environmentOnly, 0), within(mean(environmentOnly, 0) * 0.01));
+        });
+    }
+
+    /**
+     * Ground lit by a glowing panel 2 m from the anchor camera, beyond its first cascade (which reaches 1.25 m from it)
+     * but within the coarser ones: as the camera moves, the light there changes as little where its grids snap to their
+     * next probes (each 0.5 m it moves) as elsewhere. Taking the first cascade's border probes there, it jumped at each
+     * step.
+     */
+    @Test
+    void lightBeyondTheFirstCascadeMovesWithTheCameraWithoutStepsWhereTheGridsSnap() {
+        Environment sky = Environment.uniform("grey", 0.05f, 0.05f, 0.05f);
+        outdoors(sky, -2, new double[] {-2, 1.3, 0}, anchor -> {
+            double[] at = {0.47, 0.49, 0.51, 0.97, 0.99, 1.01};
+            float[][] seen = new float[at.length][];
+            for (int i = 0; i < at.length; i++) {
+                anchor.position(at[i], 0, 0);
+                view.set(anchor, 1, MeshletRenderer.MODE_LIT);
+                seen[i] = frames(8);
+            }
+            ProbeVolumeLighting.SLOT.choose(graph.settings(), null);
+            float[] environmentOnly = frames(3);
+            ProbeVolumeLighting.SLOT.choose(graph.settings(), ProbeVolumeLighting.CASCADES);
+            System.out.printf("GLOW cascades %.5f environment %.5f%n", mean(seen[0], 0), mean(environmentOnly, 0));
+            assertThat(mean(seen[0], 0)).as("the panel's light on the ground").isGreaterThan(
+                2 * mean(environmentOnly, 0));
+            for (int step = 0; step < 2; step++) {
+                double along = change(seen[3 * step], seen[3 * step + 1]);
+                double across = change(seen[3 * step + 1], seen[3 * step + 2]);
+                System.out.printf("STEP %d along %.5f across %.5f%n", step, along, across);
+                assertThat(across).as("the change moving 2 cm across the grids' step %d", step)
+                    .isLessThan(2 * along + 0.002);
+            }
+        });
     }
 
     @Test

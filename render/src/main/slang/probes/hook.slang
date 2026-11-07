@@ -34,33 +34,33 @@ public struct ProbeVolumeHook : IIndirectHook
         ProbeVolumeData* volume = (ProbeVolumeData*) address;
         float3 at = p.position + probes[0].offset;
         float sky;
-        bool found;
+        float coverage; // of the point's light: the environment's the rest
         if (q.wanted(AROUND_DIFFUSE | AROUND_VISIBILITY))
         {
-            float3 e = probeLight(volume, at, p.normal, p.toViewer, q.direction, sky, found);
-            if (found)
+            float3 e = probeLight(volume, at, p.normal, p.toViewer, q.direction, sky, coverage);
+            if (coverage > 0)
             {
                 if (q.wanted(AROUND_DIFFUSE))
                 {
-                    light.add(e, 1);
+                    light.add(e, coverage);
                 }
-                light.visibility *= sky;
+                light.visibility *= lerp(1, sky, coverage);
             }
         }
         if (q.wanted(AROUND_COAT))
         {
-            probeLight(volume, at, p.normal, p.toViewer, q.coatDirection, sky, found);
-            if (found)
+            probeLight(volume, at, p.normal, p.toViewer, q.coatDirection, sky, coverage);
+            if (coverage > 0)
             {
-                light.coatVisibility *= sky;
+                light.coatVisibility *= lerp(1, sky, coverage);
             }
         }
         if (q.wanted(AROUND_BACK))
         {
-            float3 e = probeLight(volume, at, -p.normal, p.toViewer, -p.normal, sky, found);
-            if (found)
+            float3 e = probeLight(volume, at, -p.normal, p.toViewer, -p.normal, sky, coverage);
+            if (coverage > 0)
             {
-                light.addBack(e, 1);
+                light.addBack(e, coverage);
             }
         }
     }

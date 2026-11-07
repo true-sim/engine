@@ -63,6 +63,11 @@ public static const uint PATH_INTERVALS = 1u << 17;
 public static const uint PATH_CASCADE_SHIFT = 16;
 /** A probe ray ending at its cascade's interval (PATH_INTERVALS); the last cascade's go on to the environment. */
 public static const uint PATH_BOUNDED = 1u << 24;
+/**
+ * With PATH_BOUNDED: a ray from its cascade's probe itself, ending where that cascade's intervals start (as long as
+ * every finer cascade's together), the light nearer to the probe than they reach.
+ */
+public static const uint PATH_NEAR = 1u << 25;
 
 /** Groups per row of the 2D dispatches over paths: (min(groups, this), rows). */
 public static const uint PATH_ROW = 1024;
@@ -892,7 +897,8 @@ public float probeRayEnd(PathState path)
         return 1.0e30;
     }
     uint cascade = (path.flags >> PATH_CASCADE_SHIFT) & 0xff;
-    return asfloat(push.size) * float(1u << (2 * cascade)) - asfloat(path.pad);
+    uint intervals = (path.flags & PATH_NEAR) != 0 ? ((1u << (2 * cascade)) - 1) / 3 : 1u << (2 * cascade);
+    return asfloat(push.size) * float(intervals) - asfloat(path.pad);
 }
 
 /** Records probe ray `path` meeting nothing: the environment, or within a bounded interval no light. */
