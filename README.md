@@ -1256,7 +1256,16 @@ public struct AcmeFog : IMediaHook
   `VIEW`, the default) or with every hook any view of the device has run (`UNION`: one set of pipelines for all views;
   `ShadingHooksBenchmark` measures what a view pays for hooks it runs not). Either way a hook turns on and off from frame
   to frame by its bit (`ShadingHookSource.active`, `ShadingHookValues.on`), with no new pipelines or graph; a hook added
-  or removed rebuilds the graph, and pipelines made ahead are made for every set in use.
+  or removed rebuilds the graph, and pipelines made ahead are made for every set in use. On an RX 9070 XT (30,000
+  rocks, 1920 x 1080, GPU per frame, ranges of 5 rounds' medians; 2026-11-07, without JaCoCo):
+
+  | shading | no hooks | fog, per view | fog, union of 4 | none on, union of 4 |
+  |---|---|---|---|---|
+  | forward | 1.226-1.259 ms | 1.241-1.271 ms | 1.256-1.295 ms | 1.249-1.301 ms |
+  | visibility buffer | 0.934-0.954 ms | 0.936-0.958 ms | 0.942-0.960 ms | 0.942-0.957 ms |
+
+  Hooks compiled in but off cost forward shading about 0.02-0.03 ms (2 %) and the visibility buffer nothing
+  measurable: `VIEW` stays the default, `UNION` trades that for one set of pipelines across views.
 - **Glass and the sky.** The scene seen through a transmissive surface came through the media already: shading takes
   the media once for it, less the light they add in front of the glass (`(own) * T + L + through * (1 - F) * (behind -
   L)`). The sky background takes the media as a point at infinity.
