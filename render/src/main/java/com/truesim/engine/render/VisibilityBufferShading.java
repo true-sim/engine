@@ -148,9 +148,9 @@ public final class VisibilityBufferShading implements Technique {
             MaterialType type = materials.binType(bin);
             int features = materials.binFeatures(bin);
             shade[bin] = compute(g, type.shader(), type.entry(), features, surfaces != null ? 1 : 0,
-                indirect == null ? 0 : indirect.hooks());
+                indirect == null ? ShadingHooks.Mask.NONE : indirect.hooks());
         }
-        Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain", 0, 0, 0);
+        Pipeline classify = compute(g, "shaders/visibility/classify.spv", "classifyMain", 0, 0, ShadingHooks.Mask.NONE);
         Image ids = targets.color();
         Image color = g.create("scene color", ImageDesc.of(Format.of(colorFormat), width, height));
         int tilesX = (width + TILE - 1) / TILE;
@@ -242,8 +242,8 @@ public final class VisibilityBufferShading implements Technique {
      * the shading hooks {@code hooks} (SHADING_HOOKS, constant 3).
      */
     private static Pipeline compute(GraphBuilder g, String shader, String entry, int features, int surfaces,
-        int hooks) {
-        return g.computeProgram(shader, entry, PUSH_BYTES, features, surfaces, 0, hooks);
+        ShadingHooks.Mask hooks) {
+        return g.computeProgram(shader, entry, PUSH_BYTES, hooks.constants(features, surfaces));
     }
 
     /**

@@ -21,7 +21,7 @@ import com.truesim.engine.graph.ImageDesc;
 import com.truesim.engine.graph.PassContext;
 import com.truesim.engine.graph.Request;
 import com.truesim.engine.render.layout.IndirectConstants;
-import com.truesim.engine.render.layout.HookDataLayout;
+import com.truesim.engine.render.layout.ProbeVolumeParametersLayout;
 import com.truesim.engine.render.layout.IndirectLightLayout;
 import com.truesim.engine.render.layout.InvalidatePush;
 import com.truesim.engine.render.layout.PathPush;
@@ -242,15 +242,43 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
         return ShadingHooks.of(renderer.device()).require(HOOK);
     }
 
+    /** Where a probe table of its own (the volume's rays' hits) holds the hook's parameters: past its addresses. */
+    static long ownRecord(MeshletRenderer renderer) {
+        return (ShadingHooks.of(renderer.device()).tableBytes() + 15) / 16 * 16;
+    }
+
+    /** The bytes of a probe table of its own: the table, its hooks' addresses, the probe hook's parameters. */
+    static long ownTableBytes(MeshletRenderer renderer) {
+        return ownRecord(renderer) + ProbeVolumeParametersLayout.BYTES;
+    }
+
     /**
-     * Writes the probe volume hook's data into the slot at {@code slot} (hooks.slang's HookData): the volume's data at
-     * {@code volume}, and the view's camera less the volume's origin. Allocates nothing.
+     * Writes the probe volume hook's parameters (probes/hook.slang's ProbeVolumeParameters) at {@code at}: the volume's
+     * data at {@code volume}, and the view's camera less the volume's origin. Allocates nothing.
      */
-    static void putHook(long slot, long volume, double x, double y, double z) {
-        memPutLong(slot + HookDataLayout.ADDRESS, volume);
-        memPutFloat(slot + HookDataLayout.VALUES, (float) x);
-        memPutFloat(slot + HookDataLayout.VALUES + 4, (float) y);
-        memPutFloat(slot + HookDataLayout.VALUES + 8, (float) z);
+    static void putParameters(long at, long volume, double x, double y, double z) {
+        memPutLong(at + ProbeVolumeParametersLayout.VOLUME, volume);
+        memPutFloat(at + ProbeVolumeParametersLayout.OFFSET, (float) x);
+        memPutFloat(at + ProbeVolumeParametersLayout.OFFSET + 4, (float) y);
+        memPutFloat(at + ProbeVolumeParametersLayout.OFFSET + 8, (float) z);
+    }
+
+    /**
+     * Into a probe table of its own ({@code table}, {@link #ownTableBytes}): hook {@code hook}'s parameters past its
+     * addresses, and their address. Allocates nothing.
+     */
+    static void writeOwnHook(PassContext ctx, MeshletRenderer renderer, Buffer table, int hook, long volume, double x,
+        double y, double z) {
+        long record = ownRecord(renderer);
+        try (MemoryStack stack = stackPush()) {
+            long values = stack.ncalloc(16, 1, ProbeVolumeParametersLayout.BYTES);
+            putParameters(values, volume, x, y, z);
+            long handle = ctx.unsafe().buffer(table);
+            Commands.updateBuffer(ctx.unsafe().commands(), handle, record, ProbeVolumeParametersLayout.BYTES, values);
+            long address = stack.nmalloc(8, 8);
+            memPutLong(address, ctx.address(table) + record);
+            Commands.updateBuffer(ctx.unsafe().commands(), handle, ShadingHooks.entry(hook), 8, address);
+        }
     }
 
     @Override
@@ -276,7 +304,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             up * cascades * DEPTH_TEXELS));
         Buffer states = g.persistentBuffer("probe states", (long) STATE_BYTES * count);
         Buffer data = g.createBuffer("probe volume", ProbeVolumeDataLayout.BYTES);
-        Buffer table = g.createBuffer("probe volume indirect light", IndirectLightLayout.BYTES);
+        Buffer table = g.createBuffer("probe volume indirect light", ownTableBytes(renderer));
         Image rayImage = g.create("probe rays", ImageDesc.of(RAY_FORMAT, rays * RAY_ROW,
             (count + RAY_ROW - 1) / RAY_ROW));
         long capacity = (long) count * rays;
@@ -329,7 +357,7 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
             MaterialType type = materials.binType(bin);
             if (type.hitShader() != null) {
                 shade[bin] = g.computeProgram(type.hitShader(), type.hitEntry(), PathPush.BYTES,
-                    materials.binFeatures(bin), 0, 0, 1 << hook); // SHADING_HOOKS (3): the volume's own
+                    ShadingHooks.Mask.NONE.with(hook).constants(materials.binFeatures(bin))); // its own
             }
         }
         Frame frame = new Frame(across, up, cascades, spacing, rays, fixed, count, skinnedWords, hook);
@@ -614,14 +642,12 @@ public record ProbeVolume(RayTracing rayTracing, MeshletRenderer renderer, Light
                     memPutFloat(t + IndirectLightLayout.ROTATION + 4L * i, environment.toEnvironment(i));
                 }
                 RenderView view = anchor.view();
-                long slot = t + ShadingHooks.slot(hook);
-                ProbeVolume.putHook(slot, ctx.address(data), view.position(0) - Volume.origin(camera.position(0), coarsest),
-                    view.position(1) - Volume.origin(camera.position(1), coarsest),
-                    view.position(2) - Volume.origin(camera.position(2), coarsest));
                 long handle = ctx.unsafe().buffer(table);
                 Commands.updateBuffer(ctx.unsafe().commands(), handle, 0, IndirectLightLayout.SH, t);
-                Commands.updateBuffer(ctx.unsafe().commands(), handle, ShadingHooks.slot(hook), HookDataLayout.BYTES,
-                    slot);
+                writeOwnHook(ctx, renderer, table, hook, ctx.address(data),
+                    view.position(0) - Volume.origin(camera.position(0), coarsest),
+                    view.position(1) - Volume.origin(camera.position(1), coarsest),
+                    view.position(2) - Volume.origin(camera.position(2), coarsest));
                 // The meshes skinned since the frame before
                 Deformation deformation = renderer.pool().deformation();
                 java.util.Arrays.fill(skinnedBits, 0);

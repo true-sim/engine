@@ -127,13 +127,13 @@ public final class MeshletGeometry implements GeometryProvider {
      */
     @AllowAllocation("building the graph, when it changes")
     private RasterPipelines.Typed typed(GraphBuilder g, RenderView view, boolean shaded, boolean surfaces,
-        boolean opaque, int hooks) {
+        boolean opaque, ShadingHooks.Mask hooks) {
         return shaded && view.splitCategories() > 0 ? renderer.forwardPipelines(surfaces, opaque, hooks) : null;
     }
 
     /** The shading hooks a view with {@code indirect} runs (0 without). */
-    private static int hooks(IndirectInputs.Set indirect) {
-        return indirect == null ? 0 : indirect.hooks();
+    private static ShadingHooks.Mask hooks(IndirectInputs.Set indirect) {
+        return indirect == null ? ShadingHooks.Mask.NONE : indirect.hooks();
     }
 
     /**

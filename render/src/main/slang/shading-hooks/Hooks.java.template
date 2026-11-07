@@ -3,14 +3,16 @@ package {package};
 import com.truesim.engine.render.ShadingHooks;
 
 /**
- * Generated from the {@code [ShadingHook]} structs of these shaders and their libraries: the hooks by bit, as the
- * generated dispatch numbers them, and the libraries' shaders rebuilt with them, each beside its variant.
+ * Generated from the {@code [ShadingHook]} structs of these shaders and their libraries: the hooks by index, as the
+ * generated dispatch numbers them, with their parameters' records, and the libraries' shaders rebuilt with them, each
+ * beside its variant.
  */
 @lombok.Generated
 public final class {class} {
 
     /** The hooks, for {@link ShadingHooks#use}. */
-    public static final ShadingHooks HOOKS = ShadingHooks.of("{class}", new String[] {{names}}, new String[] {
+    public static final ShadingHooks HOOKS = ShadingHooks.of("{class}", new String[] {{names}},
+        new Class<?>[] {{parameters}}, new int[] {{bytes}}, {firstConstant}, {words}, new String[] {
             {replaced}
         });
 

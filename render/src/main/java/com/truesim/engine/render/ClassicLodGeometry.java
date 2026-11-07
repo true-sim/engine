@@ -423,7 +423,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
         Pipeline[] pipeline = switch (kind) {
             case DEPTH -> geometry(materials, drawDepth, ShadingPipelines.DEPTH, selection);
             case SHADED -> typed(materials, draw.output().surfaces() && wantSurfaces() ? ShadingPipelines.COLOR_SURFACES
-                : ShadingPipelines.COLOR, selection.categories(), indirect == null ? 0 : indirect.hooks());
+                : ShadingPipelines.COLOR, selection.categories(),
+                indirect == null ? ShadingHooks.Mask.NONE : indirect.hooks());
             case IDS -> geometry(materials, drawIds, ShadingPipelines.IDS, selection);
         };
         pass.record(ctx -> {
@@ -503,7 +504,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
                 ? "DepthMain" : "ClassicIdsMain"),
             0, type.geometry(), (bin == MeshletRenderer.BIN_OPAQUE && !casters ? ShadingPipelines.CULL_BACK
             : ShadingPipelines.DOUBLE_SIDED) | (list >= MeshletRenderer.BINS ? ShadingPipelines.CLOCKWISE : 0), target,
-            DRAW_PUSH, 0);
+            DRAW_PUSH, ShadingHooks.Mask.NONE);
     }
 
     /**
@@ -513,7 +514,7 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
      * the list's raster bin; running the shading hooks {@code hooks}.
      */
     @AllowAllocation("building the graph, when it changes")
-    private Pipeline[] typed(Materials materials, int target, int categories, int hooks) {
+    private Pipeline[] typed(Materials materials, int target, int categories, ShadingHooks.Mask hooks) {
         boolean weighted = target == ShadingPipelines.WEIGHTED;
         Pipeline[] parts = new Pipeline[LISTS * categories];
         for (int category = 0; category < Math.min(categories, materials.binCount()); category++) {
@@ -539,7 +540,8 @@ public final class ClassicLodGeometry implements GeometryProvider, AutoCloseable
      * hooks {@code hooks}.
      */
     @AllowAllocation("building the graph, when it changes")
-    static ShadingPipelines.Key forwardKey(MaterialType type, int features, int list, int target, int hooks) {
+    static ShadingPipelines.Key forwardKey(MaterialType type, int features, int list, int target,
+        ShadingHooks.Mask hooks) {
         boolean weighted = target == ShadingPipelines.WEIGHTED;
         int bin = list % MeshletRenderer.BINS;
         boolean masked = bin == MeshletRenderer.BIN_MASKED || bin == MeshletRenderer.BIN_BLENDED;

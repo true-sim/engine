@@ -51,7 +51,7 @@ public record IndirectInputs(ViewPort view) implements Request<IndirectInputs.Se
         private final List<Image> images = new ArrayList<>();
         private final List<Buffer> buffers = new ArrayList<>();
         private Buffer table;
-        private int hooks;
+        private ShadingHooks.Mask hooks = ShadingHooks.Mask.NONE;
 
         /** The table shading reads: the latest of {@link Keys#INDIRECT_LIGHT}. */
         Set table(Buffer table) {
@@ -77,17 +77,17 @@ public record IndirectInputs(ViewPort view) implements Request<IndirectInputs.Se
         }
 
         /**
-         * The view's shading runs hook {@code index} ({@link ShadingHooks#require}): its technique writes its slot of
-         * the table ({@link ShadingHooks#slot}) every frame before shading reads it.
+         * The view's shading runs hook {@code index} ({@link ShadingHooks#require}): its technique writes its
+         * parameters' address into the table ({@link ShadingHooks#entry}) every frame before shading reads it, as
+         * {@link ShadingHooks#add} does.
          */
         public Set hook(int index) {
-            ShadingHooks.slot(index); // in range
-            hooks |= 1 << index;
+            hooks = hooks.with(index);
             return this;
         }
 
-        /** The hooks the view's shading runs, a bit each: its pipelines' {@code SHADING_HOOKS}. */
-        public int hooks() {
+        /** The hooks the view's shading runs: its pipelines' {@code SHADING_HOOKS_<n>} ({@link ShadingHooks.Mask}). */
+        public ShadingHooks.Mask hooks() {
             return hooks;
         }
 

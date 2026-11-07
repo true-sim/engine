@@ -1,17 +1,21 @@
 // Shading hooks: what a library adds to every way of shading without the core knowing it (README, "Writing a shading
-// hook"). A hook is a struct marked [ShadingHook("name")] with a static function per hook point it has:
+// hook"). A hook is a struct marked [ShadingHook("name")] with a static function per hook point it has, and may name
+// its parameters, `typealias Parameters = X;`, X a [ShadingHookParameters] record (any size; a Java record is generated
+// for it, as for material records):
 //
-//   static void indirect(ShadingPoint p, float3 direction, inout AroundLight light)
+//   static void indirect(ShadingPoint p, X params, float3 direction, inout AroundLight light)
 //       the light from all around the point: diffuse light where the hook has some (an irradiance volume, probes),
 //       and how much of the environment the point sees around `direction` (specular occlusion);
-//   static void media(ShadingPoint p, inout ViewRay ray)
+//   static void media(ShadingPoint p, X params, inout ViewRay ray)
 //       what lies between the camera and the point: fog, aerial perspective, volumetric media.
 //
-// The build (truesim.slang) merges the hooks of a project and its libraries into the dispatch indirect.slang includes
-// (shading-hooks/dispatch.slang, from this directory's shading-hooks templates); each hook runs under its bit of the
-// specialization constant SHADING_HOOKS, which a view's pipelines are made with: a hook the view does not use is
-// compiled out. Its data for the view is its slot of the view's indirect-light table (IndirectLight.hooks), which
-// the hook's technique writes (engine-render's IndirectInputs.Set.hook).
+// (without parameters, the same without `params`). The build (truesim.slang) merges the hooks of a project and its
+// libraries into the dispatch indirect.slang includes (shading-hooks/dispatch.slang, from this directory's
+// shading-hooks templates); each hook runs under its bit of the specialization constants SHADING_HOOKS_<n> (as many
+// as the hooks need), which a view's pipelines are made with: a hook the view does not use is compiled out. Its
+// parameters for the view are a record its technique writes each frame, whose address the view's indirect-light
+// table holds after its fields, one per hook (engine-render's ShadingHooks.add); the dispatch loads them field by
+// field.
 module hooks;
 
 import bindless;
@@ -23,23 +27,13 @@ public struct ShadingHookAttribute
     string name;
 };
 
-/**
- * A hook's data for a view, as its technique writes it into its slot of the view's table: the address of data of its
- * own (or 0), and a few values it reads with the slot. 48 bytes.
- */
-[HostLayout]
-public struct HookData
-{
-    public uint64_t address;
-    public uint2 words;
-    public float4 values;
-    public float4 more;
-};
+/** Marks a struct as a shading hook's parameters: a record, generated as Java as material records are. */
+[__AttributeUsage(_AttributeTargets.Struct)]
+public struct ShadingHookParametersAttribute {};
 
 /** The point being shaded, as a hook sees it. Positions and directions camera-relative, world axes. */
 public struct ShadingPoint
 {
-    public HookData data;      // the hook's slot of the view's table
     public float3 position;    // the point, from the view's camera
     public float3 normal;      // unit: the side lit
     public float3 toViewer;    // unit

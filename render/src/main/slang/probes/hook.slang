@@ -4,22 +4,32 @@
 // knows it only through the generated dispatch. It moves out of the engine with global illumination.
 module hook;
 
+import bindless;
 import hooks;
 import probes.volume;
 
-/**
- * The probe volume's light at a shaded point. Its data: `address` the ProbeVolumeData, `values.xyz` the view's camera
- * less the volume's origin (world axes).
- */
+/** The probe volume hook's parameters for a view. */
+[ShadingHookParameters]
+[HostLayout]
+public struct ProbeVolumeParameters
+{
+    public uint64_t volume;        // the ProbeVolumeData, as its frame wrote it
+    public float3 offset;          // the view's camera less the volume's origin (world axes)
+};
+
+/** The probe volume's light at a shaded point. */
 [ShadingHook("probeVolume")]
 public struct ProbeVolumeHook
 {
-    public static void indirect(ShadingPoint p, float3 direction, inout AroundLight light)
+    public typealias Parameters = ProbeVolumeParameters;
+
+    public static void indirect(ShadingPoint p, ProbeVolumeParameters probes, float3 direction,
+        inout AroundLight light)
     {
         float sky;
         bool found;
-        float3 e = probeLight((ProbeVolumeData*) p.data.address, p.position + p.data.values.xyz, p.normal,
-            p.toViewer, direction, sky, found);
+        float3 e = probeLight((ProbeVolumeData*) probes.volume, p.position + probes.offset, p.normal, p.toViewer,
+            direction, sky, found);
         if (found)
         {
             light.add(e, 1);

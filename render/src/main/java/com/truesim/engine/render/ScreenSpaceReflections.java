@@ -246,8 +246,8 @@ public final class ScreenSpaceReflections implements Technique, SurfaceOutputs.C
         float scale = g.setting(kind.<Float>setting("resolutionScale"));
         Image hits = g.create("reflection hits", ImageDesc.of(HITS_FORMAT,
             Math.max(1, (int) Math.ceil(color.width() * scale)), Math.max(1, (int) Math.ceil(color.height() * scale))));
-        int[] constants = {hierarchical ? 1 : 0, indirect != null ? 1 : 0, occlusion != null ? 1 : 0,
-            indirect != null ? indirect.hooks() : 0}; // the last: SHADING_HOOKS, constant 3
+        int[] constants = (indirect != null ? indirect.hooks() : ShadingHooks.Mask.NONE)
+            .constants(hierarchical ? 1 : 0, indirect != null ? 1 : 0, occlusion != null ? 1 : 0);
         Pipeline trace = g.computeProgram("shaders/reflections/reflect.spv", "traceMain", ReflectPush.BYTES,
             constants);
         Pipeline composite = g.computeProgram("shaders/reflections/reflect.spv", "compositeMain", ReflectPush.BYTES,

@@ -58,8 +58,8 @@ public record BlendedTargets(Kind kind, Image color, Image accumulated, Image re
     }
 
     /** The shading hooks the view runs ({@link IndirectInputs.Set#hooks}); 0 without indirect light. */
-    public int hooks() {
-        return indirect == null ? 0 : indirect.hooks();
+    public ShadingHooks.Mask hooks() {
+        return indirect == null ? ShadingHooks.Mask.NONE : indirect.hooks();
     }
 
     /** The indirect light's table address in a pass with context {@code ctx}; 0 without. Allocates nothing. */

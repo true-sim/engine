@@ -61,7 +61,7 @@ final class ShadingPipelines implements AutoCloseable {
      * ({@link #COLOR} ...) and its push block's bytes.
      */
     record Key(String geometryShader, String geometryEntry, boolean mesh, String fragmentShader, String fragmentEntry,
-        int features, int geometry, int raster, int target, int push, int hooks) {
+        int features, int geometry, int raster, int target, int push, ShadingHooks.Mask hooks) {
 
         Key {
             Objects.requireNonNull(geometryShader, "geometryShader");
@@ -152,7 +152,7 @@ final class ShadingPipelines implements AutoCloseable {
             if (key.fragmentShader() != null) {
                 graphics.stage(VK_SHADER_STAGE_FRAGMENT_BIT, fragment != null ? fragment : geometry,
                     key.fragmentEntry());
-                graphics.constants(key.features(), key.geometry(), coldSalt, key.hooks());
+                graphics.constants(key.hooks().constants(key.features(), key.geometry(), coldSalt));
             }
             if ((key.raster() & DOUBLE_SIDED) != 0) {
                 graphics.doubleSided();

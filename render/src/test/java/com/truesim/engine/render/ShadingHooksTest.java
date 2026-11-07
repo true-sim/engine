@@ -3,7 +3,6 @@ package com.truesim.engine.render;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.memPutFloat;
 
 import com.truesim.common.math.color.Color;
 import com.truesim.engine.graph.Buffer;
@@ -11,7 +10,10 @@ import com.truesim.engine.graph.BufferAccess;
 import com.truesim.engine.graph.GraphBuilder;
 import com.truesim.engine.graph.Key;
 import com.truesim.engine.graph.Technique;
-import com.truesim.engine.render.layout.HookDataLayout;
+import com.truesim.common.math.Vec3;
+import com.truesim.engine.render.materials.TestFogParameters;
+import com.truesim.engine.render.materials.TestGlowLight;
+import com.truesim.engine.render.materials.TestGlowParameters;
 import com.truesim.engine.render.materials.MetallicRoughnessParameters;
 import com.truesim.engine.render.testing.TestMeshes;
 import com.truesim.engine.render.testing.TestRenderer;
@@ -86,6 +88,8 @@ class ShadingHooksTest {
         assertThat(device.shaderVariants().resolve("shaders/material-types/metallicRoughnessForward.spv"))
             .isEqualTo("shaders/shading-hooks/TestEngineShadingHooks/material-types/metallicRoughnessForward.spv");
         assertThat(device.shaderVariants().resolve("shaders/ao/ao.spv")).endsWith("ao/ao.hooks.spv");
+        assertThat(hooks.parameters(hooks.index("test.glow"))).isEqualTo(TestGlowParameters.class);
+        assertThat(hooks.bytes(hooks.index("test.fog"))).isEqualTo(TestFogParameters.BYTES);
         assertThat(EngineShadingHooks.HOOKS.hooks()).containsExactly(ProbeVolume.HOOK);
         assertThatThrownBy(() -> EngineShadingHooks.HOOKS.require("test.fog")).isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("without test.fog");
@@ -101,7 +105,8 @@ class ShadingHooksTest {
             .withEmissive(new Color(1, 1, 1, 1))).alphaBlend().doubleSided(true)
             : new Material(MR.withBaseColor(new Color(1, 1, 1, 1)).withRoughness(1).withMetallic(0)).doubleSided(true));
         SceneView main = view(shading, material);
-        main.port().add(new Hooked("test.fog", true, new float[] {0, 0, 0, 0}, new float[] {FOG[0], FOG[1], FOG[2], 0}));
+        main.port().add(new Hooked("test.fog", true, new TestFogParameters(new Vec3(0, 0, 0),
+            new Vec3(FOG[0], FOG[1], FOG[2]))));
         for (MeshletRenderer.Path path : paths()) {
             rig.renderer().setPath(path);
             rig.frames(3);
@@ -123,11 +128,12 @@ class ShadingHooksTest {
         int material = materials.add(new Material(MR.withBaseColor(new Color(1, 1, 1, 1)).withRoughness(1)
             .withMetallic(0)).doubleSided(true));
         SceneView main = view(shading, material);
-        Hooked glow = new Hooked("test.glow", true, new float[] {0, 0, 0, 0}, new float[4]);
+        Hooked glow = new Hooked("test.glow", true, TestGlowParameters.DEFAULTS.withVisibility(0));
         main.port().add(glow);
         rig.frames(3);
         int dark = rig.target().rgba(SIZE / 2, SIZE / 2)[1];
-        glow.values = new float[] {0.25f, 0.25f, 0.25f, 0}; // read as frames record
+        glow.parameters = TestGlowParameters.DEFAULTS.withVisibility(0)
+            .withLight(new TestGlowLight(new Vec3(0.25, 0.25, 0.25))); // read as frames record
         rig.frames(2);
         int lit = rig.target().rgba(SIZE / 2, SIZE / 2)[1];
         assertThat(lit).as("%s: the hook's light from all around adds to the sun's", shading).isGreaterThan(dark + 20);
@@ -145,7 +151,7 @@ class ShadingHooksTest {
         rig.frames(3);
         BufferedImage without = rig.target().shot();
         // Its data written into its slot of the table every frame, but not turned on for the view
-        main.port().add(new Hooked("test.fog", false, new float[] {0, 0, 0, 0}, new float[] {1, 1, 1, 0}));
+        main.port().add(new Hooked("test.fog", false, new TestFogParameters(new Vec3(0, 0, 0), new Vec3(1, 1, 1))));
         rig.frames(3);
         BufferedImage with = rig.target().shot();
         for (int y = 0; y < SIZE; y++) {
@@ -203,20 +209,19 @@ class ShadingHooksTest {
     }
 
     /**
-     * A test's technique adding a shading hook to its view, as a library's does: it writes the hook's slot of the
-     * view's table each frame ({@code values}, {@code more}), and with {@code run} turns the hook on for the view.
+     * A test's technique adding a shading hook to its view, as a library's does ({@link ShadingHooks#add}): its
+     * parameters' record from {@code parameters}, read each frame. Without {@code run}, the same record and its address
+     * written into the view's table, but the hook not turned on for the view.
      */
     private final class Hooked implements Technique {
         private final String hook;
         private final boolean run;
-        private volatile float[] values;
-        private final float[] more;
+        private volatile ShadingHookParameters parameters;
 
-        Hooked(String hook, boolean run, float[] values, float[] more) {
+        Hooked(String hook, boolean run, ShadingHookParameters parameters) {
             this.hook = hook;
             this.run = run;
-            this.values = values;
-            this.more = more;
+            this.parameters = parameters;
         }
 
         @Override
@@ -231,23 +236,29 @@ class ShadingHooksTest {
 
         @Override
         public void build(GraphBuilder g) {
-            int index = ShadingHooks.of(device).require(hook);
-            Buffer table = g.modify(Keys.INDIRECT_LIGHT);
-            g.pass("test hook " + hook).write(table, BufferAccess.TRANSFER_DST).record(ctx -> {
-                try (MemoryStack stack = stackPush()) {
-                    long slot = stack.ncalloc(16, 1, HookDataLayout.BYTES);
-                    float[] v = values;
-                    for (int k = 0; k < 4; k++) {
-                        memPutFloat(slot + HookDataLayout.VALUES + 4L * k, v[k]);
-                        memPutFloat(slot + HookDataLayout.MORE + 4L * k, more[k]);
-                    }
-                    Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(table),
-                        ShadingHooks.slot(index), HookDataLayout.BYTES, slot);
-                }
-            });
+            ShadingHooks hooks = ShadingHooks.of(device);
+            ShadingHookSource source = ShadingHookSource.of(parameters.bytes(), () -> parameters);
             if (run) {
-                g.request(new IndirectInputs(g.view())).hook(index);
+                hooks.add(g, hook, source);
+                return;
             }
+            int index = hooks.require(hook);
+            Buffer table = g.modify(Keys.INDIRECT_LIGHT);
+            Buffer record = g.createBuffer("test record", source.bytes());
+            MemorySegment values = Arena.ofAuto().allocate(source.bytes(), 16);
+            g.pass("test hook, not run").write(table, BufferAccess.TRANSFER_DST)
+                .write(record, BufferAccess.TRANSFER_DST).record(ctx -> {
+                    source.write(ctx, values, 0);
+                    Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(record), 0, values.byteSize(),
+                        values.address());
+                    try (MemoryStack stack = stackPush()) {
+                        long address = stack.nmalloc(8, 8);
+                        org.lwjgl.system.MemoryUtil.memPutLong(address, ctx.address(record));
+                        Commands.updateBuffer(ctx.unsafe().commands(), ctx.unsafe().buffer(table),
+                            ShadingHooks.entry(index), 8, address);
+                    }
+                });
+            g.request(new IndirectInputs(g.view())).read(record);
         }
     }
 }
